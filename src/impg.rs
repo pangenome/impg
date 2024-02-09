@@ -36,11 +36,13 @@ impl Impg {
         }
 
         // Construct COITrees from the collected intervals
-        let trees = intervals.into_iter()
+        let trees: TreeMap = intervals.into_iter()
             .map(|(seqname, interval_nodes)| {
                 (seqname, COITree::new(&interval_nodes))
             })
             .collect();
+
+        println!("built with {} trees", trees.len());
 
         Ok(Self { trees })
     }
@@ -49,6 +51,7 @@ impl Impg {
     // This returns the corresponding query intervals for the target range overlaps
     pub fn query(&self, target_name: &str, query_start: i32, query_end: i32) -> Vec<QueryInterval> {
         let mut results = Vec::new();
+        println!("querying {}: {}-{}", target_name, query_start, query_end);
         if let Some(tree) = self.trees.get(target_name) {
             tree.query(query_start, query_end, |interval| {
                 results.push(interval.metadata.clone());
@@ -80,4 +83,22 @@ impl Impg {
         }
         results
     }
+}
+
+/// Parse a query string in the format "seqname:start-end" into a tuple
+pub fn parse_query(query: &str) -> Result<(String, (i32, i32)), &'static str> {
+    let parts: Vec<&str> = query.split(':').collect();
+    if parts.len() != 2 {
+        return Err("Invalid query format");
+    }
+    let seq_name = parts[0].to_string();
+    let range_parts: Vec<&str> = parts[1].split('-').collect();
+    if range_parts.len() != 2 {
+        return Err("Invalid range format");
+    }
+
+    let start = range_parts[0].parse::<i32>().map_err(|_| "Invalid start range")?;
+    let end = range_parts[1].parse::<i32>().map_err(|_| "Invalid end range")?;
+
+    Ok((seq_name, (start, end)))
 }

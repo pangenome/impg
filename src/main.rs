@@ -45,7 +45,8 @@ fn main() -> io::Result<()> {
 
     println!("Overlapping regions:");
     for overlap in overlaps {
-        println!("{}", overlap);
+        println!("{:?}", overlap);
+        //println!("{}", overlap);
     }
 
     Ok(())
