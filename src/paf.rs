@@ -1,36 +1,38 @@
 use std::io::BufRead;
 
+#[derive(Debug)]
 pub struct PafRecord {
     pub query_name: String,
-    pub query_length: usize,
-    pub query_start: usize, 
+    pub query_length: usize, // Added for query length
+    pub query_start: usize,
     pub query_end: usize,
     pub target_name: String,
-    pub target_length: usize,
+    pub target_length: usize, // Added for target length
     pub target_start: usize,
     pub target_end: usize,
-    pub matches: usize,
-    pub mapq: u8,
+    pub cigar: Option<String>, // Added field for CIGAR string
 }
 
 impl PafRecord {
-
     pub fn parse(line: &str) -> Result<Self, ParseErr> {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 12 {
             return Err(ParseErr::NotEnoughFields);
         }
-        
+
         let query_name = fields[0].to_string();
-        let query_length = fields[1].parse::<usize>()?;
+        let query_length = fields[1].parse::<usize>()?; // Parse query length
         let query_start = fields[2].parse::<usize>()?;
         let query_end = fields[3].parse::<usize>()?;
         let target_name = fields[5].to_string();
-        let target_length = fields[6].parse::<usize>()?;
+        let target_length = fields[6].parse::<usize>()?; // Parse target length
         let target_start = fields[7].parse::<usize>()?;
         let target_end = fields[8].parse::<usize>()?;
-        let matches = fields[9].parse::<usize>()?;
-        let mapq = fields[11].parse::<u8>()?;
+
+        // Find the CIGAR string, if present
+        let cigar = fields.iter()
+            .find(|&&f| f.starts_with("cg:Z:"))
+            .map(|&s| s[5..].to_string());
 
         Ok(Self {
             query_name,
@@ -40,12 +42,10 @@ impl PafRecord {
             target_name,
             target_length,
             target_start,
-            target_end, 
-            matches,
-            mapq
+            target_end,
+            cigar,
         })
     }
-
 }
 
 #[derive(Debug)]
@@ -63,16 +63,13 @@ impl From<std::num::ParseIntError> for ParseErr {
 
 pub fn parse_paf<R: BufRead>(reader: R) -> Result<Vec<PafRecord>, ParseErr> {
     let mut records = Vec::new();
-
     for line_result in reader.lines() {
-        let line = line_result.map_err(|e| ParseErr::IoError(e))?; // Convert io::Error to ParseErr
+        let line = line_result.map_err(|e| ParseErr::IoError(e))?;
         let record = PafRecord::parse(&line)?;
         records.push(record);
     }
-
     Ok(records)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -80,7 +77,7 @@ mod tests {
     
     #[test]
     fn test_parse() {
-        let line = "q1\t100\t10\t20\t+\tt1\t200\t30\t40\t10\t20\t255";
+        let line = "q1\t100\t10\t20\t+\tt1\t200\t30\t40\t10\t20\t255\tcg:Z:10M";
         let record = PafRecord::parse(line).unwrap();
         assert_eq!(record.query_name, "q1");
         assert_eq!(record.query_length, 100);
@@ -90,8 +87,7 @@ mod tests {
         assert_eq!(record.target_length, 200);
         assert_eq!(record.target_start, 30);
         assert_eq!(record.target_end, 40);
-        assert_eq!(record.matches, 10);
-        assert_eq!(record.mapq, 255);
+        assert_eq!(record.cigar, Some("10M".to_string())); // Test for CIGAR string
 
         let empty = "";
         assert!(PafRecord::parse(empty).is_err());
