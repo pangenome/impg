@@ -1,25 +1,25 @@
-use coitrees::{Interval, COITree, IntervalTree};
 use std::collections::{HashMap, HashSet};
-use crate::paf::{PafRecord, ParseErr};
+use coitrees::{Interval, COITree};
+use crate::paf::PafRecord;
 
 #[derive(Clone, Debug)]
-struct CigarOp {
+pub struct CigarOp {
     target_delta: i32,
     query_delta: i32,
 }
 
 #[derive(Clone, Debug)]
-struct QueryMetadata {
+pub struct QueryMetadata {
     query_id: u32,
     cigar_ops: Vec<CigarOp>,
-    mapping_target_start: i32,
-    mapping_target_end: i32,
-    mapping_query_start: i32,
-    mapping_query_end: i32,
+    target_start: i32,
+    target_end: i32,
+    query_start: i32,
+    query_end: i32,
 }
 
 type QueryInterval = Interval<QueryMetadata>;
-type TreeMap = HashMap<u32, COITree<QueryInterval, u32>>;
+type TreeMap = HashMap<u32, COITree<QueryMetadata, u32>>;
 
 struct SequenceIndex {
     name_to_id: HashMap<String, u32>,
@@ -52,6 +52,16 @@ pub struct Impg {
 }
 
 impl Impg {
+    /// Creates an Impg index from PAF records.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let records = vec![paf::PafRecord { /* fields */ }];
+    /// let seq_index = impg::SequenceIndex::new();
+    /// // Add records to seq_index...
+    /// let impg = Impg::from_paf_records(&records, &seq_index).unwrap();
+    /// ```
     pub fn from_paf_records(records: &[PafRecord], seq_index: &SequenceIndex) -> Result<Self, ParseErr> {
         let mut intervals: HashMap<u32, Vec<Interval<QueryMetadata>>> = HashMap::new();
 
@@ -63,10 +73,10 @@ impl Impg {
             let query_metadata = QueryMetadata {
                 query_id,
                 cigar_ops,
-                mapping_target_start: record.target_start as i32,
-                mapping_target_end: record.target_end as i32,
-                mapping_query_start: record.query_start as i32,
-                mapping_query_end: record.query_end as i32,
+                target_start: record.target_start as i32,
+                target_end: record.target_end as i32,
+                query_start: record.query_start as i32,
+                query_end: record.query_end as i32,
             };
 
             intervals.entry(target_id).or_default().push(Interval {
@@ -76,7 +86,7 @@ impl Impg {
             });
         }
 
-        let trees: TreeMap = intervals.into_iter().map(|(target_id, interval_nodes)| (target_id, COITree::new(interval_nodes))).collect();
+        let trees: TreeMap = intervals.into_iter().map(|(target_id, interval_nodes)| (target_id, COITree::new(interval_nodes.as_slice()))).collect();
         Ok(Self { trees })
     }
 
@@ -84,11 +94,16 @@ impl Impg {
         let mut results = Vec::new();
         if let Some(tree) = self.trees.get(&target_id) {
             tree.query(query_start, query_end, |interval| {
-                let (adjusted_start, adjusted_end) = project_target_range_through_alignment((interval.first, interval.last), (interval.metadata.mapping_target_start, interval.metadata.mapping_target_end, interval.metadata.mapping_query_start, interval.metadata.mapping_query_end), &interval.metadata.cigar_ops);
+                let metadata = &interval.metadata;
+                let (adjusted_start, adjusted_end) = project_target_range_through_alignment(
+                    (interval.first, interval.last),
+                    (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end),
+                    &metadata.cigar_ops
+                );
                 let adjusted_interval = QueryInterval {
                     first: adjusted_start,
                     last: adjusted_end,
-                    metadata: interval.metadata.clone(),
+                    metadata: metadata.clone(),
                 };
                 results.push(adjusted_interval);
             });
@@ -108,17 +123,22 @@ impl Impg {
 
             if let Some(tree) = self.trees.get(&current_target) {
                 tree.query(current_start, current_end, |interval| {
-                    let (adjusted_start, adjusted_end) = project_target_range_through_alignment((interval.first, interval.last), (interval.metadata.mapping_target_start, interval.metadata.mapping_target_end, interval.metadata.mapping_query_start, interval.metadata.mapping_query_end), &interval.metadata.cigar_ops);
+                    let metadata = &interval.metadata;
+                    let (adjusted_start, adjusted_end) = project_target_range_through_alignment(
+                        (interval.first, interval.last),
+                        (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end),
+                        &metadata.cigar_ops
+                    );
 
                     let adjusted_interval = QueryInterval {
                         first: adjusted_start,
                         last: adjusted_end,
-                        metadata: interval.metadata.clone(),
+                        metadata: metadata.clone(),
                     };
                     results.push(adjusted_interval);
 
-                    if interval.metadata.query_id != current_target {
-                        stack.push((interval.metadata.query_id, adjusted_start, adjusted_end));
+                    if metadata.query_id != current_target {
+                        stack.push((metadata.query_id, adjusted_start, adjusted_end));
                     }
                 });
             }
@@ -130,14 +150,14 @@ impl Impg {
 
 fn project_target_range_through_alignment(
     target_range: (i32, i32),
-    mapping_record: (i32, i32, i32, i32),
+    record: (i32, i32, i32, i32),
     cigar_ops: &[CigarOp],
 ) -> (i32, i32) {
     let (target_start, target_end) = target_range;
-    let (mapping_target_start, _, mapping_query_start, _) = mapping_record;
+    let (target_start, _, query_start, _) = record;
 
-    let mut query_pos = mapping_query_start;
-    let mut target_pos = mapping_target_start;
+    let mut query_pos = query_start;
+    let mut target_pos = target_start;
 
     let mut projected_start = -1;
     let mut projected_end = -1;
@@ -222,4 +242,58 @@ fn split_into_ops(len: i32, target_delta: i32, query_delta: i32) -> Vec<CigarOp>
     }
 
     ops
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_cigar_to_delta_basic() {
+        let cigar = "10M5I5D";
+        let expected_ops = vec![
+            CigarOp { target_delta: 10, query_delta: 10 },
+            CigarOp { target_delta: 0, query_delta: 5 },
+            CigarOp { target_delta: 5, query_delta: 0 },
+        ];
+        let ops = parse_cigar_to_delta(cigar).unwrap();
+        assert_eq!(ops, expected_ops);
+    }
+
+    #[test]
+    fn test_parse_cigar_to_delta_invalid() {
+        let cigar = "10M5X"; // 'X' is not a supported operation
+        assert!(parse_cigar_to_delta(cigar).is_err());
+    }
+
+    #[test]
+    fn test_parse_paf_valid() {
+        let paf_data = b"seq1\t100\t10\t20\t+\tt1\t200\t30\t40\t10\t20\t255\tcg:Z:10M\n";
+        let reader = BufReader::new(&paf_data[..]);
+        let expected_records = vec![
+            PafRecord {
+                query_name: "seq1".to_string(),
+                query_length: 100,
+                query_start: 10,
+                query_end: 20,
+                target_name: "t1".to_string(),
+                target_length: 200,
+                target_start: 30,
+                target_end: 40,
+                cigar: Some("10M".to_string()),
+            },
+            // Add more test records as needed
+        ];
+        let records = parse_paf(reader).unwrap();
+        assert_eq!(records, expected_records);
+    }
+
+    #[test]
+    fn test_parse_paf_invalid() {
+        let file = File::open("path/to/invalid/paf/file").unwrap();
+        let reader = BufReader::new(file);
+        let records = parse_paf(reader);
+        assert!(records.is_err());
+    }
 }

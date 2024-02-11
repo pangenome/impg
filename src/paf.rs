@@ -1,19 +1,28 @@
 use std::io::BufRead;
 
 #[derive(Debug)]
+#[derive(PartialEq)]
 pub struct PafRecord {
     pub query_name: String,
-    pub query_length: usize, // Added for query length
+    pub query_length: usize,
     pub query_start: usize,
     pub query_end: usize,
     pub target_name: String,
-    pub target_length: usize, // Added for target length
+    pub target_length: usize,
     pub target_start: usize,
     pub target_end: usize,
-    pub cigar: Option<String>, // Added field for CIGAR string
+    pub cigar: Option<String>,
 }
 
 impl PafRecord {
+    /// Parses a single PAF record from a string slice.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let line = "seq1\t100\t0\t100\t+\tseq2\t100\t0\t100\t60\t100\t255";
+    /// let record = PafRecord::parse(line).unwrap();
+    /// ```
     pub fn parse(line: &str) -> Result<Self, ParseErr> {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 12 {
@@ -21,11 +30,11 @@ impl PafRecord {
         }
 
         let query_name = fields[0].to_string();
-        let query_length = fields[1].parse::<usize>()?; // Parse query length
+        let query_length = fields[1].parse::<usize>()?;
         let query_start = fields[2].parse::<usize>()?;
         let query_end = fields[3].parse::<usize>()?;
         let target_name = fields[5].to_string();
-        let target_length = fields[6].parse::<usize>()?; // Parse target length
+        let target_length = fields[6].parse::<usize>()?;
         let target_start = fields[7].parse::<usize>()?;
         let target_end = fields[8].parse::<usize>()?;
 
@@ -53,6 +62,8 @@ pub enum ParseErr {
     NotEnoughFields,
     IoError(std::io::Error),
     InvalidField(std::num::ParseIntError),
+    InvalidCigarFormat,
+    UnsupportedCigarOperation,
 }
 
 impl From<std::num::ParseIntError> for ParseErr {
@@ -64,32 +75,41 @@ impl From<std::num::ParseIntError> for ParseErr {
 pub fn parse_paf<R: BufRead>(reader: R) -> Result<Vec<PafRecord>, ParseErr> {
     let mut records = Vec::new();
     for line_result in reader.lines() {
-        let line = line_result.map_err(|e| ParseErr::IoError(e))?;
+        let line = line_result.map_err(ParseErr::IoError)?;
         let record = PafRecord::parse(&line)?;
         records.push(record);
     }
     Ok(records)
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    #[test]
-    fn test_parse() {
-        let line = "q1\t100\t10\t20\t+\tt1\t200\t30\t40\t10\t20\t255\tcg:Z:10M";
-        let record = PafRecord::parse(line).unwrap();
-        assert_eq!(record.query_name, "q1");
-        assert_eq!(record.query_length, 100);
-        assert_eq!(record.query_start, 10);
-        assert_eq!(record.query_end, 20);
-        assert_eq!(record.target_name, "t1");
-        assert_eq!(record.target_length, 200);
-        assert_eq!(record.target_start, 30);
-        assert_eq!(record.target_end, 40);
-        assert_eq!(record.cigar, Some("10M".to_string())); // Test for CIGAR string
 
-        let empty = "";
-        assert!(PafRecord::parse(empty).is_err());
+    #[test]
+    fn test_parse_paf_valid() {
+        let line = "seq1\t100\t0\t100\t+\tseq2\t100\t0\t100\t60\t100\t255";
+        let record = PafRecord::parse(line).unwrap();
+        assert_eq!(
+            record,
+            PafRecord {
+                query_name: "seq1".to_string(),
+                query_length: 100,
+                query_start: 0,
+                query_end: 100,
+                target_name: "seq2".to_string(),
+                target_length: 100,
+                target_start: 0,
+                target_end: 100,
+                cigar: Some("60M".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_paf_invalid() {
+        let line = "seq1\t100\t0\t100\t+\tseq2\t100\t0\t100\t60\t100\t255\tcg:Z:10M";
+        assert!(PafRecord::parse(line).is_err());
     }
 }
