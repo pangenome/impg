@@ -2,9 +2,7 @@ use clap::Parser;
 use std::fs::File;
 use std::io::{self, BufReader};
 use impg::Impg;
-
-mod paf;
-mod impg;
+use crate::paf::ParseErr;
 
 /// Command-line tool for querying overlaps in PAF files.
 #[derive(Parser, Debug)]

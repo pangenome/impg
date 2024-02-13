@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use coitrees::{Interval, COITree};
-use crate::paf::PafRecord;
+use coitrees::{Interval, IntervalTree};
+use crate::paf::{PafRecord, ParseErr};
 
 #[derive(Clone, Debug)]
 pub struct CigarOp {
@@ -19,7 +19,7 @@ pub struct QueryMetadata {
 }
 
 type QueryInterval = Interval<QueryMetadata>;
-type TreeMap = HashMap<u32, COITree<QueryMetadata, u32>>;
+type TreeMap = HashMap<u32, IntervalTree<QueryMetadata, u32>>;
 
 struct SequenceIndex {
     name_to_id: HashMap<String, u32>,
@@ -86,7 +86,7 @@ impl Impg {
             });
         }
 
-        let trees: TreeMap = intervals.into_iter().map(|(target_id, interval_nodes)| (target_id, COITree::new(interval_nodes.as_slice()))).collect();
+        let trees: TreeMap = intervals.into_iter().map(|(target_id, interval_nodes)| (target_id, IntervalTree::new(interval_nodes.as_slice()))).collect();
         Ok(Self { trees })
     }
 
