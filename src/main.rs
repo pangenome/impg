@@ -1,7 +1,8 @@
 use clap::Parser;
 use std::fs::File;
 use std::io::{self, BufReader};
-use impg::impg::{Impg, SequenceIndex};
+use impg::impg::Impg;
+use impg::seqidx::SequenceIndex;
 use impg::paf;
 
 /// Command-line tool for querying overlaps in PAF files.
