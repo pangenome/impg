@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
-use coitrees::{Interval, IntervalTree};
+use coitrees::{COITree, Interval, IntervalTree};
 use crate::paf::{PafRecord, ParseErr};
 
 #[derive(Clone, Debug)]
+#[derive(PartialEq, Eq, Hash)]
 pub struct CigarOp {
     target_delta: i32,
     query_delta: i32,
@@ -19,7 +20,7 @@ pub struct QueryMetadata {
 }
 
 type QueryInterval = Interval<QueryMetadata>;
-type TreeMap = HashMap<u32, IntervalTree<QueryMetadata, u32>>;
+type TreeMap = HashMap<u32, COITree<QueryMetadata, u32>>;
 
 struct SequenceIndex {
     name_to_id: HashMap<String, u32>,
@@ -66,7 +67,7 @@ impl Impg {
         let mut intervals: HashMap<u32, Vec<Interval<QueryMetadata>>> = HashMap::new();
 
         for record in records {
-            let cigar_ops = record.cigar.as_ref().map(|x: &std::string::String| parse_cigar_to_delta(x)).transpose()?.unwrap_or_else(Vec::new);
+            let cigar_ops = record.cigar.as_ref().map(|x| parse_cigar_to_delta(x)).transpose()?.unwrap_or_else(Vec::new);
             let query_id = seq_index.get_id(&record.query_name).expect("Query name not found in index");
             let target_id = seq_index.get_id(&record.target_name).expect("Target name not found in index");
 
@@ -86,7 +87,10 @@ impl Impg {
             });
         }
 
-        let trees: TreeMap = intervals.into_iter().map(|(target_id, interval_nodes)| (target_id, IntervalTree::new(interval_nodes.as_slice()))).collect();
+        let trees: TreeMap = intervals.into_iter().map(|(target_id, interval_nodes)| {
+            (target_id, COITree::new(interval_nodes.as_slice()))
+        }).collect();
+
         Ok(Self { trees })
     }
 
@@ -100,6 +104,7 @@ impl Impg {
                     (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end),
                     &metadata.cigar_ops
                 );
+
                 let adjusted_interval = QueryInterval {
                     first: adjusted_start,
                     last: adjusted_end,
@@ -138,7 +143,7 @@ impl Impg {
                     results.push(adjusted_interval);
 
                     if metadata.query_id != current_target {
-                        stack.push((metadata.query_id, adjusted_start, adjusted_end));
+                        stack.push((metadata.query_id, adjusted_end, adjusted_end));
                     }
                 });
             }
