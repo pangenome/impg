@@ -1,3 +1,3 @@
 // lib.rs
-mod paf;
-mod impg;
+pub mod impg;
+pub mod paf;

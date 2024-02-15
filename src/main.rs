@@ -1,8 +1,8 @@
 use clap::Parser;
 use std::fs::File;
 use std::io::{self, BufReader};
-use impg::Impg;
-use crate::paf::ParseErr;
+use impg::impg::{Impg, SequenceIndex};
+use impg::paf;
 
 /// Command-line tool for querying overlaps in PAF files.
 #[derive(Parser, Debug)]
@@ -30,7 +30,7 @@ fn main() -> io::Result<()> {
     let reader = BufReader::new(file);
 
     let records = paf::parse_paf(reader).expect("Failed to parse PAF records");
-    let mut seq_index = impg::SequenceIndex::new();
+    let mut seq_index = SequenceIndex::new();
     for record in &records {
         seq_index.get_or_insert_id(&record.query_name);
         seq_index.get_or_insert_id(&record.target_name);
