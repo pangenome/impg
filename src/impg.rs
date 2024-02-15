@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use coitrees::{COITree, Interval, IntervalTree};
-use crate::paf::{PafRecord, ParseErr};
+use crate::paf::{PafRecord, ParseErr, Strand};
 use crate::seqidx::SequenceIndex;
 
 #[derive(Clone, Debug)]
@@ -18,6 +18,7 @@ pub struct QueryMetadata {
     target_end: i32,
     query_start: i32,
     query_end: i32,
+    strand: Strand,
 }
 
 type QueryInterval = Interval<QueryMetadata>;
@@ -28,16 +29,6 @@ pub struct Impg {
 }
 
 impl Impg {
-    /// Creates an Impg index from PAF records.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let records = vec![paf::PafRecord { /* fields */ }];
-    /// let seq_index = impg::SequenceIndex::new();
-    /// // Add records to seq_index...
-    /// let impg = Impg::from_paf_records(&records, &seq_index).unwrap();
-    /// ```
     pub fn from_paf_records(records: &[PafRecord], seq_index: &SequenceIndex) -> Result<Self, ParseErr> {
         let mut intervals: HashMap<u32, Vec<Interval<QueryMetadata>>> = HashMap::new();
 
@@ -53,6 +44,7 @@ impl Impg {
                 target_end: record.target_end as i32,
                 query_start: record.query_start as i32,
                 query_end: record.query_end as i32,
+                strand: record.strand,
             };
 
             intervals.entry(target_id).or_default().push(Interval {
@@ -76,7 +68,7 @@ impl Impg {
                 let metadata = &interval.metadata;
                 let (adjusted_start, adjusted_end) = project_target_range_through_alignment(
                     (interval.first, interval.last),
-                    (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end),
+                    (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end, metadata.strand),
                     &metadata.cigar_ops
                 );
 
@@ -106,7 +98,7 @@ impl Impg {
                     let metadata = &interval.metadata;
                     let (adjusted_start, adjusted_end) = project_target_range_through_alignment(
                         (interval.first, interval.last),
-                        (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end),
+                        (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end, metadata.strand),
                         &metadata.cigar_ops
                     );
 
@@ -130,11 +122,10 @@ impl Impg {
 
 fn project_target_range_through_alignment(
     target_range: (i32, i32),
-    record: (i32, i32, i32, i32),
+    record: (i32, i32, i32, i32, Strand),
     cigar_ops: &[CigarOp],
 ) -> (i32, i32) {
-    let (target_start, target_end) = target_range;
-    let (target_start, _, query_start, _) = record;
+    let (target_start, target_end, query_start, query_end, strand) = record;
 
     let mut query_pos = query_start;
     let mut target_pos = target_start;
@@ -142,24 +133,33 @@ fn project_target_range_through_alignment(
     let mut projected_start = -1;
     let mut projected_end = -1;
 
-    for CigarOp { target_delta, query_delta } in cigar_ops {
-        let target_delta_i32 = *target_delta as i32;
-        let query_delta_i32 = *query_delta as i32;
-
-        if target_pos >= target_start && projected_start == -1 {
-            projected_start = query_pos + (target_start - target_pos).max(0);
+    for CigarOp { target_delta, query_delta } in cigar_ops.iter() {
+        if target_pos >= target_range.0 && projected_start == -1 {
+            projected_start = query_pos;
         }
 
-        if target_pos + target_delta_i32 > target_end {
-            projected_end = query_pos + (target_end - target_pos).min(target_delta_i32);
+        if target_pos + target_delta > target_end {
+            projected_end = query_pos + (target_end - target_pos).min(*query_delta);
             break;
         }
 
-        target_pos += target_delta_i32;
-        query_pos += query_delta_i32;
+        target_pos += target_delta;
+        query_pos += match strand {
+            Strand::Forward => *query_delta,
+            Strand::Reverse => -(*query_delta), // Reverse the query position increment for reverse strand
+        };
     }
 
-    (projected_start, projected_end)
+    if projected_end == -1 { // Ensure projected_end is set if the loop completes without setting it
+        projected_end = query_pos;
+    }
+
+    assert!(projected_start != -1 && projected_end != -1, "Projection failed to calculate valid start and end positions");
+
+    match strand {
+        Strand::Forward => (projected_start, projected_end),
+        Strand::Reverse => (query_start - projected_end, query_start - projected_start), // Adjust for reverse strand
+    }
 }
 
 fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, ParseErr> {
@@ -168,66 +168,61 @@ fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, ParseErr> {
 
     for c in cigar.chars() {
         if c.is_digit(10) {
-            // Accumulate digit characters to build the length of the operation
             num_buf.push(c);
         } else {
-            // When encountering an operation character, process the accumulated number and the operation
+            let len = num_buf.parse::<i32>().map_err(|_| ParseErr::InvalidCigarFormat)?;
+            num_buf.clear(); // Reset the buffer for the next operation
+
             match c {
-                'M' | '=' | 'X' => { // 'M' for match/mismatch, '=' for match, 'X' for mismatch
-                    let len = num_buf.parse::<usize>().map_err(|_| ParseErr::InvalidCigarFormat)?;
-                    num_buf.clear(); // Reset the buffer for the next operation
-
-                    // For 'M', '=', and 'X', both target and query positions advance
-                    ops.extend(split_into_ops(len as i32, 1, 1));
-                }
-                'I' => { // Insertion to the query
-                    let len = num_buf.parse::<usize>().map_err(|_| ParseErr::InvalidCigarFormat)?;
-                    num_buf.clear();
-
-                    // For an insertion, only the query position advances
-                    ops.extend(split_into_ops(len as i32, 0, 1));
-                }
-                'D' => { // Deletion from the target
-                    let len = num_buf.parse::<usize>().map_err(|_| ParseErr::InvalidCigarFormat)?;
-                    num_buf.clear();
-
-                    // For a deletion, only the target position advances
-                    ops.extend(split_into_ops(len as i32, 1, 0));
-                }
-                _ => return Err(ParseErr::UnsupportedCigarOperation), // Unsupported operation
+                'M' | '=' | 'X' => ops.push(CigarOp { target_delta: len, query_delta: len }),
+                'I' => ops.push(CigarOp { target_delta: 0, query_delta: len }),
+                'D' => ops.push(CigarOp { target_delta: len, query_delta: 0 }),
+                _ => return Err(ParseErr::UnsupportedCigarOperation),
             }
         }
-    }
-
-    if !num_buf.is_empty() {
-        // Handle any trailing numbers without an associated operation
-        return Err(ParseErr::InvalidCigarFormat);
     }
 
     Ok(ops)
 }
 
-/// Splits large operations into multiple CigarOps if necessary, due to i32 limits.
-fn split_into_ops(len: i32, target_delta: i32, query_delta: i32) -> Vec<CigarOp> {
-    let mut ops = Vec::new();
-    let mut remaining = len;
-
-    while remaining > 0 {
-        let delta = remaining.min(2147483647); // Max value for i32
-        ops.push(CigarOp {
-            target_delta: if target_delta > 0 { delta } else { 0 },
-            query_delta: if query_delta > 0 { delta } else { 0 },
-        });
-        remaining -= delta;
-    }
-
-    ops
-}
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_project_target_range_through_alignment_forward() {
+        let target_range = (100, 200);
+        let record = (100, 200, 0, 100, Strand::Forward);
+        let cigar_ops = vec![CigarOp { target_delta: 100, query_delta: 100 }];
+        let (start, end) = project_target_range_through_alignment(target_range, record, &cigar_ops);
+
+        assert_eq!(start, 0);
+        assert_eq!(end, 100);
+    }
+
+    #[test]
+    fn test_project_target_range_through_alignment_reverse() {
+        let target_range = (100, 200);
+        let record = (100, 200, 100, 200, Strand::Reverse);
+        let cigar_ops = vec![CigarOp { target_delta: 100, query_delta: 100 }];
+        let (start, end) = project_target_range_through_alignment(target_range, record, &cigar_ops);
+
+        assert_eq!(start, 0);
+        assert_eq!(end, 100);
+    }
+
+    #[test]
+    fn test_project_target_range_through_alignment() {
+        let cigar_ops = vec![
+            CigarOp { target_delta: 10, query_delta: 10 },
+            CigarOp { target_delta: 0, query_delta: 5 },
+            CigarOp { target_delta: 5, query_delta: 0 },
+        ];
+        let (target_start, target_end, query_start, query_end, strand) = (0, 100, 10, 20, Strand::Forward);
+        let expected_result = (10, 20);
+        let result = project_target_range_through_alignment((0, 100), (target_start, target_end, query_start, query_end, strand), &cigar_ops);
+        assert_eq!(result, expected_result);
+    }
 
     #[test]
     fn test_parse_cigar_to_delta_basic() {

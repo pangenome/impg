@@ -1,8 +1,8 @@
 use std::io::BufRead;
-//use crate::paf::ParseErr;
+use std::num::ParseIntError;
+use std::str::FromStr;
 
-#[derive(Debug)]
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct PafRecord {
     pub query_name: String,
     pub query_length: usize,
@@ -13,17 +13,16 @@ pub struct PafRecord {
     pub target_start: usize,
     pub target_end: usize,
     pub cigar: Option<String>,
+    pub strand: Strand,
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum Strand {
+    Forward,
+    Reverse,
 }
 
 impl PafRecord {
-    /// Parses a single PAF record from a string slice.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let line = "seq1\t100\t0\t100\t+\tseq2\t100\t0\t100\t60\t100\t255";
-    /// let record = PafRecord::parse(line).unwrap();
-    /// ```
     pub fn parse(line: &str) -> Result<Self, ParseErr> {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 12 {
@@ -38,8 +37,13 @@ impl PafRecord {
         let target_length = fields[6].parse::<usize>()?;
         let target_start = fields[7].parse::<usize>()?;
         let target_end = fields[8].parse::<usize>()?;
+        let strand_char = fields[4].chars().next().ok_or(ParseErr::InvalidField)?;
+        let strand = match strand_char {
+            '+' => Strand::Forward,
+            '-' => Strand::Reverse,
+            _ => return Err(ParseErr::InvalidStrand),
+        };
 
-        // Find the CIGAR string, if present
         let cigar = fields.iter()
             .find(|&&f| f.starts_with("cg:Z:"))
             .map(|&s| s[5..].to_string());
@@ -53,6 +57,7 @@ impl PafRecord {
             target_length,
             target_start,
             target_end,
+            strand,
             cigar,
         })
     }
@@ -63,8 +68,7 @@ pub enum ParseErr {
     NotEnoughFields,
     IoError(std::io::Error),
     InvalidField(std::num::ParseIntError),
-    InvalidCigarFormat,
-    UnsupportedCigarOperation,
+    InvalidStrand,
 }
 
 impl From<std::num::ParseIntError> for ParseErr {
@@ -82,7 +86,6 @@ pub fn parse_paf<R: BufRead>(reader: R) -> Result<Vec<PafRecord>, ParseErr> {
     }
     Ok(records)
 }
-
 
 #[cfg(test)]
 mod tests {
