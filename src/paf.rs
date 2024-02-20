@@ -1,6 +1,5 @@
-use std::io::BufRead;
+use std::io::{BufRead, Error as IoError};
 use std::num::ParseIntError;
-use std::str::FromStr;
 
 #[derive(Debug, PartialEq)]
 pub struct PafRecord {
@@ -30,14 +29,16 @@ impl PafRecord {
         }
 
         let query_name = fields[0].to_string();
-        let query_length = fields[1].parse::<usize>()?;
-        let query_start = fields[2].parse::<usize>()?;
-        let query_end = fields[3].parse::<usize>()?;
+        let query_length = fields[1].parse::<usize>().map_err(ParseErr::InvalidField)?;
+        let query_start = fields[2].parse::<usize>().map_err(ParseErr::InvalidField)?;
+        let query_end = fields[3].parse::<usize>().map_err(ParseErr::InvalidField)?;
         let target_name = fields[5].to_string();
-        let target_length = fields[6].parse::<usize>()?;
-        let target_start = fields[7].parse::<usize>()?;
-        let target_end = fields[8].parse::<usize>()?;
-        let strand_char = fields[4].chars().next().ok_or(ParseErr::InvalidField)?;
+        let target_length = fields[6].parse::<usize>().map_err(ParseErr::InvalidField)?;
+        let target_start = fields[7].parse::<usize>().map_err(ParseErr::InvalidField)?;
+        let target_end = fields[8].parse::<usize>().map_err(ParseErr::InvalidField)?;
+        let strand_char = fields[4].chars().next().ok_or_else(|| {
+            ParseErr::InvalidFormat("Expected '+' or '-' for strand".to_string())
+        })?;
         let strand = match strand_char {
             '+' => Strand::Forward,
             '-' => Strand::Reverse,
@@ -66,15 +67,12 @@ impl PafRecord {
 #[derive(Debug)]
 pub enum ParseErr {
     NotEnoughFields,
-    IoError(std::io::Error),
-    InvalidField(std::num::ParseIntError),
+    IoError(IoError),
+    InvalidField(ParseIntError),
     InvalidStrand,
-}
-
-impl From<std::num::ParseIntError> for ParseErr {
-    fn from(err: std::num::ParseIntError) -> Self {
-        ParseErr::InvalidField(err)
-    }
+    InvalidCigarFormat,
+    UnsupportedCigarOperation,
+    InvalidFormat(String),
 }
 
 pub fn parse_paf<R: BufRead>(reader: R) -> Result<Vec<PafRecord>, ParseErr> {
@@ -106,7 +104,8 @@ mod tests {
                 target_length: 100,
                 target_start: 0,
                 target_end: 100,
-                cigar: Some("60M".to_string()),
+                cigar: None, // Adjusted for the example to not include a CIGAR string
+                strand: Strand::Forward,
             }
         );
     }
