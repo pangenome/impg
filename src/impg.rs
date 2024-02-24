@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn test_parse_cigar_to_delta_invalid() {
-        let cigar = "10M5X"; // 'X' is not a supported operation
+        let cigar = "10M5Q"; // Q is not a valid CIGAR operation
         assert!(parse_cigar_to_delta(cigar).is_err());
     }
 
