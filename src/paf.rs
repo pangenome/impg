@@ -1,7 +1,7 @@
 use std::io::{BufRead, Error as IoError};
 use std::num::ParseIntError;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct PafRecord {
     pub query_name: String,
     pub query_length: usize,

@@ -268,11 +268,4 @@ mod tests {
         assert_eq!(records, expected_records);
     }
 
-    #[test]
-    fn test_parse_paf_invalid() {
-        let file = File::open("path/to/invalid/paf/file").unwrap();
-        let reader = BufReader::new(file);
-        let records = parse_paf(reader);
-        assert!(records.is_err());
-    }
 }
