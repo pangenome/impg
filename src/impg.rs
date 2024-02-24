@@ -188,6 +188,9 @@ fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, ParseErr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
+    use std::io::BufReader;
+    use crate::paf::parse_paf;
 
     #[test]
     fn test_project_target_range_through_alignment_forward() {
@@ -257,6 +260,7 @@ mod tests {
                 target_start: 30,
                 target_end: 40,
                 cigar: Some("10M".to_string()),
+                strand: Strand::Forward,
             },
             // Add more test records as needed
         ];
