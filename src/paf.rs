@@ -111,8 +111,22 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_paf_valid_2() {
+        let line = "seq1\t100\t0\t100\t+\tseq2\t100\t0\t100\t60\t100\t255\tcg:Z:10=";
+        assert!(PafRecord::parse(line).is_ok());
+    }
+
+    #[test]
     fn test_parse_paf_invalid() {
-        let line = "seq1\t100\t0\t100\t+\tseq2\t100\t0\t100\t60\t100\t255\tcg:Z:10M";
+        // it's got a character 'z' in the length field
+        let line = "seq1\t100\t0\t100\t+\tseq2\t100\tz\t100\t60\t100\t255\tcg:Z:10M";
+        assert!(PafRecord::parse(line).is_err());
+    }
+
+    #[test]
+    fn test_parse_paf_cigar_invalid() {
+        // it's got Q in the CIGAR string
+        let line = "seq1\t100\t0\t100\t+\tseq2\t100\tz\t100\t60\t100\t255\tcg:Z:10Q";
         assert!(PafRecord::parse(line).is_err());
     }
 }
