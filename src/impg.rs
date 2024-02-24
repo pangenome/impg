@@ -167,7 +167,7 @@ fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, ParseErr> {
     let mut num_buf = String::new();
 
     for c in cigar.chars() {
-        if c.is_digit(10) {
+        if c.is_ascii_digit() {
             num_buf.push(c);
         } else {
             let len = num_buf.parse::<i32>().map_err(|_| ParseErr::InvalidCigarFormat)?;
