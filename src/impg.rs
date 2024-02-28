@@ -33,7 +33,7 @@ impl Impg {
         let mut intervals: HashMap<u32, Vec<Interval<QueryMetadata>>> = HashMap::new();
 
         for record in records {
-            let cigar_ops = record.cigar.as_ref().map(|x| parse_cigar_to_delta(x)).transpose()?.unwrap_or_else(Vec::new);
+            let cigar_ops = record.cigar.as_ref().map(|x| parse_cigar_to_delta(x, record.strand)).transpose()?.unwrap_or_else(Vec::new);
             let query_id = seq_index.get_id(&record.query_name).expect("Query name not found in index");
             let target_id = seq_index.get_id(&record.target_name).expect("Target name not found in index");
 
@@ -127,42 +127,60 @@ fn project_target_range_through_alignment(
 ) -> (i32, i32) {
     let (target_start, target_end, query_start, query_end, strand) = record;
 
-    let mut query_pos = query_start;
     let mut target_pos = target_start;
+    let mut query_pos = if strand == Strand::Forward { query_start } else { query_end };
 
-    let mut projected_start = -1;
-    let mut projected_end = -1;
+    let mut projected_start: Option<i32> = None;
+    let mut projected_end: Option<i32> = None;
 
-    for CigarOp { target_delta, query_delta } in cigar_ops.iter() {
-        if target_pos >= target_range.0 && projected_start == -1 {
-            projected_start = query_pos;
+    for cigar_op in cigar_ops {
+        match (cigar_op.target_delta, cigar_op.query_delta) {
+            (0, query_delta) => { // Insertion in query
+                if target_pos >= target_range.0 && target_pos <= target_range.1 {
+                    projected_start.get_or_insert(query_pos);
+                    projected_end = Some(query_pos +
+                                         if target_pos <= target_range.1 { 0 } else { query_delta });
+                }
+                query_pos += query_delta;
+            },
+            (target_delta, 0) => { // Deletion in target
+                let overlap_start = target_pos.max(target_range.0);
+                let overlap_end = (target_pos + target_delta).min(target_range.1);
+
+                if overlap_start < overlap_end { // There's an overlap
+                    projected_start.get_or_insert(query_pos);
+                    projected_end = Some(query_pos); // Deletion does not advance query position
+                }
+
+                target_pos += target_delta;
+            },
+            (target_delta, query_delta) => { // Match or mismatch
+                let overlap_start = target_pos.max(target_range.0);
+                let overlap_end = (target_pos + target_delta).min(target_range.1);
+
+                if overlap_start < overlap_end { // There's an overlap
+                    let overlap_length = overlap_end - overlap_start;
+                    let dir = if strand == Strand::Forward { 1 } else { -1 };
+                    let query_overlap_start = query_pos + (overlap_start - target_pos) * dir;
+                    let query_overlap_end = query_overlap_start + overlap_length * dir;
+
+                    projected_start.get_or_insert(query_overlap_start);
+                    projected_end = Some(query_overlap_end);
+                }
+
+                target_pos += target_delta;
+                query_pos += query_delta;
+            },
         }
-
-        if target_pos + target_delta > target_end {
-            projected_end = query_pos + (target_end - target_pos).min(*query_delta);
-            break;
-        }
-
-        target_pos += target_delta;
-        query_pos += match strand {
-            Strand::Forward => *query_delta,
-            Strand::Reverse => -(*query_delta), // Reverse the query position increment for reverse strand
-        };
     }
 
-    if projected_end == -1 { // Ensure projected_end is set if the loop completes without setting it
-        projected_end = query_pos;
+    if strand == Strand::Reverse {
+        std::mem::swap(&mut projected_start, &mut projected_end);
     }
-
-    assert!(projected_start != -1 && projected_end != -1, "Projection failed to calculate valid start and end positions");
-
-    match strand {
-        Strand::Forward => (projected_start, projected_end),
-        Strand::Reverse => (query_start - projected_end, query_start - projected_start), // Adjust for reverse strand
-    }
+    (projected_start.unwrap_or(query_start), projected_end.unwrap_or(query_pos)) // Changed _query_end to query_pos
 }
 
-fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, ParseErr> {
+fn parse_cigar_to_delta(cigar: &str, strand: Strand) -> Result<Vec<CigarOp>, ParseErr> {
     let mut ops = Vec::new();
     let mut num_buf = String::new();
 
@@ -172,10 +190,13 @@ fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, ParseErr> {
         } else {
             let len = num_buf.parse::<i32>().map_err(|_| ParseErr::InvalidCigarFormat)?;
             num_buf.clear(); // Reset the buffer for the next operation
-
             match c {
-                'M' | '=' | 'X' => ops.push(CigarOp { target_delta: len, query_delta: len }),
-                'I' => ops.push(CigarOp { target_delta: 0, query_delta: len }),
+                'M' | '=' | 'X' => ops.push(
+                    CigarOp { target_delta: len,
+                              query_delta: (if strand == Strand::Forward { len } else { -len }) }),
+                'I' => ops.push(
+                    CigarOp { target_delta: 0,
+                              query_delta: (if strand == Strand::Forward { len } else { -len }) }),
                 'D' => ops.push(CigarOp { target_delta: len, query_delta: 0 }),
                 _ => return Err(ParseErr::UnsupportedCigarOperation),
             }
@@ -206,9 +227,10 @@ mod tests {
     #[test]
     fn test_project_target_range_through_alignment_reverse() {
         let target_range = (100, 200);
-        let record = (100, 200, 100, 200, Strand::Reverse);
+        let record = (100, 200, 0, 100, Strand::Reverse);
         let cigar_ops = vec![CigarOp { target_delta: 100, query_delta: 100 }];
         let (start, end) = project_target_range_through_alignment(target_range, record, &cigar_ops);
+        println!("Final result: ({}, {})", start, end);
 
         assert_eq!(start, 0);
         assert_eq!(end, 100);
@@ -217,14 +239,120 @@ mod tests {
     #[test]
     fn test_project_target_range_through_alignment() {
         let cigar_ops = vec![
-            CigarOp { target_delta: 10, query_delta: 10 },
-            CigarOp { target_delta: 0, query_delta: 5 },
-            CigarOp { target_delta: 5, query_delta: 0 },
+            CigarOp { target_delta: 10, query_delta: 10 }, // 10, 60
+            CigarOp { target_delta: 0, query_delta: 5 }, // 10, 65
+            CigarOp { target_delta: 5, query_delta: 0 }, // 15, 65
+            CigarOp { target_delta: 50, query_delta: 50 }, // 65, 115
+            CigarOp { target_delta: 0, query_delta: 50 }, // 65, 165
+            CigarOp { target_delta: 35, query_delta: 35 }, // 100, 200
         ];
-        let (target_start, target_end, query_start, query_end, strand) = (0, 100, 10, 20, Strand::Forward);
-        let expected_result = (10, 20);
-        let result = project_target_range_through_alignment((0, 100), (target_start, target_end, query_start, query_end, strand), &cigar_ops);
-        assert_eq!(result, expected_result);
+        let base = (0, 100, 50, 200, Strand::Forward);
+        {
+            let result = project_target_range_through_alignment((0, 100), base, &cigar_ops);
+            assert_eq!(result, (50, 200));
+        }
+        {
+            let result = project_target_range_through_alignment((50, 55), base, &cigar_ops);
+            assert_eq!(result, (100, 105));
+        }
+        {
+            let result = project_target_range_through_alignment((50, 64), base, &cigar_ops);
+            assert_eq!(result, (100, 114));
+        }
+        {
+            let result = project_target_range_through_alignment((65, 65), base, &cigar_ops);
+            assert_eq!(result, (115, 115));
+        }
+        {
+            let result = project_target_range_through_alignment((50, 65), base, &cigar_ops);
+            assert_eq!(result, (100, 115));
+        }
+        {
+            let result = project_target_range_through_alignment((50, 66), base, &cigar_ops);
+            assert_eq!(result, (100, 166));
+        }
+        {
+            let result = project_target_range_through_alignment((70, 95), base, &cigar_ops);
+            assert_eq!(result, (170, 195));
+        }
+    }
+
+    // 1. Simple Forward Projection
+    #[test]
+    fn test_forward_projection_simple() {
+        let target_range = (100, 200);
+        let record = (100, 200, 100, 200, Strand::Forward);
+        let cigar_ops = vec![CigarOp { target_delta: 100, query_delta: 100 }];
+        let (start, end) = project_target_range_through_alignment(target_range, record, &cigar_ops);
+        assert_eq!((start, end), (100, 200));
+    }
+
+    // 2. Simple Reverse Projection
+    #[test]
+    fn test_reverse_projection_simple() {
+        let target_range = (100, 200);
+        let record = (100, 200, 100, 200, Strand::Reverse);
+        let cigar_ops = vec![CigarOp { target_delta: 100, query_delta: -100 }];
+        let (start, end) = project_target_range_through_alignment(target_range, record, &cigar_ops);
+        assert_eq!((start, end), (100, 200)); // Adjust for reverse calculation
+    }
+
+    // 3. Forward Projection with Insertions
+    #[test]
+    fn test_forward_projection_with_insertions() {
+        let target_range = (50, 150);
+        let record = (50, 150, 50, 160, Strand::Forward);
+        let cigar_ops = vec![
+            CigarOp { target_delta: 50, query_delta: 50 }, // Match
+            CigarOp { target_delta: 0, query_delta: 10 },  // Insertion
+            CigarOp { target_delta: 50, query_delta: 50 }  // Match
+        ];
+        let (start, end) = project_target_range_through_alignment(target_range, record, &cigar_ops);
+        assert_eq!((start, end), (50, 160));
+    }
+
+    // 4. Forward Projection with Deletions
+    #[test]
+    fn test_forward_projection_with_deletions() {
+        let target_range = (50, 150);
+        let record = (50, 150, 50, 140, Strand::Forward);
+        let cigar_ops = vec![
+            CigarOp { target_delta: 50, query_delta: 50 }, // Match
+            CigarOp { target_delta: 10, query_delta: 0 },  // Deletion
+            CigarOp { target_delta: 40, query_delta: 40 }  // Match
+        ];
+        let (start, end) = project_target_range_through_alignment(target_range, record, &cigar_ops);
+        assert_eq!((start, end), (50, 140));
+    }
+
+    // 5. Reverse Projection with Mixed Operations
+    #[test]
+    fn test_reverse_projection_with_mixed_operations() {
+        let target_range = (150, 250);
+        let record = (100, 200, 200, 300, Strand::Reverse);
+        let cigar_ops = vec![
+            CigarOp { target_delta: 50, query_delta: -50 }, // 150, 250
+            CigarOp { target_delta: 10, query_delta: 0 },  // 160, 250
+            CigarOp { target_delta: 0, query_delta: -10 },  // 160, 240
+            CigarOp { target_delta: 40, query_delta: -40 }  // 200, 200
+        ];
+        let (start, end) = project_target_range_through_alignment(target_range, record, &cigar_ops);
+        assert_eq!((start, end), (200, 250));
+    }
+
+    // 6. Edge Case Projection
+    #[test]
+    fn test_edge_case_projection() {
+        let target_range = (0, 10);
+        let record = (0, 50, 0, 40, Strand::Forward);
+        let cigar_ops = vec![
+            CigarOp { target_delta: 10, query_delta: 10 }, // Match
+            CigarOp { target_delta: 20, query_delta: 0 },  // Deletion in target
+            CigarOp { target_delta: 20, query_delta: 30 }  // Match with insertion in query
+        ];
+        let (start, end) = project_target_range_through_alignment(target_range, record, &cigar_ops);
+        println!("{} {}", start, end);
+        assert_eq!((start, end), (0, 10));
     }
 
     #[test]
@@ -235,14 +363,14 @@ mod tests {
             CigarOp { target_delta: 0, query_delta: 5 },
             CigarOp { target_delta: 5, query_delta: 0 },
         ];
-        let ops = parse_cigar_to_delta(cigar).unwrap();
+        let ops = parse_cigar_to_delta(cigar, Strand::Forward).unwrap();
         assert_eq!(ops, expected_ops);
     }
 
     #[test]
     fn test_parse_cigar_to_delta_invalid() {
         let cigar = "10M5Q"; // Q is not a valid CIGAR operation
-        assert!(parse_cigar_to_delta(cigar).is_err());
+        assert!(parse_cigar_to_delta(cigar, Strand::Forward).is_err());
     }
 
     #[test]
