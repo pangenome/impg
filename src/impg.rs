@@ -91,10 +91,6 @@ impl Impg {
         let mut visited = HashSet::new();
 
         while let Some((current_target, current_start, current_end)) = stack.pop() {
-            if !visited.insert((current_target, current_start, current_end)) {
-                continue; // Skip if this query has already been processed
-            }
-
             if let Some(tree) = self.trees.get(&current_target) {
                 tree.query(current_start, current_end, |interval| {
                     let metadata = &interval.metadata;
@@ -112,7 +108,10 @@ impl Impg {
                     results.push(adjusted_interval);
 
                     if metadata.query_id != current_target {
-                        stack.push((metadata.query_id, adjusted_start, adjusted_end));
+                        let todo_range = (metadata.query_id, adjusted_start, adjusted_end);
+                        if !visited.insert(todo_range) {
+                            stack.push(todo_range);
+                        }
                     }
                 });
             }
