@@ -1,6 +1,8 @@
 use clap::Parser;
 use std::fs::File;
 use std::io::{self, BufReader};
+use flate2::read::GzDecoder;
+use zstd::stream::read::Decoder as ZstdDecoder;
 use impg::impg::Impg;
 use impg::seqidx::SequenceIndex;
 use impg::paf;
@@ -18,7 +20,7 @@ struct Args {
     query: String,
 
     /// Enable transitive overlap queries.
-    #[clap(long, action)]
+    #[clap(short='x', long, action)]
     transitive: bool,
 }
 
@@ -28,7 +30,17 @@ fn main() -> io::Result<()> {
     let (query_start, query_end) = query_range;
 
     let file = File::open(&args.paf_file)?;
-    let reader = BufReader::new(file);
+
+    // Determine the file type and wrap the file reader in the appropriate decoder
+    let reader: Box<dyn io::Read> = if args.paf_file.ends_with(".gz") {
+        Box::new(GzDecoder::new(file))
+    } else if args.paf_file.ends_with(".zst") {
+        Box::new(ZstdDecoder::new(file).expect("Failed to create Zstd decoder"))
+    } else {
+        Box::new(file)
+    };
+    
+    let reader = BufReader::new(reader);
 
     let records = paf::parse_paf(reader).expect("Failed to parse PAF records");
     let mut seq_index = SequenceIndex::new();

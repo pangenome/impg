@@ -3,6 +3,8 @@ use coitrees::{COITree, Interval, IntervalTree};
 use crate::paf::{PafRecord, ParseErr, Strand};
 use crate::seqidx::SequenceIndex;
 
+/// Parse a CIGAR string into a vector of CigarOp
+// Note that the query_delta is negative for reverse strand alignments
 #[derive(Clone, Debug)]
 #[derive(PartialEq, Eq, Hash)]
 pub struct CigarOp {
@@ -21,7 +23,7 @@ pub struct QueryMetadata {
     strand: Strand,
 }
 
-type QueryInterval = Interval<QueryMetadata>;
+type QueryInterval = Interval<u32>;
 type TreeMap = HashMap<u32, COITree<QueryMetadata, u32>>;
 
 pub struct Impg {
@@ -61,13 +63,13 @@ impl Impg {
         Ok(Self { trees })
     }
 
-    pub fn query(&self, target_id: u32, query_start: i32, query_end: i32) -> Vec<QueryInterval> {
+    pub fn query(&self, target_id: u32, range_start: i32, range_end: i32) -> Vec<QueryInterval> {
         let mut results = Vec::new();
         if let Some(tree) = self.trees.get(&target_id) {
-            tree.query(query_start, query_end, |interval| {
+            tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
                 let (adjusted_start, adjusted_end) = project_target_range_through_alignment(
-                    (interval.first, interval.last),
+                    (range_start, range_end),
                     (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end, metadata.strand),
                     &metadata.cigar_ops
                 );
@@ -75,7 +77,7 @@ impl Impg {
                 let adjusted_interval = QueryInterval {
                     first: adjusted_start,
                     last: adjusted_end,
-                    metadata: metadata.clone(),
+                    metadata: metadata.query_id,
                 };
                 results.push(adjusted_interval);
             });
@@ -83,9 +85,9 @@ impl Impg {
         results
     }
 
-    pub fn query_transitive(&self, target_id: u32, query_start: i32, query_end: i32) -> Vec<QueryInterval> {
+    pub fn query_transitive(&self, target_id: u32, range_start: i32, range_end: i32) -> Vec<QueryInterval> {
         let mut results = Vec::new();
-        let mut stack = vec![(target_id, query_start, query_end)];
+        let mut stack = vec![(target_id, range_start, range_end)];
         let mut visited = HashSet::new();
 
         while let Some((current_target, current_start, current_end)) = stack.pop() {
@@ -97,7 +99,7 @@ impl Impg {
                 tree.query(current_start, current_end, |interval| {
                     let metadata = &interval.metadata;
                     let (adjusted_start, adjusted_end) = project_target_range_through_alignment(
-                        (interval.first, interval.last),
+                        (current_start, current_end),
                         (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end, metadata.strand),
                         &metadata.cigar_ops
                     );
@@ -105,12 +107,12 @@ impl Impg {
                     let adjusted_interval = QueryInterval {
                         first: adjusted_start,
                         last: adjusted_end,
-                        metadata: metadata.clone(),
+                        metadata: metadata.query_id,
                     };
                     results.push(adjusted_interval);
 
                     if metadata.query_id != current_target {
-                        stack.push((metadata.query_id, adjusted_end, adjusted_end));
+                        stack.push((metadata.query_id, adjusted_start, adjusted_end));
                     }
                 });
             }
@@ -125,7 +127,7 @@ fn project_target_range_through_alignment(
     record: (i32, i32, i32, i32, Strand),
     cigar_ops: &[CigarOp],
 ) -> (i32, i32) {
-    let (target_start, target_end, query_start, query_end, strand) = record;
+    let (target_start, _target_end, query_start, query_end, strand) = record;
 
     let mut target_pos = target_start;
     let mut query_pos = if strand == Strand::Forward { query_start } else { query_end };
@@ -134,6 +136,10 @@ fn project_target_range_through_alignment(
     let mut projected_end: Option<i32> = None;
 
     for cigar_op in cigar_ops {
+        // If the target position is past the end of the range, we can stop
+        if target_pos > target_range.1 {
+            break;
+        }
         match (cigar_op.target_delta, cigar_op.query_delta) {
             (0, query_delta) => { // Insertion in query
                 if target_pos >= target_range.0 && target_pos <= target_range.1 {
