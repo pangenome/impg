@@ -58,9 +58,11 @@ fn main() -> io::Result<()> {
         impg.query(target_id, query_start, query_end)
     };
 
-    println!("Overlapping regions:");
+    // write output in BED format relative to the queries that match the target range
     for overlap in overlaps {
-        println!("{:?}", overlap);
+        println!("{}\t{}\t{}",
+                 seq_index.get_name(overlap.metadata).unwrap(),
+                 overlap.first, overlap.last);
     }
 
     Ok(())
@@ -79,6 +81,15 @@ fn parse_query(query: &str) -> Result<(String, (i32, i32)), &'static str> {
 
     let start = range_parts[0].parse::<i32>().map_err(|_| "Invalid start value")?;
     let end = range_parts[1].parse::<i32>().map_err(|_| "Invalid end value")?;
+
+    // assert that start and end are at least one apart
+    if start >= end {
+        return Err("Start value must be less than end value");
+    }
+
+    if start == end {
+        return Err("Start and end values must be different");
+    }
 
     Ok((parts[0].to_string(), (start, end)))
 }
