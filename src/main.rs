@@ -26,8 +26,8 @@ struct Args {
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
-    let (target_name, query_range) = parse_query(&args.query).expect("Invalid query format");
-    let (query_start, query_end) = query_range;
+    let (target_name, target_range) = parse_query(&args.query).expect("Invalid query format");
+    let (target_start, target_end) = target_range;
 
     let file = File::open(&args.paf_file)?;
 
@@ -53,12 +53,13 @@ fn main() -> io::Result<()> {
     let impg = Impg::from_paf_records(&records, &seq_index).expect("Failed to create index");
 
     let overlaps = if args.transitive {
-        impg.query_transitive(target_id, query_start, query_end)
+        impg.query_transitive(target_id, target_start, target_end)
     } else {
-        impg.query(target_id, query_start, query_end)
+        impg.query(target_id, target_start, target_end)
     };
 
     // write output in BED format relative to the queries that match the target range
+    println!("{}\t{}\t{}", target_name, target_start, target_end);
     for overlap in overlaps {
         println!("{}\t{}\t{}",
                  seq_index.get_name(overlap.metadata).unwrap(),
