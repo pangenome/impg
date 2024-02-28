@@ -22,7 +22,19 @@ This approach allows for fast and memory-efficient projection of sequence ranges
 Getting started with `impg` is straightforward. Here's a basic example of how to use the command-line utility:
 
 ```bash
-impg -p x.zst -q S288C#1#chrI:50000-100000 -x
+impg -p cerevisiae.pan.paf.gz -q S288C#1#chrI:50000-100000 -x
+```
+
+Depending on your alignments, this might result in the following BED file:
+
+```txt
+S288C#1#chrI        50000  100000
+DBVPG6044#1#chrI    35335  85288
+Y12#1#chrI          36263  86288
+DBVPG6765#1#chrI    36166  86150
+YPS128#1#chrI       47080  97062
+UWOPS034614#1#chrI  36826  86817
+SK1#1#chrI          52740  102721
 ```
 
 In this example, `-p` specifies the path to the PAF file (compressed with zstd in this case), `-q` defines the query in the format of `target:start-end`, and `-x` requests a *transitive closure* of the matches.
