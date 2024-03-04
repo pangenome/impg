@@ -12,7 +12,7 @@ pub struct CigarOp {
     query_delta: i32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct QueryMetadata {
     query_id: u32,
     cigar_ops: Vec<CigarOp>,

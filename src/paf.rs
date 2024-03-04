@@ -21,6 +21,12 @@ pub enum Strand {
     Reverse,
 }
 
+impl Default for Strand {
+    fn default() -> Self {
+        Strand::Forward
+    }
+}
+
 impl PafRecord {
     pub fn parse(line: &str) -> Result<Self, ParseErr> {
         let fields: Vec<&str> = line.split('\t').collect();
