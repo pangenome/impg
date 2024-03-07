@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use coitrees::{COITree, Interval, IntervalTree};
+use coitrees::{BasicCOITree, Interval, IntervalTree};
 use crate::paf::{PafRecord, ParseErr, Strand};
 use crate::seqidx::SequenceIndex;
 
@@ -24,7 +24,7 @@ pub struct QueryMetadata {
 }
 
 type QueryInterval = Interval<u32>;
-type TreeMap = HashMap<u32, COITree<QueryMetadata, u32>>;
+type TreeMap = HashMap<u32, BasicCOITree<QueryMetadata, u32>>;
 
 pub struct Impg {
     trees: TreeMap,
@@ -57,7 +57,7 @@ impl Impg {
         }
 
         let trees: TreeMap = intervals.into_iter().map(|(target_id, interval_nodes)| {
-            (target_id, COITree::new(interval_nodes.as_slice()))
+            (target_id, BasicCOITree::new(interval_nodes.as_slice()))
         }).collect();
 
         Ok(Self { trees })
