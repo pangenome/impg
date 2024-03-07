@@ -9,4 +9,3 @@ edition = "2021"
 clap = { version = "4.5.0", features = ["derive"] }
 coitrees = "0.4.0"
 flate2 = "1.0.28"
-zstd = "0.13.0"

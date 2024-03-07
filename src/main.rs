@@ -2,7 +2,6 @@ use clap::Parser;
 use std::fs::File;
 use std::io::{self, BufReader};
 use flate2::read::GzDecoder;
-use zstd::stream::read::Decoder as ZstdDecoder;
 use impg::impg::Impg;
 use impg::seqidx::SequenceIndex;
 use impg::paf;
@@ -34,8 +33,6 @@ fn main() -> io::Result<()> {
     // Determine the file type and wrap the file reader in the appropriate decoder
     let reader: Box<dyn io::Read> = if args.paf_file.ends_with(".gz") {
         Box::new(GzDecoder::new(file))
-    } else if args.paf_file.ends_with(".zst") {
-        Box::new(ZstdDecoder::new(file).expect("Failed to create Zstd decoder"))
     } else {
         Box::new(file)
     };
