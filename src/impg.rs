@@ -2,11 +2,13 @@ use std::collections::{HashMap, HashSet};
 use coitrees::{BasicCOITree, Interval, IntervalTree};
 use crate::paf::{PafRecord, ParseErr, Strand};
 use crate::seqidx::SequenceIndex;
+use lz4::block::{compress, decompress};
+use serde::{Serialize, Deserialize};
 
 /// Parse a CIGAR string into a vector of CigarOp
 // Note that the query_delta is negative for reverse strand alignments
 #[derive(Clone, Debug)]
-#[derive(PartialEq, Eq, Hash)]
+#[derive(PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CigarOp {
     target_delta: i32,
     query_delta: i32,
@@ -15,12 +17,24 @@ pub struct CigarOp {
 #[derive(Clone, Debug, Default)]
 pub struct QueryMetadata {
     query_id: u32,
-    cigar_ops: Vec<CigarOp>,
+    compressed_cigar_ops: Vec<u8>,
     target_start: i32,
     target_end: i32,
     query_start: i32,
     query_end: i32,
     strand: Strand,
+}
+
+impl QueryMetadata {
+    fn set_cigar_ops(&mut self, cigar_ops: &[CigarOp]) {
+        let encoded_cigar_ops = bincode::serialize(cigar_ops).expect("Failed to serialize CIGAR ops");
+        self.compressed_cigar_ops = compress(&encoded_cigar_ops, None, true).expect("Failed to compress CIGAR ops");
+    }
+
+    fn get_cigar_ops(&self) -> Vec<CigarOp> {
+        let decompressed_cigar_ops = decompress(&self.compressed_cigar_ops, None).expect("Failed to decompress CIGAR ops");
+        bincode::deserialize(&decompressed_cigar_ops).expect("Failed to deserialize CIGAR ops")
+    }
 }
 
 type QueryInterval = Interval<u32>;
@@ -39,15 +53,16 @@ impl Impg {
             let query_id = seq_index.get_id(&record.query_name).expect("Query name not found in index");
             let target_id = seq_index.get_id(&record.target_name).expect("Target name not found in index");
 
-            let query_metadata = QueryMetadata {
+            let mut query_metadata = QueryMetadata {
                 query_id,
-                cigar_ops,
+                compressed_cigar_ops: Vec::new(),
                 target_start: record.target_start as i32,
                 target_end: record.target_end as i32,
                 query_start: record.query_start as i32,
                 query_end: record.query_end as i32,
                 strand: record.strand,
             };
+            query_metadata.set_cigar_ops(&cigar_ops);
 
             intervals.entry(target_id).or_default().push(Interval {
                 first: record.target_start as i32,
@@ -71,7 +86,7 @@ impl Impg {
                 let (adjusted_start, adjusted_end) = project_target_range_through_alignment(
                     (range_start, range_end),
                     (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end, metadata.strand),
-                    &metadata.cigar_ops
+                    &metadata.get_cigar_ops()
                 );
 
                 let adjusted_interval = QueryInterval {
@@ -97,7 +112,7 @@ impl Impg {
                     let (adjusted_start, adjusted_end) = project_target_range_through_alignment(
                         (current_start, current_end),
                         (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end, metadata.strand),
-                        &metadata.cigar_ops
+                        &metadata.get_cigar_ops()
                     );
 
                     let adjusted_interval = QueryInterval {
