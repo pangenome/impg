@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use coitrees::{BasicCOITree, Interval, IntervalTree};
 use crate::paf::{PafRecord, ParseErr, Strand};
 use crate::seqidx::SequenceIndex;
-use flate2::write::GzEncoder;
-use flate2::Compression;
+use xz2::write::XzEncoder;
+use xz2::read::XzDecoder;
 use serde::{Serialize, Deserialize};
 use std::io::{Write, Read};
 
@@ -30,13 +30,13 @@ pub struct QueryMetadata {
 impl QueryMetadata {
     fn set_cigar_ops(&mut self, cigar_ops: &[CigarOp]) {
         let encoded_cigar_ops = bincode::serialize(cigar_ops).expect("Failed to serialize CIGAR ops");
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+        let mut encoder = XzEncoder::new(Vec::new(), 9);
         encoder.write_all(&encoded_cigar_ops).expect("Failed to compress CIGAR ops");
         self.compressed_cigar_ops = encoder.finish().expect("Failed to finish compression");
     }
-    
+
     fn get_cigar_ops(&self) -> Vec<CigarOp> {
-        let mut decoder = flate2::read::GzDecoder::new(&self.compressed_cigar_ops[..]);
+        let mut decoder = XzDecoder::new(&self.compressed_cigar_ops[..]);
         let mut decompressed_cigar_ops = Vec::new();
         decoder.read_to_end(&mut decompressed_cigar_ops).expect("Failed to decompress CIGAR ops");
         bincode::deserialize(&decompressed_cigar_ops).expect("Failed to deserialize CIGAR ops")
