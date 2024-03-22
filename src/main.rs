@@ -2,7 +2,7 @@ use clap::Parser;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter};
 use flate2::read::GzDecoder;
-use impg::impg::{Impg, SerializableImpg};
+use impg::impg::{Impg, SerializableImpg, QueryInterval};
 use impg::paf;
 
 /// Command-line tool for querying overlaps in PAF files.
@@ -44,13 +44,15 @@ fn main() -> io::Result<()> {
 
     let (target_name, target_range) = parse_query(&args.query)?;
     let results = perform_query(&impg, &target_name, target_range, args.transitive);
-    output_results(results);
+    output_results(&impg, results);
 
     Ok(())
 }
 
 fn load_or_generate_index(paf_file: &str, index_file: Option<&str>) -> io::Result<Impg> {
-    let index_file = index_file.unwrap_or_else(|| &format!("{}.impg", paf_file));
+    let index_file = index_file.map(|s| s.to_string());
+    let index_file = index_file.unwrap_or_else(|| format!("{}.impg", paf_file));
+    let index_file = index_file.as_str();
     if std::path::Path::new(index_file).exists() {
         load_index(index_file)
     } else {
@@ -106,7 +108,7 @@ fn parse_query(query: &str) -> io::Result<(String, (i32, i32))> {
     Ok((parts[0].to_string(), (start, end)))
 }
 
-fn perform_query(impg: &Impg, target_name: &str, target_range: (i32, i32), transitive: bool) -> Vec<impg::QueryInterval> {
+fn perform_query(impg: &Impg, target_name: &str, target_range: (i32, i32), transitive: bool) -> Vec<QueryInterval> {
     let (target_start, target_end) = target_range;
     let target_id = impg.seq_index.get_id(target_name).expect("Target name not found in index");
     if transitive {
@@ -116,7 +118,7 @@ fn perform_query(impg: &Impg, target_name: &str, target_range: (i32, i32), trans
     }
 }
 
-fn output_results(results: Vec<impg::QueryInterval>) {
+fn output_results(impg: &Impg, results: Vec<QueryInterval>) {
     for overlap in results {
         println!("{}\t{}\t{}",
                  impg.seq_index.get_name(overlap.metadata).unwrap(),

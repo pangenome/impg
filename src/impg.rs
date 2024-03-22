@@ -37,7 +37,7 @@ impl QueryMetadata {
     }
 }
 
-type QueryInterval = Interval<u32>;
+pub type QueryInterval = Interval<u32>;
 type TreeMap = HashMap<u32, BasicCOITree<QueryMetadata, u32>>;
 pub type SerializableImpg = (HashMap<u32, Vec<SerializableInterval>>, SequenceIndex);
 
