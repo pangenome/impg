@@ -6,6 +6,7 @@ use xz2::write::XzEncoder;
 use xz2::read::XzDecoder;
 use serde::{Serialize, Deserialize};
 use std::io::{Write, Read};
+use rayon::prelude::*;
 
 /// Parse a CIGAR string into a vector of CigarOp
 // Note that the query_delta is negative for reverse strand alignments
@@ -69,30 +70,39 @@ impl Impg {
             seq_index.get_or_insert_id(&record.target_name);
         }
         
-        let mut intervals: HashMap<u32, Vec<Interval<QueryMetadata>>> = HashMap::new();
+        let intervals: HashMap<u32, Vec<Interval<QueryMetadata>>> = records.par_iter()
+            .filter_map(|record| {
+                let cigar_ops = record.cigar.as_ref().map(|x| parse_cigar_to_delta(x, record.strand)).transpose().ok()?.unwrap_or_else(Vec::new);
+                let query_id = seq_index.get_id(&record.query_name).expect("Query name not found in index");
+                let target_id = seq_index.get_id(&record.target_name).expect("Target name not found in index");
 
-        for record in records {
-            let cigar_ops = record.cigar.as_ref().map(|x| parse_cigar_to_delta(x, record.strand)).transpose()?.unwrap_or_else(Vec::new);
-            let query_id = seq_index.get_id(&record.query_name).expect("Query name not found in index");
-            let target_id = seq_index.get_id(&record.target_name).expect("Target name not found in index");
+                let mut query_metadata = QueryMetadata {
+                    query_id,
+                    compressed_cigar_ops: Vec::new(),
+                    target_start: record.target_start as i32,
+                    target_end: record.target_end as i32,
+                    query_start: record.query_start as i32,
+                    query_end: record.query_end as i32,
+                    strand: record.strand,
+                };
+                query_metadata.set_cigar_ops(&cigar_ops);
 
-            let mut query_metadata = QueryMetadata {
-                query_id,
-                compressed_cigar_ops: Vec::new(),
-                target_start: record.target_start as i32,
-                target_end: record.target_end as i32,
-                query_start: record.query_start as i32,
-                query_end: record.query_end as i32,
-                strand: record.strand,
-            };
-            query_metadata.set_cigar_ops(&cigar_ops);
-
-            intervals.entry(target_id).or_default().push(Interval {
-                first: record.target_start as i32,
-                last: record.target_end as i32,
-                metadata: query_metadata,
+                Some((target_id, Interval {
+                    first: record.target_start as i32,
+                    last: record.target_end as i32,
+                    metadata: query_metadata,
+                }))
+            })  // Use fold and reduce to achieve grouping
+            .fold(HashMap::new, |mut acc: HashMap<u32, Vec<Interval<QueryMetadata>>>, (target_id, interval)| {
+                acc.entry(target_id).or_default().push(interval);
+                acc
+            })
+            .reduce(HashMap::new, |mut acc, part| {
+                for (key, value) in part {
+                    acc.entry(key).or_default().extend(value);
+                }
+                acc
             });
-        }
 
         let trees: TreeMap = intervals.into_iter().map(|(target_id, interval_nodes)| {
             (target_id, BasicCOITree::new(interval_nodes.as_slice()))

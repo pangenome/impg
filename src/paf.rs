@@ -16,16 +16,11 @@ pub struct PafRecord {
     pub strand: Strand,
 }
 
-#[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
+#[derive(Default, Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
 pub enum Strand {
+    #[default]
     Forward,
     Reverse,
-}
-
-impl Default for Strand {
-    fn default() -> Self {
-        Strand::Forward
-    }
 }
 
 impl PafRecord {
