@@ -4,117 +4,122 @@ use std::io::{self, BufReader, BufWriter};
 use flate2::read::GzDecoder;
 use impg::impg::{Impg, SerializableImpg};
 use impg::paf;
-//use std::collections::HashMap;
-//use bincode;
 
 /// Command-line tool for querying overlaps in PAF files.
 #[derive(Parser, Debug)]
 #[clap(author, version, about)]
 struct Args {
-    /// Path to the PAF file.
-    #[clap(short, long, value_parser)]
-    paf_file: String,
+    /// Path to the PAF file. If specified without an index, the tool will look for or generate an associated index file.
+    #[clap(short='p', long, value_parser)]
+    paf_file: Option<String>,
+
+    /// Path to the index file. Use this to specify a custom index file or to force the use of an index.
+    #[clap(short='i', long, value_parser)]
+    index_file: Option<String>,
+
+    /// Force the regeneration of the index, even if it already exists.
+    #[clap(short='I', long, action)]
+    force_reindex: bool,
 
     /// Query in the format `seq_name:start-end`.
-    #[clap(short, long, value_parser)]
+    #[clap(short='q', long, value_parser)]
     query: String,
 
     /// Enable transitive overlap queries.
     #[clap(short='x', long, action)]
     transitive: bool,
-
-    /// Path to the impg index file.
-    #[clap(short, long, value_parser)]
-    index_file: Option<String>,
-
-    /// Force reindexing even if the index file already exists.
-    #[clap(short='f', long, action)]
-    force_reindex: bool,
 }
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
-    let (target_name, target_range) = parse_query(&args.query).expect("Invalid query format");
-    let (target_start, target_end) = target_range;
 
-    let impg = if let Some(index_file) = &args.index_file {
-        if std::path::Path::new(index_file).exists() && !args.force_reindex {
-            // Load the index from the file
-            let file = File::open(index_file)?;
-            let reader = BufReader::new(file);
-            let serializable: SerializableImpg = bincode::deserialize_from(reader).expect("Failed to deserialize index");
-            Impg::from_serializable(serializable)
-        } else {
-            // Generate the index from the PAF file
-            let file = File::open(&args.paf_file)?;
-            let reader: Box<dyn io::Read> = if args.paf_file.ends_with(".gz") {
-                Box::new(GzDecoder::new(file))
-            } else {
-                Box::new(file)
-            };
-            let reader = BufReader::new(reader);
-            let records = paf::parse_paf(reader).expect("Failed to parse PAF records");
-            let impg = Impg::from_paf_records(&records).expect("Failed to create index");
-
-            // Serialize the index to the file
-            if let Some(index_file) = &args.index_file {
-                let serializable = impg.to_serializable();
-                let file = File::create(index_file)?;
-                let writer = BufWriter::new(file);
-                bincode::serialize_into(writer, &serializable).expect("Failed to serialize index");
-            }
-
-            impg
-        }
-    } else {
-        // Generate the index from the PAF file
-        let file = File::open(&args.paf_file)?;
-        let reader: Box<dyn io::Read> = if args.paf_file.ends_with(".gz") {
-            Box::new(GzDecoder::new(file))
-        } else {
-            Box::new(file)
-        };
-        let reader = BufReader::new(reader);
-        let records = paf::parse_paf(reader).expect("Failed to parse PAF records");
-        Impg::from_paf_records(&records).expect("Failed to create index")
+    let impg = match args {
+        Args { paf_file: Some(paf), index_file: None, force_reindex: false, .. } => load_or_generate_index(&paf, None)?,
+        Args { paf_file: Some(paf), index_file: None, force_reindex: true, .. } => generate_index(&paf, None)?,
+        Args { paf_file: Some(paf), index_file: Some(index), force_reindex: false, .. } => load_or_generate_index(&paf, Some(&index))?,
+        Args { paf_file: Some(paf), index_file: Some(index), force_reindex: true, .. } => generate_index(&paf, Some(&index))?,
+        Args { paf_file: None, index_file: Some(index), .. } => load_index(&index)?,
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid argument combination")),
     };
 
-    let target_id = impg.seq_index.get_id(&target_name).expect("Target name not found in index");
-    let overlaps = if args.transitive {
-        impg.query_transitive(target_id, target_start, target_end)
-    } else {
-        impg.query(target_id, target_start, target_end)
-    };
-
-    // write output in BED format relative to the queries that match the target range
-    println!("{}\t{}\t{}", target_name, target_start, target_end);
-    for overlap in overlaps {
-        println!("{}\t{}\t{}",
-                 impg.seq_index.get_name(overlap.metadata).unwrap(),
-                 overlap.first, overlap.last);
-    }
+    let (target_name, target_range) = parse_query(&args.query)?;
+    let results = perform_query(&impg, &target_name, target_range, args.transitive);
+    output_results(results);
 
     Ok(())
 }
 
-/// Parses the query string into a target sequence name and a range.
-fn parse_query(query: &str) -> Result<(String, (i32, i32)), &'static str> {
+fn load_or_generate_index(paf_file: &str, index_file: Option<&str>) -> io::Result<Impg> {
+    let index_file = index_file.unwrap_or_else(|| &format!("{}.impg", paf_file));
+    if std::path::Path::new(index_file).exists() {
+        load_index(index_file)
+    } else {
+        generate_index(paf_file, Some(index_file))
+    }
+}
+
+fn generate_index(paf_file: &str, index_file: Option<&str>) -> io::Result<Impg> {
+    let file = File::open(paf_file)?;
+    let reader: Box<dyn io::Read> = if paf_file.ends_with(".gz") {
+        Box::new(GzDecoder::new(file))
+    } else {
+        Box::new(file)
+    };
+    let reader = BufReader::new(reader);
+    let records = paf::parse_paf(reader).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to parse PAF records: {:?}", e)))?;
+    let impg = Impg::from_paf_records(&records).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to create index: {:?}", e)))?;
+
+    if let Some(index_file) = index_file {
+        let serializable = impg.to_serializable();
+        let file = File::create(index_file)?;
+        let writer = BufWriter::new(file);
+        bincode::serialize_into(writer, &serializable).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to serialize index: {:?}", e)))?;
+    }
+
+    Ok(impg)
+}
+
+fn load_index(index_file: &str) -> io::Result<Impg> {
+    let file = File::open(index_file)?;
+    let reader = BufReader::new(file);
+    let serializable: SerializableImpg = bincode::deserialize_from(reader).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to deserialize index: {:?}", e)))?;
+    Ok(Impg::from_serializable(serializable))
+}
+
+fn parse_query(query: &str) -> io::Result<(String, (i32, i32))> {
     let parts: Vec<&str> = query.split(':').collect();
     if parts.len() != 2 {
-        return Err("Query format should be `seq_name:start-end`");
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Query format should be `seq_name:start-end`"));
     }
     let range_parts: Vec<&str> = parts[1].split('-').collect();
     if range_parts.len() != 2 {
-        return Err("Query range format should be `start-end`");
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Query range format should be `start-end`"));
     }
 
-    let start = range_parts[0].parse::<i32>().map_err(|_| "Invalid start value")?;
-    let end = range_parts[1].parse::<i32>().map_err(|_| "Invalid end value")?;
+    let start = range_parts[0].parse::<i32>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid start value"))?;
+    let end = range_parts[1].parse::<i32>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid end value"))?;
 
-    // assert that start and end are at least one apart
     if start >= end {
-        return Err("Start value must be less than end value");
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Start value must be less than end value"));
     }
 
     Ok((parts[0].to_string(), (start, end)))
+}
+
+fn perform_query(impg: &Impg, target_name: &str, target_range: (i32, i32), transitive: bool) -> Vec<impg::QueryInterval> {
+    let (target_start, target_end) = target_range;
+    let target_id = impg.seq_index.get_id(target_name).expect("Target name not found in index");
+    if transitive {
+        impg.query_transitive(target_id, target_start, target_end)
+    } else {
+        impg.query(target_id, target_start, target_end)
+    }
+}
+
+fn output_results(results: Vec<impg::QueryInterval>) {
+    for overlap in results {
+        println!("{}\t{}\t{}",
+                 impg.seq_index.get_name(overlap.metadata).unwrap(),
+                 overlap.first, overlap.last);
+    }
 }
