@@ -1,5 +1,6 @@
 use std::io::{BufRead, Error as IoError};
 use std::num::ParseIntError;
+use serde::{Serialize, Deserialize};
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct PafRecord {
@@ -15,7 +16,7 @@ pub struct PafRecord {
     pub strand: Strand,
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
 pub enum Strand {
     Forward,
     Reverse,

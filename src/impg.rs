@@ -14,7 +14,7 @@ pub struct CigarOp {
     query_delta: i32,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct QueryMetadata {
     query_id: u32,
     compressed_cigar_ops: Vec<u8>,
@@ -39,13 +39,30 @@ impl QueryMetadata {
 
 type QueryInterval = Interval<u32>;
 type TreeMap = HashMap<u32, BasicCOITree<QueryMetadata, u32>>;
+pub type SerializableImpg = (HashMap<u32, Vec<SerializableInterval>>, SequenceIndex);
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SerializableInterval {
+    first: i32,
+    last: i32,
+    metadata: QueryMetadata,
+}
+
+#[derive(Clone)]
 pub struct Impg {
     trees: TreeMap,
+    pub seq_index: SequenceIndex,
 }
 
 impl Impg {
-    pub fn from_paf_records(records: &[PafRecord], seq_index: &SequenceIndex) -> Result<Self, ParseErr> {
+    pub fn from_paf_records(records: &[PafRecord]) -> Result<Self, ParseErr> {
+
+        let mut seq_index = SequenceIndex::new();
+        for record in records {
+            seq_index.get_or_insert_id(&record.query_name);
+            seq_index.get_or_insert_id(&record.target_name);
+        }
+        
         let mut intervals: HashMap<u32, Vec<Interval<QueryMetadata>>> = HashMap::new();
 
         for record in records {
@@ -75,7 +92,32 @@ impl Impg {
             (target_id, BasicCOITree::new(interval_nodes.as_slice()))
         }).collect();
 
-        Ok(Self { trees })
+        Ok(Self { trees, seq_index })
+    }
+
+    pub fn to_serializable(&self) -> SerializableImpg {
+        let serializable_trees = self.trees.iter().map(|(target_id, tree)| {
+            let intervals = tree.iter().map(|interval| SerializableInterval {
+                first: interval.first,
+                last: interval.last,
+                metadata: interval.metadata.clone(),
+            }).collect();
+            (*target_id, intervals)
+        }).collect();
+        (serializable_trees, self.seq_index.clone())
+    }
+
+    pub fn from_serializable(serializable: SerializableImpg) -> Self {
+        let (serializable_trees, seq_index) = serializable;
+        let trees = serializable_trees.into_iter().map(|(target_id, intervals)| {
+            let tree = BasicCOITree::new(intervals.iter().map(|interval| Interval {
+                first: interval.first,
+                last: interval.last,
+                metadata: interval.metadata.clone(),
+            }).collect::<Vec<_>>().as_slice());
+            (target_id, tree)
+        }).collect();
+        Self { trees, seq_index }
     }
 
     pub fn query(&self, target_id: u32, range_start: i32, range_end: i32) -> Vec<QueryInterval> {
