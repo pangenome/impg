@@ -5,6 +5,7 @@ use flate2::read::GzDecoder;
 use impg::impg::{Impg, SerializableImpg, QueryInterval};
 use coitrees::IntervalTree;
 use impg::paf;
+use rayon::ThreadPoolBuilder;
 
 /// Command-line tool for querying overlaps in PAF files.
 #[derive(Parser, Debug)]
@@ -33,10 +34,17 @@ struct Args {
     /// Print stats about the index.
     #[clap(short='s', long, action)]
     stats: bool,
+
+    /// Number of threads for parallel processing.
+    #[clap(short='t', long, value_parser, default_value_t = num_cpus::get())]
+    num_threads: usize,
 }
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
+
+    // Configure the global thread pool to use the specified number of threads
+    ThreadPoolBuilder::new().num_threads(args.num_threads).build_global().unwrap();
 
     let impg = match args {
         Args { paf_file: Some(paf), index_file: None, force_reindex: false, .. } => load_or_generate_index(&paf, None)?,
