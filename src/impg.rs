@@ -271,7 +271,6 @@ fn parse_cigar_to_delta(cigar: &str, strand: Strand) -> Result<Vec<CigarOp>, Par
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs::File;
     use std::io::BufReader;
     use crate::paf::parse_paf;
 
