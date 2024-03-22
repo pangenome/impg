@@ -33,4 +33,12 @@ impl SequenceIndex {
     pub fn get_name(&self, id: u32) -> Option<&str> {
         self.id_to_name.get(&id).map(|s| s.as_str())
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.name_to_id.is_empty()
+    }
+    
+    pub fn len(&self) -> usize {
+        self.name_to_id.len()
+    }
 }

@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::{self, BufReader, BufWriter};
 use flate2::read::GzDecoder;
 use impg::impg::{Impg, SerializableImpg, QueryInterval};
+use coitrees::IntervalTree;
 use impg::paf;
 
 /// Command-line tool for querying overlaps in PAF files.
@@ -23,11 +24,15 @@ struct Args {
 
     /// Query in the format `seq_name:start-end`.
     #[clap(short='q', long, value_parser)]
-    query: String,
+    query: Option<String>,
 
     /// Enable transitive overlap queries.
     #[clap(short='x', long, action)]
     transitive: bool,
+
+    /// Print stats about the index.
+    #[clap(short='s', long, action)]
+    stats: bool,
 }
 
 fn main() -> io::Result<()> {
@@ -39,15 +44,22 @@ fn main() -> io::Result<()> {
         Args { paf_file: Some(paf), index_file: Some(index), force_reindex: false, .. } => load_or_generate_index(&paf, Some(&index))?,
         Args { paf_file: Some(paf), index_file: Some(index), force_reindex: true, .. } => generate_index(&paf, Some(&index))?,
         Args { paf_file: None, index_file: Some(index), .. } => load_index(&index)?,
-        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid argument combination")),
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "Either a PAF file or an index file must be provided")),
     };
 
-    let (target_name, target_range) = parse_query(&args.query)?;
-    let results = perform_query(&impg, &target_name, target_range, args.transitive);
-    output_results(&impg, results);
+    if args.stats {
+        print_stats(&impg);
+    }
+
+    if let Some(query) = args.query {
+        let (target_name, target_range) = parse_query(&query)?;
+        let results = perform_query(&impg, &target_name, target_range, args.transitive);
+        output_results(&impg, results);
+    }
 
     Ok(())
 }
+
 
 fn load_or_generate_index(paf_file: &str, index_file: Option<&str>) -> io::Result<Impg> {
     let index_file = index_file.map(|s| s.to_string());
@@ -124,4 +136,9 @@ fn output_results(impg: &Impg, results: Vec<QueryInterval>) {
                  impg.seq_index.get_name(overlap.metadata).unwrap(),
                  overlap.first, overlap.last);
     }
+}
+
+fn print_stats(impg: &Impg) {
+    println!("Number of sequences: {}", impg.seq_index.len());
+    println!("Number of overlaps: {}", impg.trees.values().map(|tree| tree.len()).sum::<usize>());
 }

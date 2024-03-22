@@ -50,7 +50,7 @@ pub struct SerializableInterval {
 
 #[derive(Clone)]
 pub struct Impg {
-    trees: TreeMap,
+    pub trees: TreeMap,
     pub seq_index: SequenceIndex,
 }
 
