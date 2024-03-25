@@ -13,9 +13,53 @@ use rayon::prelude::*;
 #[derive(Clone, Debug)]
 #[derive(PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CigarOp {
-    target_delta: i32,
-    query_delta: i32,
+    pub val: u32,
 }
+
+impl CigarOp {
+    pub fn new(op: char, len: i32) -> Self {
+        let val = match op {
+            '=' => 0,
+            'X' => 1,
+            'I' => 2,
+            'D' => 3,
+            _ => panic!("Invalid CIGAR operation: {}", op),
+        };
+        Self { val: (val << 30) | (len as u32) }
+    }
+
+    pub fn op(&self) -> char {
+        // two most significant bits in the val tell us the op
+        match self.val >> 30 {
+            0 => '=',
+            1 => 'X',
+            2 => 'I',
+            3 => 'D',
+            _ => panic!("Invalid CIGAR operation: {}", self.val),
+        }
+    }
+
+    pub fn len(&self) -> i32 {
+        (self.val & ((1 << 30) - 1)) as i32
+    }
+
+    pub fn target_delta(&self, strand: Strand) -> i32 {
+        match self.op() {
+            '=' | 'X' => if strand == Strand::Forward { self.len() } else { -self.len() },
+            'I' => 0,
+            _ => panic!("Invalid CIGAR operation: {}", self.op()),
+        }
+    }
+
+    pub fn query_delta(&self, strand: Strand) -> i32 {
+        match self.op() {
+            '=' | 'X' => if strand == Strand::Forward { self.len() } else { -self.len() },
+            'D' => 0,
+            _ => panic!("Invalid CIGAR operation: {}", self.op()),
+        }
+    }
+}
+
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct QueryMetadata {
@@ -72,7 +116,7 @@ impl Impg {
         
         let intervals: HashMap<u32, Vec<Interval<QueryMetadata>>> = records.par_iter()
             .filter_map(|record| {
-                let cigar_ops = record.cigar.as_ref().map(|x| parse_cigar_to_delta(x, record.strand)).transpose().ok()?.unwrap_or_else(Vec::new);
+                let cigar_ops = record.cigar.as_ref().map(|x| parse_cigar_to_delta(x)).transpose().ok()?.unwrap_or_else(Vec::new);
                 let query_id = seq_index.get_id(&record.query_name).expect("Query name not found in index");
                 let target_id = seq_index.get_id(&record.target_name).expect("Target name not found in index");
 
@@ -212,7 +256,7 @@ fn project_target_range_through_alignment(
         if target_pos > target_range.1 {
             break;
         }
-        match (cigar_op.target_delta, cigar_op.query_delta) {
+        match (cigar_op.target_delta(strand), cigar_op.query_delta(strand)) {
             (0, query_delta) => { // Insertion in query
                 if target_pos >= target_range.0 && target_pos <= target_range.1 {
                     projected_start.get_or_insert(query_pos);
@@ -258,7 +302,7 @@ fn project_target_range_through_alignment(
     (projected_start.unwrap_or(query_start), projected_end.unwrap_or(query_pos)) // Changed _query_end to query_pos
 }
 
-fn parse_cigar_to_delta(cigar: &str, strand: Strand) -> Result<Vec<CigarOp>, ParseErr> {
+fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, ParseErr> {
     let mut ops = Vec::new();
     let mut num_buf = String::new();
 
@@ -268,16 +312,7 @@ fn parse_cigar_to_delta(cigar: &str, strand: Strand) -> Result<Vec<CigarOp>, Par
         } else {
             let len = num_buf.parse::<i32>().map_err(|_| ParseErr::InvalidCigarFormat)?;
             num_buf.clear(); // Reset the buffer for the next operation
-            match c {
-                'M' | '=' | 'X' => ops.push(
-                    CigarOp { target_delta: len,
-                              query_delta: (if strand == Strand::Forward { len } else { -len }) }),
-                'I' => ops.push(
-                    CigarOp { target_delta: 0,
-                              query_delta: (if strand == Strand::Forward { len } else { -len }) }),
-                'D' => ops.push(CigarOp { target_delta: len, query_delta: 0 }),
-                _ => return Err(ParseErr::UnsupportedCigarOperation),
-            }
+            ops.push(CigarOp::new(c, len));
         }
     }
 
