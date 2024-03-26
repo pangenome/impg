@@ -25,6 +25,8 @@ Getting started with `impg` is straightforward. Here's a basic example of how to
 impg -p cerevisiae.pan.paf.gz -q S288C#1#chrI:50000-100000 -x
 ```
 
+Your alignments must use `wfmash` default or `minimap2 --eqx` type CIGAR strings which have `=` for matches and `X` for mismatches. The `M` positional match character is not allowed.
+
 Depending on your alignments, this might result in the following BED file:
 
 ```txt
