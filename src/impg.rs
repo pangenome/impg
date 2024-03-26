@@ -43,6 +43,10 @@ impl CigarOp {
         (self.val & ((1 << 30) - 1)) as i32
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn target_delta(&self, strand: Strand) -> i32 {
         match self.op() {
             '=' | 'X' => if strand == Strand::Forward { self.len() } else { -self.len() },
