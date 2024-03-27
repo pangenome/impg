@@ -2,8 +2,6 @@ use std::collections::{HashMap, HashSet};
 use coitrees::{BasicCOITree, Interval, IntervalTree};
 use crate::paf::{PafRecord, ParseErr, Strand};
 use crate::seqidx::SequenceIndex;
-use xz2::write::XzEncoder;
-use xz2::read::XzDecoder;
 use serde::{Serialize, Deserialize};
 use std::io::{Read, SeekFrom, Seek};
 use std::fs::File;
