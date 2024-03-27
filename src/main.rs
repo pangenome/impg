@@ -71,7 +71,7 @@ fn main() -> io::Result<()> {
 
 fn load_or_generate_index(paf_file: &str, index_file: Option<&str>) -> io::Result<Impg> {
     let index_file = index_file.map(|s| s.to_string());
-    let index_file = index_file.unwrap_or_else(|| format!("{}.impg", paf_file));
+    let index_file = index_file.unwrap_or_else(|| format!("{}.impg-lazy", paf_file));
     let index_file = index_file.as_str();
     if std::path::Path::new(index_file).exists() {
         load_index(index_file)
@@ -89,7 +89,7 @@ fn generate_index(paf_file: &str, index_file: Option<&str>) -> io::Result<Impg> 
     };
     let reader = BufReader::new(reader);
     let records = paf::parse_paf(reader).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to parse PAF records: {:?}", e)))?;
-    let impg = Impg::from_paf_records(&records).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to create index: {:?}", e)))?;
+    let impg = Impg::from_paf_records(&records, paf_file).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to create index: {:?}", e)))?;
 
     if let Some(index_file) = index_file {
         let serializable = impg.to_serializable();

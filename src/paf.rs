@@ -12,8 +12,9 @@ pub struct PafRecord {
     pub target_length: usize,
     pub target_start: usize,
     pub target_end: usize,
-    pub cigar: Option<String>,
     pub strand: Strand,
+    pub cigar_offset: u64,
+    pub cigar_bytes: usize,
 }
 
 #[derive(Default, Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
@@ -24,7 +25,7 @@ pub enum Strand {
 }
 
 impl PafRecord {
-    pub fn parse(line: &str) -> Result<Self, ParseErr> {
+    pub fn parse(line: &str, file_pos: u64) -> Result<Self, ParseErr> {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 12 {
             return Err(ParseErr::NotEnoughFields);
@@ -47,9 +48,18 @@ impl PafRecord {
             _ => return Err(ParseErr::InvalidStrand),
         };
 
-        let cigar = fields.iter()
-            .find(|&&f| f.starts_with("cg:Z:"))
-            .map(|&s| s[5..].to_string());
+        let mut cigar_offset: u64 = file_pos;
+        let mut cigar_bytes: usize = 0;
+
+        for tag_str in fields.iter() {
+            if tag_str.starts_with("cg:Z:") {
+                cigar_offset += 5;
+                cigar_bytes = tag_str.len() - 5;
+                break;
+            } else {
+                cigar_offset += (tag_str.len() + 1) as u64;
+            }
+        }
 
         Ok(Self {
             query_name,
@@ -61,7 +71,8 @@ impl PafRecord {
             target_start,
             target_end,
             strand,
-            cigar,
+            cigar_offset,
+            cigar_bytes,
         })
     }
 }
@@ -78,11 +89,15 @@ pub enum ParseErr {
 }
 
 pub fn parse_paf<R: BufRead>(reader: R) -> Result<Vec<PafRecord>, ParseErr> {
+    let mut bytes_read: u64 = 0;
     let mut records = Vec::new();
     for line_result in reader.lines() {
         let line = line_result.map_err(ParseErr::IoError)?;
-        let record = PafRecord::parse(&line)?;
+        let record = PafRecord::parse(&line, bytes_read)?;
         records.push(record);
+
+        // Size of line plus newline
+        bytes_read += (line.len() + 1) as u64;
     }
     Ok(records)
 }
