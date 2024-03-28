@@ -121,7 +121,8 @@ impl Impg {
     pub fn from_paf_records(records: &[PafRecord], paf_file: &str) -> Result<Self, ParseErr> {
 
         let paf_gzi_index: Option<bgzf::gzi::Index> = if paf_file.ends_with(".bgz") {
-            Some(bgzf::gzi::read(paf_file.to_owned() + ".gzi").unwrap())
+            let paf_gzi_file = paf_file.to_owned() + ".gzi";
+            Some(bgzf::gzi::read(paf_gzi_file.clone()).expect(format!("Could not open {}", paf_gzi_file).as_str()))
         } else {
             None
         };
@@ -187,7 +188,8 @@ impl Impg {
     pub fn from_serializable(serializable: SerializableImpg) -> Self {
         let (serializable_trees, seq_index, paf_file) = serializable;
         let paf_gzi_index: Option<bgzf::gzi::Index> = if paf_file.ends_with(".bgz") {
-            Some(bgzf::gzi::read(paf_file.to_owned() + ".gzi").unwrap())
+            let paf_gzi_file = paf_file.to_owned() + ".gzi";
+            Some(bgzf::gzi::read(paf_gzi_file.clone()).expect(format!("Could not open {}", paf_gzi_file).as_str()))
         } else {
             None
         };
