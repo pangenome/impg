@@ -1,7 +1,7 @@
 use clap::Parser;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter};
-use flate2::read::GzDecoder;
+use noodles::bgzf;
 use impg::impg::{Impg, SerializableImpg, QueryInterval};
 use coitrees::IntervalTree;
 use impg::paf;
@@ -82,8 +82,8 @@ fn load_or_generate_index(paf_file: &str, index_file: Option<&str>) -> io::Resul
 
 fn generate_index(paf_file: &str, index_file: Option<&str>) -> io::Result<Impg> {
     let file = File::open(paf_file)?;
-    let reader: Box<dyn io::Read> = if paf_file.ends_with(".gz") {
-        Box::new(GzDecoder::new(file))
+    let reader: Box<dyn io::Read> = if paf_file.ends_with(".bgz") {
+        Box::new(bgzf::Reader::new(file))
     } else {
         Box::new(file)
     };

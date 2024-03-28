@@ -6,6 +6,7 @@ use serde::{Serialize, Deserialize};
 use std::io::{Read, SeekFrom, Seek};
 use std::fs::File;
 use rayon::prelude::*;
+use noodles::bgzf;
 
 /// Parse a CIGAR string into a vector of CigarOp
 // Note that the query_delta is negative for reverse strand alignments
@@ -77,11 +78,21 @@ pub struct QueryMetadata {
 }
 
 impl QueryMetadata {
-    fn get_cigar_ops(&self, paf_file: &String) -> Vec<CigarOp> {
-        let mut reader = File::open(paf_file).unwrap();
+    fn get_cigar_ops(&self, paf_file: &String, paf_gzi_index: Option<&bgzf::gzi::Index>) -> Vec<CigarOp> {
+        // Allocate space for cigar
         let mut cigar_buffer = vec![0; self.cigar_bytes];
-        reader.seek(SeekFrom::Start(self.cigar_offset)).unwrap();
-        reader.read_exact(&mut cigar_buffer).unwrap();
+
+        // Get reader and seek start of cigar str
+        if paf_file.ends_with(".bgz") {
+            let mut reader = bgzf::Reader::new(File::open(paf_file).unwrap());
+            reader.seek_by_uncompressed_position(&paf_gzi_index.unwrap(), self.cigar_offset).unwrap();
+            reader.read_exact(&mut cigar_buffer).unwrap();
+        } else {
+            let mut reader = File::open(paf_file).unwrap();
+            reader.seek(SeekFrom::Start(self.cigar_offset)).unwrap();
+            reader.read_exact(&mut cigar_buffer).unwrap();
+        };
+
         let cigar_str: &str = std::str::from_utf8(&cigar_buffer).unwrap();
         parse_cigar_to_delta(cigar_str).ok().unwrap_or_else(Vec::new)
     }
@@ -103,10 +114,17 @@ pub struct Impg {
     pub trees: TreeMap,
     pub seq_index: SequenceIndex,
     pub paf_file: String,
+    pub paf_gzi_index: Option<bgzf::gzi::Index>,
 }
 
 impl Impg {
     pub fn from_paf_records(records: &[PafRecord], paf_file: &str) -> Result<Self, ParseErr> {
+
+        let paf_gzi_index: Option<bgzf::gzi::Index> = if paf_file.ends_with(".bgz") {
+            Some(bgzf::gzi::read(paf_file.to_owned() + ".gzi").unwrap())
+        } else {
+            None
+        };
 
         let mut seq_index = SequenceIndex::new();
         for record in records {
@@ -151,7 +169,7 @@ impl Impg {
             (target_id, BasicCOITree::new(interval_nodes.as_slice()))
         }).collect();
 
-        Ok(Self { trees, seq_index, paf_file: paf_file.to_string() })
+        Ok(Self { trees, seq_index, paf_file: paf_file.to_string(), paf_gzi_index })
     }
 
     pub fn to_serializable(&self) -> SerializableImpg {
@@ -168,6 +186,11 @@ impl Impg {
 
     pub fn from_serializable(serializable: SerializableImpg) -> Self {
         let (serializable_trees, seq_index, paf_file) = serializable;
+        let paf_gzi_index: Option<bgzf::gzi::Index> = if paf_file.ends_with(".bgz") {
+            Some(bgzf::gzi::read(paf_file.to_owned() + ".gzi").unwrap())
+        } else {
+            None
+        };
         let trees = serializable_trees.into_iter().map(|(target_id, intervals)| {
             let tree = BasicCOITree::new(intervals.iter().map(|interval| Interval {
                 first: interval.first,
@@ -176,7 +199,7 @@ impl Impg {
             }).collect::<Vec<_>>().as_slice());
             (target_id, tree)
         }).collect();
-        Self { trees, seq_index, paf_file }
+        Self { trees, seq_index, paf_file, paf_gzi_index }
     }
 
     pub fn query(&self, target_id: u32, range_start: i32, range_end: i32) -> Vec<QueryInterval> {
@@ -193,7 +216,7 @@ impl Impg {
                 let (adjusted_start, adjusted_end) = project_target_range_through_alignment(
                     (range_start, range_end),
                     (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end, metadata.strand),
-                    &metadata.get_cigar_ops(&self.paf_file)
+                    &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref())
                 );
 
                 let adjusted_interval = QueryInterval {
@@ -225,7 +248,7 @@ impl Impg {
                     let (adjusted_start, adjusted_end) = project_target_range_through_alignment(
                         (current_start, current_end),
                         (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end, metadata.strand),
-                        &metadata.get_cigar_ops(&self.paf_file)
+                    &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref())
                     );
 
                     let adjusted_interval = QueryInterval {
