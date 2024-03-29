@@ -109,7 +109,7 @@ mod tests {
     #[test]
     fn test_parse_paf_valid() {
         let line = "seq1\t100\t0\t100\t+\tseq2\t100\t0\t100\t60\t100\t255";
-        let record = PafRecord::parse(line).unwrap();
+        let record = PafRecord::parse(line, 0).unwrap();
         assert_eq!(
             record,
             PafRecord {
@@ -121,8 +121,11 @@ mod tests {
                 target_length: 100,
                 target_start: 0,
                 target_end: 100,
-                cigar: None, // Adjusted for the example to not include a CIGAR string
                 strand: Strand::Forward,
+                // If no cigar, then the offset is just the length of the line and cigar_bytes=0
+                // Should we use Option<> instead?
+                cigar_offset: (line.len() + 1) as u64,
+                cigar_bytes: 0,
             }
         );
     }
@@ -130,20 +133,20 @@ mod tests {
     #[test]
     fn test_parse_paf_valid_2() {
         let line = "seq1\t100\t0\t100\t+\tseq2\t100\t0\t100\t60\t100\t255\tcg:Z:10=";
-        assert!(PafRecord::parse(line).is_ok());
+        assert!(PafRecord::parse(line, 0).is_ok());
     }
 
     #[test]
     fn test_parse_paf_invalid() {
         // it's got a character 'z' in the length field
         let line = "seq1\t100\t0\t100\t+\tseq2\t100\tz\t100\t60\t100\t255\tcg:Z:10M";
-        assert!(PafRecord::parse(line).is_err());
+        assert!(PafRecord::parse(line, 0).is_err());
     }
 
     #[test]
     fn test_parse_paf_cigar_invalid() {
         // it's got Q in the CIGAR string
         let line = "seq1\t100\t0\t100\t+\tseq2\t100\tz\t100\t60\t100\t255\tcg:Z:10Q";
-        assert!(PafRecord::parse(line).is_err());
+        assert!(PafRecord::parse(line, 0).is_err());
     }
 }

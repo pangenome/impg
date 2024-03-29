@@ -548,7 +548,8 @@ mod tests {
                 target_length: 200,
                 target_start: 30,
                 target_end: 40,
-                cigar: Some("10M".to_string()),
+                cigar_offset: 45,
+                cigar_bytes: 3,
                 strand: Strand::Forward,
             },
             // Add more test records as needed
