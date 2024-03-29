@@ -1,6 +1,7 @@
 use clap::Parser;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter};
+use std::num::NonZeroUsize;
 use noodles::bgzf;
 use impg::impg::{Impg, SerializableImpg, QueryInterval};
 use coitrees::IntervalTree;
@@ -36,15 +37,15 @@ struct Args {
     stats: bool,
 
     /// Number of threads for parallel processing.
-    #[clap(short='t', long, value_parser, default_value_t = num_cpus::get())]
-    num_threads: usize,
+    #[clap(short='t', long, value_parser, default_value_t = NonZeroUsize::new(1).unwrap())]
+    num_threads: NonZeroUsize,
 }
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
     // Configure the global thread pool to use the specified number of threads
-    ThreadPoolBuilder::new().num_threads(args.num_threads).build_global().unwrap();
+    ThreadPoolBuilder::new().num_threads(args.num_threads.into()).build_global().unwrap();
 
     let impg = match args {
         Args { paf_file: Some(paf), index_file: None, force_reindex: false, .. } => load_or_generate_index(&paf, None)?,
