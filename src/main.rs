@@ -48,10 +48,10 @@ fn main() -> io::Result<()> {
     ThreadPoolBuilder::new().num_threads(args.num_threads.into()).build_global().unwrap();
 
     let impg = match args {
-        Args { paf_file: Some(paf), index_file: None, force_reindex: false, .. } => load_or_generate_index(&paf, None)?,
-        Args { paf_file: Some(paf), index_file: None, force_reindex: true, .. } => generate_index(&paf, None)?,
-        Args { paf_file: Some(paf), index_file: Some(index), force_reindex: false, .. } => load_or_generate_index(&paf, Some(&index))?,
-        Args { paf_file: Some(paf), index_file: Some(index), force_reindex: true, .. } => generate_index(&paf, Some(&index))?,
+        Args { paf_file: Some(paf), index_file: None, force_reindex: false, .. } => load_or_generate_index(&paf, None, args.num_threads)?,
+        Args { paf_file: Some(paf), index_file: None, force_reindex: true, .. } => generate_index(&paf, None, args.num_threads)?,
+        Args { paf_file: Some(paf), index_file: Some(index), force_reindex: false, .. } => load_or_generate_index(&paf, Some(&index), args.num_threads)?,
+        Args { paf_file: Some(paf), index_file: Some(index), force_reindex: true, .. } => generate_index(&paf, Some(&index), args.num_threads)?,
         Args { paf_file: None, index_file: Some(index), .. } => load_index(&index)?,
         _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "Either a PAF file or an index file must be provided")),
     };
@@ -70,21 +70,21 @@ fn main() -> io::Result<()> {
 }
 
 
-fn load_or_generate_index(paf_file: &str, index_file: Option<&str>) -> io::Result<Impg> {
+fn load_or_generate_index(paf_file: &str, index_file: Option<&str>, num_threads: NonZeroUsize) -> io::Result<Impg> {
     let index_file = index_file.map(|s| s.to_string());
     let index_file = index_file.unwrap_or_else(|| format!("{}.impg-lazy", paf_file));
     let index_file = index_file.as_str();
     if std::path::Path::new(index_file).exists() {
         load_index(index_file)
     } else {
-        generate_index(paf_file, Some(index_file))
+        generate_index(paf_file, Some(index_file), num_threads)
     }
 }
 
-fn generate_index(paf_file: &str, index_file: Option<&str>) -> io::Result<Impg> {
+fn generate_index(paf_file: &str, index_file: Option<&str>, num_threads: NonZeroUsize) -> io::Result<Impg> {
     let file = File::open(paf_file)?;
     let reader: Box<dyn io::Read> = if paf_file.ends_with(".bgz") {
-        Box::new(bgzf::Reader::new(file))
+        Box::new(bgzf::MultithreadedReader::with_worker_count(num_threads, file))
     } else {
         Box::new(file)
     };
