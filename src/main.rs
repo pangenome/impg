@@ -83,7 +83,7 @@ fn load_or_generate_index(paf_file: &str, index_file: Option<&str>, num_threads:
 
 fn generate_index(paf_file: &str, index_file: Option<&str>, num_threads: NonZeroUsize) -> io::Result<Impg> {
     let file = File::open(paf_file)?;
-    let reader: Box<dyn io::Read> = if paf_file.ends_with(".bgz") {
+    let reader: Box<dyn io::Read> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
         Box::new(bgzf::MultithreadedReader::with_worker_count(num_threads, file))
     } else {
         Box::new(file)

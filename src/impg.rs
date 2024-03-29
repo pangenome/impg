@@ -83,7 +83,7 @@ impl QueryMetadata {
         let mut cigar_buffer = vec![0; self.cigar_bytes];
 
         // Get reader and seek start of cigar str
-        if paf_file.ends_with(".bgz") {
+        if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
             let mut reader = bgzf::Reader::new(File::open(paf_file).unwrap());
             reader.seek_by_uncompressed_position(&paf_gzi_index.unwrap(), self.cigar_offset).unwrap();
             reader.read_exact(&mut cigar_buffer).unwrap();
@@ -120,7 +120,7 @@ pub struct Impg {
 impl Impg {
     pub fn from_paf_records(records: &[PafRecord], paf_file: &str) -> Result<Self, ParseErr> {
 
-        let paf_gzi_index: Option<bgzf::gzi::Index> = if paf_file.ends_with(".bgz") {
+        let paf_gzi_index: Option<bgzf::gzi::Index> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
             let paf_gzi_file = paf_file.to_owned() + ".gzi";
             Some(bgzf::gzi::read(paf_gzi_file.clone()).expect(format!("Could not open {}", paf_gzi_file).as_str()))
         } else {
@@ -187,7 +187,7 @@ impl Impg {
 
     pub fn from_serializable(serializable: SerializableImpg) -> Self {
         let (serializable_trees, seq_index, paf_file) = serializable;
-        let paf_gzi_index: Option<bgzf::gzi::Index> = if paf_file.ends_with(".bgz") {
+        let paf_gzi_index: Option<bgzf::gzi::Index> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
             let paf_gzi_file = paf_file.to_owned() + ".gzi";
             Some(bgzf::gzi::read(paf_gzi_file.clone()).expect(format!("Could not open {}", paf_gzi_file).as_str()))
         } else {
