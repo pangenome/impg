@@ -72,7 +72,7 @@ fn main() -> io::Result<()> {
 
 fn load_or_generate_index(paf_file: &str, index_file: Option<&str>, num_threads: NonZeroUsize) -> io::Result<Impg> {
     let index_file = index_file.map(|s| s.to_string());
-    let index_file = index_file.unwrap_or_else(|| format!("{}.impg-lazy", paf_file));
+    let index_file = index_file.unwrap_or_else(|| format!("{}.impg", paf_file));
     let index_file = index_file.as_str();
     if std::path::Path::new(index_file).exists() {
         load_index(index_file)
