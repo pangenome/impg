@@ -60,9 +60,10 @@ To compile and install `impg` from source, you'll need a recent rust build toolc
    cargo install --force --path .
    ```
 
-## Author
+## Authors
 
 Erik Garrison <erik.garrison@gmail.com>
+Bryce Kille <brycekille@gmail.com>
 
 ## License
 
