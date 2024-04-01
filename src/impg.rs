@@ -2,11 +2,11 @@ use std::collections::{HashMap, HashSet};
 use coitrees::{BasicCOITree, Interval, IntervalTree};
 use crate::paf::{PafRecord, ParseErr, Strand};
 use crate::seqidx::SequenceIndex;
-use xz2::write::XzEncoder;
-use xz2::read::XzDecoder;
 use serde::{Serialize, Deserialize};
-use std::io::{Write, Read};
+use std::io::{Read, SeekFrom, Seek};
+use std::fs::File;
 use rayon::prelude::*;
+use noodles::bgzf;
 
 /// Parse a CIGAR string into a vector of CigarOp
 // Note that the query_delta is negative for reverse strand alignments
@@ -68,33 +68,39 @@ impl CigarOp {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct QueryMetadata {
     query_id: u32,
-    compressed_cigar_ops: Vec<u8>,
     target_start: i32,
     target_end: i32,
     query_start: i32,
     query_end: i32,
     strand: Strand,
+    cigar_offset: u64,
+    cigar_bytes: usize,
 }
 
 impl QueryMetadata {
-    fn set_cigar_ops(&mut self, cigar_ops: &[CigarOp]) {
-        let encoded_cigar_ops = bincode::serialize(cigar_ops).expect("Failed to serialize CIGAR ops");
-        let mut encoder = XzEncoder::new(Vec::new(), 9);
-        encoder.write_all(&encoded_cigar_ops).expect("Failed to compress CIGAR ops");
-        self.compressed_cigar_ops = encoder.finish().expect("Failed to finish compression");
-    }
+    fn get_cigar_ops(&self, paf_file: &String, paf_gzi_index: Option<&bgzf::gzi::Index>) -> Vec<CigarOp> {
+        // Allocate space for cigar
+        let mut cigar_buffer = vec![0; self.cigar_bytes];
 
-    fn get_cigar_ops(&self) -> Vec<CigarOp> {
-        let mut decoder = XzDecoder::new(&self.compressed_cigar_ops[..]);
-        let mut decompressed_cigar_ops = Vec::new();
-        decoder.read_to_end(&mut decompressed_cigar_ops).expect("Failed to decompress CIGAR ops");
-        bincode::deserialize(&decompressed_cigar_ops).expect("Failed to deserialize CIGAR ops")
+        // Get reader and seek start of cigar str
+        if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
+            let mut reader = bgzf::Reader::new(File::open(paf_file).unwrap());
+            reader.seek_by_uncompressed_position(&paf_gzi_index.unwrap(), self.cigar_offset).unwrap();
+            reader.read_exact(&mut cigar_buffer).unwrap();
+        } else {
+            let mut reader = File::open(paf_file).unwrap();
+            reader.seek(SeekFrom::Start(self.cigar_offset)).unwrap();
+            reader.read_exact(&mut cigar_buffer).unwrap();
+        };
+
+        let cigar_str: &str = std::str::from_utf8(&cigar_buffer).unwrap();
+        parse_cigar_to_delta(cigar_str).ok().unwrap_or_else(Vec::new)
     }
 }
 
 pub type QueryInterval = Interval<u32>;
 type TreeMap = HashMap<u32, BasicCOITree<QueryMetadata, u32>>;
-pub type SerializableImpg = (HashMap<u32, Vec<SerializableInterval>>, SequenceIndex);
+pub type SerializableImpg = (HashMap<u32, Vec<SerializableInterval>>, SequenceIndex, String);
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SerializableInterval {
@@ -107,10 +113,19 @@ pub struct SerializableInterval {
 pub struct Impg {
     pub trees: TreeMap,
     pub seq_index: SequenceIndex,
+    pub paf_file: String,
+    pub paf_gzi_index: Option<bgzf::gzi::Index>,
 }
 
 impl Impg {
-    pub fn from_paf_records(records: &[PafRecord]) -> Result<Self, ParseErr> {
+    pub fn from_paf_records(records: &[PafRecord], paf_file: &str) -> Result<Self, ParseErr> {
+
+        let paf_gzi_index: Option<bgzf::gzi::Index> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
+            let paf_gzi_file = paf_file.to_owned() + ".gzi";
+            Some(bgzf::gzi::read(paf_gzi_file.clone()).expect(format!("Could not open {}", paf_gzi_file).as_str()))
+        } else {
+            None
+        };
 
         let mut seq_index = SequenceIndex::new();
         for record in records {
@@ -120,20 +135,19 @@ impl Impg {
         
         let intervals: HashMap<u32, Vec<Interval<QueryMetadata>>> = records.par_iter()
             .filter_map(|record| {
-                let cigar_ops = record.cigar.as_ref().map(|x| parse_cigar_to_delta(x)).transpose().ok()?.unwrap_or_else(Vec::new);
                 let query_id = seq_index.get_id(&record.query_name).expect("Query name not found in index");
                 let target_id = seq_index.get_id(&record.target_name).expect("Target name not found in index");
 
-                let mut query_metadata = QueryMetadata {
+                let query_metadata = QueryMetadata {
                     query_id,
-                    compressed_cigar_ops: Vec::new(),
                     target_start: record.target_start as i32,
                     target_end: record.target_end as i32,
                     query_start: record.query_start as i32,
                     query_end: record.query_end as i32,
                     strand: record.strand,
+                    cigar_offset: record.cigar_offset,
+                    cigar_bytes: record.cigar_bytes,
                 };
-                query_metadata.set_cigar_ops(&cigar_ops);
 
                 Some((target_id, Interval {
                     first: record.target_start as i32,
@@ -156,7 +170,7 @@ impl Impg {
             (target_id, BasicCOITree::new(interval_nodes.as_slice()))
         }).collect();
 
-        Ok(Self { trees, seq_index })
+        Ok(Self { trees, seq_index, paf_file: paf_file.to_string(), paf_gzi_index })
     }
 
     pub fn to_serializable(&self) -> SerializableImpg {
@@ -168,11 +182,17 @@ impl Impg {
             }).collect();
             (*target_id, intervals)
         }).collect();
-        (serializable_trees, self.seq_index.clone())
+        (serializable_trees, self.seq_index.clone(), self.paf_file.clone())
     }
 
     pub fn from_serializable(serializable: SerializableImpg) -> Self {
-        let (serializable_trees, seq_index) = serializable;
+        let (serializable_trees, seq_index, paf_file) = serializable;
+        let paf_gzi_index: Option<bgzf::gzi::Index> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
+            let paf_gzi_file = paf_file.to_owned() + ".gzi";
+            Some(bgzf::gzi::read(paf_gzi_file.clone()).expect(format!("Could not open {}", paf_gzi_file).as_str()))
+        } else {
+            None
+        };
         let trees = serializable_trees.into_iter().map(|(target_id, intervals)| {
             let tree = BasicCOITree::new(intervals.iter().map(|interval| Interval {
                 first: interval.first,
@@ -181,7 +201,7 @@ impl Impg {
             }).collect::<Vec<_>>().as_slice());
             (target_id, tree)
         }).collect();
-        Self { trees, seq_index }
+        Self { trees, seq_index, paf_file, paf_gzi_index }
     }
 
     pub fn query(&self, target_id: u32, range_start: i32, range_end: i32) -> Vec<QueryInterval> {
@@ -198,7 +218,7 @@ impl Impg {
                 let (adjusted_start, adjusted_end) = project_target_range_through_alignment(
                     (range_start, range_end),
                     (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end, metadata.strand),
-                    &metadata.get_cigar_ops()
+                    &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref())
                 );
 
                 let adjusted_interval = QueryInterval {
@@ -230,7 +250,7 @@ impl Impg {
                     let (adjusted_start, adjusted_end) = project_target_range_through_alignment(
                         (current_start, current_end),
                         (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end, metadata.strand),
-                        &metadata.get_cigar_ops()
+                    &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref())
                     );
 
                     let adjusted_interval = QueryInterval {
@@ -528,7 +548,8 @@ mod tests {
                 target_length: 200,
                 target_start: 30,
                 target_end: 40,
-                cigar: Some("10M".to_string()),
+                cigar_offset: 45,
+                cigar_bytes: 3,
                 strand: Strand::Forward,
             },
             // Add more test records as needed

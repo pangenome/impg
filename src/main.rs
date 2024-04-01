@@ -1,7 +1,8 @@
 use clap::Parser;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter};
-use flate2::read::GzDecoder;
+use std::num::NonZeroUsize;
+use noodles::bgzf;
 use impg::impg::{Impg, SerializableImpg, QueryInterval};
 use coitrees::IntervalTree;
 use impg::paf;
@@ -36,21 +37,21 @@ struct Args {
     stats: bool,
 
     /// Number of threads for parallel processing.
-    #[clap(short='t', long, value_parser, default_value_t = num_cpus::get())]
-    num_threads: usize,
+    #[clap(short='t', long, value_parser, default_value_t = NonZeroUsize::new(1).unwrap())]
+    num_threads: NonZeroUsize,
 }
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
     // Configure the global thread pool to use the specified number of threads
-    ThreadPoolBuilder::new().num_threads(args.num_threads).build_global().unwrap();
+    ThreadPoolBuilder::new().num_threads(args.num_threads.into()).build_global().unwrap();
 
     let impg = match args {
-        Args { paf_file: Some(paf), index_file: None, force_reindex: false, .. } => load_or_generate_index(&paf, None)?,
-        Args { paf_file: Some(paf), index_file: None, force_reindex: true, .. } => generate_index(&paf, None)?,
-        Args { paf_file: Some(paf), index_file: Some(index), force_reindex: false, .. } => load_or_generate_index(&paf, Some(&index))?,
-        Args { paf_file: Some(paf), index_file: Some(index), force_reindex: true, .. } => generate_index(&paf, Some(&index))?,
+        Args { paf_file: Some(paf), index_file: None, force_reindex: false, .. } => load_or_generate_index(&paf, None, args.num_threads)?,
+        Args { paf_file: Some(paf), index_file: None, force_reindex: true, .. } => generate_index(&paf, None, args.num_threads)?,
+        Args { paf_file: Some(paf), index_file: Some(index), force_reindex: false, .. } => load_or_generate_index(&paf, Some(&index), args.num_threads)?,
+        Args { paf_file: Some(paf), index_file: Some(index), force_reindex: true, .. } => generate_index(&paf, Some(&index), args.num_threads)?,
         Args { paf_file: None, index_file: Some(index), .. } => load_index(&index)?,
         _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "Either a PAF file or an index file must be provided")),
     };
@@ -69,27 +70,27 @@ fn main() -> io::Result<()> {
 }
 
 
-fn load_or_generate_index(paf_file: &str, index_file: Option<&str>) -> io::Result<Impg> {
+fn load_or_generate_index(paf_file: &str, index_file: Option<&str>, num_threads: NonZeroUsize) -> io::Result<Impg> {
     let index_file = index_file.map(|s| s.to_string());
     let index_file = index_file.unwrap_or_else(|| format!("{}.impg", paf_file));
     let index_file = index_file.as_str();
     if std::path::Path::new(index_file).exists() {
         load_index(index_file)
     } else {
-        generate_index(paf_file, Some(index_file))
+        generate_index(paf_file, Some(index_file), num_threads)
     }
 }
 
-fn generate_index(paf_file: &str, index_file: Option<&str>) -> io::Result<Impg> {
+fn generate_index(paf_file: &str, index_file: Option<&str>, num_threads: NonZeroUsize) -> io::Result<Impg> {
     let file = File::open(paf_file)?;
-    let reader: Box<dyn io::Read> = if paf_file.ends_with(".gz") {
-        Box::new(GzDecoder::new(file))
+    let reader: Box<dyn io::Read> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
+        Box::new(bgzf::MultithreadedReader::with_worker_count(num_threads, file))
     } else {
         Box::new(file)
     };
     let reader = BufReader::new(reader);
     let records = paf::parse_paf(reader).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to parse PAF records: {:?}", e)))?;
-    let impg = Impg::from_paf_records(&records).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to create index: {:?}", e)))?;
+    let impg = Impg::from_paf_records(&records, paf_file).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to create index: {:?}", e)))?;
 
     if let Some(index_file) = index_file {
         let serializable = impg.to_serializable();

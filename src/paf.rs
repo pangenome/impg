@@ -12,8 +12,9 @@ pub struct PafRecord {
     pub target_length: usize,
     pub target_start: usize,
     pub target_end: usize,
-    pub cigar: Option<String>,
     pub strand: Strand,
+    pub cigar_offset: u64,
+    pub cigar_bytes: usize,
 }
 
 #[derive(Default, Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
@@ -24,7 +25,7 @@ pub enum Strand {
 }
 
 impl PafRecord {
-    pub fn parse(line: &str) -> Result<Self, ParseErr> {
+    pub fn parse(line: &str, file_pos: u64) -> Result<Self, ParseErr> {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 12 {
             return Err(ParseErr::NotEnoughFields);
@@ -47,9 +48,18 @@ impl PafRecord {
             _ => return Err(ParseErr::InvalidStrand),
         };
 
-        let cigar = fields.iter()
-            .find(|&&f| f.starts_with("cg:Z:"))
-            .map(|&s| s[5..].to_string());
+        let mut cigar_offset: u64 = file_pos;
+        let mut cigar_bytes: usize = 0;
+
+        for tag_str in fields.iter() {
+            if tag_str.starts_with("cg:Z:") {
+                cigar_offset += 5;
+                cigar_bytes = tag_str.len() - 5;
+                break;
+            } else {
+                cigar_offset += (tag_str.len() + 1) as u64;
+            }
+        }
 
         Ok(Self {
             query_name,
@@ -61,7 +71,8 @@ impl PafRecord {
             target_start,
             target_end,
             strand,
-            cigar,
+            cigar_offset,
+            cigar_bytes,
         })
     }
 }
@@ -78,11 +89,15 @@ pub enum ParseErr {
 }
 
 pub fn parse_paf<R: BufRead>(reader: R) -> Result<Vec<PafRecord>, ParseErr> {
+    let mut bytes_read: u64 = 0;
     let mut records = Vec::new();
     for line_result in reader.lines() {
         let line = line_result.map_err(ParseErr::IoError)?;
-        let record = PafRecord::parse(&line)?;
+        let record = PafRecord::parse(&line, bytes_read)?;
         records.push(record);
+
+        // Size of line plus newline
+        bytes_read += (line.len() + 1) as u64;
     }
     Ok(records)
 }
@@ -94,7 +109,7 @@ mod tests {
     #[test]
     fn test_parse_paf_valid() {
         let line = "seq1\t100\t0\t100\t+\tseq2\t100\t0\t100\t60\t100\t255";
-        let record = PafRecord::parse(line).unwrap();
+        let record = PafRecord::parse(line, 0).unwrap();
         assert_eq!(
             record,
             PafRecord {
@@ -106,8 +121,11 @@ mod tests {
                 target_length: 100,
                 target_start: 0,
                 target_end: 100,
-                cigar: None, // Adjusted for the example to not include a CIGAR string
                 strand: Strand::Forward,
+                // If no cigar, then the offset is just the length of the line and cigar_bytes=0
+                // Should we use Option<> instead?
+                cigar_offset: (line.len() + 1) as u64,
+                cigar_bytes: 0,
             }
         );
     }
@@ -115,20 +133,20 @@ mod tests {
     #[test]
     fn test_parse_paf_valid_2() {
         let line = "seq1\t100\t0\t100\t+\tseq2\t100\t0\t100\t60\t100\t255\tcg:Z:10=";
-        assert!(PafRecord::parse(line).is_ok());
+        assert!(PafRecord::parse(line, 0).is_ok());
     }
 
     #[test]
     fn test_parse_paf_invalid() {
         // it's got a character 'z' in the length field
         let line = "seq1\t100\t0\t100\t+\tseq2\t100\tz\t100\t60\t100\t255\tcg:Z:10M";
-        assert!(PafRecord::parse(line).is_err());
+        assert!(PafRecord::parse(line, 0).is_err());
     }
 
     #[test]
     fn test_parse_paf_cigar_invalid() {
         // it's got Q in the CIGAR string
         let line = "seq1\t100\t0\t100\t+\tseq2\t100\tz\t100\t60\t100\t255\tcg:Z:10Q";
-        assert!(PafRecord::parse(line).is_err());
+        assert!(PafRecord::parse(line, 0).is_err());
     }
 }
