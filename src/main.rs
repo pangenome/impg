@@ -7,6 +7,7 @@ use impg::impg::{Impg, SerializableImpg, QueryInterval};
 use coitrees::IntervalTree;
 use impg::paf;
 use rayon::ThreadPoolBuilder;
+use std::io::BufRead;
 
 /// Command-line tool for querying overlaps in PAF files.
 #[derive(Parser, Debug)]
@@ -27,6 +28,10 @@ struct Args {
     /// Query in the format `seq_name:start-end`.
     #[clap(short='q', long, value_parser)]
     query: Option<String>,
+
+    /// Path to the BED file containing query regions.
+    #[clap(short='b', long, value_parser)]
+    query_bed: Option<String>,
 
     /// Enable transitive overlap queries.
     #[clap(short='x', long, action)]
@@ -63,10 +68,40 @@ fn main() -> io::Result<()> {
     if let Some(query) = args.query {
         let (target_name, target_range) = parse_query(&query)?;
         let results = perform_query(&impg, &target_name, target_range, args.transitive);
-        output_results(&impg, results);
+        output_results_bed(&impg, results);
+    } else if let Some(query_bed) = args.query_bed {
+        let queries = parse_bed_file(&query_bed)?;
+        for (target_name, target_range) in queries {
+            let results = perform_query(&impg, &target_name, target_range, args.transitive);
+            output_results_bedpe(&impg, results, &target_name, target_range);
+        }
+    }
+    Ok(())
+}
+
+fn parse_bed_file(bed_file: &str) -> io::Result<Vec<(String, (i32, i32))>> {
+    let file = File::open(bed_file)?;
+    let reader = BufReader::new(file);
+    let mut queries = Vec::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 3 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid BED file format"));
+        }
+
+        let start = parts[1].parse::<i32>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid start value"))?;
+        let end = parts[2].parse::<i32>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid end value"))?;
+
+        if start >= end {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Start value must be less than end value"));
+        }
+
+        queries.push((parts[0].to_string(), (start, end)));
     }
 
-    Ok(())
+    Ok(queries)
 }
 
 
@@ -139,11 +174,20 @@ fn perform_query(impg: &Impg, target_name: &str, target_range: (i32, i32), trans
     }
 }
 
-fn output_results(impg: &Impg, results: Vec<QueryInterval>) {
+fn output_results_bed(impg: &Impg, results: Vec<QueryInterval>) {
     for overlap in results {
         println!("{}\t{}\t{}",
                  impg.seq_index.get_name(overlap.metadata).unwrap(),
                  overlap.first, overlap.last);
+    }
+}
+
+fn output_results_bedpe(impg: &Impg, results: Vec<QueryInterval>, target_name: &str, target_range: (i32, i32)) {
+    for overlap in results {
+        let overlap_name = impg.seq_index.get_name(overlap.metadata).unwrap();
+        println!("{}\t{}\t{}\t{}\t{}\t{}",
+                 overlap_name, overlap.first, overlap.last,
+                 target_name, target_range.0, target_range.1);
     }
 }
 
