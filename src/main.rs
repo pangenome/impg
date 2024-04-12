@@ -37,6 +37,10 @@ struct Args {
     #[clap(short='x', long, action)]
     transitive: bool,
 
+    /// Output results in PAF format.
+    #[clap(short='P', long, action)]
+    output_paf: bool,
+        
     /// Print stats about the index.
     #[clap(short='s', long, action)]
     stats: bool,
@@ -68,12 +72,20 @@ fn main() -> io::Result<()> {
     if let Some(query) = args.query {
         let (target_name, target_range) = parse_query(&query)?;
         let results = perform_query(&impg, &target_name, target_range, args.transitive);
-        output_results_bed(&impg, results);
+        if args.output_paf {
+            output_results_paf(&impg, results, &target_name, target_range);
+        } else {
+            output_results_bed(&impg, results);
+        }
     } else if let Some(query_bed) = args.query_bed {
         let queries = parse_bed_file(&query_bed)?;
         for (target_name, target_range) in queries {
             let results = perform_query(&impg, &target_name, target_range, args.transitive);
-            output_results_bedpe(&impg, results, &target_name, target_range);
+            if args.output_paf {
+                output_results_paf(&impg, results, &target_name, target_range);
+            } else {
+                output_results_bedpe(&impg, results, &target_name, target_range);
+            }
         }
     }
     Ok(())
@@ -175,7 +187,7 @@ fn perform_query(impg: &Impg, target_name: &str, target_range: (i32, i32), trans
 }
 
 fn output_results_bed(impg: &Impg, results: Vec<QueryInterval>) {
-    for overlap in results {
+    for (overlap, _) in results {
         println!("{}\t{}\t{}",
                  impg.seq_index.get_name(overlap.metadata).unwrap(),
                  overlap.first, overlap.last);
@@ -183,13 +195,40 @@ fn output_results_bed(impg: &Impg, results: Vec<QueryInterval>) {
 }
 
 fn output_results_bedpe(impg: &Impg, results: Vec<QueryInterval>, target_name: &str, target_range: (i32, i32)) {
-    for overlap in results {
+    for (overlap, _) in results {
         let overlap_name = impg.seq_index.get_name(overlap.metadata).unwrap();
         println!("{}\t{}\t{}\t{}\t{}\t{}",
                  overlap_name, overlap.first, overlap.last,
                  target_name, target_range.0, target_range.1);
     }
 }
+
+fn output_results_paf(impg: &Impg, results: Vec<QueryInterval>, target_name: &str, target_range: (i32, i32)) { 
+    let target_length = impg.seq_index.get_len_from_id(impg.seq_index.get_id(target_name).unwrap()).unwrap();  
+    for (overlap, cigar) in results {
+        let overlap_name = impg.seq_index.get_name(overlap.metadata).unwrap();
+        let strand = if overlap.first <= overlap.last { '+' } else { '-' };
+
+        let query_length = impg.seq_index.get_len_from_id(overlap.metadata).unwrap();  
+
+        let (matches, block_len) = cigar.iter().fold((0, 0), |(matches, block_len), op| {
+            let len = op.len();
+            match op.op() {
+                '=' => (matches + len, block_len + len),
+                'X' | 'I' | 'D' => (matches, block_len + len),
+                _ => (matches, block_len),
+            }
+        });
+
+        let cigar_str : String = cigar.iter().map(|op| format!("{}{}", op.len(), op.op())).collect();
+
+        println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tcg:Z:{}",
+                    overlap_name, query_length, overlap.first, overlap.last, strand,
+                    target_name, target_length, target_range.0, target_range.1,
+                    matches, block_len, 255, cigar_str);
+    }
+}
+
 
 fn print_stats(impg: &Impg) {
     println!("Number of sequences: {}", impg.seq_index.len());
