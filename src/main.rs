@@ -7,6 +7,7 @@ use impg::impg::{Impg, SerializableImpg, QueryInterval};
 use coitrees::IntervalTree;
 use impg::paf;
 use rayon::ThreadPoolBuilder;
+use std::io::BufRead;
 
 /// Command-line tool for querying overlaps in PAF files.
 #[derive(Parser, Debug)]
@@ -24,14 +25,22 @@ struct Args {
     #[clap(short='I', long, action)]
     force_reindex: bool,
 
-    /// Query in the format `seq_name:start-end`.
-    #[clap(short='q', long, value_parser)]
-    query: Option<String>,
+    /// Target range in the format `seq_name:start-end`.
+    #[clap(short='r', long, value_parser)]
+    target_range: Option<String>,
 
-    /// Enable transitive overlap queries.
+    /// Path to the BED file containing target regions.
+    #[clap(short='b', long, value_parser)]
+    target_bed: Option<String>,
+
+    /// Enable transitive overlap requests.
     #[clap(short='x', long, action)]
     transitive: bool,
 
+    /// Output results in PAF format.
+    #[clap(short='P', long, action)]
+    output_paf: bool,
+        
     /// Print stats about the index.
     #[clap(short='s', long, action)]
     stats: bool,
@@ -60,13 +69,51 @@ fn main() -> io::Result<()> {
         print_stats(&impg);
     }
 
-    if let Some(query) = args.query {
-        let (target_name, target_range) = parse_query(&query)?;
+    if let Some(target_range) = args.target_range {
+        let (target_name, target_range) = parse_target_range(&target_range)?;
         let results = perform_query(&impg, &target_name, target_range, args.transitive);
-        output_results(&impg, results);
+        if args.output_paf {
+            output_results_paf(&impg, results, &target_name, target_range);
+        } else {
+            output_results_bed(&impg, results);
+        }
+    } else if let Some(target_bed) = args.target_bed {
+        let targets = parse_bed_file(&target_bed)?;
+        for (target_name, target_range) in targets {
+            let results = perform_query(&impg, &target_name, target_range, args.transitive);
+            if args.output_paf {
+                output_results_paf(&impg, results, &target_name, target_range);
+            } else {
+                output_results_bedpe(&impg, results, &target_name, target_range);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_bed_file(bed_file: &str) -> io::Result<Vec<(String, (i32, i32))>> {
+    let file = File::open(bed_file)?;
+    let reader = BufReader::new(file);
+    let mut queries = Vec::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 3 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid BED file format"));
+        }
+
+        let start = parts[1].parse::<i32>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid start value"))?;
+        let end = parts[2].parse::<i32>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid end value"))?;
+
+        if start >= end {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Start value must be less than end value"));
+        }
+
+        queries.push((parts[0].to_string(), (start, end)));
     }
 
-    Ok(())
+    Ok(queries)
 }
 
 
@@ -109,14 +156,14 @@ fn load_index(index_file: &str) -> io::Result<Impg> {
     Ok(Impg::from_serializable(serializable))
 }
 
-fn parse_query(query: &str) -> io::Result<(String, (i32, i32))> {
-    let parts: Vec<&str> = query.split(':').collect();
+fn parse_target_range(target_range: &str) -> io::Result<(String, (i32, i32))> {
+    let parts: Vec<&str> = target_range.split(':').collect();
     if parts.len() != 2 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Query format should be `seq_name:start-end`"));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Target range format should be `seq_name:start-end`"));
     }
     let range_parts: Vec<&str> = parts[1].split('-').collect();
     if range_parts.len() != 2 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Query range format should be `start-end`"));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Target range format should be `start-end`"));
     }
 
     let start = range_parts[0].parse::<i32>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid start value"))?;
@@ -139,13 +186,49 @@ fn perform_query(impg: &Impg, target_name: &str, target_range: (i32, i32), trans
     }
 }
 
-fn output_results(impg: &Impg, results: Vec<QueryInterval>) {
-    for overlap in results {
+fn output_results_bed(impg: &Impg, results: Vec<QueryInterval>) {
+    for (overlap, _) in results {
         println!("{}\t{}\t{}",
                  impg.seq_index.get_name(overlap.metadata).unwrap(),
                  overlap.first, overlap.last);
     }
 }
+
+fn output_results_bedpe(impg: &Impg, results: Vec<QueryInterval>, target_name: &str, target_range: (i32, i32)) {
+    for (overlap, _) in results {
+        let overlap_name = impg.seq_index.get_name(overlap.metadata).unwrap();
+        println!("{}\t{}\t{}\t{}\t{}\t{}",
+                 overlap_name, overlap.first, overlap.last,
+                 target_name, target_range.0, target_range.1);
+    }
+}
+
+fn output_results_paf(impg: &Impg, results: Vec<QueryInterval>, target_name: &str, target_range: (i32, i32)) { 
+    let target_length = impg.seq_index.get_len_from_id(impg.seq_index.get_id(target_name).unwrap()).unwrap();  
+    for (overlap, cigar) in results {
+        let overlap_name = impg.seq_index.get_name(overlap.metadata).unwrap();
+        let strand = if overlap.first <= overlap.last { '+' } else { '-' };
+
+        let query_length = impg.seq_index.get_len_from_id(overlap.metadata).unwrap();  
+
+        let (matches, block_len) = cigar.iter().fold((0, 0), |(matches, block_len), op| {
+            let len = op.len();
+            match op.op() {
+                '=' => (matches + len, block_len + len),
+                'X' | 'I' | 'D' => (matches, block_len + len),
+                _ => (matches, block_len),
+            }
+        });
+
+        let cigar_str : String = cigar.iter().map(|op| format!("{}{}", op.len(), op.op())).collect();
+
+        println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tcg:Z:{}",
+                    overlap_name, query_length, overlap.first, overlap.last, strand,
+                    target_name, target_length, target_range.0, target_range.1,
+                    matches, block_len, 255, cigar_str);
+    }
+}
+
 
 fn print_stats(impg: &Impg) {
     println!("Number of sequences: {}", impg.seq_index.len());
