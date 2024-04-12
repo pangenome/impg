@@ -6,10 +6,10 @@ Often, we would like to be able to break a small piece out of a pangenome withou
 
 ## What does `impg` do?
 
-At its core, `impg` lifts over ranges from a target sequence into the other genomes described in alignments.
+At its core, `impg` lifts over ranges from a target sequence (used as reference) into the queries (the other sequences aligned to the sequence used as reference) described in alignments.
 In effect, it lets us pick up homologous loci from all genomes mapped onto our specific target region.
 This is particularly useful when you're interested in comparing a specific genomic region across different individuals, strains, or species in a pangenomic or comparative genomic setting.
-The output is provided in BED format, making it straightforward to use to extract FASTA sequences for downstream use in multiple sequence alignment (like `mafft`) or pangenome graph building (e.g., `pggb` or `minigraph-cactus`).
+The output is provided in BED, BEDPE and PAF formats, making it straightforward to use to extract FASTA sequences for downstream use in multiple sequence alignment (like `mafft`) or pangenome graph building (e.g., `pggb` or `minigraph-cactus`).
 
 ## How does it work?
 
@@ -22,7 +22,7 @@ This approach allows for fast and memory-efficient projection of sequence ranges
 Getting started with `impg` is straightforward. Here's a basic example of how to use the command-line utility:
 
 ```bash
-impg -p cerevisiae.pan.paf.gz -q S288C#1#chrI:50000-100000 -x
+impg -p cerevisiae.pan.paf.gz -r S288C#1#chrI:50000-100000 -x
 ```
 
 Your alignments must use `wfmash` default or `minimap2 --eqx` type CIGAR strings which have `=` for matches and `X` for mismatches. The `M` positional match character is not allowed.
@@ -39,9 +39,9 @@ UWOPS034614#1#chrI  36826  86817
 SK1#1#chrI          52740  102721
 ```
 
-In this example, `-p` specifies the path to the PAF file (compressed with zstd in this case), `-q` defines the query in the format of `target:start-end`, and `-x` requests a *transitive closure* of the matches.
+In this example, `-p` specifies the path to the PAF file, `-r` defines the target range in the format of `seq_name:start-end`, and `-x` requests a *transitive closure* of the matches.
 That is, for each collected range, we then find what sequence ranges are aligned onto it.
-This is done progressively until we've closed the set of alignments connected to the initial query range.
+This is done progressively until we've closed the set of alignments connected to the initial target range.
 
 ### Installation
 

@@ -25,15 +25,15 @@ struct Args {
     #[clap(short='I', long, action)]
     force_reindex: bool,
 
-    /// Query in the format `seq_name:start-end`.
-    #[clap(short='q', long, value_parser)]
-    query: Option<String>,
+    /// Target range in the format `seq_name:start-end`.
+    #[clap(short='r', long, value_parser)]
+    target_range: Option<String>,
 
-    /// Path to the BED file containing query regions.
+    /// Path to the BED file containing target regions.
     #[clap(short='b', long, value_parser)]
-    query_bed: Option<String>,
+    target_bed: Option<String>,
 
-    /// Enable transitive overlap queries.
+    /// Enable transitive overlap requests.
     #[clap(short='x', long, action)]
     transitive: bool,
 
@@ -69,17 +69,17 @@ fn main() -> io::Result<()> {
         print_stats(&impg);
     }
 
-    if let Some(query) = args.query {
-        let (target_name, target_range) = parse_query(&query)?;
+    if let Some(target_range) = args.target_range {
+        let (target_name, target_range) = parse_target_range(&target_range)?;
         let results = perform_query(&impg, &target_name, target_range, args.transitive);
         if args.output_paf {
             output_results_paf(&impg, results, &target_name, target_range);
         } else {
             output_results_bed(&impg, results);
         }
-    } else if let Some(query_bed) = args.query_bed {
-        let queries = parse_bed_file(&query_bed)?;
-        for (target_name, target_range) in queries {
+    } else if let Some(target_bed) = args.target_bed {
+        let targets = parse_bed_file(&target_bed)?;
+        for (target_name, target_range) in targets {
             let results = perform_query(&impg, &target_name, target_range, args.transitive);
             if args.output_paf {
                 output_results_paf(&impg, results, &target_name, target_range);
@@ -156,14 +156,14 @@ fn load_index(index_file: &str) -> io::Result<Impg> {
     Ok(Impg::from_serializable(serializable))
 }
 
-fn parse_query(query: &str) -> io::Result<(String, (i32, i32))> {
-    let parts: Vec<&str> = query.split(':').collect();
+fn parse_target_range(target_range: &str) -> io::Result<(String, (i32, i32))> {
+    let parts: Vec<&str> = target_range.split(':').collect();
     if parts.len() != 2 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Query format should be `seq_name:start-end`"));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Target range format should be `seq_name:start-end`"));
     }
     let range_parts: Vec<&str> = parts[1].split('-').collect();
     if range_parts.len() != 2 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Query range format should be `start-end`"));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Target range format should be `start-end`"));
     }
 
     let start = range_parts[0].parse::<i32>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid start value"))?;
