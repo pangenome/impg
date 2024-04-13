@@ -23,24 +23,26 @@ impl CigarOp {
             'X' => 1,
             'I' => 2,
             'D' => 3,
+            'M' => 4,
             _ => panic!("Invalid CIGAR operation: {}", op),
         };
-        Self { val: (val << 30) | (len as u32) }
+        Self { val: (val << 29) | (len as u32) }
     }
 
     pub fn op(&self) -> char {
         // two most significant bits in the val tell us the op
-        match self.val >> 30 {
+        match self.val >> 29 {
             0 => '=',
             1 => 'X',
             2 => 'I',
             3 => 'D',
-            _ => panic!("Invalid CIGAR operation: {}", self.val >> 30),
+            4 => 'M',
+            _ => panic!("Invalid CIGAR operation: {}", self.val >> 29),
         }
     }
 
     pub fn len(&self) -> i32 {
-        (self.val & ((1 << 30) - 1)) as i32
+        (self.val & ((1 << 29) - 1)) as i32
     }
 
     pub fn is_empty(&self) -> bool {
@@ -57,7 +59,7 @@ impl CigarOp {
 
     pub fn query_delta(&self, strand: Strand) -> i32 {
         match self.op() {
-            '=' | 'X' | 'I' => if strand == Strand::Forward { self.len() } else { -self.len() },
+            '=' | 'X' | 'I' | 'M' => if strand == Strand::Forward { self.len() } else { -self.len() },
             'D' => 0,
             _ => panic!("Invalid CIGAR operation: {}", self.op()),
         }
