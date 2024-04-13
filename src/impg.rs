@@ -396,7 +396,7 @@ mod tests {
 
         assert_eq!(start, 0);
         assert_eq!(end, 100);
-        assert_eq!(cigar, "100=");
+        assert_eq!(cigar, cigar_ops);
     }
 
     #[test]
@@ -409,7 +409,7 @@ mod tests {
 
         assert_eq!(start, 100);
         assert_eq!(end, 0);
-        assert_eq!(cigar, "100=");
+        assert_eq!(cigar, cigar_ops);
     }
 
     #[test]
@@ -427,31 +427,42 @@ mod tests {
         let base = (0, 100, 50, 200, Strand::Forward);
         {
             let result = project_target_range_through_alignment((0, 100), base, &cigar_ops);
-            assert_eq!(result, (50, 200, "10=5I5D50=50I35=".to_string()));
+            assert_eq!(result, (50, 200, cigar_ops.clone()));
         }
         {
             let result = project_target_range_through_alignment((50, 55), base, &cigar_ops);
-            assert_eq!(result, (100, 105, "5=".to_string()));
+            assert_eq!(result, (100, 105, vec![CigarOp::new(5, '=').unwrap()]));
         }
         {
             let result = project_target_range_through_alignment((50, 64), base, &cigar_ops);
-            assert_eq!(result, (100, 114, "14=".to_string()));
+            assert_eq!(result, (100, 114, vec![CigarOp::new(14, '=').unwrap()]));
         }
         {
             let result = project_target_range_through_alignment((65, 65), base, &cigar_ops);
-            assert_eq!(result, (115, 115, "50I".to_string()));
+            assert_eq!(result, (115, 115, vec![CigarOp::new(50, 'I').unwrap()]));
         }
         {
             let result = project_target_range_through_alignment((50, 65), base, &cigar_ops);
-            assert_eq!(result, (100, 115, "15=50I".to_string()));
+            let cigar_ops = vec![
+                CigarOp::new(15, '='),
+                CigarOp::new(50, 'I')
+            ];
+            let cigar_ops: Vec<_> = cigar_ops.into_iter().map(|op| op.unwrap()).collect();
+            assert_eq!(result, (100, 115, cigar_ops));
         }
         {
             let result = project_target_range_through_alignment((50, 66), base, &cigar_ops);
-            assert_eq!(result, (100, 166, "15=50I1=".to_string()));
+            let cigar_ops = vec![
+                CigarOp::new(15, '='),
+                CigarOp::new(50, 'I'),
+                CigarOp::new(1, '=')
+            ];
+            let cigar_ops: Vec<_> = cigar_ops.into_iter().map(|op| op.unwrap()).collect();
+            assert_eq!(result, (100, 166, cigar_ops));
         }
         {
             let result = project_target_range_through_alignment((70, 95), base, &cigar_ops);
-            assert_eq!(result, (170, 195, "25=".to_string()));
+            assert_eq!(result, (170, 195, vec![CigarOp::new(25, '=').unwrap()]));
         }
     }
 
@@ -462,7 +473,7 @@ mod tests {
         let record = (100, 200, 100, 200, Strand::Forward);
         let cigar_ops = vec![CigarOp::new(100, '=').unwrap()];
         let (start, end, cigar) = project_target_range_through_alignment(target_range, record, &cigar_ops);
-        assert_eq!((start, end, cigar), (100, 200, "100=".to_string()));
+        assert_eq!((start, end, cigar), (100, 200, vec![CigarOp::new(100, '=').unwrap()]));
     }
 
     // 2. Simple Reverse Projection
@@ -472,7 +483,7 @@ mod tests {
         let record = (100, 200, 100, 200, Strand::Reverse);
         let cigar_ops = vec![CigarOp::new(100, '=').unwrap()];
         let (start, end, cigar) = project_target_range_through_alignment(target_range, record, &cigar_ops);
-        assert_eq!((start, end, cigar), (200, 100, "100=".to_string())); // Adjust for reverse calculation
+        assert_eq!((start, end, cigar), (200, 100, vec![CigarOp::new(100, '=').unwrap()])); // Adjust for reverse calculation
     }
 
     // 3. Forward Projection with Insertions
@@ -487,7 +498,7 @@ mod tests {
         ];
         let cigar_ops: Vec<_> = cigar_ops.into_iter().map(|op| op.unwrap()).collect();
         let (start, end, cigar) = project_target_range_through_alignment(target_range, record, &cigar_ops);
-        assert_eq!((start, end, cigar), (50, 160, "50=10I50=".to_string()));
+        assert_eq!((start, end, cigar), (50, 160, cigar_ops));
     }
 
     // 4. Forward Projection with Deletions
@@ -502,7 +513,7 @@ mod tests {
         ];
         let cigar_ops: Vec<_> = cigar_ops.into_iter().map(|op| op.unwrap()).collect();
         let (start, end, cigar) = project_target_range_through_alignment(target_range, record, &cigar_ops);
-        assert_eq!((start, end, cigar), (50, 140, "50=10D40=".to_string()));
+        assert_eq!((start, end, cigar), (50, 140, cigar_ops));
     }
 
     // 5. Reverse Projection with Mixed Operations
@@ -518,7 +529,13 @@ mod tests {
         ];
         let cigar_ops: Vec<_> = cigar_ops.into_iter().map(|op| op.unwrap()).collect();
         let (start, end, cigar) = project_target_range_through_alignment(target_range, record, &cigar_ops);
-        assert_eq!((start, end, cigar), (250, 200, "10D10I40=".to_string()));
+        let cigar_ops = vec![
+            CigarOp::new(10, 'D'), // 150, 260
+            CigarOp::new(10, 'I'), // 150, 250
+            CigarOp::new(40, '='), // 150, 250
+        ];
+        let cigar_ops: Vec<_> = cigar_ops.into_iter().map(|op| op.unwrap()).collect();
+        assert_eq!((start, end, cigar), (250, 200, cigar_ops));
     }
 
     // 6. Edge Case Projection
@@ -538,7 +555,7 @@ mod tests {
         let cigar_ops: Vec<_> = cigar_ops.into_iter().map(|op| op.unwrap()).collect();
         let (start, end, cigar) = project_target_range_through_alignment(target_range, record, &cigar_ops);
         println!("{} {}", start, end);
-        assert_eq!((start, end, cigar), (0, 10, "10=".to_string()));
+        assert_eq!((start, end, cigar), (0, 10, vec![CigarOp::new(10, '=').unwrap()]));
     }
 
     #[test]
