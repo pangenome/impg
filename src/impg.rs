@@ -23,7 +23,6 @@ impl CigarOp {
             'X' => 1,
             'I' => 2,
             'D' => 3,
-            'M' => 4,
             _ => panic!("Invalid CIGAR operation: {}", op),
         };
         Self { val: (val << 30) | (len as u32) }
@@ -36,7 +35,6 @@ impl CigarOp {
             1 => 'X',
             2 => 'I',
             3 => 'D',
-            4 => 'M',
             _ => panic!("Invalid CIGAR operation: {}", self.val >> 30),
         }
     }
@@ -59,7 +57,7 @@ impl CigarOp {
 
     pub fn query_delta(&self, strand: Strand) -> i32 {
         match self.op() {
-            '=' | 'X' | 'I' | 'M' => if strand == Strand::Forward { self.len() } else { -self.len() },
+            '=' | 'X' | 'I' => if strand == Strand::Forward { self.len() } else { -self.len() },
             'D' => 0,
             _ => panic!("Invalid CIGAR operation: {}", self.op()),
         }
