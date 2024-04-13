@@ -217,14 +217,27 @@ fn output_results_paf(impg: &Impg, results: Vec<QueryInterval>, target_name: &st
 
         let query_length = impg.seq_index.get_len_from_id(overlap.metadata).unwrap();  
 
-        let (matches, block_len) = cigar.iter().fold((0, 0), |(matches, block_len), op| {
-            let len = op.len();
-            match op.op() {
-                '=' => (matches + len, block_len + len),
-                'X' | 'I' | 'D' => (matches, block_len + len),
-                _ => (matches, block_len),
-            }
-        });
+        let has_m_operation = cigar.iter().any(|op| op.op() == 'M');
+        let (matches, block_len) = if has_m_operation {
+            // We overestimate the number of matches by counting all M operations
+            cigar.iter().fold((0, 0), |(matches, block_len), op| {
+                let len = op.len();
+                match op.op() {
+                    'M' => (matches + len, block_len + len),
+                    'I' | 'D' => (matches, block_len + len),
+                    _ => (matches, block_len),
+                }
+            })
+        } else {
+            cigar.iter().fold((0, 0), |(matches, block_len), op| {
+                let len = op.len();
+                match op.op() {
+                    '=' => (matches + len, block_len + len),
+                    'X' | 'I' | 'D' => (matches, block_len + len),
+                    _ => (matches, block_len),
+                }
+            })
+        };
 
         let cigar_str : String = cigar.iter().map(|op| format!("{}{}", op.len(), op.op())).collect();
 
