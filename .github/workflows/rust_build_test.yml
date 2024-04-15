@@ -1,0 +1,15 @@
+name: Rust CI
+
+on: [push]
+
+jobs:
+  build_and_test:
+    name: Run cargo build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - run: cargo build --verbose
+      - run: cargo test --verbose

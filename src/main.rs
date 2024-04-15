@@ -73,25 +73,25 @@ fn main() -> io::Result<()> {
         let (target_name, target_range) = parse_target_range(&target_range)?;
         let results = perform_query(&impg, &target_name, target_range, args.transitive);
         if args.output_paf {
-            output_results_paf(&impg, results, &target_name, target_range);
+            output_results_paf(&impg, results, &target_name, target_range, None);
         } else {
             output_results_bed(&impg, results);
         }
     } else if let Some(target_bed) = args.target_bed {
         let targets = parse_bed_file(&target_bed)?;
-        for (target_name, target_range) in targets {
+        for (target_name, target_range, name) in targets {
             let results = perform_query(&impg, &target_name, target_range, args.transitive);
             if args.output_paf {
-                output_results_paf(&impg, results, &target_name, target_range);
+                output_results_paf(&impg, results, &target_name, target_range, name);
             } else {
-                output_results_bedpe(&impg, results, &target_name, target_range);
+                output_results_bedpe(&impg, results, &target_name, target_range, name);
             }
         }
     }
     Ok(())
 }
 
-fn parse_bed_file(bed_file: &str) -> io::Result<Vec<(String, (i32, i32))>> {
+fn parse_bed_file(bed_file: &str) -> io::Result<Vec<(String, (i32, i32), Option<String>)>> {
     let file = File::open(bed_file)?;
     let reader = BufReader::new(file);
     let mut queries = Vec::new();
@@ -110,7 +110,8 @@ fn parse_bed_file(bed_file: &str) -> io::Result<Vec<(String, (i32, i32))>> {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "Start value must be less than end value"));
         }
 
-        queries.push((parts[0].to_string(), (start, end)));
+        let name = if parts.len() > 3 { Some(parts[3].to_string()) } else { None };
+        queries.push((parts[0].to_string(), (start, end), name));
     }
 
     Ok(queries)
@@ -188,44 +189,77 @@ fn perform_query(impg: &Impg, target_name: &str, target_range: (i32, i32), trans
 
 fn output_results_bed(impg: &Impg, results: Vec<QueryInterval>) {
     for (overlap, _) in results {
-        println!("{}\t{}\t{}",
-                 impg.seq_index.get_name(overlap.metadata).unwrap(),
-                 overlap.first, overlap.last);
+        let overlap_name = impg.seq_index.get_name(overlap.metadata).unwrap();
+        let (first, last, strand) = if overlap.first <= overlap.last {
+            (overlap.first, overlap.last, '+')
+        } else {
+            (overlap.last, overlap.first, '-')
+        };
+        println!("{}\t{}\t{}\t.\t{}", overlap_name, first, last, strand);
     }
 }
 
-fn output_results_bedpe(impg: &Impg, results: Vec<QueryInterval>, target_name: &str, target_range: (i32, i32)) {
+fn output_results_bedpe(impg: &Impg, results: Vec<QueryInterval>, target_name: &str, target_range: (i32, i32), name: Option<String>) {
     for (overlap, _) in results {
         let overlap_name = impg.seq_index.get_name(overlap.metadata).unwrap();
-        println!("{}\t{}\t{}\t{}\t{}\t{}",
-                 overlap_name, overlap.first, overlap.last,
-                 target_name, target_range.0, target_range.1);
+        let (first, last, strand) = if overlap.first <= overlap.last {
+            (overlap.first, overlap.last, '+')
+        } else {
+            (overlap.last, overlap.first, '-')
+        };
+        println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t0\t{}\t+",
+                 overlap_name, first, last,
+                 target_name, target_range.0, target_range.1,
+                 name.as_deref().unwrap_or("."), strand);
     }
 }
 
-fn output_results_paf(impg: &Impg, results: Vec<QueryInterval>, target_name: &str, target_range: (i32, i32)) { 
+fn output_results_paf(impg: &Impg, results: Vec<QueryInterval>, target_name: &str, target_range: (i32, i32), name: Option<String>) { 
     let target_length = impg.seq_index.get_len_from_id(impg.seq_index.get_id(target_name).unwrap()).unwrap();  
     for (overlap, cigar) in results {
         let overlap_name = impg.seq_index.get_name(overlap.metadata).unwrap();
-        let strand = if overlap.first <= overlap.last { '+' } else { '-' };
+        let (first, last, strand) = if overlap.first <= overlap.last {
+            (overlap.first, overlap.last, '+')
+        } else {
+            (overlap.last, overlap.first, '-')
+        };
 
         let query_length = impg.seq_index.get_len_from_id(overlap.metadata).unwrap();  
 
-        let (matches, block_len) = cigar.iter().fold((0, 0), |(matches, block_len), op| {
-            let len = op.len();
-            match op.op() {
-                '=' => (matches + len, block_len + len),
-                'X' | 'I' | 'D' => (matches, block_len + len),
-                _ => (matches, block_len),
-            }
-        });
+        let has_m_operation = cigar.iter().any(|op| op.op() == 'M');
+        let (matches, block_len) = if has_m_operation {
+            // We overestimate the number of matches by counting all M operations
+            cigar.iter().fold((0, 0), |(matches, block_len), op| {
+                let len = op.len();
+                match op.op() {
+                    'M' => (matches + len, block_len + len),
+                    'I' | 'D' => (matches, block_len + len),
+                    _ => (matches, block_len),
+                }
+            })
+        } else {
+            cigar.iter().fold((0, 0), |(matches, block_len), op| {
+                let len = op.len();
+                match op.op() {
+                    '=' => (matches + len, block_len + len),
+                    'X' | 'I' | 'D' => (matches, block_len + len),
+                    _ => (matches, block_len),
+                }
+            })
+        };
 
         let cigar_str : String = cigar.iter().map(|op| format!("{}{}", op.len(), op.op())).collect();
 
-        println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tcg:Z:{}",
-                    overlap_name, query_length, overlap.first, overlap.last, strand,
-                    target_name, target_length, target_range.0, target_range.1,
-                    matches, block_len, 255, cigar_str);
+        match name {
+            Some(ref name) => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tcg:Z:{}\tan:Z:{}",
+                                    overlap_name, query_length, first, last, strand,
+                                    target_name, target_length, target_range.0, target_range.1,
+                                    matches, block_len, 255, cigar_str, name),
+            None => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tcg:Z:{}",
+                                overlap_name, query_length, overlap.first, overlap.last, strand,
+                                target_name, target_length, target_range.0, target_range.1,
+                                matches, block_len, 255, cigar_str),
+        }
     }
 }
 
