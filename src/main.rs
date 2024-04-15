@@ -189,23 +189,28 @@ fn perform_query(impg: &Impg, target_name: &str, target_range: (i32, i32), trans
 
 fn output_results_bed(impg: &Impg, results: Vec<QueryInterval>) {
     for (overlap, _) in results {
-        println!("{}\t{}\t{}",
-                 impg.seq_index.get_name(overlap.metadata).unwrap(),
-                 overlap.first, overlap.last);
+        let overlap_name = impg.seq_index.get_name(overlap.metadata).unwrap();
+        let (first, last, strand) = if overlap.first <= overlap.last {
+            (overlap.first, overlap.last, '+')
+        } else {
+            (overlap.last, overlap.first, '-')
+        };
+        println!("{}\t{}\t{}\t.\t{}", overlap_name, first, last, strand);
     }
 }
 
 fn output_results_bedpe(impg: &Impg, results: Vec<QueryInterval>, target_name: &str, target_range: (i32, i32), name: Option<String>) {
     for (overlap, _) in results {
         let overlap_name = impg.seq_index.get_name(overlap.metadata).unwrap();
-        match name {
-            Some(ref name) => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                                    overlap_name, overlap.first, overlap.last,
-                                    target_name, target_range.0, target_range.1, name),
-            None => println!("{}\t{}\t{}\t{}\t{}\t{}",
-                             overlap_name, overlap.first, overlap.last,
-                             target_name, target_range.0, target_range.1),
-        }
+        let (first, last, strand) = if overlap.first <= overlap.last {
+            (overlap.first, overlap.last, '+')
+        } else {
+            (overlap.last, overlap.first, '-')
+        };
+        println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t0\t{}\t+",
+                 overlap_name, first, last,
+                 target_name, target_range.0, target_range.1,
+                 name.as_deref().unwrap_or("."), strand);
     }
 }
 
@@ -213,7 +218,11 @@ fn output_results_paf(impg: &Impg, results: Vec<QueryInterval>, target_name: &st
     let target_length = impg.seq_index.get_len_from_id(impg.seq_index.get_id(target_name).unwrap()).unwrap();  
     for (overlap, cigar) in results {
         let overlap_name = impg.seq_index.get_name(overlap.metadata).unwrap();
-        let strand = if overlap.first <= overlap.last { '+' } else { '-' };
+        let (first, last, strand) = if overlap.first <= overlap.last {
+            (overlap.first, overlap.last, '+')
+        } else {
+            (overlap.last, overlap.first, '-')
+        };
 
         let query_length = impg.seq_index.get_len_from_id(overlap.metadata).unwrap();  
 
@@ -243,7 +252,7 @@ fn output_results_paf(impg: &Impg, results: Vec<QueryInterval>, target_name: &st
 
         match name {
             Some(ref name) => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tcg:Z:{}\tan:Z:{}",
-                                    overlap_name, query_length, overlap.first, overlap.last, strand,
+                                    overlap_name, query_length, first, last, strand,
                                     target_name, target_length, target_range.0, target_range.1,
                                     matches, block_len, 255, cigar_str, name),
             None => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tcg:Z:{}",
