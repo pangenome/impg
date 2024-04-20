@@ -131,8 +131,8 @@ impl Impg {
 
         let mut seq_index = SequenceIndex::new();
         for record in records {
-            seq_index.get_or_insert_id(&record.query_name, Some(record.target_length as u64));
-            seq_index.get_or_insert_id(&record.target_name, Some(record.target_length as u64));
+            seq_index.get_or_insert_id(&record.query_name, Some(record.target_length));
+            seq_index.get_or_insert_id(&record.target_name, Some(record.target_length));
         }
         
         let intervals: HashMap<u32, Vec<Interval<QueryMetadata>>> = records.par_iter()
@@ -261,7 +261,7 @@ impl Impg {
                     let (adjusted_start, adjusted_end, adjusted_cigar) = project_target_range_through_alignment(
                         (current_start, current_end),
                         (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end, metadata.strand),
-                    &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref())
+                        &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref())
                     );
 
                     let adjusted_interval = (
