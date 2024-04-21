@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{self, BufReader, BufWriter};
 use std::num::NonZeroUsize;
 use noodles::bgzf;
-use impg::impg::{Impg, SerializableImpg, AdjustedInterval};
+use impg::impg::{Impg, SerializableImpg, AdjustedInterval, check_intervals};
 use coitrees::IntervalTree;
 use impg::paf;
 use rayon::ThreadPoolBuilder;
@@ -48,6 +48,10 @@ struct Args {
     /// Number of threads for parallel processing.
     #[clap(short='t', long, value_parser, default_value_t = NonZeroUsize::new(1).unwrap())]
     num_threads: NonZeroUsize,
+
+    /// Check the projected intervals, reporting the wrong ones (slow, useful for debugging).
+    #[clap(short='c', long, action)]
+    check_intervals: bool,
 }
 
 fn main() -> io::Result<()> {
@@ -72,6 +76,15 @@ fn main() -> io::Result<()> {
     if let Some(target_range) = args.target_range {
         let (target_name, target_range) = parse_target_range(&target_range)?;
         let results = perform_query(&impg, &target_name, target_range, args.transitive);
+        if args.check_intervals {
+            let invalid_cigars = check_intervals(&impg, &results);
+            if !invalid_cigars.is_empty() {
+                for (row, error_reason) in invalid_cigars {
+                    eprintln!("{}; {}", error_reason, row);
+                }
+                panic!("Invalid intervals encountered.");
+            }
+        }
         if args.output_paf {
             output_results_paf(&impg, results, &target_name, None);
         } else {
@@ -81,6 +94,15 @@ fn main() -> io::Result<()> {
         let targets = parse_bed_file(&target_bed)?;
         for (target_name, target_range, name) in targets {
             let results = perform_query(&impg, &target_name, target_range, args.transitive);
+            if args.check_intervals {
+                let invalid_cigars = check_intervals(&impg, &results);
+                if !invalid_cigars.is_empty() {
+                    for (row, error_reason) in invalid_cigars {
+                        eprintln!("{}; {}", error_reason, row);
+                    }
+                    panic!("Invalid intervals encountered.");
+                }
+            }
             if args.output_paf {
                 output_results_paf(&impg, results, &target_name, name);
             } else {
@@ -259,7 +281,6 @@ fn output_results_paf(impg: &Impg, results: Vec<AdjustedInterval>, target_name: 
         }
     }
 }
-
 
 fn print_stats(impg: &Impg) {
     println!("Number of sequences: {}", impg.seq_index.len());

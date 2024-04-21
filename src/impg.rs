@@ -7,6 +7,7 @@ use std::io::{Read, SeekFrom, Seek};
 use std::fs::File;
 use rayon::prelude::*;
 use noodles::bgzf;
+use regex::Regex;
 
 /// Parse a CIGAR string into a vector of CigarOp
 // Note that the query_delta is negative for reverse strand alignments
@@ -382,6 +383,91 @@ fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, ParseErr> {
     }
 
     Ok(ops)
+}
+
+fn is_valid_cigar(cigar: &[CigarOp]) -> Result<(), String> {
+    let cigar_str: String = cigar.iter().map(|op| format!("{}{}", op.len(), op.op())).collect();
+
+    let re = Regex::new(r"^(\d+[MX=ID])+$").unwrap();
+    if !re.is_match(&cigar_str) {
+        return Err("Invalid format: non-standard or not-yet-supported operations, or formatting errors detected.".to_string());
+    }
+
+    let mut last_type = None;
+    for op in cigar {
+        let op_type = op.op();
+        if let Some(last) = last_type {
+            if "ISHP".contains(last) && "ISHP".contains(op_type) {
+                return Err(format!("Consecutive non-reference-consuming operations detected: {} followed by {}.", last, op_type));
+            }
+        }
+        last_type = Some(op_type);
+    }
+
+    Ok(())
+}
+
+fn parse_cigar(cigar: &[CigarOp]) -> (i32, i32) {
+    let (query_length, target_length) = cigar.iter().fold((0, 0), |(query_len, target_len), op| {
+        let len = op.len();
+        match op.op() {
+            'M' | 'X' | '=' | 'E' => (query_len + len, target_len + len),
+            'I' | 'S' => (query_len + len, target_len),
+            'D' | 'N' => (query_len, target_len + len),
+            _ => (query_len, target_len),
+        }
+    });
+    (query_length, target_length)
+}
+
+pub fn check_intervals(impg: &Impg, results: &Vec<AdjustedInterval>) -> Vec<(String, String)> {
+    let mut invalid = Vec::new();
+
+    for (overlap_query, cigar, overlap_target) in results {
+        let query_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
+        let query_len = impg.seq_index.get_len_from_id(overlap_query.metadata).unwrap();
+        let target_name = impg.seq_index.get_name(overlap_target.metadata).unwrap();
+        let target_len = impg.seq_index.get_len_from_id(overlap_target.metadata).unwrap();
+
+        let (query_start, query_end) = (overlap_query.first, overlap_query.last);
+        let (target_start, target_end) = (overlap_target.first, overlap_target.last);
+
+        let full_cigar: String = cigar.iter().map(|op| format!("{}{}", op.len(), op.op())).collect();
+        let first_chunk_cigar = if full_cigar.len() > 20 {
+            format!("{}...", &full_cigar[..20])
+        } else {
+            full_cigar
+        };
+
+        let (calc_query_len, calc_target_len) = parse_cigar(cigar);
+
+        let mut error_details = Vec::new();
+        if calc_query_len != (query_end - query_start).abs() {
+            error_details.push(format!("Query length mismatch: expected {} from the query range [{}-{}), got {} from the CIGAR string", (query_end - query_start).abs(), query_start, query_end, calc_query_len));
+        }
+        if calc_target_len != (target_end - target_start).abs() {
+            error_details.push(format!("Target length mismatch: expected {} from the target range [{}-{}), got {} from the CIGAR string", (target_end - target_start).abs(), target_start, target_end, calc_target_len));
+        }
+
+        match is_valid_cigar(cigar) {
+            Ok(()) => {
+                if !error_details.is_empty() {
+                    let error_reason = error_details.join("; ");
+                    invalid.push((format!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", query_name, query_len, query_start, query_end, if query_start <= query_end { '+' } else { '-' }, target_name, target_len, target_start, target_end, first_chunk_cigar), error_reason));
+                }
+            }
+            Err(error_msg) => {
+                let error_reason = if error_details.is_empty() {
+                    error_msg
+                } else {
+                    format!("{}; {}", error_msg, error_details.join("; "))
+                };
+                invalid.push((format!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", query_name, query_len, query_start, query_end, if query_start <= query_end { '+' } else { '-' }, target_name, target_len, target_start, target_end, first_chunk_cigar), error_reason));
+            }
+        }
+    }
+
+    invalid
 }
 
 #[cfg(test)]

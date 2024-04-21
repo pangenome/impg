@@ -1,6 +1,6 @@
 [package]
 name = "impg"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -13,3 +13,4 @@ num_cpus = "1.16.0"
 rayon = "1.9.0"
 serde = { version = "1.0.197", features = ["derive"] }
 noodles = { version = "0.66.0", features = ["bgzf"] }
+regex = "1.10.4"
