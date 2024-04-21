@@ -256,7 +256,7 @@ fn output_results_paf(impg: &Impg, results: Vec<QueryInterval>, target_name: &st
                                     target_name, target_length, target_range.0, target_range.1,
                                     matches, block_len, 255, cigar_str, name),
             None => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tcg:Z:{}",
-                                overlap_name, query_length, overlap.first, overlap.last, strand,
+                                overlap_name, query_length, first, last, strand,
                                 target_name, target_length, target_range.0, target_range.1,
                                 matches, block_len, 255, cigar_str),
         }

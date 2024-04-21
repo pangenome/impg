@@ -291,7 +291,7 @@ impl Impg {
 fn project_target_range_through_alignment(
     target_range: (i32, i32),
     record: (i32, i32, i32, i32, Strand),
-    cigar_ops: &[CigarOp],
+    cigar_ops: &[CigarOp]
 ) -> (i32, i32, Vec<CigarOp>) {
     let (target_start, _target_end, query_start, query_end, strand) = record;
 
