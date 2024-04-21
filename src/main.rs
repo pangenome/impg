@@ -94,7 +94,7 @@ fn main() -> io::Result<()> {
 fn parse_bed_file(bed_file: &str) -> io::Result<Vec<(String, (i32, i32), Option<String>)>> {
     let file = File::open(bed_file)?;
     let reader = BufReader::new(file);
-    let mut queries = Vec::new();
+    let mut ranges = Vec::new();
 
     for line in reader.lines() {
         let line = line?;
@@ -103,20 +103,38 @@ fn parse_bed_file(bed_file: &str) -> io::Result<Vec<(String, (i32, i32), Option<
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid BED file format"));
         }
 
-        let start = parts[1].parse::<i32>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid start value"))?;
-        let end = parts[2].parse::<i32>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid end value"))?;
-
-        if start >= end {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Start value must be less than end value"));
-        }
-
-        let name = if parts.len() > 3 { Some(parts[3].to_string()) } else { None };
-        queries.push((parts[0].to_string(), (start, end), name));
+        let (start, end) = parse_range(&parts[1..=2])?;
+        let name = parts.get(3).map(|s| s.to_string());
+        ranges.push((parts[0].to_string(), (start, end), name));
     }
 
-    Ok(queries)
+    Ok(ranges)
 }
 
+fn parse_target_range(target_range: &str) -> io::Result<(String, (i32, i32))> {
+    let parts: Vec<&str> = target_range.split(':').collect();
+    if parts.len() != 2 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Target range format should be `seq_name:start-end`"));
+    }
+
+    let (start, end) = parse_range(&parts[1].split('-').collect::<Vec<_>>())?;
+    Ok((parts[0].to_string(), (start, end)))
+}
+
+fn parse_range(range_parts: &[&str]) -> io::Result<(i32, i32)> {
+    if range_parts.len() != 2 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Range format should be `start-end`"));
+    }
+
+    let start = range_parts[0].parse::<i32>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid start value"))?;
+    let end = range_parts[1].parse::<i32>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid end value"))?;
+
+    if start >= end {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Start value must be less than end value"));
+    }
+
+    Ok((start, end))
+}
 
 fn load_or_generate_index(paf_file: &str, index_file: Option<&str>, num_threads: NonZeroUsize) -> io::Result<Impg> {
     let index_file = index_file.map(|s| s.to_string());
@@ -155,26 +173,6 @@ fn load_index(index_file: &str) -> io::Result<Impg> {
     let reader = BufReader::new(file);
     let serializable: SerializableImpg = bincode::deserialize_from(reader).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to deserialize index: {:?}", e)))?;
     Ok(Impg::from_serializable(serializable))
-}
-
-fn parse_target_range(target_range: &str) -> io::Result<(String, (i32, i32))> {
-    let parts: Vec<&str> = target_range.split(':').collect();
-    if parts.len() != 2 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Target range format should be `seq_name:start-end`"));
-    }
-    let range_parts: Vec<&str> = parts[1].split('-').collect();
-    if range_parts.len() != 2 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Target range format should be `start-end`"));
-    }
-
-    let start = range_parts[0].parse::<i32>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid start value"))?;
-    let end = range_parts[1].parse::<i32>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid end value"))?;
-
-    if start >= end {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Start value must be less than end value"));
-    }
-
-    Ok((parts[0].to_string(), (start, end)))
 }
 
 fn perform_query(impg: &Impg, target_name: &str, target_range: (i32, i32), transitive: bool) -> Vec<AdjustedInterval> {
