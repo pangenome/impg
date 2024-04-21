@@ -188,43 +188,43 @@ fn perform_query(impg: &Impg, target_name: &str, target_range: (i32, i32), trans
 }
 
 fn output_results_bed(impg: &Impg, results: Vec<AdjustedInterval>) {
-    for (overlap, _, _) in results {
-        let overlap_name = impg.seq_index.get_name(overlap.metadata).unwrap();
-        let (first, last, strand) = if overlap.first <= overlap.last {
-            (overlap.first, overlap.last, '+')
+    for (query_id, (overlap_query_start, overlap_query_end), _, _, (alignment_query_end, _)) in results {
+        let overlap_name = impg.seq_index.get_name(query_id).unwrap();
+        let (first, last, strand) = if overlap_query_start <= overlap_query_end {
+            (overlap_query_start, overlap_query_end, '+')
         } else {
-            (overlap.last, overlap.first, '-')
+            (overlap_query_end, overlap_query_start, '-')
         };
-        println!("{}\t{}\t{}\t.\t{}", overlap_name, first, last, strand);
+        println!("{}\t{}\t{}\t.\t{}", overlap_name, first, (last + 1).min(alignment_query_end), strand);
     }
 }
 
 fn output_results_bedpe(impg: &Impg, results: Vec<AdjustedInterval>, target_name: &str, name: Option<String>) {
-    for (overlap_query, _, overlap_target) in results {
-        let overlap_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
-        let (first, last, strand) = if overlap_query.first <= overlap_query.last {
-            (overlap_query.first, overlap_query.last, '+')
+    for (query_id, (overlap_query_start, overlap_query_end), _, (overlap_target_start, overlap_target_end), (alignment_query_end, alignment_target_end)) in results {
+        let overlap_name = impg.seq_index.get_name(query_id).unwrap();
+        let (first, last, strand) = if overlap_query_start <= overlap_query_end {
+            (overlap_query_start, overlap_query_end, '+')
         } else {
-            (overlap_query.last, overlap_query.first, '-')
+            (overlap_query_end, overlap_query_start, '-')
         };
         println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t0\t{}\t+",
-                 overlap_name, first, last,
-                 target_name, overlap_target.first, overlap_target.last,
+                 overlap_name, first, (last + 1).min(alignment_query_end),
+                 target_name, overlap_target_start, (overlap_target_end + 1).min(alignment_target_end),
                  name.as_deref().unwrap_or("."), strand);
     }
 }
 
 fn output_results_paf(impg: &Impg, results: Vec<AdjustedInterval>, target_name: &str, name: Option<String>) { 
     let target_length = impg.seq_index.get_len_from_id(impg.seq_index.get_id(target_name).unwrap()).unwrap();  
-    for (overlap_query, cigar, overlap_target) in results {
-        let overlap_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
-        let (first, last, strand) = if overlap_query.first <= overlap_query.last {
-            (overlap_query.first, overlap_query.last, '+')
+    for (query_id, (overlap_query_start, overlap_query_end), cigar, (overlap_target_start, overlap_target_end), (alignment_query_end, alignment_target_end)) in results {
+        let overlap_name = impg.seq_index.get_name(query_id).unwrap();
+        let (first, last, strand) = if overlap_query_start <= overlap_query_end {
+            (overlap_query_start, overlap_query_end, '+')
         } else {
-            (overlap_query.last, overlap_query.first, '-')
+            (overlap_query_end, overlap_query_start, '-')
         };
 
-        let query_length = impg.seq_index.get_len_from_id(overlap_query.metadata).unwrap();  
+        let query_length = impg.seq_index.get_len_from_id(query_id).unwrap();  
 
         let has_m_operation = cigar.iter().any(|op| op.op() == 'M');
         let (matches, block_len) = if has_m_operation {
@@ -252,12 +252,12 @@ fn output_results_paf(impg: &Impg, results: Vec<AdjustedInterval>, target_name: 
 
         match name {
             Some(ref name) => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tcg:Z:{}\tan:Z:{}",
-                                    overlap_name, query_length, first, last, strand,
-                                    target_name, target_length, overlap_target.first, overlap_target.last,
+                                    overlap_name, query_length, first, (last + 1).min(alignment_query_end), strand,
+                                    target_name, target_length, overlap_target_start, (overlap_target_end + 1).min(alignment_target_end),
                                     matches, block_len, 255, cigar_str, name),
             None => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tcg:Z:{}",
-                                overlap_name, query_length, first, last, strand,
-                                target_name, target_length, overlap_target.first, overlap_target.last,
+                                overlap_name, query_length, first, (last + 1).min(alignment_query_end), strand,
+                                target_name, target_length, overlap_target_start, (overlap_target_end + 1).min(alignment_target_end),
                                 matches, block_len, 255, cigar_str),
         }
     }

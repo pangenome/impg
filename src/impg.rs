@@ -100,7 +100,7 @@ impl QueryMetadata {
     }
 }
 
-pub type AdjustedInterval = (Interval<u32>, Vec<CigarOp>, Interval<u32>);
+pub type AdjustedInterval = (u32, (i32, i32), Vec<CigarOp>, (i32, i32), (i32, i32));
 type TreeMap = HashMap<u32, BasicCOITree<QueryMetadata, u32>>;
 pub type SerializableImpg = (HashMap<u32, Vec<SerializableInterval>>, SequenceIndex, String);
 
@@ -208,36 +208,22 @@ impl Impg {
 
     pub fn query(&self, target_id: u32, range_start: i32, range_end: i32) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
-        // // add the input target interval to the results
-        // results.push((
-        //     Interval {
-        //         first: range_start,
-        //         last: range_end,
-        //         metadata: target_id,
-        //     },
-        //     vec![CigarOp::new(range_end - range_start, '=')],
-        // ));
         if let Some(tree) = self.trees.get(&target_id) {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
-                let (adjusted_query_start, adjusted_query_end, adjusted_cigar, adjusted_target_start, adjusted_target_end) = project_target_range_through_alignment(
+                let (adjusted_query_start, adjusted_query_end, adjusted_cigar, adjusted_target_start, adjusted_target_end) = 
+                project_target_range_through_alignment(
                     (range_start, range_end),
                     (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end, metadata.strand),
                     &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref())
                 );
 
                 let adjusted_interval = (
-                    Interval {
-                        first: adjusted_query_start,
-                        last: adjusted_query_end,
-                        metadata: metadata.query_id
-                    },
+                    metadata.query_id,
+                    (adjusted_query_start, adjusted_query_end),
                     adjusted_cigar,
-                    Interval {
-                        first: adjusted_target_start,
-                        last: adjusted_target_end,
-                        metadata: 0
-                    }
+                    (adjusted_target_start, adjusted_target_end),
+                    (metadata.query_end, metadata.target_end)
                 );
                 results.push(adjusted_interval);
             });
@@ -247,15 +233,6 @@ impl Impg {
 
     pub fn query_transitive(&self, target_id: u32, range_start: i32, range_end: i32) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
-        // // add the input target interval to the results
-        // results.push((
-        //     Interval {
-        //         first: range_start,
-        //         last: range_end,
-        //         metadata: target_id,
-        //     },
-        //     vec![CigarOp::new(range_end - range_start, '=')]
-        // ));
         let mut stack = vec![(target_id, range_start, range_end)];
         let mut visited = HashSet::new();
 
@@ -263,24 +240,19 @@ impl Impg {
             if let Some(tree) = self.trees.get(&current_target) {
                 tree.query(current_start, current_end, |interval| {
                     let metadata = &interval.metadata;
-                    let (adjusted_query_start, adjusted_query_end, adjusted_cigar, adjusted_target_start, adjusted_target_end) = project_target_range_through_alignment(
+                    let (adjusted_query_start, adjusted_query_end, adjusted_cigar, adjusted_target_start, adjusted_target_end) = 
+                    project_target_range_through_alignment(
                         (current_start, current_end),
                         (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end, metadata.strand),
                         &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref())
                     );
 
                     let adjusted_interval = (
-                        Interval {
-                            first: adjusted_query_start,
-                            last: adjusted_query_end,
-                            metadata: metadata.query_id
-                        },
+                        metadata.query_id,
+                        (adjusted_query_start, adjusted_query_end),
                         adjusted_cigar,
-                        Interval {
-                            first: adjusted_target_start,
-                            last: adjusted_target_end,
-                            metadata: 0
-                        }
+                        (adjusted_target_start, adjusted_target_end),
+                        (metadata.query_end, metadata.target_end)
                     );
                     results.push(adjusted_interval);
 
@@ -375,13 +347,12 @@ fn project_target_range_through_alignment(
         }
     }
 
-    // +1 to make the end exclusive (or open, as in the BED and PAF formats)
     (
         projected_start.unwrap_or(query_start),
-        (projected_end.unwrap_or(query_pos) + 1).min(query_end),
+        (projected_end.unwrap_or(query_pos)).min(query_end),
         projected_cigar,
         new_target_start.unwrap_or(target_start),
-        (new_target_end.unwrap_or(target_pos) + 1).min(target_end),
+        (new_target_end.unwrap_or(target_pos)).min(target_end),
     )
 }
 
@@ -415,11 +386,9 @@ mod tests {
         let target_range = (100, 200);
         let record = (100, 200, 0, 100, Strand::Forward);
         let cigar_ops = vec![CigarOp::new(100, '=')];
-        let (start, end, cigar) = project_target_range_through_alignment(target_range, record, &cigar_ops);
+        let result = project_target_range_through_alignment(target_range, record, &cigar_ops);
 
-        assert_eq!(start, 0);
-        assert_eq!(end, 100);
-        assert_eq!(cigar, cigar_ops);
+        assert_eq!(result, (0, 100, cigar_ops.clone(), 100, 200));
     }
 
     #[test]
@@ -427,12 +396,9 @@ mod tests {
         let target_range = (100, 200);
         let record = (100, 200, 0, 100, Strand::Reverse);
         let cigar_ops = vec![CigarOp::new(100, '=')];
-        let (start, end, cigar) = project_target_range_through_alignment(target_range, record, &cigar_ops);
-        println!("Final result: ({}, {})", start, end);
+        let result = project_target_range_through_alignment(target_range, record, &cigar_ops);
 
-        assert_eq!(start, 100);
-        assert_eq!(end, 0);
-        assert_eq!(cigar, cigar_ops);
+        assert_eq!(result, (100, 0, cigar_ops.clone(), 100, 200));
     }
 
     #[test]
@@ -448,19 +414,19 @@ mod tests {
         let base = (0, 100, 50, 200, Strand::Forward);
         {
             let result = project_target_range_through_alignment((0, 100), base, &cigar_ops);
-            assert_eq!(result, (50, 200, cigar_ops.clone()));
+            assert_eq!(result, (50, 200, cigar_ops.clone(), 0, 100));
         }
         {
             let result = project_target_range_through_alignment((50, 55), base, &cigar_ops);
-            assert_eq!(result, (100, 105, vec![CigarOp::new(5, '=')]));
+            assert_eq!(result, (100, 105, vec![CigarOp::new(5, '=')], 50, 55));
         }
         {
             let result = project_target_range_through_alignment((50, 64), base, &cigar_ops);
-            assert_eq!(result, (100, 114, vec![CigarOp::new(14, '=')]));
+            assert_eq!(result, (100, 114, vec![CigarOp::new(14, '=')], 50, 64));
         }
         {
             let result = project_target_range_through_alignment((65, 65), base, &cigar_ops);
-            assert_eq!(result, (115, 115, vec![CigarOp::new(50, 'I')]));
+            assert_eq!(result, (115, 115, vec![CigarOp::new(50, 'I')], 65, 65));
         }
         {
             let result = project_target_range_through_alignment((50, 65), base, &cigar_ops);
@@ -468,7 +434,7 @@ mod tests {
                 CigarOp::new(15, '='),
                 CigarOp::new(50, 'I')
             ];
-            assert_eq!(result, (100, 115, cigar_ops));
+            assert_eq!(result, (100, 115, cigar_ops, 50, 65));
         }
         {
             let result = project_target_range_through_alignment((50, 66), base, &cigar_ops);
@@ -477,11 +443,11 @@ mod tests {
                 CigarOp::new(50, 'I'),
                 CigarOp::new(1, '=')
             ];
-            assert_eq!(result, (100, 166, cigar_ops));
+            assert_eq!(result, (100, 166, cigar_ops, 50, 66));
         }
         {
             let result = project_target_range_through_alignment((70, 95), base, &cigar_ops);
-            assert_eq!(result, (170, 195, vec![CigarOp::new(25, '=')]));
+            assert_eq!(result, (170, 195, vec![CigarOp::new(25, '=')], 70, 95));
         }
     }
 
@@ -491,8 +457,8 @@ mod tests {
         let target_range = (100, 200);
         let record = (100, 200, 100, 200, Strand::Forward);
         let cigar_ops = vec![CigarOp::new(100, '=')];
-        let (start, end, cigar) = project_target_range_through_alignment(target_range, record, &cigar_ops);
-        assert_eq!((start, end, cigar), (100, 200, vec![CigarOp::new(100, '=')]));
+        let (query_start, query_end, cigar, target_start, target_end) = project_target_range_through_alignment(target_range, record, &cigar_ops);
+        assert_eq!((query_start, query_end, cigar, target_start, target_end), (100, 200, vec![CigarOp::new(100, '=')], 100, 200));
     }
 
     // 2. Simple Reverse Projection
@@ -501,8 +467,8 @@ mod tests {
         let target_range = (100, 200);
         let record = (100, 200, 100, 200, Strand::Reverse);
         let cigar_ops = vec![CigarOp::new(100, '=')];
-        let (start, end, cigar) = project_target_range_through_alignment(target_range, record, &cigar_ops);
-        assert_eq!((start, end, cigar), (200, 100, vec![CigarOp::new(100, '=')])); // Adjust for reverse calculation
+        let (query_start, query_end, cigar, target_start, target_end) = project_target_range_through_alignment(target_range, record, &cigar_ops);
+        assert_eq!((query_start, query_end, cigar, target_start, target_end), (200, 100, vec![CigarOp::new(100, '=')], 100, 200)); // Adjust for reverse calculation
     }
 
     // 3. Forward Projection with Insertions
@@ -515,7 +481,7 @@ mod tests {
             CigarOp::new(10, 'I'), // Insertion
             CigarOp::new(50, '='), // Match
         ];
-        let (start, end, cigar) = project_target_range_through_alignment(target_range, record, &cigar_ops);
+        let (start, end, cigar, _, _) = project_target_range_through_alignment(target_range, record, &cigar_ops);
         assert_eq!((start, end, cigar), (50, 160, cigar_ops));
     }
 
@@ -529,7 +495,7 @@ mod tests {
             CigarOp::new(10, 'D'), // Deletion
             CigarOp::new(40, '='), // Match
         ];
-        let (start, end, cigar) = project_target_range_through_alignment(target_range, record, &cigar_ops);
+        let (start, end, cigar, _, _) = project_target_range_through_alignment(target_range, record, &cigar_ops);
         assert_eq!((start, end, cigar), (50, 140, cigar_ops));
     }
 
@@ -544,7 +510,7 @@ mod tests {
             CigarOp::new(10, 'I'), // 150, 250
             CigarOp::new(40, '='), // 150, 250
         ];
-        let (start, end, cigar) = project_target_range_through_alignment(target_range, record, &cigar_ops);
+        let (start, end, cigar, _, _) = project_target_range_through_alignment(target_range, record, &cigar_ops);
         let cigar_ops = vec![
             CigarOp::new(10, 'D'), // 150, 260
             CigarOp::new(10, 'I'), // 150, 250
@@ -561,15 +527,14 @@ mod tests {
         let cigar_ops = vec![
             CigarOp::new(10, '='), // Match
             CigarOp::new(20, 'D'), // Deletion in target
-            CigarOp::new(8, '='), // Match
-            CigarOp::new(1, 'X'), // Match
-            CigarOp::new(1, '='), // Match
+            CigarOp::new(8, '='),  // Match
+            CigarOp::new(1, 'X'),  // Match
+            CigarOp::new(1, '='),  // Match
             CigarOp::new(10, 'I'), // Insertion in query
             CigarOp::new(10, '='), // Match
         ];
-        let (start, end, cigar) = project_target_range_through_alignment(target_range, record, &cigar_ops);
-        println!("{} {}", start, end);
-        assert_eq!((start, end, cigar), (0, 10, vec![CigarOp::new(10, '=')]));
+        let (query_start, query_end, cigar, target_start, target_end) = project_target_range_through_alignment(target_range, record, &cigar_ops);
+        assert_eq!((query_start, query_end, cigar, target_start, target_end), (0, 10, vec![CigarOp::new(10, '=')], 0, 10));
     }
 
     #[test]
