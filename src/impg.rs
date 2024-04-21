@@ -208,15 +208,15 @@ impl Impg {
 
     pub fn query(&self, target_id: u32, range_start: i32, range_end: i32) -> Vec<QueryInterval> {
         let mut results = Vec::new();
-        // add the query interval to the results
-        results.push((
-            Interval {
-                first: range_start,
-                last: range_end,
-                metadata: target_id,
-            },
-            vec![CigarOp::new(range_end - range_start, '=')],
-        ));
+        // // add the input target interval to the results
+        // results.push((
+        //     Interval {
+        //         first: range_start,
+        //         last: range_end,
+        //         metadata: target_id,
+        //     },
+        //     vec![CigarOp::new(range_end - range_start, '=')],
+        // ));
         if let Some(tree) = self.trees.get(&target_id) {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
@@ -242,15 +242,15 @@ impl Impg {
 
     pub fn query_transitive(&self, target_id: u32, range_start: i32, range_end: i32) -> Vec<QueryInterval> {
         let mut results = Vec::new();
-        // add the query interval to the results
-        results.push((
-            Interval {
-                first: range_start,
-                last: range_end,
-                metadata: target_id,
-            },
-            vec![CigarOp::new(range_end - range_start, '=')]
-        ));
+        // // add the input target interval to the results
+        // results.push((
+        //     Interval {
+        //         first: range_start,
+        //         last: range_end,
+        //         metadata: target_id,
+        //     },
+        //     vec![CigarOp::new(range_end - range_start, '=')]
+        // ));
         let mut stack = vec![(target_id, range_start, range_end)];
         let mut visited = HashSet::new();
 
@@ -308,7 +308,7 @@ fn project_target_range_through_alignment(
             break;
         }
         match (cigar_op.target_delta(), cigar_op.query_delta(strand)) {
-            (0, query_delta) => { // Insertion in query
+            (0, query_delta) => { // Insertion in query (deletions in target)
                 if target_pos >= target_range.0 && target_pos <= target_range.1 {
                     projected_start.get_or_insert(query_pos);
                     projected_end = Some(query_pos +
@@ -317,7 +317,7 @@ fn project_target_range_through_alignment(
                 }
                 query_pos += query_delta;
             },
-            (target_delta, 0) => { // Deletion in target
+            (target_delta, 0) => { // Deletion in query (insertions in target)
                 let overlap_start = target_pos.max(target_range.0);
                 let overlap_end = (target_pos + target_delta).min(target_range.1);
 
