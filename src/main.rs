@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{self, BufReader, BufWriter};
 use std::num::NonZeroUsize;
 use noodles::bgzf;
-use impg::impg::{Impg, SerializableImpg, QueryInterval};
+use impg::impg::{Impg, SerializableImpg, AdjustedInterval};
 use coitrees::IntervalTree;
 use impg::paf;
 use rayon::ThreadPoolBuilder;
@@ -73,7 +73,7 @@ fn main() -> io::Result<()> {
         let (target_name, target_range) = parse_target_range(&target_range)?;
         let results = perform_query(&impg, &target_name, target_range, args.transitive);
         if args.output_paf {
-            output_results_paf(&impg, results, &target_name, target_range, None);
+            output_results_paf(&impg, results, &target_name, None);
         } else {
             output_results_bed(&impg, results);
         }
@@ -82,9 +82,9 @@ fn main() -> io::Result<()> {
         for (target_name, target_range, name) in targets {
             let results = perform_query(&impg, &target_name, target_range, args.transitive);
             if args.output_paf {
-                output_results_paf(&impg, results, &target_name, target_range, name);
+                output_results_paf(&impg, results, &target_name, name);
             } else {
-                output_results_bedpe(&impg, results, &target_name, target_range, name);
+                output_results_bedpe(&impg, results, &target_name, name);
             }
         }
     }
@@ -177,7 +177,7 @@ fn parse_target_range(target_range: &str) -> io::Result<(String, (i32, i32))> {
     Ok((parts[0].to_string(), (start, end)))
 }
 
-fn perform_query(impg: &Impg, target_name: &str, target_range: (i32, i32), transitive: bool) -> Vec<QueryInterval> {
+fn perform_query(impg: &Impg, target_name: &str, target_range: (i32, i32), transitive: bool) -> Vec<AdjustedInterval> {
     let (target_start, target_end) = target_range;
     let target_id = impg.seq_index.get_id(target_name).expect("Target name not found in index");
     if transitive {
@@ -187,8 +187,8 @@ fn perform_query(impg: &Impg, target_name: &str, target_range: (i32, i32), trans
     }
 }
 
-fn output_results_bed(impg: &Impg, results: Vec<QueryInterval>) {
-    for (overlap, _) in results {
+fn output_results_bed(impg: &Impg, results: Vec<AdjustedInterval>) {
+    for (overlap, _, _) in results {
         let overlap_name = impg.seq_index.get_name(overlap.metadata).unwrap();
         let (first, last, strand) = if overlap.first <= overlap.last {
             (overlap.first, overlap.last, '+')
@@ -199,32 +199,32 @@ fn output_results_bed(impg: &Impg, results: Vec<QueryInterval>) {
     }
 }
 
-fn output_results_bedpe(impg: &Impg, results: Vec<QueryInterval>, target_name: &str, target_range: (i32, i32), name: Option<String>) {
-    for (overlap, _) in results {
-        let overlap_name = impg.seq_index.get_name(overlap.metadata).unwrap();
-        let (first, last, strand) = if overlap.first <= overlap.last {
-            (overlap.first, overlap.last, '+')
+fn output_results_bedpe(impg: &Impg, results: Vec<AdjustedInterval>, target_name: &str, name: Option<String>) {
+    for (overlap_query, _, overlap_target) in results {
+        let overlap_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
+        let (first, last, strand) = if overlap_query.first <= overlap_query.last {
+            (overlap_query.first, overlap_query.last, '+')
         } else {
-            (overlap.last, overlap.first, '-')
+            (overlap_query.last, overlap_query.first, '-')
         };
         println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t0\t{}\t+",
                  overlap_name, first, last,
-                 target_name, target_range.0, target_range.1,
+                 target_name, overlap_target.first, overlap_target.last,
                  name.as_deref().unwrap_or("."), strand);
     }
 }
 
-fn output_results_paf(impg: &Impg, results: Vec<QueryInterval>, target_name: &str, target_range: (i32, i32), name: Option<String>) { 
+fn output_results_paf(impg: &Impg, results: Vec<AdjustedInterval>, target_name: &str, name: Option<String>) { 
     let target_length = impg.seq_index.get_len_from_id(impg.seq_index.get_id(target_name).unwrap()).unwrap();  
-    for (overlap, cigar) in results {
-        let overlap_name = impg.seq_index.get_name(overlap.metadata).unwrap();
-        let (first, last, strand) = if overlap.first <= overlap.last {
-            (overlap.first, overlap.last, '+')
+    for (overlap_query, cigar, overlap_target) in results {
+        let overlap_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
+        let (first, last, strand) = if overlap_query.first <= overlap_query.last {
+            (overlap_query.first, overlap_query.last, '+')
         } else {
-            (overlap.last, overlap.first, '-')
+            (overlap_query.last, overlap_query.first, '-')
         };
 
-        let query_length = impg.seq_index.get_len_from_id(overlap.metadata).unwrap();  
+        let query_length = impg.seq_index.get_len_from_id(overlap_query.metadata).unwrap();  
 
         let has_m_operation = cigar.iter().any(|op| op.op() == 'M');
         let (matches, block_len) = if has_m_operation {
@@ -253,11 +253,11 @@ fn output_results_paf(impg: &Impg, results: Vec<QueryInterval>, target_name: &st
         match name {
             Some(ref name) => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tcg:Z:{}\tan:Z:{}",
                                     overlap_name, query_length, first, last, strand,
-                                    target_name, target_length, target_range.0, target_range.1,
+                                    target_name, target_length, overlap_target.first, overlap_target.last,
                                     matches, block_len, 255, cigar_str, name),
             None => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tcg:Z:{}",
                                 overlap_name, query_length, first, last, strand,
-                                target_name, target_length, target_range.0, target_range.1,
+                                target_name, target_length, overlap_target.first, overlap_target.last,
                                 matches, block_len, 255, cigar_str),
         }
     }
