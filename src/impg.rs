@@ -102,7 +102,7 @@ impl QueryMetadata {
 
 pub type QueryInterval = (Interval<u32>, Vec<CigarOp>);
 type TreeMap = HashMap<u32, BasicCOITree<QueryMetadata, u32>>;
-pub type SerializableImpg = (HashMap<u32, Vec<SerializableInterval>>, SequenceIndex, String);
+pub type SerializableImpg = (HashMap<u32, Vec<SerializableInterval>>, SequenceIndex);
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SerializableInterval {
@@ -184,11 +184,11 @@ impl Impg {
             }).collect();
             (*target_id, intervals)
         }).collect();
-        (serializable_trees, self.seq_index.clone(), self.paf_file.clone())
+        (serializable_trees, self.seq_index.clone())
     }
 
-    pub fn from_serializable(serializable: SerializableImpg) -> Self {
-        let (serializable_trees, seq_index, paf_file) = serializable;
+    pub fn from_serializable(paf_file: &str, serializable: SerializableImpg) -> Self {
+        let (serializable_trees, seq_index) = serializable;
         let paf_gzi_index: Option<bgzf::gzi::Index> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
             let paf_gzi_file = paf_file.to_owned() + ".gzi";
             Some(bgzf::gzi::read(paf_gzi_file.clone()).expect(format!("Could not open {}", paf_gzi_file).as_str()))
@@ -203,7 +203,7 @@ impl Impg {
             }).collect::<Vec<_>>().as_slice());
             (target_id, tree)
         }).collect();
-        Self { trees, seq_index, paf_file, paf_gzi_index }
+        Self { trees, seq_index, paf_file: paf_file.to_string(), paf_gzi_index }
     }
 
     pub fn query(&self, target_id: u32, range_start: i32, range_end: i32) -> Vec<QueryInterval> {
