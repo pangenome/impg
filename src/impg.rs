@@ -187,7 +187,7 @@ impl Impg {
         (serializable_trees, self.seq_index.clone())
     }
 
-    pub fn from_serializable(paf_file: &str, serializable: SerializableImpg) -> Self {
+    pub fn from_paf_and_serializable(paf_file: &str, serializable: SerializableImpg) -> Self {
         let (serializable_trees, seq_index) = serializable;
         let paf_gzi_index: Option<bgzf::gzi::Index> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
             let paf_gzi_file = paf_file.to_owned() + ".gzi";

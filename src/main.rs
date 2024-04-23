@@ -145,7 +145,7 @@ fn load_index(paf_file: &str) -> io::Result<Impg> {
     let file = File::open(index_file)?;
     let reader = BufReader::new(file);
     let serializable: SerializableImpg = bincode::deserialize_from(reader).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to deserialize index: {:?}", e)))?;
-    Ok(Impg::from_serializable(paf_file, serializable))
+    Ok(Impg::from_paf_and_serializable(paf_file, serializable))
 }
 
 fn parse_target_range(target_range: &str) -> io::Result<(String, (i32, i32))> {
