@@ -209,6 +209,20 @@ impl Impg {
 
     pub fn query(&self, target_id: u32, range_start: i32, range_end: i32) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
+        // add the input range to the results
+        results.push((
+            Interval {
+                first: range_start,
+                last: range_end,
+                metadata: target_id,
+            },
+            vec![CigarOp::new(range_end - range_start, '=')],
+            Interval {
+                first: range_start,
+                last: range_end,
+                metadata: 0
+            }
+        ));
         if let Some(tree) = self.trees.get(&target_id) {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
@@ -240,6 +254,20 @@ impl Impg {
 
     pub fn query_transitive(&self, target_id: u32, range_start: i32, range_end: i32) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
+        // add the input range to the results
+        results.push((
+            Interval {
+                first: range_start,
+                last: range_end,
+                metadata: target_id,
+            },
+            vec![CigarOp::new(range_end - range_start, '=')],
+            Interval {
+                first: range_start,
+                last: range_end,
+                metadata: 0
+            }
+        ));
         let mut stack = vec![(target_id, range_start, range_end)];
         let mut visited = HashSet::new();
 
