@@ -17,10 +17,6 @@ struct Args {
     #[clap(short='p', long, value_parser)]
     paf_file: Option<String>,
 
-    /// Path to the index file. Use this to specify a custom index file or to force the use of an index.
-    #[clap(short='i', long, value_parser)]
-    index_file: Option<String>,
-
     /// Force the regeneration of the index, even if it already exists.
     #[clap(short='I', long, action)]
     force_reindex: bool,
@@ -57,12 +53,9 @@ fn main() -> io::Result<()> {
     ThreadPoolBuilder::new().num_threads(args.num_threads.into()).build_global().unwrap();
 
     let impg = match args {
-        Args { paf_file: Some(paf), index_file: None, force_reindex: false, .. } => load_or_generate_index(&paf, None, args.num_threads)?,
-        Args { paf_file: Some(paf), index_file: None, force_reindex: true, .. } => generate_index(&paf, None, args.num_threads)?,
-        Args { paf_file: Some(paf), index_file: Some(index), force_reindex: false, .. } => load_or_generate_index(&paf, Some(&index), args.num_threads)?,
-        Args { paf_file: Some(paf), index_file: Some(index), force_reindex: true, .. } => generate_index(&paf, Some(&index), args.num_threads)?,
-        Args { paf_file: None, index_file: Some(index), .. } => load_index(&index)?,
-        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "Either a PAF file or an index file must be provided")),
+        Args { paf_file: Some(paf), force_reindex: false, .. } => load_or_generate_index(&paf, args.num_threads)?,
+        Args { paf_file: Some(paf), force_reindex: true, .. } => generate_index(&paf, args.num_threads)?,
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "A PAF file must be provided")),
     };
 
     if args.stats {
@@ -118,18 +111,16 @@ fn parse_bed_file(bed_file: &str) -> io::Result<Vec<(String, (i32, i32), Option<
 }
 
 
-fn load_or_generate_index(paf_file: &str, index_file: Option<&str>, num_threads: NonZeroUsize) -> io::Result<Impg> {
-    let index_file = index_file.map(|s| s.to_string());
-    let index_file = index_file.unwrap_or_else(|| format!("{}.impg", paf_file));
-    let index_file = index_file.as_str();
-    if std::path::Path::new(index_file).exists() {
-        load_index(index_file)
+fn load_or_generate_index(paf_file: &str, num_threads: NonZeroUsize) -> io::Result<Impg> {
+    let index_file = format!("{}.impg", paf_file);
+    if std::path::Path::new(&index_file).exists() {
+        load_index(paf_file)
     } else {
-        generate_index(paf_file, Some(index_file), num_threads)
+        generate_index(paf_file, num_threads)
     }
 }
 
-fn generate_index(paf_file: &str, index_file: Option<&str>, num_threads: NonZeroUsize) -> io::Result<Impg> {
+fn generate_index(paf_file: &str, num_threads: NonZeroUsize) -> io::Result<Impg> {
     let file = File::open(paf_file)?;
     let reader: Box<dyn io::Read> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
         Box::new(bgzf::MultithreadedReader::with_worker_count(num_threads, file))
@@ -140,21 +131,21 @@ fn generate_index(paf_file: &str, index_file: Option<&str>, num_threads: NonZero
     let records = paf::parse_paf(reader).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to parse PAF records: {:?}", e)))?;
     let impg = Impg::from_paf_records(&records, paf_file).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to create index: {:?}", e)))?;
 
-    if let Some(index_file) = index_file {
-        let serializable = impg.to_serializable();
-        let file = File::create(index_file)?;
-        let writer = BufWriter::new(file);
-        bincode::serialize_into(writer, &serializable).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to serialize index: {:?}", e)))?;
-    }
+    let index_file = format!("{}.impg", paf_file);
+    let serializable = impg.to_serializable();
+    let file = File::create(index_file)?;
+    let writer = BufWriter::new(file);
+    bincode::serialize_into(writer, &serializable).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to serialize index: {:?}", e)))?;
 
     Ok(impg)
 }
 
-fn load_index(index_file: &str) -> io::Result<Impg> {
+fn load_index(paf_file: &str) -> io::Result<Impg> {
+    let index_file = format!("{}.impg", paf_file);
     let file = File::open(index_file)?;
     let reader = BufReader::new(file);
     let serializable: SerializableImpg = bincode::deserialize_from(reader).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to deserialize index: {:?}", e)))?;
-    Ok(Impg::from_serializable(serializable))
+    Ok(Impg::from_paf_and_serializable(paf_file, serializable))
 }
 
 fn parse_target_range(target_range: &str) -> io::Result<(String, (i32, i32))> {
