@@ -5,7 +5,7 @@ use serde::{Serialize, Deserialize};
 pub struct SequenceIndex {
     name_to_id: HashMap<String, u32>,
     id_to_name: HashMap<u32, String>,
-    id_to_len: HashMap<u32, u64>,
+    id_to_len: HashMap<u32, usize>,
     next_id: u32,
 }
 
@@ -19,7 +19,7 @@ impl SequenceIndex {
         }
     }
 
-    pub fn get_or_insert_id(&mut self, name: &str, length: Option<u64>) -> u32 {
+    pub fn get_or_insert_id(&mut self, name: &str, length: Option<usize>) -> u32 {
         let id = *self.name_to_id.entry(name.to_owned()).or_insert_with(|| {
             let id = self.next_id;
             self.id_to_name.insert(id, name.to_owned());
@@ -42,7 +42,7 @@ impl SequenceIndex {
         self.id_to_name.get(&id).map(|s| s.as_str())
     }
 
-    pub fn get_len_from_id(&self, id: u32) -> Option<u64> {
+    pub fn get_len_from_id(&self, id: u32) -> Option<usize> {
         self.id_to_len.get(&id).copied()
     }
 
