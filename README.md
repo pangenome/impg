@@ -1,5 +1,7 @@
 # impg: implicit pangenome graph
 
+[![install with bioconda](https://img.shields.io/badge/install%20with-bioconda-brightgreen.svg?style=flat)](http://bioconda.github.io/recipes/impg/README.html)
+
 Pangenome graphs and whole genome multiple alignments are powerful tools, but they are expensive to build and manipulate.
 Often, we would like to be able to break a small piece out of a pangenome without constructing the whole thing.
 `impg` lets us do this by projecting sequence ranges through many-way (e.g. all-vs-all) pairwise alignments built by tools like `wfmash` and `minimap2`.
