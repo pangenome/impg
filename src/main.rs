@@ -191,6 +191,10 @@ fn load_index(paf_file: &str) -> io::Result<Impg> {
 fn perform_query(impg: &Impg, target_name: &str, target_range: (i32, i32), transitive: bool) -> Vec<AdjustedInterval> {
     let (target_start, target_end) = target_range;
     let target_id = impg.seq_index.get_id(target_name).expect("Target name not found in index");
+    let target_length = impg.seq_index.get_len_from_id(target_id).expect("Target length not found in index");
+    if target_end > target_length as i32 {
+        panic!("Target range end ({}) exceeds the target sequence length ({})", target_end, target_length);
+    }
     if transitive {
         impg.query_transitive(target_id, target_start, target_end)
     } else {
