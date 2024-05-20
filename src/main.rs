@@ -127,13 +127,13 @@ fn parse_bed_file(bed_file: &str) -> io::Result<Vec<(String, (i32, i32), Option<
 }
 
 fn parse_target_range(target_range: &str) -> io::Result<(String, (i32, i32))> {
-    let parts: Vec<&str> = target_range.split(':').collect();
+    let parts: Vec<&str> = target_range.rsplitn(2, ':').collect();
     if parts.len() != 2 {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "Target range format should be `seq_name:start-end`"));
     }
 
-    let (start, end) = parse_range(&parts[1].split('-').collect::<Vec<_>>())?;
-    Ok((parts[0].to_string(), (start, end)))
+    let (start, end) = parse_range(&parts[0].split('-').collect::<Vec<_>>())?;
+    Ok((parts[1].to_string(), (start, end)))
 }
 
 fn parse_range(range_parts: &[&str]) -> io::Result<(i32, i32)> {
