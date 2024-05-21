@@ -65,6 +65,7 @@ To compile and install `impg` from source, you'll need a recent rust build toolc
 ## Authors
 
 Erik Garrison <erik.garrison@gmail.com>
+Andrea Guarracino <aguarra1@uthsc.edu>
 Bryce Kille <brycekille@gmail.com>
 
 ## License
