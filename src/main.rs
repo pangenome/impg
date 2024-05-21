@@ -182,6 +182,18 @@ fn generate_index(paf_file: &str, num_threads: NonZeroUsize) -> io::Result<Impg>
 
 fn load_index(paf_file: &str) -> io::Result<Impg> {
     let index_file = format!("{}.impg", paf_file);
+    
+    let paf_file_metadata = std::fs::metadata(paf_file)?;
+    let index_file_metadata = std::fs::metadata(index_file.clone())?;
+    if let (Ok(paf_file_ts), Ok(index_file_ts)) = (paf_file_metadata.modified(), index_file_metadata.modified()) {
+        if paf_file_ts > index_file_ts
+        {
+            eprintln!("WARNING:\tPAF file has been modified since impg index creation.");
+        }
+    } else {
+        eprintln!("WARNING:\tUnable to compare timestamps of PAF file and impg index file. PAF file may have been modified since impg index creation.");
+    }
+
     let file = File::open(index_file)?;
     let reader = BufReader::new(file);
     let serializable: SerializableImpg = bincode::deserialize_from(reader).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to deserialize index: {:?}", e)))?;
