@@ -132,7 +132,7 @@ impl Impg {
 
         let mut seq_index = SequenceIndex::new();
         for record in records {
-            seq_index.get_or_insert_id(&record.query_name, Some(record.target_length));
+            seq_index.get_or_insert_id(&record.query_name, Some(record.query_length));
             seq_index.get_or_insert_id(&record.target_name, Some(record.target_length));
         }
         
