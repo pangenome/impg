@@ -253,38 +253,33 @@ fn output_results_paf(impg: &Impg, results: Vec<AdjustedInterval>, target_name: 
 
         let query_length = impg.seq_index.get_len_from_id(overlap_query.metadata).unwrap();  
 
-        let has_m_operation = cigar.iter().any(|op| op.op() == 'M');
-        let (matches, block_len) = if has_m_operation {
-            // We overestimate the number of matches by counting all M operations
-            cigar.iter().fold((0, 0), |(matches, block_len), op| {
-                let len = op.len();
-                match op.op() {
-                    'M' => (matches + len, block_len + len),
-                    'I' | 'D' => (matches, block_len + len),
-                    _ => (matches, block_len),
-                }
-            })
-        } else {
-            cigar.iter().fold((0, 0), |(matches, block_len), op| {
-                let len = op.len();
-                match op.op() {
-                    '=' => (matches + len, block_len + len),
-                    'X' | 'I' | 'D' => (matches, block_len + len),
-                    _ => (matches, block_len),
-                }
-            })
-        };
+        let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, block_len) = cigar.iter().fold((0, 0, 0, 0, 0, 0, 0), |(m, mm, i, i_bp, d, d_bp, bl), op| {
+            let len = op.len();
+            match op.op() {
+                'M' => (m + len, mm, i, i_bp, d, d_bp, bl + len), // We overestimate num. of matches by assuming 'M' represents matches for simplicity
+                '=' => (m + len, mm, i, i_bp, d, d_bp, bl + len),
+                'X' => (m, mm + len, i, i_bp, d, d_bp, bl + len),
+                'I' => (m, mm, i + 1, i_bp + len, d, d_bp, bl + len),
+                'D' => (m, mm, i, i_bp, d + 1, d_bp + len, bl + len),
+                _ => (m, mm, i, i_bp, d, d_bp, bl),
+            }
+        });
+        let gap_compressed_identity = (matches as f64) / (matches + mismatches + insertions + deletions) as f64;
+        
+        let edit_distance = mismatches + inserted_bp + deleted_bp;
+        let block_identity = (matches as f64) / (matches + edit_distance) as f64;
+
         let cigar_str : String = cigar.iter().map(|op| format!("{}{}", op.len(), op.op())).collect();
 
         match name {
-            Some(ref name) => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tcg:Z:{}\tan:Z:{}",
+            Some(ref name) => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{:.6}\tbi:f:{:.6}\tcg:Z:{}\tan:Z:{}",
                                     overlap_name, query_length, first, last, strand,
                                     target_name, target_length, overlap_target.first, overlap_target.last,
-                                    matches, block_len, 255, cigar_str, name),
-            None => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tcg:Z:{}",
+                                    matches, block_len, 255, gap_compressed_identity, block_identity, cigar_str, name),
+            None => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{:.6}\tbi:f:{:.6}\tcg:Z:{}",
                                 overlap_name, query_length, first, last, strand,
                                 target_name, target_length, overlap_target.first, overlap_target.last,
-                                matches, block_len, 255, cigar_str),
+                                matches, block_len, 255, gap_compressed_identity, block_identity, cigar_str),
         }
     }
 }
