@@ -269,17 +269,21 @@ fn output_results_paf(impg: &Impg, results: Vec<AdjustedInterval>, target_name: 
         let edit_distance = mismatches + inserted_bp + deleted_bp;
         let block_identity = (matches as f64) / (matches + edit_distance) as f64;
 
+        // Format bi and gi fields without trailing zeros
+        let gi_str = format!("{:.6}", gap_compressed_identity).trim_end_matches('0').trim_end_matches('.').to_string();
+        let bi_str = format!("{:.6}", block_identity).trim_end_matches('0').trim_end_matches('.').to_string();
+
         let cigar_str : String = cigar.iter().map(|op| format!("{}{}", op.len(), op.op())).collect();
 
         match name {
-            Some(ref name) => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{:.6}\tbi:f:{:.6}\tcg:Z:{}\tan:Z:{}",
+            Some(ref name) => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{}\tbi:f:{}\tcg:Z:{}\tan:Z:{}",
                                     overlap_name, query_length, first, last, strand,
                                     target_name, target_length, overlap_target.first, overlap_target.last,
-                                    matches, block_len, 255, gap_compressed_identity, block_identity, cigar_str, name),
-            None => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{:.6}\tbi:f:{:.6}\tcg:Z:{}",
+                                    matches, block_len, 255, gi_str, bi_str, cigar_str, name),
+            None => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{}\tbi:f:{}\tcg:Z:{}",
                                 overlap_name, query_length, first, last, strand,
                                 target_name, target_length, overlap_target.first, overlap_target.last,
-                                matches, block_len, 255, gap_compressed_identity, block_identity, cigar_str),
+                                matches, block_len, 255, gi_str, bi_str, cigar_str),
         }
     }
 }
