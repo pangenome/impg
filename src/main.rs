@@ -79,7 +79,8 @@ fn main() -> io::Result<()> {
             }
         }
         if args.output_paf {
-            output_results_paf(&impg, results, &target_name, None);
+            // Skip the first element (the input range) for PAF
+            output_results_paf(&impg, results.into_iter().skip(1), &target_name, None);
         } else {
             output_results_bed(&impg, results);
         }
@@ -96,10 +97,13 @@ fn main() -> io::Result<()> {
                     panic!("Invalid intervals encountered.");
                 }
             }
+
+           // Skip the first element (the input range) for both PAF and BEDPE
+            let results_iter = results.into_iter().skip(1);
             if args.output_paf {
-                output_results_paf(&impg, results, &target_name, name);
+                output_results_paf(&impg, results_iter, &target_name, name);
             } else {
-                output_results_bedpe(&impg, results, &target_name, name);
+                output_results_bedpe(&impg, results_iter, &target_name, name);
             }
         }
     }
@@ -226,7 +230,10 @@ fn output_results_bed(impg: &Impg, results: Vec<AdjustedInterval>) {
     }
 }
 
-fn output_results_bedpe(impg: &Impg, results: Vec<AdjustedInterval>, target_name: &str, name: Option<String>) {
+fn output_results_bedpe<I>(impg: &Impg, results: I, target_name: &str, name: Option<String>)
+where
+    I: Iterator<Item = AdjustedInterval>
+{
     for (overlap_query, _, overlap_target) in results {
         let overlap_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
         let (first, last, strand) = if overlap_query.first <= overlap_query.last {
@@ -241,7 +248,10 @@ fn output_results_bedpe(impg: &Impg, results: Vec<AdjustedInterval>, target_name
     }
 }
 
-fn output_results_paf(impg: &Impg, results: Vec<AdjustedInterval>, target_name: &str, name: Option<String>) { 
+fn output_results_paf<I>(impg: &Impg, results: I, target_name: &str, name: Option<String>)
+where
+    I: Iterator<Item = AdjustedInterval>
+{
     let target_length = impg.seq_index.get_len_from_id(impg.seq_index.get_id(target_name).unwrap()).unwrap();  
     for (overlap_query, cigar, overlap_target) in results {
         let overlap_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
