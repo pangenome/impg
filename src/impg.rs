@@ -299,12 +299,12 @@ impl Impg {
                             }
                         );
                         results.push(adjusted_interval);
-                    }                    
 
-                    if metadata.query_id != current_target {
-                        let todo_range = (metadata.query_id, adjusted_query_start, adjusted_query_end);
-                        if !visited.insert(todo_range) {
-                            stack.push(todo_range);
+                        if metadata.query_id != current_target {
+                            let todo_range = (metadata.query_id, adjusted_query_start, adjusted_query_end);
+                            if !visited.insert(todo_range) {
+                                stack.push(todo_range);
+                            }
                         }
                     }
                 });
