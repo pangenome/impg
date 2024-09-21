@@ -233,20 +233,22 @@ impl Impg {
                     &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref())
                 );
 
-                let adjusted_interval = (
-                    Interval {
-                        first: adjusted_query_start,
-                        last: adjusted_query_end,
-                        metadata: metadata.query_id
-                    },
-                    adjusted_cigar,
-                    Interval {
-                        first: adjusted_target_start,
-                        last: adjusted_target_end,
-                        metadata: 0
-                    }
-                );
-                results.push(adjusted_interval);
+                if !adjusted_cigar.is_empty() {
+                    let adjusted_interval = (
+                        Interval {
+                            first: adjusted_query_start,
+                            last: adjusted_query_end,
+                            metadata: metadata.query_id
+                        },
+                        adjusted_cigar,
+                        Interval {
+                            first: adjusted_target_start,
+                            last: adjusted_target_end,
+                            metadata: 0
+                        }
+                    );
+                    results.push(adjusted_interval);
+                }
             });
         }
         results
@@ -282,20 +284,22 @@ impl Impg {
                         &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref())
                     );
 
-                    let adjusted_interval = (
-                        Interval {
-                            first: adjusted_query_start,
-                            last: adjusted_query_end,
-                            metadata: metadata.query_id
-                        },
-                        adjusted_cigar,
-                        Interval {
-                            first: adjusted_target_start,
-                            last: adjusted_target_end,
-                            metadata: 0
-                        }
-                    );
-                    results.push(adjusted_interval);
+                    if !adjusted_cigar.is_empty() {
+                        let adjusted_interval = (
+                            Interval {
+                                first: adjusted_query_start,
+                                last: adjusted_query_end,
+                                metadata: metadata.query_id
+                            },
+                            adjusted_cigar,
+                            Interval {
+                                first: adjusted_target_start,
+                                last: adjusted_target_end,
+                                metadata: 0
+                            }
+                        );
+                        results.push(adjusted_interval);
+                    }                    
 
                     if metadata.query_id != current_target {
                         let todo_range = (metadata.query_id, adjusted_query_start, adjusted_query_end);
