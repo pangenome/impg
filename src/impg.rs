@@ -270,8 +270,10 @@ impl Impg {
                 metadata: 0
             }
         ));
-        let mut stack = vec![(target_id, range_start, range_end)];
+        let result_key = (target_id, range_start, range_end);
+        let mut stack = vec![result_key];
         let mut visited = HashSet::new();
+        visited.insert(result_key);
 
         while let Some((current_target, current_start, current_end)) = stack.pop() {
             if let Some(tree) = self.trees.get(&current_target) {
@@ -285,25 +287,25 @@ impl Impg {
                     );
 
                     if !adjusted_cigar.is_empty() {
-                        let adjusted_interval = (
-                            Interval {
-                                first: adjusted_query_start,
-                                last: adjusted_query_end,
-                                metadata: metadata.query_id
-                            },
-                            adjusted_cigar,
-                            Interval {
-                                first: adjusted_target_start,
-                                last: adjusted_target_end,
-                                metadata: 0
-                            }
-                        );
-                        results.push(adjusted_interval);
+                        let result_key = (metadata.query_id, adjusted_query_start, adjusted_query_end);
+                        if visited.insert(result_key) {
+                            let adjusted_interval = (
+                                Interval {
+                                    first: adjusted_query_start,
+                                    last: adjusted_query_end,
+                                    metadata: metadata.query_id
+                                },
+                                adjusted_cigar,
+                                Interval {
+                                    first: adjusted_target_start,
+                                    last: adjusted_target_end,
+                                    metadata: 0
+                                }
+                            );
+                            results.push(adjusted_interval);
 
-                        if metadata.query_id != current_target {
-                            let todo_range = (metadata.query_id, adjusted_query_start, adjusted_query_end);
-                            if visited.insert(todo_range) {
-                                stack.push(todo_range);
+                            if metadata.query_id != current_target {
+                                stack.push(result_key);
                             }
                         }
                     }
