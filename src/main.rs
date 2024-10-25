@@ -212,7 +212,7 @@ fn perform_query(impg: &Impg, target_name: &str, target_range: (i32, i32), trans
         panic!("Target range end ({}) exceeds the target sequence length ({})", target_end, target_length);
     }
     if transitive {
-        impg.query_transitive(target_id, target_start, target_end)
+        impg.query_transitive(target_id, target_start, target_end, None)
     } else {
         impg.query(target_id, target_start, target_end)
     }

@@ -254,22 +254,25 @@ impl Impg {
         results
     }
 
-    pub fn query_transitive(&self, target_id: u32, range_start: i32, range_end: i32) -> Vec<AdjustedInterval> {
+    pub fn query_transitive(&self, target_id: u32, range_start: i32, range_end: i32, should_return: Option<&dyn Fn(&Interval<u32>) -> bool>) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
         // add the input range to the results
-        results.push((
-            Interval {
-                first: range_start,
-                last: range_end,
-                metadata: target_id,
-            },
-            vec![CigarOp::new(range_end - range_start, '=')],
-            Interval {
-                first: range_start,
-                last: range_end,
-                metadata: 0
-            }
-        ));
+        let input_interval = Interval {
+            first: range_start,
+            last: range_end,
+            metadata: target_id,
+        };
+        if should_return.map_or(true, |f| f(&input_interval)) {
+            results.push((
+                input_interval,
+                vec![CigarOp::new(range_end - range_start, '=')],
+                Interval {
+                    first: range_start,
+                    last: range_end,
+                    metadata: 0
+                }
+            ));
+        }
         let result_key = (target_id, range_start, range_end);
         let mut stack = vec![result_key];
         let mut visited = HashSet::new();
@@ -289,20 +292,23 @@ impl Impg {
                     if !adjusted_cigar.is_empty() {
                         let result_key = (metadata.query_id, adjusted_query_start, adjusted_query_end);
                         if visited.insert(result_key) {
-                            let adjusted_interval = (
-                                Interval {
-                                    first: adjusted_query_start,
-                                    last: adjusted_query_end,
-                                    metadata: metadata.query_id
-                                },
-                                adjusted_cigar,
-                                Interval {
-                                    first: adjusted_target_start,
-                                    last: adjusted_target_end,
-                                    metadata: 0
-                                }
-                            );
-                            results.push(adjusted_interval);
+                            let adjusted_interval = Interval {
+                                first: adjusted_query_start,
+                                last: adjusted_query_end,
+                                metadata: metadata.query_id
+                            };
+    
+                            if should_return.map_or(true, |f| f(&adjusted_interval)) {
+                                results.push((
+                                    adjusted_interval,
+                                    adjusted_cigar,
+                                    Interval {
+                                        first: adjusted_target_start,
+                                        last: adjusted_target_end,
+                                        metadata: 0
+                                    }
+                                ));
+                            }
 
                             if metadata.query_id != current_target {
                                 stack.push(result_key);
