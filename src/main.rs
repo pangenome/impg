@@ -1,13 +1,15 @@
 use clap::Parser;
-use std::fs::File;
-use std::io::{self, BufReader, BufWriter};
+use std::fs::{File, create_dir_all};
+use std::io::{self, BufReader, BufWriter, Write};
 use std::num::NonZeroUsize;
 use noodles::bgzf;
 use impg::impg::{Impg, SerializableImpg, AdjustedInterval, check_intervals};
-use coitrees::IntervalTree;
+use impg::progressive::Progressive;
+use coitrees::{IntervalTree, Interval};
 use impg::paf;
 use rayon::ThreadPoolBuilder;
 use std::io::BufRead;
+use std::path::PathBuf;
 
 /// Command-line tool for querying overlaps in PAF files.
 #[derive(Parser, Debug)]
@@ -48,6 +50,10 @@ struct Args {
     /// Check the projected intervals, reporting the wrong ones (slow, useful for debugging).
     #[clap(short='c', long, action)]
     check_intervals: bool,
+
+    /// Output directory for progressive subgraph enumeration.
+    #[clap(short='g', long, value_parser)]
+    progressive_output: Option<PathBuf>,
 }
 
 fn main() -> io::Result<()> {
@@ -66,7 +72,65 @@ fn main() -> io::Result<()> {
         print_stats(&impg);
     }
 
-    if let Some(target_range) = args.target_range {
+    if let Some(output_dir) = args.progressive_output.as_ref() {
+        let target_bed = args.target_bed.as_ref().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, 
+                "A BED file must be provided for progressive pangenome enumeration (-b option)")
+        })?;
+
+        let bed_entries = parse_bed_file(target_bed)?;
+        let initial_intervals: Vec<Interval<u32>> = bed_entries
+            .into_iter()
+            .filter_map(|(target_name, target_range, _)| {
+                let genome_id = impg.seq_index.get_id(&target_name)?;
+                Some(Interval {
+                    first: target_range.0,
+                    last: target_range.1,
+                    metadata: genome_id,
+                })
+            })
+            .collect();
+
+
+        println!("Initial intervals: {:?}", initial_intervals.len());
+
+        let mut pp = Progressive::new(&impg, initial_intervals);
+        let results = pp.process();
+        
+        // if args.check_intervals {
+        //     for partition_results in &results {
+        //         let invalid_cigars = check_intervals(&impg, partition_results);
+        //         if !invalid_cigars.is_empty() {
+        //             for (row, error_reason) in invalid_cigars {
+        //                 eprintln!("{}; {}", error_reason, row);
+        //             }
+        //             panic!("Invalid intervals encountered.");
+        //         }
+        //     }
+        // }
+
+        println!("Partitions: {:?}", results.len());
+
+        // create_dir_all(output_dir)?;
+
+        for (partition_id, partition_results) in results.into_iter().enumerate() {
+            eprintln!("Partition: {}", partition_id);
+            eprintln!("Results: {}", partition_results.len());
+        //     let file_name = if args.output_paf {
+        //         format!("partition_{}.paf", partition_id)
+        //     } else {
+        //         format!("partition_{}.bedpe", partition_id)
+        //     };
+        //     let file_path = output_dir.join(file_name);
+        //     let mut writer = BufWriter::new(File::create(file_path)?);
+
+        //     if args.output_paf {
+        //         output_results_paf_to_writer(&impg, partition_results.into_iter(), "", None, &mut writer)?;
+        //     } else {
+        //         output_results_bedpe_to_writer(&impg, partition_results.into_iter(), "", None, &mut writer)?;
+        //     }
+        }
+    } else if let Some(target_range) = args.target_range {
         let (target_name, target_range) = parse_target_range(&target_range)?;
         let results = perform_query(&impg, &target_name, target_range, args.transitive);
         if args.check_intervals {
@@ -301,4 +365,76 @@ where
 fn print_stats(impg: &Impg) {
     println!("Number of sequences: {}", impg.seq_index.len());
     println!("Number of overlaps: {}", impg.trees.values().map(|tree| tree.len()).sum::<usize>());
+}
+
+fn output_results_bedpe_to_writer<I, W>(impg: &Impg, results: I, target_name: &str, name: Option<&str>, writer: &mut W) -> io::Result<()>
+where
+    I: Iterator<Item = AdjustedInterval>,
+    W: Write,
+{
+    for (overlap_query, _, overlap_target) in results {
+        let overlap_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
+        let (first, last, strand) = if overlap_query.first <= overlap_query.last {
+            (overlap_query.first, overlap_query.last, '+')
+        } else {
+            (overlap_query.last, overlap_query.first, '-')
+        };
+        writeln!(writer, "{}\t{}\t{}\t{}\t{}\t{}\t{}\t0\t{}\t+",
+                 overlap_name, first, last,
+                 target_name, overlap_target.first, overlap_target.last,
+                 name.unwrap_or("."), strand)?;
+    }
+    Ok(())
+}
+
+fn output_results_paf_to_writer<I, W>(impg: &Impg, results: I, target_name: &str, name: Option<&str>, writer: &mut W) -> io::Result<()>
+where
+    I: Iterator<Item = AdjustedInterval>,
+    W: Write,
+{
+    let target_length = impg.seq_index.get_len_from_id(impg.seq_index.get_id(target_name).unwrap()).unwrap();  
+    for (overlap_query, cigar, overlap_target) in results {
+        let overlap_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
+        let (first, last, strand) = if overlap_query.first <= overlap_query.last {
+            (overlap_query.first, overlap_query.last, '+')
+        } else {
+            (overlap_query.last, overlap_query.first, '-')
+        };
+
+        let query_length = impg.seq_index.get_len_from_id(overlap_query.metadata).unwrap();  
+
+        let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, block_len) = cigar.iter().fold((0, 0, 0, 0, 0, 0, 0), |(m, mm, i, i_bp, d, d_bp, bl), op| {
+            let len = op.len();
+            match op.op() {
+                'M' => (m + len, mm, i, i_bp, d, d_bp, bl + len),
+                '=' => (m + len, mm, i, i_bp, d, d_bp, bl + len),
+                'X' => (m, mm + len, i, i_bp, d, d_bp, bl + len),
+                'I' => (m, mm, i + 1, i_bp + len, d, d_bp, bl + len),
+                'D' => (m, mm, i, i_bp, d + 1, d_bp + len, bl + len),
+                _ => (m, mm, i, i_bp, d, d_bp, bl),
+            }
+        });
+        let gap_compressed_identity = (matches as f64) / (matches + mismatches + insertions + deletions) as f64;
+        
+        let edit_distance = mismatches + inserted_bp + deleted_bp;
+        let block_identity = (matches as f64) / (matches + edit_distance) as f64;
+
+        let gi_str = format!("{:.6}", gap_compressed_identity).trim_end_matches('0').trim_end_matches('.').to_string();
+        let bi_str = format!("{:.6}", block_identity).trim_end_matches('0').trim_end_matches('.').to_string();
+
+        let cigar_str : String = cigar.iter().map(|op| format!("{}{}", op.len(), op.op())).collect();
+
+        if let Some(name) = name {
+            writeln!(writer, "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{}\tbi:f:{}\tcg:Z:{}\tan:Z:{}",
+                     overlap_name, query_length, first, last, strand,
+                     target_name, target_length, overlap_target.first, overlap_target.last,
+                     matches, block_len, 255, gi_str, bi_str, cigar_str, name)?;
+        } else {
+            writeln!(writer, "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{}\tbi:f:{}\tcg:Z:{}",
+                     overlap_name, query_length, first, last, strand,
+                     target_name, target_length, overlap_target.first, overlap_target.last,
+                     matches, block_len, 255, gi_str, bi_str, cigar_str)?;
+        }
+    }
+    Ok(())
 }
