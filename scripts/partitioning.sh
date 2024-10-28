@@ -15,13 +15,14 @@ FASTA_FAI=$2
 AVG_WINDOW_SIZE=$3
 SAMPLE=$4
 
-# Create initial bed file for the sample
+# Prepare initial windows
+WINDOWS_BED=windows.bed
 grep $SAMPLE $FASTA_FAI -w -m 1 | awk -v OFS='\t' '{print($1,"0",$2)}' > $SAMPLE.bed
-bedtools makewindows -b $SAMPLE.bed -w $AVG_WINDOW_SIZE > windows.bed
+bedtools makewindows -b $SAMPLE.bed -w $AVG_WINDOW_SIZE > $WINDOWS_BED
 
 # Prepare mask file
 MASK_BED=mask.bed
-touch $MASK_BED
+cat /dev/null > $MASK_BED
 
 # Create initial missing regions file
 MISSING_BED=missing.bed
@@ -31,7 +32,7 @@ cut -f 1,2 $PAF | sort | uniq | awk -v OFS='\t' '{print($1,"0",$2,".",".","+")}'
 num=0
 
 # Process windows until no missing regions remain
-while [ -s windows.bed ]; do
+while [ -s $WINDOWS_BED ]; do
     echo "Processing new window set..."
 
     while IFS=$'\t' read -r chrom start end; do
@@ -57,7 +58,7 @@ while [ -s windows.bed ]; do
         rm partition$num.tmp.bed $num.bed $num.mask.bed $num.missing.bed
 
         num=$((num + 1))
-    done < windows.bed
+    done < $WINDOWS_BED
 
     # Check if there are any missing regions not covered by mask
     bedtools subtract -a $MISSING_BED -b $MASK_BED -s > $num.remaining.bed
@@ -69,10 +70,10 @@ while [ -s windows.bed ]; do
 
     # Create new windows from longest remaining region
     awk -v OFS='\t' '{print($0,$3-$2)}' $num.remaining.bed | sort -k 7,7nr | cut -f 1-6 | head -n 1 > $num.new.bed
-    bedtools makewindows -b $num.new.bed -w $AVG_WINDOW_SIZE > windows.bed
+    bedtools makewindows -b $num.new.bed -w $AVG_WINDOW_SIZE > $WINDOWS_BED
     
     # Cleanup
     rm $num.remaining.bed $num.new.bed
 done
 
-rm windows.bed
+rm $SAMPLE.bed $WINDOWS_BED $MASK_BED $MISSING_BED
