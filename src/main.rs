@@ -226,7 +226,7 @@ fn output_results_bed(impg: &Impg, results: Vec<AdjustedInterval>) {
         } else {
             (overlap.last, overlap.first, '-')
         };
-        println!("{}\t{}\t{}\t.\t{}", overlap_name, first, last, strand);
+        println!("{}\t{}\t{}\t.\t.\t{}", overlap_name, first, last, strand);
     }
 }
 
