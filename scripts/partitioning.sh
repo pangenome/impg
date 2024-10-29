@@ -45,19 +45,25 @@ while [ -s $WINDOWS_BED ]; do
         # Apply mask
         bedtools subtract -a partition$num.tmp.bed -b $MASK_BED -s > partition$num.bed
 
-        # Update masked regions
-        cat partition$num.bed $MASK_BED | bedtools sort > $num.bed
-        bedtools merge -i $num.bed -s -c 4,5,6 -o distinct > $num.mask.bed
-        cp $num.mask.bed $MASK_BED
+        # Check if the partition is not empty
+        if [ -s partition$num.bed ]; then
 
-         # Update missing regions
-        bedtools subtract -a $MISSING_BED -b partition$num.bed -s > $num.missing.bed
-        cp $num.missing.bed $MISSING_BED
+            # Update masked regions
+            cat partition$num.bed $MASK_BED | bedtools sort > $num.bed
+            bedtools merge -i $num.bed -s -c 4,5,6 -o distinct > $num.mask.bed
+            cp $num.mask.bed $MASK_BED
 
-        # Cleanup
-        rm partition$num.tmp.bed $num.bed $num.mask.bed $num.missing.bed
+            # Update missing regions
+            bedtools subtract -a $MISSING_BED -b partition$num.bed -s > $num.missing.bed
+            cp $num.missing.bed $MISSING_BED
 
-        num=$((num + 1))
+            # Cleanup
+            rm partition$num.tmp.bed $num.bed $num.mask.bed $num.missing.bed
+
+            num=$((num + 1))
+        else
+            rm partition$num.tmp.bed partition$num.bed
+        fi
     done < $WINDOWS_BED
 
     # Check if there are any missing regions not covered by mask
