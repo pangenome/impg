@@ -40,7 +40,7 @@ while [ -s $WINDOWS_BED ]; do
         REGION_FORMATTED="${chrom}:${start}-${end}"
 
         echo "Processing partition $num, region $REGION_FORMATTED..."
-        impg -p $PAF -r $REGION_FORMATTED -x | bedtools sort | bedtools merge -s -c 4,5,6 -o distinct > partition$num.tmp.bed
+        impg -p $PAF -r $REGION_FORMATTED -x | bedtools sort | bedtools merge -s -c 4,5,6 -o distinct -d 5000 > partition$num.tmp.bed
 
         # Apply mask
         bedtools subtract -a partition$num.tmp.bed -b $MASK_BED -s > partition$num.bed
