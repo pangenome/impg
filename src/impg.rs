@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use coitrees::{BasicCOITree, Interval, IntervalTree};
 use crate::paf::{PafRecord, ParseErr, Strand};
 use crate::seqidx::SequenceIndex;
@@ -270,10 +270,11 @@ impl Impg {
                 metadata: 0
             }
         ));
-        let result_key = (target_id, range_start, range_end);
-        let mut stack = vec![result_key];
-        let mut visited = HashSet::new();
-        visited.insert(result_key);
+        // Initialize stack with first query
+        let mut stack = vec![(target_id, range_start, range_end)];
+        // Track visited ranges per sequence
+        let mut visited_ranges: HashMap<u32, Vec<(i32, i32)>> = HashMap::new();
+        visited_ranges.insert(target_id, vec![(range_start, range_end)]);
 
         while let Some((current_target, current_start, current_end)) = stack.pop() {
             if let Some(tree) = self.trees.get(&current_target) {
@@ -287,25 +288,34 @@ impl Impg {
                     );
 
                     if !adjusted_cigar.is_empty() {
-                        let result_key = (metadata.query_id, adjusted_query_start, adjusted_query_end);
-                        if visited.insert(result_key) {
-                            let adjusted_interval = (
-                                Interval {
-                                    first: adjusted_query_start,
-                                    last: adjusted_query_end,
-                                    metadata: metadata.query_id
-                                },
-                                adjusted_cigar,
-                                Interval {
-                                    first: adjusted_target_start,
-                                    last: adjusted_target_end,
-                                    metadata: 0
-                                }
-                            );
-                            results.push(adjusted_interval);
+                        let adjusted_interval = (
+                            Interval {
+                                first: adjusted_query_start,
+                                last: adjusted_query_end,
+                                metadata: metadata.query_id
+                            },
+                            adjusted_cigar,
+                            Interval {
+                                first: adjusted_target_start,
+                                last: adjusted_target_end,
+                                metadata: 0
+                            }
+                        );
+                        results.push(adjusted_interval);
 
-                            if metadata.query_id != current_target {
-                                stack.push(result_key);
+                        // Only add non-overlapping portions to the stack for further exploration
+                        if metadata.query_id != current_target {
+                            let ranges = visited_ranges.entry(metadata.query_id).or_default();
+                            let new_ranges = subtract_overlapping_ranges(
+                                (adjusted_query_start, adjusted_query_end), 
+                                ranges
+                            );
+
+                            // Add non-overlapping portions to visited and stack
+                            for (new_start, new_end) in new_ranges {
+                                //println!("\t\tnew {}:{}-{}", self.seq_index.get_name(metadata.query_id).unwrap(), new_start, new_end);
+                                ranges.push((new_start, new_end));
+                                stack.push((metadata.query_id, new_start, new_end));
                             }
                         }
                     }
@@ -315,6 +325,7 @@ impl Impg {
 
         results
     }
+
 }
 
 fn project_target_range_through_alignment(
@@ -398,6 +409,46 @@ fn project_target_range_through_alignment(
         new_target_start.unwrap_or(target_start),
         (new_target_end.unwrap_or(target_pos)).min(target_end),
     )
+}
+
+fn split_range(range: (i32, i32), existing: (i32, i32)) -> Vec<(i32, i32)> {
+    let (start, end) = range;
+    let (ex_start, ex_end) = existing;
+    
+    if end <= ex_start || start >= ex_end {
+        // No overlap
+        return vec![range];
+    }
+    
+    let mut result = Vec::new();
+    
+    // Add portion before overlap if it exists
+    if start < ex_start {
+        result.push((start, ex_start));
+    }
+    
+    // Add portion after overlap if it exists
+    if end > ex_end {
+        result.push((ex_end, end));
+    }
+    
+    result
+}
+
+fn subtract_overlapping_ranges(new_range: (i32, i32), existing_ranges: &[(i32, i32)]) -> Vec<(i32, i32)> {
+    let mut result = vec![new_range];
+    
+    for &existing in existing_ranges {
+        let mut next_result = Vec::new();
+        for current in result {
+            // For each existing range, split current range if needed
+            let mut ranges = split_range(current, existing);
+            next_result.append(&mut ranges);
+        }
+        result = next_result;
+    }
+    
+    result
 }
 
 fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, ParseErr> {
