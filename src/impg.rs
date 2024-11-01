@@ -313,7 +313,6 @@ impl Impg {
 
                             // Add non-overlapping portions to visited and stack
                             for (new_start, new_end) in new_ranges {
-                                //println!("\t\tnew {}:{}-{}", self.seq_index.get_name(metadata.query_id).unwrap(), new_start, new_end);
                                 ranges.push((new_start, new_end));
                                 stack.push((metadata.query_id, new_start, new_end));
                             }
