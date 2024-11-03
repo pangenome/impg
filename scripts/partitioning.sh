@@ -51,9 +51,8 @@ while [ -s "$WINDOWS_BED" ]; do
             echo "-- Processing partition $num"
 
             # Update masked regions
-            cat "partition$num.bed" "$MASK_BED" | bedtools sort > "$num.bed"
-            bedtools merge -i "$num.bed" -s -c 4,5,6 -o distinct > "$num.mask.bed"
-            cp "$num.mask.bed" "$MASK_BED"
+            cat "partition$num.bed" "$MASK_BED" | bedtools sort > "$num.mask.bed"
+            bedtools merge -i "$num.mask.bed" -s -c 4,5,6 -o distinct > "$MASK_BED"
 
             # Update missing regions
             bedtools subtract -a "$MISSING_BED" -b "partition$num.bed" -s > "$num.missing.bed"
@@ -77,4 +76,4 @@ while [ -s "$WINDOWS_BED" ]; do
 done
 
 # Cleanup
-rm -f "$SAMPLE.bed" "$WINDOWS_BED" "$MASK_BED" "$MISSING_BED" "partition[0-9]*.tmp.bed"" [0-9]*.{remaining,new}.bed"
+rm -f "$SAMPLE.bed" "$WINDOWS_BED" "$MASK_BED" "$MISSING_BED" partition[0-9]*.tmp.bed [0-9]*.{mask,missing,remaining,new}.bed
