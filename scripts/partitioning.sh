@@ -18,7 +18,7 @@ SAMPLE=$4
 
 # Prepare initial windows
 WINDOWS_BED=windows.bed
-grep $SAMPLE "$FASTA_FAI" -w -m 1 | awk -v OFS='\t' '{print($1,"0",$2)}' > "$SAMPLE.bed"
+grep $SAMPLE "$FASTA_FAI" -w | awk -v OFS='\t' '{print($1,"0",$2)}' > "$SAMPLE.bed"
 bedtools makewindows -b "$SAMPLE.bed" -w "$AVG_WINDOW_SIZE" > "$WINDOWS_BED"
 
 # Prepare mask file
