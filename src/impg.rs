@@ -8,6 +8,7 @@ use std::fs::File;
 use rayon::prelude::*;
 use noodles::bgzf;
 use regex::Regex;
+use std::cmp::max;
 
 /// Parse a CIGAR string into a vector of CigarOp
 // Note that the query_delta is negative for reverse strand alignments
@@ -414,12 +415,18 @@ fn split_range(range: (i32, i32), existing: (i32, i32)) -> Vec<(i32, i32)> {
     let (start, end) = range;
     let (ex_start, ex_end) = existing;
     
+    // Validate input range
+    if start > end || ex_start > ex_end {
+        return Vec::new();
+    }
+    
     if end <= ex_start || start >= ex_end {
-        // No overlap
+        // If no overlap, return original range
         return vec![range];
     }
     
-    let mut result = Vec::new();
+    // Pre-allocate for potential splits
+    let mut result = Vec::with_capacity(2);
     
     // Add portion before overlap if it exists
     if start < ex_start {
@@ -435,18 +442,65 @@ fn split_range(range: (i32, i32), existing: (i32, i32)) -> Vec<(i32, i32)> {
 }
 
 fn subtract_overlapping_ranges(new_range: (i32, i32), existing_ranges: &[(i32, i32)]) -> Vec<(i32, i32)> {
-    let mut result = vec![new_range];
-    
-    for &existing in existing_ranges {
-        let mut next_result = Vec::new();
-        for current in result {
-            // For each existing range, split current range if needed
-            let mut ranges = split_range(current, existing);
-            next_result.append(&mut ranges);
-        }
-        result = next_result;
+    // Validate input range
+    let (start, end) = new_range;
+    if start > end || existing_ranges.is_empty() {
+        return vec![new_range];
     }
+
+    // Sort and merge existing ranges first to minimize iterations
+    let mut sorted_ranges: Vec<_> = existing_ranges.iter().cloned().collect();
+    sorted_ranges.sort_by_key(|&(s, _)| s);
     
+    let mut merged = Vec::with_capacity(sorted_ranges.len());
+    let mut current = sorted_ranges[0];
+    
+    for &range in &sorted_ranges[1..] {
+        if current.1 >= range.0 {
+            current.1 = max(current.1, range.1);
+        } else {
+            merged.push(current);
+            current = range;
+        }
+    }
+    merged.push(current);
+
+    // Process the new range against merged existing ranges
+    let mut result = vec![new_range];
+    let mut temp = Vec::with_capacity(result.len() * 2);
+
+    for existing in merged {
+        if result.is_empty() {
+            break;  // Early exit if no ranges left
+        }
+
+        for current in result.drain(..) {
+            temp.extend(split_range(current, existing));
+        }
+
+        // Swap vectors to avoid allocations
+        std::mem::swap(&mut result, &mut temp);
+        temp.clear();
+    }
+
+    // Optional: merge adjacent ranges in result
+    if !result.is_empty() {
+        result.sort_by_key(|&(s, _)| s);
+        let mut merged = Vec::with_capacity(result.len());
+        let mut current = result[0];
+        
+        for &range in &result[1..] {
+            if current.1 == range.0 {
+                current.1 = range.1;
+            } else {
+                merged.push(current);
+                current = range;
+            }
+        }
+        merged.push(current);
+        result = merged;
+    }
+
     result
 }
 
