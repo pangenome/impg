@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use coitrees::{BasicCOITree, Interval, IntervalTree};
 use crate::paf::{PafRecord, ParseErr, Strand};
 use crate::seqidx::SequenceIndex;
@@ -8,6 +8,7 @@ use std::fs::File;
 use rayon::prelude::*;
 use noodles::bgzf;
 use regex::Regex;
+use std::cmp::{min,max};
 
 /// Parse a CIGAR string into a vector of CigarOp
 // Note that the query_delta is negative for reverse strand alignments
@@ -110,6 +111,90 @@ pub struct SerializableInterval {
     first: i32,
     last: i32,
     metadata: QueryMetadata,
+}
+
+#[derive(Debug, Default)]
+struct SortedRanges {
+    ranges: Vec<(i32, i32)>
+}
+
+impl SortedRanges {
+    fn new() -> Self {
+        Self { ranges: Vec::new() }
+    }
+
+    fn insert(&mut self, new_range: (i32, i32)) -> Vec<(i32, i32)> {
+        let (start, end) = new_range;
+        if start >= end {
+            return Vec::new();
+        }
+
+        // Return regions that don't overlap with existing ranges
+        let mut non_overlapping = Vec::new();
+        let mut current = start;
+
+        // Find the first range that could overlap
+        let mut i = match self.ranges.binary_search_by_key(&start, |&(s, _)| s) {
+            Ok(pos) => pos,
+            Err(pos) => pos,
+        };
+
+        // Check previous range for overlap
+        if i > 0 && self.ranges[i - 1].1 > start {
+            i -= 1;
+        }
+
+        // Process all potentially overlapping ranges
+        while i < self.ranges.len() && current < end {
+            let (range_start, range_end) = self.ranges[i];
+            if range_start > end {
+                break;
+            }
+            if current < range_start {
+                non_overlapping.push((current, range_start));
+            }
+            current = max(current, range_end);
+            i += 1;
+        }
+
+        if current < end {
+            non_overlapping.push((current, end));
+        }
+
+        // Now insert the range while maintaining sorted order and merging overlaps
+        match self.ranges.binary_search_by_key(&start, |&(s, _)| s) {
+            Ok(pos) | Err(pos) => {
+                // Check if we can merge with the previous range
+                if pos > 0 && self.ranges[pos - 1].1 >= start {
+                    self.ranges[pos - 1].1 = max(self.ranges[pos - 1].1, end);
+                    self.merge_forward_from(pos - 1);
+                } else if pos < self.ranges.len() && end >= self.ranges[pos].0 {
+                    self.ranges[pos].0 = min(start, self.ranges[pos].0);
+                    self.ranges[pos].1 = max(end, self.ranges[pos].1);
+                    self.merge_forward_from(pos);
+                } else {
+                    self.ranges.insert(pos, (start, end));
+                }
+            }
+        }
+
+        non_overlapping
+    }
+
+    fn merge_forward_from(&mut self, start_idx: usize) {
+        let mut write = start_idx;
+        let mut read = start_idx + 1;
+        while read < self.ranges.len() {
+            if self.ranges[write].1 >= self.ranges[read].0 {
+                self.ranges[write].1 = max(self.ranges[write].1, self.ranges[read].1);
+            } else {
+                write += 1;
+                self.ranges.swap(write, read);
+            }
+            read += 1;
+        }
+        self.ranges.truncate(write + 1);
+    }
 }
 
 #[derive(Clone)]
@@ -233,7 +318,7 @@ impl Impg {
                     &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref())
                 );
 
-                if !adjusted_cigar.is_empty() {
+                if adjusted_query_start < adjusted_query_end && !adjusted_cigar.is_empty() {
                     let adjusted_interval = (
                         Interval {
                             first: adjusted_query_start,
@@ -270,10 +355,15 @@ impl Impg {
                 metadata: 0
             }
         ));
-        let result_key = (target_id, range_start, range_end);
-        let mut stack = vec![result_key];
-        let mut visited = HashSet::new();
-        visited.insert(result_key);
+        // Initialize stack with first query
+        let mut stack = vec![(target_id, range_start, range_end)];
+        // Track visited ranges per sequence
+        let mut visited_ranges: HashMap<u32, SortedRanges> = HashMap::new();
+        visited_ranges.insert(target_id, {
+            let mut sr = SortedRanges::new();
+            sr.insert((range_start, range_end));
+            sr
+        });
 
         while let Some((current_target, current_start, current_end)) = stack.pop() {
             if let Some(tree) = self.trees.get(&current_target) {
@@ -286,26 +376,32 @@ impl Impg {
                         &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref())
                     );
 
-                    if !adjusted_cigar.is_empty() {
-                        let result_key = (metadata.query_id, adjusted_query_start, adjusted_query_end);
-                        if visited.insert(result_key) {
-                            let adjusted_interval = (
-                                Interval {
-                                    first: adjusted_query_start,
-                                    last: adjusted_query_end,
-                                    metadata: metadata.query_id
-                                },
-                                adjusted_cigar,
-                                Interval {
-                                    first: adjusted_target_start,
-                                    last: adjusted_target_end,
-                                    metadata: 0
-                                }
-                            );
-                            results.push(adjusted_interval);
+                    if adjusted_query_start < adjusted_query_end && !adjusted_cigar.is_empty() {
+                        let adjusted_interval = (
+                            Interval {
+                                first: adjusted_query_start,
+                                last: adjusted_query_end,
+                                metadata: metadata.query_id
+                            },
+                            adjusted_cigar,
+                            Interval {
+                                first: adjusted_target_start,
+                                last: adjusted_target_end,
+                                metadata: 0
+                            }
+                        );
+                        results.push(adjusted_interval);
 
-                            if metadata.query_id != current_target {
-                                stack.push(result_key);
+                        // Only add non-overlapping portions to the stack for further exploration
+                        if metadata.query_id != current_target {
+                            let ranges = visited_ranges.entry(metadata.query_id)
+                                .or_insert_with(|| SortedRanges::new());  // Note the closure here
+                        
+                            let new_ranges = ranges.insert((adjusted_query_start, adjusted_query_end));
+                            
+                            // Add non-overlapping portions to stack
+                            for (new_start, new_end) in new_ranges {
+                                stack.push((metadata.query_id, new_start, new_end));
                             }
                         }
                     }
@@ -315,6 +411,7 @@ impl Impg {
 
         results
     }
+
 }
 
 fn project_target_range_through_alignment(
@@ -399,6 +496,7 @@ fn project_target_range_through_alignment(
         (new_target_end.unwrap_or(target_pos)).min(target_end),
     )
 }
+
 
 fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, ParseErr> {
     let mut ops = Vec::new();
