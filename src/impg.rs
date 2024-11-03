@@ -8,7 +8,7 @@ use std::fs::File;
 use rayon::prelude::*;
 use noodles::bgzf;
 use regex::Regex;
-use std::cmp::max;
+use std::cmp::{min,max};
 
 /// Parse a CIGAR string into a vector of CigarOp
 // Note that the query_delta is negative for reverse strand alignments
@@ -111,6 +111,90 @@ pub struct SerializableInterval {
     first: i32,
     last: i32,
     metadata: QueryMetadata,
+}
+
+#[derive(Debug, Default)]
+struct SortedRanges {
+    ranges: Vec<(i32, i32)>
+}
+
+impl SortedRanges {
+    fn new() -> Self {
+        Self { ranges: Vec::new() }
+    }
+
+    fn insert(&mut self, new_range: (i32, i32)) -> Vec<(i32, i32)> {
+        let (start, end) = new_range;
+        if start >= end {
+            return Vec::new();
+        }
+
+        // Return regions that don't overlap with existing ranges
+        let mut non_overlapping = Vec::new();
+        let mut current = start;
+
+        // Find the first range that could overlap
+        let mut i = match self.ranges.binary_search_by_key(&start, |&(s, _)| s) {
+            Ok(pos) => pos,
+            Err(pos) => pos,
+        };
+
+        // Check previous range for overlap
+        if i > 0 && self.ranges[i - 1].1 > start {
+            i -= 1;
+        }
+
+        // Process all potentially overlapping ranges
+        while i < self.ranges.len() && current < end {
+            let (range_start, range_end) = self.ranges[i];
+            if range_start > end {
+                break;
+            }
+            if current < range_start {
+                non_overlapping.push((current, range_start));
+            }
+            current = max(current, range_end);
+            i += 1;
+        }
+
+        if current < end {
+            non_overlapping.push((current, end));
+        }
+
+        // Now insert the range while maintaining sorted order and merging overlaps
+        match self.ranges.binary_search_by_key(&start, |&(s, _)| s) {
+            Ok(pos) | Err(pos) => {
+                // Check if we can merge with the previous range
+                if pos > 0 && self.ranges[pos - 1].1 >= start {
+                    self.ranges[pos - 1].1 = max(self.ranges[pos - 1].1, end);
+                    self.merge_forward_from(pos - 1);
+                } else if pos < self.ranges.len() && end >= self.ranges[pos].0 {
+                    self.ranges[pos].0 = min(start, self.ranges[pos].0);
+                    self.ranges[pos].1 = max(end, self.ranges[pos].1);
+                    self.merge_forward_from(pos);
+                } else {
+                    self.ranges.insert(pos, (start, end));
+                }
+            }
+        }
+
+        non_overlapping
+    }
+
+    fn merge_forward_from(&mut self, start_idx: usize) {
+        let mut write = start_idx;
+        let mut read = start_idx + 1;
+        while read < self.ranges.len() {
+            if self.ranges[write].1 >= self.ranges[read].0 {
+                self.ranges[write].1 = max(self.ranges[write].1, self.ranges[read].1);
+            } else {
+                write += 1;
+                self.ranges.swap(write, read);
+            }
+            read += 1;
+        }
+        self.ranges.truncate(write + 1);
+    }
 }
 
 #[derive(Clone)]
@@ -274,8 +358,12 @@ impl Impg {
         // Initialize stack with first query
         let mut stack = vec![(target_id, range_start, range_end)];
         // Track visited ranges per sequence
-        let mut visited_ranges: HashMap<u32, Vec<(i32, i32)>> = HashMap::new();
-        visited_ranges.insert(target_id, vec![(range_start, range_end)]);
+        let mut visited_ranges: HashMap<u32, SortedRanges> = HashMap::new();
+        visited_ranges.insert(target_id, {
+            let mut sr = SortedRanges::new();
+            sr.insert((range_start, range_end));
+            sr
+        });
 
         while let Some((current_target, current_start, current_end)) = stack.pop() {
             if let Some(tree) = self.trees.get(&current_target) {
@@ -306,15 +394,13 @@ impl Impg {
 
                         // Only add non-overlapping portions to the stack for further exploration
                         if metadata.query_id != current_target {
-                            let ranges = visited_ranges.entry(metadata.query_id).or_default();
-                            let new_ranges = subtract_overlapping_ranges(
-                                (adjusted_query_start, adjusted_query_end), 
-                                ranges
-                            );
-
-                            // Add non-overlapping portions to visited and stack
+                            let ranges = visited_ranges.entry(metadata.query_id)
+                                .or_insert_with(|| SortedRanges::new());  // Note the closure here
+                        
+                            let new_ranges = ranges.insert((adjusted_query_start, adjusted_query_end));
+                            
+                            // Add non-overlapping portions to stack
                             for (new_start, new_end) in new_ranges {
-                                ranges.push((new_start, new_end));
                                 stack.push((metadata.query_id, new_start, new_end));
                             }
                         }
@@ -411,98 +497,6 @@ fn project_target_range_through_alignment(
     )
 }
 
-fn split_range(range: (i32, i32), existing: (i32, i32)) -> Vec<(i32, i32)> {
-    let (start, end) = range;
-    let (ex_start, ex_end) = existing;
-    
-    // Validate input range
-    if start > end || ex_start > ex_end {
-        return Vec::new();
-    }
-    
-    if end <= ex_start || start >= ex_end {
-        // If no overlap, return original range
-        return vec![range];
-    }
-    
-    // Pre-allocate for potential splits
-    let mut result = Vec::with_capacity(2);
-    
-    // Add portion before overlap if it exists
-    if start < ex_start {
-        result.push((start, ex_start));
-    }
-    
-    // Add portion after overlap if it exists
-    if end > ex_end {
-        result.push((ex_end, end));
-    }
-    
-    result
-}
-
-fn subtract_overlapping_ranges(new_range: (i32, i32), existing_ranges: &[(i32, i32)]) -> Vec<(i32, i32)> {
-    // Validate input range
-    let (start, end) = new_range;
-    if start > end || existing_ranges.is_empty() {
-        return vec![new_range];
-    }
-
-    // Sort and merge existing ranges first to minimize iterations
-    let mut sorted_ranges: Vec<_> = existing_ranges.iter().cloned().collect();
-    sorted_ranges.sort_by_key(|&(s, _)| s);
-    
-    let mut merged = Vec::with_capacity(sorted_ranges.len());
-    let mut current = sorted_ranges[0];
-    
-    for &range in &sorted_ranges[1..] {
-        if current.1 >= range.0 {
-            current.1 = max(current.1, range.1);
-        } else {
-            merged.push(current);
-            current = range;
-        }
-    }
-    merged.push(current);
-
-    // Process the new range against merged existing ranges
-    let mut result = vec![new_range];
-    let mut temp = Vec::with_capacity(result.len() * 2);
-
-    for existing in merged {
-        if result.is_empty() {
-            break;  // Early exit if no ranges left
-        }
-
-        for current in result.drain(..) {
-            temp.extend(split_range(current, existing));
-        }
-
-        // Swap vectors to avoid allocations
-        std::mem::swap(&mut result, &mut temp);
-        temp.clear();
-    }
-
-    // Optional: merge adjacent ranges in result
-    if !result.is_empty() {
-        result.sort_by_key(|&(s, _)| s);
-        let mut merged = Vec::with_capacity(result.len());
-        let mut current = result[0];
-        
-        for &range in &result[1..] {
-            if current.1 == range.0 {
-                current.1 = range.1;
-            } else {
-                merged.push(current);
-                current = range;
-            }
-        }
-        merged.push(current);
-        result = merged;
-    }
-
-    result
-}
 
 fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, ParseErr> {
     let mut ops = Vec::new();
