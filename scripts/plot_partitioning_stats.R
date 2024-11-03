@@ -34,77 +34,96 @@ process_bed_file <- function(file_path) {
   return(bed_data)
 }
 
-# Modified function to create the sample/haplotype count plot
-create_count_plot <- function(data) {
-  counts <- data %>%
+# Modified function to create separate sample and haplotype count plots
+create_sample_plot <- function(data) {
+  sample_counts <- data %>%
     group_by(partition) %>%
-    summarize(
-      sample_count = n_distinct(sample),
-      haplotype_count = n_distinct(haplotype)
-    ) %>%
-    pivot_longer(
-      cols = c(sample_count, haplotype_count),
-      names_to = "count_type",
-      values_to = "count"
-    )
+    summarize(count = n_distinct(sample))
   
-  ggplot(counts, aes(x = partition, y = count, fill = count_type)) +
-    geom_bar(stat = "identity", position = "dodge") +
-    scale_fill_manual(
-      values = c("sample_count" = "#2E86C1", "haplotype_count" = "#E74C3C"),
-      labels = c("Samples", "Haplotypes")
+  # Calculate y-axis breaks with smaller intervals
+  max_count <- max(sample_counts$count)
+  y_breaks <- seq(0, ceiling(max_count), by = max(1, ceiling(max_count/20)))
+  
+  ggplot(sample_counts, aes(x = factor(partition), y = count)) +
+    geom_bar(stat = "identity", fill = "#2E86C1", width = 0.8) +
+    scale_y_continuous(
+      breaks = y_breaks,
+      limits = c(0, NA),
+      expand = expansion(mult = c(0, 0.05))
     ) +
-    # Add more x-axis ticks
-    scale_x_continuous(breaks = function(x) seq(floor(min(x)), ceiling(max(x)), by = 1)) +
-    # Add more y-axis ticks
-    scale_y_continuous(breaks = function(x) seq(0, ceiling(max(x)), by = 2)) +
     theme_minimal() +
     labs(
-      title = "Sample and Haplotype Counts by Partition",
+      title = "Sample Counts by Partition",
       x = "Partition Number",
-      y = "Count",
-      fill = "Type"
+      y = "Number of Samples"
     ) +
     theme(
       plot.title = element_text(hjust = 0.5),
-      legend.position = "bottom",
-      axis.text.x = element_text(angle = 45, hjust = 1),
+      axis.text.x = element_text(angle = 90, hjust = 1),
       panel.grid.minor = element_line(color = "gray90")
     )
 }
 
-# Modified function to create the sequence length plot
+create_haplotype_plot <- function(data) {
+  haplotype_counts <- data %>%
+    group_by(partition) %>%
+    summarize(count = n_distinct(haplotype))
+  
+  # Calculate y-axis breaks with smaller intervals
+  max_count <- max(haplotype_counts$count)
+  y_breaks <- seq(0, ceiling(max_count), by = max(1, ceiling(max_count/20)))
+  
+  ggplot(haplotype_counts, aes(x = factor(partition), y = count)) +
+    geom_bar(stat = "identity", fill = "#E74C3C", width = 0.8) +
+    scale_y_continuous(
+      breaks = y_breaks,
+      limits = c(0, NA),
+      expand = expansion(mult = c(0, 0.05))
+    ) +
+    theme_minimal() +
+    labs(
+      title = "Haplotype Counts by Partition",
+      x = "Partition Number",
+      y = "Number of Haplotypes"
+    ) +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      axis.text.x = element_text(angle = 90, hjust = 1),
+      panel.grid.minor = element_line(color = "gray90")
+    )
+}
+
 create_length_plot <- function(data) {
   lengths <- data %>%
     group_by(partition) %>%
     summarize(total_length = sum(length) / 1e6)  # Convert to megabases
   
-  ggplot(lengths, aes(x = partition, y = total_length)) +
-    geom_bar(stat = "identity", fill = "#27AE60") +
-    # Add more x-axis ticks
-    scale_x_continuous(breaks = function(x) seq(floor(min(x)), ceiling(max(x)), by = 1)) +
-    # Format y-axis in megabases with comma separator
+  # Calculate y-axis breaks with smaller intervals
+  max_length <- max(lengths$total_length)
+  y_breaks <- seq(0, ceiling(max_length), by = max(1, ceiling(max_length/20)))
+  
+  ggplot(lengths, aes(x = factor(partition), y = total_length)) +
+    geom_bar(stat = "identity", fill = "#27AE60", width = 0.8) +
     scale_y_continuous(
-      breaks = function(x) pretty(c(0, x), n = 10),
-      labels = function(x) format(x, big.mark = ",", scientific = FALSE)
+      breaks = y_breaks,
+      labels = function(x) format(x, big.mark = ",", scientific = FALSE),
+      limits = c(0, NA),
+      expand = expansion(mult = c(0, 0.05))
     ) +
     theme_minimal() +
     labs(
       title = "Total Sequence Length by Partition",
       x = "Partition Number",
-      y = "Total Length (Mb)",  # Updated to show Mb
-      caption = "Values shown in megabases (Mb)"
+      y = "Total Length (Mb)"
     ) +
     theme(
       plot.title = element_text(hjust = 0.5),
-      axis.text.x = element_text(angle = 45, hjust = 1),
+      axis.text.x = element_text(angle = 90, hjust = 1),
       panel.grid.minor = element_line(color = "gray90")
     )
 }
 
-
-
-directory <- '/home/guarracino/Desktop/Garrison/impg/aaa'
+directory <- '/home/guarracino/Desktop/Garrison/impg/'
 
 # List all partition BED files
 bed_files <- list.files(directory, pattern = "partition\\d+\\.bed$", full.names = TRUE)
@@ -112,27 +131,18 @@ bed_files <- list.files(directory, pattern = "partition\\d+\\.bed$", full.names 
 # Process each file and combine results
 all_data <- map_df(bed_files, process_bed_file)
 
-
-# Create plots
-count_plot <- create_count_plot(all_data)
+# Create individual plots
+sample_plot <- create_sample_plot(all_data)
+haplotype_plot <- create_haplotype_plot(all_data)
 length_plot <- create_length_plot(all_data)
 
-# Save plots
-#ggsave("partition_counts.pdf", count_plot, width = 10, height = 6)
-#ggsave("partition_lengths.pdf", length_plot, width = 10, height = 6)
-
 # Combine plots using patchwork
-combined_plot <- count_plot / length_plot +
-  plot_layout(heights = c(1, 1)) +
+combined_plot <- sample_plot / haplotype_plot / length_plot +
+  plot_layout(heights = c(1, 1, 1)) +
   plot_annotation(
-    title = "Partition Analysis",
+    title = "Pangenome Partitions",
     theme = theme(plot.title = element_text(hjust = 0.5, size = 16))
   )
 
 # Save combined plot
-ggsave("partition_analysis.pdf", combined_plot, width = 12, height = 10)
-
-
-
-
-
+ggsave("partition_analysis.pdf", combined_plot, width = 30, height = 12)
