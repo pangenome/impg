@@ -51,7 +51,7 @@ create_sample_plot <- function(data) {
       limits = c(0, NA),
       expand = expansion(mult = c(0, 0.05))
     ) +
-    theme_minimal() +
+    #theme_minimal() +
     labs(
       title = "Sample Counts by Partition",
       x = "Partition Number",
@@ -59,7 +59,7 @@ create_sample_plot <- function(data) {
     ) +
     theme(
       plot.title = element_text(hjust = 0.5),
-      axis.text.x = element_text(angle = 90, hjust = 1),
+      axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 5),
       panel.grid.minor = element_line(color = "gray90")
     )
 }
@@ -80,7 +80,7 @@ create_haplotype_plot <- function(data) {
       limits = c(0, NA),
       expand = expansion(mult = c(0, 0.05))
     ) +
-    theme_minimal() +
+    #theme_minimal() +
     labs(
       title = "Haplotype Counts by Partition",
       x = "Partition Number",
@@ -88,7 +88,7 @@ create_haplotype_plot <- function(data) {
     ) +
     theme(
       plot.title = element_text(hjust = 0.5),
-      axis.text.x = element_text(angle = 90, hjust = 1),
+      axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 5),
       panel.grid.minor = element_line(color = "gray90")
     )
 }
@@ -110,7 +110,7 @@ create_length_plot <- function(data) {
       limits = c(0, NA),
       expand = expansion(mult = c(0, 0.05))
     ) +
-    theme_minimal() +
+    #theme_minimal() +
     labs(
       title = "Total Sequence Length by Partition",
       x = "Partition Number",
@@ -118,7 +118,7 @@ create_length_plot <- function(data) {
     ) +
     theme(
       plot.title = element_text(hjust = 0.5),
-      axis.text.x = element_text(angle = 90, hjust = 1),
+      axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 5),
       panel.grid.minor = element_line(color = "gray90")
     )
 }
@@ -145,7 +145,7 @@ combined_plot <- sample_plot / haplotype_plot / length_plot +
   )
 
 # Save combined plot
-ggsave("partition_analysis.pdf", combined_plot, width = 30, height = 12)
+ggsave("partition_analysis.pdf", combined_plot, width = 26, height = 12)
 
 
 # Read chromosome data
@@ -157,8 +157,6 @@ chr_data <- read_tsv("/home/guarracino/Desktop/Garrison/impg/scerevisiae8.chromo
 all_data_with_chr <- all_data %>%
   left_join(chr_data, by = "name")
 
-data=all_data_with_chr %>%
-  filter(partition == '95')
 create_chromosome_composition_plot <- function(data) {
   # Calculate the total length per chromosome per partition
   chr_composition <- data %>%
@@ -179,7 +177,7 @@ create_chromosome_composition_plot <- function(data) {
       expand = expansion(mult = c(0, 0.05))
     ) +
     scale_fill_viridis_d(option = "turbo") +  # Use viridis color palette
-    theme_minimal() +
+    #theme_minimal() +
     labs(
       title = "Chromosome Composition by Partition",
       x = "Partition Number",
