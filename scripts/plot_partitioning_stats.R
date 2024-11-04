@@ -146,3 +146,92 @@ combined_plot <- sample_plot / haplotype_plot / length_plot +
 
 # Save combined plot
 ggsave("partition_analysis.pdf", combined_plot, width = 30, height = 12)
+
+
+# Read chromosome data
+chr_data <- read_tsv("/home/guarracino/Desktop/Garrison/impg/scerevisiae8.chromosomes.tsv",
+                     col_names = c("name", "chromosome"),
+                     col_types = "cc")
+
+# Join with chromosome data
+all_data_with_chr <- all_data %>%
+  left_join(chr_data, by = "name")
+
+data=all_data_with_chr %>%
+  filter(partition == '95')
+create_chromosome_composition_plot <- function(data) {
+  # Calculate the total length per chromosome per partition
+  chr_composition <- data %>%
+    group_by(partition, chromosome) %>%
+    summarize(total_length = sum(length) / 1e6, .groups = 'drop') %>%
+    group_by(partition) %>%
+    mutate(
+      percentage = total_length / sum(total_length) * 100,
+      partition = factor(partition)
+    )
+  
+  # Create a stacked bar plot
+  ggplot(chr_composition, aes(x = partition, y = percentage, fill = chromosome)) +
+    geom_bar(stat = "identity", width = 0.8) +
+    scale_y_continuous(
+      breaks = seq(0, 100, 10),
+      limits = c(0, 101),
+      expand = expansion(mult = c(0, 0.05))
+    ) +
+    scale_fill_viridis_d(option = "turbo") +  # Use viridis color palette
+    theme_minimal() +
+    labs(
+      title = "Chromosome Composition by Partition",
+      x = "Partition Number",
+      y = "Percentage of Sequence Length",
+      fill = "Chromosome"
+    ) +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 5),
+      panel.grid.minor = element_line(color = "gray90"),
+      legend.position = "bottom"
+    ) +
+    guides(fill = guide_legend(nrow = 2))
+}
+
+# Create chromosome composition plot
+chr_plot <- create_chromosome_composition_plot(all_data_with_chr)
+
+ggsave("partition_analysis.chr-composition.pdf", chr_plot, width = 26, height = 4.5)
+
+
+create_faceted_chromosome_plot <- function(data) {
+  # Calculate the total length per chromosome per partition
+  chr_composition <- data %>%
+    group_by(partition, chromosome) %>%
+    summarize(total_length = sum(length) / 1e6, .groups = 'drop') %>%
+    ungroup()
+  
+  # Create a faceted bar plot
+  ggplot(chr_composition, aes(x = chromosome, y = total_length, fill = chromosome)) +
+    geom_bar(stat = "identity", width = 0.8) +
+    scale_fill_viridis_d(option = "turbo") +  # Use viridis color palette
+    facet_wrap(~partition, scales = "free_y", ncol = 4) +
+    theme_minimal() +
+    labs(
+      title = "Chromosome Distribution by Partition",
+      x = "Chromosome",
+      y = "Total Length (Mb)",
+      fill = "Chromosome"
+    ) +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      axis.text.x = element_text(angle = 90, hjust = 1, size = 16),
+      panel.grid.minor = element_line(color = "gray90"),
+      legend.position = "none",  # Remove legend since x-axis shows the same information
+      strip.text = element_text(size = 18),
+      axis.text = element_text(size = 16)
+    )
+}
+
+# Create faceted chromosome plot
+faceted_chr_plot <- create_faceted_chromosome_plot(all_data_with_chr)
+
+# Save the new plot
+ggsave("partition_analysis.chr-faceted.pdf", faceted_chr_plot, width = 30, height = ceiling(n_distinct(all_data_with_chr$partition)/20) * 16, limitsize = FALSE)
