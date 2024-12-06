@@ -318,7 +318,7 @@ impl Impg {
                     &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref())
                 );
 
-                if adjusted_query_start < adjusted_query_end && !adjusted_cigar.is_empty() {
+                if (adjusted_query_start - adjusted_query_end).abs() > 0 && !adjusted_cigar.is_empty() {
                     let adjusted_interval = (
                         Interval {
                             first: adjusted_query_start,
@@ -376,7 +376,7 @@ impl Impg {
                         &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref())
                     );
 
-                    if adjusted_query_start < adjusted_query_end && !adjusted_cigar.is_empty() {
+                    if (adjusted_query_start - adjusted_query_end).abs() > 0 && !adjusted_cigar.is_empty() {
                         let adjusted_interval = (
                             Interval {
                                 first: adjusted_query_start,
