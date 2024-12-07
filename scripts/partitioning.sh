@@ -27,7 +27,7 @@ cat /dev/null > "$MASK_BED"
 
 # Create initial missing regions file
 MISSING_BED=missing.bed
-cut -f 1,2 "$PAF" | sort | uniq | awk -v OFS='\t' '{print($1,"0",$2,".",".","+")}' > "$MISSING_BED"
+cut -f 1,2 "$PAF" | sort | uniq | awk -v OFS='\t' '{print($1,"0",$2)}' > "$MISSING_BED"
 
 # Initialize partition counter
 num=0
@@ -41,10 +41,10 @@ while [ -s "$WINDOWS_BED" ]; do
         REGION_FORMATTED="${chrom}:${start}-${end}"
 
         echo "-- Querying region $REGION_FORMATTED"
-        impg -p "$PAF" -r "$REGION_FORMATTED" -x | bedtools sort | bedtools merge -s -c 4,5,6 -o distinct -d 10000 > "partition$num.tmp.bed"
+        impg -p "$PAF" -r "$REGION_FORMATTED" -x | bedtools sort | bedtools merge -d 10000 > "partition$num.tmp.bed"
 
         # Apply mask
-        bedtools subtract -a "partition$num.tmp.bed" -b "$MASK_BED" -s > "partition$num.bed"
+        bedtools subtract -a "partition$num.tmp.bed" -b "$MASK_BED" > "partition$num.bed"
 
         # Check if the partition is not empty
         if [ -s "partition$num.bed" ]; then
@@ -52,10 +52,10 @@ while [ -s "$WINDOWS_BED" ]; do
 
             # Update masked regions
             cat "partition$num.bed" "$MASK_BED" | bedtools sort > "$num.mask.bed"
-            bedtools merge -i "$num.mask.bed" -s -c 4,5,6 -o distinct > "$MASK_BED"
+            bedtools merge -i "$num.mask.bed" > "$MASK_BED"
 
             # Update missing regions
-            bedtools subtract -a "$MISSING_BED" -b "partition$num.bed" -s > "$num.missing.bed"
+            bedtools subtract -a "$MISSING_BED" -b "partition$num.bed" > "$num.missing.bed"
             cp "$num.missing.bed" "$MISSING_BED"
 
             num=$((num + 1))
