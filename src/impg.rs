@@ -166,13 +166,16 @@ impl SortedRanges {
             Ok(pos) | Err(pos) => {
                 // Check if we can merge with the previous range
                 if pos > 0 && self.ranges[pos - 1].1 >= start {
+                    // Merge with previous range
                     self.ranges[pos - 1].1 = max(self.ranges[pos - 1].1, end);
                     self.merge_forward_from(pos - 1);
                 } else if pos < self.ranges.len() && end >= self.ranges[pos].0 {
+                    // Merge with current range
                     self.ranges[pos].0 = min(start, self.ranges[pos].0);
                     self.ranges[pos].1 = max(end, self.ranges[pos].1);
                     self.merge_forward_from(pos);
                 } else {
+                    // Insert new range
                     self.ranges.insert(pos, (start, end));
                 }
             }
