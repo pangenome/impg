@@ -24,7 +24,7 @@ This approach allows for fast and memory-efficient projection of sequence ranges
 Getting started with `impg` is straightforward. Here's a basic example of how to use the command-line utility:
 
 ```bash
-impg -p cerevisiae.pan.paf.gz -r S288C#1#chrI:50000-100000 -x
+impg query -p cerevisiae.pan.paf.gz -r S288C#1#chrI:50000-100000 -x
 ```
 
 Your alignments must use `wfmash` default or `minimap2 --eqx` type CIGAR strings which have `=` for matches and `X` for mismatches. The `M` positional match character is not allowed.
@@ -51,7 +51,7 @@ To compile and install `impg` from source, you'll need a recent rust build toolc
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/ekg/impg.git
+   git clone https://github.com/pangenome/impg.git
    ```
 2. Navigate to the `impg` directory:
    ```bash

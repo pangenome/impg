@@ -3,156 +3,149 @@ use std::fs::File;
 use std::io::{self, BufReader, BufWriter};
 use std::num::NonZeroUsize;
 use noodles::bgzf;
-use impg::impg::{Impg, SerializableImpg, AdjustedInterval, check_intervals};
+use impg::impg::{Impg, SerializableImpg, AdjustedInterval};
 use coitrees::IntervalTree;
 use impg::paf;
 use rayon::ThreadPoolBuilder;
 use std::io::BufRead;
 
-/// Command-line tool for querying overlaps in PAF files.
+/// Common options shared between all commands
 #[derive(Parser, Debug)]
-#[clap(author, version, about)]
-struct Args {
+struct CommonOpts {
     /// Path to the PAF file. If specified without an index, the tool will look for or generate an associated index file.
-    #[clap(short='p', long, value_parser)]
-    paf_file: Option<String>,
+    #[clap(short = 'p', long, value_parser)]
+    paf_file: String,
 
     /// Force the regeneration of the index, even if it already exists.
-    #[clap(short='I', long, action)]
+    #[clap(short = 'I', long, action)]
     force_reindex: bool,
 
-    /// Target range in the format `seq_name:start-end`.
-    #[clap(short='r', long, value_parser)]
-    target_range: Option<String>,
-
-    /// Path to the BED file containing target regions.
-    #[clap(short='b', long, value_parser)]
-    target_bed: Option<String>,
-
-    /// Enable transitive overlap requests.
-    #[clap(short='x', long, action)]
-    transitive: bool,
-
-    /// Output results in PAF format.
-    #[clap(short='P', long, action)]
-    output_paf: bool,
-        
-    /// Print stats about the index.
-    #[clap(short='s', long, action)]
-    stats: bool,
-
     /// Number of threads for parallel processing.
-    #[clap(short='t', long, value_parser, default_value_t = NonZeroUsize::new(1).unwrap())]
+    #[clap(short = 't', long, value_parser, default_value_t = NonZeroUsize::new(1).unwrap())]
     num_threads: NonZeroUsize,
+}
 
-    /// Check the projected intervals, reporting the wrong ones (slow, useful for debugging).
-    #[clap(short='c', long, action)]
-    check_intervals: bool,
+/// Command-line tool for querying overlaps in PAF files.
+#[derive(Parser, Debug)]
+#[command(author, version, about, disable_help_subcommand = true)]
+enum Args {
+    /// Query overlaps in the PAF file.
+    Query {
+        #[clap(flatten)]
+        common: CommonOpts,
+        
+        /// Target range in the format `seq_name:start-end`.
+        #[clap(short = 'r', long, value_parser)]
+        target_range: Option<String>,
+
+        /// Path to the BED file containing target regions.
+        #[clap(short = 'b', long, value_parser)]
+        target_bed: Option<String>,
+
+        /// Enable transitive overlap requests.
+        #[clap(short = 'x', long, action)]
+        transitive: bool,
+
+        /// Output results in PAF format.
+        #[clap(short = 'P', long, action)]
+        output_paf: bool,
+
+        /// Check the projected intervals, reporting the wrong ones (slow, useful for debugging).
+        #[clap(short = 'c', long, action)]
+        check_intervals: bool,
+    },
+    /// Print stats about the index.
+    Stats {
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
 }
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
-    // Configure the global thread pool to use the specified number of threads
-    ThreadPoolBuilder::new().num_threads(args.num_threads.into()).build_global().unwrap();
+    match args {
+        Args::Query {
+            common,
+            target_range,
+            target_bed,
+            transitive,
+            output_paf,
+            check_intervals,
+        } => {
+            let impg = initialize_impg(&common)?;
 
-    let impg = match args {
-        Args { paf_file: Some(paf), force_reindex: false, .. } => load_or_generate_index(&paf, args.num_threads)?,
-        Args { paf_file: Some(paf), force_reindex: true, .. } => generate_index(&paf, args.num_threads)?,
-        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "A PAF file must be provided")),
-    };
-
-    if args.stats {
-        print_stats(&impg);
-    }
-
-    if let Some(target_range) = args.target_range {
-        let (target_name, target_range) = parse_target_range(&target_range)?;
-        let results = perform_query(&impg, &target_name, target_range, args.transitive);
-        if args.check_intervals {
-            let invalid_cigars = check_intervals(&impg, &results);
-            if !invalid_cigars.is_empty() {
-                for (row, error_reason) in invalid_cigars {
-                    eprintln!("{}; {}", error_reason, row);
-                }
-                panic!("Invalid intervals encountered.");
-            }
-        }
-        if args.output_paf {
-            // Skip the first element (the input range) for PAF
-            output_results_paf(&impg, results.into_iter().skip(1), &target_name, None);
-        } else {
-            output_results_bed(&impg, results);
-        }
-    } else if let Some(target_bed) = args.target_bed {
-        let targets = parse_bed_file(&target_bed)?;
-        for (target_name, target_range, name) in targets {
-            let results = perform_query(&impg, &target_name, target_range, args.transitive);
-            if args.check_intervals {
-                let invalid_cigars = check_intervals(&impg, &results);
-                if !invalid_cigars.is_empty() {
-                    for (row, error_reason) in invalid_cigars {
-                        eprintln!("{}; {}", error_reason, row);
+            if let Some(target_range) = target_range {
+                let (target_name, target_range) = parse_target_range(&target_range)?;
+                let results = perform_query(&impg, &target_name, target_range, transitive);
+                if check_intervals {
+                    let invalid_cigars = impg::impg::check_intervals(&impg, &results);
+                    if !invalid_cigars.is_empty() {
+                        for (row, error_reason) in invalid_cigars {
+                            eprintln!("{}; {}", error_reason, row);
+                        }
+                        panic!("Invalid intervals encountered.");
                     }
-                    panic!("Invalid intervals encountered.");
                 }
-            }
+                if output_paf {
+                    // Skip the first element (the input range) for PAF
+                    output_results_paf(&impg, results.into_iter().skip(1), &target_name, None);
+                } else {
+                    output_results_bed(&impg, results);
+                }
+            } else if let Some(target_bed) = target_bed {
+                let targets = parse_bed_file(&target_bed)?;
+                for (target_name, target_range, name) in targets {
+                    let results = perform_query(&impg, &target_name, target_range, transitive);
+                    if check_intervals {
+                        let invalid_cigars = impg::impg::check_intervals(&impg, &results);
+                        if !invalid_cigars.is_empty() {
+                            for (row, error_reason) in invalid_cigars {
+                                eprintln!("{}; {}", error_reason, row);
+                            }
+                            panic!("Invalid intervals encountered.");
+                        }
+                    }
 
-           // Skip the first element (the input range) for both PAF and BEDPE
-            let results_iter = results.into_iter().skip(1);
-            if args.output_paf {
-                output_results_paf(&impg, results_iter, &target_name, name);
+                    // Skip the first element (the input range) for both PAF and BEDPE
+                    let results_iter = results.into_iter().skip(1);
+                    if output_paf {
+                        output_results_paf(&impg, results_iter, &target_name, name);
+                    } else {
+                        output_results_bedpe(&impg, results_iter, &target_name, name);
+                    }
+                }
             } else {
-                output_results_bedpe(&impg, results_iter, &target_name, name);
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Either --target-range or --target-bed must be provided for query subcommand",
+                ));
             }
+        },
+        Args::Stats { common } => {
+            let impg = initialize_impg(&common)?;
+
+            print_stats(&impg);
         }
     }
+
     Ok(())
 }
 
-fn parse_bed_file(bed_file: &str) -> io::Result<Vec<(String, (i32, i32), Option<String>)>> {
-    let file = File::open(bed_file)?;
-    let reader = BufReader::new(file);
-    let mut ranges = Vec::new();
+/// Initialize thread pool and load/generate index based on common options
+fn initialize_impg(common: &CommonOpts) -> io::Result<Impg> {
+    // Configure thread pool
+    ThreadPoolBuilder::new()
+        .num_threads(common.num_threads.into())
+        .build_global()
+        .unwrap();
 
-    for line in reader.lines() {
-        let line = line?;
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 3 {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid BED file format"));
-        }
-
-        let (start, end) = parse_range(&parts[1..=2])?;
-        let name = parts.get(3).map(|s| s.to_string());
-        ranges.push((parts[0].to_string(), (start, end), name));
+    // Load or generate index
+    if common.force_reindex {
+        generate_index(&common.paf_file, common.num_threads)
+    } else {
+        load_or_generate_index(&common.paf_file, common.num_threads)
     }
-
-    Ok(ranges)
-}
-
-fn parse_target_range(target_range: &str) -> io::Result<(String, (i32, i32))> {
-    let parts: Vec<&str> = target_range.rsplitn(2, ':').collect();
-    if parts.len() != 2 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Target range format should be `seq_name:start-end`"));
-    }
-
-    let (start, end) = parse_range(&parts[0].split('-').collect::<Vec<_>>())?;
-    Ok((parts[1].to_string(), (start, end)))
-}
-
-fn parse_range(range_parts: &[&str]) -> io::Result<(i32, i32)> {
-    if range_parts.len() != 2 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Range format should be `start-end`"));
-    }
-
-    let start = range_parts[0].parse::<i32>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid start value"))?;
-    let end = range_parts[1].parse::<i32>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid end value"))?;
-
-    if start >= end {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Start value must be less than end value"));
-    }
-
-    Ok((start, end))
 }
 
 fn load_or_generate_index(paf_file: &str, num_threads: NonZeroUsize) -> io::Result<Impg> {
@@ -162,6 +155,26 @@ fn load_or_generate_index(paf_file: &str, num_threads: NonZeroUsize) -> io::Resu
     } else {
         generate_index(paf_file, num_threads)
     }
+}
+
+fn load_index(paf_file: &str) -> io::Result<Impg> {
+    let index_file = format!("{}.impg", paf_file);
+    
+    let paf_file_metadata = std::fs::metadata(paf_file)?;
+    let index_file_metadata = std::fs::metadata(index_file.clone())?;
+    if let (Ok(paf_file_ts), Ok(index_file_ts)) = (paf_file_metadata.modified(), index_file_metadata.modified()) {
+        if paf_file_ts > index_file_ts
+        {
+            eprintln!("WARNING:\tPAF file has been modified since impg index creation.");
+        }
+    } else {
+        eprintln!("WARNING:\tUnable to compare timestamps of PAF file and impg index file. PAF file may have been modified since impg index creation.");
+    }
+
+    let file = File::open(index_file)?;
+    let reader = BufReader::new(file);
+    let serializable: SerializableImpg = bincode::deserialize_from(reader).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to deserialize index: {:?}", e)))?;
+    Ok(Impg::from_paf_and_serializable(paf_file, serializable))
 }
 
 fn generate_index(paf_file: &str, num_threads: NonZeroUsize) -> io::Result<Impg> {
@@ -184,24 +197,49 @@ fn generate_index(paf_file: &str, num_threads: NonZeroUsize) -> io::Result<Impg>
     Ok(impg)
 }
 
-fn load_index(paf_file: &str) -> io::Result<Impg> {
-    let index_file = format!("{}.impg", paf_file);
-    
-    let paf_file_metadata = std::fs::metadata(paf_file)?;
-    let index_file_metadata = std::fs::metadata(index_file.clone())?;
-    if let (Ok(paf_file_ts), Ok(index_file_ts)) = (paf_file_metadata.modified(), index_file_metadata.modified()) {
-        if paf_file_ts > index_file_ts
-        {
-            eprintln!("WARNING:\tPAF file has been modified since impg index creation.");
-        }
-    } else {
-        eprintln!("WARNING:\tUnable to compare timestamps of PAF file and impg index file. PAF file may have been modified since impg index creation.");
+fn parse_target_range(target_range: &str) -> io::Result<(String, (i32, i32))> {
+    let parts: Vec<&str> = target_range.rsplitn(2, ':').collect();
+    if parts.len() != 2 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Target range format should be `seq_name:start-end`"));
     }
 
-    let file = File::open(index_file)?;
+    let (start, end) = parse_range(&parts[0].split('-').collect::<Vec<_>>())?;
+    Ok((parts[1].to_string(), (start, end)))
+}
+
+fn parse_bed_file(bed_file: &str) -> io::Result<Vec<(String, (i32, i32), Option<String>)>> {
+    let file = File::open(bed_file)?;
     let reader = BufReader::new(file);
-    let serializable: SerializableImpg = bincode::deserialize_from(reader).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to deserialize index: {:?}", e)))?;
-    Ok(Impg::from_paf_and_serializable(paf_file, serializable))
+    let mut ranges = Vec::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 3 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid BED file format"));
+        }
+
+        let (start, end) = parse_range(&parts[1..=2])?;
+        let name = parts.get(3).map(|s| s.to_string());
+        ranges.push((parts[0].to_string(), (start, end), name));
+    }
+
+    Ok(ranges)
+}
+
+fn parse_range(range_parts: &[&str]) -> io::Result<(i32, i32)> {
+    if range_parts.len() != 2 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Range format should be `start-end`"));
+    }
+
+    let start = range_parts[0].parse::<i32>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid start value"))?;
+    let end = range_parts[1].parse::<i32>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid end value"))?;
+
+    if start >= end {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Start value must be less than end value"));
+    }
+
+    Ok((start, end))
 }
 
 fn perform_query(impg: &Impg, target_name: &str, target_range: (i32, i32), transitive: bool) -> Vec<AdjustedInterval> {
