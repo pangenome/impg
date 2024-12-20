@@ -16,6 +16,8 @@ FASTA_FAI=$2
 AVG_WINDOW_SIZE=$3
 SAMPLE=$4
 
+MIN_LEN=5000
+
 # Prepare initial windows
 WINDOWS_BED=windows.bed
 grep $SAMPLE "$FASTA_FAI" -w | awk -v OFS='\t' '{print($1,"0",$2)}' > "$SAMPLE.bed"
@@ -58,6 +60,12 @@ while [ -s "$WINDOWS_BED" ]; do
             bedtools subtract -a "$MISSING_BED" -b "partition$num.bed" > "$num.missing.bed"
             cp "$num.missing.bed" "$MISSING_BED"
 
+            # Extend short intervals
+            awk -v min_len="$MIN_LEN" -v OFS='\t' '{len=$3-$2; if(len<min_len) print}' "partition$num.bed" > "partition$num.short.bed"
+            awk -v min_len="$MIN_LEN" -v OFS='\t' '{len=$3-$2; if(len>=min_len) print}' "partition$num.bed" > "partition$num.long.bed"
+            bedtools slop -i "partition$num.short.bed" -g "$FASTA_FAI" -b $MIN_LEN > "partition$num.slop.bed"
+            cat "partition$num.slop.bed" "partition$num.long.bed" | bedtools sort > "partition$num.bed"
+
             num=$((num + 1))
         fi
     done < $WINDOWS_BED
@@ -76,4 +84,4 @@ while [ -s "$WINDOWS_BED" ]; do
 done
 
 # Cleanup
-rm -f "$SAMPLE.bed" "$WINDOWS_BED" "$MASK_BED" "$MISSING_BED" partition[0-9]*.tmp.bed [0-9]*.{mask,missing,remaining,new}.bed
+rm -f "$SAMPLE.bed" "$WINDOWS_BED" "$MASK_BED" "$MISSING_BED" partition[0-9]*.tmp.bed rm partition[0-9]*.{short,long,slop}.bed [0-9]*.{mask,missing,remaining,new}.bed
