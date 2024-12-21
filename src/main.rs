@@ -29,7 +29,28 @@ struct CommonOpts {
 #[derive(Parser, Debug)]
 #[command(author, version, about, disable_help_subcommand = true)]
 enum Args {
-    /// Query overlaps in the PAF file.
+    /// Partition the alignment
+    Partition {
+        #[clap(flatten)]
+        common: CommonOpts,
+
+        /// Path to the FASTA index file (.fai).
+        #[clap(short = 'f', long, value_parser)]
+        fasta_index: String,
+
+        /// Window size for partitioning.
+        #[clap(short = 'w', long, value_parser)]
+        window_size: usize,
+        
+        /// Sample/contig name to process.
+        #[clap(short = 's', long, value_parser)]
+        sample_name: String,
+
+        /// Minimum length for intervals (default: 5000).
+        #[clap(long, value_parser, default_value_t = 5000)]
+        min_length: usize,
+    },
+    /// Query overlaps in the alignment.
     Query {
         #[clap(flatten)]
         common: CommonOpts,
@@ -54,7 +75,7 @@ enum Args {
         #[clap(short = 'c', long, action)]
         check_intervals: bool,
     },
-    /// Print stats about the index.
+    /// Print alignment statistics.
     Stats {
         #[clap(flatten)]
         common: CommonOpts,
@@ -65,6 +86,16 @@ fn main() -> io::Result<()> {
     let args = Args::parse();
 
     match args {
+        Args::Partition {
+            common,
+            fasta_index,
+            window_size,
+            sample_name,
+            min_length,
+        } => {
+            let impg = initialize_impg(&common)?;
+            partition_alignments(&impg, &fasta_index, window_size, &sample_name, min_length)?;
+        },
         Args::Query {
             common,
             target_range,
@@ -126,7 +157,7 @@ fn main() -> io::Result<()> {
             let impg = initialize_impg(&common)?;
 
             print_stats(&impg);
-        }
+        },
     }
 
     Ok(())
@@ -195,6 +226,17 @@ fn generate_index(paf_file: &str, num_threads: NonZeroUsize) -> io::Result<Impg>
     bincode::serialize_into(writer, &serializable).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to serialize index: {:?}", e)))?;
 
     Ok(impg)
+}
+
+fn partition_alignments(
+    impg: &Impg,
+    fasta_index: &str,
+    window_size: usize,
+    sample_name: &str,
+    min_length: usize,
+) -> io::Result<()> {
+    
+    Ok(())
 }
 
 fn parse_target_range(target_range: &str) -> io::Result<(String, (i32, i32))> {
