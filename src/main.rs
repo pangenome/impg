@@ -261,6 +261,17 @@ fn partition_alignments(
             format!("No sequences with prefix {} found in sequence index", sequence_prefix),
         ));
     }
+    // Natural sort by sequence name
+    sample_regions.sort_by(|a, b| {
+        natord::compare(&a.0, &b.0)
+    });
+
+    if debug {
+        debug!("Found {} sequences with prefix {}", sample_regions.len(), sequence_prefix);
+        for (chrom, start, end) in &sample_regions {
+            debug!("  Sequence: {}:{}-{}", chrom, start, end);
+        }
+    }
 
     // Create windows from sample regions
     let mut windows = Vec::new();
@@ -285,46 +296,45 @@ fn partition_alignments(
     
     // Initialize missing regions from sequence index
     let mut missing_regions: HashMap<String, Vec<(usize, usize)>> = (0..impg.seq_index.len() as u32)
-    .map(|id| {
-        let name = impg.seq_index.get_name(id).unwrap();
-        let len = impg.seq_index.get_len_from_id(id).unwrap();
-        (name.to_string(), vec![(0, len)])
-    })
-    .collect();
+        .map(|id| {
+            let name = impg.seq_index.get_name(id).unwrap();
+            let len = impg.seq_index.get_len_from_id(id).unwrap();
+            (name.to_string(), vec![(0, len)])
+        })
+        .collect();
 
     let mut partition_num = 0;
     
     info!("Partitioning");
 
-    while !windows.is_empty() {       
-        if debug {
-            debug!("Processing new window set");
-            
-            debug!("  Missing {} regions in {} sequences", 
-            missing_regions.values().map(|ranges| ranges.len()).sum::<usize>(),
-            missing_regions.len()
-            );
-            for (chrom, ranges) in &missing_regions {
-                for &(start, end) in ranges {
-                    debug!("    Region: {}:{}-{}", chrom, start, end);
+    while !windows.is_empty() {
+        for (chrom, start, end) in windows.iter() {           
+            if debug {
+                debug!("Processing new window set");
+                
+                debug!("  Querying region {}:{}-{}", chrom, start, end);
+
+                debug!("  Missing {} regions in {} sequences", 
+                    missing_regions.values().map(|ranges| ranges.len()).sum::<usize>(),
+                    missing_regions.len()
+                );
+                for (chrom, ranges) in &missing_regions {
+                    for &(start, end) in ranges {
+                        debug!("    Region: {}:{}-{}", chrom, start, end);
+                    }
+                }
+                
+                debug!("  Masked {} regions in {} sequences", 
+                    masked_regions.values().map(|ranges| ranges.len()).sum::<usize>(),
+                    masked_regions.len()
+                );
+                for (chrom, ranges) in &masked_regions {
+                    for &(start, end) in ranges {
+                        debug!("    Region: {}:{}-{}", chrom, start, end);
+                    }
                 }
             }
-            
-            debug!("  Masked {} regions in {} sequences", 
-                masked_regions.values().map(|ranges| ranges.len()).sum::<usize>(),
-                masked_regions.len()
-            );
-            for (chrom, ranges) in &masked_regions {
-                for &(start, end) in ranges {
-                    debug!("    Region: {}:{}-{}", chrom, start, end);
-                }
-            }
-        }
-       
-        for (chrom, start, end) in windows.iter() {
-            let region = format!("{}:{}-{}", chrom, start, end);
-            debug!("  Querying region {}", region);
-            
+
             // Query overlaps for current window
             let mut overlaps = impg.query_transitive(
                 impg.seq_index.get_id(chrom).unwrap(), 
@@ -334,66 +344,26 @@ fn partition_alignments(
 
             if debug {
                 debug!("  Collected {} query overlaps", overlaps.len());
-                overlaps.sort_by_key(|(query, _, target)| (query.metadata, query.first <= query.last, target.first));
-                for (query_interval, _cigar, target_interval_) in &overlaps {
-                    let query_name = impg.seq_index.get_name(query_interval.metadata).unwrap();
-                    //let cigar_str : String = cigar.iter().map(|op| format!("{}{}", op.len(), op.op())).collect();
-                    // debug!("    Region: {}:{}-{} --- Target: {}:{}-{}",
-                    //     query_name, query_interval.first, query_interval.last, chrom, target_interval_.first, target_interval_.last);
-                }
+                // overlaps.sort_by_key(|(query, _, target)| (query.metadata, query.first <= query.last, target.first));
+                // for (query_interval, _, target_interval_) in &overlaps {
+                //     let query_name = impg.seq_index.get_name(query_interval.metadata).unwrap();
+                //     debug!("    Region: {}:{}-{} --- Target: {}:{}-{}",
+                //         query_name, query_interval.first, query_interval.last, chrom, target_interval_.first, target_interval_.last);
+                // }
             }
 
             // Merge query overlaps that are close to each other (bedtools sort | bedtools merge -d 10000).
             // Ignore CIGAR strings and target intervals.
-            if !overlaps.is_empty() {
-                overlaps.sort_by_key(|(query_interval, _, _)| {
-                    let start = std::cmp::min(query_interval.first, query_interval.last);
-                    (query_interval.metadata, start)
-                });
-            
-                let mut write_idx = 0;
-                let mut current_idx = 0;
-                
-                for read_idx in 1..overlaps.len() {
-                    let interval = &overlaps[read_idx].0;
-                    let current = &overlaps[current_idx].0;
-                    
-                    let interval_min = std::cmp::min(interval.first, interval.last);
-                    let interval_max = std::cmp::max(interval.first, interval.last);
-                    let current_min = std::cmp::min(current.first, current.last);
-                    let current_max = std::cmp::max(current.first, current.last);
-            
-                    if interval.metadata != current.metadata || interval_min > current_max + 10000 {
-                        // Save current merged interval if it's not already in place
-                        if current_idx != write_idx {
-                            overlaps[write_idx].0 = overlaps[current_idx].0;
-                        }
-                        write_idx += 1;
-                        current_idx = read_idx;
-                    } else {
-                        // Extend current interval with global min/max
-                        overlaps[current_idx].0.first = std::cmp::min(current_min, interval_min);
-                        overlaps[current_idx].0.last = std::cmp::max(current_max, interval_max);
-                    }
-                }
-                
-                // Add last interval if it's not already in place
-                if current_idx != write_idx {
-                    overlaps[write_idx].0 = overlaps[current_idx].0;
-                }
-                
-                // Truncate vector to new size
-                overlaps.truncate(write_idx + 1);
-            }
+            debug!("  Merging overlaps closer than 10kb");
+            merge_overlaps(&mut overlaps, 10000);
 
             if debug {
                 debug!("  Collected {} query overlaps after merging", overlaps.len());
-                for (query_interval, _cigar, target_interval_) in &overlaps {
-                    let query_name = impg.seq_index.get_name(query_interval.metadata).unwrap();
-                    //let cigar_str : String = cigar.iter().map(|op| format!("{}{}", op.len(), op.op())).collect();
-                    // debug!("    Region: {}:{}-{} --- Target: {}:{}-{}",
-                    //     query_name, query_interval.first, query_interval.last, chrom, target_interval_.first, target_interval_.last);
-                }
+                // for (query_interval, _, target_interval_) in &overlaps {
+                //     let query_name = impg.seq_index.get_name(query_interval.metadata).unwrap();
+                //     debug!("    Region: {}:{}-{} --- Target: {}:{}-{}",
+                //         query_name, query_interval.first, query_interval.last, chrom, target_interval_.first, target_interval_.last);
+                // }
             }
 
             // Apply mask by excluding masked regions (bedtools subtract -a "partition$num.tmp.bed" -b "$MASK_BED")
@@ -407,17 +377,16 @@ fn partition_alignments(
                     //     debug!("    Overlap: {}:{}-{}", chrom, start, end);
                     // }
 
-                    debug!("  Extending short intervals");
+                    debug!("  Updating mask and missing regions");
                 }
 
-                debug!("  Updating mask and missing regions");
                 update_masked_and_missing_regions(&mut masked_regions, &mut missing_regions, &overlaps, impg);            
-
+                
                 // Extend short intervals in place before updating masks
+                debug!("  Extending short intervals");
                 extend_short_intervals(&mut overlaps, impg, min_length);
 
-                info!("  Writing partition {} with {} regions", partition_num, overlaps.len());
-                // Write partition to file
+                info!("  Writing partition {} with {} regions (query {}:{}-{})", partition_num, overlaps.len(), chrom, start, end);
                 let mut partition_file = File::create(format!("partition{}.bed", partition_num))?;
                 for (query_interval, _, _) in &overlaps {
                     let name = impg.seq_index.get_name(query_interval.metadata).unwrap();
@@ -431,7 +400,7 @@ fn partition_alignments(
 
                 partition_num += 1;
             } else {
-                panic!("No overlaps found for region {}", region);
+                debug!("  No overlaps found for region {}:{}-{}", chrom, start, end);
             }
         }
 
@@ -473,6 +442,51 @@ fn partition_alignments(
     info!("Partitioned into {} regions", partition_num);
 
     Ok(())
+}
+
+fn merge_overlaps(
+    overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>,
+    max_gap: i32) {
+    if !overlaps.is_empty() {
+        overlaps.sort_by_key(|(query_interval, _, _)| {
+            let start = std::cmp::min(query_interval.first, query_interval.last);
+            (query_interval.metadata, start)
+        });
+    
+        let mut write_idx = 0;
+        let mut current_idx = 0;
+        
+        for read_idx in 1..overlaps.len() {
+            let interval = &overlaps[read_idx].0;
+            let current = &overlaps[current_idx].0;
+            
+            let interval_min = std::cmp::min(interval.first, interval.last);
+            let interval_max = std::cmp::max(interval.first, interval.last);
+            let current_min = std::cmp::min(current.first, current.last);
+            let current_max = std::cmp::max(current.first, current.last);
+    
+            if interval.metadata != current.metadata || interval_min > current_max + max_gap {
+                // Save current merged interval if it's not already in place
+                if current_idx != write_idx {
+                    overlaps[write_idx].0 = overlaps[current_idx].0;
+                }
+                write_idx += 1;
+                current_idx = read_idx;
+            } else {
+                // Extend current interval with global min/max
+                overlaps[current_idx].0.first = std::cmp::min(current_min, interval_min);
+                overlaps[current_idx].0.last = std::cmp::max(current_max, interval_max);
+            }
+        }
+        
+        // Add last interval if it's not already in place
+        if current_idx != write_idx {
+            overlaps[write_idx].0 = overlaps[current_idx].0;
+        }
+        
+        // Truncate vector to new size
+        overlaps.truncate(write_idx + 1);
+    }
 }
 
 fn subtract_masked_regions(
@@ -639,7 +653,7 @@ fn merge_ranges(ranges: &mut Vec<(usize, usize)>) {
     let mut current = ranges[0];
 
     for &(start, end) in ranges.iter().skip(1) {
-        if start <= current.1 + 1 {
+        if start <= current.1 {
             // Ranges overlap or are adjacent, merge them
             current.1 = std::cmp::max(current.1, end);
         } else {
