@@ -252,7 +252,7 @@ fn partition_alignments(
         let seq_name = impg.seq_index.get_name(seq_id).unwrap();
         if seq_name.starts_with(sequence_prefix) {
             let seq_length = impg.seq_index.get_len_from_id(seq_id).unwrap();
-            sample_regions.push((seq_name.to_string(), 0, seq_length));
+            sample_regions.push((seq_id, 0, seq_length));
         }
     }
     if sample_regions.is_empty() {
@@ -263,12 +263,15 @@ fn partition_alignments(
     }
     // Natural sort by sequence name
     sample_regions.sort_by(|a, b| {
-        natord::compare(&a.0, &b.0)
+        let chrom_a = impg.seq_index.get_name(a.0).unwrap();
+        let chrom_b = impg.seq_index.get_name(b.0).unwrap();
+        natord::compare(&chrom_a, &chrom_b)
     });
 
     if debug {
         debug!("Found {} sequences with prefix {}", sample_regions.len(), sequence_prefix);
-        for (chrom, start, end) in &sample_regions {
+        for (seq_id, start, end) in &sample_regions {
+            let chrom = impg.seq_index.get_name(*seq_id).unwrap();
             debug!("  Sequence: {}:{}-{}", chrom, start, end);
         }
     }
@@ -292,15 +295,11 @@ fn partition_alignments(
     }
 
     // Initialize masked regions
-    let mut masked_regions: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+    let mut masked_regions: HashMap<u32, Vec<(usize, usize)>> = HashMap::new();
     
     // Initialize missing regions from sequence index
-    let mut missing_regions: HashMap<String, Vec<(usize, usize)>> = (0..impg.seq_index.len() as u32)
-        .map(|id| {
-            let name = impg.seq_index.get_name(id).unwrap();
-            let len = impg.seq_index.get_len_from_id(id).unwrap();
-            (name.to_string(), vec![(0, len)])
-        })
+    let mut missing_regions: HashMap<u32, Vec<(usize, usize)>> = (0..impg.seq_index.len() as u32)
+        .map(|id| (id, vec![(0, impg.seq_index.get_len_from_id(id).unwrap())]))
         .collect();
 
     let mut partition_num = 0;
@@ -308,10 +307,12 @@ fn partition_alignments(
     info!("Partitioning");
 
     while !windows.is_empty() {
-        for (chrom, start, end) in windows.iter() {           
+        for (seq_id, start, end) in windows.iter() {     
+            let chrom = impg.seq_index.get_name(*seq_id).unwrap();
+
             if debug {
                 debug!("Processing new window set");
-                
+
                 debug!("  Querying region {}:{}-{}", chrom, start, end);
 
                 debug!("  Missing {} regions in {} sequences", 
@@ -336,11 +337,7 @@ fn partition_alignments(
             }
 
             // Query overlaps for current window
-            let mut overlaps = impg.query_transitive(
-                impg.seq_index.get_id(chrom).unwrap(), 
-                *start as i32, 
-                *end as i32
-            );
+            let mut overlaps = impg.query_transitive(*seq_id, *start as i32, *end as i32);
 
             if debug {
                 debug!("  Collected {} query overlaps", overlaps.len());
@@ -352,9 +349,8 @@ fn partition_alignments(
                 // }
             }
 
-            // Merge query overlaps that are close to each other (bedtools sort | bedtools merge -d 10000).
             // Ignore CIGAR strings and target intervals.
-            debug!("  Merging overlaps closer than 10kb");
+            debug!("  Merging overlaps closer than 10kb"); // bedtools sort | bedtools merge -d 10000
             merge_overlaps(&mut overlaps, 10000);
 
             if debug {
@@ -366,9 +362,8 @@ fn partition_alignments(
                 // }
             }
 
-            // Apply mask by excluding masked regions (bedtools subtract -a "partition$num.tmp.bed" -b "$MASK_BED")
-            debug!("  Subtracting masked regions");
-            overlaps = subtract_masked_regions(&mut overlaps, impg, &masked_regions);
+            debug!("  Excluding masked regions"); // bedtools subtract -a "partition$num.tmp.bed" -b "$MASK_BED"
+            overlaps = subtract_masked_regions(&mut overlaps, &masked_regions);
 
             if !overlaps.is_empty() {
                 if debug {
@@ -380,7 +375,7 @@ fn partition_alignments(
                     debug!("  Updating mask and missing regions");
                 }
 
-                update_masked_and_missing_regions(&mut masked_regions, &mut missing_regions, &overlaps, impg);            
+                update_masked_and_missing_regions(&mut masked_regions, &mut missing_regions, &overlaps);            
                 
                 // Extend short intervals in place before updating masks
                 debug!("  Extending short intervals");
@@ -412,26 +407,26 @@ fn partition_alignments(
         let mut new_windows = Vec::new();
 
         // Find longest remaining region
-        let mut longest_region: Option<(String, usize, usize)> = None;
+        let mut longest_region: Option<(u32, usize, usize)> = None;
         let mut max_length = 0;
         
         // Scan through missing regions to find the longest one
-        for (seq_name, ranges) in missing_regions.iter() {
+        for (seq_id, ranges) in missing_regions.iter() {
             for &(start, end) in ranges {
                 let length = end - start;
                 if length > max_length {
                     max_length = length;
-                    longest_region = Some((seq_name.clone(), start, end));
+                    longest_region = Some((*seq_id, start, end));
                 }
             }
         }
         
         // Create new windows from the longest region
-        if let Some((seq_name, start, end)) = longest_region {
+        if let Some((seq_id, start, end)) = longest_region {
             let mut pos = start;
             while pos < end {
                 let window_end = std::cmp::min(pos + window_size, end);
-                new_windows.push((seq_name.clone(), pos, window_end));
+                new_windows.push((seq_id, pos, window_end));
                 pos = window_end;
             }
         }
@@ -491,16 +486,13 @@ fn merge_overlaps(
 
 fn subtract_masked_regions(
     overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>,
-    impg: &Impg,
-    masked_regions: &HashMap<String, Vec<(usize, usize)>>
+    masked_regions: &HashMap<u32, Vec<(usize, usize)>>
 ) -> Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
     let mut result = Vec::new();
 
-    for (query_interval, cigar, target_interval) in overlaps.drain(..) {
-        let seq_name = impg.seq_index.get_name(query_interval.metadata).unwrap().to_string();
-        
+    for (query_interval, cigar, target_interval) in overlaps.drain(..) {       
         // Get masked regions for this sequence
-        if let Some(masks) = masked_regions.get(&seq_name) {
+        if let Some(masks) = masked_regions.get(&query_interval.metadata) {
             let (start, end) = if query_interval.first <= query_interval.last {
                 (query_interval.first as usize, query_interval.last as usize)
             } else {
@@ -568,21 +560,19 @@ fn subtract_masked_regions(
 }
 
 fn update_masked_and_missing_regions(
-    masked_regions: &mut HashMap<String, Vec<(usize, usize)>>,
-    missing_regions: &mut HashMap<String, Vec<(usize, usize)>>,
-    overlaps: &Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>,
-    impg: &Impg,
+    masked_regions: &mut HashMap<u32, Vec<(usize, usize)>>,
+    missing_regions: &mut HashMap<u32, Vec<(usize, usize)>>,
+    overlaps: &Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>
 ) {
     // First, collect all new regions to be masked by sequence
-    let mut new_masks: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+    let mut new_masks: HashMap<u32, Vec<(usize, usize)>> = HashMap::new();
     for (query_interval, _, _) in overlaps {
-        let seq_name = impg.seq_index.get_name(query_interval.metadata).unwrap().to_string();
         let (start, end) = if query_interval.first <= query_interval.last {
             (query_interval.first as usize, query_interval.last as usize)
         } else {
             (query_interval.last as usize, query_interval.first as usize)
         };
-        new_masks.entry(seq_name).or_default().push((start, end));
+        new_masks.entry(query_interval.metadata).or_default().push((start, end));
     }
 
     // Update masked regions with new masks
