@@ -622,30 +622,27 @@ fn update_masked_and_missing_regions(
 }
 
 fn merge_ranges(ranges: &mut Vec<(usize, usize)>) {
-    if ranges.is_empty() {
+    if ranges.len() <= 1 {
         return;
     }
 
     // Sort ranges by start position
-    ranges.sort_by_key(|&(start, _)| start);
+    ranges.sort_unstable_by_key(|&(start, _)| start);
 
     // Merge overlapping ranges
-    let mut merged = Vec::new();
-    let mut current = ranges[0];
-
-    for &(start, end) in ranges.iter().skip(1) {
-        if start <= current.1 {
-            // Ranges overlap or are adjacent, merge them
-            current.1 = std::cmp::max(current.1, end);
+    let mut write_idx = 0;
+    let mut current_end = ranges[0].1;
+    for i in 1..ranges.len() {
+        if ranges[i].0 <= current_end {
+            current_end = current_end.max(ranges[i].1);
+            ranges[write_idx].1 = current_end;
         } else {
-            // Ranges don't overlap, add current to result and start new current
-            merged.push(current);
-            current = (start, end);
+            write_idx += 1;
+            ranges[write_idx] = ranges[i];
+            current_end = ranges[i].1;
         }
     }
-    merged.push(current);
-
-    *ranges = merged;
+    ranges.truncate(write_idx + 1);
 }
 
 fn extend_short_intervals(
