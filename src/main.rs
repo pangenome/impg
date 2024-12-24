@@ -382,16 +382,7 @@ fn partition_alignments(
                 extend_short_intervals(&mut overlaps, impg, min_length);
 
                 info!("  Writing partition {} with {} regions (query {}:{}-{})", partition_num, overlaps.len(), chrom, start, end);
-                let mut partition_file = File::create(format!("partition{}.bed", partition_num))?;
-                for (query_interval, _, _) in &overlaps {
-                    let name = impg.seq_index.get_name(query_interval.metadata).unwrap();
-                    let (start, end) = if query_interval.first <= query_interval.last {
-                        (query_interval.first, query_interval.last)
-                    } else {
-                        (query_interval.last, query_interval.first)
-                    };
-                    writeln!(partition_file, "{}\t{}\t{}", name, start, end)?;
-                }
+                write_partition(partition_num, &overlaps, impg)?;
 
                 partition_num += 1;
             } else {
@@ -691,6 +682,37 @@ fn extend_short_intervals(
     overlaps.sort_unstable_by_key(|(query_interval, _, _)| {
         (query_interval.metadata, std::cmp::min(query_interval.first, query_interval.last))
     });
+}
+
+fn write_partition(
+    partition_num: usize,
+    overlaps: &[(Interval<u32>, Vec<CigarOp>, Interval<u32>)],
+    impg: &Impg,
+) -> io::Result<()> {
+    // Only performing an actual file system write (a system call) when:
+    // - The buffer is full
+    // - flush() is called
+    // - The BufWriter is dropped
+
+    // Create file with buffer
+    let file = File::create(format!("partition{}.bed", partition_num))?;
+    let mut writer = BufWriter::new(file);
+    
+    // Write all overlaps to buffered writer
+    for (query_interval, _, _) in overlaps {
+        let name = impg.seq_index.get_name(query_interval.metadata).unwrap();
+        let (start, end) = if query_interval.first <= query_interval.last {
+            (query_interval.first, query_interval.last)
+        } else {
+            (query_interval.last, query_interval.first)
+        };
+        
+        writeln!(writer, "{}\t{}\t{}", name, start, end)?;
+    }
+    
+    // Ensure all data is written to file
+    writer.flush()?;
+    Ok(())
 }
 
 fn parse_target_range(target_range: &str) -> io::Result<(String, (i32, i32))> {
