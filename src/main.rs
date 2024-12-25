@@ -48,8 +48,12 @@ enum Args {
         #[clap(short = 's', long, value_parser)]
         sequence_prefix: String,
 
+        /// Maximum distance between intervals to merge (default: 10000).
+        #[clap(short = 'd', long, value_parser, default_value_t = 10000)]
+        merge_distance: usize,
+
         /// Minimum length for intervals (default: 5000).
-        #[clap(long, value_parser, default_value_t = 5000)]
+        #[clap(short = 'l', long, value_parser, default_value_t = 5000)]
         min_length: usize,
     },
     /// Query overlaps in the alignment.
@@ -93,9 +97,10 @@ fn main() -> io::Result<()> {
             window_size,
             sequence_prefix,
             min_length,
+            merge_distance
         } => {
             let impg = initialize_impg(&common)?;
-            partition_alignments(&impg, window_size, &sequence_prefix, min_length, common.verbose > 1)?;
+            partition_alignments(&impg, window_size, &sequence_prefix, min_length, merge_distance, common.verbose > 1)?;
         },
         Args::Query {
             common,
@@ -244,6 +249,7 @@ fn partition_alignments(
     window_size: usize,
     sequence_prefix: &str,
     min_length: usize,
+    merge_distance: usize,
     debug: bool,
 ) -> io::Result<()> {
     // Get all sequences with the given prefix
@@ -356,9 +362,9 @@ fn partition_alignments(
             }
 
             // Ignore CIGAR strings and target intervals.
-            debug!("  Merging overlaps closer than 10kb"); // bedtools sort | bedtools merge -d 10000
+            debug!("  Merging overlaps closer than {}bb", merge_distance); // bedtools sort | bedtools merge -d merge_distance
             let merge_start = Instant::now();
-            merge_overlaps(&mut overlaps, 10000);
+            merge_overlaps(&mut overlaps, merge_distance as i32);
             let merge_time = merge_start.elapsed();
 
             if debug {
