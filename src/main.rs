@@ -432,45 +432,34 @@ fn partition_alignments(
 
 fn merge_overlaps(
     overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>,
-    max_gap: i32) {
-    if !overlaps.is_empty() {
-        overlaps.sort_by_key(|(query_interval, _, _)| {
-            let start = std::cmp::min(query_interval.first, query_interval.last);
-            (query_interval.metadata, start)
+    max_gap: i32
+) {
+    if overlaps.len() > 1 {
+        // Sort by sequence ID and start position
+        overlaps.sort_unstable_by_key(|(query_interval, _, _)| {
+            (query_interval.metadata, std::cmp::min(query_interval.first, query_interval.last))
         });
-    
+
         let mut write_idx = 0;
-        let mut current_idx = 0;
-        
         for read_idx in 1..overlaps.len() {
-            let interval = &overlaps[read_idx].0;
-            let current = &overlaps[current_idx].0;
-            
-            let interval_min = std::cmp::min(interval.first, interval.last);
-            let interval_max = std::cmp::max(interval.first, interval.last);
-            let current_min = std::cmp::min(current.first, current.last);
-            let current_max = std::cmp::max(current.first, current.last);
-    
-            if interval.metadata != current.metadata || interval_min > current_max + max_gap {
-                // Save current merged interval if it's not already in place
-                if current_idx != write_idx {
-                    overlaps[write_idx].0 = overlaps[current_idx].0;
-                }
+            let (curr_interval, _, _) = &overlaps[write_idx];
+            let (next_interval, _, _) = &overlaps[read_idx];
+
+            let curr_min = std::cmp::min(curr_interval.first, curr_interval.last);
+            let curr_max = std::cmp::max(curr_interval.first, curr_interval.last);
+            let next_min = std::cmp::min(next_interval.first, next_interval.last);
+            let next_max = std::cmp::max(next_interval.first, next_interval.last);
+
+            if curr_interval.metadata != next_interval.metadata || next_min > curr_max + max_gap {
                 write_idx += 1;
-                current_idx = read_idx;
+                if write_idx != read_idx {
+                    overlaps.swap(write_idx, read_idx);
+                }
             } else {
-                // Extend current interval with global min/max
-                overlaps[current_idx].0.first = std::cmp::min(current_min, interval_min);
-                overlaps[current_idx].0.last = std::cmp::max(current_max, interval_max);
+                overlaps[write_idx].0.first = curr_min.min(next_min);
+                overlaps[write_idx].0.last = curr_max.max(next_max);
             }
         }
-        
-        // Add last interval if it's not already in place
-        if current_idx != write_idx {
-            overlaps[write_idx].0 = overlaps[current_idx].0;
-        }
-        
-        // Truncate vector to new size
         overlaps.truncate(write_idx + 1);
     }
 }
