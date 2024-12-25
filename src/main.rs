@@ -436,18 +436,18 @@ fn partition_alignments(
             }
         }
 
+        // Clear existing windows but keep the allocation
+        windows.clear();
+
         // Create new windows from the selected region
-        let mut new_windows = Vec::new();
         if let Some((seq_id, start, end)) = longest_region {
             let mut pos = start;
             while pos < end {
                 let window_end = std::cmp::min(pos + window_size as i32, end);
-                new_windows.push((seq_id, pos, window_end));
+                windows.push((seq_id, pos, window_end));
                 pos = window_end;
             }
         }
-        
-        windows = new_windows;
     }
 
     info!("Partitioned into {} regions", partition_num);
