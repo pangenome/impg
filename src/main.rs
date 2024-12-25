@@ -420,24 +420,24 @@ fn partition_alignments(
             break;
         }
 
-        let mut new_windows = Vec::new();
-
-        // Find longest remaining region
+        // Find longest remaining region with smallest seq_id and start position
         let mut longest_region: Option<(u32, i32, i32)> = None;
         let mut max_length = 0;
-        
-        // Scan through missing regions to find the longest one
+        // Scan through missing regions
         for (seq_id, ranges) in missing_regions.iter() {
             for &(start, end) in ranges.iter() {
                 let length = end - start;
-                if length > max_length {
+                if length > max_length || (length == max_length && longest_region.map_or(true, |(curr_seq_id, curr_start, _)| 
+                    (*seq_id < curr_seq_id) || (*seq_id == curr_seq_id && start < curr_start))) 
+                {
                     max_length = length;
                     longest_region = Some((*seq_id, start, end));
                 }
             }
         }
-        
-        // Create new windows from the longest region
+
+        // Create new windows from the selected region
+        let mut new_windows = Vec::new();
         if let Some((seq_id, start, end)) = longest_region {
             let mut pos = start;
             while pos < end {
