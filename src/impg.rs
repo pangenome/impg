@@ -113,17 +113,29 @@ pub struct SerializableInterval {
     metadata: QueryMetadata,
 }
 
-#[derive(Debug, Default)]
-struct SortedRanges {
+#[derive(Debug, Default, Clone)]
+pub struct SortedRanges {
     ranges: Vec<(i32, i32)>
 }
 
 impl SortedRanges {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self { ranges: Vec::new() }
     }
 
-    fn insert(&mut self, new_range: (i32, i32)) -> Vec<(i32, i32)> {
+    pub fn len(&self) -> usize {
+        self.ranges.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ranges.is_empty()
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, (i32, i32)> {
+        self.ranges.iter()
+    }
+
+    pub fn insert(&mut self, new_range: (i32, i32)) -> Vec<(i32, i32)> {
         let (start, end) = new_range;
         if start >= end {
             return Vec::new();
@@ -181,7 +193,7 @@ impl SortedRanges {
         non_overlapping
     }
 
-    fn merge_forward_from(&mut self, start_idx: usize) {
+    pub fn merge_forward_from(&mut self, start_idx: usize) {
         let mut write = start_idx;
         let mut read = start_idx + 1;
         while read < self.ranges.len() {
@@ -292,9 +304,14 @@ impl Impg {
         Self { trees, seq_index, paf_file: paf_file.to_string(), paf_gzi_index }
     }
 
-    pub fn query(&self, target_id: u32, range_start: i32, range_end: i32) -> Vec<AdjustedInterval> {
+    pub fn query(
+        &self,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32
+    ) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
-        // add the input range to the results
+        // Add the input range to the results
         results.push((
             Interval {
                 first: range_start,
@@ -339,9 +356,15 @@ impl Impg {
         results
     }
 
-    pub fn query_transitive(&self, target_id: u32, range_start: i32, range_end: i32) -> Vec<AdjustedInterval> {
+    pub fn query_transitive(
+        &self, 
+        target_id: u32, 
+        range_start: i32, 
+        range_end: i32,
+        masked_regions: Option<&HashMap<u32, SortedRanges>>
+    ) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
-        // add the input range to the results
+        // Add the input range to the results
         results.push((
             Interval {
                 first: range_start,
@@ -357,13 +380,18 @@ impl Impg {
         ));
         // Initialize stack with first query
         let mut stack = vec![(target_id, range_start, range_end)];
-        // Track visited ranges per sequence
-        let mut visited_ranges: HashMap<u32, SortedRanges> = HashMap::new();
-        visited_ranges.insert(target_id, {
-            let mut sr = SortedRanges::new();
-            sr.insert((range_start, range_end));
-            sr
-        });
+        // Initialize visited ranges from masked regions if provided
+        let mut visited_ranges: HashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
+            m.iter()
+            .map(|(&k, v)| (k, (*v).clone()))
+            .collect()
+        } else {
+            HashMap::new()
+        };
+        // Initialize first visited range for target_id if not already present
+        visited_ranges.entry(target_id)
+            .or_default()
+            .insert((range_start, range_end));
 
         while let Some((current_target, current_start, current_end)) = stack.pop() {
             if let Some(tree) = self.trees.get(&current_target) {
