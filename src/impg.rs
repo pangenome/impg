@@ -115,7 +115,7 @@ pub struct SerializableInterval {
 
 #[derive(Debug, Default, Clone)]
 pub struct SortedRanges {
-    ranges: Vec<(i32, i32)>
+    pub ranges: Vec<(i32, i32)>
 }
 
 impl SortedRanges {

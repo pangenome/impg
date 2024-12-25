@@ -284,11 +284,11 @@ fn partition_alignments(
 
     // Create windows from sample regions
     let mut windows = Vec::<(u32, i32, i32)>::new();
-    for (chrom, start, end) in sample_regions {
+    for (seq_id, start, end) in sample_regions {
         let mut pos = start as i32;
         while pos < end as i32 {
             let window_end = std::cmp::min(pos + window_size as i32, end as i32);
-            windows.push((chrom.clone(), pos, window_end));
+            windows.push((seq_id, pos, window_end));
             pos = window_end;
         }
     }
@@ -589,8 +589,9 @@ fn update_masked_and_missing_regions(
 
         // Update missing regions for this sequence
         if let Some(missing) = missing_regions.get_mut(&seq_id) {
-            let mut new_missing = SortedRanges::new();
-            
+            // Create temporary vector to store new ranges
+            let mut new_ranges = Vec::new();
+
             // For each missing range, subtract all masked ranges
             for &(miss_start, miss_end) in missing.iter() {
                 let mut current_ranges = vec![(miss_start, miss_end)];
@@ -622,12 +623,14 @@ fn update_masked_and_missing_regions(
                     current_ranges = next_ranges;
                 }
                 
-                for range in current_ranges {
-                    new_missing.insert(range);
-                }
+                new_ranges.extend(current_ranges);
             }
             
-            *missing = new_missing;
+            // Clear existing ranges and insert new ones in-place
+            missing.ranges.clear();
+            for range in new_ranges {
+                missing.insert(range);
+            }
             
             // Remove sequence from missing_regions if no ranges remain
             if missing.is_empty() {
