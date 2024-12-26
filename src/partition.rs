@@ -6,8 +6,8 @@ use crate::impg::CigarOp;
 use std::collections::HashMap;
 use crate::impg::SortedRanges;
 use log::{debug, info};
+//use std::time::Instant;
 
-use std::time::Instant;
 pub fn partition_alignments(
     impg: &Impg,
     window_size: usize,
@@ -112,68 +112,45 @@ pub fn partition_alignments(
             }
 
             // Query overlaps for current window
-            let query_start = Instant::now();
+            //let query_start = Instant::now();
             let mut overlaps = impg.query_transitive(*seq_id, *start as i32, *end as i32, Some(&masked_regions));
-            let query_time = query_start.elapsed();
-            if debug {
-                debug!("  Collected {} query overlaps", overlaps.len());
-                // overlaps.sort_by_key(|(query, _, target)| (query.metadata, query.first <= query.last, target.first));
-                // for (query_interval, _, target_interval_) in &overlaps {
-                //     let query_name = impg.seq_index.get_name(query_interval.metadata).unwrap();
-                //     debug!("    Region: {}:{}-{} --- Target: {}:{}-{}",
-                //         query_name, query_interval.first, query_interval.last, chrom, target_interval_.first, target_interval_.last);
-                // }
-            }
+            //let query_time = query_start.elapsed();
+            debug!("  Collected {} query overlaps", overlaps.len());
 
             // Ignore CIGAR strings and target intervals.
-            debug!("  Merging overlaps closer than {}bb", merge_distance); // bedtools sort | bedtools merge -d merge_distance
-            let merge_start = Instant::now();
+            debug!("  Merging overlaps closer than {}bp", merge_distance); // bedtools sort | bedtools merge -d merge_distance
+            //let merge_start = Instant::now();
             merge_overlaps(&mut overlaps, merge_distance as i32);
-            let merge_time = merge_start.elapsed();
-
-            if debug {
-                debug!("  Collected {} query overlaps after merging", overlaps.len());
-                // for (query_interval, _, target_interval_) in &overlaps {
-                //     let query_name = impg.seq_index.get_name(query_interval.metadata).unwrap();
-                //     debug!("    Region: {}:{}-{} --- Target: {}:{}-{}",
-                //         query_name, query_interval.first, query_interval.last, chrom, target_interval_.first, target_interval_.last);
-                // }
-            }
+            //let merge_time = merge_start.elapsed();
+            debug!("  Collected {} query overlaps after merging", overlaps.len());
 
             debug!("  Excluding masked regions"); // bedtools subtract -a "partition$num.tmp.bed" -b "$MASK_BED"
-            let mask_start = Instant::now();
+            //let mask_start = Instant::now();
             overlaps = subtract_masked_regions(&mut overlaps, &masked_regions);
-            let mask_time = mask_start.elapsed();
+            //let mask_time = mask_start.elapsed();
 
             if !overlaps.is_empty() {
-                if debug {
-                    debug!("  Collected {} query overlaps in partition {}", overlaps.len(), partition_num);
-                    // for (chrom, start, end) in &overlaps {
-                    //     debug!("    Overlap: {}:{}-{}", chrom, start, end);
-                    // }
+                debug!("  Collected {} query overlaps in partition {}", overlaps.len(), partition_num);
 
-                    debug!("  Updating mask and missing regions");
-                }
-
-                let update_start = Instant::now();
+                debug!("  Updating mask and missing regions");
+                //let update_start = Instant::now();
                 update_masked_and_missing_regions(&mut masked_regions, &mut missing_regions, &overlaps);            
-                let update_time = update_start.elapsed();
+                //let update_time = update_start.elapsed();
 
-                // Extend short intervals in place before updating masks
                 debug!("  Extending short intervals");
-                let extend_start = Instant::now();
-                extend_short_intervals(&mut overlaps, impg, min_length);
-                let extend_time = extend_start.elapsed();
+                //let extend_start = Instant::now();
+                extend_short_intervals(&mut overlaps, impg, min_length as i32);
+                //let extend_time = extend_start.elapsed();
 
                 info!("  Writing partition {} with {} regions (query {}:{}-{})", partition_num, overlaps.len(), chrom, start, end);
-                let write_start = Instant::now();
+                //let write_start = Instant::now();
                 write_partition(partition_num, &overlaps, impg)?;
-                let write_time = write_start.elapsed();
+                //let write_time = write_start.elapsed();
 
                 partition_num += 1;
 
-                info!("Partition {} timings: query={:?}, merge={:?}, mask={:?}, update={:?}, extend={:?}, write={:?}",
-                    partition_num, query_time, merge_time, mask_time, update_time, extend_time, write_time);
+                // info!("  Partition {} timings: query={:?}, merge={:?}, mask={:?}, update={:?}, extend={:?}, write={:?}",
+                //     partition_num, query_time, merge_time, mask_time, update_time, extend_time, write_time);
             } else {
                 debug!("  No overlaps found for region {}:{}-{}", chrom, start, end);
             }
@@ -407,30 +384,72 @@ fn update_masked_and_missing_regions(
 fn extend_short_intervals(
     overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>,
     impg: &Impg,
-    min_length: usize,
+    min_length: i32,
 ) {
     let min_len = min_length as i32;
     
     for (query_interval, _, target_interval) in overlaps.iter_mut() {
-        let len = (query_interval.last - query_interval.first).abs() as usize;
+        let len = (query_interval.last - query_interval.first).abs();
         
         if len < min_length {
-            let seq_len = impg.seq_index.get_len_from_id(query_interval.metadata).unwrap() as i32;
+            let extension_needed = min_len - len;
+            // Add 1 to the first side if extension_needed is odd
+            let extension_per_side = extension_needed / 2;
+            let first_side_extension = extension_per_side + (extension_needed % 2);
+            let second_side_extension = extension_per_side;
             
+            let seq_len = impg.seq_index.get_len_from_id(query_interval.metadata).unwrap() as i32;
             if query_interval.first <= query_interval.last {
                 // Forward strand
-                query_interval.first = std::cmp::max(0, query_interval.first - min_len);
-                query_interval.last = std::cmp::min(seq_len, query_interval.last + min_len);
+                let mut start_extension = first_side_extension;
+                let mut end_extension = second_side_extension;
                 
-                target_interval.first -= min_len;
-                target_interval.last += min_len;
+                // If we can't extend fully on the start side, add the remainder to the end
+                if query_interval.first < start_extension {
+                    let remaining = start_extension - query_interval.first;
+                    start_extension = query_interval.first;
+                    end_extension += remaining;
+                }
+                
+                // If we can't extend fully on the end side, add the remainder to the start
+                if query_interval.last + end_extension > seq_len {
+                    let remaining = (query_interval.last + end_extension) - seq_len;
+                    end_extension = seq_len - query_interval.last;
+                    // Only use remaining if we can extend more at the start
+                    if query_interval.first >= remaining {
+                        start_extension += remaining;
+                    }
+                }
+                
+                query_interval.first -= start_extension;
+                query_interval.last += end_extension;
+                target_interval.first -= start_extension;
+                target_interval.last += end_extension;
             } else {
                 // Reverse strand
-                query_interval.last = std::cmp::max(0, query_interval.last - min_len);
-                query_interval.first = std::cmp::min(seq_len, query_interval.first + min_len);
+                let mut start_extension = first_side_extension;
+                let mut end_extension = second_side_extension;
                 
-                target_interval.first -= min_len;
-                target_interval.last += min_len;
+                // For reverse strand, query_interval.last is the start position
+                if query_interval.last < start_extension {
+                    let remaining = start_extension - query_interval.last;
+                    start_extension = query_interval.last;
+                    end_extension += remaining;
+                }
+                
+                if query_interval.first + end_extension > seq_len {
+                    let remaining = (query_interval.first + end_extension) - seq_len;
+                    end_extension = seq_len - query_interval.first;
+                    // Only use remaining if we can extend more at the start
+                    if query_interval.last >= remaining {
+                        start_extension += remaining;
+                    }
+                }
+                
+                query_interval.last -= start_extension;
+                query_interval.first += end_extension;
+                target_interval.first -= start_extension;
+                target_interval.last += end_extension;
             }
         }
     }
