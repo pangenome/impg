@@ -135,10 +135,11 @@ impl SortedRanges {
     }
 
     pub fn insert(&mut self, new_range: (i32, i32)) -> Vec<(i32, i32)> {
-        let (start, end) = new_range;
-        if start >= end {
-            return Vec::new();
-        }
+        let (start, end) = if new_range.0 <= new_range.1 {
+            (new_range.0, new_range.1)
+        } else {
+            (new_range.1, new_range.0)
+        };
 
         // Return regions that don't overlap with existing ranges
         let mut non_overlapping = Vec::new();
