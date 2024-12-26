@@ -207,49 +207,6 @@ impl SortedRanges {
         }
         self.ranges.truncate(write + 1);
     }
-
-    pub fn insert_batch(&mut self, new_ranges: &mut Vec<(i32, i32)>) -> Vec<(i32, i32)> {
-        // Pre-sort new ranges in place
-        new_ranges.sort_unstable_by_key(|&(start, _)| start);
-        
-        let mut non_overlapping = Vec::new();
-        let mut temp_ranges = Vec::new();
-    
-        // Merge existing and new ranges in one pass
-        let mut i = 0;  // index for self.ranges
-        let mut j = 0;  // index for new_ranges
-        
-        while i < self.ranges.len() && j < new_ranges.len() {
-            let (curr_start, curr_end) = self.ranges[i];
-            let (new_start, new_end) = if new_ranges[j].0 <= new_ranges[j].1 {
-                (new_ranges[j].0, new_ranges[j].1)
-            } else {
-                (new_ranges[j].1, new_ranges[j].0)
-            };   
-            
-            if new_start > curr_end {
-                temp_ranges.push(self.ranges[i]);
-                i += 1;
-            } else if curr_start > new_end {
-                non_overlapping.push(new_ranges[j]);
-                temp_ranges.push(new_ranges[j]);
-                j += 1;
-            } else {
-                temp_ranges.push((std::cmp::min(curr_start, new_start), 
-                                std::cmp::max(curr_end, new_end)));
-                i += 1;
-                j += 1;
-            }
-        }
-    
-        // Add remaining ranges
-        temp_ranges.extend_from_slice(&self.ranges[i..]);
-        non_overlapping.extend_from_slice(&new_ranges[j..]);
-        temp_ranges.extend_from_slice(&new_ranges[j..]);
-    
-        self.ranges = temp_ranges;
-        non_overlapping
-    }
 }
 
 #[derive(Clone)]
