@@ -88,7 +88,7 @@ impl QueryMetadata {
         // Get reader and seek start of cigar str
         if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
             let mut reader = bgzf::Reader::new(File::open(paf_file).unwrap());
-            reader.seek_by_uncompressed_position(&paf_gzi_index.unwrap(), self.cigar_offset).unwrap();
+            reader.seek_by_uncompressed_position(paf_gzi_index.unwrap(), self.cigar_offset).unwrap();
             reader.read_exact(&mut cigar_buffer).unwrap();
         } else {
             let mut reader = File::open(paf_file).unwrap();
