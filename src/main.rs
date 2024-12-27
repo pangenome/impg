@@ -8,6 +8,8 @@ use coitrees::IntervalTree;
 use impg::paf;
 use rayon::ThreadPoolBuilder;
 use std::io::BufRead;
+use log::{warn, error};
+use impg::partition::partition_alignments;
 
 /// Common options shared between all commands
 #[derive(Parser, Debug)]
@@ -23,13 +25,38 @@ struct CommonOpts {
     /// Number of threads for parallel processing.
     #[clap(short = 't', long, value_parser, default_value_t = NonZeroUsize::new(1).unwrap())]
     num_threads: NonZeroUsize,
+
+    /// Verbosity level (0 = error, 1 = info, 2 = debug)
+    #[clap(short, long, default_value = "0")]
+    verbose: u8,
 }
 
 /// Command-line tool for querying overlaps in PAF files.
 #[derive(Parser, Debug)]
 #[command(author, version, about, disable_help_subcommand = true)]
 enum Args {
-    /// Query overlaps in the PAF file.
+    /// Partition the alignment
+    Partition {
+        #[clap(flatten)]
+        common: CommonOpts,
+
+        /// Window size for partitioning.
+        #[clap(short = 'w', long, value_parser)]
+        window_size: usize,
+        
+        /// Sequence name prefix to start - all sequences starting with this prefix will be included
+        #[clap(short = 's', long, value_parser)]
+        sequence_prefix: String,
+
+        /// Maximum distance between intervals to merge (default: 10000).
+        #[clap(short = 'd', long, value_parser, default_value_t = 10000)]
+        merge_distance: usize,
+
+        /// Minimum length for intervals (default: 5000).
+        #[clap(short = 'l', long, value_parser, default_value_t = 5000)]
+        min_length: usize,
+    },
+    /// Query overlaps in the alignment.
     Query {
         #[clap(flatten)]
         common: CommonOpts,
@@ -54,7 +81,7 @@ enum Args {
         #[clap(short = 'c', long, action)]
         check_intervals: bool,
     },
-    /// Print stats about the index.
+    /// Print alignment statistics.
     Stats {
         #[clap(flatten)]
         common: CommonOpts,
@@ -65,6 +92,16 @@ fn main() -> io::Result<()> {
     let args = Args::parse();
 
     match args {
+        Args::Partition {
+            common,
+            window_size,
+            sequence_prefix,
+            min_length,
+            merge_distance
+        } => {
+            let impg = initialize_impg(&common)?;
+            partition_alignments(&impg, window_size, &sequence_prefix, min_length, merge_distance, common.verbose > 1)?;
+        },
         Args::Query {
             common,
             target_range,
@@ -82,11 +119,12 @@ fn main() -> io::Result<()> {
                     let invalid_cigars = impg::impg::check_intervals(&impg, &results);
                     if !invalid_cigars.is_empty() {
                         for (row, error_reason) in invalid_cigars {
-                            eprintln!("{}; {}", error_reason, row);
+                            error!("{}; {}", error_reason, row);
                         }
                         panic!("Invalid intervals encountered.");
                     }
                 }
+                
                 if output_paf {
                     // Skip the first element (the input range) for PAF
                     output_results_paf(&impg, results.into_iter().skip(1), &target_name, None);
@@ -101,7 +139,7 @@ fn main() -> io::Result<()> {
                         let invalid_cigars = impg::impg::check_intervals(&impg, &results);
                         if !invalid_cigars.is_empty() {
                             for (row, error_reason) in invalid_cigars {
-                                eprintln!("{}; {}", error_reason, row);
+                                error!("{}; {}", error_reason, row);
                             }
                             panic!("Invalid intervals encountered.");
                         }
@@ -126,7 +164,7 @@ fn main() -> io::Result<()> {
             let impg = initialize_impg(&common)?;
 
             print_stats(&impg);
-        }
+        },
     }
 
     Ok(())
@@ -134,6 +172,15 @@ fn main() -> io::Result<()> {
 
 /// Initialize thread pool and load/generate index based on common options
 fn initialize_impg(common: &CommonOpts) -> io::Result<Impg> {
+    // Initialize logger based on verbosity
+    env_logger::Builder::new()
+    .filter_level(match common.verbose {
+        0 => log::LevelFilter::Error,
+        1 => log::LevelFilter::Info,
+        _ => log::LevelFilter::Debug,
+    })
+    .init();
+
     // Configure thread pool
     ThreadPoolBuilder::new()
         .num_threads(common.num_threads.into())
@@ -165,10 +212,10 @@ fn load_index(paf_file: &str) -> io::Result<Impg> {
     if let (Ok(paf_file_ts), Ok(index_file_ts)) = (paf_file_metadata.modified(), index_file_metadata.modified()) {
         if paf_file_ts > index_file_ts
         {
-            eprintln!("WARNING:\tPAF file has been modified since impg index creation.");
+            warn!("WARNING:\tPAF file has been modified since impg index creation.");
         }
     } else {
-        eprintln!("WARNING:\tUnable to compare timestamps of PAF file and impg index file. PAF file may have been modified since impg index creation.");
+        warn!("WARNING:\tUnable to compare timestamps of PAF file and impg index file. PAF file may have been modified since impg index creation.");
     }
 
     let file = File::open(index_file)?;
@@ -250,7 +297,7 @@ fn perform_query(impg: &Impg, target_name: &str, target_range: (i32, i32), trans
         panic!("Target range end ({}) exceeds the target sequence length ({})", target_end, target_length);
     }
     if transitive {
-        impg.query_transitive(target_id, target_start, target_end)
+        impg.query_transitive(target_id, target_start, target_end, None)
     } else {
         impg.query(target_id, target_start, target_end)
     }
@@ -273,16 +320,16 @@ where
     I: Iterator<Item = AdjustedInterval>
 {
     for (overlap_query, _, overlap_target) in results {
-        let overlap_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
+        let query_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
         let (first, last, strand) = if overlap_query.first <= overlap_query.last {
             (overlap_query.first, overlap_query.last, '+')
         } else {
             (overlap_query.last, overlap_query.first, '-')
         };
         println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t0\t{}\t+",
-                 overlap_name, first, last,
-                 target_name, overlap_target.first, overlap_target.last,
-                 name.as_deref().unwrap_or("."), strand);
+            query_name, first, last,
+            target_name, overlap_target.first, overlap_target.last,
+            name.as_deref().unwrap_or("."), strand);
     }
 }
 
@@ -292,7 +339,7 @@ where
 {
     let target_length = impg.seq_index.get_len_from_id(impg.seq_index.get_id(target_name).unwrap()).unwrap();  
     for (overlap_query, cigar, overlap_target) in results {
-        let overlap_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
+        let query_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
         let (first, last, strand) = if overlap_query.first <= overlap_query.last {
             (overlap_query.first, overlap_query.last, '+')
         } else {
@@ -325,11 +372,11 @@ where
 
         match name {
             Some(ref name) => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{}\tbi:f:{}\tcg:Z:{}\tan:Z:{}",
-                                    overlap_name, query_length, first, last, strand,
-                                    target_name, target_length, overlap_target.first, overlap_target.last,
-                                    matches, block_len, 255, gi_str, bi_str, cigar_str, name),
+                                query_name, query_length, first, last, strand,
+                                target_name, target_length, overlap_target.first, overlap_target.last,
+                                matches, block_len, 255, gi_str, bi_str, cigar_str, name),
             None => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{}\tbi:f:{}\tcg:Z:{}",
-                                overlap_name, query_length, first, last, strand,
+                                query_name, query_length, first, last, strand,
                                 target_name, target_length, overlap_target.first, overlap_target.last,
                                 matches, block_len, 255, gi_str, bi_str, cigar_str),
         }
