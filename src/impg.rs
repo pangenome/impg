@@ -97,7 +97,7 @@ impl QueryMetadata {
         };
 
         let cigar_str: &str = std::str::from_utf8(&cigar_buffer).unwrap();
-        parse_cigar_to_delta(cigar_str).ok().unwrap_or_else(Vec::new)
+        parse_cigar_to_delta(cigar_str).ok().unwrap_or_default()
     }
 }
 
@@ -222,7 +222,7 @@ impl Impg {
 
         let paf_gzi_index: Option<bgzf::gzi::Index> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
             let paf_gzi_file = paf_file.to_owned() + ".gzi";
-            Some(bgzf::gzi::read(paf_gzi_file.clone()).expect(format!("Could not open {}", paf_gzi_file).as_str()))
+            Some(bgzf::gzi::read(paf_gzi_file.clone()).unwrap_or_else(|_| panic!("Could not open {}", paf_gzi_file)))
         } else {
             None
         };
@@ -289,7 +289,7 @@ impl Impg {
         let (serializable_trees, seq_index) = serializable;
         let paf_gzi_index: Option<bgzf::gzi::Index> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
             let paf_gzi_file = paf_file.to_owned() + ".gzi";
-            Some(bgzf::gzi::read(paf_gzi_file.clone()).expect(format!("Could not open {}", paf_gzi_file).as_str()))
+            Some(bgzf::gzi::read(paf_gzi_file.clone()).unwrap_or_else(|_| panic!("Could not open {}", paf_gzi_file)))
         } else {
             None
         };
@@ -423,7 +423,7 @@ impl Impg {
                         // Only add non-overlapping portions to the stack for further exploration
                         if metadata.query_id != current_target {
                             let ranges = visited_ranges.entry(metadata.query_id)
-                                .or_insert_with(|| SortedRanges::new());  // Note the closure here
+                                .or_default();  // Note the closure here
 
                             let new_ranges = ranges.insert((adjusted_query_start, adjusted_query_end));
                             

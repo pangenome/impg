@@ -35,7 +35,7 @@ pub fn partition_alignments(
     sample_regions.sort_by(|a, b| {
         let chrom_a = impg.seq_index.get_name(a.0).unwrap();
         let chrom_b = impg.seq_index.get_name(b.0).unwrap();
-        natord::compare(&chrom_a, &chrom_b)
+        natord::compare(chrom_a, chrom_b)
     });
 
     if debug {
@@ -49,7 +49,7 @@ pub fn partition_alignments(
     // Create windows from sample regions
     let mut windows = Vec::<(u32, i32, i32)>::new();
     for (seq_id, start, end) in sample_regions {
-        let mut pos = start as i32;
+        let mut pos = start;
         while pos < end as i32 {
             let window_end = std::cmp::min(pos + window_size as i32, end as i32);
             windows.push((seq_id, pos, window_end));
@@ -113,7 +113,7 @@ pub fn partition_alignments(
 
             // Query overlaps for current window
             //let query_start = Instant::now();
-            let mut overlaps = impg.query_transitive(*seq_id, *start as i32, *end as i32, Some(&masked_regions));
+            let mut overlaps = impg.query_transitive(*seq_id, *start, *end, Some(&masked_regions));
             //let query_time = query_start.elapsed();
             debug!("  Collected {} query overlaps", overlaps.len());
 
@@ -325,7 +325,7 @@ fn update_masked_and_missing_regions(
     for (seq_id, ranges) in new_masks {
         let masked = masked_regions.entry(seq_id).or_default();
         for range in ranges {
-            masked.insert((range.0 as i32, range.1 as i32));
+            masked.insert((range.0, range.1));
         }
 
         // Update missing regions for this sequence
@@ -386,7 +386,7 @@ fn extend_short_intervals(
     impg: &Impg,
     min_length: i32,
 ) {
-    let min_len = min_length as i32;
+    let min_len = min_length;
     
     for (query_interval, _, target_interval) in overlaps.iter_mut() {
         let len = (query_interval.last - query_interval.first).abs();
