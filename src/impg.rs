@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Write;
 use coitrees::{BasicCOITree, Interval, IntervalTree};
 use crate::paf::{PafRecord, ParseErr, Strand};
 use crate::seqidx::SequenceIndex;
@@ -545,7 +546,10 @@ fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, ParseErr> {
 }
 
 fn is_valid_cigar(cigar: &[CigarOp]) -> Result<(), String> {
-    let cigar_str: String = cigar.iter().map(|op| format!("{}{}", op.len(), op.op())).collect();
+    let cigar_str = cigar.iter().fold(String::new(), |mut acc, op| {
+        write!(acc, "{}{}", op.len(), op.op()).unwrap();
+        acc
+    });
 
     let re = Regex::new(r"^(\d+[MX=ID])+$").unwrap();
     if !re.is_match(&cigar_str) {
@@ -591,7 +595,10 @@ pub fn check_intervals(impg: &Impg, results: &Vec<AdjustedInterval>) -> Vec<(Str
         let (query_start, query_end) = (overlap_query.first, overlap_query.last);
         let (target_start, target_end) = (overlap_target.first, overlap_target.last);
 
-        let full_cigar: String = cigar.iter().map(|op| format!("{}{}", op.len(), op.op())).collect();
+        let full_cigar = cigar.iter().fold(String::new(), |mut acc, op| {
+            write!(acc, "{}{}", op.len(), op.op()).unwrap();
+            acc
+        });
         let first_chunk_cigar = if full_cigar.len() > 20 {
             format!("{}...", &full_cigar[..20])
         } else {

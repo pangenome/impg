@@ -341,12 +341,8 @@ fn update_masked_and_missing_regions(
                     let mut next_ranges = Vec::new();
                     
                     for (curr_start, curr_end) in current_ranges {
-                        // If current range is before mask
-                        if curr_end <= mask_start {
-                            next_ranges.push((curr_start, curr_end));
-                        }
-                        // If current range is after mask
-                        else if curr_start >= mask_end {
+                        // If current range doesn't overlap with mask
+                        if curr_end <= mask_start || curr_start >= mask_end {
                             next_ranges.push((curr_start, curr_end));
                         }
                         // If ranges overlap
@@ -382,7 +378,7 @@ fn update_masked_and_missing_regions(
 }
 
 fn extend_short_intervals(
-    overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>,
+    overlaps: &mut [(Interval<u32>, Vec<CigarOp>, Interval<u32>)],
     impg: &Impg,
     min_length: i32,
 ) {
