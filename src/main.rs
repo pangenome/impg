@@ -1,5 +1,4 @@
 use clap::Parser;
-use std::fmt::Write;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter};
 use std::num::NonZeroUsize;
@@ -369,10 +368,7 @@ where
         let gi_str = format!("{:.6}", gap_compressed_identity).trim_end_matches('0').trim_end_matches('.').to_string();
         let bi_str = format!("{:.6}", block_identity).trim_end_matches('0').trim_end_matches('.').to_string();
 
-        let cigar_str = cigar.iter().fold(String::new(), |mut acc, op| {
-            write!(acc, "{}{}", op.len(), op.op()).unwrap();
-            acc
-        });
+        let cigar_str : String = cigar.iter().map(|op| format!("{}{}", op.len(), op.op())).collect();
 
         match name {
             Some(ref name) => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{}\tbi:f:{}\tcg:Z:{}\tan:Z:{}",
