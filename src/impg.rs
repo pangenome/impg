@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use coitrees::{BasicCOITree, Interval, IntervalTree};
 use crate::paf::{PafRecord, ParseErr, Strand};
 use crate::seqidx::SequenceIndex;
@@ -102,8 +102,8 @@ impl QueryMetadata {
 }
 
 pub type AdjustedInterval = (Interval<u32>, Vec<CigarOp>, Interval<u32>);
-type TreeMap = HashMap<u32, BasicCOITree<QueryMetadata, u32>>;
-pub type SerializableImpg = (HashMap<u32, Vec<SerializableInterval>>, SequenceIndex);
+type TreeMap = FxHashMap<u32, BasicCOITree<QueryMetadata, u32>>;
+pub type SerializableImpg = (FxHashMap<u32, Vec<SerializableInterval>>, SequenceIndex);
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SerializableInterval {
@@ -233,7 +233,7 @@ impl Impg {
             seq_index.get_or_insert_id(&record.target_name, Some(record.target_length));
         }
         
-        let intervals: HashMap<u32, Vec<Interval<QueryMetadata>>> = records.par_iter()
+        let intervals: FxHashMap<u32, Vec<Interval<QueryMetadata>>> = records.par_iter()
             .filter_map(|record| {
                 let query_id = seq_index.get_id(&record.query_name).expect("Query name not found in index");
                 let target_id = seq_index.get_id(&record.target_name).expect("Target name not found in index");
@@ -255,11 +255,11 @@ impl Impg {
                     metadata: query_metadata,
                 }))
             })  // Use fold and reduce to achieve grouping
-            .fold(HashMap::new, |mut acc: HashMap<u32, Vec<Interval<QueryMetadata>>>, (target_id, interval)| {
+            .fold(FxHashMap::default, |mut acc: FxHashMap<u32, Vec<Interval<QueryMetadata>>>, (target_id, interval)| {
                 acc.entry(target_id).or_default().push(interval);
                 acc
             })
-            .reduce(HashMap::new, |mut acc, part| {
+            .reduce(FxHashMap::default, |mut acc, part| {
                 for (key, value) in part {
                     acc.entry(key).or_default().extend(value);
                 }
@@ -361,7 +361,7 @@ impl Impg {
         target_id: u32, 
         range_start: i32, 
         range_end: i32,
-        masked_regions: Option<&HashMap<u32, SortedRanges>>
+        masked_regions: Option<&FxHashMap<u32, SortedRanges>>
     ) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
         // Add the input range to the results
@@ -381,12 +381,12 @@ impl Impg {
         // Initialize stack with first query
         let mut stack = vec![(target_id, range_start, range_end)];
         // Initialize visited ranges from masked regions if provided
-        let mut visited_ranges: HashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
+        let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
             m.iter()
             .map(|(&k, v)| (k, (*v).clone()))
             .collect()
         } else {
-            HashMap::new()
+            FxHashMap::default()
         };
         // Initialize first visited range for target_id if not already present
         visited_ranges.entry(target_id)

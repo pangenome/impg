@@ -1,9 +1,9 @@
+use rustc_hash::FxHashMap;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use crate::impg::Impg;
 use coitrees::Interval;
 use crate::impg::CigarOp;
-use std::collections::HashMap;
 use crate::impg::SortedRanges;
 use log::{debug, info};
 //use std::time::Instant;
@@ -65,10 +65,10 @@ pub fn partition_alignments(
     }
 
     // Initialize masked regions
-    let mut masked_regions: HashMap<u32, SortedRanges> = HashMap::new();
+    let mut masked_regions: FxHashMap<u32, SortedRanges> = FxHashMap::default();
     
     // Initialize missing regions from sequence index
-    let mut missing_regions: HashMap<u32, SortedRanges> = (0..impg.seq_index.len() as u32)
+    let mut missing_regions: FxHashMap<u32, SortedRanges> = (0..impg.seq_index.len() as u32)
         .map(|id| {
             let len = impg.seq_index.get_len_from_id(id).unwrap();
             let mut ranges = SortedRanges::new();
@@ -232,7 +232,7 @@ fn merge_overlaps(
 
 fn subtract_masked_regions(
     overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>,
-    masked_regions: &HashMap<u32, SortedRanges>
+    masked_regions: &FxHashMap<u32, SortedRanges>
 ) -> Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
     let mut result = Vec::new();
 
@@ -306,12 +306,12 @@ fn subtract_masked_regions(
 }
 
 fn update_masked_and_missing_regions(
-    masked_regions: &mut HashMap<u32, SortedRanges>,
-    missing_regions: &mut HashMap<u32, SortedRanges>,
+    masked_regions: &mut FxHashMap<u32, SortedRanges>,
+    missing_regions: &mut FxHashMap<u32, SortedRanges>,
     overlaps: &Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>
 ) {
     // First, collect all new regions to be masked by sequence
-    let mut new_masks: HashMap<u32, Vec<(i32, i32)>> = HashMap::new();
+    let mut new_masks: FxHashMap<u32, Vec<(i32, i32)>> = FxHashMap::default();
     for (query_interval, _, _) in overlaps {
         let (start, end) = if query_interval.first <= query_interval.last {
             (query_interval.first, query_interval.last)
