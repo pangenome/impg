@@ -328,14 +328,12 @@ impl Impg {
         if let Some(tree) = self.trees.get(&target_id) {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
-                let (adjusted_query_start, adjusted_query_end, adjusted_cigar, adjusted_target_start, adjusted_target_end) = 
-                project_target_range_through_alignment(
+                let result = project_target_range_through_alignment(
                     (range_start, range_end),
                     (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end, metadata.strand),
                     &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref())
                 );
-
-                if (adjusted_query_start - adjusted_query_end).abs() > 0 && !adjusted_cigar.is_empty() {
+                if let Some((adjusted_query_start, adjusted_query_end, adjusted_cigar, adjusted_target_start, adjusted_target_end)) = result {
                     let adjusted_interval = (
                         Interval {
                             first: adjusted_query_start,
@@ -397,14 +395,12 @@ impl Impg {
             if let Some(tree) = self.trees.get(&current_target_id) {
                 tree.query(current_target_start, current_target_end, |interval| {
                     let metadata = &interval.metadata;
-                    let (adjusted_query_start, adjusted_query_end, adjusted_cigar, adjusted_target_start, adjusted_target_end) = 
-                    project_target_range_through_alignment(
+                    let result = project_target_range_through_alignment(
                         (current_target_start, current_target_end),
                         (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end, metadata.strand),
                         &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref())
                     );
-
-                    if (adjusted_query_start - adjusted_query_end).abs() > 0 && !adjusted_cigar.is_empty() {
+                    if let Some((adjusted_query_start, adjusted_query_end, adjusted_cigar, adjusted_target_start, adjusted_target_end)) = result {
                         let adjusted_interval = (
                             Interval {
                                 first: adjusted_query_start,
@@ -446,19 +442,19 @@ fn project_target_range_through_alignment(
     target_range: (i32, i32),
     record: (i32, i32, i32, i32, Strand),
     cigar_ops: &[CigarOp]
-) -> (i32, i32, Vec<CigarOp>, i32, i32) {
+) -> Option<(i32, i32, Vec<CigarOp>, i32, i32)> {
     let (target_start, target_end, query_start, query_end, strand) = record;
 
     let mut target_pos = target_start;
     let mut query_pos = if strand == Strand::Forward { query_start } else { query_end };
 
-    let mut projected_start: Option<i32> = None;
-    let mut projected_end: Option<i32> = None;
+    let mut first_overlap = true;
+    let mut projected_start = -1;
+    let mut projected_end = -1;
     let mut projected_cigar = Vec::new();
-
-    let mut new_target_start: Option<i32> = None;
-    let mut new_target_end: Option<i32> = None;
-
+    let mut new_target_start = -1; 
+    let mut new_target_end = -1;
+    
     for cigar_op in cigar_ops {
         // If the target position is past the end of the range, we can stop
         if target_pos > target_range.1 {
@@ -467,12 +463,14 @@ fn project_target_range_through_alignment(
         match (cigar_op.target_delta(), cigar_op.query_delta(strand)) {
             (0, query_delta) => { // Insertion in query (deletions in target)
                 if target_pos >= target_range.0 && target_pos <= target_range.1 {
-                    projected_start.get_or_insert(query_pos);
-                    projected_end = Some(query_pos + query_delta);
+                    if first_overlap {
+                        projected_start = query_pos;
+                        new_target_start = target_pos;
+                        first_overlap = false;
+                    }
+                    projected_end = query_pos + query_delta;
                     projected_cigar.push(CigarOp::new(query_delta.abs(), 'I'));
-
-                    new_target_start.get_or_insert(target_pos);
-                    new_target_end = Some(target_pos);
+                    new_target_end = target_pos;
                 }
                 query_pos += query_delta;
             },
@@ -481,13 +479,14 @@ fn project_target_range_through_alignment(
                 let overlap_end = (target_pos + target_delta).min(target_range.1);
 
                 if overlap_start < overlap_end { // There's an overlap
-                    projected_start.get_or_insert(query_pos);
-                    projected_end = Some(query_pos); // Deletion does not advance query position
-
+                    if first_overlap {
+                        projected_start = query_pos;
+                        new_target_start = overlap_start;
+                        first_overlap = false;
+                    }
+                    projected_end = query_pos; // Deletion does not advance query position
                     projected_cigar.push(CigarOp::new(overlap_end - overlap_start, 'D'));
-
-                    new_target_start.get_or_insert(overlap_start);
-                    new_target_end = Some(overlap_end);
+                    new_target_end = overlap_end;
                 }
 
                 target_pos += target_delta;
@@ -501,13 +500,14 @@ fn project_target_range_through_alignment(
                     let query_overlap_start = query_pos + (overlap_start - target_pos) * dir;
                     let query_overlap_end = query_overlap_start + overlap_length * dir;
 
-                    projected_start.get_or_insert(query_overlap_start);
-                    projected_end = Some(query_overlap_end);
-
+                    if first_overlap {
+                        projected_start = query_overlap_start;
+                        new_target_start = overlap_start;
+                        first_overlap = false;
+                    }
+                    projected_end = query_overlap_end;
                     projected_cigar.push(CigarOp::new(overlap_length, cigar_op.op()));
-
-                    new_target_start.get_or_insert(overlap_start);
-                    new_target_end = Some(overlap_end);
+                    new_target_end = overlap_end;
                 }
 
                 target_pos += target_delta;
@@ -515,14 +515,19 @@ fn project_target_range_through_alignment(
             },
         }
     }
-    
-    (
-        projected_start.unwrap_or(query_start),
-        (projected_end.unwrap_or(query_pos)).min(query_end),
-        projected_cigar,
-        new_target_start.unwrap_or(target_start),
-        (new_target_end.unwrap_or(target_pos)).min(target_end),
-    )
+
+    // If we had at least one overlap, variables should be set
+    if !first_overlap {
+        Some((
+            projected_start,
+            projected_end,
+            projected_cigar,
+            new_target_start,
+            new_target_end,
+        ))
+    } else {
+        None
+    }
 }
 
 fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, ParseErr> {
