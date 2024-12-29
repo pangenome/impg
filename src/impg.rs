@@ -322,7 +322,7 @@ impl Impg {
             Interval {
                 first: range_start,
                 last: range_end,
-                metadata: 0
+                metadata: target_id
             }
         ));
         if let Some(tree) = self.trees.get(&target_id) {
@@ -346,7 +346,7 @@ impl Impg {
                         Interval {
                             first: adjusted_target_start,
                             last: adjusted_target_end,
-                            metadata: 0
+                            metadata: target_id
                         }
                     );
                     results.push(adjusted_interval);
@@ -375,7 +375,7 @@ impl Impg {
             Interval {
                 first: range_start,
                 last: range_end,
-                metadata: 0
+                metadata: target_id
             }
         ));
         // Initialize stack with first query
@@ -393,13 +393,13 @@ impl Impg {
             .or_default()
             .insert((range_start, range_end));
 
-        while let Some((current_target, current_start, current_end)) = stack.pop() {
-            if let Some(tree) = self.trees.get(&current_target) {
-                tree.query(current_start, current_end, |interval| {
+        while let Some((current_target_id, current_target_start, current_target_end)) = stack.pop() {
+            if let Some(tree) = self.trees.get(&current_target_id) {
+                tree.query(current_target_start, current_target_end, |interval| {
                     let metadata = &interval.metadata;
                     let (adjusted_query_start, adjusted_query_end, adjusted_cigar, adjusted_target_start, adjusted_target_end) = 
                     project_target_range_through_alignment(
-                        (current_start, current_end),
+                        (current_target_start, current_target_end),
                         (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end, metadata.strand),
                         &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref())
                     );
@@ -415,13 +415,13 @@ impl Impg {
                             Interval {
                                 first: adjusted_target_start,
                                 last: adjusted_target_end,
-                                metadata: 0
+                                metadata: current_target_id
                             }
                         );
                         results.push(adjusted_interval);
 
                         // Only add non-overlapping portions to the stack for further exploration
-                        if metadata.query_id != current_target {
+                        if metadata.query_id != current_target_id {
                             let ranges = visited_ranges.entry(metadata.query_id)
                                 .or_insert_with(|| SortedRanges::new());  // Note the closure here
 
