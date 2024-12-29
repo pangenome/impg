@@ -1,20 +1,20 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SequenceIndex {
-    name_to_id: HashMap<String, u32>,
-    id_to_name: HashMap<u32, String>,
-    id_to_len: HashMap<u32, usize>,
+    name_to_id: FxHashMap<String, u32>,
+    id_to_name: FxHashMap<u32, String>,
+    id_to_len: FxHashMap<u32, usize>,
     next_id: u32,
 }
 
 impl SequenceIndex {
     pub fn new() -> Self {
         SequenceIndex {
-            name_to_id: HashMap::new(),
-            id_to_name: HashMap::new(),
-            id_to_len: HashMap::new(),
+            name_to_id: FxHashMap::default(),
+            id_to_name: FxHashMap::default(),
+            id_to_len: FxHashMap::default(),
             next_id: 0,
         }
     }

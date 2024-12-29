@@ -1,9 +1,9 @@
+use rustc_hash::FxHashMap;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use crate::impg::Impg;
 use coitrees::Interval;
 use crate::impg::CigarOp;
-use std::collections::HashMap;
 use crate::impg::SortedRanges;
 use log::{debug, info};
 //use std::time::Instant;
@@ -35,7 +35,7 @@ pub fn partition_alignments(
     sample_regions.sort_by(|a, b| {
         let chrom_a = impg.seq_index.get_name(a.0).unwrap();
         let chrom_b = impg.seq_index.get_name(b.0).unwrap();
-        natord::compare(&chrom_a, &chrom_b)
+        natord::compare(chrom_a, chrom_b)
     });
 
     if debug {
@@ -49,7 +49,7 @@ pub fn partition_alignments(
     // Create windows from sample regions
     let mut windows = Vec::<(u32, i32, i32)>::new();
     for (seq_id, start, end) in sample_regions {
-        let mut pos = start as i32;
+        let mut pos = start;
         while pos < end as i32 {
             let window_end = std::cmp::min(pos + window_size as i32, end as i32);
             windows.push((seq_id, pos, window_end));
@@ -65,10 +65,10 @@ pub fn partition_alignments(
     }
 
     // Initialize masked regions
-    let mut masked_regions: HashMap<u32, SortedRanges> = HashMap::new();
+    let mut masked_regions: FxHashMap<u32, SortedRanges> = FxHashMap::default();
     
     // Initialize missing regions from sequence index
-    let mut missing_regions: HashMap<u32, SortedRanges> = (0..impg.seq_index.len() as u32)
+    let mut missing_regions: FxHashMap<u32, SortedRanges> = (0..impg.seq_index.len() as u32)
         .map(|id| {
             let len = impg.seq_index.get_len_from_id(id).unwrap();
             let mut ranges = SortedRanges::new();
@@ -113,7 +113,7 @@ pub fn partition_alignments(
 
             // Query overlaps for current window
             //let query_start = Instant::now();
-            let mut overlaps = impg.query_transitive(*seq_id, *start as i32, *end as i32, Some(&masked_regions));
+            let mut overlaps = impg.query_transitive(*seq_id, *start, *end, Some(&masked_regions));
             //let query_time = query_start.elapsed();
             debug!("  Collected {} query overlaps", overlaps.len());
 
@@ -232,7 +232,7 @@ fn merge_overlaps(
 
 fn subtract_masked_regions(
     overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>,
-    masked_regions: &HashMap<u32, SortedRanges>
+    masked_regions: &FxHashMap<u32, SortedRanges>
 ) -> Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
     let mut result = Vec::new();
 
@@ -306,12 +306,12 @@ fn subtract_masked_regions(
 }
 
 fn update_masked_and_missing_regions(
-    masked_regions: &mut HashMap<u32, SortedRanges>,
-    missing_regions: &mut HashMap<u32, SortedRanges>,
+    masked_regions: &mut FxHashMap<u32, SortedRanges>,
+    missing_regions: &mut FxHashMap<u32, SortedRanges>,
     overlaps: &Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>
 ) {
     // First, collect all new regions to be masked by sequence
-    let mut new_masks: HashMap<u32, Vec<(i32, i32)>> = HashMap::new();
+    let mut new_masks: FxHashMap<u32, Vec<(i32, i32)>> = FxHashMap::default();
     for (query_interval, _, _) in overlaps {
         let (start, end) = if query_interval.first <= query_interval.last {
             (query_interval.first, query_interval.last)
@@ -325,7 +325,7 @@ fn update_masked_and_missing_regions(
     for (seq_id, ranges) in new_masks {
         let masked = masked_regions.entry(seq_id).or_default();
         for range in ranges {
-            masked.insert((range.0 as i32, range.1 as i32));
+            masked.insert((range.0, range.1));
         }
 
         // Update missing regions for this sequence
@@ -341,12 +341,8 @@ fn update_masked_and_missing_regions(
                     let mut next_ranges = Vec::new();
                     
                     for (curr_start, curr_end) in current_ranges {
-                        // If current range is before mask
-                        if curr_end <= mask_start {
-                            next_ranges.push((curr_start, curr_end));
-                        }
-                        // If current range is after mask
-                        else if curr_start >= mask_end {
+                        // If current range doesn't overlap with mask
+                        if curr_end <= mask_start || curr_start >= mask_end {
                             next_ranges.push((curr_start, curr_end));
                         }
                         // If ranges overlap
@@ -386,7 +382,7 @@ fn extend_short_intervals(
     impg: &Impg,
     min_length: i32,
 ) {
-    let min_len = min_length as i32;
+    let min_len = min_length;
     
     for (query_interval, _, target_interval) in overlaps.iter_mut() {
         let len = (query_interval.last - query_interval.first).abs();
