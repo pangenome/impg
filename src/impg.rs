@@ -649,7 +649,7 @@ mod tests {
         let target_range = (100, 200);
         let record = (100, 200, 0, 100, Strand::Forward);
         let cigar_ops = vec![CigarOp::new(100, '=')];
-        let result = project_target_range_through_alignment(target_range, record, &cigar_ops);
+        let result = project_target_range_through_alignment(target_range, record, &cigar_ops).unwrap();
 
         assert_eq!(result, (0, 100, cigar_ops.clone(), 100, 200));
     }
@@ -659,7 +659,7 @@ mod tests {
         let target_range = (100, 200);
         let record = (100, 200, 0, 100, Strand::Reverse);
         let cigar_ops = vec![CigarOp::new(100, '=')];
-        let result = project_target_range_through_alignment(target_range, record, &cigar_ops);
+        let result = project_target_range_through_alignment(target_range, record, &cigar_ops).unwrap();
 
         assert_eq!(result, (100, 0, cigar_ops.clone(), 100, 200));
     }
@@ -676,23 +676,24 @@ mod tests {
         ];
         let base = (0, 100, 50, 200, Strand::Forward);
         {
-            let result = project_target_range_through_alignment((0, 100), base, &cigar_ops);
+            let result = project_target_range_through_alignment((0, 100), base, &cigar_ops).unwrap();
             assert_eq!(result, (50, 200, cigar_ops.clone(), 0, 100));
         }
         {
-            let result = project_target_range_through_alignment((50, 55), base, &cigar_ops);
+            let result = project_target_range_through_alignment((50, 55), base, &cigar_ops).unwrap();
             assert_eq!(result, (100, 105, vec![CigarOp::new(5, '=')], 50, 55));
         }
         {
-            let result = project_target_range_through_alignment((50, 64), base, &cigar_ops);
+            let result = project_target_range_through_alignment((50, 64), base, &cigar_ops).unwrap();
             assert_eq!(result, (100, 114, vec![CigarOp::new(14, '=')], 50, 64));
         }
+        // We no longer output empty target ranges
+        // {
+        //     let result = project_target_range_through_alignment((65, 65), base, &cigar_ops).unwrap();
+        //     assert_eq!(result, (115, 165, vec![CigarOp::new(50, 'I')], 65, 65));
+        // }
         {
-            let result = project_target_range_through_alignment((65, 65), base, &cigar_ops);
-            assert_eq!(result, (115, 165, vec![CigarOp::new(50, 'I')], 65, 65));
-        }
-        {
-            let result = project_target_range_through_alignment((50, 65), base, &cigar_ops);
+            let result = project_target_range_through_alignment((50, 65), base, &cigar_ops).unwrap();
             let cigar_ops = vec![
                 CigarOp::new(15, '='),
                 CigarOp::new(50, 'I')
@@ -700,7 +701,7 @@ mod tests {
             assert_eq!(result, (100, 165, cigar_ops, 50, 65));
         }
         {
-            let result = project_target_range_through_alignment((50, 66), base, &cigar_ops);
+            let result = project_target_range_through_alignment((50, 66), base, &cigar_ops).unwrap();
             let cigar_ops = vec![
                 CigarOp::new(15, '='),
                 CigarOp::new(50, 'I'),
@@ -709,7 +710,7 @@ mod tests {
             assert_eq!(result, (100, 166, cigar_ops, 50, 66));
         }
         {
-            let result = project_target_range_through_alignment((70, 95), base, &cigar_ops);
+            let result = project_target_range_through_alignment((70, 95), base, &cigar_ops).unwrap();
             assert_eq!(result, (170, 195, vec![CigarOp::new(25, '=')], 70, 95));
         }
     }
@@ -720,7 +721,7 @@ mod tests {
         let target_range = (100, 200);
         let record = (100, 200, 100, 200, Strand::Forward);
         let cigar_ops = vec![CigarOp::new(100, '=')];
-        let (query_start, query_end, cigar, target_start, target_end) = project_target_range_through_alignment(target_range, record, &cigar_ops);
+        let (query_start, query_end, cigar, target_start, target_end) = project_target_range_through_alignment(target_range, record, &cigar_ops).unwrap();
         assert_eq!((query_start, query_end, cigar, target_start, target_end), (100, 200, vec![CigarOp::new(100, '=')], 100, 200));
     }
 
@@ -730,7 +731,7 @@ mod tests {
         let target_range = (100, 200);
         let record = (100, 200, 100, 200, Strand::Reverse);
         let cigar_ops = vec![CigarOp::new(100, '=')];
-        let (query_start, query_end, cigar, target_start, target_end) = project_target_range_through_alignment(target_range, record, &cigar_ops);
+        let (query_start, query_end, cigar, target_start, target_end) = project_target_range_through_alignment(target_range, record, &cigar_ops).unwrap();
         assert_eq!((query_start, query_end, cigar, target_start, target_end), (200, 100, vec![CigarOp::new(100, '=')], 100, 200)); // Adjust for reverse calculation
     }
 
@@ -744,7 +745,7 @@ mod tests {
             CigarOp::new(10, 'I'), // Insertion
             CigarOp::new(50, '='), // Match
         ];
-        let (start, end, cigar, _, _) = project_target_range_through_alignment(target_range, record, &cigar_ops);
+        let (start, end, cigar, _, _) = project_target_range_through_alignment(target_range, record, &cigar_ops).unwrap();
         assert_eq!((start, end, cigar), (50, 160, cigar_ops));
     }
 
@@ -758,7 +759,7 @@ mod tests {
             CigarOp::new(10, 'D'), // Deletion
             CigarOp::new(40, '='), // Match
         ];
-        let (start, end, cigar, _, _) = project_target_range_through_alignment(target_range, record, &cigar_ops);
+        let (start, end, cigar, _, _) = project_target_range_through_alignment(target_range, record, &cigar_ops).unwrap();
         assert_eq!((start, end, cigar), (50, 140, cigar_ops));
     }
 
@@ -773,7 +774,7 @@ mod tests {
             CigarOp::new(10, 'I'), // 150, 250
             CigarOp::new(40, '='), // 150, 250
         ];
-        let (start, end, cigar, _, _) = project_target_range_through_alignment(target_range, record, &cigar_ops);
+        let (start, end, cigar, _, _) = project_target_range_through_alignment(target_range, record, &cigar_ops).unwrap();
         let cigar_ops = vec![
             CigarOp::new(10, 'D'), // 150, 260
             CigarOp::new(10, 'I'), // 150, 250
@@ -796,7 +797,7 @@ mod tests {
             CigarOp::new(10, 'I'), // Insertion in query
             CigarOp::new(10, '='), // Match
         ];
-        let (query_start, query_end, cigar, target_start, target_end) = project_target_range_through_alignment(target_range, record, &cigar_ops);
+        let (query_start, query_end, cigar, target_start, target_end) = project_target_range_through_alignment(target_range, record, &cigar_ops).unwrap();
         assert_eq!((query_start, query_end, cigar, target_start, target_end), (0, 10, vec![CigarOp::new(10, '=')], 0, 10));
     }
 
