@@ -127,7 +127,7 @@ fn main() -> io::Result<()> {
                 
                 if output_paf {
                     // Skip the first element (the input range) for PAF
-                    output_results_paf(&impg, results.into_iter().skip(1), &target_name, None);
+                    output_results_paf(&impg, results.into_iter().skip(1), None);
                 } else {
                     output_results_bed(&impg, results);
                 }
@@ -148,9 +148,9 @@ fn main() -> io::Result<()> {
                     // Skip the first element (the input range) for both PAF and BEDPE
                     let results_iter = results.into_iter().skip(1);
                     if output_paf {
-                        output_results_paf(&impg, results_iter, &target_name, name);
+                        output_results_paf(&impg, results_iter, name);
                     } else {
-                        output_results_bedpe(&impg, results_iter, &target_name, name);
+                        output_results_bedpe(&impg, results_iter, name);
                     }
                 }
             } else {
@@ -315,12 +315,13 @@ fn output_results_bed(impg: &Impg, results: Vec<AdjustedInterval>) {
     }
 }
 
-fn output_results_bedpe<I>(impg: &Impg, results: I, target_name: &str, name: Option<String>)
+fn output_results_bedpe<I>(impg: &Impg, results: I, name: Option<String>)
 where
     I: Iterator<Item = AdjustedInterval>
 {
     for (overlap_query, _, overlap_target) in results {
         let query_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
+        let target_name = impg.seq_index.get_name(overlap_target.metadata).unwrap();
         let (first, last, strand) = if overlap_query.first <= overlap_query.last {
             (overlap_query.first, overlap_query.last, '+')
         } else {
@@ -333,13 +334,13 @@ where
     }
 }
 
-fn output_results_paf<I>(impg: &Impg, results: I, target_name: &str, name: Option<String>)
+fn output_results_paf<I>(impg: &Impg, results: I, name: Option<String>)
 where
     I: Iterator<Item = AdjustedInterval>
 {
-    let target_length = impg.seq_index.get_len_from_id(impg.seq_index.get_id(target_name).unwrap()).unwrap();  
     for (overlap_query, cigar, overlap_target) in results {
         let query_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
+        let target_name = impg.seq_index.get_name(overlap_target.metadata).unwrap();
         let (first, last, strand) = if overlap_query.first <= overlap_query.last {
             (overlap_query.first, overlap_query.last, '+')
         } else {
@@ -347,6 +348,7 @@ where
         };
 
         let query_length = impg.seq_index.get_len_from_id(overlap_query.metadata).unwrap();  
+        let target_length = impg.seq_index.get_len_from_id(overlap_target.metadata).unwrap();  
 
         let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, block_len) = cigar.iter().fold((0, 0, 0, 0, 0, 0, 0), |(m, mm, i, i_bp, d, d_bp, bl), op| {
             let len = op.len();
