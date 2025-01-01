@@ -112,6 +112,8 @@ pub struct SerializableInterval {
     metadata: QueryMetadata,
 }
 
+// Align ranges to cache line boundary for better memory access
+#[repr(align(64))]
 #[derive(Debug, Default, Clone)]
 pub struct SortedRanges {
     pub ranges: Vec<(i32, i32)>
