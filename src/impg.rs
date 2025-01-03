@@ -384,14 +384,14 @@ impl Impg {
             .map(|(&k, v)| (k, (*v).clone()))
             .collect()
         } else {
-            FxHashMap::default()
+            FxHashMap::with_capacity_and_hasher(self.seq_index.len(), Default::default())
         };
         // Initialize first visited range for target_id if not already present
         visited_ranges.entry(target_id)
             .or_default()
             .insert((range_start, range_end));
 
-        while let Some((current_target_id, current_target_start, current_target_end)) = stack.pop() {
+                while let Some((current_target_id, current_target_start, current_target_end)) = stack.pop() {
             if let Some(tree) = self.trees.get(&current_target_id) {
                 tree.query(current_target_start, current_target_end, |interval| {
                     let metadata = &interval.metadata;
