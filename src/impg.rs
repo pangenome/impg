@@ -463,6 +463,7 @@ fn project_target_range_through_alignment(
     let mut query_pos = if strand == Strand::Forward { query_start } else { query_end };
     let mut target_pos = target_start;
     
+    // Track CIGAR slice bounds
     let mut first_op_idx = 0;
     let mut last_op_idx = 0;
     let mut found_overlap = false;
@@ -474,6 +475,7 @@ fn project_target_range_through_alignment(
     let mut first_op_offset = 0;
     let mut last_op_remaining = 0;
 
+    // Calculate the last valid target position
     let last_target_pos = min(target_end, requested_target_range.1);
 
     for (curr_op_idx, cigar_op) in cigar_ops.iter().enumerate() {
