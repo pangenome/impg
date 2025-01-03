@@ -66,6 +66,10 @@ impl CigarOp {
             _ => panic!("Invalid CIGAR operation: {}", self.op()),
         }
     }
+
+    fn adjust_len(&mut self, length_delta: i32) {
+        self.val = (self.val & (7 << 29)) | ((self.len() + length_delta) as u32);
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -459,34 +463,43 @@ fn project_target_range_through_alignment(
 ) -> Option<(i32, i32, Vec<CigarOp>, i32, i32)> {
     let (target_start, target_end, query_start, query_end, strand) = record;
 
+    let dir = if strand == Strand::Forward { 1 } else { -1 };
     let mut query_pos = if strand == Strand::Forward { query_start } else { query_end };
     let mut target_pos = target_start;
-
-    let mut first_overlap = true;
+    
+    // Track CIGAR slice bounds
+    let mut first_op_idx = 0;
+    let mut last_op_idx = 0;
+    let mut found_overlap = false;
+    
     let mut projected_query_start = -1;
     let mut projected_query_end = -1;
-    let mut projected_cigar = Vec::new();
-    let mut projected_target_start = -1; 
+    let mut projected_target_start = -1;
     let mut projected_target_end = -1;
-    
+    let mut first_op_offset = 0;
+    let mut last_op_remaining = 0;
+
+    // Calculate the last valid target position
     let last_target_pos = min(target_end, requested_target_range.1);
 
-    for cigar_op in cigar_ops {
+    for (curr_op_idx, cigar_op) in cigar_ops.iter().enumerate() {
         // If the target position is past the end of the range, we can stop
         if target_pos > last_target_pos {
             break;
         }
+
         match (cigar_op.target_delta(), cigar_op.query_delta(strand)) {
             (0, query_delta) => { // Insertion in query (deletions in target)
                 if target_pos >= requested_target_range.0 {
-                    if first_overlap {
+                    if !found_overlap {
                         projected_query_start = query_pos;
                         projected_target_start = target_pos;
-                        first_overlap = false;
+                        first_op_idx = curr_op_idx;
+                        found_overlap = true;
                     }
                     projected_query_end = query_pos + query_delta;
-                    projected_cigar.push(CigarOp::new(query_delta.abs(), 'I'));
                     projected_target_end = target_pos;
+                    last_op_idx = curr_op_idx + 1;
                 }
                 query_pos += query_delta;
             },
@@ -494,36 +507,41 @@ fn project_target_range_through_alignment(
                 let overlap_start = target_pos.max(requested_target_range.0);
                 let overlap_end = (target_pos + target_delta).min(last_target_pos);
 
-                if overlap_start < overlap_end { // There's an overlap
-                    if first_overlap {
+                if overlap_start < overlap_end {
+                    if !found_overlap {
                         projected_query_start = query_pos;
                         projected_target_start = overlap_start;
-                        first_overlap = false;
+                        first_op_idx = curr_op_idx;
+                        first_op_offset = overlap_start - target_pos;
+                        found_overlap = true;
                     }
-                    projected_query_end = query_pos; // Deletion does not advance query position
-                    projected_cigar.push(CigarOp::new(overlap_end - overlap_start, 'D'));
+                    projected_query_end = query_pos;
                     projected_target_end = overlap_end;
+                    last_op_idx = curr_op_idx + 1;
+                    last_op_remaining = overlap_end - (target_pos + target_delta);
                 }
-
                 target_pos += target_delta;
             },
             (target_delta, query_delta) => { // Match or mismatch
                 let overlap_start = target_pos.max(requested_target_range.0);
                 let overlap_end = (target_pos + target_delta).min(requested_target_range.1);
-                if overlap_start < overlap_end { // There's an overlap
+
+                if overlap_start < overlap_end {
                     let overlap_length = overlap_end - overlap_start;
-                    let dir = if strand == Strand::Forward { 1 } else { -1 };
                     let query_overlap_start = query_pos + (overlap_start - target_pos) * dir;
                     let query_overlap_end = query_overlap_start + overlap_length * dir;
 
-                    if first_overlap {
+                    if !found_overlap {
                         projected_query_start = query_overlap_start;
                         projected_target_start = overlap_start;
-                        first_overlap = false;
+                        first_op_idx = curr_op_idx;
+                        first_op_offset = overlap_start - target_pos;
+                        found_overlap = true;
                     }
                     projected_query_end = query_overlap_end;
-                    projected_cigar.push(CigarOp::new(overlap_length, cigar_op.op()));
                     projected_target_end = overlap_end;
+                    last_op_idx = curr_op_idx + 1;
+                    last_op_remaining = overlap_end - (target_pos + target_delta);
                 }
 
                 target_pos += target_delta;
@@ -535,17 +553,27 @@ fn project_target_range_through_alignment(
     // If we had at least one overlap, the variables were set
     // projected_query_start == projected_query_end in deletions in the query
     // projected_target_start == projected_target_end in insertions in the query
-    if !first_overlap && projected_query_start != projected_query_end && projected_target_start != projected_target_end {
-        Some((
+    (found_overlap && projected_query_start != projected_query_end && projected_target_start != projected_target_end).then(|| {
+        let mut projected_cigar_ops = cigar_ops[first_op_idx..last_op_idx].to_vec();
+        
+        // Adjust first operation length
+        if first_op_offset > 0 {
+            projected_cigar_ops[0].adjust_len(-first_op_offset);
+        }
+
+        // Adjust last operation length
+        if last_op_remaining < 0 {
+            projected_cigar_ops[last_op_idx - first_op_idx - 1].adjust_len(last_op_remaining);
+        }
+
+        (
             projected_query_start,
             projected_query_end,
-            projected_cigar,
+            projected_cigar_ops,
             projected_target_start,
             projected_target_end,
-        ))
-    } else {
-        None
-    }
+        )
+    })
 }
 
 fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, ParseErr> {
