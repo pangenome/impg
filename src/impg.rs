@@ -140,22 +140,22 @@ impl SortedRanges {
         } else {
             (new_range.1, new_range.0)
         };
-
+    
         // Return regions that don't overlap with existing ranges
         let mut non_overlapping = Vec::new();
         let mut current = start;
-
+    
         // Find the first range that could overlap
         let mut i = match self.ranges.binary_search_by_key(&start, |&(s, _)| s) {
             Ok(pos) => pos,
             Err(pos) => pos,
         };
-
+    
         // Check previous range for overlap
         if i > 0 && self.ranges[i - 1].1 > start {
             i -= 1;
         }
-
+    
         // Process all potentially overlapping ranges
         while i < self.ranges.len() && current < end {
             let (range_start, range_end) = self.ranges[i];
@@ -168,11 +168,11 @@ impl SortedRanges {
             current = max(current, range_end);
             i += 1;
         }
-
+    
         if current < end {
             non_overlapping.push((current, end));
         }
-
+    
         // Now insert the range while maintaining sorted order and merging overlaps
         match self.ranges.binary_search_by_key(&start, |&(s, _)| s) {
             Ok(pos) | Err(pos) => {
@@ -184,12 +184,12 @@ impl SortedRanges {
                     self.ranges[pos].0 = min(start, self.ranges[pos].0);
                     self.ranges[pos].1 = max(end, self.ranges[pos].1);
                     self.merge_forward_from(pos);
-                } else {
+        } else {
                     self.ranges.insert(pos, (start, end));
                 }
             }
         }
-
+    
         non_overlapping
     }
 
@@ -384,14 +384,14 @@ impl Impg {
             .map(|(&k, v)| (k, (*v).clone()))
             .collect()
         } else {
-            FxHashMap::default()
+            FxHashMap::with_capacity_and_hasher(self.seq_index.len(), Default::default())
         };
         // Initialize first visited range for target_id if not already present
         visited_ranges.entry(target_id)
             .or_default()
             .insert((range_start, range_end));
 
-        while let Some((current_target_id, current_target_start, current_target_end)) = stack.pop() {
+                while let Some((current_target_id, current_target_start, current_target_end)) = stack.pop() {
             if let Some(tree) = self.trees.get(&current_target_id) {
                 tree.query(current_target_start, current_target_end, |interval| {
                     let metadata = &interval.metadata;
@@ -430,7 +430,21 @@ impl Impg {
                         }
                     }
                 });
-            }
+
+                // Merge contiguous/overlapping ranges with same sequence_id
+                stack.sort_by_key(|(id, start, _)| (*id, *start));
+                let mut write = 0;
+                for read in 1..stack.len() {
+                    if stack[write].0 == stack[read].0 &&   // Same sequence_id 
+                        stack[write].2 >= stack[read].1 {   // Overlapping or contiguous
+                        stack[write].2 = stack[write].2.max(stack[read].2);
+                    } else {
+                        write += 1;
+                        stack.swap(write, read);
+                    }
+                }
+                stack.truncate(write + 1);
+            }            
         }
 
         results
