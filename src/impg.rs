@@ -459,6 +459,7 @@ fn project_target_range_through_alignment(
 ) -> Option<(i32, i32, Vec<CigarOp>, i32, i32)> {
     let (target_start, target_end, query_start, query_end, strand) = record;
 
+    let dir = if strand == Strand::Forward { 1 } else { -1 };
     let mut query_pos = if strand == Strand::Forward { query_start } else { query_end };
     let mut target_pos = target_start;
 
@@ -512,7 +513,6 @@ fn project_target_range_through_alignment(
                 let overlap_end = (target_pos + target_delta).min(requested_target_range.1);
                 if overlap_start < overlap_end { // There's an overlap
                     let overlap_length = overlap_end - overlap_start;
-                    let dir = if strand == Strand::Forward { 1 } else { -1 };
                     let query_overlap_start = query_pos + (overlap_start - target_pos) * dir;
                     let query_overlap_end = query_overlap_start + overlap_length * dir;
 
@@ -535,17 +535,13 @@ fn project_target_range_through_alignment(
     // If we had at least one overlap, the variables were set
     // projected_query_start == projected_query_end in deletions in the query
     // projected_target_start == projected_target_end in insertions in the query
-    if !first_overlap && projected_query_start != projected_query_end && projected_target_start != projected_target_end {
-        Some((
-            projected_query_start,
-            projected_query_end,
-            projected_cigar,
-            projected_target_start,
-            projected_target_end,
-        ))
-    } else {
-        None
-    }
+    (!first_overlap && projected_query_start != projected_query_end && projected_target_start != projected_target_end).then(|| (
+        projected_query_start,
+        projected_query_end,
+        projected_cigar,
+        projected_target_start,
+        projected_target_end,
+    ))
 }
 
 fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, ParseErr> {
