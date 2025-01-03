@@ -554,22 +554,22 @@ fn project_target_range_through_alignment(
     // projected_query_start == projected_query_end in deletions in the query
     // projected_target_start == projected_target_end in insertions in the query
     (found_overlap && projected_query_start != projected_query_end && projected_target_start != projected_target_end).then(|| {
-        let mut adjusted_ops = cigar_ops[first_op_idx..last_op_idx].to_vec();
+        let mut projected_cigar_ops = cigar_ops[first_op_idx..last_op_idx].to_vec();
         
         // Adjust first operation length
         if first_op_offset > 0 {
-            adjusted_ops[0].adjust_len(-first_op_offset);
+            projected_cigar_ops[0].adjust_len(-first_op_offset);
         }
 
         // Adjust last operation length
         if last_op_remaining < 0 {
-            adjusted_ops[last_op_idx - first_op_idx - 1].adjust_len(last_op_remaining);
+            projected_cigar_ops[last_op_idx - first_op_idx - 1].adjust_len(last_op_remaining);
         }
 
         (
             projected_query_start,
             projected_query_end,
-            adjusted_ops,
+            projected_cigar_ops,
             projected_target_start,
             projected_target_end,
         )
