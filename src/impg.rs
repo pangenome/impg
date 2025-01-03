@@ -66,6 +66,10 @@ impl CigarOp {
             _ => panic!("Invalid CIGAR operation: {}", self.op()),
         }
     }
+
+    fn adjust_len(&mut self, length_delta: i32) {
+        self.val = (self.val & (7 << 29)) | ((self.len() + length_delta) as u32);
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -485,7 +489,7 @@ fn project_target_range_through_alignment(
         }
 
         match (cigar_op.target_delta(), cigar_op.query_delta(strand)) {
-            (0, query_delta) => { // Insertion in query
+            (0, query_delta) => { // Insertion in query (deletions in target)
                 if target_pos >= requested_target_range.0 {
                     if !found_overlap {
                         projected_query_start = query_pos;
@@ -499,7 +503,7 @@ fn project_target_range_through_alignment(
                 }
                 query_pos += query_delta;
             },
-            (target_delta, 0) => { // Deletion in query
+            (target_delta, 0) => { // Deletion in query (insertions in target)
                 let overlap_start = target_pos.max(requested_target_range.0);
                 let overlap_end = (target_pos + target_delta).min(last_target_pos);
 
@@ -553,15 +557,13 @@ fn project_target_range_through_alignment(
         let mut adjusted_ops = cigar_ops[first_op_idx..last_op_idx].to_vec();
         
         // Adjust first operation length
-        if first_op_offset > 0 && !adjusted_ops.is_empty() {
-            let first_op = &mut adjusted_ops[0];
-            first_op.val = (first_op.val & (7 << 29)) | ((first_op.len() - first_op_offset) as u32);
+        if first_op_offset > 0 {
+            adjusted_ops[0].adjust_len(-first_op_offset);
         }
 
         // Adjust last operation length
-        if last_op_remaining < 0 && !adjusted_ops.is_empty() {
-            let last_op = adjusted_ops.last_mut().unwrap();
-            last_op.val = (last_op.val & (7 << 29)) | ((last_op.len() + last_op_remaining) as u32);
+        if last_op_remaining < 0 {
+            adjusted_ops[last_op_idx - first_op_idx - 1].adjust_len(last_op_remaining);
         }
 
         (
