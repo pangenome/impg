@@ -14,6 +14,7 @@ pub fn partition_alignments(
     sequence_prefix: &str,
     min_length: usize,
     merge_distance: usize,
+    max_depth: Option<u32>,
     debug: bool,
 ) -> io::Result<()> {
     // Get all sequences with the given prefix
@@ -113,7 +114,7 @@ pub fn partition_alignments(
 
             // Query overlaps for current window
             //let query_start = Instant::now();
-            let mut overlaps = impg.query_transitive(*seq_id, *start, *end, Some(&masked_regions));
+            let mut overlaps = impg.query_transitive(*seq_id, *start, *end, Some(&masked_regions), max_depth);
             //let query_time = query_start.elapsed();
             debug!("  Collected {} query overlaps", overlaps.len());
 

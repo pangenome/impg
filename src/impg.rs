@@ -369,7 +369,8 @@ impl Impg {
         target_id: u32, 
         range_start: i32, 
         range_end: i32,
-        masked_regions: Option<&FxHashMap<u32, SortedRanges>>
+        masked_regions: Option<&FxHashMap<u32, SortedRanges>>,
+        max_depth: Option<u32>
     ) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
         // Add the input range to the results
@@ -387,7 +388,7 @@ impl Impg {
             }
         ));
         // Initialize stack with first query
-        let mut stack = vec![(target_id, range_start, range_end)];
+        let mut stack = vec![(target_id, range_start, range_end, 0u32)];
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
             m.iter()
@@ -403,7 +404,14 @@ impl Impg {
 
         let mut prec_num_results = 0;
 
-        while let Some((current_target_id, current_target_start, current_target_end)) = stack.pop() {
+        while let Some((current_target_id, current_target_start, current_target_end, current_depth)) = stack.pop() {
+            // Check if we've reached max depth
+            if let Some(max) = max_depth {
+                if current_depth >= max {
+                    continue;
+                }
+            }
+
             debug!("Querying region: {}:{}-{}", self.seq_index.get_name(current_target_id).unwrap(), current_target_start, current_target_end);
 
             if let Some(tree) = self.trees.get(&current_target_id) {
@@ -439,7 +447,7 @@ impl Impg {
                             
                             // Add non-overlapping portions to stack
                             for (new_start, new_end) in new_ranges {
-                                stack.push((metadata.query_id, new_start, new_end));
+                                stack.push((metadata.query_id, new_start, new_end, current_depth + 1));
                             }
                         }
                     }
@@ -447,7 +455,7 @@ impl Impg {
 
                 // Merge contiguous/overlapping ranges with same sequence_id
                 let stack_size = stack.len();
-                stack.sort_by_key(|(id, start, _)| (*id, *start));
+                stack.sort_by_key(|(id, start, _, _)| (*id, *start));
                 let mut write = 0;
                 for read in 1..stack.len() {
                     if stack[write].0 == stack[read].0 &&   // Same sequence_id 

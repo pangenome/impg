@@ -55,6 +55,10 @@ enum Args {
         /// Minimum length for intervals (default: 5000).
         #[clap(short = 'l', long, value_parser, default_value_t = 5000)]
         min_length: usize,
+
+        /// Maximum recursion depth for transitive overlaps (default: no limit).
+        #[clap(short = 'm', long, value_parser)]
+        max_depth: Option<u32>,
     },
     /// Query overlaps in the alignment.
     Query {
@@ -72,6 +76,10 @@ enum Args {
         /// Enable transitive overlap requests.
         #[clap(short = 'x', long, action)]
         transitive: bool,
+
+        /// Maximum recursion depth for transitive overlaps (default: no limit).
+        #[clap(short = 'm', long, value_parser)]
+        max_depth: Option<u32>,
 
         /// Output results in PAF format.
         #[clap(short = 'P', long, action)]
@@ -97,10 +105,11 @@ fn main() -> io::Result<()> {
             window_size,
             sequence_prefix,
             min_length,
-            merge_distance
+            merge_distance,
+            max_depth,
         } => {
             let impg = initialize_impg(&common)?;
-            partition_alignments(&impg, window_size, &sequence_prefix, min_length, merge_distance, common.verbose > 1)?;
+            partition_alignments(&impg, window_size, &sequence_prefix, min_length, merge_distance, max_depth, common.verbose > 1)?;
         },
         Args::Query {
             common,
@@ -109,12 +118,13 @@ fn main() -> io::Result<()> {
             transitive,
             output_paf,
             check_intervals,
+            max_depth,
         } => {
             let impg = initialize_impg(&common)?;
 
             if let Some(target_range) = target_range {
                 let (target_name, target_range) = parse_target_range(&target_range)?;
-                let results = perform_query(&impg, &target_name, target_range, transitive);
+                let results = perform_query(&impg, &target_name, target_range, transitive, max_depth);
                 if check_intervals {
                     let invalid_cigars = impg::impg::check_intervals(&impg, &results);
                     if !invalid_cigars.is_empty() {
@@ -135,7 +145,7 @@ fn main() -> io::Result<()> {
                 let targets = parse_bed_file(&target_bed)?;
                 info!("Parsed {} target ranges from BED file", targets.len());
                 for (target_name, target_range, name) in targets {
-                    let results = perform_query(&impg, &target_name, target_range, transitive);
+                    let results = perform_query(&impg, &target_name, target_range, transitive, max_depth);
                     if check_intervals {
                         let invalid_cigars = impg::impg::check_intervals(&impg, &results);
                         if !invalid_cigars.is_empty() {
@@ -290,7 +300,13 @@ fn parse_range(range_parts: &[&str]) -> io::Result<(i32, i32)> {
     Ok((start, end))
 }
 
-fn perform_query(impg: &Impg, target_name: &str, target_range: (i32, i32), transitive: bool) -> Vec<AdjustedInterval> {
+fn perform_query(
+    impg: &Impg, 
+    target_name: &str, 
+    target_range: (i32, i32), 
+    transitive: bool,
+    max_depth: Option<u32>
+) -> Vec<AdjustedInterval> {
     let (target_start, target_end) = target_range;
     let target_id = impg.seq_index.get_id(target_name).expect("Target name not found in index");
     let target_length = impg.seq_index.get_len_from_id(target_id).expect("Target length not found in index");
@@ -298,7 +314,7 @@ fn perform_query(impg: &Impg, target_name: &str, target_range: (i32, i32), trans
         panic!("Target range end ({}) exceeds the target sequence length ({})", target_end, target_length);
     }
     if transitive {
-        impg.query_transitive(target_id, target_start, target_end, None)
+        impg.query_transitive(target_id, target_start, target_end, None, max_depth)
     } else {
         impg.query(target_id, target_start, target_end)
     }
