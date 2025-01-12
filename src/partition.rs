@@ -14,7 +14,7 @@ pub fn partition_alignments(
     sequence_prefix: &str,
     min_length: usize,
     merge_distance: usize,
-    max_depth: Option<u32>,
+    max_depth: u32,
     debug: bool,
 ) -> io::Result<()> {
     // Get all sequences with the given prefix

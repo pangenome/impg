@@ -370,7 +370,7 @@ impl Impg {
         range_start: i32, 
         range_end: i32,
         masked_regions: Option<&FxHashMap<u32, SortedRanges>>,
-        max_depth: Option<u32>
+        max_depth: u32
     ) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
         // Add the input range to the results
@@ -404,10 +404,8 @@ impl Impg {
 
         while let Some((current_target_id, current_target_start, current_target_end, current_depth)) = stack.pop() {
             // Check if we've reached max depth
-            if let Some(max) = max_depth {
-                if current_depth >= max {
-                    continue;
-                }
+            if max_depth > 0 && current_depth >= max_depth {
+                continue;
             }
 
             debug!("Querying region: {}:{}-{}", self.seq_index.get_name(current_target_id).unwrap(), current_target_start, current_target_end);

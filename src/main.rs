@@ -48,17 +48,17 @@ enum Args {
         #[clap(short = 's', long, value_parser)]
         sequence_prefix: String,
 
-        /// Maximum distance between intervals to merge (default: 10000).
+        /// Maximum distance between intervals to merge.
         #[clap(short = 'd', long, value_parser, default_value_t = 10000)]
         merge_distance: usize,
 
-        /// Minimum length for intervals (default: 5000).
+        /// Minimum length for intervals.
         #[clap(short = 'l', long, value_parser, default_value_t = 5000)]
         min_length: usize,
 
-        /// Maximum recursion depth for transitive overlaps (default: no limit).
-        #[clap(short = 'm', long, value_parser)]
-        max_depth: Option<u32>,
+        /// Maximum recursion depth for transitive overlaps (0 for no limit).
+        #[clap(short = 'm', long, value_parser, default_value_t = 4)]
+        max_depth: u32,
     },
     /// Query overlaps in the alignment.
     Query {
@@ -77,9 +77,9 @@ enum Args {
         #[clap(short = 'x', long, action)]
         transitive: bool,
 
-        /// Maximum recursion depth for transitive overlaps (default: no limit).
-        #[clap(short = 'm', long, value_parser)]
-        max_depth: Option<u32>,
+        /// Maximum recursion depth for transitive overlaps (0 for no limit).
+        #[clap(short = 'm', long, value_parser, default_value_t = 4)]
+        max_depth: u32,
 
         /// Output results in PAF format.
         #[clap(short = 'P', long, action)]
@@ -305,7 +305,7 @@ fn perform_query(
     target_name: &str, 
     target_range: (i32, i32), 
     transitive: bool,
-    max_depth: Option<u32>
+    max_depth: u32
 ) -> Vec<AdjustedInterval> {
     let (target_start, target_end) = target_range;
     let target_id = impg.seq_index.get_id(target_name).expect("Target name not found in index");
