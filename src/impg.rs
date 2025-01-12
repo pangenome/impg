@@ -9,6 +9,7 @@ use rayon::prelude::*;
 use noodles::bgzf;
 use regex::Regex;
 use std::cmp::{min,max};
+use log::debug;
 
 /// Parse a CIGAR string into a vector of CigarOp
 // Note that the query_delta is negative for reverse strand alignments
@@ -223,7 +224,6 @@ pub struct Impg {
 
 impl Impg {
     pub fn from_paf_records(records: &[PafRecord], paf_file: &str) -> Result<Self, ParseErr> {
-
         let paf_gzi_index: Option<bgzf::gzi::Index> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
             let paf_gzi_file = paf_file.to_owned() + ".gzi";
             Some(bgzf::gzi::read(paf_gzi_file.clone()).unwrap_or_else(|_| panic!("Could not open {}", paf_gzi_file)))
@@ -329,6 +329,9 @@ impl Impg {
                 metadata: target_id
             }
         ));
+
+        debug!("Querying region: {}:{}-{}", self.seq_index.get_name(target_id).unwrap(), range_start, range_end);
+
         if let Some(tree) = self.trees.get(&target_id) {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
@@ -355,6 +358,9 @@ impl Impg {
                 }
             });
         }
+        
+        debug!("Collected {} results", results.len());
+
         results
     }
 
@@ -363,7 +369,8 @@ impl Impg {
         target_id: u32, 
         range_start: i32, 
         range_end: i32,
-        masked_regions: Option<&FxHashMap<u32, SortedRanges>>
+        masked_regions: Option<&FxHashMap<u32, SortedRanges>>,
+        max_depth: u16
     ) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
         // Add the input range to the results
@@ -381,7 +388,7 @@ impl Impg {
             }
         ));
         // Initialize stack with first query
-        let mut stack = vec![(target_id, range_start, range_end)];
+        let mut stack = vec![(target_id, range_start, range_end, 0u16)];
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
             m.iter()
@@ -395,7 +402,16 @@ impl Impg {
             .or_default()
             .insert((range_start, range_end));
 
-                while let Some((current_target_id, current_target_start, current_target_end)) = stack.pop() {
+        while let Some((current_target_id, current_target_start, current_target_end, current_depth)) = stack.pop() {
+            // Check if we've reached max depth
+            if max_depth > 0 && current_depth >= max_depth {
+                continue;
+            }
+
+            debug!("Querying region: {}:{}-{}", self.seq_index.get_name(current_target_id).unwrap(), current_target_start, current_target_end);
+
+            let prec_num_results = results.len();
+
             if let Some(tree) = self.trees.get(&current_target_id) {
                 tree.query(current_target_start, current_target_end, |interval| {
                     let metadata = &interval.metadata;
@@ -429,14 +445,15 @@ impl Impg {
                             
                             // Add non-overlapping portions to stack
                             for (new_start, new_end) in new_ranges {
-                                stack.push((metadata.query_id, new_start, new_end));
+                                stack.push((metadata.query_id, new_start, new_end, current_depth + 1));
                             }
                         }
                     }
                 });
 
                 // Merge contiguous/overlapping ranges with same sequence_id
-                stack.sort_by_key(|(id, start, _)| (*id, *start));
+                let stack_size = stack.len();
+                stack.sort_by_key(|(id, start, _, _)| (*id, *start));
                 let mut write = 0;
                 for read in 1..stack.len() {
                     if stack[write].0 == stack[read].0 &&   // Same sequence_id 
@@ -448,7 +465,10 @@ impl Impg {
                     }
                 }
                 stack.truncate(write + 1);
-            }            
+                debug!("Merged stack size from {} to {}", stack_size, stack.len());
+            }
+            
+            debug!("Collected {} results", results.len() - prec_num_results);
         }
 
         results
