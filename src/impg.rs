@@ -402,8 +402,6 @@ impl Impg {
             .or_default()
             .insert((range_start, range_end));
 
-        let mut prec_num_results = 0;
-
         while let Some((current_target_id, current_target_start, current_target_end, current_depth)) = stack.pop() {
             // Check if we've reached max depth
             if let Some(max) = max_depth {
@@ -413,6 +411,8 @@ impl Impg {
             }
 
             debug!("Querying region: {}:{}-{}", self.seq_index.get_name(current_target_id).unwrap(), current_target_start, current_target_end);
+
+            let prec_num_results = results.len();
 
             if let Some(tree) = self.trees.get(&current_target_id) {
                 tree.query(current_target_start, current_target_end, |interval| {
@@ -471,7 +471,6 @@ impl Impg {
             }
             
             debug!("Collected {} results", results.len() - prec_num_results);
-            prec_num_results = results.len();
         }
 
         results
