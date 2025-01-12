@@ -100,7 +100,11 @@ create_length_plot <- function(data) {
   
   # Calculate y-axis breaks with smaller intervals
   max_length <- max(lengths$total_length)
-  y_breaks <- seq(0, ceiling(max_length), by = max(1, ceiling(max_length/20)))
+  y_breaks <- if(max_length < 1) {
+    seq(0, ceiling(max_length * 10) / 10, by = 0.1)  # Use 0.1 intervals for small values
+  } else {
+    seq(0, ceiling(max_length), by = max(1, ceiling(max_length/20)))
+  }
   
   ggplot(lengths, aes(x = factor(partition), y = total_length)) +
     geom_bar(stat = "identity", fill = "#27AE60", width = 0.8) +
