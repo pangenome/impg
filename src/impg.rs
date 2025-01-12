@@ -9,6 +9,7 @@ use rayon::prelude::*;
 use noodles::bgzf;
 use regex::Regex;
 use std::cmp::{min,max};
+use log::debug;
 
 /// Parse a CIGAR string into a vector of CigarOp
 // Note that the query_delta is negative for reverse strand alignments
@@ -223,7 +224,6 @@ pub struct Impg {
 
 impl Impg {
     pub fn from_paf_records(records: &[PafRecord], paf_file: &str) -> Result<Self, ParseErr> {
-
         let paf_gzi_index: Option<bgzf::gzi::Index> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
             let paf_gzi_file = paf_file.to_owned() + ".gzi";
             Some(bgzf::gzi::read(paf_gzi_file.clone()).unwrap_or_else(|_| panic!("Could not open {}", paf_gzi_file)))
@@ -329,6 +329,9 @@ impl Impg {
                 metadata: target_id
             }
         ));
+
+        debug!("Querying region: {}:{}-{}", self.seq_index.get_name(target_id).unwrap(), range_start, range_end);
+
         if let Some(tree) = self.trees.get(&target_id) {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
@@ -355,6 +358,9 @@ impl Impg {
                 }
             });
         }
+        
+        debug!("Collected {} results", results.len());
+
         results
     }
 
@@ -395,7 +401,11 @@ impl Impg {
             .or_default()
             .insert((range_start, range_end));
 
-                while let Some((current_target_id, current_target_start, current_target_end)) = stack.pop() {
+        let mut prec_num_results = 0;
+
+        while let Some((current_target_id, current_target_start, current_target_end)) = stack.pop() {
+            debug!("Querying region: {}:{}-{}", self.seq_index.get_name(current_target_id).unwrap(), current_target_start, current_target_end);
+
             if let Some(tree) = self.trees.get(&current_target_id) {
                 tree.query(current_target_start, current_target_end, |interval| {
                     let metadata = &interval.metadata;
@@ -436,6 +446,7 @@ impl Impg {
                 });
 
                 // Merge contiguous/overlapping ranges with same sequence_id
+                let stack_size = stack.len();
                 stack.sort_by_key(|(id, start, _)| (*id, *start));
                 let mut write = 0;
                 for read in 1..stack.len() {
@@ -448,7 +459,11 @@ impl Impg {
                     }
                 }
                 stack.truncate(write + 1);
-            }            
+                debug!("Merged stack size from {} to {}", stack_size, stack.len());
+            }
+            
+            debug!("Collected {} results", results.len() - prec_num_results);
+            prec_num_results = results.len();
         }
 
         results

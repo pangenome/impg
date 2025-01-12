@@ -8,7 +8,7 @@ use coitrees::IntervalTree;
 use impg::paf;
 use rayon::ThreadPoolBuilder;
 use std::io::BufRead;
-use log::{warn, error};
+use log::{warn, error, info};
 use impg::partition::partition_alignments;
 
 /// Common options shared between all commands
@@ -133,6 +133,7 @@ fn main() -> io::Result<()> {
                 }
             } else if let Some(target_bed) = target_bed {
                 let targets = parse_bed_file(&target_bed)?;
+                info!("Parsed {} target ranges from BED file", targets.len());
                 for (target_name, target_range, name) in targets {
                     let results = perform_query(&impg, &target_name, target_range, transitive);
                     if check_intervals {
