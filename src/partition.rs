@@ -381,14 +381,12 @@ fn extend_short_intervals(
     overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>,
     impg: &Impg,
     min_length: i32,
-) {
-    let min_len = min_length;
-    
+) {   
     for (query_interval, _, target_interval) in overlaps.iter_mut() {
         let len = (query_interval.last - query_interval.first).abs();
         
         if len < min_length {
-            let extension_needed = min_len - len;
+            let extension_needed = min_length - len;
             // Add 1 to the first side if extension_needed is odd
             let extension_per_side = extension_needed / 2;
             let first_side_extension = extension_per_side + (extension_needed % 2);
