@@ -372,6 +372,7 @@ impl Impg {
         masked_regions: Option<&FxHashMap<u32, SortedRanges>>,
         max_depth: u16,
         min_interval_size: u32,
+        min_distance_between_ranges: u32,
     ) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
         // Add the input range to the results
@@ -440,14 +441,48 @@ impl Impg {
                         // Only add non-overlapping portions to the stack for further exploration
                         if metadata.query_id != current_target_id {
                             let ranges = visited_ranges.entry(metadata.query_id)
-                                .or_default();  // Note the closure here
+                                .or_default();
 
-                            let new_ranges = ranges.insert((adjusted_query_start, adjusted_query_end));
+                            let mut should_add = true;
+                
+                            if min_distance_between_ranges > 0 {
+                                let (new_min, new_max) = if adjusted_query_start <= adjusted_query_end {
+                                    (adjusted_query_start, adjusted_query_end)
+                                } else {
+                                    (adjusted_query_end, adjusted_query_start)
+                                };
+
+                                // Find insertion point in sorted ranges
+                                let idx = match ranges.ranges.binary_search_by_key(&new_min, |&(start, _)| start) {
+                                    Ok(i) => i,
+                                    Err(i) => i,
+                                };
+                                
+                                // Only need to check adjacent ranges due to sorting
+                                if idx > 0 {
+                                    // Check previous range
+                                    let (_, prev_end) = ranges.ranges[idx - 1];
+                                    if ((new_min - prev_end).abs() as u32) < min_distance_between_ranges {
+                                        should_add = false;
+                                    }
+                                }
+                                if should_add && idx < ranges.ranges.len() {
+                                    // Check next range
+                                    let (next_start, _) = ranges.ranges[idx];
+                                    if ((next_start - new_max).abs() as u32) < min_distance_between_ranges {
+                                        should_add = false;
+                                    }
+                                }
+                            }
+
+                            if should_add {
+                                let new_ranges = ranges.insert((adjusted_query_start, adjusted_query_end));
                             
-                            // Add non-overlapping portions to stack
-                            for (new_start, new_end) in new_ranges {
-                                if (new_end - new_start).abs() as u32 >= min_interval_size {
-                                    stack.push((metadata.query_id, new_start, new_end, current_depth + 1));
+                                // Add non-overlapping portions to stack
+                                for (new_start, new_end) in new_ranges {
+                                    if ((new_end - new_start).abs() as u32) >= min_interval_size {
+                                        stack.push((metadata.query_id, new_start, new_end, current_depth + 1));
+                                    }
                                 }
                             }
                         }
