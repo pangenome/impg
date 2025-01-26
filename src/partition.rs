@@ -20,12 +20,12 @@ pub fn partition_alignments(
     debug: bool,
 ) -> io::Result<()> {
     // Get all sequences with the given prefix
-    let mut sample_regions = Vec::new();
+    let mut sample_regions = Vec::<(u32, i32, i32)>::new();
     for seq_id in 0..impg.seq_index.len() as u32 {
         let seq_name = impg.seq_index.get_name(seq_id).unwrap();
         if seq_name.starts_with(sequence_prefix) {
             let seq_length = impg.seq_index.get_len_from_id(seq_id).unwrap();
-            sample_regions.push((seq_id, 0, seq_length));
+            sample_regions.push((seq_id, 0, seq_length as i32));
         }
     }
     if sample_regions.is_empty() {
@@ -45,7 +45,7 @@ pub fn partition_alignments(
         debug!("Found {} sequences with prefix {}", sample_regions.len(), sequence_prefix);
         for (seq_id, start, end) in &sample_regions {
             let chrom = impg.seq_index.get_name(*seq_id).unwrap();
-            debug!("  Sequence: {}:{}-{}", chrom, start, end);
+            debug!("  Sequence: {}:{}-{}, len: {}", chrom, start, end, end - start);
         }
     }
 
@@ -63,7 +63,7 @@ pub fn partition_alignments(
     if debug {
         debug!("Starting with {} windows:", windows.len());
         for (chrom, start, end) in &windows {
-            debug!("  Window: {}:{}-{}", chrom, start, end);
+            debug!("  Window: {}:{}-{}, len: {}", chrom, start, end, end - start);
         }
     }
 
@@ -71,7 +71,7 @@ pub fn partition_alignments(
     let mut masked_regions: FxHashMap<u32, SortedRanges> = (0..impg.seq_index.len() as u32)
         .map(|id| {
             let len = impg.seq_index.get_len_from_id(id).unwrap();
-            (id, SortedRanges::new(len as i32, 10000 as i32))
+            (id, SortedRanges::new(len as i32, 10000))
         })
         .collect();
     
@@ -79,7 +79,7 @@ pub fn partition_alignments(
     let mut missing_regions: FxHashMap<u32, SortedRanges> = (0..impg.seq_index.len() as u32)
         .map(|id| {
             let len = impg.seq_index.get_len_from_id(id).unwrap();
-            let mut ranges = SortedRanges::new(len as i32, 10000 as i32);
+            let mut ranges = SortedRanges::new(len as i32, 10000);
             ranges.insert((0, len as i32));
             (id, ranges)
         })
@@ -96,7 +96,7 @@ pub fn partition_alignments(
             if debug {
                 debug!("Processing new window set");
 
-                debug!("  Querying region {}:{}-{}", chrom, start, end);
+                debug!("  Querying region {}:{}-{}, , len: {}", chrom, start, end, end - start);
 
                 debug!("  Missing {} regions in {} sequences", 
                     missing_regions.values().map(|ranges| ranges.len()).sum::<usize>(),
@@ -104,7 +104,7 @@ pub fn partition_alignments(
                 );
                 for (chrom, ranges) in &missing_regions {
                     for &(start, end) in ranges.iter() {
-                        debug!("    Region: {}:{}-{}", chrom, start, end);
+                        debug!("    Region: {}:{}-{}, len: {}", chrom, start, end, end - start);
                     }
                 }
                 
@@ -114,7 +114,7 @@ pub fn partition_alignments(
                 );
                 for (chrom, ranges) in &masked_regions {
                     for &(start, end) in ranges.iter() {
-                        debug!("    Region: {}:{}-{}", chrom, start, end);
+                        debug!("    Region: {}:{}-{}, len: {}", chrom, start, end, end - start);
                     }
                 }
             }
@@ -150,7 +150,7 @@ pub fn partition_alignments(
                 extend_short_intervals(&mut overlaps, impg, min_length as i32);
                 //let extend_time = extend_start.elapsed();
 
-                info!("  Writing partition {} with {} regions (query {}:{}-{})", partition_num, overlaps.len(), chrom, start, end);
+                info!("  Writing partition {} with {} regions (query {}:{}-{}, len: {})", partition_num, overlaps.len(), chrom, start, end, end - start);
                 //let write_start = Instant::now();
                 write_partition(partition_num, &overlaps, impg)?;
                 //let write_time = write_start.elapsed();
@@ -160,7 +160,7 @@ pub fn partition_alignments(
                 // info!("  Partition {} timings: query={:?}, merge={:?}, mask={:?}, update={:?}, extend={:?}, write={:?}",
                 //     partition_num, query_time, merge_time, mask_time, update_time, extend_time, write_time);
             } else {
-                debug!("  No overlaps found for region {}:{}-{}", chrom, start, end);
+                debug!("  No overlaps found for region {}:{}-{}, len: {}", chrom, start, end, end - start);
             }
         }
 

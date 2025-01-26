@@ -120,12 +120,12 @@ pub struct SerializableInterval {
 #[derive(Debug, Default, Clone)]
 pub struct SortedRanges {
     pub ranges: Vec<(i32, i32)>,
-    sequence_length: u32,
-    min_distance: u32,
+    sequence_length: i32,
+    min_distance: i32,
 }
 
 impl SortedRanges {
-    pub fn new(sequence_length: u32, min_distance: u32) -> Self {
+    pub fn new(sequence_length: i32, min_distance: i32) -> Self {
         Self { 
             ranges: Vec::new(),
             sequence_length,
@@ -169,7 +169,7 @@ impl SortedRanges {
         // Check next range
         if i < self.ranges.len() && (self.ranges[i].0 - end).abs() < self.min_distance {
             end = self.ranges[i].0;
-        } else if end > self.sequence_length - self.min_distance {
+        } else if end > (self.sequence_length - self.min_distance) {
             end = self.sequence_length;
         }
 
@@ -356,7 +356,7 @@ impl Impg {
             }
         ));
 
-        debug!("Querying region: {}:{}-{}", self.seq_index.get_name(target_id).unwrap(), range_start, range_end);
+        debug!("Querying region: {}:{}-{}, len: {}", self.seq_index.get_name(target_id).unwrap(), range_start, range_end, range_end - range_start);
 
         if let Some(tree) = self.trees.get(&target_id) {
             tree.query(range_start, range_end, |interval| {
@@ -436,7 +436,7 @@ impl Impg {
                 continue;
             }
 
-            debug!("Querying region: {}:{}-{}", self.seq_index.get_name(current_target_id).unwrap(), current_target_start, current_target_end);
+            debug!("Querying region: {}:{}-{}, len: {}", self.seq_index.get_name(current_target_id).unwrap(), current_target_start, current_target_end, current_target_end - current_target_start);
 
             let prec_num_results = results.len();
 
