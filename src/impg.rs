@@ -119,12 +119,18 @@ pub struct SerializableInterval {
 
 #[derive(Debug, Default, Clone)]
 pub struct SortedRanges {
-    pub ranges: Vec<(i32, i32)>
+    pub ranges: Vec<(i32, i32)>,
+    sequence_length: u32,
+    min_distance: u32,
 }
 
 impl SortedRanges {
-    pub fn new() -> Self {
-        Self { ranges: Vec::new() }
+    pub fn new(sequence_length: u32, min_distance: u32) -> Self {
+        Self { 
+            ranges: Vec::new(),
+            sequence_length,
+            min_distance,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -140,12 +146,33 @@ impl SortedRanges {
     }
 
     pub fn insert(&mut self, new_range: (i32, i32)) -> Vec<(i32, i32)> {
-        let (start, end) = if new_range.0 <= new_range.1 {
+        let (mut start, mut end) = if new_range.0 <= new_range.1 {
             (new_range.0, new_range.1)
         } else {
             (new_range.1, new_range.0)
         };
     
+        // Find nearby ranges to potentially merge with
+        let mut i = match self.ranges.binary_search_by_key(&start, |&(s, _)| s) {
+            Ok(pos) => pos,
+            Err(pos) => pos,
+        };
+
+        // Check previous range
+        if i > 0 && (start - self.ranges[i-1].1).abs() < self.min_distance {
+            start = self.ranges[i-1].1;
+            i -= 1;
+        } else if start < self.min_distance {
+            start = 0;
+        }
+    
+        // Check next range
+        if i < self.ranges.len() && (self.ranges[i].0 - end).abs() < self.min_distance {
+            end = self.ranges[i].0;
+        } else if end > self.sequence_length - self.min_distance {
+            end = self.sequence_length;
+        }
+
         // Return regions that don't overlap with existing ranges
         let mut non_overlapping = Vec::new();
         let mut current = start;
@@ -178,7 +205,6 @@ impl SortedRanges {
             non_overlapping.push((current, end));
         }
     
-        // Now insert the range while maintaining sorted order and merging overlaps
         match self.ranges.binary_search_by_key(&start, |&(s, _)| s) {
             Ok(pos) | Err(pos) => {
                 // Check if we can merge with the previous range
@@ -189,7 +215,7 @@ impl SortedRanges {
                     self.ranges[pos].0 = min(start, self.ranges[pos].0);
                     self.ranges[pos].1 = max(end, self.ranges[pos].1);
                     self.merge_forward_from(pos);
-        } else {
+                } else {
                     self.ranges.insert(pos, (start, end));
                 }
             }
@@ -477,7 +503,7 @@ impl Impg {
 
                             if should_add {
                                 let new_ranges = ranges.insert((adjusted_query_start, adjusted_query_end));
-                            
+
                                 // Add non-overlapping portions to stack
                                 for (new_start, new_end) in new_ranges {
                                     if ((new_end - new_start).abs() as u32) >= min_interval_size {
