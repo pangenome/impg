@@ -396,9 +396,9 @@ impl Impg {
         range_start: i32, 
         range_end: i32,
         masked_regions: Option<&FxHashMap<u32, SortedRanges>>,
-        max_depth: u16,
-        min_interval_size: u32,
-        min_distance_between_ranges: u32,
+        max_depth: i32,
+        min_interval_size: i32,
+        min_distance_between_ranges: i32,
     ) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
         // Add the input range to the results
@@ -416,7 +416,7 @@ impl Impg {
             }
         ));
         // Initialize stack with first query
-        let mut stack = vec![(target_id, range_start, range_end, 0u16)];
+        let mut stack = vec![(target_id, range_start, range_end, 0i32)];
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
             m.iter()
@@ -488,14 +488,14 @@ impl Impg {
                                 if idx > 0 {
                                     // Check previous range
                                     let (_, prev_end) = ranges.ranges[idx - 1];
-                                    if ((new_min - prev_end).abs() as u32) < min_distance_between_ranges {
+                                    if (new_min - prev_end).abs() < min_distance_between_ranges {
                                         should_add = false;
                                     }
                                 }
                                 if should_add && idx < ranges.ranges.len() {
                                     // Check next range
                                     let (next_start, _) = ranges.ranges[idx];
-                                    if ((next_start - new_max).abs() as u32) < min_distance_between_ranges {
+                                    if (next_start - new_max).abs() < min_distance_between_ranges {
                                         should_add = false;
                                     }
                                 }
@@ -506,7 +506,7 @@ impl Impg {
 
                                 // Add non-overlapping portions to stack
                                 for (new_start, new_end) in new_ranges {
-                                    if ((new_end - new_start).abs() as u32) >= min_interval_size {
+                                    if (new_end - new_start).abs() >= min_interval_size {
                                         stack.push((metadata.query_id, new_start, new_end, current_depth + 1));
                                     }
                                 }

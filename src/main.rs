@@ -50,23 +50,23 @@ enum Args {
 
         /// Maximum distance between intervals to merge.
         #[clap(short = 'd', long, value_parser, default_value_t = 10000)]
-        merge_distance: usize,
+        merge_distance: i32,
 
         /// Minimum length for intervals.
         #[clap(short = 'l', long, value_parser, default_value_t = 5000)]
-        min_length: usize,
+        min_length: i32,
 
         /// Maximum recursion depth for transitive overlaps (0 for no limit).
         #[clap(short = 'm', long, value_parser, default_value_t = 1)]
-        max_depth: u16,
+        max_depth: i32,
 
         /// Minimum size of intervals to consider for transitive queries
         #[clap(long, value_parser, default_value_t = 0)]
-        min_interval_size: u32,
+        min_interval_size: i32,
         
         /// Minimum distance between transitive ranges to consider on the same sequence
         #[clap(long, value_parser, default_value_t = 0)]
-        min_distance_between_ranges: u32,
+        min_distance_between_ranges: i32,
     },
     /// Query overlaps in the alignment.
     Query {
@@ -87,15 +87,15 @@ enum Args {
 
         /// Maximum recursion depth for transitive overlaps (0 for no limit).
         #[clap(short = 'm', long, value_parser, default_value_t = 1)]
-        max_depth: u16,
+        max_depth: i32,
 
         /// Minimum size of intervals to consider for transitive queries
         #[clap(long, value_parser, default_value_t = 0)]
-        min_interval_size: u32,
+        min_interval_size: i32,
         
         /// Minimum distance between transitive ranges to consider on the same sequence
         #[clap(long, value_parser, default_value_t = 0)]
-        min_distance_between_ranges: u32,
+        min_distance_between_ranges: i32,
 
         /// Output results in PAF format.
         #[clap(short = 'P', long, action)]
@@ -325,9 +325,9 @@ fn perform_query(
     target_name: &str, 
     target_range: (i32, i32), 
     transitive: bool,
-    max_depth: u16,
-    min_interval_size: u32,
-    min_distance_between_ranges: u32
+    max_depth: i32,
+    min_interval_size: i32,
+    min_distance_between_ranges: i32
 ) -> Vec<AdjustedInterval> {
     let (target_start, target_end) = target_range;
     let target_id = impg.seq_index.get_id(target_name).expect("Target name not found in index");

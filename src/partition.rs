@@ -12,11 +12,11 @@ pub fn partition_alignments(
     impg: &Impg,
     window_size: usize,
     sequence_prefix: &str,
-    min_length: usize,
-    merge_distance: usize,
-    max_depth: u16,
-    min_interval_size: u32,
-    min_distance_between_ranges: u32,
+    min_length: i32,
+    merge_distance: i32,
+    max_depth: i32,
+    min_interval_size: i32,
+    min_distance_between_ranges: i32,
     debug: bool,
 ) -> io::Result<()> {
     // Get all sequences with the given prefix
@@ -128,7 +128,7 @@ pub fn partition_alignments(
             // Ignore CIGAR strings and target intervals.
             debug!("  Merging overlaps closer than {}bp", merge_distance); // bedtools sort | bedtools merge -d merge_distance
             //let merge_start = Instant::now();
-            merge_overlaps(&mut overlaps, merge_distance as i32);
+            merge_overlaps(&mut overlaps, merge_distance);
             //let merge_time = merge_start.elapsed();
             debug!("  Collected {} query overlaps after merging", overlaps.len());
 
