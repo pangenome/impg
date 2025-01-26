@@ -471,6 +471,7 @@ impl Impg {
 
                             let mut should_add = true;
                 
+                            // Check if the range is too close to any existing ranges
                             if min_distance_between_ranges > 0 {
                                 let (new_min, new_max) = if adjusted_query_start <= adjusted_query_end {
                                     (adjusted_query_start, adjusted_query_end)

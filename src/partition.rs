@@ -17,6 +17,7 @@ pub fn partition_alignments(
     max_depth: i32,
     min_transitive_region_size: i32,
     min_distance_between_ranges: i32,
+    min_mask_proximity: i32,
     debug: bool,
 ) -> io::Result<()> {
     // Get all sequences with the given prefix
@@ -72,7 +73,7 @@ pub fn partition_alignments(
     let mut masked_regions: FxHashMap<u32, SortedRanges> = (0..impg.seq_index.len() as u32)
         .map(|id| {
             let len = impg.seq_index.get_len_from_id(id).unwrap();
-            (id, SortedRanges::new(len as i32, 10000))
+            (id, SortedRanges::new(len as i32, min_mask_proximity))
         })
         .collect();
     
@@ -80,7 +81,7 @@ pub fn partition_alignments(
     let mut missing_regions: FxHashMap<u32, SortedRanges> = (0..impg.seq_index.len() as u32)
         .map(|id| {
             let len = impg.seq_index.get_len_from_id(id).unwrap();
-            let mut ranges = SortedRanges::new(len as i32, 10000);
+            let mut ranges = SortedRanges::new(len as i32, min_mask_proximity);
             ranges.insert((0, len as i32));
             (id, ranges)
         })

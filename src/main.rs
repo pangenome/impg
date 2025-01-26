@@ -61,12 +61,16 @@ enum Args {
         max_depth: i32,
 
         /// Minimum size of intervals to consider for transitive queries
-        #[clap(long, value_parser, default_value_t = 0)]
+        #[clap(long, value_parser, default_value_t = 500)]
         min_transitive_region_size: i32,
         
         /// Minimum distance between transitive ranges to consider on the same sequence
-        #[clap(long, value_parser, default_value_t = 0)]
+        #[clap(long, value_parser, default_value_t = 10)]
         min_distance_between_ranges: i32,
+
+        /// Minimum proximity between masked regions to consider them adjacent
+        #[clap(long, value_parser, default_value_t = 5000)]
+        min_mask_proximity: i32,
     },
     /// Query overlaps in the alignment
     Query {
@@ -125,9 +129,10 @@ fn main() -> io::Result<()> {
             max_depth,
             min_transitive_region_size,
             min_distance_between_ranges,
+            min_mask_proximity,
         } => {
             let impg = initialize_impg(&common)?;
-            partition_alignments(&impg, window_size, &sequence_prefix, min_region_size, merge_distance, max_depth, min_transitive_region_size, min_distance_between_ranges, common.verbose > 1)?;
+            partition_alignments(&impg, window_size, &sequence_prefix, min_region_size, merge_distance, max_depth, min_transitive_region_size, min_distance_between_ranges, min_mask_proximity, common.verbose > 1)?;
         },
         Args::Query {
             common,
