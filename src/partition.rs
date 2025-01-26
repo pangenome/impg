@@ -62,7 +62,8 @@ pub fn partition_alignments(
 
     if debug {
         debug!("Starting with {} windows:", windows.len());
-        for (chrom, start, end) in &windows {
+        for (seq_id, start, end) in &windows {
+            let chrom = impg.seq_index.get_name(*seq_id).unwrap();
             debug!("  Window: {}:{}-{}, len: {}", chrom, start, end, end - start);
         }
     }
@@ -103,6 +104,7 @@ pub fn partition_alignments(
                     missing_regions.len()
                 );
                 for (chrom, ranges) in &missing_regions {
+                    let chrom = impg.seq_index.get_name(*chrom).unwrap();
                     for &(start, end) in ranges.iter() {
                         debug!("    Region: {}:{}-{}, len: {}", chrom, start, end, end - start);
                     }
@@ -113,6 +115,7 @@ pub fn partition_alignments(
                     masked_regions.len()
                 );
                 for (chrom, ranges) in &masked_regions {
+                    let chrom = impg.seq_index.get_name(*chrom).unwrap();
                     for &(start, end) in ranges.iter() {
                         debug!("    Region: {}:{}-{}, len: {}", chrom, start, end, end - start);
                     }
