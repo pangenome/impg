@@ -397,7 +397,7 @@ impl Impg {
         range_end: i32,
         masked_regions: Option<&FxHashMap<u32, SortedRanges>>,
         max_depth: i32,
-        min_interval_size: i32,
+        min_transitive_region_size: i32,
         min_distance_between_ranges: i32,
     ) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
@@ -506,7 +506,7 @@ impl Impg {
 
                                 // Add non-overlapping portions to stack
                                 for (new_start, new_end) in new_ranges {
-                                    if (new_end - new_start).abs() >= min_interval_size {
+                                    if (new_end - new_start).abs() >= min_transitive_region_size {
                                         stack.push((metadata.query_id, new_start, new_end, current_depth + 1));
                                     }
                                 }

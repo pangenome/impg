@@ -12,10 +12,10 @@ pub fn partition_alignments(
     impg: &Impg,
     window_size: usize,
     sequence_prefix: &str,
-    min_length: i32,
+    min_region_size: i32,
     merge_distance: i32,
     max_depth: i32,
-    min_interval_size: i32,
+    min_transitive_region_size: i32,
     min_distance_between_ranges: i32,
     debug: bool,
 ) -> io::Result<()> {
@@ -124,7 +124,7 @@ pub fn partition_alignments(
 
             // Query overlaps for current window
             //let query_start = Instant::now();
-            let mut overlaps = impg.query_transitive(*seq_id, *start, *end, Some(&masked_regions), max_depth, min_interval_size, min_distance_between_ranges);
+            let mut overlaps = impg.query_transitive(*seq_id, *start, *end, Some(&masked_regions), max_depth, min_transitive_region_size, min_distance_between_ranges);
             //let query_time = query_start.elapsed();
             debug!("  Collected {} query overlaps", overlaps.len());
 
@@ -150,7 +150,7 @@ pub fn partition_alignments(
 
                 debug!("  Extending short intervals");
                 //let extend_start = Instant::now();
-                extend_short_intervals(&mut overlaps, impg, min_length as i32);
+                extend_short_intervals(&mut overlaps, impg, min_region_size);
                 //let extend_time = extend_start.elapsed();
 
                 info!("  Writing partition {} with {} regions (query {}:{}-{}, len: {})", partition_num, overlaps.len(), chrom, start, end, end - start);
@@ -391,13 +391,13 @@ fn update_masked_and_missing_regions(
 fn extend_short_intervals(
     overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>,
     impg: &Impg,
-    min_length: i32,
+    min_region_size: i32,
 ) {   
     for (query_interval, _, target_interval) in overlaps.iter_mut() {
         let len = (query_interval.last - query_interval.first).abs();
         
-        if len < min_length {
-            let extension_needed = min_length - len;
+        if len < min_region_size {
+            let extension_needed = min_region_size - len;
             // Add 1 to the first side if extension_needed is odd
             let extension_per_side = extension_needed / 2;
             let first_side_extension = extension_per_side + (extension_needed % 2);
