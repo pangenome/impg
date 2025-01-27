@@ -12,20 +12,21 @@ pub fn partition_alignments(
     impg: &Impg,
     window_size: usize,
     sequence_prefix: &str,
-    min_length: usize,
-    merge_distance: usize,
-    max_depth: u16,
-    min_interval_size: u32,
-    min_distance_between_ranges: u32,
+    min_region_size: i32,
+    merge_distance: i32,
+    max_depth: i32,
+    min_transitive_region_size: i32,
+    min_distance_between_ranges: i32,
+    min_mask_proximity: i32,
     debug: bool,
 ) -> io::Result<()> {
     // Get all sequences with the given prefix
-    let mut sample_regions = Vec::new();
+    let mut sample_regions = Vec::<(u32, i32, i32)>::new();
     for seq_id in 0..impg.seq_index.len() as u32 {
         let seq_name = impg.seq_index.get_name(seq_id).unwrap();
         if seq_name.starts_with(sequence_prefix) {
             let seq_length = impg.seq_index.get_len_from_id(seq_id).unwrap();
-            sample_regions.push((seq_id, 0, seq_length));
+            sample_regions.push((seq_id, 0, seq_length as i32));
         }
     }
     if sample_regions.is_empty() {
@@ -45,7 +46,7 @@ pub fn partition_alignments(
         debug!("Found {} sequences with prefix {}", sample_regions.len(), sequence_prefix);
         for (seq_id, start, end) in &sample_regions {
             let chrom = impg.seq_index.get_name(*seq_id).unwrap();
-            debug!("  Sequence: {}:{}-{}", chrom, start, end);
+            debug!("  Sequence: {}:{}-{}, len: {}", chrom, start, end, end - start);
         }
     }
 
@@ -62,19 +63,25 @@ pub fn partition_alignments(
 
     if debug {
         debug!("Starting with {} windows:", windows.len());
-        for (chrom, start, end) in &windows {
-            debug!("  Window: {}:{}-{}", chrom, start, end);
+        for (seq_id, start, end) in &windows {
+            let chrom = impg.seq_index.get_name(*seq_id).unwrap();
+            debug!("  Window: {}:{}-{}, len: {}", chrom, start, end, end - start);
         }
     }
 
     // Initialize masked regions
-    let mut masked_regions: FxHashMap<u32, SortedRanges> = FxHashMap::default();
+    let mut masked_regions: FxHashMap<u32, SortedRanges> = (0..impg.seq_index.len() as u32)
+        .map(|id| {
+            let len = impg.seq_index.get_len_from_id(id).unwrap();
+            (id, SortedRanges::new(len as i32, min_mask_proximity))
+        })
+        .collect();
     
     // Initialize missing regions from sequence index
     let mut missing_regions: FxHashMap<u32, SortedRanges> = (0..impg.seq_index.len() as u32)
         .map(|id| {
             let len = impg.seq_index.get_len_from_id(id).unwrap();
-            let mut ranges = SortedRanges::new();
+            let mut ranges = SortedRanges::new(len as i32, min_mask_proximity);
             ranges.insert((0, len as i32));
             (id, ranges)
         })
@@ -91,15 +98,16 @@ pub fn partition_alignments(
             if debug {
                 debug!("Processing new window set");
 
-                debug!("  Querying region {}:{}-{}", chrom, start, end);
+                debug!("  Querying region {}:{}-{}, , len: {}", chrom, start, end, end - start);
 
                 debug!("  Missing {} regions in {} sequences", 
                     missing_regions.values().map(|ranges| ranges.len()).sum::<usize>(),
                     missing_regions.len()
                 );
                 for (chrom, ranges) in &missing_regions {
+                    let chrom = impg.seq_index.get_name(*chrom).unwrap();
                     for &(start, end) in ranges.iter() {
-                        debug!("    Region: {}:{}-{}", chrom, start, end);
+                        debug!("    Region: {}:{}-{}, len: {}", chrom, start, end, end - start);
                     }
                 }
                 
@@ -108,22 +116,23 @@ pub fn partition_alignments(
                     masked_regions.len()
                 );
                 for (chrom, ranges) in &masked_regions {
+                    let chrom = impg.seq_index.get_name(*chrom).unwrap();
                     for &(start, end) in ranges.iter() {
-                        debug!("    Region: {}:{}-{}", chrom, start, end);
+                        debug!("    Region: {}:{}-{}, len: {}", chrom, start, end, end - start);
                     }
                 }
             }
 
             // Query overlaps for current window
             //let query_start = Instant::now();
-            let mut overlaps = impg.query_transitive(*seq_id, *start, *end, Some(&masked_regions), max_depth, min_interval_size, min_distance_between_ranges);
+            let mut overlaps = impg.query_transitive(*seq_id, *start, *end, Some(&masked_regions), max_depth, min_transitive_region_size, min_distance_between_ranges);
             //let query_time = query_start.elapsed();
             debug!("  Collected {} query overlaps", overlaps.len());
 
             // Ignore CIGAR strings and target intervals.
             debug!("  Merging overlaps closer than {}bp", merge_distance); // bedtools sort | bedtools merge -d merge_distance
             //let merge_start = Instant::now();
-            merge_overlaps(&mut overlaps, merge_distance as i32);
+            merge_overlaps(&mut overlaps, merge_distance);
             //let merge_time = merge_start.elapsed();
             debug!("  Collected {} query overlaps after merging", overlaps.len());
 
@@ -142,10 +151,10 @@ pub fn partition_alignments(
 
                 debug!("  Extending short intervals");
                 //let extend_start = Instant::now();
-                extend_short_intervals(&mut overlaps, impg, min_length as i32);
+                extend_short_intervals(&mut overlaps, impg, min_region_size);
                 //let extend_time = extend_start.elapsed();
 
-                info!("  Writing partition {} with {} regions (query {}:{}-{})", partition_num, overlaps.len(), chrom, start, end);
+                info!("  Writing partition {} with {} regions (query {}:{}-{}, len: {})", partition_num, overlaps.len(), chrom, start, end, end - start);
                 //let write_start = Instant::now();
                 write_partition(partition_num, &overlaps, impg)?;
                 //let write_time = write_start.elapsed();
@@ -155,7 +164,7 @@ pub fn partition_alignments(
                 // info!("  Partition {} timings: query={:?}, merge={:?}, mask={:?}, update={:?}, extend={:?}, write={:?}",
                 //     partition_num, query_time, merge_time, mask_time, update_time, extend_time, write_time);
             } else {
-                debug!("  No overlaps found for region {}:{}-{}", chrom, start, end);
+                debug!("  No overlaps found for region {}:{}-{}, len: {}", chrom, start, end, end - start);
             }
         }
 
@@ -383,13 +392,13 @@ fn update_masked_and_missing_regions(
 fn extend_short_intervals(
     overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>,
     impg: &Impg,
-    min_length: i32,
+    min_region_size: i32,
 ) {   
     for (query_interval, _, target_interval) in overlaps.iter_mut() {
         let len = (query_interval.last - query_interval.first).abs();
         
-        if len < min_length {
-            let extension_needed = min_length - len;
+        if len < min_region_size {
+            let extension_needed = min_region_size - len;
             // Add 1 to the first side if extension_needed is odd
             let extension_per_side = extension_needed / 2;
             let first_side_extension = extension_per_side + (extension_needed % 2);

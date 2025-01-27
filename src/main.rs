@@ -40,7 +40,7 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
 
-        /// Window size for partitioning.
+        /// Window size for partitioning
         #[clap(short = 'w', long, value_parser)]
         window_size: usize,
         
@@ -48,64 +48,68 @@ enum Args {
         #[clap(short = 's', long, value_parser)]
         sequence_prefix: String,
 
-        /// Maximum distance between intervals to merge.
+        /// Maximum distance between intervals to merge
         #[clap(short = 'd', long, value_parser, default_value_t = 10000)]
-        merge_distance: usize,
+        merge_distance: i32,
 
-        /// Minimum length for intervals.
+        /// Minimum size for partitioned regions - shorter regions will be extended
         #[clap(short = 'l', long, value_parser, default_value_t = 5000)]
-        min_length: usize,
+        min_region_size: i32,
 
-        /// Maximum recursion depth for transitive overlaps (0 for no limit).
+        /// Maximum recursion depth for transitive overlaps (0 for no limit)
         #[clap(short = 'm', long, value_parser, default_value_t = 1)]
-        max_depth: u16,
+        max_depth: i32,
 
         /// Minimum size of intervals to consider for transitive queries
-        #[clap(long, value_parser, default_value_t = 0)]
-        min_interval_size: u32,
+        #[clap(long, value_parser, default_value_t = 500)]
+        min_transitive_region_size: i32,
         
         /// Minimum distance between transitive ranges to consider on the same sequence
-        #[clap(long, value_parser, default_value_t = 0)]
-        min_distance_between_ranges: u32,
+        #[clap(long, value_parser, default_value_t = 10)]
+        min_distance_between_ranges: i32,
+
+        /// Minimum proximity between masked regions to consider them adjacent
+        #[clap(long, value_parser, default_value_t = 5000)]
+        min_mask_proximity: i32,
     },
-    /// Query overlaps in the alignment.
+    /// Query overlaps in the alignment
     Query {
         #[clap(flatten)]
         common: CommonOpts,
         
-        /// Target range in the format `seq_name:start-end`.
+        /// Target range in the format `seq_name:start-end`
         #[clap(short = 'r', long, value_parser)]
         target_range: Option<String>,
 
-        /// Path to the BED file containing target regions.
+        /// Path to the BED file containing target regions
         #[clap(short = 'b', long, value_parser)]
         target_bed: Option<String>,
 
-        /// Enable transitive overlap requests.
+        /// Enable transitive overlap requests
         #[clap(short = 'x', long, action)]
         transitive: bool,
 
-        /// Maximum recursion depth for transitive overlaps (0 for no limit).
+        /// Maximum recursion depth for transitive overlaps (0 for no limit)
         #[clap(short = 'm', long, value_parser, default_value_t = 1)]
-        max_depth: u16,
+        max_depth: i32,
 
         /// Minimum size of intervals to consider for transitive queries
         #[clap(long, value_parser, default_value_t = 0)]
-        min_interval_size: u32,
+        min_transitive_region_size: i32,
         
         /// Minimum distance between transitive ranges to consider on the same sequence
         #[clap(long, value_parser, default_value_t = 0)]
-        min_distance_between_ranges: u32,
+        min_distance_between_ranges: i32,
 
-        /// Output results in PAF format.
+        /// Output results in PAF format
         #[clap(short = 'P', long, action)]
         output_paf: bool,
 
-        /// Check the projected intervals, reporting the wrong ones (slow, useful for debugging).
+        /// Check the projected intervals, reporting the wrong ones (slow, useful for debugging)
         #[clap(short = 'c', long, action)]
         check_intervals: bool,
     },
-    /// Print alignment statistics.
+    /// Print alignment statistics
     Stats {
         #[clap(flatten)]
         common: CommonOpts,
@@ -120,14 +124,15 @@ fn main() -> io::Result<()> {
             common,
             window_size,
             sequence_prefix,
-            min_length,
+            min_region_size,
             merge_distance,
             max_depth,
-            min_interval_size,
+            min_transitive_region_size,
             min_distance_between_ranges,
+            min_mask_proximity,
         } => {
             let impg = initialize_impg(&common)?;
-            partition_alignments(&impg, window_size, &sequence_prefix, min_length, merge_distance, max_depth, min_interval_size, min_distance_between_ranges, common.verbose > 1)?;
+            partition_alignments(&impg, window_size, &sequence_prefix, min_region_size, merge_distance, max_depth, min_transitive_region_size, min_distance_between_ranges, min_mask_proximity, common.verbose > 1)?;
         },
         Args::Query {
             common,
@@ -137,14 +142,14 @@ fn main() -> io::Result<()> {
             output_paf,
             check_intervals,
             max_depth,
-            min_interval_size,
+            min_transitive_region_size,
             min_distance_between_ranges
         } => {
             let impg = initialize_impg(&common)?;
 
             if let Some(target_range) = target_range {
                 let (target_name, target_range) = parse_target_range(&target_range)?;
-                let results = perform_query(&impg, &target_name, target_range, transitive, max_depth, min_interval_size, min_distance_between_ranges);
+                let results = perform_query(&impg, &target_name, target_range, transitive, max_depth, min_transitive_region_size, min_distance_between_ranges);
                 if check_intervals {
                     let invalid_cigars = impg::impg::check_intervals(&impg, &results);
                     if !invalid_cigars.is_empty() {
@@ -165,7 +170,7 @@ fn main() -> io::Result<()> {
                 let targets = parse_bed_file(&target_bed)?;
                 info!("Parsed {} target ranges from BED file", targets.len());
                 for (target_name, target_range, name) in targets {
-                    let results = perform_query(&impg, &target_name, target_range, transitive, max_depth, min_interval_size, min_distance_between_ranges);
+                    let results = perform_query(&impg, &target_name, target_range, transitive, max_depth, min_transitive_region_size, min_distance_between_ranges);
                     if check_intervals {
                         let invalid_cigars = impg::impg::check_intervals(&impg, &results);
                         if !invalid_cigars.is_empty() {
@@ -325,9 +330,9 @@ fn perform_query(
     target_name: &str, 
     target_range: (i32, i32), 
     transitive: bool,
-    max_depth: u16,
-    min_interval_size: u32,
-    min_distance_between_ranges: u32
+    max_depth: i32,
+    min_transitive_region_size: i32,
+    min_distance_between_ranges: i32
 ) -> Vec<AdjustedInterval> {
     let (target_start, target_end) = target_range;
     let target_id = impg.seq_index.get_id(target_name).expect("Target name not found in index");
@@ -336,7 +341,7 @@ fn perform_query(
         panic!("Target range end ({}) exceeds the target sequence length ({})", target_end, target_length);
     }
     if transitive {
-        impg.query_transitive(target_id, target_start, target_end, None, max_depth, min_interval_size, min_distance_between_ranges)
+        impg.query_transitive(target_id, target_start, target_end, None, max_depth, min_transitive_region_size, min_distance_between_ranges)
     } else {
         impg.query(target_id, target_start, target_end)
     }
