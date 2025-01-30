@@ -58,7 +58,7 @@ enum Args {
 
         /// Maximum recursion depth for transitive overlaps (0 for no limit)
         #[clap(short = 'm', long, value_parser, default_value_t = 1)]
-        max_depth: i32,
+        max_depth: u16,
 
         /// Minimum size of intervals to consider for transitive queries
         #[clap(long, value_parser, default_value_t = 500)]
@@ -91,7 +91,7 @@ enum Args {
 
         /// Maximum recursion depth for transitive overlaps (0 for no limit)
         #[clap(short = 'm', long, value_parser, default_value_t = 1)]
-        max_depth: i32,
+        max_depth: u16,
 
         /// Minimum size of intervals to consider for transitive queries
         #[clap(long, value_parser, default_value_t = 0)]
@@ -330,7 +330,7 @@ fn perform_query(
     target_name: &str, 
     target_range: (i32, i32), 
     transitive: bool,
-    max_depth: i32,
+    max_depth: u16,
     min_transitive_region_size: i32,
     min_distance_between_ranges: i32
 ) -> Vec<AdjustedInterval> {

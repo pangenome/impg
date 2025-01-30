@@ -396,7 +396,7 @@ impl Impg {
         range_start: i32, 
         range_end: i32,
         masked_regions: Option<&FxHashMap<u32, SortedRanges>>,
-        max_depth: i32,
+        max_depth: u16,
         min_transitive_region_size: i32,
         min_distance_between_ranges: i32,
     ) -> Vec<AdjustedInterval> {
@@ -416,7 +416,7 @@ impl Impg {
             }
         ));
         // Initialize stack with first query
-        let mut stack = vec![(target_id, range_start, range_end, 0i32)];
+        let mut stack = vec![(target_id, range_start, range_end, 0u16)];
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
             m.iter()

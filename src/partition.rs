@@ -14,7 +14,7 @@ pub fn partition_alignments(
     sequence_prefix: &str,
     min_region_size: i32,
     merge_distance: i32,
-    max_depth: i32,
+    max_depth: u16,
     min_transitive_region_size: i32,
     min_distance_between_ranges: i32,
     min_mask_proximity: i32,
