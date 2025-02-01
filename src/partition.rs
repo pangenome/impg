@@ -124,8 +124,13 @@ pub fn partition_alignments(
             }
 
             // Query overlaps for current window
-            //let query_start = Instant::now();
-            let mut overlaps = impg.query_transitive(*seq_id, *start, *end, Some(&masked_regions), max_depth, min_transitive_region_size, min_distance_between_ranges);
+            let query_start = Instant::now();
+            let mut overlaps = impg.query_transitive(
+                *seq_id, *start, *end, 
+                Some(&masked_regions),
+                max_depth, min_transitive_region_size, min_distance_between_ranges,
+                false  // Don't store CIGAR strings during partitioning
+            );
             //let query_time = query_start.elapsed();
             debug!("  Collected {} query overlaps", overlaps.len());
 

@@ -364,7 +364,8 @@ impl Impg {
                 let result = project_target_range_through_alignment(
                     (range_start, range_end),
                     (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end, metadata.strand),
-                    &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref())
+                    &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref()),
+                    true
                 );
                 if let Some((adjusted_query_start, adjusted_query_end, adjusted_cigar, adjusted_target_start, adjusted_target_end)) = result {
                     let adjusted_interval = (
@@ -399,6 +400,7 @@ impl Impg {
         max_depth: u16,
         min_transitive_region_size: i32,
         min_distance_between_ranges: i32,
+        store_cigar: bool
     ) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
         // Add the input range to the results
@@ -408,7 +410,7 @@ impl Impg {
                 last: range_end,
                 metadata: target_id,
             },
-            vec![CigarOp::new(range_end - range_start, '=')],
+            if store_cigar { vec![CigarOp::new(range_end - range_start, '=')] } else { Vec::new() },
             Interval {
                 first: range_start,
                 last: range_end,
@@ -446,7 +448,8 @@ impl Impg {
                     let result = project_target_range_through_alignment(
                         (current_target_start, current_target_end),
                         (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end, metadata.strand),
-                        &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref())
+                        &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref()),
+                        store_cigar
                     );
                     if let Some((adjusted_query_start, adjusted_query_end, adjusted_cigar, adjusted_target_start, adjusted_target_end)) = result {
                         let adjusted_interval = (
@@ -544,7 +547,8 @@ impl Impg {
 fn project_target_range_through_alignment(
     requested_target_range: (i32, i32),
     record: (i32, i32, i32, i32, Strand),
-    cigar_ops: &[CigarOp]
+    cigar_ops: &[CigarOp],
+    store_cigar: bool
 ) -> Option<(i32, i32, Vec<CigarOp>, i32, i32)> {
     let (target_start, target_end, query_start, query_end, strand) = record;
 
@@ -639,17 +643,23 @@ fn project_target_range_through_alignment(
     // projected_query_start == projected_query_end in deletions in the query
     // projected_target_start == projected_target_end in insertions in the query
     (found_overlap && projected_query_start != projected_query_end && projected_target_start != projected_target_end).then(|| {
-        let mut projected_cigar_ops = cigar_ops[first_op_idx..last_op_idx].to_vec();
-        
-        // Adjust first operation length
-        if first_op_offset > 0 {
-            projected_cigar_ops[0].adjust_len(-first_op_offset);
-        }
+        let projected_cigar_ops = if store_cigar {
+            let mut projected_cigar_ops = cigar_ops[first_op_idx..last_op_idx].to_vec();
+            
+            // Adjust first operation length
+            if first_op_offset > 0 {
+                projected_cigar_ops[0].adjust_len(-first_op_offset);
+            }
 
-        // Adjust last operation length
-        if last_op_remaining < 0 {
-            projected_cigar_ops[last_op_idx - first_op_idx - 1].adjust_len(last_op_remaining);
-        }
+            // Adjust last operation length
+            if last_op_remaining < 0 {
+                projected_cigar_ops[last_op_idx - first_op_idx - 1].adjust_len(last_op_remaining);
+            }
+
+            projected_cigar_ops
+        } else {
+            Vec::new()
+        };
 
         (
             projected_query_start,
