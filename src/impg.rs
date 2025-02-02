@@ -425,7 +425,12 @@ impl Impg {
             .map(|(&k, v)| (k, (*v).clone()))
             .collect()
         } else {
-            FxHashMap::with_capacity_and_hasher(self.seq_index.len(), Default::default())
+            (0..self.seq_index.len() as u32)
+            .map(|id| {
+                let len = self.seq_index.get_len_from_id(id).unwrap();
+                (id, SortedRanges::new(len as i32, min_distance_between_ranges))
+            })
+            .collect()
         };
         // Initialize first visited range for target_id if not already present
         visited_ranges.entry(target_id)
