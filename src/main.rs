@@ -341,7 +341,7 @@ fn perform_query(
         panic!("Target range end ({}) exceeds the target sequence length ({})", target_end, target_length);
     }
     if transitive {
-        impg.query_transitive(target_id, target_start, target_end, None, max_depth, min_transitive_region_size, min_distance_between_ranges)
+        impg.query_transitive(target_id, target_start, target_end, None, max_depth, min_transitive_region_size, min_distance_between_ranges, true)
     } else {
         impg.query(target_id, target_start, target_end)
     }

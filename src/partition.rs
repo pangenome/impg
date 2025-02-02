@@ -92,7 +92,7 @@ pub fn partition_alignments(
     info!("Partitioning");
 
     while !windows.is_empty() {
-        for (seq_id, start, end) in windows.iter() {     
+        for (seq_id, start, end) in windows.iter() {
             let chrom = impg.seq_index.get_name(*seq_id).unwrap();
 
             if debug {
@@ -125,7 +125,12 @@ pub fn partition_alignments(
 
             // Query overlaps for current window
             //let query_start = Instant::now();
-            let mut overlaps = impg.query_transitive(*seq_id, *start, *end, Some(&masked_regions), max_depth, min_transitive_region_size, min_distance_between_ranges);
+            let mut overlaps = impg.query_transitive(
+                *seq_id, *start, *end, 
+                Some(&masked_regions),
+                max_depth, min_transitive_region_size, min_distance_between_ranges,
+                false  // Don't store CIGAR strings during partitioning
+            );
             //let query_time = query_start.elapsed();
             debug!("  Collected {} query overlaps", overlaps.len());
 
@@ -248,7 +253,7 @@ fn subtract_masked_regions(
 ) -> Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
     let mut result = Vec::new();
 
-    for (query_interval, cigar, target_interval) in overlaps.drain(..) {       
+    for (query_interval, _, target_interval) in overlaps.drain(..) {       
         // Get masked regions for this sequence
         if let Some(masks) = masked_regions.get(&query_interval.metadata) {
             let (start, end) = if query_interval.first <= query_interval.last {
@@ -306,11 +311,11 @@ fn subtract_masked_regions(
                     metadata: target_interval.metadata,
                 };
 
-                result.push((new_query, cigar.clone(), new_target));
+                result.push((new_query, Vec::new(), new_target));
             }
         } else {
             // No masks for this sequence - keep original interval
-            result.push((query_interval, cigar, target_interval));
+            result.push((query_interval, Vec::new(), target_interval));
         }
     }
 
