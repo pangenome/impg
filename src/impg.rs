@@ -5,6 +5,7 @@ use crate::seqidx::SequenceIndex;
 use serde::{Serialize, Deserialize};
 use std::io::{Read, SeekFrom, Seek};
 use std::fs::File;
+use std::cell::RefCell;
 use rayon::prelude::*;
 use noodles::bgzf;
 use regex::Regex;
@@ -86,23 +87,33 @@ pub struct QueryMetadata {
 }
 
 impl QueryMetadata {
-    fn get_cigar_ops(&self, paf_file: &String, paf_gzi_index: Option<&bgzf::gzi::Index>) -> Vec<CigarOp> {
-        // Allocate space for cigar
-        let mut cigar_buffer = vec![0; self.cigar_bytes];
+    fn fetch_cigar_ops(
+        &self, 
+        paf_file: &String, 
+        paf_gzi_index: Option<&bgzf::gzi::Index>, 
+        offset_to_cigar: &mut FxHashMap::<u64, Vec<CigarOp>>
+    ) {
 
-        // Get reader and seek start of cigar str
-        if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-            let mut reader = bgzf::Reader::new(File::open(paf_file).unwrap());
-            reader.seek_by_uncompressed_position(paf_gzi_index.unwrap(), self.cigar_offset).unwrap();
-            reader.read_exact(&mut cigar_buffer).unwrap();
-        } else {
-            let mut reader = File::open(paf_file).unwrap();
-            reader.seek(SeekFrom::Start(self.cigar_offset)).unwrap();
-            reader.read_exact(&mut cigar_buffer).unwrap();
-        };
+        if !offset_to_cigar.contains_key(&self.cigar_offset) 
+        {
+            if offset_to_cigar.len() > 1000 { offset_to_cigar.clear(); }
+            // Allocate space for cigar
+            let mut cigar_buffer = vec![0; self.cigar_bytes];
 
-        let cigar_str: &str = std::str::from_utf8(&cigar_buffer).unwrap();
-        parse_cigar_to_delta(cigar_str).ok().unwrap_or_default()
+            // Get reader and seek start of cigar str
+            if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
+                let mut reader = bgzf::Reader::new(File::open(paf_file).unwrap());
+                reader.seek_by_uncompressed_position(paf_gzi_index.unwrap(), self.cigar_offset).unwrap();
+                reader.read_exact(&mut cigar_buffer).unwrap();
+            } else {
+                let mut reader = File::open(paf_file).unwrap();
+                reader.seek(SeekFrom::Start(self.cigar_offset)).unwrap();
+                reader.read_exact(&mut cigar_buffer).unwrap();
+            };
+
+            let cigar_str: &str = std::str::from_utf8(&cigar_buffer).unwrap();
+            offset_to_cigar.insert(self.cigar_offset, parse_cigar_to_delta(cigar_str).ok().unwrap_or_default());
+        }
     }
 }
 
@@ -240,12 +251,13 @@ impl SortedRanges {
     }
 }
 
-#[derive(Clone)]
+//#[derive(Clone)]
 pub struct Impg {
     pub trees: TreeMap,
     pub seq_index: SequenceIndex,
     pub paf_file: String,
     pub paf_gzi_index: Option<bgzf::gzi::Index>,
+    pub offset_to_cigar: RefCell<FxHashMap<u64, Vec<CigarOp>>>,
 }
 
 impl Impg {
@@ -300,7 +312,8 @@ impl Impg {
             (target_id, BasicCOITree::new(interval_nodes.as_slice()))
         }).collect();
 
-        Ok(Self { trees, seq_index, paf_file: paf_file.to_string(), paf_gzi_index })
+        let offset_to_cigar = RefCell::new(FxHashMap::default());
+        Ok(Self { trees, seq_index, paf_file: paf_file.to_string(), paf_gzi_index, offset_to_cigar })
     }
 
     pub fn to_serializable(&self) -> SerializableImpg {
@@ -331,7 +344,8 @@ impl Impg {
             }).collect::<Vec<_>>().as_slice());
             (target_id, tree)
         }).collect();
-        Self { trees, seq_index, paf_file: paf_file.to_string(), paf_gzi_index }
+        let offset_to_cigar = RefCell::new(FxHashMap::default());
+        Self { trees, seq_index, paf_file: paf_file.to_string(), paf_gzi_index, offset_to_cigar }
     }
 
     pub fn query(
@@ -361,10 +375,11 @@ impl Impg {
         if let Some(tree) = self.trees.get(&target_id) {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
+                metadata.fetch_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref(), &mut *self.offset_to_cigar.borrow_mut());
                 let result = project_target_range_through_alignment(
                     (range_start, range_end),
                     (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end, metadata.strand),
-                    &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref()),
+                    &self.offset_to_cigar.borrow()[&metadata.cigar_offset],
                     true
                 );
                 if let Some((adjusted_query_start, adjusted_query_end, adjusted_cigar, adjusted_target_start, adjusted_target_end)) = result {
@@ -450,10 +465,11 @@ impl Impg {
             if let Some(tree) = self.trees.get(&current_target_id) {
                 tree.query(current_target_start, current_target_end, |interval| {
                     let metadata = &interval.metadata;
+                    metadata.fetch_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref(), &mut *self.offset_to_cigar.borrow_mut());
                     let result = project_target_range_through_alignment(
                         (current_target_start, current_target_end),
                         (metadata.target_start, metadata.target_end, metadata.query_start, metadata.query_end, metadata.strand),
-                        &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref()),
+                        &self.offset_to_cigar.borrow()[&metadata.cigar_offset],
                         store_cigar
                     );
                     if let Some((adjusted_query_start, adjusted_query_end, adjusted_cigar, adjusted_target_start, adjusted_target_end)) = result {
