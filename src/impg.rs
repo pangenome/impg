@@ -678,17 +678,15 @@ fn project_target_range_through_alignment(
 
 fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, ParseErr> {
     let mut ops = Vec::new();
-    let mut num_buf = String::new();
+    let mut len: i32 = 0;
 
     for c in cigar.chars() {
         if c.is_ascii_digit() {
-            num_buf.push(c);
+            len = len*10 + (c as i32 - '0' as i32);
         } else {
-            let len = num_buf.parse::<i32>().map_err(|_| ParseErr::InvalidCigarFormat)?;
-            num_buf.clear(); // Reset the buffer for the next operation
-            // raise any error from the cigar op parsing
             let op = CigarOp::new(len, c);
             ops.push(op);
+            len = 0;
         }
     }
 
