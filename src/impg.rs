@@ -549,6 +549,7 @@ impl Impg {
 
 }
 
+#[inline]
 fn project_target_range_through_alignment(
     requested_target_range: (i32, i32),
     record: (i32, i32, i32, i32, Strand),
