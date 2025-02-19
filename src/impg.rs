@@ -647,7 +647,7 @@ fn project_target_range_through_alignment(
     // If we had at least one overlap, the variables were set
     // projected_query_start == projected_query_end in deletions in the query
     // projected_target_start == projected_target_end in insertions in the query
-    (found_overlap && projected_query_start != projected_query_end && projected_target_start != projected_target_end).then(|| {
+    if found_overlap && projected_query_start != projected_query_end && projected_target_start != projected_target_end {
         let projected_cigar_ops = if store_cigar {
             let mut projected_cigar_ops = cigar_ops[first_op_idx..last_op_idx].to_vec();
             
@@ -666,14 +666,16 @@ fn project_target_range_through_alignment(
             Vec::new()
         };
 
-        (
+        Some((
             projected_query_start,
             projected_query_end,
             projected_cigar_ops,
             projected_target_start,
             projected_target_end,
-        )
-    })
+        ))
+    } else {
+        None
+    }
 }
 
 fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, ParseErr> {
