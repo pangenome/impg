@@ -174,11 +174,6 @@ pub fn partition_alignments(
             }
         }
 
-        // If no missing regions remain, we're done
-        if missing_regions.is_empty() {
-            break;
-        }
-
         // Find longest remaining region with smallest seq_id and start position
         let mut longest_region: Option<(u32, i32, i32)> = None;
         let mut max_length = 0;
@@ -206,7 +201,7 @@ pub fn partition_alignments(
                 windows.push((seq_id, pos, window_end));
                 pos = window_end;
             }
-        }
+        } // If no missing regions remain, we're done
     }
 
     info!("Partitioned into {} regions", partition_num);
