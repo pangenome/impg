@@ -149,15 +149,16 @@ pub fn partition_alignments(
             if !overlaps.is_empty() {
                 debug!("  Collected {} query overlaps in partition {}", overlaps.len(), partition_num);
 
+                debug!("  Extending short intervals");
+                //let extend_start = Instant::now();
+                extend_short_intervals(&mut overlaps, impg, min_region_size);
+                //let extend_time = extend_start.elapsed();
+
                 debug!("  Updating mask and missing regions");
                 //let update_start = Instant::now();
                 update_masked_and_missing_regions(&mut masked_regions, &mut missing_regions, &overlaps);            
                 //let update_time = update_start.elapsed();
 
-                debug!("  Extending short intervals");
-                //let extend_start = Instant::now();
-                extend_short_intervals(&mut overlaps, impg, min_region_size);
-                //let extend_time = extend_start.elapsed();
 
                 info!("  Writing partition {} with {} regions (query {}:{}-{}, len: {})", partition_num, overlaps.len(), chrom, start, end, end - start);
                 //let write_start = Instant::now();
