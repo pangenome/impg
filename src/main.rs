@@ -48,29 +48,33 @@ enum Args {
         #[clap(short = 's', long, value_parser)]
         sequence_prefix: String,
 
-        /// Maximum distance between intervals to merge
+        /// Maximum distance between regions to merge
         #[clap(short = 'd', long, value_parser, default_value_t = 10000)]
         merge_distance: i32,
 
-        /// Minimum size for partitioned regions - shorter regions will be extended
-        #[clap(short = 'l', long, value_parser, default_value_t = 5000)]
+        /// Minimum region size - shorter regions will be extended
+        #[clap(short = 'l', long, value_parser, default_value_t = 3000)]
         min_region_size: i32,
+
+        /// Minimum region size for missing regions
+        #[clap(short = 'f', long, value_parser, default_value_t = 3000)]
+        min_missing_size: i32,
+
+        /// Minimum distance from sequence start/end - closer regions will be extended to the boundaries
+        #[clap(long, value_parser, default_value_t = 3000)]
+        min_boundary_distance: i32,
 
         /// Maximum recursion depth for transitive overlaps (0 for no limit)
         #[clap(short = 'm', long, value_parser, default_value_t = 1)]
         max_depth: u16,
 
-        /// Minimum size of intervals to consider for transitive queries
-        #[clap(long, value_parser, default_value_t = 500)]
-        min_transitive_region_size: i32,
+        /// Minimum region size to consider for transitive queries
+        #[clap(long, value_parser, default_value_t = 0)]
+        min_transitive_len: i32,
         
         /// Minimum distance between transitive ranges to consider on the same sequence
         #[clap(long, value_parser, default_value_t = 10)]
         min_distance_between_ranges: i32,
-
-        /// Minimum proximity between masked regions to consider them adjacent
-        #[clap(long, value_parser, default_value_t = 5000)]
-        min_mask_proximity: i32,
     },
     /// Query overlaps in the alignment
     Query {
@@ -90,12 +94,12 @@ enum Args {
         transitive: bool,
 
         /// Maximum recursion depth for transitive overlaps (0 for no limit)
-        #[clap(short = 'm', long, value_parser, default_value_t = 1)]
+        #[clap(short = 'm', long, value_parser, default_value_t = 0)]
         max_depth: u16,
 
-        /// Minimum size of intervals to consider for transitive queries
+        /// Minimum region size to consider for transitive queries
         #[clap(long, value_parser, default_value_t = 0)]
-        min_transitive_region_size: i32,
+        min_transitive_len: i32,
         
         /// Minimum distance between transitive ranges to consider on the same sequence
         #[clap(long, value_parser, default_value_t = 0)]
@@ -124,15 +128,16 @@ fn main() -> io::Result<()> {
             common,
             window_size,
             sequence_prefix,
-            min_region_size,
             merge_distance,
+            min_region_size,
+            min_missing_size,
+            min_boundary_distance,
             max_depth,
-            min_transitive_region_size,
-            min_distance_between_ranges,
-            min_mask_proximity,
+            min_transitive_len,
+            min_distance_between_ranges
         } => {
             let impg = initialize_impg(&common)?;
-            partition_alignments(&impg, window_size, &sequence_prefix, min_region_size, merge_distance, max_depth, min_transitive_region_size, min_distance_between_ranges, min_mask_proximity, common.verbose > 1)?;
+            partition_alignments(&impg, window_size, &sequence_prefix, merge_distance, min_region_size, min_missing_size, min_boundary_distance, max_depth, min_transitive_len, min_distance_between_ranges, common.verbose > 1)?;
         },
         Args::Query {
             common,
@@ -142,14 +147,14 @@ fn main() -> io::Result<()> {
             output_paf,
             check_intervals,
             max_depth,
-            min_transitive_region_size,
+            min_transitive_len,
             min_distance_between_ranges
         } => {
             let impg = initialize_impg(&common)?;
 
             if let Some(target_range) = target_range {
                 let (target_name, target_range) = parse_target_range(&target_range)?;
-                let results = perform_query(&impg, &target_name, target_range, transitive, max_depth, min_transitive_region_size, min_distance_between_ranges);
+                let results = perform_query(&impg, &target_name, target_range, transitive, max_depth, min_transitive_len, min_distance_between_ranges);
                 if check_intervals {
                     let invalid_cigars = impg::impg::check_intervals(&impg, &results);
                     if !invalid_cigars.is_empty() {
@@ -170,7 +175,7 @@ fn main() -> io::Result<()> {
                 let targets = parse_bed_file(&target_bed)?;
                 info!("Parsed {} target ranges from BED file", targets.len());
                 for (target_name, target_range, name) in targets {
-                    let results = perform_query(&impg, &target_name, target_range, transitive, max_depth, min_transitive_region_size, min_distance_between_ranges);
+                    let results = perform_query(&impg, &target_name, target_range, transitive, max_depth, min_transitive_len, min_distance_between_ranges);
                     if check_intervals {
                         let invalid_cigars = impg::impg::check_intervals(&impg, &results);
                         if !invalid_cigars.is_empty() {
@@ -331,7 +336,7 @@ fn perform_query(
     target_range: (i32, i32), 
     transitive: bool,
     max_depth: u16,
-    min_transitive_region_size: i32,
+    min_transitive_len: i32,
     min_distance_between_ranges: i32
 ) -> Vec<AdjustedInterval> {
     let (target_start, target_end) = target_range;
@@ -341,7 +346,7 @@ fn perform_query(
         panic!("Target range end ({}) exceeds the target sequence length ({})", target_end, target_length);
     }
     if transitive {
-        impg.query_transitive(target_id, target_start, target_end, None, max_depth, min_transitive_region_size, min_distance_between_ranges, true)
+        impg.query_transitive(target_id, target_start, target_end, None, max_depth, min_transitive_len, min_distance_between_ranges, true)
     } else {
         impg.query(target_id, target_start, target_end)
     }
