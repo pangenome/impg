@@ -392,69 +392,68 @@ fn extend_short_intervals(
     overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>,
     impg: &Impg,
     min_region_size: i32,
+    min_distance_visited_regions: i32,
 ) {   
     for (query_interval, _, target_interval) in overlaps.iter_mut() {
-        let len = (query_interval.last - query_interval.first).abs();
+        let seq_len = impg.seq_index.get_len_from_id(query_interval.metadata).unwrap() as i32;
         
-        if len < min_region_size {
-            let extension_needed = min_region_size - len;
-            // Add 1 to the first side if extension_needed is odd
-            let extension_per_side = extension_needed / 2;
-            let first_side_extension = extension_per_side + (extension_needed % 2);
-            let second_side_extension = extension_per_side;
-            
-            let seq_len = impg.seq_index.get_len_from_id(query_interval.metadata).unwrap() as i32;
-            if query_interval.first <= query_interval.last {
-                // Forward strand
-                let mut start_extension = first_side_extension;
-                let mut end_extension = second_side_extension;
-                
-                // If we can't extend fully on the start side, add the remainder to the end
-                if query_interval.first < start_extension {
-                    let remaining = start_extension - query_interval.first;
-                    start_extension = query_interval.first;
-                    end_extension += remaining;
-                }
-                
-                // If we can't extend fully on the end side, add the remainder to the start
-                if query_interval.last + end_extension > seq_len {
-                    let remaining = (query_interval.last + end_extension) - seq_len;
-                    end_extension = seq_len - query_interval.last;
-                    // Only use remaining if we can extend more at the start
-                    if query_interval.first >= remaining {
-                        start_extension += remaining;
-                    }
-                }
+        if query_interval.first <= query_interval.last {
+            // Forward strand
+                       
+            // First ensure minimum size using min_region_size
+            let len = query_interval.last - query_interval.first;
+            if len < min_region_size {
+                let extension_needed = min_region_size - len;
+                let start_extension = std::cmp::min(extension_needed / 2, query_interval.first);
+                let end_extension = std::cmp::min(extension_needed - start_extension, seq_len - query_interval.last);
                 
                 query_interval.first -= start_extension;
                 query_interval.last += end_extension;
                 target_interval.first -= start_extension;
                 target_interval.last += end_extension;
-            } else {
-                // Reverse strand
-                let mut start_extension = first_side_extension;
-                let mut end_extension = second_side_extension;
-                
-                // For reverse strand, query_interval.last is the start position
-                if query_interval.last < start_extension {
-                    let remaining = start_extension - query_interval.last;
-                    start_extension = query_interval.last;
-                    end_extension += remaining;
-                }
-                
-                if query_interval.first + end_extension > seq_len {
-                    let remaining = (query_interval.first + end_extension) - seq_len;
-                    end_extension = seq_len - query_interval.first;
-                    // Only use remaining if we can extend more at the start
-                    if query_interval.last >= remaining {
-                        start_extension += remaining;
-                    }
-                }
+            }
+
+            // Then handle boundaries using min_distance_visited_regions
+            // Extend to start if close to beginning
+            if query_interval.first < min_distance_visited_regions {
+                let shift = query_interval.first;
+                query_interval.first = 0;
+                target_interval.first -= shift;
+            }
+            // Extend to end if close to sequence end
+            if seq_len - query_interval.last < min_distance_visited_regions {
+                let shift = seq_len - query_interval.last;
+                query_interval.last = seq_len;
+                target_interval.last += shift;
+            }
+        } else {
+            // Reverse strand
+                        
+            // First ensure minimum size using min_region_size
+            let len = query_interval.first - query_interval.last;
+            if len < min_region_size {
+                let extension_needed = min_region_size - len;
+                let start_extension = std::cmp::min(extension_needed / 2, query_interval.last);
+                let end_extension = std::cmp::min(extension_needed - start_extension, seq_len - query_interval.first);
                 
                 query_interval.last -= start_extension;
                 query_interval.first += end_extension;
                 target_interval.first -= start_extension;
                 target_interval.last += end_extension;
+            }
+
+            // Then handle boundaries using min_distance_visited_regions
+            // Extend to start if close to beginning
+            if query_interval.last < min_distance_visited_regions {
+                let shift = query_interval.last;
+                query_interval.last = 0;
+                target_interval.first -= shift;
+            }
+            // Extend to end if close to sequence end
+            if seq_len - query_interval.first < min_distance_visited_regions {
+                let shift = seq_len - query_interval.first;
+                query_interval.first = seq_len;
+                target_interval.last += shift;
             }
         }
     }
