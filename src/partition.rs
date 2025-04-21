@@ -92,14 +92,12 @@ pub fn partition_alignments(
     info!("Partitioning");
 
     while !windows.is_empty() {
+        debug!("Processing new window set");
+
         for (seq_id, start, end) in windows.iter() {
             let chrom = impg.seq_index.get_name(*seq_id).unwrap();
 
             if debug {
-                debug!("Processing new window set");
-
-                debug!("  Querying region {}:{}-{}, , len: {}", chrom, start, end, end - start);
-
                 debug!("  Missing {} regions in {} sequences", 
                     missing_regions.values().map(|ranges| ranges.len()).sum::<usize>(),
                     missing_regions.len()
