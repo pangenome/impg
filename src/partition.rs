@@ -58,7 +58,7 @@ pub fn partition_alignments(
             let window_end = std::cmp::min(pos + window_size as i32, end as i32);
     
             // If this tail‐window is too small, merge it into the last one
-            if window_end - pos < min_region_size && !windows.is_empty() {
+            if window_end - pos < window_size as i32 && !windows.is_empty() {
                 let last = windows.last_mut().unwrap();
                 last.2 = end as i32;
                 break;
@@ -206,7 +206,7 @@ pub fn partition_alignments(
                 let window_end = std::cmp::min(pos + window_size as i32, end);
 
                 // If this tail‐window is too small, merge it into the last one
-                if window_end - pos < min_region_size && !windows.is_empty() {
+                if window_end - pos < window_size as i32 && !windows.is_empty() {
                     let last = windows.last_mut().unwrap();
                     last.2 = end;
                     break;
