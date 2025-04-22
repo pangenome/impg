@@ -220,7 +220,13 @@ impl SortedRanges {
                 }
             }
         }
-    
+
+        // let adjusted_new_range = if new_range.0 <= new_range.1 {
+        //     (start, end)
+        // } else {
+        //     (end, start)
+        // };
+
         non_overlapping
     }
 
@@ -398,7 +404,7 @@ impl Impg {
         range_end: i32,
         masked_regions: Option<&FxHashMap<u32, SortedRanges>>,
         max_depth: u16,
-        min_transitive_region_size: i32,
+        min_transitive_len: i32,
         min_distance_between_ranges: i32,
         store_cigar: bool
     ) -> Vec<AdjustedInterval> {
@@ -428,7 +434,7 @@ impl Impg {
             (0..self.seq_index.len() as u32)
             .map(|id| {
                 let len = self.seq_index.get_len_from_id(id).unwrap();
-                (id, SortedRanges::new(len as i32, min_distance_between_ranges))
+                (id, SortedRanges::new(len as i32, 0))
             })
             .collect()
         };
@@ -515,7 +521,7 @@ impl Impg {
 
                                 // Add non-overlapping portions to stack
                                 for (new_start, new_end) in new_ranges {
-                                    if (new_end - new_start).abs() >= min_transitive_region_size {
+                                    if (new_end - new_start).abs() >= min_transitive_len {
                                         stack.push((metadata.query_id, new_start, new_end, current_depth + 1));
                                     }
                                 }
