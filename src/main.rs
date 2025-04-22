@@ -434,6 +434,7 @@ where
     }
 }
 
+use rustc_hash::FxHashMap;
 fn print_stats(impg: &Impg) {
     // Basic stats
     let num_sequences = impg.seq_index.len();
@@ -444,4 +445,38 @@ fn print_stats(impg: &Impg) {
     println!("Number of sequences: {}", num_sequences);
     println!("Total sequence length: {} bp", total_sequence_length);
     println!("Number of overlaps: {}", num_overlaps);
+
+    // Overlap distribution stats
+    let mut overlaps_per_seq: FxHashMap<u32, usize> = FxHashMap::default();
+    for (&target_id, tree) in &impg.trees {
+        overlaps_per_seq.insert(target_id, tree.len());
+    }
+    
+    let mut entries: Vec<(u32, usize)> = overlaps_per_seq.into_iter().collect();
+    entries.sort_by(|a, b| b.1.cmp(&a.1));
+    
+    if !entries.is_empty() {
+       
+        // Calculate mean and median overlaps
+        let sum: usize = entries.iter().map(|(_, count)| count).sum();
+        let mean = sum as f64 / entries.len() as f64;
+        
+        let median = if entries.is_empty() {
+            0.0
+        } else if entries.len() % 2 == 0 {
+            let mid = entries.len() / 2;
+            (entries[mid - 1].1 + entries[mid].1) as f64 / 2.0
+        } else {
+            entries[entries.len() / 2].1 as f64
+        };
+        println!("\nMean overlaps per sequence: {:.2}", mean);
+        println!("Median overlaps per sequence: {:.2}", median);
+
+        println!("\nTop sequences by number of overlaps:");
+        for (idx, (seq_id, count)) in entries.iter().take(5).enumerate() {
+            if let Some(name) = impg.seq_index.get_name(*seq_id) {
+                println!("{}. {}: {} overlaps", idx + 1, name, count);
+            }
+        }
+    }
 }
