@@ -435,6 +435,13 @@ where
 }
 
 fn print_stats(impg: &Impg) {
-    println!("Number of sequences: {}", impg.seq_index.len());
-    println!("Number of overlaps: {}", impg.trees.values().map(|tree| tree.len()).sum::<usize>());
+    // Basic stats
+    let num_sequences = impg.seq_index.len();
+    let total_sequence_length: usize = (0..num_sequences as u32)
+        .filter_map(|id| impg.seq_index.get_len_from_id(id))
+        .sum();
+    let num_overlaps = impg.trees.values().map(|tree| tree.len()).sum::<usize>();
+    println!("Number of sequences: {}", num_sequences);
+    println!("Total sequence length: {} bp", total_sequence_length);
+    println!("Number of overlaps: {}", num_overlaps);
 }
