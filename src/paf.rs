@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Error as IoError};
 use std::num::ParseIntError;
-use serde::{Serialize, Deserialize};
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct PafRecord {
@@ -39,9 +39,10 @@ impl PafRecord {
         let target_length = fields[6].parse::<usize>().map_err(ParseErr::InvalidField)?;
         let target_start = fields[7].parse::<usize>().map_err(ParseErr::InvalidField)?;
         let target_end = fields[8].parse::<usize>().map_err(ParseErr::InvalidField)?;
-        let strand_char = fields[4].chars().next().ok_or_else(|| {
-            ParseErr::InvalidFormat("Expected '+' or '-' for strand".to_string())
-        })?;
+        let strand_char = fields[4]
+            .chars()
+            .next()
+            .ok_or_else(|| ParseErr::InvalidFormat("Expected '+' or '-' for strand".to_string()))?;
         let strand = match strand_char {
             '+' => Strand::Forward,
             '-' => Strand::Reverse,
