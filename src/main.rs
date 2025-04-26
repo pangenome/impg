@@ -1,15 +1,15 @@
 use clap::Parser;
+use coitrees::IntervalTree;
+use impg::impg::{AdjustedInterval, Impg, SerializableImpg};
+use impg::paf;
+use impg::partition::partition_alignments;
+use log::{error, info, warn};
+use noodles::bgzf;
+use rayon::ThreadPoolBuilder;
 use std::fs::File;
+use std::io::BufRead;
 use std::io::{self, BufReader, BufWriter};
 use std::num::NonZeroUsize;
-use noodles::bgzf;
-use impg::impg::{Impg, SerializableImpg, AdjustedInterval};
-use coitrees::IntervalTree;
-use impg::paf;
-use rayon::ThreadPoolBuilder;
-use std::io::BufRead;
-use log::{warn, error, info};
-use impg::partition::partition_alignments;
 
 /// Common options shared between all commands
 #[derive(Parser, Debug)]
@@ -43,7 +43,7 @@ enum Args {
         /// Window size for partitioning
         #[clap(short = 'w', long, value_parser)]
         window_size: usize,
-        
+
         /// Sequence name prefix to start - all sequences starting with this prefix will be included
         #[clap(short = 's', long, value_parser)]
         sequence_prefix: String,
@@ -71,7 +71,7 @@ enum Args {
         /// Minimum region size to consider for transitive queries
         #[clap(long, value_parser, default_value_t = 0)]
         min_transitive_len: i32,
-        
+
         /// Minimum distance between transitive ranges to consider on the same sequence
         #[clap(long, value_parser, default_value_t = 10)]
         min_distance_between_ranges: i32,
@@ -80,7 +80,7 @@ enum Args {
     Query {
         #[clap(flatten)]
         common: CommonOpts,
-        
+
         /// Target range in the format `seq_name:start-end`
         #[clap(short = 'r', long, value_parser)]
         target_range: Option<String>,
@@ -100,7 +100,7 @@ enum Args {
         /// Minimum region size to consider for transitive queries
         #[clap(long, value_parser, default_value_t = 0)]
         min_transitive_len: i32,
-        
+
         /// Minimum distance between transitive ranges to consider on the same sequence
         #[clap(long, value_parser, default_value_t = 0)]
         min_distance_between_ranges: i32,
@@ -134,11 +134,23 @@ fn main() -> io::Result<()> {
             min_boundary_distance,
             max_depth,
             min_transitive_len,
-            min_distance_between_ranges
+            min_distance_between_ranges,
         } => {
             let impg = initialize_impg(&common)?;
-            partition_alignments(&impg, window_size, &sequence_prefix, merge_distance, min_region_size, min_missing_size, min_boundary_distance, max_depth, min_transitive_len, min_distance_between_ranges, common.verbose > 1)?;
-        },
+            partition_alignments(
+                &impg,
+                window_size,
+                &sequence_prefix,
+                merge_distance,
+                min_region_size,
+                min_missing_size,
+                min_boundary_distance,
+                max_depth,
+                min_transitive_len,
+                min_distance_between_ranges,
+                common.verbose > 1,
+            )?;
+        }
         Args::Query {
             common,
             target_range,
@@ -148,13 +160,21 @@ fn main() -> io::Result<()> {
             check_intervals,
             max_depth,
             min_transitive_len,
-            min_distance_between_ranges
+            min_distance_between_ranges,
         } => {
             let impg = initialize_impg(&common)?;
 
             if let Some(target_range) = target_range {
                 let (target_name, target_range) = parse_target_range(&target_range)?;
-                let results = perform_query(&impg, &target_name, target_range, transitive, max_depth, min_transitive_len, min_distance_between_ranges);
+                let results = perform_query(
+                    &impg,
+                    &target_name,
+                    target_range,
+                    transitive,
+                    max_depth,
+                    min_transitive_len,
+                    min_distance_between_ranges,
+                );
                 if check_intervals {
                     let invalid_cigars = impg::impg::check_intervals(&impg, &results);
                     if !invalid_cigars.is_empty() {
@@ -164,7 +184,7 @@ fn main() -> io::Result<()> {
                         panic!("Invalid intervals encountered.");
                     }
                 }
-                
+
                 if output_paf {
                     // Skip the first element (the input range) for PAF
                     output_results_paf(&impg, results.into_iter().skip(1), None);
@@ -175,7 +195,15 @@ fn main() -> io::Result<()> {
                 let targets = parse_bed_file(&target_bed)?;
                 info!("Parsed {} target ranges from BED file", targets.len());
                 for (target_name, target_range, name) in targets {
-                    let results = perform_query(&impg, &target_name, target_range, transitive, max_depth, min_transitive_len, min_distance_between_ranges);
+                    let results = perform_query(
+                        &impg,
+                        &target_name,
+                        target_range,
+                        transitive,
+                        max_depth,
+                        min_transitive_len,
+                        min_distance_between_ranges,
+                    );
                     if check_intervals {
                         let invalid_cigars = impg::impg::check_intervals(&impg, &results);
                         if !invalid_cigars.is_empty() {
@@ -200,12 +228,12 @@ fn main() -> io::Result<()> {
                     "Either --target-range or --target-bed must be provided for query subcommand",
                 ));
             }
-        },
+        }
         Args::Stats { common } => {
             let impg = initialize_impg(&common)?;
 
             print_stats(&impg);
-        },
+        }
     }
 
     Ok(())
@@ -215,12 +243,12 @@ fn main() -> io::Result<()> {
 fn initialize_impg(common: &CommonOpts) -> io::Result<Impg> {
     // Initialize logger based on verbosity
     env_logger::Builder::new()
-    .filter_level(match common.verbose {
-        0 => log::LevelFilter::Error,
-        1 => log::LevelFilter::Info,
-        _ => log::LevelFilter::Debug,
-    })
-    .init();
+        .filter_level(match common.verbose {
+            0 => log::LevelFilter::Error,
+            1 => log::LevelFilter::Info,
+            _ => log::LevelFilter::Debug,
+        })
+        .init();
 
     // Configure thread pool
     ThreadPoolBuilder::new()
@@ -247,12 +275,13 @@ fn load_or_generate_index(paf_file: &str, num_threads: NonZeroUsize) -> io::Resu
 
 fn load_index(paf_file: &str) -> io::Result<Impg> {
     let index_file = format!("{}.impg", paf_file);
-    
+
     let paf_file_metadata = std::fs::metadata(paf_file)?;
     let index_file_metadata = std::fs::metadata(index_file.clone())?;
-    if let (Ok(paf_file_ts), Ok(index_file_ts)) = (paf_file_metadata.modified(), index_file_metadata.modified()) {
-        if paf_file_ts > index_file_ts
-        {
+    if let (Ok(paf_file_ts), Ok(index_file_ts)) =
+        (paf_file_metadata.modified(), index_file_metadata.modified())
+    {
+        if paf_file_ts > index_file_ts {
             warn!("WARNING:\tPAF file has been modified since impg index creation.");
         }
     } else {
@@ -261,26 +290,49 @@ fn load_index(paf_file: &str) -> io::Result<Impg> {
 
     let file = File::open(index_file)?;
     let reader = BufReader::new(file);
-    let serializable: SerializableImpg = bincode::deserialize_from(reader).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to deserialize index: {:?}", e)))?;
+    let serializable: SerializableImpg = bincode::deserialize_from(reader).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Failed to deserialize index: {:?}", e),
+        )
+    })?;
     Ok(Impg::from_paf_and_serializable(paf_file, serializable))
 }
 
 fn generate_index(paf_file: &str, num_threads: NonZeroUsize) -> io::Result<Impg> {
     let file = File::open(paf_file)?;
     let reader: Box<dyn io::Read> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-        Box::new(bgzf::MultithreadedReader::with_worker_count(num_threads, file))
+        Box::new(bgzf::MultithreadedReader::with_worker_count(
+            num_threads,
+            file,
+        ))
     } else {
         Box::new(file)
     };
     let reader = BufReader::new(reader);
-    let records = paf::parse_paf(reader).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to parse PAF records: {:?}", e)))?;
-    let impg = Impg::from_paf_records(&records, paf_file).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to create index: {:?}", e)))?;
+    let records = paf::parse_paf(reader).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Failed to parse PAF records: {:?}", e),
+        )
+    })?;
+    let impg = Impg::from_paf_records(&records, paf_file).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Failed to create index: {:?}", e),
+        )
+    })?;
 
     let index_file = format!("{}.impg", paf_file);
     let serializable = impg.to_serializable();
     let file = File::create(index_file)?;
     let writer = BufWriter::new(file);
-    bincode::serialize_into(writer, &serializable).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to serialize index: {:?}", e)))?;
+    bincode::serialize_into(writer, &serializable).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!("Failed to serialize index: {:?}", e),
+        )
+    })?;
 
     Ok(impg)
 }
@@ -288,7 +340,10 @@ fn generate_index(paf_file: &str, num_threads: NonZeroUsize) -> io::Result<Impg>
 fn parse_target_range(target_range: &str) -> io::Result<(String, (i32, i32))> {
     let parts: Vec<&str> = target_range.rsplitn(2, ':').collect();
     if parts.len() != 2 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Target range format should be `seq_name:start-end`"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Target range format should be `seq_name:start-end`",
+        ));
     }
 
     let (start, end) = parse_range(&parts[0].split('-').collect::<Vec<_>>())?;
@@ -304,7 +359,10 @@ fn parse_bed_file(bed_file: &str) -> io::Result<Vec<(String, (i32, i32), Option<
         let line = line?;
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() < 3 {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid BED file format"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid BED file format",
+            ));
         }
 
         let (start, end) = parse_range(&parts[1..=2])?;
@@ -317,36 +375,64 @@ fn parse_bed_file(bed_file: &str) -> io::Result<Vec<(String, (i32, i32), Option<
 
 fn parse_range(range_parts: &[&str]) -> io::Result<(i32, i32)> {
     if range_parts.len() != 2 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Range format should be `start-end`"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Range format should be `start-end`",
+        ));
     }
 
-    let start = range_parts[0].parse::<i32>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid start value"))?;
-    let end = range_parts[1].parse::<i32>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid end value"))?;
+    let start = range_parts[0]
+        .parse::<i32>()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid start value"))?;
+    let end = range_parts[1]
+        .parse::<i32>()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid end value"))?;
 
     if start >= end {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Start value must be less than end value"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Start value must be less than end value",
+        ));
     }
 
     Ok((start, end))
 }
 
 fn perform_query(
-    impg: &Impg, 
-    target_name: &str, 
-    target_range: (i32, i32), 
+    impg: &Impg,
+    target_name: &str,
+    target_range: (i32, i32),
     transitive: bool,
     max_depth: u16,
     min_transitive_len: i32,
-    min_distance_between_ranges: i32
+    min_distance_between_ranges: i32,
 ) -> Vec<AdjustedInterval> {
     let (target_start, target_end) = target_range;
-    let target_id = impg.seq_index.get_id(target_name).expect("Target name not found in index");
-    let target_length = impg.seq_index.get_len_from_id(target_id).expect("Target length not found in index");
+    let target_id = impg
+        .seq_index
+        .get_id(target_name)
+        .expect("Target name not found in index");
+    let target_length = impg
+        .seq_index
+        .get_len_from_id(target_id)
+        .expect("Target length not found in index");
     if target_end > target_length as i32 {
-        panic!("Target range end ({}) exceeds the target sequence length ({})", target_end, target_length);
+        panic!(
+            "Target range end ({}) exceeds the target sequence length ({})",
+            target_end, target_length
+        );
     }
     if transitive {
-        impg.query_transitive(target_id, target_start, target_end, None, max_depth, min_transitive_len, min_distance_between_ranges, true)
+        impg.query_transitive(
+            target_id,
+            target_start,
+            target_end,
+            None,
+            max_depth,
+            min_transitive_len,
+            min_distance_between_ranges,
+            true,
+        )
     } else {
         impg.query(target_id, target_start, target_end)
     }
@@ -366,7 +452,7 @@ fn output_results_bed(impg: &Impg, results: Vec<AdjustedInterval>) {
 
 fn output_results_bedpe<I>(impg: &Impg, results: I, name: Option<String>)
 where
-    I: Iterator<Item = AdjustedInterval>
+    I: Iterator<Item = AdjustedInterval>,
 {
     for (overlap_query, _, overlap_target) in results {
         let query_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
@@ -376,16 +462,23 @@ where
         } else {
             (overlap_query.last, overlap_query.first, '-')
         };
-        println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t0\t{}\t+",
-            query_name, first, last,
-            target_name, overlap_target.first, overlap_target.last,
-            name.as_deref().unwrap_or("."), strand);
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t0\t{}\t+",
+            query_name,
+            first,
+            last,
+            target_name,
+            overlap_target.first,
+            overlap_target.last,
+            name.as_deref().unwrap_or("."),
+            strand
+        );
     }
 }
 
 fn output_results_paf<I>(impg: &Impg, results: I, name: Option<String>)
 where
-    I: Iterator<Item = AdjustedInterval>
+    I: Iterator<Item = AdjustedInterval>,
 {
     for (overlap_query, cigar, overlap_target) in results {
         let query_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
@@ -396,30 +489,50 @@ where
             (overlap_query.last, overlap_query.first, '-')
         };
 
-        let query_length = impg.seq_index.get_len_from_id(overlap_query.metadata).unwrap();  
-        let target_length = impg.seq_index.get_len_from_id(overlap_target.metadata).unwrap();  
+        let query_length = impg
+            .seq_index
+            .get_len_from_id(overlap_query.metadata)
+            .unwrap();
+        let target_length = impg
+            .seq_index
+            .get_len_from_id(overlap_target.metadata)
+            .unwrap();
 
-        let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, block_len) = cigar.iter().fold((0, 0, 0, 0, 0, 0, 0), |(m, mm, i, i_bp, d, d_bp, bl), op| {
-            let len = op.len();
-            match op.op() {
-                'M' => (m + len, mm, i, i_bp, d, d_bp, bl + len), // We overestimate num. of matches by assuming 'M' represents matches for simplicity
-                '=' => (m + len, mm, i, i_bp, d, d_bp, bl + len),
-                'X' => (m, mm + len, i, i_bp, d, d_bp, bl + len),
-                'I' => (m, mm, i + 1, i_bp + len, d, d_bp, bl + len),
-                'D' => (m, mm, i, i_bp, d + 1, d_bp + len, bl + len),
-                _ => (m, mm, i, i_bp, d, d_bp, bl),
-            }
-        });
-        let gap_compressed_identity = (matches as f64) / (matches + mismatches + insertions + deletions) as f64;
-        
+        let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, block_len) =
+            cigar.iter().fold(
+                (0, 0, 0, 0, 0, 0, 0),
+                |(m, mm, i, i_bp, d, d_bp, bl), op| {
+                    let len = op.len();
+                    match op.op() {
+                        'M' => (m + len, mm, i, i_bp, d, d_bp, bl + len), // We overestimate num. of matches by assuming 'M' represents matches for simplicity
+                        '=' => (m + len, mm, i, i_bp, d, d_bp, bl + len),
+                        'X' => (m, mm + len, i, i_bp, d, d_bp, bl + len),
+                        'I' => (m, mm, i + 1, i_bp + len, d, d_bp, bl + len),
+                        'D' => (m, mm, i, i_bp, d + 1, d_bp + len, bl + len),
+                        _ => (m, mm, i, i_bp, d, d_bp, bl),
+                    }
+                },
+            );
+        let gap_compressed_identity =
+            (matches as f64) / (matches + mismatches + insertions + deletions) as f64;
+
         let edit_distance = mismatches + inserted_bp + deleted_bp;
         let block_identity = (matches as f64) / (matches + edit_distance) as f64;
 
         // Format bi and gi fields without trailing zeros
-        let gi_str = format!("{:.6}", gap_compressed_identity).trim_end_matches('0').trim_end_matches('.').to_string();
-        let bi_str = format!("{:.6}", block_identity).trim_end_matches('0').trim_end_matches('.').to_string();
+        let gi_str = format!("{:.6}", gap_compressed_identity)
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string();
+        let bi_str = format!("{:.6}", block_identity)
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string();
 
-        let cigar_str : String = cigar.iter().map(|op| format!("{}{}", op.len(), op.op())).collect();
+        let cigar_str: String = cigar
+            .iter()
+            .map(|op| format!("{}{}", op.len(), op.op()))
+            .collect();
 
         match name {
             Some(ref name) => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{}\tbi:f:{}\tcg:Z:{}\tan:Z:{}",
@@ -451,16 +564,15 @@ fn print_stats(impg: &Impg) {
     for (&target_id, tree) in &impg.trees {
         overlaps_per_seq.insert(target_id, tree.len());
     }
-    
+
     let mut entries: Vec<(u32, usize)> = overlaps_per_seq.into_iter().collect();
     entries.sort_by(|a, b| b.1.cmp(&a.1));
-    
+
     if !entries.is_empty() {
-       
         // Calculate mean and median overlaps
         let sum: usize = entries.iter().map(|(_, count)| count).sum();
         let mean = sum as f64 / entries.len() as f64;
-        
+
         let median = if entries.is_empty() {
             0.0
         } else if entries.len() % 2 == 0 {
