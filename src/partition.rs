@@ -147,32 +147,28 @@ pub fn partition_alignments(
             //let query_time = query_start.elapsed();
             debug!("  Collected {} query overlaps", overlaps.len());
 
+            // Ignore CIGAR strings and target intervals.
+            //debug!("  Merging overlaps closer than {}bp", merge_distance); // bedtools sort | bedtools merge -d merge_distance
+            //let merge_start = Instant::now();
+            merge_overlaps(&mut overlaps, merge_distance);
+            //let merge_time = merge_start.elapsed();
+            debug!("  Collected {} query overlaps after merging those closer than {}bp", overlaps.len(), merge_distance);
+
+            debug!("  Extending short intervals");
+            //let extend_start = Instant::now();
+            pad_short_intervals(&mut overlaps, impg, min_region_size);
+            extend_to_close_boundaries(&mut overlaps, impg, min_boundary_distance);          
+            //let extend_time = extend_start.elapsed();
+
             //debug!("  Excluding masked regions"); // bedtools subtract -a "partition$num.tmp.bed" -b "$MASK_BED"
             //let mask_start = Instant::now();
-            overlaps = subtract_masked_regions(&mut overlaps, &masked_regions);
+            overlaps = mask_and_update_regions(&mut overlaps, &mut masked_regions, &mut missing_regions, min_missing_size); 
             //let mask_time = mask_start.elapsed();
 
             if !overlaps.is_empty() {
                 debug!("  Collected {} query overlaps after masking", overlaps.len());
-
-                // Ignore CIGAR strings and target intervals.
-                //debug!("  Merging overlaps closer than {}bp", merge_distance); // bedtools sort | bedtools merge -d merge_distance
-                //let merge_start = Instant::now();
-                merge_overlaps(&mut overlaps, merge_distance);
-                //let merge_time = merge_start.elapsed();
-                debug!("  Collected {} query overlaps after merging those closer than {}bp", overlaps.len(), merge_distance);
-
-                debug!("  Extending short intervals");
-                //let extend_start = Instant::now();
-                extend_short_intervals(&mut overlaps, impg, min_region_size, min_boundary_distance);
-                //let extend_time = extend_start.elapsed();
-
-                debug!("  Updating masked and missing regions");
-                //let update_start = Instant::now();
-                update_masked_and_missing_regions(&mut masked_regions, &mut missing_regions, &mut overlaps, min_missing_size);            
-                //let update_time = update_start.elapsed();
-
                 merge_overlaps(&mut overlaps, 0); // Final merge to ensure no overlaps remain
+                debug!("  Collected {} query overlaps after re-merging", overlaps.len());
 
                 // Calculate current partition length
                 let current_partition_length: u64 = overlaps.iter().map(|(interval, _, _)| {
@@ -256,7 +252,7 @@ fn merge_overlaps(
     overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>,
     max_gap: i32
 ) {
-    if overlaps.len() > 1 {
+    if overlaps.len() > 1 && max_gap >= 0 {
         // Sort by sequence ID and start position
         overlaps.sort_unstable_by_key(|(query_interval, _, _)| {
             (query_interval.metadata, std::cmp::min(query_interval.first, query_interval.last))
@@ -286,104 +282,19 @@ fn merge_overlaps(
     }
 }
 
-fn subtract_masked_regions(
+fn mask_and_update_regions(
     overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>,
-    masked_regions: &FxHashMap<u32, SortedRanges>
-) -> Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
-    let mut result = Vec::new();
-
-    for (query_interval, _, target_interval) in overlaps.drain(..) {       
-        // Get masked regions for this sequence
-        if let Some(masks) = masked_regions.get(&query_interval.metadata) {
-            let (start, end) = if query_interval.first <= query_interval.last {
-                (query_interval.first, query_interval.last)
-            } else {
-                (query_interval.last, query_interval.first)
-            };
-
-            // Track unmasked segments
-            let mut curr_pos = start;
-            let mut unmasked_segments = Vec::new();
-
-            for &(mask_start, mask_end) in masks.iter() {
-                // If mask starts after current segment ends, we're done
-                if mask_start >= end {
-                    break;
-                }
-
-                // If mask ends before current position, skip it
-                if mask_end <= curr_pos {
-                    continue;
-                }
-
-                // Add unmasked segment before mask if it exists
-                if curr_pos < mask_start {
-                    unmasked_segments.push((curr_pos, mask_start));
-                }
-
-                // Move current position to end of mask
-                curr_pos = mask_end;
-            }
-
-            // Add final unmasked segment if needed
-            if curr_pos < end {
-                unmasked_segments.push((curr_pos, end));
-            }
-
-            // Create new intervals for unmasked segments
-            for (seg_start, seg_end) in unmasked_segments {
-                let new_query = Interval {
-                    first: seg_start,
-                    last: seg_end,
-                    metadata: query_interval.metadata,
-                };
-                
-                // Adjust target interval proportionally
-                let query_len = (end - start) as f64;
-                let seg_frac_start = (seg_start - start) as f64 / query_len;
-                let seg_frac_end = (seg_end - start) as f64 / query_len;
-                
-                let target_span = (target_interval.last - target_interval.first) as f64;
-                let new_target = Interval {
-                    first: target_interval.first + (seg_frac_start * target_span) as i32,
-                    last: target_interval.first + (seg_frac_end * target_span) as i32,
-                    metadata: target_interval.metadata,
-                };
-
-                result.push((new_query, Vec::new(), new_target));
-            }
-        } else {
-            // No masks for this sequence - keep original interval
-            result.push((query_interval, Vec::new(), target_interval));
-        }
-    }
-
-    result
-}
-
-fn update_masked_and_missing_regions(
     masked_regions: &mut FxHashMap<u32, SortedRanges>,
     missing_regions: &mut FxHashMap<u32, SortedRanges>,
-    overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>,
     min_fragment_size: i32,
-) {
-    // First, collect all new regions to be masked by sequence
-    let mut new_masks: FxHashMap<u32, Vec<(i32, i32)>> = FxHashMap::default();
+) -> Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
+    let mut result = Vec::new();
+    
+    // First, identify and store extensions separately, indexed by sequence ID
+    let mut extensions_by_seq_id: FxHashMap<u32, Vec<(i32, i32)>> = FxHashMap::default();
+    
+    // Collect extension info before draining overlaps
     for (query_interval, _, _) in overlaps.iter() {
-        let (start, end) = if query_interval.first <= query_interval.last {
-            (query_interval.first, query_interval.last)
-        } else {
-            (query_interval.last, query_interval.first)
-        };
-        new_masks.entry(query_interval.metadata).or_default().push((start, end));
-    }
-
-    // Collect regions that might be extended to avoid small fragments
-    let mut regions_to_extend: FxHashMap<u32, Vec<(usize, i32, i32)>> = FxHashMap::default();
-
-    // First pass: identify regions that would create small fragments when masked
-    // This time we also track the index in overlaps array for each region to extend
-    for (overlap_idx, (query_interval, _, _)) in overlaps.iter().enumerate() {
         let seq_id = query_interval.metadata;
         let (mask_start, mask_end) = if query_interval.first <= query_interval.last {
             (query_interval.first, query_interval.last)
@@ -393,90 +304,144 @@ fn update_masked_and_missing_regions(
 
         if let Some(missing) = missing_regions.get(&seq_id) {
             for &(miss_start, miss_end) in missing.iter() {
-                // Check if mask would create a small fragment at the start
+                // Check if mask would create a small fragment at start
                 if mask_start > miss_start && mask_start < miss_end && 
                    mask_start - miss_start < min_fragment_size && mask_start - miss_start > 0 {
-                    regions_to_extend.entry(seq_id).or_default().push((overlap_idx, miss_start, mask_start));
+                    extensions_by_seq_id.entry(seq_id).or_default().push((miss_start, mask_start));
                 }
-                
-                // Check if mask would create a small fragment at the end
+                // Check if mask would create a small fragment at end
                 if mask_end > miss_start && mask_end < miss_end && 
                    miss_end - mask_end < min_fragment_size && miss_end - mask_end > 0 {
-                    regions_to_extend.entry(seq_id).or_default().push((overlap_idx, mask_end, miss_end));
+                    extensions_by_seq_id.entry(seq_id).or_default().push((mask_end, miss_end));
                 }
             }
         }
     }
-
-    // Extend overlaps to avoid small fragments
-    for (seq_id, extensions) in &regions_to_extend {
-        for &(overlap_idx, ext_start, ext_end) in extensions {
-            let (query_interval, _, target_interval) = &mut overlaps[overlap_idx];
-
-            // Only modify if the sequence IDs match
-            if query_interval.metadata == *seq_id {
-                // Calculate how to adjust the interval
-                if query_interval.first <= query_interval.last {
-                    // Forward strand
-                    if ext_start < query_interval.first {
-                        // Extend start
-                        let extension = query_interval.first - ext_start;
-                        query_interval.first = ext_start;
-                        // Proportionally adjust target start
-                        target_interval.first -= extension;
-                    }
-                    if ext_end > query_interval.last {
-                        // Extend end
-                        let extension = ext_end - query_interval.last;
-                        query_interval.last = ext_end;
-                        // Proportionally adjust target end
-                        target_interval.last += extension;
-                    }
-                } else {
-                    // Reverse strand
-                    if ext_start < query_interval.last {
-                        // Extend end (in reverse orientation)
-                        let extension = query_interval.last - ext_start;
-                        query_interval.last = ext_start;
-                        // Proportionally adjust target start
-                        target_interval.first -= extension;
-                    }
-                    if ext_end > query_interval.first {
-                        // Extend start (in reverse orientation)
-                        let extension = ext_end - query_interval.first;
-                        query_interval.first = ext_end;
-                        // Proportionally adjust target end
-                        target_interval.last += extension;
-                    }
-                }
-            }
-        }
-    }
-
-    // Now that we've extended the overlaps, recalculate the masks
-    new_masks.clear();
-    for (query_interval, _, _) in overlaps.iter() {
-        let (start, end) = if query_interval.first <= query_interval.last {
+    
+    // Process each overlap
+    for (query_interval, cigar, target_interval) in overlaps.drain(..) {
+        let seq_id = query_interval.metadata;
+        let (mut start, mut end) = if query_interval.first <= query_interval.last {
             (query_interval.first, query_interval.last)
         } else {
             (query_interval.last, query_interval.first)
         };
-        new_masks.entry(query_interval.metadata).or_default().push((start, end));
-    }
-
-    // Update masked regions with new masks
-    for (seq_id, ranges) in new_masks {
-        let masked = masked_regions.entry(seq_id).or_default();
-        for range in ranges {
-            masked.insert(range);
+        
+        // Apply extensions if any
+        if let Some(extensions) = extensions_by_seq_id.get(&seq_id) {
+            for &(ext_start, ext_end) in extensions {
+                // Only apply extension if it's relevant to this interval
+                if (ext_end == start) || (ext_start == end) {
+                    if ext_start < start { start = ext_start; }
+                    if ext_end > end { end = ext_end; }
+                }
+            }
         }
-
-        // Update missing regions for this sequence
-        if let Some(missing) = missing_regions.get_mut(&seq_id) {
-            // Create temporary vector to store new ranges
+        
+        // Adjust query and target intervals based on extensions
+        let adjusted_query = if query_interval.first <= query_interval.last {
+            Interval {
+                first: start,
+                last: end,
+                metadata: query_interval.metadata,
+            }
+        } else {
+            Interval {
+                first: end,
+                last: start,
+                metadata: query_interval.metadata,
+            }
+        };
+        
+        // Proportionally adjust target interval
+        let original_span = if query_interval.first <= query_interval.last {
+            query_interval.last - query_interval.first
+        } else {
+            query_interval.first - query_interval.last
+        } as f64;
+        
+        let new_span = if adjusted_query.first <= adjusted_query.last {
+            adjusted_query.last - adjusted_query.first 
+        } else {
+            adjusted_query.first - adjusted_query.last
+        } as f64;
+        
+        let scale = new_span / original_span;
+        let target_span = (target_interval.last - target_interval.first) as f64;
+        
+        let adjusted_target = Interval {
+            first: target_interval.first,
+            last: target_interval.first + (target_span * scale) as i32,
+            metadata: target_interval.metadata,
+        };
+        
+        // Filter against existing masked regions
+        if let Some(masks) = masked_regions.get(&seq_id) {
+            let mut curr_pos = start;
+            let mut unmasked_segments = Vec::new();
+            
+            for &(mask_start, mask_end) in masks.iter() {
+                if mask_start >= end { break; }
+                if mask_end <= curr_pos { continue; }
+                
+                if curr_pos < mask_start {
+                    unmasked_segments.push((curr_pos, mask_start));
+                }
+                curr_pos = mask_end;
+            }
+            
+            if curr_pos < end {
+                unmasked_segments.push((curr_pos, end));
+            }
+            
+            // Create new intervals for unmasked segments
+            for (seg_start, seg_end) in unmasked_segments {
+                // Create adjusted intervals
+                let segment_ratio = (seg_end - seg_start) as f64 / (end - start) as f64;
+                let segment_target_span = target_span * segment_ratio;
+                let segment_offset = (seg_start - start) as f64 / (end - start) as f64 * target_span;
+                
+                let new_target = Interval {
+                    first: target_interval.first + segment_offset as i32,
+                    last: target_interval.first + (segment_offset + segment_target_span) as i32,
+                    metadata: target_interval.metadata,
+                };
+                
+                let new_query = if query_interval.first <= query_interval.last {
+                    Interval {
+                        first: seg_start,
+                        last: seg_end,
+                        metadata: query_interval.metadata,
+                    }
+                } else {
+                    Interval {
+                        first: seg_end,
+                        last: seg_start,
+                        metadata: query_interval.metadata,
+                    }
+                };
+                
+                result.push((new_query, Vec::new(), new_target));
+                
+                // Update masked regions
+                let masked = masked_regions.entry(seq_id).or_default();
+                masked.insert((seg_start, seg_end));
+            }
+        } else {
+            // No masks for this sequence - keep original interval with extensions
+            result.push((adjusted_query, cigar, adjusted_target));
+            
+            // Update masked regions
+            let masked = masked_regions.entry(seq_id).or_default();
+            masked.insert((start, end));
+        }
+    }
+    
+    // Update missing regions based on new masked regions
+    for (seq_id, masked) in masked_regions.iter() {
+        if let Some(missing) = missing_regions.get_mut(seq_id) {
             let mut new_ranges = Vec::new();
-
-            // For each missing range, subtract all masked ranges
+            
             for &(miss_start, miss_end) in missing.iter() {
                 let mut current_ranges = vec![(miss_start, miss_end)];
                 
@@ -484,17 +449,12 @@ fn update_masked_and_missing_regions(
                     let mut next_ranges = Vec::new();
                     
                     for (curr_start, curr_end) in current_ranges {
-                        // If current range doesn't overlap with mask
                         if curr_end <= mask_start || curr_start >= mask_end {
                             next_ranges.push((curr_start, curr_end));
-                        }
-                        // If ranges overlap
-                        else {
-                            // Add portion before mask if it exists
+                        } else {
                             if curr_start < mask_start {
                                 next_ranges.push((curr_start, mask_start));
                             }
-                            // Add portion after mask if it exists
                             if curr_end > mask_end {
                                 next_ranges.push((mask_end, curr_end));
                             }
@@ -506,93 +466,107 @@ fn update_masked_and_missing_regions(
                 new_ranges.extend(current_ranges);
             }
             
-            // Clear existing ranges and insert new ones in-place
             missing.ranges.clear();
             for range in new_ranges {
                 missing.insert(range);
             }
             
-            // Remove sequence from missing_regions if no ranges remain
             if missing.is_empty() {
-                missing_regions.remove(&seq_id);
+                missing_regions.remove(seq_id);
             }
+        }
+    }
+    
+    result
+}
+
+// Function to pad short intervals to ensure they meet minimum size requirements
+fn pad_short_intervals(
+    overlaps: &mut [(Interval<u32>, Vec<CigarOp>, Interval<u32>)],
+    impg: &Impg,
+    min_region_size: i32,
+) {
+    if min_region_size <= 0 {
+        return;
+    }
+    for (query_interval, _, target_interval) in overlaps.iter_mut() {
+        let seq_len = impg.seq_index.get_len_from_id(query_interval.metadata).unwrap() as i32;
+        let is_forward = query_interval.first <= query_interval.last;
+        
+        // Get current length and calculate extensions needed
+        let len = if is_forward {
+            query_interval.last - query_interval.first
+        } else {
+            query_interval.first - query_interval.last
+        };
+        
+        if len < min_region_size {
+            let extension_needed = min_region_size - len;
+            let (start_bound, end_bound) = if is_forward {
+                (query_interval.first, seq_len - query_interval.last)
+            } else {
+                (query_interval.last, seq_len - query_interval.first)
+            };
+            
+            let start_extension = std::cmp::min(extension_needed / 2, start_bound);
+            let end_extension = std::cmp::min(extension_needed - start_extension, end_bound);
+            
+            // Apply extensions
+            if is_forward {
+                query_interval.first -= start_extension;
+                query_interval.last += end_extension;
+            } else {
+                query_interval.last -= start_extension;
+                query_interval.first += end_extension;
+            }
+            
+            // Also adjust target interval
+            target_interval.first -= start_extension;
+            target_interval.last += end_extension;
         }
     }
 }
 
-fn extend_short_intervals(
-    overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>,
+// Function to extend intervals that are close to sequence boundaries
+fn extend_to_close_boundaries(
+    overlaps: &mut [(Interval<u32>, Vec<CigarOp>, Interval<u32>)],
     impg: &Impg,
-    min_region_size: i32,
-    min_distance_visited_regions: i32,
-) {   
+    min_boundary_distance: i32,
+) {
+    if min_boundary_distance <= 0 {
+        return;
+    }
     for (query_interval, _, target_interval) in overlaps.iter_mut() {
         let seq_len = impg.seq_index.get_len_from_id(query_interval.metadata).unwrap() as i32;
+        let is_forward = query_interval.first <= query_interval.last;
         
-        if query_interval.first <= query_interval.last {
-            // Forward strand
-                       
-            // First ensure minimum size using min_region_size
-            let len = query_interval.last - query_interval.first;
-            if len < min_region_size {
-                let extension_needed = min_region_size - len;
-                let start_extension = std::cmp::min(extension_needed / 2, query_interval.first);
-                let end_extension = std::cmp::min(extension_needed - start_extension, seq_len - query_interval.last);
-                
-                query_interval.first -= start_extension;
-                query_interval.last += end_extension;
-                target_interval.first -= start_extension;
-                target_interval.last += end_extension;
-            }
-
-            // Then handle boundaries using min_distance_visited_regions
+        if is_forward {
             // Extend to start if close to beginning
-            if query_interval.first < min_distance_visited_regions {
+            if query_interval.first < min_boundary_distance {
                 let shift = query_interval.first;
                 query_interval.first = 0;
                 target_interval.first -= shift;
             }
             // Extend to end if close to sequence end
-            if seq_len - query_interval.last < min_distance_visited_regions {
+            if seq_len - query_interval.last < min_boundary_distance {
                 let shift = seq_len - query_interval.last;
                 query_interval.last = seq_len;
                 target_interval.last += shift;
             }
         } else {
-            // Reverse strand
-                        
-            // First ensure minimum size using min_region_size
-            let len = query_interval.first - query_interval.last;
-            if len < min_region_size {
-                let extension_needed = min_region_size - len;
-                let start_extension = std::cmp::min(extension_needed / 2, query_interval.last);
-                let end_extension = std::cmp::min(extension_needed - start_extension, seq_len - query_interval.first);
-                
-                query_interval.last -= start_extension;
-                query_interval.first += end_extension;
-                target_interval.first -= start_extension;
-                target_interval.last += end_extension;
-            }
-
-            // Then handle boundaries using min_distance_visited_regions
-            // Extend to start if close to beginning
-            if query_interval.last < min_distance_visited_regions {
+            // Reverse strand - same logic with first/last swapped
+            if query_interval.last < min_boundary_distance {
                 let shift = query_interval.last;
                 query_interval.last = 0;
                 target_interval.first -= shift;
             }
-            // Extend to end if close to sequence end
-            if seq_len - query_interval.first < min_distance_visited_regions {
+            if seq_len - query_interval.first < min_boundary_distance {
                 let shift = seq_len - query_interval.first;
                 query_interval.first = seq_len;
                 target_interval.last += shift;
             }
         }
     }
-
-    overlaps.sort_unstable_by_key(|(query_interval, _, _)| {
-        (query_interval.metadata, std::cmp::min(query_interval.first, query_interval.last))
-    });
 }
 
 fn write_partition(

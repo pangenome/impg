@@ -49,11 +49,11 @@ enum Args {
         sequence_prefix: String,
 
         /// Maximum distance between regions to merge
-        #[clap(short = 'd', long, value_parser, default_value_t = 10000)]
+        #[clap(short = 'd', long, value_parser, default_value_t = 100000)]
         merge_distance: i32,
 
         /// Minimum region size - shorter regions will be extended
-        #[clap(short = 'l', long, value_parser, default_value_t = 3000)]
+        #[clap(short = 'l', long, value_parser, default_value_t = 0)]
         min_region_size: i32,
 
         /// Minimum region size for missing regions
