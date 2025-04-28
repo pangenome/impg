@@ -242,15 +242,26 @@ pub fn partition_alignments(
                 let total_percentage =
                     (total_partitioned_length as f64 / total_sequence_length as f64) * 100.0;
 
-                info!("  Writing partition {} with {} regions (query {}:{}-{}, len: {}) - {:.4}% of total sequence ({:.4}% so far)", 
+                // Create formatted percentage strings with conditional scientific notation
+                let current_percentage_str = if current_percentage < 0.0001 {
+                    format!("{:.4e}%", current_percentage)
+                } else {
+                    format!("{:.4}%", current_percentage)
+                };
+                let total_percentage_str = if total_percentage < 0.0001 {
+                    format!("{:.4e}%", total_percentage)
+                } else {
+                    format!("{:.4}%", total_percentage)
+                };
+                info!("  Writing partition {} with {} regions (query {}:{}-{}, len: {}) - {} of total sequence ({} so far)", 
                     partition_num,
                     overlaps.len(),
                     chrom,
                     start,
                     end,
                     end - start,
-                    current_percentage,
-                    total_percentage
+                    current_percentage_str,
+                    total_percentage_str
                 );
 
                 //let write_start = Instant::now();
