@@ -61,11 +61,11 @@ enum Args {
         min_boundary_distance: i32,
 
         /// Maximum recursion depth for transitive overlaps (0 for no limit)
-        #[clap(short = 'm', long, value_parser, default_value_t = 1)]
+        #[clap(short = 'm', long, value_parser, default_value_t = 2)]
         max_depth: u16,
 
         /// Minimum region size to consider for transitive queries
-        #[clap(long, value_parser, default_value_t = 0)]
+        #[clap(short = 'l', long, value_parser, default_value_t = 10)]
         min_transitive_len: i32,
 
         /// Minimum distance between transitive ranges to consider on the same sequence
@@ -94,7 +94,7 @@ enum Args {
         max_depth: u16,
 
         /// Minimum region size to consider for transitive queries
-        #[clap(long, value_parser, default_value_t = 0)]
+        #[clap(short = 'l', long, value_parser, default_value_t = 0)]
         min_transitive_len: i32,
 
         /// Minimum distance between transitive ranges to consider on the same sequence
