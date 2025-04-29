@@ -89,20 +89,6 @@ pub fn partition_alignments(
         }
     }
 
-    if debug {
-        debug!("Starting with {} windows:", windows.len());
-        for (seq_id, start, end) in &windows {
-            let chrom = impg.seq_index.get_name(*seq_id).unwrap();
-            debug!(
-                "  Window: {}:{}-{}, len: {}",
-                chrom,
-                start,
-                end,
-                end - start
-            );
-        }
-    }
-
     // Initialize masked regions
     let mut masked_regions: FxHashMap<u32, SortedRanges> = (0..impg.seq_index.len() as u32)
         .map(|id| {
@@ -127,8 +113,20 @@ pub fn partition_alignments(
     info!("Partitioning");
 
     while !windows.is_empty() {
-        debug!("Processing new window set");
-
+        if debug {
+            debug!("Processing new set of {} windows", windows.len());
+            for (seq_id, start, end) in &windows {
+                let chrom = impg.seq_index.get_name(*seq_id).unwrap();
+                debug!(
+                    "  Window: {}:{}-{}, len: {}",
+                    chrom,
+                    start,
+                    end,
+                    end - start
+                );
+            }
+        }
+        
         for (seq_id, start, end) in windows.iter() {
             let chrom = impg.seq_index.get_name(*seq_id).unwrap();
 

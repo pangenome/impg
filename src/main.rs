@@ -75,7 +75,7 @@ enum Args {
         /// Selection mode for next sequence: 
         /// - Not specified: Select sequence with highest total missing
         /// - "none": Select longest single missing region
-        /// - "sample[,separator]" or "haplotype[,separator]": Use PanSN to select sample/haplotype with most missing regions
+        /// - "sample[,separator]" or "haplotype[,separator]": Use PanSN to select sample/haplotype with most missing
         #[clap(long, value_parser)]
         selection_mode: Option<String>,
     },
