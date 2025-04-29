@@ -52,10 +52,6 @@ enum Args {
         #[clap(short = 'd', long, value_parser, default_value_t = 100000)]
         merge_distance: i32,
 
-        /// Minimum region size - shorter regions will be extended
-        #[clap(short = 'l', long, value_parser, default_value_t = 0)]
-        min_region_size: i32,
-
         /// Minimum region size for missing regions
         #[clap(short = 'f', long, value_parser, default_value_t = 3000)]
         min_missing_size: i32,
@@ -129,7 +125,6 @@ fn main() -> io::Result<()> {
             window_size,
             sequence_prefix,
             merge_distance,
-            min_region_size,
             min_missing_size,
             min_boundary_distance,
             max_depth,
@@ -142,7 +137,6 @@ fn main() -> io::Result<()> {
                 window_size,
                 &sequence_prefix,
                 merge_distance,
-                min_region_size,
                 min_missing_size,
                 min_boundary_distance,
                 max_depth,

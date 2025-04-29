@@ -13,7 +13,6 @@ pub fn partition_alignments(
     window_size: usize,
     sequence_prefix: &str,
     merge_distance: i32,
-    min_region_size: i32,
     min_missing_size: i32,
     min_boundary_distance: i32,
     max_depth: u16,
@@ -202,11 +201,16 @@ pub fn partition_alignments(
                 merge_distance
             );
 
-            debug!("  Extending short intervals");
-            //let extend_start = Instant::now();
-            pad_short_intervals(&mut overlaps, impg, min_region_size);
-            extend_to_close_boundaries(&mut overlaps, impg, min_boundary_distance);
-            //let extend_time = extend_start.elapsed();
+            if min_boundary_distance > 0 {
+                //debug!("  Extending short intervals");
+                //let extend_start = Instant::now();
+                extend_to_close_boundaries(&mut overlaps, impg, min_boundary_distance);
+                //let extend_time = extend_start.elapsed();
+                debug!(
+                    "  Collected {} query overlaps after extending those close to boundaries",
+                    overlaps.len()
+                );
+            }
 
             //debug!("  Excluding masked regions"); // bedtools subtract -a "partition$num.tmp.bed" -b "$MASK_BED"
             //let mask_start = Instant::now();
@@ -586,65 +590,12 @@ fn mask_and_update_regions(
     result
 }
 
-// Function to pad short intervals to ensure they meet minimum size requirements
-fn pad_short_intervals(
-    overlaps: &mut [(Interval<u32>, Vec<CigarOp>, Interval<u32>)],
-    impg: &Impg,
-    min_region_size: i32,
-) {
-    if min_region_size <= 0 {
-        return;
-    }
-    for (query_interval, _, target_interval) in overlaps.iter_mut() {
-        let seq_len = impg
-            .seq_index
-            .get_len_from_id(query_interval.metadata)
-            .unwrap() as i32;
-        let is_forward = query_interval.first <= query_interval.last;
-
-        // Get current length and calculate extensions needed
-        let len = if is_forward {
-            query_interval.last - query_interval.first
-        } else {
-            query_interval.first - query_interval.last
-        };
-
-        if len < min_region_size {
-            let extension_needed = min_region_size - len;
-            let (start_bound, end_bound) = if is_forward {
-                (query_interval.first, seq_len - query_interval.last)
-            } else {
-                (query_interval.last, seq_len - query_interval.first)
-            };
-
-            let start_extension = std::cmp::min(extension_needed / 2, start_bound);
-            let end_extension = std::cmp::min(extension_needed - start_extension, end_bound);
-
-            // Apply extensions
-            if is_forward {
-                query_interval.first -= start_extension;
-                query_interval.last += end_extension;
-            } else {
-                query_interval.last -= start_extension;
-                query_interval.first += end_extension;
-            }
-
-            // Also adjust target interval
-            target_interval.first -= start_extension;
-            target_interval.last += end_extension;
-        }
-    }
-}
-
 // Function to extend intervals that are close to sequence boundaries
 fn extend_to_close_boundaries(
     overlaps: &mut [(Interval<u32>, Vec<CigarOp>, Interval<u32>)],
     impg: &Impg,
     min_boundary_distance: i32,
 ) {
-    if min_boundary_distance <= 0 {
-        return;
-    }
     for (query_interval, _, target_interval) in overlaps.iter_mut() {
         let seq_len = impg
             .seq_index
