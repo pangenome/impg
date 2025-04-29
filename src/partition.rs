@@ -18,7 +18,7 @@ pub fn partition_alignments(
     max_depth: u16,
     min_transitive_len: i32,
     min_distance_between_ranges: i32,
-    use_total_missing: bool,
+    selection_mode: Option<&str>,
     debug: bool,
 ) -> io::Result<()> {
     // Get all sequences with the given prefix
@@ -288,35 +288,21 @@ pub fn partition_alignments(
             }
         }
 
-        // Find next region to process based on the selection strategy
-        let mut longest_region: Option<(u32, i32, i32)> = None;
+        // Clear existing windows but keep the allocation
+        windows.clear();
+
+        // Vector to collect ranges for windowing
+        let mut ranges_to_window: Vec<(u32, i32, i32)> = Vec::new();
                 
-        if use_total_missing {
-            // Select sequence with most total missing sequence
-            let mut max_total_missing = 0;
-            let mut seq_with_most_missing: Option<u32> = None;
-            
-            // Calculate total missing sequence for each seq_id
-            for (seq_id, ranges) in missing_regions.iter() {
-                let total_missing: i32 = ranges.iter().map(|&(start, end)| end - start).sum();
-                
-                if total_missing > max_total_missing {
-                    max_total_missing = total_missing;
-                    seq_with_most_missing = Some(*seq_id);
-                }
-            }
-            
-            // If we found a sequence, select its entire length for windowing
-            if let Some(seq_id) = seq_with_most_missing {
-                let seq_length = impg.seq_index.get_len_from_id(seq_id).unwrap() as i32;
-                longest_region = Some((seq_id, 0, seq_length));
-                
-                debug!("Selected sequence with ID {} for having most missing sequence ({}bp)",
-                    seq_id, max_total_missing);
-            }
-        } else {
+        // Determine which selection mode to use
+        let use_longest_missing = selection_mode.map_or(false, |mode| mode == "none");
+        let pan_sn_config = selection_mode.filter(|&mode| mode != "none");
+
+        // Find regions to process based on the selection strategy
+        if use_longest_missing {
             // Select longest single missing region
             let mut max_length = 0;
+            let mut longest_region: Option<(u32, i32, i32)> = None;
             
             // Scan through missing regions
             for (seq_id, ranges) in missing_regions.iter() {
@@ -334,18 +320,115 @@ pub fn partition_alignments(
                     }
                 }
             }
+            
+            // Add the single longest region to windowing list
+            if let Some(region) = longest_region {
+                ranges_to_window.push(region);
+            }
+        } else if let Some(config) = pan_sn_config {
+            // PanSN-based selection: find sample/haplotype with most missing sequence
+            
+            // Parse config: field[,separator]
+            let mut parts = config.split(',');
+            let field_type = parts.next().unwrap_or("sample");
+            let separator = parts.next().unwrap_or("#");
+            
+            // Determine field count based on field_type
+            let field_count = match field_type {
+                "sample" => 1,
+                "haplotype" => 2,
+                _ => 1, // Default to sample if unrecognized
+            };
+            
+            // Group sequences by sample/haplotype prefix
+            let mut prefix_to_seqs: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+            
+            for seq_id in 0..impg.seq_index.len() as u32 {
+                if let Some(seq_name) = impg.seq_index.get_name(seq_id) {
+                    let parts: Vec<&str> = seq_name.split(separator).collect();
+                    if parts.len() >= field_count {
+                        let prefix = parts[..field_count].join(separator);
+                        prefix_to_seqs.entry(prefix).or_default().push(seq_id);
+                    }
+                }
+            }
+            
+            // Calculate missing sequence per sample/haplotype
+            let mut max_missing = 0;
+            let mut prefix_with_most_missing: Option<String> = None;
+            
+            for (prefix, seqs) in &prefix_to_seqs {
+                let mut total_missing = 0;
+                
+                for &seq_id in seqs {
+                    if let Some(ranges) = missing_regions.get(&seq_id) {
+                        total_missing += ranges.iter().map(|&(start, end)| end - start).sum::<i32>();
+                    }
+                }
+                
+                if total_missing > max_missing {
+                    max_missing = total_missing;
+                    prefix_with_most_missing = Some(prefix.clone());
+                }
+            }
+            
+            // If we found a prefix, add all its sequences to the windowing list
+            if let Some(prefix) = prefix_with_most_missing {
+                if let Some(seqs) = prefix_to_seqs.get(&prefix) {
+                    // Get all sequences for this prefix and sort by length
+                    let mut seqs_with_length: Vec<(u32, usize)> = seqs
+                        .iter()
+                        .filter_map(|&seq_id| {
+                            impg.seq_index.get_len_from_id(seq_id).map(|len| (seq_id, len))
+                        })
+                        .collect();
+                    
+                    // Sort by length (descending)
+                    seqs_with_length.sort_by(|a, b| b.1.cmp(&a.1));
+                    
+                    debug!("Selected {} sequences from {} with total missing {}bp",
+                        seqs_with_length.len(), prefix, max_missing);
+                    
+                    // Add full range for each sequence
+                    for (seq_id, _) in seqs_with_length {
+                        let seq_length = impg.seq_index.get_len_from_id(seq_id).unwrap() as i32;
+                        ranges_to_window.push((seq_id, 0, seq_length));
+                    }
+                }
+            }
+        } else {
+            // Default strategy: select sequence with highest total missing
+            let mut max_total_missing = 0;
+            let mut seq_with_most_missing: Option<u32> = None;
+            
+            // Calculate total missing sequence for each seq_id
+            for (seq_id, ranges) in missing_regions.iter() {
+                let total_missing: i32 = ranges.iter().map(|&(start, end)| end - start).sum();
+                
+                if total_missing > max_total_missing {
+                    max_total_missing = total_missing;
+                    seq_with_most_missing = Some(*seq_id);
+                }
+            }
+            
+            // Add the sequence with most missing to windowing list
+            if let Some(seq_id) = seq_with_most_missing {
+                let seq_length = impg.seq_index.get_len_from_id(seq_id).unwrap() as i32;
+                
+                debug!("Selected sequence with ID {} for having most missing sequence ({}bp)",
+                    seq_id, max_total_missing);
+                
+                ranges_to_window.push((seq_id, 0, seq_length));
+            }
         }
 
-        // Clear existing windows but keep the allocation
-        windows.clear();
-
-        // Create new windows from the selected region
-        if let Some((seq_id, start, end)) = longest_region {
+        // Create windows from all collected ranges
+        for (seq_id, start, end) in ranges_to_window {
             let mut pos = start;
             while pos < end {
                 let window_end = std::cmp::min(pos + window_size as i32, end);
-
-                // If this tail‐window is too small, merge it into the last one
+                
+                // If this tail-window is too small, merge it into the last one
                 if window_end - pos < window_size as i32
                     && !windows.is_empty()
                     && windows.last().unwrap().0 == seq_id
@@ -354,11 +437,12 @@ pub fn partition_alignments(
                     last.2 = end;
                     break;
                 }
-
+                
                 windows.push((seq_id, pos, window_end));
                 pos = window_end;
             }
-        } // If no missing regions remain, we're done
+        }
+
     }
 
     info!("Partitioned into {} regions", partition_num);

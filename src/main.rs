@@ -72,9 +72,12 @@ enum Args {
         #[clap(long, value_parser, default_value_t = 10)]
         min_distance_between_ranges: i32,
 
-        /// Select next sequence based on total missing sequence rather than longest missing region
-        #[clap(short = 'T', long, action)]
-        use_total_missing: bool,
+        /// Selection mode for next sequence: 
+        /// - Not specified: Select sequence with highest total missing
+        /// - "none": Select longest single missing region
+        /// - "sample[,separator]" or "haplotype[,separator]": Use PanSN to select sample/haplotype with most missing regions
+        #[clap(long, value_parser)]
+        selection_mode: Option<String>,
     },
     /// Query overlaps in the alignment
     Query {
@@ -134,7 +137,7 @@ fn main() -> io::Result<()> {
             max_depth,
             min_transitive_len,
             min_distance_between_ranges,
-            use_total_missing,
+            selection_mode,
         } => {
             let impg = initialize_impg(&common)?;
             partition_alignments(
@@ -147,7 +150,7 @@ fn main() -> io::Result<()> {
                 max_depth,
                 min_transitive_len,
                 min_distance_between_ranges,
-                use_total_missing,
+                selection_mode.as_deref(),
                 common.verbose > 1,
             )?;
         }
