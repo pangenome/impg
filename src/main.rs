@@ -71,6 +71,10 @@ enum Args {
         /// Minimum distance between transitive ranges to consider on the same sequence
         #[clap(long, value_parser, default_value_t = 10)]
         min_distance_between_ranges: i32,
+
+        /// Select next sequence based on total missing sequence rather than longest missing region
+        #[clap(short = 'T', long, action)]
+        use_total_missing: bool,
     },
     /// Query overlaps in the alignment
     Query {
@@ -130,6 +134,7 @@ fn main() -> io::Result<()> {
             max_depth,
             min_transitive_len,
             min_distance_between_ranges,
+            use_total_missing,
         } => {
             let impg = initialize_impg(&common)?;
             partition_alignments(
@@ -142,6 +147,7 @@ fn main() -> io::Result<()> {
                 max_depth,
                 min_transitive_len,
                 min_distance_between_ranges,
+                use_total_missing,
                 common.verbose > 1,
             )?;
         }

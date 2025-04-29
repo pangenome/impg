@@ -18,6 +18,7 @@ pub fn partition_alignments(
     max_depth: u16,
     min_transitive_len: i32,
     min_distance_between_ranges: i32,
+    use_total_missing: bool,
     debug: bool,
 ) -> io::Result<()> {
     // Get all sequences with the given prefix
@@ -287,22 +288,50 @@ pub fn partition_alignments(
             }
         }
 
-        // Find longest remaining region with smallest seq_id and start position
+        // Find next region to process based on the selection strategy
         let mut longest_region: Option<(u32, i32, i32)> = None;
-        let mut max_length = 0;
-        // Scan through missing regions
-        for (seq_id, ranges) in missing_regions.iter() {
-            for &(start, end) in ranges.iter() {
-                let length = end - start;
-                if length > max_length
-                    || (length == max_length
-                        && longest_region.map_or(true, |(curr_seq_id, curr_start, _)| {
-                            (*seq_id < curr_seq_id)
-                                || (*seq_id == curr_seq_id && start < curr_start)
-                        }))
-                {
-                    max_length = length;
-                    longest_region = Some((*seq_id, start, end));
+                
+        if use_total_missing {
+            // Select sequence with most total missing sequence
+            let mut max_total_missing = 0;
+            let mut seq_with_most_missing: Option<u32> = None;
+            
+            // Calculate total missing sequence for each seq_id
+            for (seq_id, ranges) in missing_regions.iter() {
+                let total_missing: i32 = ranges.iter().map(|&(start, end)| end - start).sum();
+                
+                if total_missing > max_total_missing {
+                    max_total_missing = total_missing;
+                    seq_with_most_missing = Some(*seq_id);
+                }
+            }
+            
+            // If we found a sequence, select its entire length for windowing
+            if let Some(seq_id) = seq_with_most_missing {
+                let seq_length = impg.seq_index.get_len_from_id(seq_id).unwrap() as i32;
+                longest_region = Some((seq_id, 0, seq_length));
+                
+                debug!("Selected sequence with ID {} for having most missing sequence ({}bp)",
+                    seq_id, max_total_missing);
+            }
+        } else {
+            // Select longest single missing region
+            let mut max_length = 0;
+            
+            // Scan through missing regions
+            for (seq_id, ranges) in missing_regions.iter() {
+                for &(start, end) in ranges.iter() {
+                    let length = end - start;
+                    if length > max_length
+                        || (length == max_length
+                            && longest_region.map_or(true, |(curr_seq_id, curr_start, _)| {
+                                (*seq_id < curr_seq_id)
+                                    || (*seq_id == curr_seq_id && start < curr_start)
+                            }))
+                    {
+                        max_length = length;
+                        longest_region = Some((*seq_id, start, end));
+                    }
                 }
             }
         }
