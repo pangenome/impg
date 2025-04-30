@@ -100,9 +100,9 @@ pub fn partition_alignments(
 
     let mut partition_num = 0;
     let mut total_partitioned_length = 0;
-    let total_sequence_length: usize = (0..impg.seq_index.len() as u32)
+    let total_sequence_length: u64 = (0..impg.seq_index.len() as u32)
         .filter_map(|id| impg.seq_index.get_len_from_id(id))
-        .sum();
+        .sum::<usize>() as u64;
 
     info!("Partitioning");
     info!("Total sequence length: {} bp", total_sequence_length);
@@ -322,11 +322,12 @@ fn select_and_window_sequences(
     match selection_mode {
         None => {
             // Default strategy: select sequence with highest total missing
-            let mut max_total_missing = 0;
+            let mut max_total_missing : i64 = 0;
             let mut seq_with_most_missing: Option<u32> = None;
             
             for (seq_id, ranges) in missing_regions.iter() {
-                let total_missing: i32 = ranges.iter().map(|&(start, end)| end - start).sum();
+                // i64 to avoid overflow for large ranges
+                let total_missing: i64 = ranges.iter().map(|&(start, end)| (end - start) as i64).sum();
                 
                 if total_missing > max_total_missing {
                     max_total_missing = total_missing;
@@ -416,7 +417,8 @@ fn select_and_window_sequences(
                 
                 for &seq_id in seqs {
                     if let Some(ranges) = missing_regions.get(&seq_id) {
-                        total_missing += ranges.iter().map(|&(start, end)| end - start).sum::<i32>();
+                        // i64 to avoid overflow for large ranges
+                        total_missing += ranges.iter().map(|&(start, end)| (end - start) as i64).sum::<i64>();
                     }
                 }
                 
