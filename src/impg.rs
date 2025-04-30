@@ -483,27 +483,6 @@ impl Impg {
         min_distance_between_ranges: i32,
         store_cigar: bool,
     ) -> Vec<AdjustedInterval> {
-        let mut results = Vec::new();
-        // Add the input range to the results
-        results.push((
-            Interval {
-                first: range_start,
-                last: range_end,
-                metadata: target_id,
-            },
-            if store_cigar {
-                vec![CigarOp::new(range_end - range_start, '=')]
-            } else {
-                Vec::new()
-            },
-            Interval {
-                first: range_start,
-                last: range_end,
-                metadata: target_id,
-            },
-        ));
-        // Initialize stack with first query
-        let mut stack = vec![(target_id, range_start, range_end, 0u16)];
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
             m.iter().map(|(&k, v)| (k, (*v).clone())).collect()
@@ -515,11 +494,44 @@ impl Impg {
                 })
                 .collect()
         };
-        // Initialize first visited range for target_id if not already present
-        visited_ranges
+        // Filter input range
+        let filtered_input_range = visited_ranges
             .entry(target_id)
             .or_default()
             .insert((range_start, range_end));
+
+        let mut results = Vec::new();
+        let mut stack = Vec::new();
+        for (filtered_start, filtered_end) in filtered_input_range {
+            // Add the filtered input range(s) to the results
+            results.push((
+                Interval {
+                    first: filtered_start,
+                    last: filtered_end,
+                    metadata: target_id,
+                },
+                if store_cigar {
+                    vec![CigarOp::new(filtered_end - filtered_start, '=')]
+                } else {
+                    Vec::new()
+                },
+                Interval {
+                    first: filtered_start,
+                    last: filtered_end,
+                    metadata: target_id,
+                },
+            ));
+
+            // Add the filtered input range(s) to the results
+            if (filtered_start - filtered_end).abs() >= min_transitive_len {
+                stack.push((
+                    target_id,
+                    filtered_start,
+                    filtered_end,
+                    0u16,
+                ));
+            }
+        }
 
         while let Some((
             current_target_id,

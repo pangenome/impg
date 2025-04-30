@@ -5,15 +5,15 @@ use coitrees::Interval;
 use log::{debug, info};
 use rustc_hash::FxHashMap;
 use std::fs::File;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufWriter, BufReader, BufRead, Write};
 //use std::time::Instant;
 
 pub fn partition_alignments(
     impg: &Impg,
     window_size: usize,
-    sequence_prefix: &str,
+    starting_sequences_file: Option<&str>,
+    selection_mode: Option<&str>,
     merge_distance: i32,
-    min_region_size: i32,
     min_missing_size: i32,
     min_boundary_distance: i32,
     max_depth: u16,
@@ -21,85 +21,62 @@ pub fn partition_alignments(
     min_distance_between_ranges: i32,
     debug: bool,
 ) -> io::Result<()> {
-    // Get all sequences with the given prefix
-    let mut sample_regions = Vec::<(u32, i32, i32)>::new();
-    let mut total_sequence_length = 0;
-    for seq_id in 0..impg.seq_index.len() as u32 {
-        let seq_name = impg.seq_index.get_name(seq_id).unwrap();
-        let seq_length = impg.seq_index.get_len_from_id(seq_id).unwrap();
-        if seq_name.starts_with(sequence_prefix) {
-            sample_regions.push((seq_id, 0, seq_length as i32));
-        }
-        total_sequence_length += seq_length;
-    }
-    if sample_regions.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!(
-                "No sequences with prefix {} found in sequence index",
-                sequence_prefix
-            ),
-        ));
-    }
-    // Natural sort by sequence name
-    sample_regions.sort_by(|a, b| {
-        let chrom_a = impg.seq_index.get_name(a.0).unwrap();
-        let chrom_b = impg.seq_index.get_name(b.0).unwrap();
-        natord::compare(chrom_a, chrom_b)
-    });
-    info!("Total sequence length: {} bp", total_sequence_length);
-
-    if debug {
-        debug!(
-            "Found {} sequences with prefix {}",
-            sample_regions.len(),
-            sequence_prefix
-        );
-        for (seq_id, start, end) in &sample_regions {
-            let chrom = impg.seq_index.get_name(*seq_id).unwrap();
-            debug!(
-                "  Sequence: {}:{}-{}, len: {}",
-                chrom,
-                start,
-                end,
-                end - start
-            );
-        }
-    }
-
-    // Create windows from sample regions
+    // Initialize windows from starting sequences if provided
     let mut windows = Vec::<(u32, i32, i32)>::new();
-    for (seq_id, start, end) in sample_regions {
-        let mut pos = start;
-        while pos < end as i32 {
-            let window_end = std::cmp::min(pos + window_size as i32, end as i32);
-
-            // If this tail‐window is too small, merge it into the last one
-            if window_end - pos < window_size as i32
-                && !windows.is_empty()
-                && windows.last().unwrap().0 == seq_id
-            {
-                let last = windows.last_mut().unwrap();
-                last.2 = end as i32;
-                break;
+    if let Some(path) = starting_sequences_file {
+        // Read sequences from starting-sequences file
+        let file = File::open(path).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Could not open starting sequences file {}: {}", path, e)
+            )
+        })?;
+        
+        let reader = BufReader::new(file);
+        let mut starting_sequences = Vec::new();
+        
+        // Read all sequences from the file
+        for line_result in reader.lines() {
+            let line = line_result?;
+            if let Some(seq_name) = line.split('\t').next() {
+                let trimmed_name = seq_name.trim();
+                if trimmed_name.is_empty() || trimmed_name.starts_with('#') {
+                    continue; // Skip empty lines and comments
+                }
+                
+                if let Some(seq_id) = impg.seq_index.get_id(trimmed_name) {
+                    let seq_length = impg.seq_index.get_len_from_id(seq_id).unwrap() as i32;
+                    starting_sequences.push((seq_id, 0, seq_length));
+                } else if debug {
+                    debug!("Sequence {} from starting file not found in index", trimmed_name);
+                }
             }
-
-            windows.push((seq_id, pos, window_end));
-            pos = window_end;
         }
-    }
-
-    if debug {
-        debug!("Starting with {} windows:", windows.len());
-        for (seq_id, start, end) in &windows {
-            let chrom = impg.seq_index.get_name(*seq_id).unwrap();
-            debug!(
-                "  Window: {}:{}-{}, len: {}",
-                chrom,
-                start,
-                end,
-                end - start
-            );
+        
+        info!("Read {} sequences from starting file {}", starting_sequences.len(), path);
+        
+        // Create windows from starting sequences
+        for (seq_id, start, end) in starting_sequences {
+            let seq_name = impg.seq_index.get_name(seq_id).unwrap();
+            info!("Creating windows for sequence {} ({}bp)", seq_name, end - start);
+            
+            let mut pos = start;
+            while pos < end {
+                let window_end = std::cmp::min(pos + window_size as i32, end);
+                
+                // If this tail-window is too small, merge it into the last one
+                if window_end - pos < window_size as i32
+                    && !windows.is_empty()
+                    && windows.last().unwrap().0 == seq_id
+                {
+                    let last = windows.last_mut().unwrap();
+                    last.2 = end;
+                    break;
+                }
+                
+                windows.push((seq_id, pos, window_end));
+                pos = window_end;
+            }
         }
     }
 
@@ -123,12 +100,39 @@ pub fn partition_alignments(
 
     let mut partition_num = 0;
     let mut total_partitioned_length = 0;
+    let total_sequence_length: u64 = (0..impg.seq_index.len() as u32)
+        .filter_map(|id| impg.seq_index.get_len_from_id(id))
+        .sum::<usize>() as u64;
 
     info!("Partitioning");
+    info!("Total sequence length: {} bp", total_sequence_length);
+
+    // If no windows are yet defined, select initial windows based on selection_mode
+    if windows.is_empty() {
+        select_and_window_sequences(
+            &mut windows,
+            impg,
+            &missing_regions,
+            selection_mode,
+            window_size,
+        )?;
+    }
 
     while !windows.is_empty() {
-        debug!("Processing new window set");
-
+        if debug {
+            debug!("Processing new set of {} windows", windows.len());
+            for (seq_id, start, end) in &windows {
+                let chrom = impg.seq_index.get_name(*seq_id).unwrap();
+                debug!(
+                    "  Window: {}:{}-{}, len: {}",
+                    chrom,
+                    start,
+                    end,
+                    end - start
+                );
+            }
+        }
+        
         for (seq_id, start, end) in windows.iter() {
             let chrom = impg.seq_index.get_name(*seq_id).unwrap();
 
@@ -202,11 +206,16 @@ pub fn partition_alignments(
                 merge_distance
             );
 
-            debug!("  Extending short intervals");
-            //let extend_start = Instant::now();
-            pad_short_intervals(&mut overlaps, impg, min_region_size);
-            extend_to_close_boundaries(&mut overlaps, impg, min_boundary_distance);
-            //let extend_time = extend_start.elapsed();
+            if min_boundary_distance > 0 {
+                //debug!("  Extending short intervals");
+                //let extend_start = Instant::now();
+                extend_to_close_boundaries(&mut overlaps, impg, min_boundary_distance);
+                //let extend_time = extend_start.elapsed();
+                debug!(
+                    "  Collected {} query overlaps after extending those close to boundaries",
+                    overlaps.len()
+                );
+            }
 
             //debug!("  Excluding masked regions"); // bedtools subtract -a "partition$num.tmp.bed" -b "$MASK_BED"
             //let mask_start = Instant::now();
@@ -283,53 +292,203 @@ pub fn partition_alignments(
             }
         }
 
-        // Find longest remaining region with smallest seq_id and start position
-        let mut longest_region: Option<(u32, i32, i32)> = None;
-        let mut max_length = 0;
-        // Scan through missing regions
-        for (seq_id, ranges) in missing_regions.iter() {
-            for &(start, end) in ranges.iter() {
-                let length = end - start;
-                if length > max_length
-                    || (length == max_length
-                        && longest_region.map_or(true, |(curr_seq_id, curr_start, _)| {
-                            (*seq_id < curr_seq_id)
-                                || (*seq_id == curr_seq_id && start < curr_start)
-                        }))
-                {
-                    max_length = length;
-                    longest_region = Some((*seq_id, start, end));
-                }
-            }
-        }
-
         // Clear existing windows but keep the allocation
         windows.clear();
 
-        // Create new windows from the selected region
-        if let Some((seq_id, start, end)) = longest_region {
-            let mut pos = start;
-            while pos < end {
-                let window_end = std::cmp::min(pos + window_size as i32, end);
-
-                // If this tail‐window is too small, merge it into the last one
-                if window_end - pos < window_size as i32
-                    && !windows.is_empty()
-                    && windows.last().unwrap().0 == seq_id
-                {
-                    let last = windows.last_mut().unwrap();
-                    last.2 = end;
-                    break;
-                }
-
-                windows.push((seq_id, pos, window_end));
-                pos = window_end;
-            }
-        } // If no missing regions remain, we're done
+        select_and_window_sequences(
+            &mut windows,
+            impg,
+            &missing_regions,
+            selection_mode,
+            window_size,
+        )?;
     }
 
     info!("Partitioned into {} regions", partition_num);
 
+    Ok(())
+}
+
+// Helper function to select and window sequences based on selection_mode
+fn select_and_window_sequences(
+    windows: &mut Vec<(u32, i32, i32)>,
+    impg: &Impg,
+    missing_regions: &FxHashMap<u32, SortedRanges>,
+    selection_mode: Option<&str>,
+    window_size: usize
+) -> io::Result<()> {
+    let mut ranges_to_window = Vec::new();
+    
+    match selection_mode {
+        None => {
+            // Default strategy: select sequence with highest total missing
+            let mut max_total_missing : i64 = 0;
+            let mut seq_with_most_missing: Option<u32> = None;
+            
+            for (seq_id, ranges) in missing_regions.iter() {
+                // i64 to avoid overflow for large ranges
+                let total_missing: i64 = ranges.iter().map(|&(start, end)| (end - start) as i64).sum();
+                
+                if total_missing > max_total_missing {
+                    max_total_missing = total_missing;
+                    seq_with_most_missing = Some(*seq_id);
+                }
+            }
+            
+            if let Some(seq_id) = seq_with_most_missing {
+                let seq_length = impg.seq_index.get_len_from_id(seq_id).unwrap() as i32;
+                let seq_name = impg.seq_index.get_name(seq_id).unwrap();
+                
+                debug!("Selected sequence {} with most missing sequence ({}bp)",
+                    seq_name, max_total_missing);
+                
+                ranges_to_window.push((seq_id, 0, seq_length));
+            }
+        },
+        Some("none") => {
+            // Select longest single missing region
+            let mut max_length = 0;
+            let mut longest_region: Option<(u32, i32, i32)> = None;
+            
+            for (seq_id, ranges) in missing_regions.iter() {
+                for &(start, end) in ranges.iter() {
+                    let length = end - start;
+                    if length > max_length {
+                        max_length = length;
+                        longest_region = Some((*seq_id, start, end));
+                    }
+                }
+            }
+            
+            if let Some((seq_id, start, end)) = longest_region {
+                let seq_name = impg.seq_index.get_name(seq_id).unwrap();
+                
+                debug!("Selected longest missing region {}:{}-{} ({}bp)",
+                    seq_name, start, end, end - start);
+                
+                ranges_to_window.push((seq_id, start, end));
+            }
+        },
+        Some(mode) if mode == "sample" || mode == "haplotype" || mode.starts_with("sample,") || mode.starts_with("haplotype,") => {
+            // Determine field type and separator based on mode format
+            let field_type = if mode.contains(',') {
+                mode.split(',').next().unwrap_or("sample")
+            } else {
+                mode
+            };
+            
+            let separator = if mode.contains(',') {
+                mode.split(',').nth(1).unwrap_or("#")
+            } else {
+                "#"
+            };
+            
+            // Determine field count based on field_type
+            let field_count = match field_type {
+                "sample" => 1,
+                "haplotype" => 2,
+                _ => 1, // Default to sample if unrecognized
+            };
+            
+            // Group sequences by sample/haplotype prefix
+            let mut prefix_to_seqs: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+            
+            for seq_id in 0..impg.seq_index.len() as u32 {
+                if let Some(seq_name) = impg.seq_index.get_name(seq_id) {
+                    let parts: Vec<&str> = seq_name.split(separator).collect();
+                    if parts.len() >= field_count {
+                        let prefix = parts[..field_count].join(separator);
+                        // Only include sequence IDs that have missing regions
+                        if let Some(ranges) = missing_regions.get(&seq_id) {
+                            if !ranges.is_empty() {
+                                prefix_to_seqs.entry(prefix).or_default().push(seq_id);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Calculate missing sequence per sample/haplotype
+            let mut max_missing = 0;
+            let mut prefix_with_most_missing: Option<String> = None;
+            
+            for (prefix, seqs) in &prefix_to_seqs {
+                let mut total_missing = 0;
+                
+                for &seq_id in seqs {
+                    if let Some(ranges) = missing_regions.get(&seq_id) {
+                        // i64 to avoid overflow for large ranges
+                        total_missing += ranges.iter().map(|&(start, end)| (end - start) as i64).sum::<i64>();
+                    }
+                }
+                
+                if total_missing > max_missing {
+                    max_missing = total_missing;
+                    prefix_with_most_missing = Some(prefix.clone());
+                }
+            }
+            
+            // If we found a prefix, add all its sequences sorted by length
+            if let Some(prefix) = prefix_with_most_missing {
+                if let Some(seqs) = prefix_to_seqs.get(&prefix) {
+                    // Get all sequences for this prefix and sort by length
+                    let mut seqs_with_length: Vec<(u32, usize)> = seqs
+                        .iter()
+                        .filter_map(|&seq_id| {
+                            impg.seq_index.get_len_from_id(seq_id).map(|len| (seq_id, len))
+                        })
+                        .collect();
+                    
+                    // Sort by length (descending)
+                    seqs_with_length.sort_by(|a, b| b.1.cmp(&a.1));
+                    
+                    debug!("Selected {} sequences from {} group with total missing {}bp",
+                        seqs_with_length.len(), prefix, max_missing);
+                    
+                    // Add all sequences to process
+                    for (seq_id, _) in seqs_with_length {
+                        let seq_length = impg.seq_index.get_len_from_id(seq_id).unwrap() as i32;
+                                                
+                        ranges_to_window.push((seq_id, 0, seq_length));
+                    }
+                }
+            }
+        },
+        Some(_) => {
+            // Invalid selection mode
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid selection mode. Must be 'none', 'sample,<sep>', or 'haplotype,<sep>'."
+            ));
+        }
+    }
+    
+    // If no more missing regions, we're done
+    if ranges_to_window.is_empty() {
+        return Ok(());
+    }
+    
+    // Create windows from ranges
+    for (seq_id, start, end) in ranges_to_window {
+        let mut pos = start;
+        while pos < end {
+            let window_end = std::cmp::min(pos + window_size as i32, end);
+            
+            // If this tail-window is too small, merge it into the last one
+            if window_end - pos < window_size as i32
+                && !windows.is_empty()
+                && windows.last().unwrap().0 == seq_id
+            {
+                let last = windows.last_mut().unwrap();
+                last.2 = end;
+                break;
+            }
+            
+            windows.push((seq_id, pos, window_end));
+            pos = window_end;
+        }
+    }
+    
     Ok(())
 }
 
@@ -586,65 +745,12 @@ fn mask_and_update_regions(
     result
 }
 
-// Function to pad short intervals to ensure they meet minimum size requirements
-fn pad_short_intervals(
-    overlaps: &mut [(Interval<u32>, Vec<CigarOp>, Interval<u32>)],
-    impg: &Impg,
-    min_region_size: i32,
-) {
-    if min_region_size <= 0 {
-        return;
-    }
-    for (query_interval, _, target_interval) in overlaps.iter_mut() {
-        let seq_len = impg
-            .seq_index
-            .get_len_from_id(query_interval.metadata)
-            .unwrap() as i32;
-        let is_forward = query_interval.first <= query_interval.last;
-
-        // Get current length and calculate extensions needed
-        let len = if is_forward {
-            query_interval.last - query_interval.first
-        } else {
-            query_interval.first - query_interval.last
-        };
-
-        if len < min_region_size {
-            let extension_needed = min_region_size - len;
-            let (start_bound, end_bound) = if is_forward {
-                (query_interval.first, seq_len - query_interval.last)
-            } else {
-                (query_interval.last, seq_len - query_interval.first)
-            };
-
-            let start_extension = std::cmp::min(extension_needed / 2, start_bound);
-            let end_extension = std::cmp::min(extension_needed - start_extension, end_bound);
-
-            // Apply extensions
-            if is_forward {
-                query_interval.first -= start_extension;
-                query_interval.last += end_extension;
-            } else {
-                query_interval.last -= start_extension;
-                query_interval.first += end_extension;
-            }
-
-            // Also adjust target interval
-            target_interval.first -= start_extension;
-            target_interval.last += end_extension;
-        }
-    }
-}
-
 // Function to extend intervals that are close to sequence boundaries
 fn extend_to_close_boundaries(
     overlaps: &mut [(Interval<u32>, Vec<CigarOp>, Interval<u32>)],
     impg: &Impg,
     min_boundary_distance: i32,
 ) {
-    if min_boundary_distance <= 0 {
-        return;
-    }
     for (query_interval, _, target_interval) in overlaps.iter_mut() {
         let seq_len = impg
             .seq_index

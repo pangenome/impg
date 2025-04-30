@@ -44,17 +44,20 @@ enum Args {
         #[clap(short = 'w', long, value_parser)]
         window_size: usize,
 
-        /// Sequence name prefix to start - all sequences starting with this prefix will be included
-        #[clap(short = 's', long, value_parser)]
-        sequence_prefix: String,
+        /// Path to the file with sequence names to start with (one per line)
+        #[clap(long, value_parser)]
+        starting_sequences_file: Option<String>,
+
+        /// Selection mode for next sequence: 
+        /// - Not specified: Select sequence with highest total missing
+        /// - "none": Select longest single missing region
+        /// - "sample[,separator]" or "haplotype[,separator]": Use PanSN to select sample/haplotype with most missing (separator '#' by default)
+        #[clap(long, value_parser)]
+        selection_mode: Option<String>,
 
         /// Maximum distance between regions to merge
         #[clap(short = 'd', long, value_parser, default_value_t = 100000)]
         merge_distance: i32,
-
-        /// Minimum region size - shorter regions will be extended
-        #[clap(short = 'l', long, value_parser, default_value_t = 0)]
-        min_region_size: i32,
 
         /// Minimum region size for missing regions
         #[clap(short = 'f', long, value_parser, default_value_t = 3000)]
@@ -65,11 +68,11 @@ enum Args {
         min_boundary_distance: i32,
 
         /// Maximum recursion depth for transitive overlaps (0 for no limit)
-        #[clap(short = 'm', long, value_parser, default_value_t = 1)]
+        #[clap(short = 'm', long, value_parser, default_value_t = 2)]
         max_depth: u16,
 
         /// Minimum region size to consider for transitive queries
-        #[clap(long, value_parser, default_value_t = 0)]
+        #[clap(short = 'l', long, value_parser, default_value_t = 10)]
         min_transitive_len: i32,
 
         /// Minimum distance between transitive ranges to consider on the same sequence
@@ -98,7 +101,7 @@ enum Args {
         max_depth: u16,
 
         /// Minimum region size to consider for transitive queries
-        #[clap(long, value_parser, default_value_t = 0)]
+        #[clap(short = 'l', long, value_parser, default_value_t = 0)]
         min_transitive_len: i32,
 
         /// Minimum distance between transitive ranges to consider on the same sequence
@@ -127,9 +130,9 @@ fn main() -> io::Result<()> {
         Args::Partition {
             common,
             window_size,
-            sequence_prefix,
+            starting_sequences_file,
+            selection_mode,
             merge_distance,
-            min_region_size,
             min_missing_size,
             min_boundary_distance,
             max_depth,
@@ -140,9 +143,9 @@ fn main() -> io::Result<()> {
             partition_alignments(
                 &impg,
                 window_size,
-                &sequence_prefix,
+                starting_sequences_file.as_deref(),
+                selection_mode.as_deref(),
                 merge_distance,
-                min_region_size,
                 min_missing_size,
                 min_boundary_distance,
                 max_depth,
