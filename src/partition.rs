@@ -240,6 +240,7 @@ pub fn partition_alignments(
                 );
                 let merge2_time = merge2_start.elapsed();
 
+                let calc_start = Instant::now();
                 // Calculate current partition length
                 let current_partition_length: u64 = overlaps
                     .iter()
@@ -252,7 +253,6 @@ pub fn partition_alignments(
                     (current_partition_length as f64 / total_sequence_length as f64) * 100.0;
                 let total_percentage =
                     (total_partitioned_length as f64 / total_sequence_length as f64) * 100.0;
-
                 // Create formatted percentage strings with conditional scientific notation
                 let current_percentage_str = if current_percentage < 0.0001 {
                     format!("{:.4e}%", current_percentage)
@@ -264,6 +264,7 @@ pub fn partition_alignments(
                 } else {
                     format!("{:.4}%", total_percentage)
                 };
+                let calc_time = calc_start.elapsed();
                 info!("  Writing partition {} with {} regions (query {}:{}-{}, len: {}) - {} of total sequence ({} so far)", 
                     partition_num,
                     overlaps.len(),
@@ -281,8 +282,8 @@ pub fn partition_alignments(
 
                 partition_num += 1;
 
-                info!("  Partition {} timings: query={:?}, merge={:?}, merge2={:?}, extend={:?}, mask={:?}, write={:?}",
-                    partition_num, query_time, merge_time, merge2_time, extend_time, mask_time, write_time);
+                info!("  Partition {} timings: query={:?}, merge={:?}, merge2={:?}, extend={:?}, mask={:?}, calc={:?}, write={:?}",
+                    partition_num, query_time, merge_time, merge2_time, extend_time, mask_time, calc_time, write_time);
             } else {
                 debug!(
                     "  No overlaps found for region {}:{}-{}, len: {}",
