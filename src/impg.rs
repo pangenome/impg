@@ -488,6 +488,7 @@ impl Impg {
             m.iter().map(|(&k, v)| (k, (*v).clone())).collect()
         } else {
             (0..self.seq_index.len() as u32)
+                .into_par_iter() // Use parallel iterator
                 .map(|id| {
                     let len = self.seq_index.get_len_from_id(id).unwrap();
                     (id, SortedRanges::new(len as i32, 0))
@@ -678,7 +679,7 @@ impl Impg {
             // Prepare ranges for next depth
             if !next_depth_ranges.is_empty() {
                 // Sort and merge contiguous/overlapping ranges
-                next_depth_ranges.sort_by_key(|(id, start, _)| (*id, *start));
+                next_depth_ranges.par_sort_by_key(|(id, start, _)| (*id, *start));
                 
                 let mut write = 0;
                 for read in 1..next_depth_ranges.len() {
