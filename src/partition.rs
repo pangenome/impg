@@ -559,7 +559,7 @@ fn mask_and_update_regions(
                     Err(pos) => {
                         if pos > 0 {
                             // Check if previous range might overlap
-                            let (prev_start, prev_end) = missing.ranges[pos-1];
+                            let (_prev_start, prev_end) = missing.ranges[pos-1];
                             if prev_end > mask_start { pos - 1 } else { pos }
                         } else { pos }
                     }
