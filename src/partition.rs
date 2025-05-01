@@ -58,7 +58,7 @@ pub fn partition_alignments(
         // Create windows from starting sequences
         for (seq_id, start, end) in starting_sequences {
             let seq_name = impg.seq_index.get_name(seq_id).unwrap();
-            info!("Creating windows for sequence {} ({}bp)", seq_name, end - start);
+            debug!("Creating windows for sequence {} ({}bp)", seq_name, end - start);
             
             let mut pos = start;
             while pos < end {
