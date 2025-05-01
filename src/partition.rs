@@ -6,7 +6,7 @@ use log::{debug, info};
 use rustc_hash::FxHashMap;
 use std::fs::File;
 use std::io::{self, BufWriter, BufReader, BufRead, Write};
-//use std::time::Instant;
+use std::time::Instant;
 
 pub fn partition_alignments(
     impg: &Impg,
@@ -181,7 +181,7 @@ pub fn partition_alignments(
             }
 
             // Query overlaps for current window
-            //let query_start = Instant::now();
+            let query_start = Instant::now();
             let mut overlaps = impg.query_transitive(
                 *seq_id,
                 *start,
@@ -192,40 +192,40 @@ pub fn partition_alignments(
                 min_distance_between_ranges,
                 false, // Don't store CIGAR strings during partitioning
             );
-            //let query_time = query_start.elapsed();
+            let query_time = query_start.elapsed();
             debug!("  Collected {} query overlaps", overlaps.len());
 
             // Ignore CIGAR strings and target intervals.
             //debug!("  Merging overlaps closer than {}bp", merge_distance); // bedtools sort | bedtools merge -d merge_distance
-            //let merge_start = Instant::now();
+            let merge_start = Instant::now();
             merge_overlaps(&mut overlaps, merge_distance);
-            //let merge_time = merge_start.elapsed();
+            let merge_time = merge_start.elapsed();
             debug!(
                 "  Collected {} query overlaps after merging those closer than {}bp",
                 overlaps.len(),
                 merge_distance
             );
 
+            let extend_start = Instant::now();
             if min_boundary_distance > 0 {
                 //debug!("  Extending short intervals");
-                //let extend_start = Instant::now();
                 extend_to_close_boundaries(&mut overlaps, impg, min_boundary_distance);
-                //let extend_time = extend_start.elapsed();
                 debug!(
                     "  Collected {} query overlaps after extending those close to boundaries",
                     overlaps.len()
                 );
             }
+            let extend_time = extend_start.elapsed();
 
             //debug!("  Excluding masked regions"); // bedtools subtract -a "partition$num.tmp.bed" -b "$MASK_BED"
-            //let mask_start = Instant::now();
+            let mask_start = Instant::now();
             overlaps = mask_and_update_regions(
                 &mut overlaps,
                 &mut masked_regions,
                 &mut missing_regions,
                 min_missing_size,
             );
-            //let mask_time = mask_start.elapsed();
+            let mask_time = mask_start.elapsed();
 
             if !overlaps.is_empty() {
                 debug!(
@@ -273,14 +273,14 @@ pub fn partition_alignments(
                     total_percentage_str
                 );
 
-                //let write_start = Instant::now();
+                let write_start = Instant::now();
                 write_partition(partition_num, &overlaps, impg)?;
-                //let write_time = write_start.elapsed();
+                let write_time = write_start.elapsed();
 
                 partition_num += 1;
 
-                // info!("  Partition {} timings: query={:?}, merge={:?}, mask={:?}, update={:?}, extend={:?}, write={:?}",
-                //     partition_num, query_time, merge_time, mask_time, update_time, extend_time, write_time);
+                info!("  Partition {} timings: query={:?}, merge={:?}, extend={:?}, mask={:?}, write={:?}",
+                    partition_num, query_time, merge_time, extend_time, mask_time, write_time);
             } else {
                 debug!(
                     "  No overlaps found for region {}:{}-{}, len: {}",
