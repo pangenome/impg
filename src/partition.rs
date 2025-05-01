@@ -232,11 +232,13 @@ pub fn partition_alignments(
                     "  Collected {} query overlaps after masking",
                     overlaps.len()
                 );
+                let merge2_start = Instant::now();
                 merge_overlaps(&mut overlaps, 0); // Final merge to ensure no overlaps remain
                 debug!(
                     "  Collected {} query overlaps after re-merging",
                     overlaps.len()
                 );
+                let merge2_time = merge2_start.elapsed();
 
                 // Calculate current partition length
                 let current_partition_length: u64 = overlaps
@@ -279,8 +281,8 @@ pub fn partition_alignments(
 
                 partition_num += 1;
 
-                info!("  Partition {} timings: query={:?}, merge={:?}, extend={:?}, mask={:?}, write={:?}",
-                    partition_num, query_time, merge_time, extend_time, mask_time, write_time);
+                info!("  Partition {} timings: query={:?}, merge={:?}, merge2={:?}, extend={:?}, mask={:?}, write={:?}",
+                    partition_num, query_time, merge_time, merge2_time, extend_time, mask_time, write_time);
             } else {
                 debug!(
                     "  No overlaps found for region {}:{}-{}, len: {}",
@@ -295,6 +297,7 @@ pub fn partition_alignments(
         // Clear existing windows but keep the allocation
         windows.clear();
 
+        let window_start = Instant::now();
         select_and_window_sequences(
             &mut windows,
             impg,
@@ -302,6 +305,8 @@ pub fn partition_alignments(
             selection_mode,
             window_size,
         )?;
+        let window_time = window_start.elapsed();
+        info!("  select_and_window_sequences={:?}", window_time);
     }
 
     info!("Partitioned into {} regions", partition_num);
