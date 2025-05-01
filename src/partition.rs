@@ -376,88 +376,76 @@ fn select_and_window_sequences(
             }
         },
         Some(mode) if mode == "sample" || mode == "haplotype" || mode.starts_with("sample,") || mode.starts_with("haplotype,") => {
-            // Determine field type and separator based on mode format
-            let field_type = if mode.contains(',') {
-                mode.split(',').next().unwrap_or("sample")
-            } else {
-                mode
-            };
-            
-            let separator = if mode.contains(',') {
-                mode.split(',').nth(1).unwrap_or("#")
-            } else {
-                "#"
-            };
-            
-            // Determine field count based on field_type
+            // Parse <field_type>[,<separator>]
+            let mut parts = mode.splitn(2, ',');
+            let field_type = parts.next().unwrap_or("sample");
+            let separator = parts.next().unwrap_or("#");
             let field_count = match field_type {
                 "sample" => 1,
                 "haplotype" => 2,
                 _ => 1, // Default to sample if unrecognized
             };
-            
-            // Group sequences by sample/haplotype prefix
-            let mut prefix_to_seqs: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-            
-            for seq_id in 0..impg.seq_index.len() as u32 {
-                if let Some(seq_name) = impg.seq_index.get_name(seq_id) {
-                    let parts: Vec<&str> = seq_name.split(separator).collect();
-                    if parts.len() >= field_count {
-                        let prefix = parts[..field_count].join(separator);
-                        // Only include sequence IDs that have missing regions
-                        if let Some(ranges) = missing_regions.get(&seq_id) {
-                            if !ranges.is_empty() {
-                                prefix_to_seqs.entry(prefix).or_default().push(seq_id);
-                            }
+
+            // Group only sequences that still have missing regions.
+            let mut prefix_to_seqs: FxHashMap<String, Vec<u32>> =
+                FxHashMap::with_capacity_and_hasher(missing_regions.len(), Default::default());
+
+            for &seq_id in missing_regions.keys() {
+                if let Some(name) = impg.seq_index.get_name(seq_id) {
+                    // Generic split for multi‑char separator.
+                    let mut split = name.split(separator);
+                    let prefix = match field_count {
+                        1 => split.next().unwrap_or(name),
+                        2 => {
+                            let p1 = split.next().unwrap_or(name);
+                            let p2 = split.next().unwrap_or("");
+                            // allocate minimal string – unavoidable here
+                            prefix_to_seqs
+                                .entry(format!("{p1}{separator}{p2}"))
+                                .or_default()
+                                .push(seq_id);
+                            continue;
                         }
-                    }
+                        _ => name,
+                    };
+                    // Store into hashmap (small string optimisation often keeps this on the stack).
+                    prefix_to_seqs
+                        .entry(prefix.to_string())
+                        .or_default()
+                        .push(seq_id);
                 }
             }
-            
-            // Calculate missing sequence per sample/haplotype
-            let mut max_missing = 0;
-            let mut prefix_with_most_missing: Option<String> = None;
-            
-            for (prefix, seqs) in &prefix_to_seqs {
-                let mut total_missing = 0;
-                
-                for &seq_id in seqs {
-                    if let Some(ranges) = missing_regions.get(&seq_id) {
-                        // i64 to avoid overflow for large ranges
-                        total_missing += ranges.iter().map(|&(start, end)| (end - start) as i64).sum::<i64>();
-                    }
-                }
-                
-                if total_missing > max_missing {
-                    max_missing = total_missing;
-                    prefix_with_most_missing = Some(prefix.clone());
-                }
-            }
-            
-            // If we found a prefix, add all its sequences sorted by length
-            if let Some(prefix) = prefix_with_most_missing {
-                if let Some(seqs) = prefix_to_seqs.get(&prefix) {
-                    // Get all sequences for this prefix and sort by length
-                    let mut seqs_with_length: Vec<(u32, usize)> = seqs
+
+            // Find the prefix with the most missing bases in total.
+            let (best_missing_bp, best_prefix, best_seqs) = prefix_to_seqs
+                .iter()
+                .map(|(prefix, ids)| {
+                    let missing: i64 = ids
                         .iter()
-                        .filter_map(|&seq_id| {
-                            impg.seq_index.get_len_from_id(seq_id).map(|len| (seq_id, len))
-                        })
-                        .collect();
-                    
-                    // Sort by length (descending)
-                    seqs_with_length.sort_by(|a, b| b.1.cmp(&a.1));
-                    
-                    debug!("Selected {} sequences from {} group with total missing {}bp",
-                        seqs_with_length.len(), prefix, max_missing);
-                    
-                    // Add all sequences to process
-                    for (seq_id, _) in seqs_with_length {
-                        let seq_length = impg.seq_index.get_len_from_id(seq_id).unwrap() as i32;
-                                                
-                        ranges_to_window.push((seq_id, 0, seq_length));
-                    }
-                }
+                        .filter_map(|id| missing_regions.get(id))
+                        .map(|ranges| ranges.iter().map(|&(s, e)| (e - s) as i64).sum::<i64>())
+                        .sum();
+                    (missing, prefix, ids)
+                })
+                .max_by_key(|&(missing, _, _)| missing)
+                .unwrap();
+
+            if !best_seqs.is_empty() {
+                debug!(
+                    "Selected {} sequences from group {best_prefix} ({best_missing_bp} bp missing)",
+                    best_seqs.len()
+                );
+
+                // Sort by length descending so that the longest sequences are processed first.
+                let mut seqs_with_len: Vec<(u32, usize)> = best_seqs
+                    .iter()
+                    .filter_map(|&id| impg.seq_index.get_len_from_id(id).map(|l| (id, l)))
+                    .collect();
+                seqs_with_len.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+
+                ranges_to_window.extend(seqs_with_len.into_iter().map(|(id, len)| {
+                    (id, 0, len as i32)
+                }));
             }
         },
         Some(_) => {
