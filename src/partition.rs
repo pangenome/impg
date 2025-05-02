@@ -106,7 +106,6 @@ pub fn partition_alignments(
         .sum::<usize>() as u64;
 
     info!("Partitioning");
-    info!("Total sequence length: {} bp", total_sequence_length);
 
     // If no windows are yet defined, select initial windows based on selection_mode
     if windows.is_empty() {
@@ -267,15 +266,17 @@ pub fn partition_alignments(
                 };
                 //let calc_time = calc_start.elapsed();
 
-                info!("  Writing partition {} with {} regions (query {}:{}-{}, len: {}) - {} of total sequence ({} so far)", 
+                info!("  Writing partition {} with {} regions: {} bp this partition ({}), {} bp total ({}) - (query {}:{}-{}, len: {})", 
                     partition_num,
                     overlaps.len(),
+                    current_partition_length,   // Current partition size in bp
+                    current_percentage_str,     // Current percentage of total sequence
+                    total_partitioned_length,   // Total bp written so far
+                    total_percentage_str,       // Total percentage of pangenome
                     chrom,
                     start,
                     end,
                     end - start,
-                    current_percentage_str,
-                    total_percentage_str
                 );
 
                 //let write_start = Instant::now();
@@ -312,7 +313,22 @@ pub fn partition_alignments(
         //info!("  select_and_window_sequences={:?}", window_time);
     }
 
-    info!("Partitioned into {} regions", partition_num);
+    // Calculate final percentage
+    let final_percentage = (total_partitioned_length as f64 / total_sequence_length as f64) * 100.0;
+    // Create formatted percentage string with conditional scientific notation
+    let final_percentage_str = if final_percentage < 0.0001 {
+        format!("{:.4e}%", final_percentage)
+    } else {
+        format!("{:.4}%", final_percentage)
+    };
+
+    info!(
+        "Partitioned into {} regions: {} bp total written / {} bp total sequence ({})",
+        partition_num,
+        total_partitioned_length,
+        total_sequence_length,
+        final_percentage_str
+    );
 
     Ok(())
 }
