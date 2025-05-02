@@ -23,7 +23,7 @@ struct CommonOpts {
     force_reindex: bool,
 
     /// Number of threads for parallel processing.
-    #[clap(short = 't', long, value_parser, default_value_t = NonZeroUsize::new(1).unwrap())]
+    #[clap(short = 't', long, value_parser, default_value_t = NonZeroUsize::new(4).unwrap())]
     num_threads: NonZeroUsize,
 
     /// Verbosity level (0 = error, 1 = info, 2 = debug)
