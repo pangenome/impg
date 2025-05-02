@@ -418,35 +418,38 @@ fn select_and_window_sequences(
             }
 
             // Find the prefix with the most missing bases in total.
-            let (best_missing_bp, best_prefix, best_seqs) = prefix_to_seqs
-                .iter()
-                .map(|(prefix, ids)| {
-                    let missing: i64 = ids
-                        .iter()
-                        .filter_map(|id| missing_regions.get(id))
-                        .map(|ranges| ranges.iter().map(|&(s, e)| (e - s) as i64).sum::<i64>())
-                        .sum();
-                    (missing, prefix, ids)
-                })
-                .max_by_key(|&(missing, _, _)| missing)
-                .unwrap();
-
-            if !best_seqs.is_empty() {
-                debug!(
-                    "Selected {} sequences from group {best_prefix} ({best_missing_bp} bp missing)",
-                    best_seqs.len()
-                );
-
-                // Sort by length descending so that the longest sequences are processed first.
-                let mut seqs_with_len: Vec<(u32, usize)> = best_seqs
+            if !prefix_to_seqs.is_empty() {
+                let best_result = prefix_to_seqs
                     .iter()
-                    .filter_map(|&id| impg.seq_index.get_len_from_id(id).map(|l| (id, l)))
-                    .collect();
-                seqs_with_len.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+                    .map(|(prefix, ids)| {
+                        let missing: i64 = ids
+                            .iter()
+                            .filter_map(|id| missing_regions.get(id))
+                            .map(|ranges| ranges.iter().map(|&(s, e)| (e - s) as i64).sum::<i64>())
+                            .sum();
+                        (missing, prefix, ids)
+                    })
+                    .max_by_key(|&(missing, _, _)| missing);
+                
+                if let Some((best_missing_bp, best_prefix, best_seqs)) = best_result {
+                    if !best_seqs.is_empty() {
+                        debug!(
+                            "Selected {} sequences from group {best_prefix} ({best_missing_bp} bp missing)",
+                            best_seqs.len()
+                        );
 
-                ranges_to_window.extend(seqs_with_len.into_iter().map(|(id, len)| {
-                    (id, 0, len as i32)
-                }));
+                        // Sort by length descending so that the longest sequences are processed first.
+                        let mut seqs_with_len: Vec<(u32, usize)> = best_seqs
+                            .iter()
+                            .filter_map(|&id| impg.seq_index.get_len_from_id(id).map(|l| (id, l)))
+                            .collect();
+                        seqs_with_len.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+
+                        ranges_to_window.extend(seqs_with_len.into_iter().map(|(id, len)| {
+                            (id, 0, len as i32)
+                        }));
+                    }
+                }
             }
         },
         Some(_) => {
