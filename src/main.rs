@@ -23,7 +23,7 @@ struct CommonOpts {
     force_reindex: bool,
 
     /// Number of threads for parallel processing.
-    #[clap(short = 't', long, value_parser, default_value_t = NonZeroUsize::new(1).unwrap())]
+    #[clap(short = 't', long, value_parser, default_value_t = NonZeroUsize::new(4).unwrap())]
     num_threads: NonZeroUsize,
 
     /// Verbosity level (0 = error, 1 = info, 2 = debug)
@@ -48,12 +48,19 @@ enum Args {
         #[clap(long, value_parser)]
         starting_sequences_file: Option<String>,
 
-        /// Selection mode for next sequence: 
-        /// - Not specified: Select sequence with highest total missing
-        /// - "none": Select longest single missing region
-        /// - "sample[,separator]" or "haplotype[,separator]": Use PanSN to select sample/haplotype with most missing (separator '#' by default)
-        #[clap(long, value_parser)]
-        selection_mode: Option<String>,
+        #[clap(
+            long, 
+            value_parser,
+            default_value = "longest",
+            help = "Selection mode for next sequence",
+            long_help = "Selection mode for next sequence:\n\
+                - \"longest\": sequence with longest single missing region\n\
+                - \"total\": sequence with highest total missing regions\n\
+                - \"sample[,separator]\": sample with highest total missing regions\n\
+                - \"haplotype[,separator]\": haplotype highest total missing regions\n\
+                The sample/haplotype modes assume PanSN naming; '#' is the default separator."
+        )]
+        selection_mode: String,
 
         /// Maximum distance between regions to merge
         #[clap(short = 'd', long, value_parser, default_value_t = 100000)]
@@ -92,9 +99,13 @@ enum Args {
         #[clap(short = 'b', long, value_parser)]
         target_bed: Option<String>,
 
-        /// Enable transitive overlap requests
+        /// Enable transitive queries
         #[clap(short = 'x', long, action)]
         transitive: bool,
+
+        /// Enable transitive queries with breadth-first search (faster, but returns more overlapping results)
+        #[clap(long, action)]
+        transitive_bfs: bool,
 
         /// Maximum recursion depth for transitive overlaps (0 for no limit)
         #[clap(short = 'm', long, value_parser, default_value_t = 0)]
@@ -123,6 +134,18 @@ enum Args {
     },
 }
 
+fn validate_selection_mode(mode: &str) -> io::Result<()> {
+    match mode {
+        "longest" | "total" => Ok(()),
+        mode if mode == "sample" || mode == "haplotype" 
+            || mode.starts_with("sample,") || mode.starts_with("haplotype,") => Ok(()),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid selection mode. Must be 'longest', 'total', 'sample[,sep]', or 'haplotype[,sep]'."
+        ))
+    }
+}
+
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
@@ -139,12 +162,14 @@ fn main() -> io::Result<()> {
             min_transitive_len,
             min_distance_between_ranges,
         } => {
+            validate_selection_mode(&selection_mode)?;
+            
             let impg = initialize_impg(&common)?;
             partition_alignments(
                 &impg,
                 window_size,
                 starting_sequences_file.as_deref(),
-                selection_mode.as_deref(),
+                &selection_mode,
                 merge_distance,
                 min_missing_size,
                 min_boundary_distance,
@@ -159,6 +184,7 @@ fn main() -> io::Result<()> {
             target_range,
             target_bed,
             transitive,
+            transitive_bfs,
             output_paf,
             check_intervals,
             max_depth,
@@ -174,6 +200,7 @@ fn main() -> io::Result<()> {
                     &target_name,
                     target_range,
                     transitive,
+                    transitive_bfs,
                     max_depth,
                     min_transitive_len,
                     min_distance_between_ranges,
@@ -203,6 +230,7 @@ fn main() -> io::Result<()> {
                         &target_name,
                         target_range,
                         transitive,
+                        transitive_bfs,
                         max_depth,
                         min_transitive_len,
                         min_distance_between_ranges,
@@ -406,6 +434,7 @@ fn perform_query(
     target_name: &str,
     target_range: (i32, i32),
     transitive: bool,
+    transitive_bfs: bool,
     max_depth: u16,
     min_transitive_len: i32,
     min_distance_between_ranges: i32,
@@ -435,6 +464,17 @@ fn perform_query(
             min_transitive_len,
             min_distance_between_ranges,
             true,
+        )
+    } else if transitive_bfs {
+        impg.query_transitive_bfs(
+            target_id,
+            target_start,
+            target_end,
+            None,
+            max_depth,
+            min_transitive_len,
+            min_distance_between_ranges,
+            false,
         )
     } else {
         impg.query(target_id, target_start, target_end)

@@ -6,13 +6,14 @@ use log::{debug, info};
 use rustc_hash::FxHashMap;
 use std::fs::File;
 use std::io::{self, BufWriter, BufReader, BufRead, Write};
+use rayon::prelude::*;
 //use std::time::Instant;
 
 pub fn partition_alignments(
     impg: &Impg,
     window_size: usize,
     starting_sequences_file: Option<&str>,
-    selection_mode: Option<&str>,
+    selection_mode: &str,
     merge_distance: i32,
     min_missing_size: i32,
     min_boundary_distance: i32,
@@ -105,7 +106,6 @@ pub fn partition_alignments(
         .sum::<usize>() as u64;
 
     info!("Partitioning");
-    info!("Total sequence length: {} bp", total_sequence_length);
 
     // If no windows are yet defined, select initial windows based on selection_mode
     if windows.is_empty() {
@@ -266,15 +266,17 @@ pub fn partition_alignments(
                 };
                 //let calc_time = calc_start.elapsed();
 
-                info!("  Writing partition {} with {} regions (query {}:{}-{}, len: {}) - {} of total sequence ({} so far)", 
+                info!("  Writing partition {} with {} regions: {} bp this partition ({}), {} bp total ({}) - (query {}:{}-{}, len: {})", 
                     partition_num,
                     overlaps.len(),
+                    current_partition_length,   // Current partition size in bp
+                    current_percentage_str,     // Current percentage of total sequence
+                    total_partitioned_length,   // Total bp written so far
+                    total_percentage_str,       // Total percentage of pangenome
                     chrom,
                     start,
                     end,
                     end - start,
-                    current_percentage_str,
-                    total_percentage_str
                 );
 
                 //let write_start = Instant::now();
@@ -311,7 +313,22 @@ pub fn partition_alignments(
         //info!("  select_and_window_sequences={:?}", window_time);
     }
 
-    info!("Partitioned into {} regions", partition_num);
+    // Calculate final percentage
+    let final_percentage = (total_partitioned_length as f64 / total_sequence_length as f64) * 100.0;
+    // Create formatted percentage string with conditional scientific notation
+    let final_percentage_str = if final_percentage < 0.0001 {
+        format!("{:.4e}%", final_percentage)
+    } else {
+        format!("{:.4}%", final_percentage)
+    };
+
+    info!(
+        "Partitioned into {} regions: {} bp total written / {} bp total sequence ({})",
+        partition_num,
+        total_partitioned_length,
+        total_sequence_length,
+        final_percentage_str
+    );
 
     Ok(())
 }
@@ -321,38 +338,13 @@ fn select_and_window_sequences(
     windows: &mut Vec<(u32, i32, i32)>,
     impg: &Impg,
     missing_regions: &FxHashMap<u32, SortedRanges>,
-    selection_mode: Option<&str>,
+    selection_mode: &str,
     window_size: usize
 ) -> io::Result<()> {
     let mut ranges_to_window = Vec::new();
     
     match selection_mode {
-        None => {
-            // Default strategy: select sequence with highest total missing
-            let mut max_total_missing : i64 = 0;
-            let mut seq_with_most_missing: Option<u32> = None;
-            
-            for (seq_id, ranges) in missing_regions.iter() {
-                // i64 to avoid overflow for large ranges
-                let total_missing: i64 = ranges.iter().map(|&(start, end)| (end - start) as i64).sum();
-                
-                if total_missing > max_total_missing {
-                    max_total_missing = total_missing;
-                    seq_with_most_missing = Some(*seq_id);
-                }
-            }
-            
-            if let Some(seq_id) = seq_with_most_missing {
-                let seq_length = impg.seq_index.get_len_from_id(seq_id).unwrap() as i32;
-                let seq_name = impg.seq_index.get_name(seq_id).unwrap();
-                
-                debug!("Selected sequence {} with most missing sequence ({}bp)",
-                    seq_name, max_total_missing);
-                
-                ranges_to_window.push((seq_id, 0, seq_length));
-            }
-        },
-        Some("none") => {
+        "longest" => {
             // Select longest single missing region
             let mut max_length = 0;
             let mut longest_region: Option<(u32, i32, i32)> = None;
@@ -376,7 +368,29 @@ fn select_and_window_sequences(
                 ranges_to_window.push((seq_id, start, end));
             }
         },
-        Some(mode) if mode == "sample" || mode == "haplotype" || mode.starts_with("sample,") || mode.starts_with("haplotype,") => {
+        "total" => {
+            // Select sequence with highest total missing
+            let seq_with_most_missing = missing_regions.par_iter()
+                .map(|(seq_id, ranges)| {
+                    // i64 to avoid overflow for large ranges
+                    let total_missing: i64 = ranges.iter()
+                        .map(|&(start, end)| (end - start) as i64)
+                        .sum();
+                    (*seq_id, total_missing)
+                })
+                .max_by_key(|(_, total_missing)| *total_missing);
+            
+            if let Some((seq_id, max_total_missing)) = seq_with_most_missing {
+                let seq_length = impg.seq_index.get_len_from_id(seq_id).unwrap() as i32;
+                let seq_name = impg.seq_index.get_name(seq_id).unwrap();
+                
+                debug!("Selected sequence {} with most missing sequence ({}bp)",
+                    seq_name, max_total_missing);
+                
+                ranges_to_window.push((seq_id, 0, seq_length));
+            }
+        },
+        mode if mode == "sample" || mode == "haplotype" || mode.starts_with("sample,") || mode.starts_with("haplotype,") => {
             // Parse <field_type>[,<separator>]
             let mut parts = mode.splitn(2, ',');
             let field_type = parts.next().unwrap_or("sample");
@@ -419,44 +433,51 @@ fn select_and_window_sequences(
 
             // Find the prefix with the most missing bases in total.
             if !prefix_to_seqs.is_empty() {
-                let best_result = prefix_to_seqs
-                    .iter()
+                let prefix_with_missing: Vec<(String, i64)> = prefix_to_seqs.par_iter()
                     .map(|(prefix, ids)| {
                         let missing: i64 = ids
-                            .iter()
+                            .par_iter()
                             .filter_map(|id| missing_regions.get(id))
                             .map(|ranges| ranges.iter().map(|&(s, e)| (e - s) as i64).sum::<i64>())
                             .sum();
-                        (missing, prefix, ids)
+                        (prefix.clone(), missing)
                     })
-                    .max_by_key(|&(missing, _, _)| missing);
+                    .collect();
                 
-                if let Some((best_missing_bp, best_prefix, best_seqs)) = best_result {
-                    if !best_seqs.is_empty() {
-                        debug!(
-                            "Selected {} sequences from group {best_prefix} ({best_missing_bp} bp missing)",
-                            best_seqs.len()
-                        );
+                // Find the prefix with maximum missing (sequential)
+                if let Some((best_prefix, best_missing)) = prefix_with_missing.iter()
+                    .max_by_key(|&(_, missing)| *missing)
+                    .map(|(p, m)| (p.clone(), *m))
+                {
+                    if let Some(best_seqs) = prefix_to_seqs.get(&best_prefix) {
+                        if !best_seqs.is_empty() {
+                            debug!(
+                                "Selected {} sequences from group {} ({} bp missing)",
+                                best_seqs.len(), best_prefix, best_missing
+                            );
 
-                        // Sort by length descending so that the longest sequences are processed first.
-                        let mut seqs_with_len: Vec<(u32, usize)> = best_seqs
-                            .iter()
-                            .filter_map(|&id| impg.seq_index.get_len_from_id(id).map(|l| (id, l)))
-                            .collect();
-                        seqs_with_len.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+                            // Parallelize fetching lengths
+                            let mut seqs_with_len: Vec<(u32, usize)> = best_seqs
+                                .par_iter()
+                                .filter_map(|&id| impg.seq_index.get_len_from_id(id).map(|l| (id, l)))
+                                .collect();
+                            
+                            // Sort by length descending (this remains sequential)
+                            seqs_with_len.sort_unstable_by(|a, b| b.1.cmp(&a.1));
 
-                        ranges_to_window.extend(seqs_with_len.into_iter().map(|(id, len)| {
-                            (id, 0, len as i32)
-                        }));
+                            ranges_to_window.extend(seqs_with_len.into_iter().map(|(id, len)| {
+                                (id, 0, len as i32)
+                            }));
+                        }
                     }
                 }
             }
         },
-        Some(_) => {
+        _ => {
             // Invalid selection mode
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "Invalid selection mode. Must be 'none', 'sample,<sep>', or 'haplotype,<sep>'."
+                "Invalid selection mode. Must be 'longest', 'total', 'sample[,sep]', or 'haplotype[,sep]'."
             ));
         }
     }
@@ -493,7 +514,7 @@ fn select_and_window_sequences(
 fn merge_overlaps(overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>, max_gap: i32) {
     if overlaps.len() > 1 && max_gap >= 0 {
         // Sort by sequence ID and start position
-        overlaps.sort_unstable_by_key(|(query_interval, _, _)| {
+        overlaps.par_sort_by_key(|(query_interval, _, _)| {
             (
                 query_interval.metadata,
                 std::cmp::min(query_interval.first, query_interval.last),
