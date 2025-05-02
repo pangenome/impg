@@ -99,17 +99,13 @@ enum Args {
         #[clap(short = 'b', long, value_parser)]
         target_bed: Option<String>,
 
-        /// Enable transitive overlap requests
+        /// Enable transitive queries
         #[clap(short = 'x', long, action)]
         transitive: bool,
 
-        /// Enable transitive overlap requests in parallel
+        /// Enable transitive queries with breadth-first search (faster, but returns more overlapping results)
         #[clap(long, action)]
-        transitive_par: bool,
-
-        /// Enable transitive overlap requests in parallel with BFS
-        #[clap(long, action)]
-        transitive_par_bfs: bool,
+        transitive_bfs: bool,
 
         /// Maximum recursion depth for transitive overlaps (0 for no limit)
         #[clap(short = 'm', long, value_parser, default_value_t = 0)]
@@ -174,8 +170,7 @@ fn main() -> io::Result<()> {
             target_range,
             target_bed,
             transitive,
-            transitive_par,
-            transitive_par_bfs,
+            transitive_bfs,
             output_paf,
             check_intervals,
             max_depth,
@@ -191,8 +186,7 @@ fn main() -> io::Result<()> {
                     &target_name,
                     target_range,
                     transitive,
-                    transitive_par,
-                    transitive_par_bfs,
+                    transitive_bfs,
                     max_depth,
                     min_transitive_len,
                     min_distance_between_ranges,
@@ -222,8 +216,7 @@ fn main() -> io::Result<()> {
                         &target_name,
                         target_range,
                         transitive,
-                        transitive_par,
-                        transitive_par_bfs,
+                        transitive_bfs,
                         max_depth,
                         min_transitive_len,
                         min_distance_between_ranges,
@@ -427,8 +420,7 @@ fn perform_query(
     target_name: &str,
     target_range: (i32, i32),
     transitive: bool,
-    transitive_par: bool,
-    transitive_par_bfs: bool,
+    transitive_bfs: bool,
     max_depth: u16,
     min_transitive_len: i32,
     min_distance_between_ranges: i32,
@@ -459,18 +451,7 @@ fn perform_query(
             min_distance_between_ranges,
             true,
         )
-    } else if transitive_par {
-        impg.query_transitive_par(
-            target_id,
-            target_start,
-            target_end,
-            None,
-            max_depth,
-            min_transitive_len,
-            min_distance_between_ranges,
-            false,
-        )
-    } else if transitive_par_bfs {
+    } else if transitive_bfs {
         impg.query_transitive_bfs(
             target_id,
             target_start,
