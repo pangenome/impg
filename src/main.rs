@@ -49,7 +49,7 @@ enum Args {
         starting_sequences_file: Option<String>,
 
         #[clap(
-            long, 
+            long,
             value_parser,
             default_value = "longest",
             help = "Selection mode for next sequence",
@@ -163,7 +163,7 @@ fn main() -> io::Result<()> {
             min_distance_between_ranges,
         } => {
             validate_selection_mode(&selection_mode)?;
-            
+
             let impg = initialize_impg(&common)?;
             partition_alignments(
                 &impg,
