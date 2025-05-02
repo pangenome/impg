@@ -48,11 +48,18 @@ enum Args {
         #[clap(long, value_parser)]
         starting_sequences_file: Option<String>,
 
-        /// Selection mode for next sequence:
-        /// - "longest": sequence with longest single missing region (default)
-        /// - "total": sequence with most missing regions
-        /// - "sample[,separator]" or "haplotype[,separator]": sample/haplotype with most missing (default separator: '#')
-        #[clap(long, value_parser, default_value = "longest")]
+        #[clap(
+            long, 
+            value_parser,
+            default_value = "longest",
+            help = "Selection mode for next sequence",
+            long_help = "Selection mode for next sequence:\n\
+                - \"longest\": sequence with longest single missing region\n\
+                - \"total\": sequence with highest total missing regions\n\
+                - \"sample[,separator]\": sample with highest total missing regions\n\
+                - \"haplotype[,separator]\": haplotype highest total missing regions\n\
+                The sample/haplotype modes assume PanSN naming; '#' is the default separator."
+        )]
         selection_mode: String,
 
         /// Maximum distance between regions to merge
