@@ -487,9 +487,8 @@ impl Impg {
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
             m.iter().map(|(&k, v)| (k, (*v).clone())).collect()
         } else {
-            // Parallelize initialization with par_iter
             (0..self.seq_index.len() as u32)
-                .into_par_iter() // Add parallelism here
+                .into_par_iter() // Use parallel iterator
                 .map(|id| {
                     let len = self.seq_index.get_len_from_id(id).unwrap();
                     (id, SortedRanges::new(len as i32, 0))
@@ -564,19 +563,13 @@ impl Impg {
                 let mut intervals = Vec::new();
                 
                 tree.query(current_target_start, current_target_end, |interval| {
-                    intervals.push((
-                        interval.metadata.clone(),
-                        current_target_id,
-                        current_target_start,
-                        current_target_end,
-                        current_depth
-                    ));
+                    intervals.push(interval.metadata.clone());
                 });
                 
                 // Process the intervals in parallel
                 let processed_results: Vec<_> = intervals
                     .into_par_iter()
-                    .filter_map(|(metadata, current_target_id, current_target_start, current_target_end, _current_depth)| {
+                    .filter_map(|metadata| {
                         let result = project_target_range_through_alignment(
                             (current_target_start, current_target_end),
                             (

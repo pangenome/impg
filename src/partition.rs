@@ -6,6 +6,7 @@ use log::{debug, info};
 use rustc_hash::FxHashMap;
 use std::fs::File;
 use std::io::{self, BufWriter, BufReader, BufRead, Write};
+use rayon::prelude::*;
 //use std::time::Instant;
 
 pub fn partition_alignments(
@@ -353,20 +354,17 @@ fn select_and_window_sequences(
         },
         "total" => {
             // Select sequence with highest total missing
-            let mut max_total_missing : i64 = 0;
-            let mut seq_with_most_missing: Option<u32> = None;
+            let seq_with_most_missing = missing_regions.par_iter()
+                .map(|(seq_id, ranges)| {
+                    // i64 to avoid overflow for large ranges
+                    let total_missing: i64 = ranges.iter()
+                        .map(|&(start, end)| (end - start) as i64)
+                        .sum();
+                    (*seq_id, total_missing)
+                })
+                .max_by_key(|(_, total_missing)| *total_missing);
             
-            for (seq_id, ranges) in missing_regions.iter() {
-                // i64 to avoid overflow for large ranges
-                let total_missing: i64 = ranges.iter().map(|&(start, end)| (end - start) as i64).sum();
-                
-                if total_missing > max_total_missing {
-                    max_total_missing = total_missing;
-                    seq_with_most_missing = Some(*seq_id);
-                }
-            }
-            
-            if let Some(seq_id) = seq_with_most_missing {
+            if let Some((seq_id, max_total_missing)) = seq_with_most_missing {
                 let seq_length = impg.seq_index.get_len_from_id(seq_id).unwrap() as i32;
                 let seq_name = impg.seq_index.get_name(seq_id).unwrap();
                 
@@ -419,35 +417,42 @@ fn select_and_window_sequences(
 
             // Find the prefix with the most missing bases in total.
             if !prefix_to_seqs.is_empty() {
-                let best_result = prefix_to_seqs
-                    .iter()
+                let prefix_with_missing: Vec<(String, i64)> = prefix_to_seqs.par_iter()
                     .map(|(prefix, ids)| {
                         let missing: i64 = ids
-                            .iter()
+                            .par_iter()
                             .filter_map(|id| missing_regions.get(id))
                             .map(|ranges| ranges.iter().map(|&(s, e)| (e - s) as i64).sum::<i64>())
                             .sum();
-                        (missing, prefix, ids)
+                        (prefix.clone(), missing)
                     })
-                    .max_by_key(|&(missing, _, _)| missing);
+                    .collect();
                 
-                if let Some((best_missing_bp, best_prefix, best_seqs)) = best_result {
-                    if !best_seqs.is_empty() {
-                        debug!(
-                            "Selected {} sequences from group {best_prefix} ({best_missing_bp} bp missing)",
-                            best_seqs.len()
-                        );
+                // Find the prefix with maximum missing (sequential)
+                if let Some((best_prefix, best_missing)) = prefix_with_missing.iter()
+                    .max_by_key(|&(_, missing)| *missing)
+                    .map(|(p, m)| (p.clone(), *m))
+                {
+                    if let Some(best_seqs) = prefix_to_seqs.get(&best_prefix) {
+                        if !best_seqs.is_empty() {
+                            debug!(
+                                "Selected {} sequences from group {} ({} bp missing)",
+                                best_seqs.len(), best_prefix, best_missing
+                            );
 
-                        // Sort by length descending so that the longest sequences are processed first.
-                        let mut seqs_with_len: Vec<(u32, usize)> = best_seqs
-                            .iter()
-                            .filter_map(|&id| impg.seq_index.get_len_from_id(id).map(|l| (id, l)))
-                            .collect();
-                        seqs_with_len.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+                            // Parallelize fetching lengths
+                            let mut seqs_with_len: Vec<(u32, usize)> = best_seqs
+                                .par_iter()
+                                .filter_map(|&id| impg.seq_index.get_len_from_id(id).map(|l| (id, l)))
+                                .collect();
+                            
+                            // Sort by length descending (this remains sequential)
+                            seqs_with_len.sort_unstable_by(|a, b| b.1.cmp(&a.1));
 
-                        ranges_to_window.extend(seqs_with_len.into_iter().map(|(id, len)| {
-                            (id, 0, len as i32)
-                        }));
+                            ranges_to_window.extend(seqs_with_len.into_iter().map(|(id, len)| {
+                                (id, 0, len as i32)
+                            }));
+                        }
                     }
                 }
             }
@@ -456,7 +461,7 @@ fn select_and_window_sequences(
             // Invalid selection mode
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "Invalid selection mode. Must be 'total', 'longest', 'sample[,sep]', or 'haplotype[,sep]'."
+                "Invalid selection mode. Must be 'longest', 'total', 'sample[,sep]', or 'haplotype[,sep]'."
             ));
         }
     }
@@ -493,7 +498,7 @@ fn select_and_window_sequences(
 fn merge_overlaps(overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>, max_gap: i32) {
     if overlaps.len() > 1 && max_gap >= 0 {
         // Sort by sequence ID and start position
-        overlaps.sort_unstable_by_key(|(query_interval, _, _)| {
+        overlaps.par_sort_by_key(|(query_interval, _, _)| {
             (
                 query_interval.metadata,
                 std::cmp::min(query_interval.first, query_interval.last),
