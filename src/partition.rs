@@ -12,7 +12,7 @@ pub fn partition_alignments(
     impg: &Impg,
     window_size: usize,
     starting_sequences_file: Option<&str>,
-    selection_mode: Option<&str>,
+    selection_mode: &str,
     merge_distance: i32,
     min_missing_size: i32,
     min_boundary_distance: i32,
@@ -321,38 +321,13 @@ fn select_and_window_sequences(
     windows: &mut Vec<(u32, i32, i32)>,
     impg: &Impg,
     missing_regions: &FxHashMap<u32, SortedRanges>,
-    selection_mode: Option<&str>,
+    selection_mode: &str,
     window_size: usize
 ) -> io::Result<()> {
     let mut ranges_to_window = Vec::new();
     
     match selection_mode {
-        None => {
-            // Default strategy: select sequence with highest total missing
-            let mut max_total_missing : i64 = 0;
-            let mut seq_with_most_missing: Option<u32> = None;
-            
-            for (seq_id, ranges) in missing_regions.iter() {
-                // i64 to avoid overflow for large ranges
-                let total_missing: i64 = ranges.iter().map(|&(start, end)| (end - start) as i64).sum();
-                
-                if total_missing > max_total_missing {
-                    max_total_missing = total_missing;
-                    seq_with_most_missing = Some(*seq_id);
-                }
-            }
-            
-            if let Some(seq_id) = seq_with_most_missing {
-                let seq_length = impg.seq_index.get_len_from_id(seq_id).unwrap() as i32;
-                let seq_name = impg.seq_index.get_name(seq_id).unwrap();
-                
-                debug!("Selected sequence {} with most missing sequence ({}bp)",
-                    seq_name, max_total_missing);
-                
-                ranges_to_window.push((seq_id, 0, seq_length));
-            }
-        },
-        Some("none") => {
+        "longest" => {
             // Select longest single missing region
             let mut max_length = 0;
             let mut longest_region: Option<(u32, i32, i32)> = None;
@@ -376,7 +351,32 @@ fn select_and_window_sequences(
                 ranges_to_window.push((seq_id, start, end));
             }
         },
-        Some(mode) if mode == "sample" || mode == "haplotype" || mode.starts_with("sample,") || mode.starts_with("haplotype,") => {
+        "total" => {
+            // Select sequence with highest total missing
+            let mut max_total_missing : i64 = 0;
+            let mut seq_with_most_missing: Option<u32> = None;
+            
+            for (seq_id, ranges) in missing_regions.iter() {
+                // i64 to avoid overflow for large ranges
+                let total_missing: i64 = ranges.iter().map(|&(start, end)| (end - start) as i64).sum();
+                
+                if total_missing > max_total_missing {
+                    max_total_missing = total_missing;
+                    seq_with_most_missing = Some(*seq_id);
+                }
+            }
+            
+            if let Some(seq_id) = seq_with_most_missing {
+                let seq_length = impg.seq_index.get_len_from_id(seq_id).unwrap() as i32;
+                let seq_name = impg.seq_index.get_name(seq_id).unwrap();
+                
+                debug!("Selected sequence {} with most missing sequence ({}bp)",
+                    seq_name, max_total_missing);
+                
+                ranges_to_window.push((seq_id, 0, seq_length));
+            }
+        },
+        mode if mode == "sample" || mode == "haplotype" || mode.starts_with("sample,") || mode.starts_with("haplotype,") => {
             // Parse <field_type>[,<separator>]
             let mut parts = mode.splitn(2, ',');
             let field_type = parts.next().unwrap_or("sample");
@@ -452,11 +452,11 @@ fn select_and_window_sequences(
                 }
             }
         },
-        Some(_) => {
+        _ => {
             // Invalid selection mode
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "Invalid selection mode. Must be 'none', 'sample,<sep>', or 'haplotype,<sep>'."
+                "Invalid selection mode. Must be 'total', 'longest', 'sample[,sep]', or 'haplotype[,sep]'."
             ));
         }
     }

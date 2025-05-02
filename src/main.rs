@@ -48,12 +48,12 @@ enum Args {
         #[clap(long, value_parser)]
         starting_sequences_file: Option<String>,
 
-        /// Selection mode for next sequence: 
-        /// - Not specified: Select sequence with highest total missing
-        /// - "none": Select longest single missing region
-        /// - "sample[,separator]" or "haplotype[,separator]": Use PanSN to select sample/haplotype with most missing (separator '#' by default)
-        #[clap(long, value_parser)]
-        selection_mode: Option<String>,
+        /// Selection mode for next sequence:
+        /// - "longest": sequence with longest single missing region (default)
+        /// - "total": sequence with most missing regions
+        /// - "sample[,separator]" or "haplotype[,separator]": sample/haplotype with most missing (default separator: '#')
+        #[clap(long, value_parser, default_value = "longest")]
+        selection_mode: String,
 
         /// Maximum distance between regions to merge
         #[clap(short = 'd', long, value_parser, default_value_t = 100000)]
@@ -152,7 +152,7 @@ fn main() -> io::Result<()> {
                 &impg,
                 window_size,
                 starting_sequences_file.as_deref(),
-                selection_mode.as_deref(),
+                &selection_mode,
                 merge_distance,
                 min_missing_size,
                 min_boundary_distance,
