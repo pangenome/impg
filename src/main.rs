@@ -453,18 +453,7 @@ fn perform_query(
             true,
         )
     } else if transitive_par {
-        impg.query_transitive(
-            target_id,
-            target_start,
-            target_end,
-            None,
-            max_depth,
-            min_transitive_len,
-            min_distance_between_ranges,
-            false,
-        )
-    } else if transitive_par {
-        impg.query_transitive(
+        impg.query_transitive_par(
             target_id,
             target_start,
             target_end,

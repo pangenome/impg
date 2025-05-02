@@ -705,7 +705,7 @@ impl Impg {
         results
     }
 
-    pub fn query_transitive(
+    pub fn query_transitive_par(
         &self,
         target_id: u32,
         range_start: i32,
@@ -947,6 +947,213 @@ impl Impg {
             debug!("Merged stack size from {} to {}", stack_size, stack.len());
         }
     
+        results
+    }
+
+    pub fn query_transitive(
+        &self,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32,
+        masked_regions: Option<&FxHashMap<u32, SortedRanges>>,
+        max_depth: u16,
+        min_transitive_len: i32,
+        min_distance_between_ranges: i32,
+        store_cigar: bool,
+    ) -> Vec<AdjustedInterval> {
+        // Initialize visited ranges from masked regions if provided
+        let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
+            m.iter().map(|(&k, v)| (k, (*v).clone())).collect()
+        } else {
+            (0..self.seq_index.len() as u32)
+                .map(|id| {
+                    let len = self.seq_index.get_len_from_id(id).unwrap();
+                    (id, SortedRanges::new(len as i32, 0))
+                })
+                .collect()
+        };
+        // Filter input range
+        let filtered_input_range = visited_ranges
+            .entry(target_id)
+            .or_default()
+            .insert((range_start, range_end));
+
+        let mut results = Vec::new();
+        let mut stack = Vec::new();
+        for (filtered_start, filtered_end) in filtered_input_range {
+            // Add the filtered input range(s) to the results
+            results.push((
+                Interval {
+                    first: filtered_start,
+                    last: filtered_end,
+                    metadata: target_id,
+                },
+                if store_cigar {
+                    vec![CigarOp::new(filtered_end - filtered_start, '=')]
+                } else {
+                    Vec::new()
+                },
+                Interval {
+                    first: filtered_start,
+                    last: filtered_end,
+                    metadata: target_id,
+                },
+            ));
+
+            // Add the filtered input range(s) to the results
+            if (filtered_start - filtered_end).abs() >= min_transitive_len {
+                stack.push((
+                    target_id,
+                    filtered_start,
+                    filtered_end,
+                    0u16,
+                ));
+            }
+        }
+
+        while let Some((
+            current_target_id,
+            current_target_start,
+            current_target_end,
+            current_depth,
+        )) = stack.pop()
+        {
+            // Check if we've reached max depth
+            if max_depth > 0 && current_depth >= max_depth {
+                continue;
+            }
+
+            debug!(
+                "Querying region: {}:{}-{}, len: {}",
+                self.seq_index.get_name(current_target_id).unwrap(),
+                current_target_start,
+                current_target_end,
+                current_target_end - current_target_start
+            );
+
+            let prec_num_results = results.len();
+
+            if let Some(tree) = self.trees.get(&current_target_id) {
+                tree.query(current_target_start, current_target_end, |interval| {
+                    let metadata = &interval.metadata;
+                    let result = project_target_range_through_alignment(
+                        (current_target_start, current_target_end),
+                        (
+                            metadata.target_start,
+                            metadata.target_end,
+                            metadata.query_start,
+                            metadata.query_end,
+                            metadata.strand,
+                        ),
+                        &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref()),
+                        store_cigar,
+                    );
+                    if let Some((
+                        adjusted_query_start,
+                        adjusted_query_end,
+                        adjusted_cigar,
+                        adjusted_target_start,
+                        adjusted_target_end,
+                    )) = result
+                    {
+                        let adjusted_interval = (
+                            Interval {
+                                first: adjusted_query_start,
+                                last: adjusted_query_end,
+                                metadata: metadata.query_id,
+                            },
+                            adjusted_cigar,
+                            Interval {
+                                first: adjusted_target_start,
+                                last: adjusted_target_end,
+                                metadata: current_target_id,
+                            },
+                        );
+                        results.push(adjusted_interval);
+
+                        // Only add non-overlapping portions to the stack for further exploration
+                        if metadata.query_id != current_target_id {
+                            let ranges = visited_ranges.entry(metadata.query_id).or_default();
+
+                            let mut should_add = true;
+
+                            // Check if the range is too close to any existing ranges
+                            if min_distance_between_ranges > 0 {
+                                let (new_min, new_max) =
+                                    if adjusted_query_start <= adjusted_query_end {
+                                        (adjusted_query_start, adjusted_query_end)
+                                    } else {
+                                        (adjusted_query_end, adjusted_query_start)
+                                    };
+
+                                // Find insertion point in sorted ranges
+                                let idx = match ranges
+                                    .ranges
+                                    .binary_search_by_key(&new_min, |&(start, _)| start)
+                                {
+                                    Ok(i) => i,
+                                    Err(i) => i,
+                                };
+
+                                // Only need to check adjacent ranges due to sorting
+                                if idx > 0 {
+                                    // Check previous range
+                                    let (_, prev_end) = ranges.ranges[idx - 1];
+                                    if (new_min - prev_end).abs() < min_distance_between_ranges {
+                                        should_add = false;
+                                    }
+                                }
+                                if should_add && idx < ranges.ranges.len() {
+                                    // Check next range
+                                    let (next_start, _) = ranges.ranges[idx];
+                                    if (next_start - new_max).abs() < min_distance_between_ranges {
+                                        should_add = false;
+                                    }
+                                }
+                            }
+
+                            if should_add {
+                                let new_ranges =
+                                    ranges.insert((adjusted_query_start, adjusted_query_end));
+
+                                // Add non-overlapping portions to stack
+                                for (new_start, new_end) in new_ranges {
+                                    if (new_end - new_start).abs() >= min_transitive_len {
+                                        stack.push((
+                                            metadata.query_id,
+                                            new_start,
+                                            new_end,
+                                            current_depth + 1,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+
+                // Merge contiguous/overlapping ranges with same sequence_id
+                let stack_size = stack.len();
+                stack.sort_by_key(|(id, start, _, _)| (*id, *start));
+                let mut write = 0;
+                for read in 1..stack.len() {
+                    if stack[write].0 == stack[read].0 &&   // Same sequence_id 
+                        stack[write].2 >= stack[read].1
+                    {
+                        // Overlapping or contiguous
+                        stack[write].2 = stack[write].2.max(stack[read].2);
+                    } else {
+                        write += 1;
+                        stack.swap(write, read);
+                    }
+                }
+                stack.truncate(write + 1);
+                debug!("Merged stack size from {} to {}", stack_size, stack.len());
+            }
+
+            debug!("Collected {} results", results.len() - prec_num_results);
+        }
+
         results
     }
 }
