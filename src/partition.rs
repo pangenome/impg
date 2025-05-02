@@ -3,10 +3,10 @@ use crate::impg::Impg;
 use crate::impg::SortedRanges;
 use coitrees::Interval;
 use log::{debug, info};
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::fs::File;
-use std::io::{self, BufWriter, BufReader, BufRead, Write};
-use rayon::prelude::*;
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
 //use std::time::Instant;
 
 pub fn partition_alignments(
@@ -29,13 +29,13 @@ pub fn partition_alignments(
         let file = File::open(path).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("Could not open starting sequences file {}: {}", path, e)
+                format!("Could not open starting sequences file {}: {}", path, e),
             )
         })?;
-        
+
         let reader = BufReader::new(file);
         let mut starting_sequences = Vec::new();
-        
+
         // Read all sequences from the file
         for line_result in reader.lines() {
             let line = line_result?;
@@ -44,27 +44,38 @@ pub fn partition_alignments(
                 if trimmed_name.is_empty() || trimmed_name.starts_with('#') {
                     continue; // Skip empty lines and comments
                 }
-                
+
                 if let Some(seq_id) = impg.seq_index.get_id(trimmed_name) {
                     let seq_length = impg.seq_index.get_len_from_id(seq_id).unwrap() as i32;
                     starting_sequences.push((seq_id, 0, seq_length));
                 } else if debug {
-                    debug!("Sequence {} from starting file not found in index", trimmed_name);
+                    debug!(
+                        "Sequence {} from starting file not found in index",
+                        trimmed_name
+                    );
                 }
             }
         }
-        
-        info!("Read {} sequences from starting file {}", starting_sequences.len(), path);
-        
+
+        info!(
+            "Read {} sequences from starting file {}",
+            starting_sequences.len(),
+            path
+        );
+
         // Create windows from starting sequences
         for (seq_id, start, end) in starting_sequences {
             let seq_name = impg.seq_index.get_name(seq_id).unwrap();
-            debug!("Creating windows for sequence {} ({}bp)", seq_name, end - start);
-            
+            debug!(
+                "Creating windows for sequence {} ({}bp)",
+                seq_name,
+                end - start
+            );
+
             let mut pos = start;
             while pos < end {
                 let window_end = std::cmp::min(pos + window_size as i32, end);
-                
+
                 // If this tail-window is too small, merge it into the last one
                 if window_end - pos < window_size as i32
                     && !windows.is_empty()
@@ -74,7 +85,7 @@ pub fn partition_alignments(
                     last.2 = end;
                     break;
                 }
-                
+
                 windows.push((seq_id, pos, window_end));
                 pos = window_end;
             }
@@ -132,7 +143,7 @@ pub fn partition_alignments(
                 );
             }
         }
-        
+
         for (seq_id, start, end) in windows.iter() {
             let chrom = impg.seq_index.get_name(*seq_id).unwrap();
 
@@ -324,10 +335,7 @@ pub fn partition_alignments(
 
     info!(
         "Partitioned into {} regions: {} bp total written / {} bp total sequence ({})",
-        partition_num,
-        total_partitioned_length,
-        total_sequence_length,
-        final_percentage_str
+        partition_num, total_partitioned_length, total_sequence_length, final_percentage_str
     );
 
     Ok(())
@@ -339,16 +347,16 @@ fn select_and_window_sequences(
     impg: &Impg,
     missing_regions: &FxHashMap<u32, SortedRanges>,
     selection_mode: &str,
-    window_size: usize
+    window_size: usize,
 ) -> io::Result<()> {
     let mut ranges_to_window = Vec::new();
-    
+
     match selection_mode {
         "longest" => {
             // Select longest single missing region
             let mut max_length = 0;
             let mut longest_region: Option<(u32, i32, i32)> = None;
-            
+
             for (seq_id, ranges) in missing_regions.iter() {
                 for &(start, end) in ranges.iter() {
                     let length = end - start;
@@ -358,39 +366,52 @@ fn select_and_window_sequences(
                     }
                 }
             }
-            
+
             if let Some((seq_id, start, end)) = longest_region {
                 let seq_name = impg.seq_index.get_name(seq_id).unwrap();
-                
-                debug!("Selected longest missing region {}:{}-{} ({}bp)",
-                    seq_name, start, end, end - start);
-                
+
+                debug!(
+                    "Selected longest missing region {}:{}-{} ({}bp)",
+                    seq_name,
+                    start,
+                    end,
+                    end - start
+                );
+
                 ranges_to_window.push((seq_id, start, end));
             }
-        },
+        }
         "total" => {
             // Select sequence with highest total missing
-            let seq_with_most_missing = missing_regions.par_iter()
+            let seq_with_most_missing = missing_regions
+                .par_iter()
                 .map(|(seq_id, ranges)| {
                     // i64 to avoid overflow for large ranges
-                    let total_missing: i64 = ranges.iter()
+                    let total_missing: i64 = ranges
+                        .iter()
                         .map(|&(start, end)| (end - start) as i64)
                         .sum();
                     (*seq_id, total_missing)
                 })
                 .max_by_key(|(_, total_missing)| *total_missing);
-            
+
             if let Some((seq_id, max_total_missing)) = seq_with_most_missing {
                 let seq_length = impg.seq_index.get_len_from_id(seq_id).unwrap() as i32;
                 let seq_name = impg.seq_index.get_name(seq_id).unwrap();
-                
-                debug!("Selected sequence {} with most missing sequence ({}bp)",
-                    seq_name, max_total_missing);
-                
+
+                debug!(
+                    "Selected sequence {} with most missing sequence ({}bp)",
+                    seq_name, max_total_missing
+                );
+
                 ranges_to_window.push((seq_id, 0, seq_length));
             }
-        },
-        mode if mode == "sample" || mode == "haplotype" || mode.starts_with("sample,") || mode.starts_with("haplotype,") => {
+        }
+        mode if mode == "sample"
+            || mode == "haplotype"
+            || mode.starts_with("sample,")
+            || mode.starts_with("haplotype,") =>
+        {
             // Parse <field_type>[,<separator>]
             let mut parts = mode.splitn(2, ',');
             let field_type = parts.next().unwrap_or("sample");
@@ -433,7 +454,8 @@ fn select_and_window_sequences(
 
             // Find the prefix with the most missing bases in total.
             if !prefix_to_seqs.is_empty() {
-                let prefix_with_missing: Vec<(String, i64)> = prefix_to_seqs.par_iter()
+                let prefix_with_missing: Vec<(String, i64)> = prefix_to_seqs
+                    .par_iter()
                     .map(|(prefix, ids)| {
                         let missing: i64 = ids
                             .par_iter()
@@ -443,9 +465,10 @@ fn select_and_window_sequences(
                         (prefix.clone(), missing)
                     })
                     .collect();
-                
+
                 // Find the prefix with maximum missing (sequential)
-                if let Some((best_prefix, best_missing)) = prefix_with_missing.iter()
+                if let Some((best_prefix, best_missing)) = prefix_with_missing
+                    .iter()
                     .max_by_key(|&(_, missing)| *missing)
                     .map(|(p, m)| (p.clone(), *m))
                 {
@@ -453,26 +476,32 @@ fn select_and_window_sequences(
                         if !best_seqs.is_empty() {
                             debug!(
                                 "Selected {} sequences from group {} ({} bp missing)",
-                                best_seqs.len(), best_prefix, best_missing
+                                best_seqs.len(),
+                                best_prefix,
+                                best_missing
                             );
 
                             // Parallelize fetching lengths
                             let mut seqs_with_len: Vec<(u32, usize)> = best_seqs
                                 .par_iter()
-                                .filter_map(|&id| impg.seq_index.get_len_from_id(id).map(|l| (id, l)))
+                                .filter_map(|&id| {
+                                    impg.seq_index.get_len_from_id(id).map(|l| (id, l))
+                                })
                                 .collect();
-                            
+
                             // Sort by length descending (this remains sequential)
                             seqs_with_len.sort_unstable_by(|a, b| b.1.cmp(&a.1));
 
-                            ranges_to_window.extend(seqs_with_len.into_iter().map(|(id, len)| {
-                                (id, 0, len as i32)
-                            }));
+                            ranges_to_window.extend(
+                                seqs_with_len
+                                    .into_iter()
+                                    .map(|(id, len)| (id, 0, len as i32)),
+                            );
                         }
                     }
                 }
             }
-        },
+        }
         _ => {
             // Invalid selection mode
             return Err(io::Error::new(
@@ -481,18 +510,18 @@ fn select_and_window_sequences(
             ));
         }
     }
-    
+
     // If no more missing regions, we're done
     if ranges_to_window.is_empty() {
         return Ok(());
     }
-    
+
     // Create windows from ranges
     for (seq_id, start, end) in ranges_to_window {
         let mut pos = start;
         while pos < end {
             let window_end = std::cmp::min(pos + window_size as i32, end);
-            
+
             // If this tail-window is too small, merge it into the last one
             if window_end - pos < window_size as i32
                 && !windows.is_empty()
@@ -502,12 +531,12 @@ fn select_and_window_sequences(
                 last.2 = end;
                 break;
             }
-            
+
             windows.push((seq_id, pos, window_end));
             pos = window_end;
         }
     }
-    
+
     Ok(())
 }
 
@@ -552,18 +581,22 @@ fn mask_and_update_regions(
     min_fragment_size: i32,
 ) -> Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
     let mut result = Vec::new();
-    
+
     // Group overlaps by sequence ID for batch processing
-    let mut overlaps_by_seq_id: FxHashMap<u32, Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>> = FxHashMap::default();
+    let mut overlaps_by_seq_id: FxHashMap<u32, Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>> =
+        FxHashMap::default();
     for (interval, cigar, target) in overlaps.drain(..) {
-        overlaps_by_seq_id.entry(interval.metadata).or_default().push((interval, cigar, target));
+        overlaps_by_seq_id
+            .entry(interval.metadata)
+            .or_default()
+            .push((interval, cigar, target));
     }
-    
+
     // Process each sequence's overlaps as a batch
     for (seq_id, seq_overlaps) in overlaps_by_seq_id {
         // Step 1: Collect all potential extensions in one pass
         let mut extensions = Vec::new();
-        
+
         if let Some(missing) = missing_regions.get(&seq_id) {
             for (query_interval, _, _) in &seq_overlaps {
                 let (mask_start, mask_end) = if query_interval.first <= query_interval.last {
@@ -571,48 +604,65 @@ fn mask_and_update_regions(
                 } else {
                     (query_interval.last, query_interval.first)
                 };
-                
+
                 // Use binary search to find relevant missing regions
-                let pos = match missing.ranges.binary_search_by_key(&mask_start, |&(s, _)| s) {
+                let pos = match missing
+                    .ranges
+                    .binary_search_by_key(&mask_start, |&(s, _)| s)
+                {
                     Ok(pos) => pos,
                     Err(pos) => {
                         if pos > 0 {
                             // Check if previous range might overlap
-                            let (_prev_start, prev_end) = missing.ranges[pos-1];
-                            if prev_end > mask_start { pos - 1 } else { pos }
-                        } else { pos }
+                            let (_prev_start, prev_end) = missing.ranges[pos - 1];
+                            if prev_end > mask_start {
+                                pos - 1
+                            } else {
+                                pos
+                            }
+                        } else {
+                            pos
+                        }
                     }
                 };
-                
+
                 // Check only relevant missing regions
                 for i in pos..missing.ranges.len() {
                     let (miss_start, miss_end) = missing.ranges[i];
-                    
+
                     // Stop if we've gone past potential overlaps
-                    if miss_start > mask_end { break; }
-                    
+                    if miss_start > mask_end {
+                        break;
+                    }
+
                     // Check for small fragment at start
-                    if mask_start > miss_start && mask_start < miss_end && 
-                       mask_start - miss_start < min_fragment_size && mask_start - miss_start > 0 {
+                    if mask_start > miss_start
+                        && mask_start < miss_end
+                        && mask_start - miss_start < min_fragment_size
+                        && mask_start - miss_start > 0
+                    {
                         extensions.push((miss_start, mask_start));
                     }
-                    
+
                     // Check for small fragment at end
-                    if mask_end > miss_start && mask_end < miss_end && 
-                       miss_end - mask_end < min_fragment_size && miss_end - mask_end > 0 {
+                    if mask_end > miss_start
+                        && mask_end < miss_end
+                        && miss_end - mask_end < min_fragment_size
+                        && miss_end - mask_end > 0
+                    {
                         extensions.push((mask_end, miss_end));
                     }
                 }
             }
         }
-        
+
         // Step 2: Sort and merge extensions
         if !extensions.is_empty() {
             extensions.sort_by_key(|&(start, _)| start);
-            
+
             let mut merged_extensions = Vec::with_capacity(extensions.len());
             let mut current = extensions[0];
-            
+
             for &(start, end) in &extensions[1..] {
                 if start <= current.1 {
                     // Merge overlapping extensions
@@ -625,29 +675,34 @@ fn mask_and_update_regions(
             merged_extensions.push(current);
             extensions = merged_extensions;
         }
-        
+
         // Step 3: Process each overlap with precomputed extensions
         let mut new_masked_ranges = Vec::new();
-        
+
         for (query_interval, cigar, target_interval) in seq_overlaps {
             let (mut start, mut end) = if query_interval.first <= query_interval.last {
                 (query_interval.first, query_interval.last)
             } else {
                 (query_interval.last, query_interval.first)
             };
-            
+
             // Apply relevant extensions
             for &(ext_start, ext_end) in &extensions {
                 // Check if extension applies to this interval's boundaries
-                if (ext_end >= start && ext_start <= start) || (ext_start <= end && ext_end >= end) {
-                    if ext_start < start { start = ext_start; }
-                    if ext_end > end { end = ext_end; }
+                if (ext_end >= start && ext_start <= start) || (ext_start <= end && ext_end >= end)
+                {
+                    if ext_start < start {
+                        start = ext_start;
+                    }
+                    if ext_end > end {
+                        end = ext_end;
+                    }
                 }
             }
-            
+
             // Add to masked ranges for this sequence
             new_masked_ranges.push((start, end));
-            
+
             // Adjust query interval based on extensions
             let adjusted_query = if query_interval.first <= query_interval.last {
                 Interval {
@@ -662,81 +717,95 @@ fn mask_and_update_regions(
                     metadata: query_interval.metadata,
                 }
             };
-            
+
             // Proportionally adjust target interval
             let original_span = if query_interval.first <= query_interval.last {
                 query_interval.last - query_interval.first
             } else {
                 query_interval.first - query_interval.last
             } as f64;
-            
+
             let new_span = if adjusted_query.first <= adjusted_query.last {
                 adjusted_query.last - adjusted_query.first
             } else {
                 adjusted_query.first - adjusted_query.last
             } as f64;
-            
+
             let scale = new_span / original_span;
             let target_span = (target_interval.last - target_interval.first) as f64;
-            
+
             let adjusted_target = Interval {
                 first: target_interval.first,
                 last: target_interval.first + (target_span * scale) as i32,
                 metadata: target_interval.metadata,
             };
-            
+
             // Find unmasked segments efficiently using binary search
             if let Some(masks) = masked_regions.get(&seq_id) {
                 let mut curr_pos = start;
                 let mut unmasked_segments = Vec::new();
-                
+
                 // Binary search for starting position in masks
                 let mut idx = match masks.ranges.binary_search_by_key(&curr_pos, |&(s, _)| s) {
                     Ok(pos) => pos,
                     Err(pos) => {
                         if pos > 0 {
                             // Check if previous range might overlap
-                            let (_, prev_end) = masks.ranges[pos-1];
-                            if prev_end > curr_pos { pos - 1 } else { pos }
-                        } else { pos }
+                            let (_, prev_end) = masks.ranges[pos - 1];
+                            if prev_end > curr_pos {
+                                pos - 1
+                            } else {
+                                pos
+                            }
+                        } else {
+                            pos
+                        }
                     }
                 };
-                
+
                 // Process only relevant masks
                 while idx < masks.ranges.len() {
                     let (mask_start, mask_end) = masks.ranges[idx];
-                    
-                    if mask_start > end { break; }  // No more relevant masks
-                    if mask_end <= curr_pos { idx += 1; continue; }
-                    
+
+                    if mask_start > end {
+                        break;
+                    } // No more relevant masks
+                    if mask_end <= curr_pos {
+                        idx += 1;
+                        continue;
+                    }
+
                     if curr_pos < mask_start {
                         unmasked_segments.push((curr_pos, mask_start));
                     }
-                    
+
                     curr_pos = curr_pos.max(mask_end);
                     idx += 1;
-                    
-                    if curr_pos >= end { break; }
+
+                    if curr_pos >= end {
+                        break;
+                    }
                 }
-                
+
                 // Check for final unmasked segment
                 if curr_pos < end {
                     unmasked_segments.push((curr_pos, end));
                 }
-                
+
                 // Create adjusted intervals for each unmasked segment
                 for (seg_start, seg_end) in unmasked_segments {
                     // Calculate proportional target interval
                     let segment_ratio = (seg_end - seg_start) as f64 / (end - start) as f64;
                     let segment_target_span = target_span * segment_ratio;
-                    let segment_offset = (seg_start - start) as f64 / (end - start) as f64 * target_span;
-                    
+                    let segment_offset =
+                        (seg_start - start) as f64 / (end - start) as f64 * target_span;
+
                     let new_target = Interval {
                         first: target_interval.first + segment_offset as i32,
                         last: target_interval.first + (segment_offset + segment_target_span) as i32,
                         metadata: target_interval.metadata,
                     };
-                    
+
                     let new_query = if query_interval.first <= query_interval.last {
                         Interval {
                             first: seg_start,
@@ -750,7 +819,7 @@ fn mask_and_update_regions(
                             metadata: query_interval.metadata,
                         }
                     };
-                    
+
                     result.push((new_query, Vec::new(), new_target));
                 }
             } else {
@@ -758,58 +827,70 @@ fn mask_and_update_regions(
                 result.push((adjusted_query, cigar, adjusted_target));
             }
         }
-        
+
         // Step 4: Update masked regions for this sequence
         let masked = masked_regions.entry(seq_id).or_default();
         for (start, end) in new_masked_ranges {
             masked.insert((start, end));
         }
-        
+
         // Step 5: Efficiently update missing regions for this sequence
         if let Some(missing) = missing_regions.get_mut(&seq_id) {
             if let Some(masked) = masked_regions.get(&seq_id) {
                 // Clone missing ranges to avoid borrow issues
                 let original_missing = missing.ranges.clone();
-                
+
                 // Clear current missing ranges and rebuild
                 missing.ranges.clear();
-                
+
                 for (miss_start, miss_end) in original_missing {
                     let mut current = miss_start;
-                    
+
                     // Find masks that could affect this missing range with binary search
-                    let mut idx = match masked.ranges.binary_search_by_key(&miss_start, |&(s, _)| s) {
+                    let mut idx = match masked.ranges.binary_search_by_key(&miss_start, |&(s, _)| s)
+                    {
                         Ok(pos) => pos,
                         Err(pos) => {
                             if pos > 0 {
-                                let (_, prev_end) = masked.ranges[pos-1];
-                                if prev_end > miss_start { pos - 1 } else { pos }
-                            } else { pos }
+                                let (_, prev_end) = masked.ranges[pos - 1];
+                                if prev_end > miss_start {
+                                    pos - 1
+                                } else {
+                                    pos
+                                }
+                            } else {
+                                pos
+                            }
                         }
                     };
-                    
+
                     // Process all relevant masks
                     while idx < masked.ranges.len() && current < miss_end {
                         let (mask_start, mask_end) = masked.ranges[idx];
-                        
-                        if mask_start > miss_end { break; }
-                        if mask_end <= current { idx += 1; continue; }
-                        
+
+                        if mask_start > miss_end {
+                            break;
+                        }
+                        if mask_end <= current {
+                            idx += 1;
+                            continue;
+                        }
+
                         if current < mask_start {
                             // Found a gap - this part is still missing
                             missing.insert((current, mask_start));
                         }
-                        
+
                         current = current.max(mask_end);
                         idx += 1;
                     }
-                    
+
                     // Check for remaining gap at the end
                     if current < miss_end {
                         missing.insert((current, miss_end));
                     }
                 }
-                
+
                 // Remove sequence if no more missing regions
                 if missing.is_empty() {
                     missing_regions.remove(&seq_id);
@@ -817,7 +898,7 @@ fn mask_and_update_regions(
             }
         }
     }
-    
+
     result
 }
 
