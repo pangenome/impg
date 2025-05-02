@@ -134,6 +134,18 @@ enum Args {
     },
 }
 
+fn validate_selection_mode(mode: &str) -> io::Result<()> {
+    match mode {
+        "longest" | "total" => Ok(()),
+        mode if mode == "sample" || mode == "haplotype" 
+            || mode.starts_with("sample,") || mode.starts_with("haplotype,") => Ok(()),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid selection mode. Must be 'longest', 'total', 'sample[,sep]', or 'haplotype[,sep]'."
+        ))
+    }
+}
+
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
@@ -150,6 +162,8 @@ fn main() -> io::Result<()> {
             min_transitive_len,
             min_distance_between_ranges,
         } => {
+            validate_selection_mode(&selection_mode)?;
+            
             let impg = initialize_impg(&common)?;
             partition_alignments(
                 &impg,
