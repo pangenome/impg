@@ -14,9 +14,9 @@ use std::num::NonZeroUsize;
 /// Common options shared between all commands
 #[derive(Parser, Debug)]
 struct CommonOpts {
-    /// Path to the PAF file. If specified without an index, the tool will look for or generate an associated index file.
+    /// Path to the PAF files.
     #[clap(short = 'p', long, value_parser)]
-    paf_file: String,
+    paf_files: Vec<String>,
 
     /// Force the regeneration of the index, even if it already exists.
     #[clap(short = 'I', long, action)]
@@ -132,18 +132,6 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
     },
-}
-
-fn validate_selection_mode(mode: &str) -> io::Result<()> {
-    match mode {
-        "longest" | "total" => Ok(()),
-        mode if mode == "sample" || mode == "haplotype" 
-            || mode.starts_with("sample,") || mode.starts_with("haplotype,") => Ok(()),
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Invalid selection mode. Must be 'longest', 'total', 'sample[,sep]', or 'haplotype[,sep]'."
-        ))
-    }
 }
 
 fn main() -> io::Result<()> {
@@ -270,6 +258,38 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
+fn validate_selection_mode(mode: &str) -> io::Result<()> {
+    match mode {
+        "longest" | "total" => Ok(()),
+        mode if mode == "sample" || mode == "haplotype" 
+            || mode.starts_with("sample,") || mode.starts_with("haplotype,") => Ok(()),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid selection mode. Must be 'longest', 'total', 'sample[,sep]', or 'haplotype[,sep]'."
+        ))
+    }
+}
+
+fn get_combined_index_filename(paf_files: &[String]) -> String {
+    if paf_files.len() == 1 {
+        return format!("{}.impg", paf_files[0]);
+    }
+    
+    // For multiple files, create a hash of the sorted filenames
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    
+    let mut sorted_files = paf_files.to_vec();
+    sorted_files.sort();
+    
+    let mut hasher = DefaultHasher::new();
+    for file in &sorted_files {
+        file.hash(&mut hasher);
+    }
+    
+    format!("combined_{:016x}.impg", hasher.finish())
+}
+
 /// Initialize thread pool and load/generate index based on common options
 fn initialize_impg(common: &CommonOpts) -> io::Result<Impg> {
     // Initialize logger based on verbosity
@@ -289,34 +309,37 @@ fn initialize_impg(common: &CommonOpts) -> io::Result<Impg> {
 
     // Load or generate index
     if common.force_reindex {
-        generate_index(&common.paf_file, common.num_threads)
+        generate_multi_index(&common.paf_files, common.num_threads)
     } else {
-        load_or_generate_index(&common.paf_file, common.num_threads)
+        load_or_generate_multi_index(&common.paf_files, common.num_threads)
     }
 }
 
-fn load_or_generate_index(paf_file: &str, num_threads: NonZeroUsize) -> io::Result<Impg> {
-    let index_file = format!("{}.impg", paf_file);
+fn load_or_generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize) -> io::Result<Impg> {
+    let index_file = get_combined_index_filename(paf_files);
     if std::path::Path::new(&index_file).exists() {
-        load_index(paf_file)
+        load_multi_index(paf_files)
     } else {
-        generate_index(paf_file, num_threads)
+        generate_multi_index(paf_files, num_threads)
     }
 }
 
-fn load_index(paf_file: &str) -> io::Result<Impg> {
-    let index_file = format!("{}.impg", paf_file);
+fn load_multi_index(paf_files: &[String]) -> io::Result<Impg> {
+    let index_file = get_combined_index_filename(paf_files);
 
-    let paf_file_metadata = std::fs::metadata(paf_file)?;
-    let index_file_metadata = std::fs::metadata(index_file.clone())?;
-    if let (Ok(paf_file_ts), Ok(index_file_ts)) =
-        (paf_file_metadata.modified(), index_file_metadata.modified())
-    {
-        if paf_file_ts > index_file_ts {
-            warn!("WARNING:\tPAF file has been modified since impg index creation.");
+    // Check if all PAF files are newer than the index
+    let index_file_metadata = std::fs::metadata(&index_file)?;
+    let index_file_ts = index_file_metadata.modified().ok();
+    
+    if let Some(index_ts) = index_file_ts {
+        for paf_file in paf_files {
+            let paf_file_metadata = std::fs::metadata(paf_file)?;
+            if let Ok(paf_file_ts) = paf_file_metadata.modified() {
+                if paf_file_ts > index_ts {
+                    warn!("WARNING:\tPAF file {} has been modified since impg index creation.", paf_file);
+                }
+            }
         }
-    } else {
-        warn!("WARNING:\tUnable to compare timestamps of PAF file and impg index file. PAF file may have been modified since impg index creation.");
     }
 
     let file = File::open(index_file)?;
@@ -327,34 +350,42 @@ fn load_index(paf_file: &str) -> io::Result<Impg> {
             format!("Failed to deserialize index: {:?}", e),
         )
     })?;
-    Ok(Impg::from_paf_and_serializable(paf_file, serializable))
+    
+    Ok(Impg::from_multi_paf_and_serializable(paf_files, serializable))
 }
 
-fn generate_index(paf_file: &str, num_threads: NonZeroUsize) -> io::Result<Impg> {
-    let file = File::open(paf_file)?;
-    let reader: Box<dyn io::Read> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-        Box::new(bgzf::MultithreadedReader::with_worker_count(
-            num_threads,
-            file,
-        ))
-    } else {
-        Box::new(file)
-    };
-    let reader = BufReader::new(reader);
-    let records = paf::parse_paf(reader).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("Failed to parse PAF records: {:?}", e),
-        )
-    })?;
-    let impg = Impg::from_paf_records(&records, paf_file).map_err(|e| {
+fn generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize) -> io::Result<Impg> {
+    let mut records_by_file = Vec::with_capacity(paf_files.len());
+    
+    for (file_index, paf_file) in paf_files.iter().enumerate() {
+        let file = File::open(paf_file)?;
+        let reader: Box<dyn io::Read> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
+            Box::new(bgzf::MultithreadedReader::with_worker_count(
+                num_threads,
+                file,
+            ))
+        } else {
+            Box::new(file)
+        };
+        let reader = BufReader::new(reader);
+        let records = paf::parse_paf(reader).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to parse PAF records from {}: {:?}", paf_file, e),
+            )
+        })?;
+        
+        records_by_file.push((records, paf_file.clone(), file_index));
+    }
+    
+    let impg = Impg::from_multi_paf_records(&records_by_file).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("Failed to create index: {:?}", e),
         )
     })?;
 
-    let index_file = format!("{}.impg", paf_file);
+    let index_file = get_combined_index_filename(paf_files);
     let serializable = impg.to_serializable();
     let file = File::create(index_file)?;
     let writer = BufWriter::new(file);

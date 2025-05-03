@@ -90,16 +90,21 @@ pub struct QueryMetadata {
     strand: Strand,
     cigar_offset: u64,
     cigar_bytes: usize,
+    paf_file_index: usize, // Track which PAF file this record belongs to
 }
 
 impl QueryMetadata {
     fn get_cigar_ops(
         &self,
-        paf_file: &String,
-        paf_gzi_index: Option<&bgzf::gzi::Index>,
+        paf_files: &[String],
+        paf_gzi_indices: &[Option<bgzf::gzi::Index>],
     ) -> Vec<CigarOp> {
         // Allocate space for cigar
         let mut cigar_buffer = vec![0; self.cigar_bytes];
+
+        // Get the correct PAF file and its GZI index
+        let paf_file = &paf_files[self.paf_file_index];
+        let paf_gzi_index = paf_gzi_indices.get(self.paf_file_index).and_then(|x| x.as_ref());
 
         // Get reader and seek start of cigar str
         if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
@@ -263,14 +268,17 @@ impl SortedRanges {
 pub struct Impg {
     pub trees: TreeMap,
     pub seq_index: SequenceIndex,
-    pub paf_file: String,
-    pub paf_gzi_index: Option<bgzf::gzi::Index>,
+    pub paf_files: Vec<String>,    // List of all PAF files
+    pub paf_gzi_indices: Vec<Option<bgzf::gzi::Index>>, // Corresponding GZI indices
 }
 
 impl Impg {
-    pub fn from_paf_records(records: &[PafRecord], paf_file: &str) -> Result<Self, ParseErr> {
-        let paf_gzi_index: Option<bgzf::gzi::Index> =
-            if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
+    pub fn from_multi_paf_records(records_by_file: &[(Vec<PafRecord>, String, usize)]) -> Result<Self, ParseErr> {
+        let mut paf_files = Vec::with_capacity(records_by_file.len());
+        let mut paf_gzi_indices = Vec::with_capacity(records_by_file.len());
+        
+        for (_, paf_file, _) in records_by_file {
+            let paf_gzi_index = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
                 let paf_gzi_file = paf_file.to_owned() + ".gzi";
                 Some(
                     bgzf::gzi::read(paf_gzi_file.clone())
@@ -279,43 +287,54 @@ impl Impg {
             } else {
                 None
             };
-
-        let mut seq_index = SequenceIndex::new();
-        for record in records {
-            seq_index.get_or_insert_id(&record.query_name, Some(record.query_length));
-            seq_index.get_or_insert_id(&record.target_name, Some(record.target_length));
+            paf_files.push(paf_file.clone());
+            paf_gzi_indices.push(paf_gzi_index);
         }
 
-        let intervals: FxHashMap<u32, Vec<Interval<QueryMetadata>>> = records
+        let mut seq_index = SequenceIndex::new();
+        for (records, _, _) in records_by_file {
+            for record in records {
+                seq_index.get_or_insert_id(&record.query_name, Some(record.query_length));
+                seq_index.get_or_insert_id(&record.target_name, Some(record.target_length));
+            }
+        }
+
+        let intervals: FxHashMap<u32, Vec<Interval<QueryMetadata>>> = records_by_file
             .par_iter()
-            .filter_map(|record| {
-                let query_id = seq_index
-                    .get_id(&record.query_name)
-                    .expect("Query name not found in index");
-                let target_id = seq_index
-                    .get_id(&record.target_name)
-                    .expect("Target name not found in index");
+            .flat_map(|(records, _, file_index)| {
+                records
+                    .par_iter()
+                    .filter_map(|record| {
+                        let query_id = seq_index
+                            .get_id(&record.query_name)
+                            .expect("Query name not found in index");
+                        let target_id = seq_index
+                            .get_id(&record.target_name)
+                            .expect("Target name not found in index");
 
-                let query_metadata = QueryMetadata {
-                    query_id,
-                    target_start: record.target_start as i32,
-                    target_end: record.target_end as i32,
-                    query_start: record.query_start as i32,
-                    query_end: record.query_end as i32,
-                    strand: record.strand,
-                    cigar_offset: record.cigar_offset,
-                    cigar_bytes: record.cigar_bytes,
-                };
+                        let query_metadata = QueryMetadata {
+                            query_id,
+                            target_start: record.target_start as i32,
+                            target_end: record.target_end as i32,
+                            query_start: record.query_start as i32,
+                            query_end: record.query_end as i32,
+                            strand: record.strand,
+                            cigar_offset: record.cigar_offset,
+                            cigar_bytes: record.cigar_bytes,
+                            paf_file_index: *file_index,
+                        };
 
-                Some((
-                    target_id,
-                    Interval {
-                        first: record.target_start as i32,
-                        last: record.target_end as i32,
-                        metadata: query_metadata,
-                    },
-                ))
-            }) // Use fold and reduce to achieve grouping
+                        Some((
+                            target_id,
+                            Interval {
+                                first: record.target_start as i32,
+                                last: record.target_end as i32,
+                                metadata: query_metadata,
+                            },
+                        ))
+                    })
+                    .collect::<Vec<_>>()
+            })
             .fold(
                 FxHashMap::default,
                 |mut acc: FxHashMap<u32, Vec<Interval<QueryMetadata>>>, (target_id, interval)| {
@@ -340,11 +359,15 @@ impl Impg {
         Ok(Self {
             trees,
             seq_index,
-            paf_file: paf_file.to_string(),
-            paf_gzi_index,
+            paf_files,
+            paf_gzi_indices,
         })
     }
-
+    pub fn from_paf_records(records: &[PafRecord], paf_file: &str) -> Result<Self, ParseErr> {
+        let records_by_file = vec![(records.to_vec(), paf_file.to_string(), 0)];
+        Self::from_multi_paf_records(&records_by_file)
+    }
+    
     pub fn to_serializable(&self) -> SerializableImpg {
         let serializable_trees = self
             .trees
@@ -364,10 +387,12 @@ impl Impg {
         (serializable_trees, self.seq_index.clone())
     }
 
-    pub fn from_paf_and_serializable(paf_file: &str, serializable: SerializableImpg) -> Self {
+    pub fn from_multi_paf_and_serializable(paf_files: &[String], serializable: SerializableImpg) -> Self {
         let (serializable_trees, seq_index) = serializable;
-        let paf_gzi_index: Option<bgzf::gzi::Index> =
-            if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
+        
+        let mut paf_gzi_indices = Vec::with_capacity(paf_files.len());
+        for paf_file in paf_files {
+            let paf_gzi_index = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
                 let paf_gzi_file = paf_file.to_owned() + ".gzi";
                 Some(
                     bgzf::gzi::read(paf_gzi_file.clone())
@@ -376,6 +401,9 @@ impl Impg {
             } else {
                 None
             };
+            paf_gzi_indices.push(paf_gzi_index);
+        }
+        
         let trees = serializable_trees
             .into_iter()
             .map(|(target_id, intervals)| {
@@ -393,14 +421,18 @@ impl Impg {
                 (target_id, tree)
             })
             .collect();
+            
         Self {
             trees,
             seq_index,
-            paf_file: paf_file.to_string(),
-            paf_gzi_index,
+            paf_files: paf_files.to_vec(),
+            paf_gzi_indices,
         }
     }
-
+    pub fn from_paf_and_serializable(paf_file: &str, serializable: SerializableImpg) -> Self {
+        Self::from_multi_paf_and_serializable(&[paf_file.to_string()], serializable)
+    }
+    
     pub fn query(&self, target_id: u32, range_start: i32, range_end: i32) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
         // Add the input range to the results
@@ -438,7 +470,7 @@ impl Impg {
                         metadata.query_end,
                         metadata.strand,
                     ),
-                    &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref()),
+                    &metadata.get_cigar_ops(&self.paf_files, self.paf_gzi_indices.as_ref()),
                     true,
                 );
                 if let Some((
@@ -574,7 +606,7 @@ impl Impg {
                                 metadata.query_end,
                                 metadata.strand,
                             ),
-                            &metadata.get_cigar_ops(&self.paf_file, self.paf_gzi_index.as_ref()),
+                            &metadata.get_cigar_ops(&self.paf_files, self.paf_gzi_indices.as_ref()),
                             store_cigar,
                         );
 
@@ -796,8 +828,8 @@ impl Impg {
                                                 metadata.strand,
                                             ),
                                             &metadata.get_cigar_ops(
-                                                &self.paf_file,
-                                                self.paf_gzi_index.as_ref(),
+                                                &self.paf_files,
+                                                self.paf_gzi_indices.as_ref(),
                                             ),
                                             store_cigar,
                                         );
