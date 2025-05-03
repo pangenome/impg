@@ -102,12 +102,14 @@ impl QueryMetadata {
         // Allocate space for cigar
         let mut cigar_buffer = vec![0; self.cigar_bytes];
 
-        // Get the correct PAF file and its GZI index
+        // Get the correct PAF file
         let paf_file = &paf_files[self.paf_file_index];
-        let paf_gzi_index = paf_gzi_indices.get(self.paf_file_index).and_then(|x| x.as_ref());
 
         // Get reader and seek start of cigar str
         if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
+            // Get the GZI index for the PAF file
+            let paf_gzi_index = paf_gzi_indices.get(self.paf_file_index).and_then(Option::as_ref);
+            
             let mut reader = bgzf::Reader::new(File::open(paf_file).unwrap());
             reader
                 .seek_by_uncompressed_position(paf_gzi_index.unwrap(), self.cigar_offset)

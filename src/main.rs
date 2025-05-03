@@ -10,6 +10,8 @@ use std::fs::File;
 use std::io::BufRead;
 use std::io::{self, BufReader, BufWriter};
 use std::num::NonZeroUsize;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 /// Common options shared between all commands
 #[derive(Parser, Debug)]
@@ -17,6 +19,10 @@ struct CommonOpts {
     /// Path to the PAF files.
     #[clap(short = 'p', long, value_parser, required = true, num_args = 1..)]
     paf_files: Vec<String>,
+
+    /// Path to the IMPG index file.
+    #[clap(short = 'i', long, value_parser)]
+    index: Option<String>,
 
     /// Force the regeneration of the index, even if it already exists.
     #[clap(short = 'I', long, action)]
@@ -270,24 +276,26 @@ fn validate_selection_mode(mode: &str) -> io::Result<()> {
     }
 }
 
-fn get_combined_index_filename(paf_files: &[String]) -> String {
+fn get_combined_index_filename(paf_files: &[String], custom_index: Option<&str>) -> String {
+    if let Some(index) = custom_index {
+        return index.to_string();
+    }
+    
     if paf_files.len() == 1 {
-        return format!("{}.impg", paf_files[0]);
+        format!("{}.impg", paf_files[0])
+    } else {
+        // For multiple files, create a hash of the sorted filenames
+        
+        let mut file_refs: Vec<&str> = paf_files.iter().map(|s| s.as_str()).collect();
+        file_refs.sort();
+        
+        let mut hasher = DefaultHasher::new();
+        for file in &file_refs {
+            file.hash(&mut hasher);
+        }
+        
+        format!("combined_{:016x}.impg", hasher.finish())
     }
-    
-    // For multiple files, create a hash of the sorted filenames
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    
-    let mut sorted_files = paf_files.to_vec();
-    sorted_files.sort();
-    
-    let mut hasher = DefaultHasher::new();
-    for file in &sorted_files {
-        file.hash(&mut hasher);
-    }
-    
-    format!("combined_{:016x}.impg", hasher.finish())
 }
 
 /// Initialize thread pool and load/generate index based on common options
@@ -309,23 +317,24 @@ fn initialize_impg(common: &CommonOpts) -> io::Result<Impg> {
 
     // Load or generate index
     if common.force_reindex {
-        generate_multi_index(&common.paf_files, common.num_threads)
+        generate_multi_index(&common.paf_files, common.num_threads, common.index.as_deref())
     } else {
-        load_or_generate_multi_index(&common.paf_files, common.num_threads)
+        load_or_generate_multi_index(&common.paf_files, common.num_threads, common.index.as_deref())
     }
 }
 
-fn load_or_generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize) -> io::Result<Impg> {
-    let index_file = get_combined_index_filename(paf_files);
+fn load_or_generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize, custom_index: Option<&str>) -> io::Result<Impg> {
+    let index_file = get_combined_index_filename(paf_files, custom_index);
     if std::path::Path::new(&index_file).exists() {
-        load_multi_index(paf_files)
+        load_multi_index(paf_files, custom_index)
     } else {
-        generate_multi_index(paf_files, num_threads)
+        generate_multi_index(paf_files, num_threads, custom_index)
     }
 }
 
-fn load_multi_index(paf_files: &[String]) -> io::Result<Impg> {
-    let index_file = get_combined_index_filename(paf_files);
+fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Result<Impg> {
+    let index_file = get_combined_index_filename(paf_files, custom_index);
+    info!("Reading IMPG index from {}", index_file);
 
     // Check if all PAF files are newer than the index
     let index_file_metadata = std::fs::metadata(&index_file)?;
@@ -354,9 +363,11 @@ fn load_multi_index(paf_files: &[String]) -> io::Result<Impg> {
     Ok(Impg::from_multi_paf_and_serializable(paf_files, serializable))
 }
 
-fn generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize) -> io::Result<Impg> {
+fn generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize, custom_index: Option<&str>) -> io::Result<Impg> {
+    let index_file = get_combined_index_filename(paf_files, custom_index);
+    info!("No index found at {}. Creating it now.", index_file);
+
     let mut records_by_file = Vec::with_capacity(paf_files.len());
-    
     for (file_index, paf_file) in paf_files.iter().enumerate() {
         let file = File::open(paf_file)?;
         let reader: Box<dyn io::Read> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
@@ -385,7 +396,6 @@ fn generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize) -> io::
         )
     })?;
 
-    let index_file = get_combined_index_filename(paf_files);
     let serializable = impg.to_serializable();
     let file = File::create(index_file)?;
     let writer = BufWriter::new(file);
