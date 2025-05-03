@@ -104,6 +104,10 @@ enum Args {
         #[clap(short = 'b', long, value_parser)]
         target_bed: Option<String>,
 
+        /// Output format: 'auto' (BED for -r, BEDPE for -b), 'bed', 'bedpe', or 'paf'
+        #[clap(short = 'o', long, value_parser, default_value = "auto")]
+        output_format: String,
+        
         /// Enable transitive queries
         #[clap(short = 'x', long, action)]
         transitive: bool,
@@ -123,10 +127,6 @@ enum Args {
         /// Minimum distance between transitive ranges to consider on the same sequence
         #[clap(long, value_parser, default_value_t = 0)]
         min_distance_between_ranges: i32,
-
-        /// Output results in PAF format
-        #[clap(short = 'P', long, action)]
-        output_paf: bool,
 
         /// Check the projected intervals, reporting the wrong ones (slow, useful for debugging)
         #[clap(short = 'c', long, action)]
@@ -176,14 +176,16 @@ fn main() -> io::Result<()> {
             common,
             target_range,
             target_bed,
+            output_format,
             transitive,
             transitive_bfs,
-            output_paf,
             check_intervals,
             max_depth,
             min_transitive_len,
             min_distance_between_ranges,
         } => {
+            validate_output_format(&output_format)?;
+
             let impg = initialize_impg(&common)?;
 
             if let Some(target_range) = target_range {
@@ -208,11 +210,20 @@ fn main() -> io::Result<()> {
                     }
                 }
 
-                if output_paf {
-                    // Skip the first element (the input range) for PAF
-                    output_results_paf(&impg, results.into_iter().skip(1), None);
-                } else {
-                    output_results_bed(&impg, results);
+                // Output results based on the format
+                match output_format.as_str() {
+                    "bedpe" => {
+                        // Skip the first element (the input range) for BEDPE output
+                        output_results_bedpe(&impg, results.into_iter().skip(1), None);
+                    },
+                    "paf" => {
+                        // Skip the first element (the input range) for PAF output
+                        output_results_paf(&impg, results.into_iter().skip(1), None);
+                    },
+                    _ => { // 'auto' or 'bed'
+                        // BED format - include the first element
+                        output_results_bed(&impg, results);
+                    }
                 }
             } else if let Some(target_bed) = target_bed {
                 let targets = parse_bed_file(&target_bed)?;
@@ -238,12 +249,20 @@ fn main() -> io::Result<()> {
                         }
                     }
 
-                    // Skip the first element (the input range) for both PAF and BEDPE
-                    let results_iter = results.into_iter().skip(1);
-                    if output_paf {
-                        output_results_paf(&impg, results_iter, name);
-                    } else {
-                        output_results_bedpe(&impg, results_iter, name);
+                    // Output results based on the format
+                    match output_format.as_str() {
+                        "bed" => {
+                            // BED format - include the first element
+                            output_results_bed(&impg, results);
+                        },
+                        "paf" => {
+                            // Skip the first element (the input range) for PAF output
+                            output_results_paf(&impg, results.into_iter().skip(1), name);
+                        },
+                        _ => { // 'auto' or 'bedpe'
+                            // Skip the first element (the input range) for BEDPE output
+                            output_results_bedpe(&impg, results.into_iter().skip(1), name);                            
+                        }
                     }
                 }
             } else {
@@ -271,6 +290,16 @@ fn validate_selection_mode(mode: &str) -> io::Result<()> {
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "Invalid selection mode. Must be 'longest', 'total', 'sample[,sep]', or 'haplotype[,sep]'."
+        ))
+    }
+}
+
+fn validate_output_format(mode: &str) -> io::Result<()> {
+    match mode {
+        "auto" | "bed" | "bedpe" | "paf" => Ok(()),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid output format. Must be 'auto', 'bed', 'bedpe', or 'paf'."
         ))
     }
 }
