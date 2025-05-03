@@ -3,7 +3,7 @@ use coitrees::IntervalTree;
 use impg::impg::{AdjustedInterval, Impg, SerializableImpg};
 use impg::paf;
 use impg::partition::partition_alignments;
-use log::{error, info, warn};
+use log::{info, warn};
 use noodles::bgzf;
 use rayon::ThreadPoolBuilder;
 use std::fs::File;
@@ -127,10 +127,6 @@ enum Args {
         /// Minimum distance between transitive ranges to consider on the same sequence
         #[clap(long, value_parser, default_value_t = 0)]
         min_distance_between_ranges: i32,
-
-        /// Check the projected intervals, reporting the wrong ones (slow, useful for debugging)
-        #[clap(short = 'c', long, action)]
-        check_intervals: bool,
     },
     /// Print alignment statistics
     Stats {
@@ -179,7 +175,6 @@ fn main() -> io::Result<()> {
             output_format,
             transitive,
             transitive_bfs,
-            check_intervals,
             max_depth,
             min_transitive_len,
             min_distance_between_ranges,
@@ -200,15 +195,6 @@ fn main() -> io::Result<()> {
                     min_transitive_len,
                     min_distance_between_ranges,
                 );
-                if check_intervals {
-                    let invalid_cigars = impg::impg::check_intervals(&impg, &results);
-                    if !invalid_cigars.is_empty() {
-                        for (row, error_reason) in invalid_cigars {
-                            error!("{}; {}", error_reason, row);
-                        }
-                        panic!("Invalid intervals encountered.");
-                    }
-                }
 
                 // Output results based on the format
                 match output_format.as_str() {
@@ -239,15 +225,6 @@ fn main() -> io::Result<()> {
                         min_transitive_len,
                         min_distance_between_ranges,
                     );
-                    if check_intervals {
-                        let invalid_cigars = impg::impg::check_intervals(&impg, &results);
-                        if !invalid_cigars.is_empty() {
-                            for (row, error_reason) in invalid_cigars {
-                                error!("{}; {}", error_reason, row);
-                            }
-                            panic!("Invalid intervals encountered.");
-                        }
-                    }
 
                     // Output results based on the format
                     match output_format.as_str() {
