@@ -385,7 +385,7 @@ fn generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize, custom_
             )
         })?;
         
-        records_by_file.push((records, paf_file.clone(), file_index));
+        records_by_file.push((records, paf_file.clone(), file_index as u32));
     }
     
     let impg = Impg::from_multi_paf_records(&records_by_file).map_err(|e| {

@@ -90,7 +90,7 @@ pub struct QueryMetadata {
     strand: Strand,
     cigar_offset: u64,
     cigar_bytes: usize,
-    paf_file_index: usize, // Track which PAF file this record belongs to
+    paf_file_index: u32, // Track which PAF file this record belongs to
 }
 
 impl QueryMetadata {
@@ -103,12 +103,12 @@ impl QueryMetadata {
         let mut cigar_buffer = vec![0; self.cigar_bytes];
 
         // Get the correct PAF file
-        let paf_file = &paf_files[self.paf_file_index];
+        let paf_file = &paf_files[self.paf_file_index as usize];
 
         // Get reader and seek start of cigar str
         if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
             // Get the GZI index for the PAF file
-            let paf_gzi_index = paf_gzi_indices.get(self.paf_file_index).and_then(Option::as_ref);
+            let paf_gzi_index = paf_gzi_indices.get(self.paf_file_index as usize).and_then(Option::as_ref);
             
             let mut reader = bgzf::Reader::new(File::open(paf_file).unwrap());
             reader
@@ -275,7 +275,7 @@ pub struct Impg {
 }
 
 impl Impg {
-    pub fn from_multi_paf_records(records_by_file: &[(Vec<PafRecord>, String, usize)]) -> Result<Self, ParseErr> {
+    pub fn from_multi_paf_records(records_by_file: &[(Vec<PafRecord>, String, u32)]) -> Result<Self, ParseErr> {
         let mut paf_files = Vec::with_capacity(records_by_file.len());
         let mut paf_gzi_indices = Vec::with_capacity(records_by_file.len());
         
