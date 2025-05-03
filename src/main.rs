@@ -25,7 +25,7 @@ struct CommonOpts {
     index: Option<String>,
 
     /// Force the regeneration of the index, even if it already exists.
-    #[clap(short = 'I', long, action)]
+    #[clap(short = 'f', long, action)]
     force_reindex: bool,
 
     /// Number of threads for parallel processing.
@@ -72,7 +72,7 @@ enum Args {
         merge_distance: i32,
 
         /// Minimum region size for missing regions
-        #[clap(short = 'f', long, value_parser, default_value_t = 3000)]
+        #[clap(long, value_parser, default_value_t = 3000)]
         min_missing_size: i32,
 
         /// Minimum distance from sequence start/end - closer regions will be extended to the boundaries
