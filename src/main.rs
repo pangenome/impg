@@ -15,7 +15,7 @@ use std::num::NonZeroUsize;
 #[derive(Parser, Debug)]
 struct CommonOpts {
     /// Path to the PAF files.
-    #[clap(short = 'p', long, value_parser)]
+    #[clap(short = 'p', long, value_parser, required = true, num_args = 1..)]
     paf_files: Vec<String>,
 
     /// Force the regeneration of the index, even if it already exists.
