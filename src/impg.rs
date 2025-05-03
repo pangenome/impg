@@ -87,13 +87,39 @@ pub struct QueryMetadata {
     target_end: i32,
     query_start: i32,
     query_end: i32,
-    strand: Strand,
+    strand_and_paf_file_index: u32, // Track strand and which PAF file this record belongs to
     cigar_offset: u64,
     cigar_bytes: usize,
-    paf_file_index: u32, // Track which PAF file this record belongs to
 }
 
 impl QueryMetadata {
+    // Constants for bit manipulation
+    const STRAND_BIT: u32 = 0x80000000; // Most significant bit
+    const FILE_INDEX_MASK: u32 = 0x7FFFFFFF; // All bits except the most significant
+
+    // Getter for strand
+    fn strand(&self) -> Strand {
+        if (self.strand_and_paf_file_index & Self::STRAND_BIT) != 0 {
+            Strand::Reverse
+        } else {
+            Strand::Forward
+        }
+    }
+
+    // Getter for paf_file_index
+    fn paf_file_index(&self) -> u32 {
+        self.strand_and_paf_file_index & Self::FILE_INDEX_MASK
+    }
+
+    // Setter for combined field
+    fn set_strand_and_file_index(&mut self, strand: Strand, file_index: u32) {
+        let strand_bit = match strand {
+            Strand::Forward => 0,
+            Strand::Reverse => Self::STRAND_BIT,
+        };
+        self.strand_and_paf_file_index = (file_index & Self::FILE_INDEX_MASK) | strand_bit;
+    }
+
     fn get_cigar_ops(
         &self,
         paf_files: &[String],
@@ -103,12 +129,13 @@ impl QueryMetadata {
         let mut cigar_buffer = vec![0; self.cigar_bytes];
 
         // Get the correct PAF file
-        let paf_file = &paf_files[self.paf_file_index as usize];
+        let paf_file_index = self.paf_file_index() as usize;
+        let paf_file = &paf_files[paf_file_index];
 
         // Get reader and seek start of cigar str
         if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
             // Get the GZI index for the PAF file
-            let paf_gzi_index = paf_gzi_indices.get(self.paf_file_index as usize).and_then(Option::as_ref);
+            let paf_gzi_index = paf_gzi_indices.get(paf_file_index).and_then(Option::as_ref);
             
             let mut reader = bgzf::Reader::new(File::open(paf_file).unwrap());
             reader
@@ -314,17 +341,17 @@ impl Impg {
                             .get_id(&record.target_name)
                             .expect("Target name not found in index");
 
-                        let query_metadata = QueryMetadata {
+                        let mut query_metadata = QueryMetadata {
                             query_id,
                             target_start: record.target_start as i32,
                             target_end: record.target_end as i32,
                             query_start: record.query_start as i32,
                             query_end: record.query_end as i32,
-                            strand: record.strand,
+                            strand_and_paf_file_index: 0, // Initialize with 0
                             cigar_offset: record.cigar_offset,
                             cigar_bytes: record.cigar_bytes,
-                            paf_file_index: *file_index,
                         };
+                        query_metadata.set_strand_and_file_index(record.strand, *file_index);
 
                         Some((
                             target_id,
@@ -470,7 +497,7 @@ impl Impg {
                         metadata.target_end,
                         metadata.query_start,
                         metadata.query_end,
-                        metadata.strand,
+                        metadata.strand(),
                     ),
                     &metadata.get_cigar_ops(&self.paf_files, self.paf_gzi_indices.as_ref()),
                     true,
@@ -606,7 +633,7 @@ impl Impg {
                                 metadata.target_end,
                                 metadata.query_start,
                                 metadata.query_end,
-                                metadata.strand,
+                                metadata.strand(),
                             ),
                             &metadata.get_cigar_ops(&self.paf_files, self.paf_gzi_indices.as_ref()),
                             store_cigar,
@@ -827,7 +854,7 @@ impl Impg {
                                                 metadata.target_end,
                                                 metadata.query_start,
                                                 metadata.query_end,
-                                                metadata.strand,
+                                                metadata.strand(),
                                             ),
                                             &metadata.get_cigar_ops(
                                                 &self.paf_files,

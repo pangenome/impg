@@ -18,6 +18,7 @@ pub struct PafRecord {
 }
 
 #[derive(Default, Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
+#[repr(u8)]
 pub enum Strand {
     #[default]
     Forward,
