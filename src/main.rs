@@ -3,7 +3,7 @@ use coitrees::IntervalTree;
 use impg::impg::{AdjustedInterval, Impg, SerializableImpg};
 use impg::paf;
 use impg::partition::partition_alignments;
-use log::{info, warn};
+use log::{info, debug, warn};
 use noodles::bgzf;
 use rayon::ThreadPoolBuilder;
 use std::fs::File;
@@ -397,6 +397,8 @@ fn generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize, custom_
 
     let mut records_by_file = Vec::with_capacity(paf_files.len());
     for (file_index, paf_file) in paf_files.iter().enumerate() {
+        debug!("Reading PAF file: {}", paf_file);
+
         let file = File::open(paf_file)?;
         let reader: Box<dyn io::Read> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
             Box::new(bgzf::MultithreadedReader::with_worker_count(
