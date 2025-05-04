@@ -14,7 +14,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use crate::paf::PafRecord;
 use rayon::prelude::*;
-
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Common options shared between all commands
 #[derive(Parser, Debug)]
@@ -399,14 +399,19 @@ fn generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize, custom_
     info!("No index found at {}. Creating it now.", index_file);
 
     let num_paf_files = paf_files.len();
+    // Thread-safe counter for tracking progress
+    let files_processed = AtomicUsize::new(0);
 
     // Process PAF files in parallel using Rayon
     let records_by_file: Vec<_> = (0..paf_files.len())
         .into_par_iter()
         .map(|file_index| -> io::Result<(Vec<PafRecord>, String, u32)> {
             let paf_file = &paf_files[file_index];
-            // Print file path and num
-            debug!("Processing PAF file ({}/{}): {}", file_index + 1, num_paf_files, paf_file);
+            
+            // Increment the counter and get the new value atomically
+            let current_count = files_processed.fetch_add(1, Ordering::SeqCst) + 1;
+            // Print progress with sequential counter
+            debug!("Processing PAF file ({}/{}): {}", current_count, num_paf_files, paf_file);
 
             let file = File::open(paf_file)?;
             let reader: Box<dyn io::Read> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
