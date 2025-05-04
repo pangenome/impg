@@ -12,8 +12,7 @@ pub struct PafRecord {
     pub target_length: usize,
     pub target_start: usize,
     pub target_end: usize,
-    pub strand: Strand,
-    pub cigar_offset: u64,
+    pub strand_and_cigar_offset: u64, // Track strand and cigar offset
     pub cigar_bytes: usize,
 }
 
@@ -26,6 +25,22 @@ pub enum Strand {
 }
 
 impl PafRecord {
+    const STRAND_BIT: u64 = 0x8000000000000000; // Most significant bit for u64
+
+    pub fn strand(&self) -> Strand {
+        if (self.strand_and_cigar_offset & Self::STRAND_BIT) != 0 {
+            Strand::Reverse
+        } else {
+            Strand::Forward
+        }
+    }
+    pub fn set_strand(&mut self, strand: Strand) {
+        match strand {
+            Strand::Forward => self.strand_and_cigar_offset &= !Self::STRAND_BIT,
+            Strand::Reverse => self.strand_and_cigar_offset |= Self::STRAND_BIT,
+        }
+    }
+
     pub fn parse(line: &str, file_pos: u64) -> Result<Self, ParseErr> {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 12 {
@@ -63,7 +78,8 @@ impl PafRecord {
             }
         }
 
-        Ok(Self {
+        // Create the record and set strand
+        let mut record = Self {
             query_name,
             query_length,
             query_start,
@@ -72,10 +88,12 @@ impl PafRecord {
             target_length,
             target_start,
             target_end,
-            strand,
-            cigar_offset,
+            strand_and_cigar_offset: cigar_offset,
             cigar_bytes,
-        })
+        };
+        record.set_strand(strand);
+        
+        Ok(record)
     }
 }
 
@@ -123,10 +141,9 @@ mod tests {
                 target_length: 100,
                 target_start: 0,
                 target_end: 100,
-                strand: Strand::Forward,
                 // If no cigar, then the offset is just the length of the line and cigar_bytes=0
                 // Should we use Option<> instead?
-                cigar_offset: (line.len() + 1) as u64,
+                strand_and_cigar_offset: (line.len() + 1) as u64, // Forward strand
                 cigar_bytes: 0,
             }
         );

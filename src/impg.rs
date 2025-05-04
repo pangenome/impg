@@ -86,37 +86,32 @@ pub struct QueryMetadata {
     target_end: i32,
     query_start: i32,
     query_end: i32,
-    strand_and_paf_file_index: u32, // Track strand and which PAF file this record belongs to
-    cigar_offset: u64,
+    paf_file_index: u32, // Track which PAF file this record belongs to
+    strand_and_cigar_offset: u64, // Track strand and cigar offset
     cigar_bytes: usize,
 }
 
 impl QueryMetadata {
     // Constants for bit manipulation
-    const STRAND_BIT: u32 = 0x80000000; // Most significant bit
-    const FILE_INDEX_MASK: u32 = 0x7FFFFFFF; // All bits except the most significant
+    const STRAND_BIT: u64 = 0x8000000000000000; // Most significant bit for u64
 
     // Getter for strand
     fn strand(&self) -> Strand {
-        if (self.strand_and_paf_file_index & Self::STRAND_BIT) != 0 {
+        if (self.strand_and_cigar_offset & Self::STRAND_BIT) != 0 {
             Strand::Reverse
         } else {
             Strand::Forward
         }
     }
+    // fn set_strand(&mut self, strand: Strand) {
+    //     match strand {
+    //         Strand::Forward => self.strand_and_cigar_offset &= !Self::STRAND_BIT,
+    //         Strand::Reverse => self.strand_and_cigar_offset |= Self::STRAND_BIT,
+    //     }
+    // }
 
-    // Getter for paf_file_index
-    fn paf_file_index(&self) -> u32 {
-        self.strand_and_paf_file_index & Self::FILE_INDEX_MASK
-    }
-
-    // Setter for combined field
-    fn set_strand_and_file_index(&mut self, strand: Strand, file_index: u32) {
-        let strand_bit = match strand {
-            Strand::Forward => 0,
-            Strand::Reverse => Self::STRAND_BIT,
-        };
-        self.strand_and_paf_file_index = (file_index & Self::FILE_INDEX_MASK) | strand_bit;
+    fn cigar_offset(&self) -> u64 {
+        self.strand_and_cigar_offset & !Self::STRAND_BIT
     }
 
     fn get_cigar_ops(
@@ -128,7 +123,7 @@ impl QueryMetadata {
         let mut cigar_buffer = vec![0; self.cigar_bytes];
 
         // Get the correct PAF file
-        let paf_file_index = self.paf_file_index() as usize;
+        let paf_file_index = self.paf_file_index as usize;
         let paf_file = &paf_files[paf_file_index];
 
         // Get reader and seek start of cigar str
@@ -138,12 +133,12 @@ impl QueryMetadata {
             
             let mut reader = bgzf::Reader::new(File::open(paf_file).unwrap());
             reader
-                .seek_by_uncompressed_position(paf_gzi_index.unwrap(), self.cigar_offset)
+                .seek_by_uncompressed_position(paf_gzi_index.unwrap(), self.cigar_offset())
                 .unwrap();
             reader.read_exact(&mut cigar_buffer).unwrap();
         } else {
             let mut reader = File::open(paf_file).unwrap();
-            reader.seek(SeekFrom::Start(self.cigar_offset)).unwrap();
+            reader.seek(SeekFrom::Start(self.cigar_offset())).unwrap();
             reader.read_exact(&mut cigar_buffer).unwrap();
         };
 
@@ -340,17 +335,16 @@ impl Impg {
                             .get_id(&record.target_name)
                             .expect("Target name not found in index");
 
-                        let mut query_metadata = QueryMetadata {
+                        let query_metadata = QueryMetadata {
                             query_id,
                             target_start: record.target_start as i32,
                             target_end: record.target_end as i32,
                             query_start: record.query_start as i32,
                             query_end: record.query_end as i32,
-                            strand_and_paf_file_index: 0, // Initialize with 0
-                            cigar_offset: record.cigar_offset,
+                            paf_file_index: *file_index,
+                            strand_and_cigar_offset: record.strand_and_cigar_offset, // Already includes strand bit
                             cigar_bytes: record.cigar_bytes,
                         };
-                        query_metadata.set_strand_and_file_index(record.strand, *file_index);
 
                         Some((
                             target_id,
@@ -1384,9 +1378,8 @@ mod tests {
                 target_length: 200,
                 target_start: 30,
                 target_end: 40,
-                cigar_offset: 45,
+                strand_and_cigar_offset: 45, // Forward strand
                 cigar_bytes: 3,
-                strand: Strand::Forward,
             },
             // Add more test records as needed
         ];
