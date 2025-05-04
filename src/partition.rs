@@ -359,18 +359,22 @@ fn select_and_window_sequences(
     match selection_mode {
         "longest" => {
             // Select longest single missing region
-            let mut max_length = 0;
-            let mut longest_region: Option<(u32, i32, i32)> = None;
-
-            for (seq_id, ranges) in missing_regions.iter() {
-                for &(start, end) in ranges.iter() {
-                    let length = end - start;
-                    if length > max_length {
-                        max_length = length;
-                        longest_region = Some((*seq_id, start, end));
-                    }
-                }
-            }
+            let longest_region = missing_regions
+                .par_iter()
+                .flat_map(|(seq_id, ranges)| {
+                    // For each sequence, convert its ranges to (seq_id, start, end, length) tuples
+                    ranges.iter().map(|&(start, end)| {
+                        let length = end - start;
+                        (*seq_id, start, end, length)
+                    }).collect::<Vec<_>>()
+                })
+                .max_by(|&(id1, _, _, len1), &(id2, _, _, len2)| {
+                    // First compare by length
+                    len1.cmp(&len2)
+                        // If lengths are equal, compare by sequence ID for deterministic results
+                        .then_with(|| id1.cmp(&id2))
+                })
+                .map(|(seq_id, start, end, _)| (seq_id, start, end));
 
             if let Some((seq_id, start, end)) = longest_region {
                 let seq_name = impg.seq_index.get_name(seq_id).unwrap();
@@ -398,7 +402,12 @@ fn select_and_window_sequences(
                         .sum();
                     (*seq_id, total_missing)
                 })
-                .max_by_key(|(_, total_missing)| *total_missing);
+                .max_by(|&(id1, missing1), &(id2, missing2)| {
+                    // First compare by total missing
+                    missing1.cmp(&missing2)
+                        // If total missing is equal, compare by sequence ID for deterministic results
+                        .then_with(|| id1.cmp(&id2))
+                });
 
             if let Some((seq_id, max_total_missing)) = seq_with_most_missing {
                 let seq_length = impg.seq_index.get_len_from_id(seq_id).unwrap() as i32;
@@ -428,35 +437,37 @@ fn select_and_window_sequences(
             };
 
             // Group only sequences that still have missing regions.
-            let mut prefix_to_seqs: FxHashMap<String, Vec<u32>> =
-                FxHashMap::with_capacity_and_hasher(missing_regions.len(), Default::default());
-
-            for &seq_id in missing_regions.keys() {
-                if let Some(name) = impg.seq_index.get_name(seq_id) {
-                    // Generic split for multi‑char separator.
-                    let mut split = name.split(separator);
-                    let prefix = match field_count {
-                        1 => split.next().unwrap_or(name),
-                        2 => {
-                            let p1 = split.next().unwrap_or(name);
-                            let p2 = split.next().unwrap_or("");
-                            // allocate minimal string – unavoidable here
-                            prefix_to_seqs
-                                .entry(format!("{p1}{separator}{p2}"))
-                                .or_default()
-                                .push(seq_id);
-                            continue;
-                        }
-                        _ => name,
-                    };
-                    // Store into hashmap (small string optimisation often keeps this on the stack).
-                    prefix_to_seqs
-                        .entry(prefix.to_string())
-                        .or_default()
-                        .push(seq_id);
-                }
-            }
-
+            let prefix_to_seqs: FxHashMap<String, Vec<u32>> = missing_regions.keys()
+                .par_bridge()
+                .fold(
+                || FxHashMap::with_capacity_and_hasher(0, Default::default()),
+                |mut map: FxHashMap<String, Vec<u32>>, seq_id: &u32| {
+                    let seq_id = *seq_id; // Dereference to get u32
+                    if let Some(name) = impg.seq_index.get_name(seq_id) {
+                        let mut split = name.split(separator);
+                        let prefix = match field_count {
+                            1 => split.next().unwrap_or(name).to_string(),
+                            2 => {
+                                let p1 = split.next().unwrap_or(name);
+                                let p2 = split.next().unwrap_or("");
+                                format!("{p1}{separator}{p2}")
+                            }
+                            _ => name.to_string(),
+                        };
+                        map.entry(prefix).or_default().push(seq_id);
+                    }
+                    map
+                },
+            ).reduce(
+                || FxHashMap::with_capacity_and_hasher(0, Default::default()),
+                |mut map1, map2| {
+                    for (key, vec2) in map2 {
+                        map1.entry(key).or_default().extend(vec2);
+                    }
+                    map1
+                },
+            );
+                
             // Find the prefix with the most missing bases in total.
             if !prefix_to_seqs.is_empty() {
                 let prefix_with_missing: Vec<(String, i64)> = prefix_to_seqs
@@ -473,8 +484,13 @@ fn select_and_window_sequences(
 
                 // Find the prefix with maximum missing (sequential)
                 if let Some((best_prefix, best_missing)) = prefix_with_missing
-                    .iter()
-                    .max_by_key(|&(_, missing)| *missing)
+                    .par_iter()
+                    .max_by(|&(prefix1, missing1), &(prefix2, missing2)| {
+                        // First compare by missing amount
+                        missing1.cmp(&missing2)
+                            // If missing amounts are equal, compare by prefix name for deterministic results
+                            .then_with(|| prefix1.cmp(prefix2))
+                    })
                     .map(|(p, m)| (p.clone(), *m))
                 {
                     if let Some(best_seqs) = prefix_to_seqs.get(&best_prefix) {
@@ -522,26 +538,29 @@ fn select_and_window_sequences(
     }
 
     // Create windows from ranges
-    for (seq_id, start, end) in ranges_to_window {
-        let mut pos = start;
-        while pos < end {
-            let window_end = std::cmp::min(pos + window_size as i32, end);
-
-            // If this tail-window is too small, merge it into the last one
-            if window_end - pos < window_size as i32
-                && !windows.is_empty()
-                && windows.last().unwrap().0 == seq_id
-            {
-                let last = windows.last_mut().unwrap();
-                last.2 = end;
-                break;
+    let new_windows: Vec<(u32, i32, i32)> = ranges_to_window.par_iter()
+        .flat_map(|(seq_id, start, end)| {
+            let mut range_windows: Vec<(u32, i32, i32)> = Vec::new();
+            let mut pos = *start;
+            while pos < *end {
+                let window_end = std::cmp::min(pos + window_size as i32, *end);
+                
+                // If this tail-window is too small, merge it into the last one
+                if window_end - pos < window_size as i32 && !range_windows.is_empty() {
+                    let last = range_windows.last_mut().unwrap();
+                    last.2 = *end;
+                } else {
+                    range_windows.push((*seq_id, pos, window_end));
+                }
+                
+                pos = window_end;
             }
-
-            windows.push((seq_id, pos, window_end));
-            pos = window_end;
-        }
-    }
-
+            range_windows
+        })
+        .collect();
+        
+    windows.extend(new_windows);
+    
     Ok(())
 }
 
