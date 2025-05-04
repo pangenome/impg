@@ -116,7 +116,15 @@ enum Args {
         /// Output format: 'auto' (BED for -r, BEDPE for -b), 'bed', 'bedpe', or 'paf'
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
-        
+
+        /// Maximum distance between regions to merge for BED output
+        #[clap(short = 'd', long, value_parser, conflicts_with = "no_merge_bed", default_value_t = 0)]
+        merge_distance: i32,
+
+        /// Disable merging for BED output
+        #[clap(long, action, conflicts_with = "merge_distance")]
+        no_merge_bed: bool,
+
         /// Enable transitive queries
         #[clap(short = 'x', long, action)]
         transitive: bool,
@@ -182,6 +190,8 @@ fn main() -> io::Result<()> {
             target_range,
             target_bed,
             output_format,
+            merge_distance,
+            no_merge_bed,
             transitive,
             transitive_bfs,
             max_depth,
@@ -194,7 +204,7 @@ fn main() -> io::Result<()> {
 
             if let Some(target_range) = target_range {
                 let (target_name, target_range) = parse_target_range(&target_range)?;
-                let results = perform_query(
+                let mut results = perform_query(
                     &impg,
                     &target_name,
                     target_range,
@@ -216,15 +226,17 @@ fn main() -> io::Result<()> {
                         output_results_paf(&impg, results.into_iter().skip(1), None);
                     },
                     _ => { // 'auto' or 'bed'
+                        let merge_distance = if no_merge_bed { -1 } else { merge_distance };
+
                         // BED format - include the first element
-                        output_results_bed(&impg, results);
+                        output_results_bed(&impg, &mut results, merge_distance);
                     }
                 }
             } else if let Some(target_bed) = target_bed {
                 let targets = parse_bed_file(&target_bed)?;
                 info!("Parsed {} target ranges from BED file", targets.len());
                 for (target_name, target_range, name) in targets {
-                    let results = perform_query(
+                    let mut results = perform_query(
                         &impg,
                         &target_name,
                         target_range,
@@ -238,8 +250,10 @@ fn main() -> io::Result<()> {
                     // Output results based on the format
                     match output_format.as_str() {
                         "bed" => {
+                            let merge_distance = if no_merge_bed { -1 } else { merge_distance };
+
                             // BED format - include the first element
-                            output_results_bed(&impg, results);
+                            output_results_bed(&impg, &mut results, merge_distance);
                         },
                         "paf" => {
                             // Skip the first element (the input range) for PAF output
@@ -604,7 +618,9 @@ fn perform_query(
     }
 }
 
-fn output_results_bed(impg: &Impg, results: Vec<AdjustedInterval>) {
+fn output_results_bed(impg: &Impg, results: &mut Vec<AdjustedInterval>, merge_distance: i32) {
+    merge_bed_intervals(results, merge_distance);
+    
     for (overlap, _, _) in results {
         let overlap_name = impg.seq_index.get_name(overlap.metadata).unwrap();
         let (first, last, strand) = if overlap.first <= overlap.last {
@@ -613,6 +629,41 @@ fn output_results_bed(impg: &Impg, results: Vec<AdjustedInterval>) {
             (overlap.last, overlap.first, '-')
         };
         println!("{}\t{}\t{}\t.\t.\t{}", overlap_name, first, last, strand);
+    }
+}
+
+// New helper function to merge BED intervals
+fn merge_bed_intervals(results: &mut Vec<AdjustedInterval>, merge_distance: i32) {
+    if results.len() > 1 && merge_distance >= 0 {
+        // Sort by sequence ID and start position
+        results.par_sort_by_key(|(query_interval, _, _)| {
+            (
+                query_interval.metadata,
+                std::cmp::min(query_interval.first, query_interval.last),
+            )
+        });
+
+        let mut write_idx = 0;
+        for read_idx in 1..results.len() {
+            let (curr_interval, _, _) = &results[write_idx];
+            let (next_interval, _, _) = &results[read_idx];
+
+            let curr_min = std::cmp::min(curr_interval.first, curr_interval.last);
+            let curr_max = std::cmp::max(curr_interval.first, curr_interval.last);
+            let next_min = std::cmp::min(next_interval.first, next_interval.last);
+            let next_max = std::cmp::max(next_interval.first, next_interval.last);
+
+            if curr_interval.metadata != next_interval.metadata || next_min > curr_max + merge_distance {
+                write_idx += 1;
+                if write_idx != read_idx {
+                    results.swap(write_idx, read_idx);
+                }
+            } else {
+                results[write_idx].0.first = curr_min.min(next_min);
+                results[write_idx].0.last = curr_max.max(next_max);
+            }
+        }
+        results.truncate(write_idx + 1);
     }
 }
 

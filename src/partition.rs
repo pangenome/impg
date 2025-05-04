@@ -561,8 +561,8 @@ fn select_and_window_sequences(
     Ok(())
 }
 
-fn merge_overlaps(overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>, max_gap: i32) {
-    if overlaps.len() > 1 && max_gap >= 0 {
+fn merge_overlaps(overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>, merge_distance: i32) {
+    if overlaps.len() > 1 && merge_distance >= 0 {
         // Sort by sequence ID and start position
         overlaps.par_sort_by_key(|(query_interval, _, _)| {
             (
@@ -581,7 +581,7 @@ fn merge_overlaps(overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>
             let next_min = std::cmp::min(next_interval.first, next_interval.last);
             let next_max = std::cmp::max(next_interval.first, next_interval.last);
 
-            if curr_interval.metadata != next_interval.metadata || next_min > curr_max + max_gap {
+            if curr_interval.metadata != next_interval.metadata || next_min > curr_max + merge_distance {
                 write_idx += 1;
                 if write_idx != read_idx {
                     overlaps.swap(write_idx, read_idx);
