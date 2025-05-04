@@ -3,23 +3,36 @@ use coitrees::IntervalTree;
 use impg::impg::{AdjustedInterval, Impg, SerializableImpg};
 use impg::paf;
 use impg::partition::partition_alignments;
-use log::{error, info, warn};
+use log::{info, debug, warn};
 use noodles::bgzf;
 use rayon::ThreadPoolBuilder;
 use std::fs::File;
 use std::io::BufRead;
 use std::io::{self, BufReader, BufWriter};
 use std::num::NonZeroUsize;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use crate::paf::PafRecord;
+use rayon::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Common options shared between all commands
 #[derive(Parser, Debug)]
 struct CommonOpts {
-    /// Path to the PAF file. If specified without an index, the tool will look for or generate an associated index file.
-    #[clap(short = 'p', long, value_parser)]
-    paf_file: String,
+    /// Path to the PAF files.
+    #[clap(short = 'p', long, value_parser, required = false, num_args = 1.., conflicts_with = "paf_list")]
+    paf_files: Vec<String>,
+
+    /// Path to a text file containing paths to PAF files (one per line).
+    #[clap(long, value_parser, required = false, conflicts_with = "paf_files")]
+    paf_list: Option<String>,
+
+    /// Path to the IMPG index file.
+    #[clap(short = 'i', long, value_parser)]
+    index: Option<String>,
 
     /// Force the regeneration of the index, even if it already exists.
-    #[clap(short = 'I', long, action)]
+    #[clap(short = 'f', long, action)]
     force_reindex: bool,
 
     /// Number of threads for parallel processing.
@@ -44,35 +57,9 @@ enum Args {
         #[clap(short = 'w', long, value_parser)]
         window_size: usize,
 
-        /// Path to the file with sequence names to start with (one per line)
-        #[clap(long, value_parser)]
-        starting_sequences_file: Option<String>,
-
-        #[clap(
-            long,
-            value_parser,
-            default_value = "longest",
-            help = "Selection mode for next sequence",
-            long_help = "Selection mode for next sequence:\n\
-                - \"longest\": sequence with longest single missing region\n\
-                - \"total\": sequence with highest total missing regions\n\
-                - \"sample[,separator]\": sample with highest total missing regions\n\
-                - \"haplotype[,separator]\": haplotype highest total missing regions\n\
-                The sample/haplotype modes assume PanSN naming; '#' is the default separator."
-        )]
-        selection_mode: String,
-
         /// Maximum distance between regions to merge
         #[clap(short = 'd', long, value_parser, default_value_t = 100000)]
         merge_distance: i32,
-
-        /// Minimum region size for missing regions
-        #[clap(short = 'f', long, value_parser, default_value_t = 3000)]
-        min_missing_size: i32,
-
-        /// Minimum distance from sequence start/end - closer regions will be extended to the boundaries
-        #[clap(long, value_parser, default_value_t = 3000)]
-        min_boundary_distance: i32,
 
         /// Maximum recursion depth for transitive overlaps (0 for no limit)
         #[clap(short = 'm', long, value_parser, default_value_t = 2)]
@@ -85,6 +72,31 @@ enum Args {
         /// Minimum distance between transitive ranges to consider on the same sequence
         #[clap(long, value_parser, default_value_t = 10)]
         min_distance_between_ranges: i32,
+
+        /// Path to the file with sequence names to start with (one per line)
+        #[clap(long, value_parser)]
+        starting_sequences_file: Option<String>,
+
+        #[clap(
+            long,
+            value_parser,
+            default_value = "longest",
+            help = "Selection mode for next sequence:\n\
+                - \"longest\": sequence with longest single missing region\n\
+                - \"total\": sequence with highest total missing regions\n\
+                - \"sample[,separator]\": sample with highest total missing regions\n\
+                - \"haplotype[,separator]\": haplotype highest total missing regions\n\
+                The sample/haplotype modes assume PanSN naming; '#' is the default separator."
+        )]
+        selection_mode: String,
+
+        /// Minimum region size for missing regions
+        #[clap(long, value_parser, default_value_t = 3000)]
+        min_missing_size: i32,
+
+        /// Minimum distance from sequence start/end - closer regions will be extended to the boundaries
+        #[clap(long, value_parser, default_value_t = 3000)]
+        min_boundary_distance: i32,
     },
     /// Query overlaps in the alignment
     Query {
@@ -99,6 +111,10 @@ enum Args {
         #[clap(short = 'b', long, value_parser)]
         target_bed: Option<String>,
 
+        /// Output format: 'auto' (BED for -r, BEDPE for -b), 'bed', 'bedpe', or 'paf'
+        #[clap(short = 'o', long, value_parser, default_value = "auto")]
+        output_format: String,
+        
         /// Enable transitive queries
         #[clap(short = 'x', long, action)]
         transitive: bool,
@@ -118,32 +134,12 @@ enum Args {
         /// Minimum distance between transitive ranges to consider on the same sequence
         #[clap(long, value_parser, default_value_t = 0)]
         min_distance_between_ranges: i32,
-
-        /// Output results in PAF format
-        #[clap(short = 'P', long, action)]
-        output_paf: bool,
-
-        /// Check the projected intervals, reporting the wrong ones (slow, useful for debugging)
-        #[clap(short = 'c', long, action)]
-        check_intervals: bool,
     },
     /// Print alignment statistics
     Stats {
         #[clap(flatten)]
         common: CommonOpts,
     },
-}
-
-fn validate_selection_mode(mode: &str) -> io::Result<()> {
-    match mode {
-        "longest" | "total" => Ok(()),
-        mode if mode == "sample" || mode == "haplotype" 
-            || mode.starts_with("sample,") || mode.starts_with("haplotype,") => Ok(()),
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Invalid selection mode. Must be 'longest', 'total', 'sample[,sep]', or 'haplotype[,sep]'."
-        ))
-    }
 }
 
 fn main() -> io::Result<()> {
@@ -153,14 +149,14 @@ fn main() -> io::Result<()> {
         Args::Partition {
             common,
             window_size,
-            starting_sequences_file,
-            selection_mode,
             merge_distance,
-            min_missing_size,
-            min_boundary_distance,
             max_depth,
             min_transitive_len,
             min_distance_between_ranges,
+            starting_sequences_file,
+            selection_mode,
+            min_missing_size,
+            min_boundary_distance,
         } => {
             validate_selection_mode(&selection_mode)?;
 
@@ -183,14 +179,15 @@ fn main() -> io::Result<()> {
             common,
             target_range,
             target_bed,
+            output_format,
             transitive,
             transitive_bfs,
-            output_paf,
-            check_intervals,
             max_depth,
             min_transitive_len,
             min_distance_between_ranges,
         } => {
+            validate_output_format(&output_format)?;
+
             let impg = initialize_impg(&common)?;
 
             if let Some(target_range) = target_range {
@@ -205,21 +202,21 @@ fn main() -> io::Result<()> {
                     min_transitive_len,
                     min_distance_between_ranges,
                 );
-                if check_intervals {
-                    let invalid_cigars = impg::impg::check_intervals(&impg, &results);
-                    if !invalid_cigars.is_empty() {
-                        for (row, error_reason) in invalid_cigars {
-                            error!("{}; {}", error_reason, row);
-                        }
-                        panic!("Invalid intervals encountered.");
-                    }
-                }
 
-                if output_paf {
-                    // Skip the first element (the input range) for PAF
-                    output_results_paf(&impg, results.into_iter().skip(1), None);
-                } else {
-                    output_results_bed(&impg, results);
+                // Output results based on the format
+                match output_format.as_str() {
+                    "bedpe" => {
+                        // Skip the first element (the input range) for BEDPE output
+                        output_results_bedpe(&impg, results.into_iter().skip(1), None);
+                    },
+                    "paf" => {
+                        // Skip the first element (the input range) for PAF output
+                        output_results_paf(&impg, results.into_iter().skip(1), None);
+                    },
+                    _ => { // 'auto' or 'bed'
+                        // BED format - include the first element
+                        output_results_bed(&impg, results);
+                    }
                 }
             } else if let Some(target_bed) = target_bed {
                 let targets = parse_bed_file(&target_bed)?;
@@ -235,22 +232,21 @@ fn main() -> io::Result<()> {
                         min_transitive_len,
                         min_distance_between_ranges,
                     );
-                    if check_intervals {
-                        let invalid_cigars = impg::impg::check_intervals(&impg, &results);
-                        if !invalid_cigars.is_empty() {
-                            for (row, error_reason) in invalid_cigars {
-                                error!("{}; {}", error_reason, row);
-                            }
-                            panic!("Invalid intervals encountered.");
-                        }
-                    }
 
-                    // Skip the first element (the input range) for both PAF and BEDPE
-                    let results_iter = results.into_iter().skip(1);
-                    if output_paf {
-                        output_results_paf(&impg, results_iter, name);
-                    } else {
-                        output_results_bedpe(&impg, results_iter, name);
+                    // Output results based on the format
+                    match output_format.as_str() {
+                        "bed" => {
+                            // BED format - include the first element
+                            output_results_bed(&impg, results);
+                        },
+                        "paf" => {
+                            // Skip the first element (the input range) for PAF output
+                            output_results_paf(&impg, results.into_iter().skip(1), name);
+                        },
+                        _ => { // 'auto' or 'bedpe'
+                            // Skip the first element (the input range) for BEDPE output
+                            output_results_bedpe(&impg, results.into_iter().skip(1), name);                            
+                        }
                     }
                 }
             } else {
@@ -270,6 +266,28 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
+fn validate_selection_mode(mode: &str) -> io::Result<()> {
+    match mode {
+        "longest" | "total" => Ok(()),
+        mode if mode == "sample" || mode == "haplotype" 
+            || mode.starts_with("sample,") || mode.starts_with("haplotype,") => Ok(()),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid selection mode. Must be 'longest', 'total', 'sample[,sep]', or 'haplotype[,sep]'."
+        ))
+    }
+}
+
+fn validate_output_format(mode: &str) -> io::Result<()> {
+    match mode {
+        "auto" | "bed" | "bedpe" | "paf" => Ok(()),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid output format. Must be 'auto', 'bed', 'bedpe', or 'paf'."
+        ))
+    }
+}
+
 /// Initialize thread pool and load/generate index based on common options
 fn initialize_impg(common: &CommonOpts) -> io::Result<Impg> {
     // Initialize logger based on verbosity
@@ -287,36 +305,81 @@ fn initialize_impg(common: &CommonOpts) -> io::Result<Impg> {
         .build_global()
         .unwrap();
 
+    // Resolve the list of PAF files
+    let paf_files = resolve_paf_files(common)?;
+    info!("Found {} PAF files", paf_files.len());
+
     // Load or generate index
     if common.force_reindex {
-        generate_index(&common.paf_file, common.num_threads)
+        generate_multi_index(&paf_files, common.num_threads, common.index.as_deref())
     } else {
-        load_or_generate_index(&common.paf_file, common.num_threads)
+        load_or_generate_multi_index(&paf_files, common.num_threads, common.index.as_deref())
     }
 }
 
-fn load_or_generate_index(paf_file: &str, num_threads: NonZeroUsize) -> io::Result<Impg> {
-    let index_file = format!("{}.impg", paf_file);
-    if std::path::Path::new(&index_file).exists() {
-        load_index(paf_file)
-    } else {
-        generate_index(paf_file, num_threads)
+/// Resolve the list of PAF files from either --paf-files or --paf-list
+fn resolve_paf_files(common: &CommonOpts) -> io::Result<Vec<String>> {
+    if !common.paf_files.is_empty() {
+        return Ok(common.paf_files.clone());
     }
-}
-
-fn load_index(paf_file: &str) -> io::Result<Impg> {
-    let index_file = format!("{}.impg", paf_file);
-
-    let paf_file_metadata = std::fs::metadata(paf_file)?;
-    let index_file_metadata = std::fs::metadata(index_file.clone())?;
-    if let (Ok(paf_file_ts), Ok(index_file_ts)) =
-        (paf_file_metadata.modified(), index_file_metadata.modified())
-    {
-        if paf_file_ts > index_file_ts {
-            warn!("WARNING:\tPAF file has been modified since impg index creation.");
+    
+    if let Some(paf_list_file) = &common.paf_list {
+        // Read PAF files from the list file
+        let file = File::open(paf_list_file)?;
+        let reader = BufReader::new(file);
+        let mut paf_files = Vec::new();
+        
+        for line in reader.lines() {
+            let line = line?;
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                paf_files.push(trimmed.to_string());
+            }
         }
+        
+        if paf_files.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("No valid PAF files found in list file: {}", paf_list_file),
+            ));
+        }
+        
+        return Ok(paf_files);
+    }
+    
+    // Neither paf_files nor paf_list provided
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "Either --paf-files or --paf-list must be provided",
+    ))
+}
+
+fn load_or_generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize, custom_index: Option<&str>) -> io::Result<Impg> {
+    let index_file = get_combined_index_filename(paf_files, custom_index);
+    if std::path::Path::new(&index_file).exists() {
+        load_multi_index(paf_files, custom_index)
     } else {
-        warn!("WARNING:\tUnable to compare timestamps of PAF file and impg index file. PAF file may have been modified since impg index creation.");
+        generate_multi_index(paf_files, num_threads, custom_index)
+    }
+}
+
+fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Result<Impg> {
+    let index_file = get_combined_index_filename(paf_files, custom_index);
+    info!("Reading IMPG index from {}", index_file);
+
+    // Check if all PAF files are newer than the index
+    let index_file_metadata = std::fs::metadata(&index_file)?;
+    let index_file_ts = index_file_metadata.modified().ok();
+    
+    if let Some(index_ts) = index_file_ts {
+        for paf_file in paf_files {
+            let paf_file_metadata = std::fs::metadata(paf_file)?;
+            if let Ok(paf_file_ts) = paf_file_metadata.modified() {
+                if paf_file_ts > index_ts {
+                    warn!("WARNING:\tPAF file {} has been modified since impg index creation.", paf_file);
+                }
+            }
+        }
     }
 
     let file = File::open(index_file)?;
@@ -327,34 +390,57 @@ fn load_index(paf_file: &str) -> io::Result<Impg> {
             format!("Failed to deserialize index: {:?}", e),
         )
     })?;
-    Ok(Impg::from_paf_and_serializable(paf_file, serializable))
+    
+    Ok(Impg::from_multi_paf_and_serializable(paf_files, serializable))
 }
 
-fn generate_index(paf_file: &str, num_threads: NonZeroUsize) -> io::Result<Impg> {
-    let file = File::open(paf_file)?;
-    let reader: Box<dyn io::Read> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-        Box::new(bgzf::MultithreadedReader::with_worker_count(
-            num_threads,
-            file,
-        ))
-    } else {
-        Box::new(file)
-    };
-    let reader = BufReader::new(reader);
-    let records = paf::parse_paf(reader).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("Failed to parse PAF records: {:?}", e),
-        )
-    })?;
-    let impg = Impg::from_paf_records(&records, paf_file).map_err(|e| {
+fn generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize, custom_index: Option<&str>) -> io::Result<Impg> {
+    let index_file = get_combined_index_filename(paf_files, custom_index);
+    info!("No index found at {}. Creating it now.", index_file);
+
+    let num_paf_files = paf_files.len();
+    // Thread-safe counter for tracking progress
+    let files_processed = AtomicUsize::new(0);
+
+    // Process PAF files in parallel using Rayon
+    let records_by_file: Vec<_> = (0..paf_files.len())
+        .into_par_iter()
+        .map(|file_index| -> io::Result<(Vec<PafRecord>, String, u32)> {
+            let paf_file = &paf_files[file_index];
+            
+            // Increment the counter and get the new value atomically
+            let current_count = files_processed.fetch_add(1, Ordering::SeqCst) + 1;
+            // Print progress with sequential counter
+            debug!("Processing PAF file ({}/{}): {}", current_count, num_paf_files, paf_file);
+
+            let file = File::open(paf_file)?;
+            let reader: Box<dyn io::Read> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
+                Box::new(bgzf::MultithreadedReader::with_worker_count(
+                    num_threads,
+                    file,
+                ))
+            } else {
+                Box::new(file)
+            };
+            let reader = BufReader::new(reader);
+            let records = paf::parse_paf(reader).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Failed to parse PAF records from {}: {:?}", paf_file, e),
+                )
+            })?;
+            
+            Ok((records, paf_file.clone(), file_index as u32))
+        })
+        .collect::<Result<Vec<_>, _>>()?;  // Propagate any errors
+    
+    let impg = Impg::from_multi_paf_records(&records_by_file).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("Failed to create index: {:?}", e),
         )
     })?;
 
-    let index_file = format!("{}.impg", paf_file);
     let serializable = impg.to_serializable();
     let file = File::create(index_file)?;
     let writer = BufWriter::new(file);
@@ -427,6 +513,28 @@ fn parse_range(range_parts: &[&str]) -> io::Result<(i32, i32)> {
     }
 
     Ok((start, end))
+}
+
+fn get_combined_index_filename(paf_files: &[String], custom_index: Option<&str>) -> String {
+    if let Some(index) = custom_index {
+        return index.to_string();
+    }
+    
+    if paf_files.len() == 1 {
+        format!("{}.impg", paf_files[0])
+    } else {
+        // For multiple files, create a hash of the sorted filenames
+        
+        let mut file_refs: Vec<&str> = paf_files.iter().map(|s| s.as_str()).collect();
+        file_refs.sort();
+        
+        let mut hasher = DefaultHasher::new();
+        for file in &file_refs {
+            file.hash(&mut hasher);
+        }
+        
+        format!("combined_{:016x}.impg", hasher.finish())
+    }
 }
 
 fn perform_query(
