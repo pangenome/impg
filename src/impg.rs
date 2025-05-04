@@ -300,10 +300,10 @@ impl Impg {
         records_by_file: &[(Vec<PafRecord>, String)],
         seq_index: SequenceIndex
     ) -> Result<Self, ParseErr> {
-        let mut paf_files = Vec::with_capacity(records_by_file.len());
-        let mut paf_gzi_indices = Vec::with_capacity(records_by_file.len());
-        
-        for (_, paf_file) in records_by_file {
+        // Use par_iter to process the files in parallel and collect both pieces of information
+        let (paf_files, paf_gzi_indices): (Vec<String>, Vec<Option<bgzf::gzi::Index>>) = records_by_file
+        .par_iter()
+        .map(|(_, paf_file)| {
             let paf_gzi_index = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
                 let paf_gzi_file = paf_file.to_owned() + ".gzi";
                 Some(
@@ -313,9 +313,11 @@ impl Impg {
             } else {
                 None
             };
-            paf_files.push(paf_file.clone());
-            paf_gzi_indices.push(paf_gzi_index);
-        }
+            
+            // Return both values as a tuple
+            (paf_file.clone(), paf_gzi_index)
+        })
+        .unzip(); // Separate the tuples into two vectors
 
         let intervals: FxHashMap<u32, Vec<Interval<QueryMetadata>>> = records_by_file
             .par_iter()
@@ -374,7 +376,7 @@ impl Impg {
             paf_gzi_indices,
         })
     }
-    
+
     pub fn to_serializable(&self) -> SerializableImpg {
         let serializable_trees = self
             .trees
