@@ -302,22 +302,22 @@ impl Impg {
     ) -> Result<Self, ParseErr> {
         // Use par_iter to process the files in parallel and collect both pieces of information
         let (paf_files, paf_gzi_indices): (Vec<String>, Vec<Option<bgzf::gzi::Index>>) = records_by_file
-        .par_iter()
-        .map(|(_, paf_file)| {
-            let paf_gzi_index = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-                let paf_gzi_file = paf_file.to_owned() + ".gzi";
-                Some(
-                    bgzf::gzi::read(paf_gzi_file.clone())
-                        .unwrap_or_else(|_| panic!("Could not open {}", paf_gzi_file)),
-                )
-            } else {
-                None
-            };
-            
-            // Return both values as a tuple
-            (paf_file.clone(), paf_gzi_index)
-        })
-        .unzip(); // Separate the tuples into two vectors
+            .par_iter()
+            .map(|(_, paf_file)| {
+                let paf_gzi_index = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
+                    let paf_gzi_file = paf_file.to_owned() + ".gzi";
+                    Some(
+                        bgzf::gzi::read(paf_gzi_file.clone())
+                            .unwrap_or_else(|_| panic!("Could not open {}", paf_gzi_file)),
+                    )
+                } else {
+                    None
+                };
+                
+                // Return both values as a tuple
+                (paf_file.clone(), paf_gzi_index)
+            })
+            .unzip(); // Separate the tuples into two vectors
 
         let intervals: FxHashMap<u32, Vec<Interval<QueryMetadata>>> = records_by_file
             .par_iter()
