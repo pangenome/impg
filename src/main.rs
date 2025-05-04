@@ -12,6 +12,9 @@ use std::io::{self, BufReader, BufWriter};
 use std::num::NonZeroUsize;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use crate::paf::PafRecord;
+use rayon::prelude::*;
+
 
 /// Common options shared between all commands
 #[derive(Parser, Debug)]
@@ -397,30 +400,34 @@ fn generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize, custom_
 
     let num_paf_files = paf_files.len();
 
-    let mut records_by_file = Vec::with_capacity(paf_files.len());
-    for (file_index, paf_file) in paf_files.iter().enumerate() {
-        // print file path and num
-        debug!("Processing PAF file ({}/{}): {}", file_index + 1, num_paf_files, paf_file);
+    // Process PAF files in parallel using Rayon
+    let records_by_file: Vec<_> = (0..paf_files.len())
+        .into_par_iter()
+        .map(|file_index| -> io::Result<(Vec<PafRecord>, String, u32)> {
+            let paf_file = &paf_files[file_index];
+            // Print file path and num
+            debug!("Processing PAF file ({}/{}): {}", file_index + 1, num_paf_files, paf_file);
 
-        let file = File::open(paf_file)?;
-        let reader: Box<dyn io::Read> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-            Box::new(bgzf::MultithreadedReader::with_worker_count(
-                num_threads,
-                file,
-            ))
-        } else {
-            Box::new(file)
-        };
-        let reader = BufReader::new(reader);
-        let records = paf::parse_paf(reader).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Failed to parse PAF records from {}: {:?}", paf_file, e),
-            )
-        })?;
-        
-        records_by_file.push((records, paf_file.clone(), file_index as u32));
-    }
+            let file = File::open(paf_file)?;
+            let reader: Box<dyn io::Read> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
+                Box::new(bgzf::MultithreadedReader::with_worker_count(
+                    num_threads,
+                    file,
+                ))
+            } else {
+                Box::new(file)
+            };
+            let reader = BufReader::new(reader);
+            let records = paf::parse_paf(reader).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Failed to parse PAF records from {}: {:?}", paf_file, e),
+                )
+            })?;
+            
+            Ok((records, paf_file.clone(), file_index as u32))
+        })
+        .collect::<Result<Vec<_>, _>>()?;  // Propagate any errors
     
     let impg = Impg::from_multi_paf_records(&records_by_file).map_err(|e| {
         io::Error::new(
