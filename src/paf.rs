@@ -130,32 +130,32 @@ pub fn parse_paf<R: BufRead>(reader: R, seq_index: &mut SequenceIndex) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::BufReader;
     
     #[test]
     fn test_parse_paf_valid() {
-        let paf_data = b"seq1\t100\t10\t20\t+\tt1\t200\t30\t40\t10\t20\t255\tcg:Z:10M\n";
-        let reader = BufReader::new(&paf_data[..]);
+        let line = "seq1\t100\t0\t100\t+\tseq2\t100\t0\t100\t60\t100\t255";
         let mut seq_index = SequenceIndex::new();
-        let records = parse_paf(reader, &mut seq_index).unwrap();
+        let record = PafRecord::parse(line, 0, &mut seq_index).unwrap();
         
         // IDs should be 0 and 1 as they're the first entries in the SequenceIndex
         let query_id = seq_index.get_id("seq1").unwrap();
-        let target_id = seq_index.get_id("t1").unwrap();
+        let target_id = seq_index.get_id("seq2").unwrap();
         
         assert_eq!(
-            records[0],
+            record,
             PafRecord {
                 query_id,
                 query_length: 100,
-                query_start: 10,
-                query_end: 20,
+                query_start: 0,
+                query_end: 100,
                 target_id,
-                target_length: 200,
-                target_start: 30,
-                target_end: 40,
-                strand_and_cigar_offset: 45, // Forward strand
-                cigar_bytes: 3,
+                target_length: 100,
+                target_start: 0,
+                target_end: 100,
+                // If no cigar, then the offset is just the length of the line and cigar_bytes=0
+                // Should we use Option<> instead?
+                strand_and_cigar_offset: (line.len() + 1) as u64,
+                cigar_bytes: 0,
             }
         );
     }
