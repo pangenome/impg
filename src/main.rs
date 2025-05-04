@@ -54,6 +54,22 @@ enum Args {
         #[clap(short = 'w', long, value_parser)]
         window_size: usize,
 
+        /// Maximum distance between regions to merge
+        #[clap(short = 'd', long, value_parser, default_value_t = 100000)]
+        merge_distance: i32,
+
+        /// Maximum recursion depth for transitive overlaps (0 for no limit)
+        #[clap(short = 'm', long, value_parser, default_value_t = 2)]
+        max_depth: u16,
+
+        /// Minimum region size to consider for transitive queries
+        #[clap(short = 'l', long, value_parser, default_value_t = 10)]
+        min_transitive_len: i32,
+
+        /// Minimum distance between transitive ranges to consider on the same sequence
+        #[clap(long, value_parser, default_value_t = 10)]
+        min_distance_between_ranges: i32,
+
         /// Path to the file with sequence names to start with (one per line)
         #[clap(long, value_parser)]
         starting_sequences_file: Option<String>,
@@ -71,10 +87,6 @@ enum Args {
         )]
         selection_mode: String,
 
-        /// Maximum distance between regions to merge
-        #[clap(short = 'd', long, value_parser, default_value_t = 100000)]
-        merge_distance: i32,
-
         /// Minimum region size for missing regions
         #[clap(long, value_parser, default_value_t = 3000)]
         min_missing_size: i32,
@@ -82,18 +94,6 @@ enum Args {
         /// Minimum distance from sequence start/end - closer regions will be extended to the boundaries
         #[clap(long, value_parser, default_value_t = 3000)]
         min_boundary_distance: i32,
-
-        /// Maximum recursion depth for transitive overlaps (0 for no limit)
-        #[clap(short = 'm', long, value_parser, default_value_t = 2)]
-        max_depth: u16,
-
-        /// Minimum region size to consider for transitive queries
-        #[clap(short = 'l', long, value_parser, default_value_t = 10)]
-        min_transitive_len: i32,
-
-        /// Minimum distance between transitive ranges to consider on the same sequence
-        #[clap(long, value_parser, default_value_t = 10)]
-        min_distance_between_ranges: i32,
     },
     /// Query overlaps in the alignment
     Query {
@@ -146,14 +146,14 @@ fn main() -> io::Result<()> {
         Args::Partition {
             common,
             window_size,
-            starting_sequences_file,
-            selection_mode,
             merge_distance,
-            min_missing_size,
-            min_boundary_distance,
             max_depth,
             min_transitive_len,
             min_distance_between_ranges,
+            starting_sequences_file,
+            selection_mode,
+            min_missing_size,
+            min_boundary_distance,
         } => {
             validate_selection_mode(&selection_mode)?;
 
