@@ -147,8 +147,8 @@ pub fn partition_alignments(
             }
         }
 
-        for (seq_id, start, end) in windows.iter() {
-            let chrom = impg.seq_index.get_name(*seq_id).unwrap();
+        for (seq_id, start, end) in windows.drain(..) {
+            let chrom = impg.seq_index.get_name(seq_id).unwrap();
 
             if debug {
                 debug!(
@@ -197,9 +197,9 @@ pub fn partition_alignments(
             // Query overlaps for current window
             //let query_start = Instant::now();
             let mut overlaps = impg.query_transitive(
-                *seq_id,
-                *start,
-                *end,
+                seq_id,
+                start,
+                end,
                 Some(&masked_regions),
                 max_depth,
                 min_transitive_len,
@@ -313,9 +313,6 @@ pub fn partition_alignments(
                 );
             }
         }
-
-        // Clear existing windows but keep the allocation
-        windows.clear();
 
         //let window_start = Instant::now();
         select_and_window_sequences(
