@@ -297,13 +297,13 @@ pub struct Impg {
 
 impl Impg {
     pub fn from_multi_paf_records(
-        records_by_file: &[(Vec<PafRecord>, String, u32)],
+        records_by_file: &[(Vec<PafRecord>, String)],
         seq_index: SequenceIndex
     ) -> Result<Self, ParseErr> {
         let mut paf_files = Vec::with_capacity(records_by_file.len());
         let mut paf_gzi_indices = Vec::with_capacity(records_by_file.len());
         
-        for (_, paf_file, _) in records_by_file {
+        for (_, paf_file) in records_by_file {
             let paf_gzi_index = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
                 let paf_gzi_file = paf_file.to_owned() + ".gzi";
                 Some(
@@ -319,7 +319,8 @@ impl Impg {
 
         let intervals: FxHashMap<u32, Vec<Interval<QueryMetadata>>> = records_by_file
             .par_iter()
-            .flat_map(|(records, _, file_index)| {
+            .enumerate()  // Add enumeration to get the position as index
+            .flat_map(|(file_index, (records, _))| {
                 records
                     .par_iter()
                     .filter_map(|record| {
@@ -329,7 +330,7 @@ impl Impg {
                             target_end: record.target_end as i32,
                             query_start: record.query_start as i32,
                             query_end: record.query_end as i32,
-                            paf_file_index: *file_index,
+                            paf_file_index: file_index as u32,
                             strand_and_cigar_offset: record.strand_and_cigar_offset, // Already includes strand bit
                             cigar_bytes: record.cigar_bytes,
                         };

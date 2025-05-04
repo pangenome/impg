@@ -411,7 +411,7 @@ fn generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize, custom_
     // Process PAF files in parallel using Rayon
     let records_by_file: Vec<_> = (0..paf_files.len())
         .into_par_iter()
-        .map(|file_index| -> io::Result<(Vec<PafRecord>, String, u32)> {
+        .map(|file_index| -> io::Result<(Vec<PafRecord>, String)> {
             let paf_file = &paf_files[file_index];
             
             // Increment the counter and get the new value atomically
@@ -439,7 +439,7 @@ fn generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize, custom_
                 )
             })?;
             
-            Ok((records, paf_file.clone(), file_index as u32))
+            Ok((records, paf_file.clone()))
         })
         .collect::<Result<Vec<_>, _>>()?;  // Propagate any errors
     
