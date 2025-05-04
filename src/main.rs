@@ -17,8 +17,12 @@ use std::hash::{Hash, Hasher};
 #[derive(Parser, Debug)]
 struct CommonOpts {
     /// Path to the PAF files.
-    #[clap(short = 'p', long, value_parser, required = true, num_args = 1..)]
+    #[clap(short = 'p', long, value_parser, required = false, num_args = 1.., conflicts_with = "paf_list")]
     paf_files: Vec<String>,
+
+    /// Path to a text file containing paths to PAF files (one per line).
+    #[clap(long, value_parser, required = false, conflicts_with = "paf_files")]
+    paf_list: Option<String>,
 
     /// Path to the IMPG index file.
     #[clap(short = 'i', long, value_parser)]
@@ -281,28 +285,6 @@ fn validate_output_format(mode: &str) -> io::Result<()> {
     }
 }
 
-fn get_combined_index_filename(paf_files: &[String], custom_index: Option<&str>) -> String {
-    if let Some(index) = custom_index {
-        return index.to_string();
-    }
-    
-    if paf_files.len() == 1 {
-        format!("{}.impg", paf_files[0])
-    } else {
-        // For multiple files, create a hash of the sorted filenames
-        
-        let mut file_refs: Vec<&str> = paf_files.iter().map(|s| s.as_str()).collect();
-        file_refs.sort();
-        
-        let mut hasher = DefaultHasher::new();
-        for file in &file_refs {
-            file.hash(&mut hasher);
-        }
-        
-        format!("combined_{:016x}.impg", hasher.finish())
-    }
-}
-
 /// Initialize thread pool and load/generate index based on common options
 fn initialize_impg(common: &CommonOpts) -> io::Result<Impg> {
     // Initialize logger based on verbosity
@@ -320,12 +302,53 @@ fn initialize_impg(common: &CommonOpts) -> io::Result<Impg> {
         .build_global()
         .unwrap();
 
+    // Resolve the list of PAF files
+    let paf_files = resolve_paf_files(common)?;
+    info!("Found {} PAF files", paf_files.len());
+
     // Load or generate index
     if common.force_reindex {
-        generate_multi_index(&common.paf_files, common.num_threads, common.index.as_deref())
+        generate_multi_index(&paf_files, common.num_threads, common.index.as_deref())
     } else {
-        load_or_generate_multi_index(&common.paf_files, common.num_threads, common.index.as_deref())
+        load_or_generate_multi_index(&paf_files, common.num_threads, common.index.as_deref())
     }
+}
+
+/// Resolve the list of PAF files from either --paf-files or --paf-list
+fn resolve_paf_files(common: &CommonOpts) -> io::Result<Vec<String>> {
+    if !common.paf_files.is_empty() {
+        return Ok(common.paf_files.clone());
+    }
+    
+    if let Some(paf_list_file) = &common.paf_list {
+        // Read PAF files from the list file
+        let file = File::open(paf_list_file)?;
+        let reader = BufReader::new(file);
+        let mut paf_files = Vec::new();
+        
+        for line in reader.lines() {
+            let line = line?;
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                paf_files.push(trimmed.to_string());
+            }
+        }
+        
+        if paf_files.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("No valid PAF files found in list file: {}", paf_list_file),
+            ));
+        }
+        
+        return Ok(paf_files);
+    }
+    
+    // Neither paf_files nor paf_list provided
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "Either --paf-files or --paf-list must be provided",
+    ))
 }
 
 fn load_or_generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize, custom_index: Option<&str>) -> io::Result<Impg> {
@@ -473,6 +496,28 @@ fn parse_range(range_parts: &[&str]) -> io::Result<(i32, i32)> {
     }
 
     Ok((start, end))
+}
+
+fn get_combined_index_filename(paf_files: &[String], custom_index: Option<&str>) -> String {
+    if let Some(index) = custom_index {
+        return index.to_string();
+    }
+    
+    if paf_files.len() == 1 {
+        format!("{}.impg", paf_files[0])
+    } else {
+        // For multiple files, create a hash of the sorted filenames
+        
+        let mut file_refs: Vec<&str> = paf_files.iter().map(|s| s.as_str()).collect();
+        file_refs.sort();
+        
+        let mut hasher = DefaultHasher::new();
+        for file in &file_refs {
+            file.hash(&mut hasher);
+        }
+        
+        format!("combined_{:016x}.impg", hasher.finish())
+    }
 }
 
 fn perform_query(
