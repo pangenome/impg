@@ -94,6 +94,7 @@ pub fn partition_alignments(
 
     // Initialize masked regions
     let mut masked_regions: FxHashMap<u32, SortedRanges> = (0..impg.seq_index.len() as u32)
+        .into_par_iter()
         .map(|id| {
             let len = impg.seq_index.get_len_from_id(id).unwrap();
             (id, SortedRanges::new(len as i32, 0))
@@ -102,6 +103,7 @@ pub fn partition_alignments(
 
     // Initialize missing regions from sequence index
     let mut missing_regions: FxHashMap<u32, SortedRanges> = (0..impg.seq_index.len() as u32)
+        .into_par_iter()
         .map(|id| {
             let len = impg.seq_index.get_len_from_id(id).unwrap();
             let mut ranges = SortedRanges::new(len as i32, 0);
@@ -113,6 +115,7 @@ pub fn partition_alignments(
     let mut partition_num = 0;
     let mut total_partitioned_length = 0;
     let total_sequence_length: u64 = (0..impg.seq_index.len() as u32)
+        .into_par_iter()
         .filter_map(|id| impg.seq_index.get_len_from_id(id))
         .sum::<usize>() as u64;
 
@@ -251,10 +254,17 @@ pub fn partition_alignments(
                 );
                 //let merge2_time = merge2_start.elapsed();
 
+                //let write_start = Instant::now();
+                write_partition(partition_num, &overlaps, impg)?;
+                //let write_time = write_start.elapsed();
+
+                partition_num += 1;
+
                 //let calc_start = Instant::now();
                 // Calculate current partition length
+                let num_regions = overlaps.len();
                 let current_partition_length: u64 = overlaps
-                    .iter()
+                    .into_par_iter()
                     .map(|(interval, _, _)| (interval.last - interval.first).abs() as u64)
                     .sum();
                 total_partitioned_length += current_partition_length;
@@ -277,9 +287,9 @@ pub fn partition_alignments(
                 };
                 //let calc_time = calc_start.elapsed();
 
-                info!("  Writing partition {} with {} regions: {} bp this partition ({}), {} bp total ({}) - (query {}:{}-{}, len: {})", 
+                info!("  Wrote partition {} with {} regions: {} bp this partition ({}), {} bp total ({}) - (query {}:{}-{}, len: {})", 
                     partition_num,
-                    overlaps.len(),
+                    num_regions,
                     current_partition_length,   // Current partition size in bp
                     current_percentage_str,     // Current percentage of total sequence
                     total_partitioned_length,   // Total bp written so far
@@ -290,11 +300,6 @@ pub fn partition_alignments(
                     end - start,
                 );
 
-                //let write_start = Instant::now();
-                write_partition(partition_num, &overlaps, impg)?;
-                //let write_time = write_start.elapsed();
-
-                partition_num += 1;
 
                 //info!("  Partition {} timings: query={:?}, merge={:?}, merge2={:?}, extend={:?}, mask={:?}, calc={:?}, write={:?}",
                 //    partition_num, query_time, merge_time, merge2_time, extend_time, mask_time, calc_time, write_time);

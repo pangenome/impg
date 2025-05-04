@@ -718,6 +718,7 @@ fn print_stats(impg: &Impg) {
     // Basic stats
     let num_sequences = impg.seq_index.len();
     let total_sequence_length: usize = (0..num_sequences as u32)
+        .into_par_iter()
         .filter_map(|id| impg.seq_index.get_len_from_id(id))
         .sum();
     let num_overlaps = impg.trees.values().map(|tree| tree.len()).sum::<usize>();
@@ -736,7 +737,10 @@ fn print_stats(impg: &Impg) {
 
     if !entries.is_empty() {
         // Calculate mean and median overlaps
-        let sum: usize = entries.iter().map(|(_, count)| count).sum();
+        let sum: usize = entries
+            .par_iter()
+            .map(|(_, count)| count)
+            .sum();
         let mean = sum as f64 / entries.len() as f64;
 
         let median = if entries.is_empty() {
