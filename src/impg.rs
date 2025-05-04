@@ -86,37 +86,32 @@ pub struct QueryMetadata {
     target_end: i32,
     query_start: i32,
     query_end: i32,
-    strand_and_paf_file_index: u32, // Track strand and which PAF file this record belongs to
-    cigar_offset: u64,
+    paf_file_index: u32, // Track which PAF file this record belongs to
+    strand_and_cigar_offset: u64, // Track strand and cigar offset
     cigar_bytes: usize,
 }
 
 impl QueryMetadata {
     // Constants for bit manipulation
-    const STRAND_BIT: u32 = 0x80000000; // Most significant bit
-    const FILE_INDEX_MASK: u32 = 0x7FFFFFFF; // All bits except the most significant
+    const STRAND_BIT: u64 = 0x8000000000000000; // Most significant bit for u64
 
     // Getter for strand
     fn strand(&self) -> Strand {
-        if (self.strand_and_paf_file_index & Self::STRAND_BIT) != 0 {
+        if (self.strand_and_cigar_offset & Self::STRAND_BIT) != 0 {
             Strand::Reverse
         } else {
             Strand::Forward
         }
     }
+    // fn set_strand(&mut self, strand: Strand) {
+    //     match strand {
+    //         Strand::Forward => self.strand_and_cigar_offset &= !Self::STRAND_BIT,
+    //         Strand::Reverse => self.strand_and_cigar_offset |= Self::STRAND_BIT,
+    //     }
+    // }
 
-    // Getter for paf_file_index
-    fn paf_file_index(&self) -> u32 {
-        self.strand_and_paf_file_index & Self::FILE_INDEX_MASK
-    }
-
-    // Setter for combined field
-    fn set_strand_and_file_index(&mut self, strand: Strand, file_index: u32) {
-        let strand_bit = match strand {
-            Strand::Forward => 0,
-            Strand::Reverse => Self::STRAND_BIT,
-        };
-        self.strand_and_paf_file_index = (file_index & Self::FILE_INDEX_MASK) | strand_bit;
+    fn cigar_offset(&self) -> u64 {
+        self.strand_and_cigar_offset & !Self::STRAND_BIT
     }
 
     fn get_cigar_ops(
@@ -128,7 +123,7 @@ impl QueryMetadata {
         let mut cigar_buffer = vec![0; self.cigar_bytes];
 
         // Get the correct PAF file
-        let paf_file_index = self.paf_file_index() as usize;
+        let paf_file_index = self.paf_file_index as usize;
         let paf_file = &paf_files[paf_file_index];
 
         // Get reader and seek start of cigar str
@@ -138,12 +133,12 @@ impl QueryMetadata {
             
             let mut reader = bgzf::Reader::new(File::open(paf_file).unwrap());
             reader
-                .seek_by_uncompressed_position(paf_gzi_index.unwrap(), self.cigar_offset)
+                .seek_by_uncompressed_position(paf_gzi_index.unwrap(), self.cigar_offset())
                 .unwrap();
             reader.read_exact(&mut cigar_buffer).unwrap();
         } else {
             let mut reader = File::open(paf_file).unwrap();
-            reader.seek(SeekFrom::Start(self.cigar_offset)).unwrap();
+            reader.seek(SeekFrom::Start(self.cigar_offset())).unwrap();
             reader.read_exact(&mut cigar_buffer).unwrap();
         };
 
@@ -301,7 +296,10 @@ pub struct Impg {
 }
 
 impl Impg {
-    pub fn from_multi_paf_records(records_by_file: &[(Vec<PafRecord>, String, u32)]) -> Result<Self, ParseErr> {
+    pub fn from_multi_paf_records(
+        records_by_file: &[(Vec<PafRecord>, String, u32)],
+        seq_index: SequenceIndex
+    ) -> Result<Self, ParseErr> {
         let mut paf_files = Vec::with_capacity(records_by_file.len());
         let mut paf_gzi_indices = Vec::with_capacity(records_by_file.len());
         
@@ -319,41 +317,25 @@ impl Impg {
             paf_gzi_indices.push(paf_gzi_index);
         }
 
-        let mut seq_index = SequenceIndex::new();
-        for (records, _, _) in records_by_file {
-            for record in records {
-                seq_index.get_or_insert_id(&record.query_name, Some(record.query_length));
-                seq_index.get_or_insert_id(&record.target_name, Some(record.target_length));
-            }
-        }
-
         let intervals: FxHashMap<u32, Vec<Interval<QueryMetadata>>> = records_by_file
             .par_iter()
             .flat_map(|(records, _, file_index)| {
                 records
                     .par_iter()
                     .filter_map(|record| {
-                        let query_id = seq_index
-                            .get_id(&record.query_name)
-                            .expect("Query name not found in index");
-                        let target_id = seq_index
-                            .get_id(&record.target_name)
-                            .expect("Target name not found in index");
-
-                        let mut query_metadata = QueryMetadata {
-                            query_id,
+                        let query_metadata = QueryMetadata {
+                            query_id: record.query_id,
                             target_start: record.target_start as i32,
                             target_end: record.target_end as i32,
                             query_start: record.query_start as i32,
                             query_end: record.query_end as i32,
-                            strand_and_paf_file_index: 0, // Initialize with 0
-                            cigar_offset: record.cigar_offset,
+                            paf_file_index: *file_index,
+                            strand_and_cigar_offset: record.strand_and_cigar_offset, // Already includes strand bit
                             cigar_bytes: record.cigar_bytes,
                         };
-                        query_metadata.set_strand_and_file_index(record.strand, *file_index);
 
                         Some((
-                            target_id,
+                            record.target_id,
                             Interval {
                                 first: record.target_start as i32,
                                 last: record.target_end as i32,
@@ -390,10 +372,6 @@ impl Impg {
             paf_files,
             paf_gzi_indices,
         })
-    }
-    pub fn from_paf_records(records: &[PafRecord], paf_file: &str) -> Result<Self, ParseErr> {
-        let records_by_file = vec![(records.to_vec(), paf_file.to_string(), 0)];
-        Self::from_multi_paf_records(&records_by_file)
     }
     
     pub fn to_serializable(&self) -> SerializableImpg {
@@ -1373,24 +1351,26 @@ mod tests {
     #[test]
     fn test_parse_paf_valid() {
         let paf_data = b"seq1\t100\t10\t20\t+\tt1\t200\t30\t40\t10\t20\t255\tcg:Z:10M\n";
+        let mut seq_index = SequenceIndex::new();
+        let query_id = seq_index.get_or_insert_id("seq1", Some(100));
+        let target_id = seq_index.get_or_insert_id("t1", Some(200));
         let reader = BufReader::new(&paf_data[..]);
         let expected_records = vec![
             PafRecord {
-                query_name: "seq1".to_string(),
+                query_id: query_id,
                 query_length: 100,
                 query_start: 10,
                 query_end: 20,
-                target_name: "t1".to_string(),
+                target_id: target_id,
                 target_length: 200,
                 target_start: 30,
                 target_end: 40,
-                cigar_offset: 45,
+                strand_and_cigar_offset: 45, // Forward strand
                 cigar_bytes: 3,
-                strand: Strand::Forward,
             },
             // Add more test records as needed
         ];
-        let records = parse_paf(reader).unwrap();
+        let records = parse_paf(reader, &mut seq_index).unwrap();
         assert_eq!(records, expected_records);
     }
 }
