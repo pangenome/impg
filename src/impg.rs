@@ -296,7 +296,10 @@ pub struct Impg {
 }
 
 impl Impg {
-    pub fn from_multi_paf_records(records_by_file: &[(Vec<PafRecord>, String, u32)]) -> Result<Self, ParseErr> {
+    pub fn from_multi_paf_records(
+        records_by_file: &[(Vec<PafRecord>, String, u32)],
+        seq_index: SequenceIndex
+    ) -> Result<Self, ParseErr> {
         let mut paf_files = Vec::with_capacity(records_by_file.len());
         let mut paf_gzi_indices = Vec::with_capacity(records_by_file.len());
         
@@ -314,29 +317,14 @@ impl Impg {
             paf_gzi_indices.push(paf_gzi_index);
         }
 
-        let mut seq_index = SequenceIndex::new();
-        for (records, _, _) in records_by_file {
-            for record in records {
-                seq_index.get_or_insert_id(&record.query_name, Some(record.query_length));
-                seq_index.get_or_insert_id(&record.target_name, Some(record.target_length));
-            }
-        }
-
         let intervals: FxHashMap<u32, Vec<Interval<QueryMetadata>>> = records_by_file
             .par_iter()
             .flat_map(|(records, _, file_index)| {
                 records
                     .par_iter()
                     .filter_map(|record| {
-                        let query_id = seq_index
-                            .get_id(&record.query_name)
-                            .expect("Query name not found in index");
-                        let target_id = seq_index
-                            .get_id(&record.target_name)
-                            .expect("Target name not found in index");
-
                         let query_metadata = QueryMetadata {
-                            query_id,
+                            query_id: record.query_id,
                             target_start: record.target_start as i32,
                             target_end: record.target_end as i32,
                             query_start: record.query_start as i32,
@@ -347,7 +335,7 @@ impl Impg {
                         };
 
                         Some((
-                            target_id,
+                            record.target_id,
                             Interval {
                                 first: record.target_start as i32,
                                 last: record.target_end as i32,
@@ -384,10 +372,6 @@ impl Impg {
             paf_files,
             paf_gzi_indices,
         })
-    }
-    pub fn from_paf_records(records: &[PafRecord], paf_file: &str) -> Result<Self, ParseErr> {
-        let records_by_file = vec![(records.to_vec(), paf_file.to_string(), 0)];
-        Self::from_multi_paf_records(&records_by_file)
     }
     
     pub fn to_serializable(&self) -> SerializableImpg {
@@ -1367,14 +1351,17 @@ mod tests {
     #[test]
     fn test_parse_paf_valid() {
         let paf_data = b"seq1\t100\t10\t20\t+\tt1\t200\t30\t40\t10\t20\t255\tcg:Z:10M\n";
+        let mut seq_index = SequenceIndex::new();
+        let query_id = seq_index.get_or_insert_id("seq1", Some(100));
+        let target_id = seq_index.get_or_insert_id("t1", Some(200));
         let reader = BufReader::new(&paf_data[..]);
         let expected_records = vec![
             PafRecord {
-                query_name: "seq1".to_string(),
+                query_id: query_id,
                 query_length: 100,
                 query_start: 10,
                 query_end: 20,
-                target_name: "t1".to_string(),
+                target_id: target_id,
                 target_length: 200,
                 target_start: 30,
                 target_end: 40,
@@ -1383,7 +1370,7 @@ mod tests {
             },
             // Add more test records as needed
         ];
-        let records = parse_paf(reader).unwrap();
+        let records = parse_paf(reader, &mut seq_index).unwrap();
         assert_eq!(records, expected_records);
     }
 }

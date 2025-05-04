@@ -15,6 +15,8 @@ use std::hash::{Hash, Hasher};
 use crate::paf::PafRecord;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use impg::seqidx::SequenceIndex;
 
 /// Common options shared between all commands
 #[derive(Parser, Debug)]
@@ -402,6 +404,9 @@ fn generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize, custom_
     // Thread-safe counter for tracking progress
     let files_processed = AtomicUsize::new(0);
 
+    // Create a shared, thread-safe index
+    let seq_index = Arc::new(Mutex::new(SequenceIndex::new()));
+
     // Process PAF files in parallel using Rayon
     let records_by_file: Vec<_> = (0..paf_files.len())
         .into_par_iter()
@@ -423,7 +428,10 @@ fn generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize, custom_
                 Box::new(file)
             };
             let reader = BufReader::new(reader);
-            let records = paf::parse_paf(reader).map_err(|e| {
+
+            // Lock, get IDs, build records
+            let mut seq_index_guard = seq_index.lock().unwrap();
+            let records = paf::parse_paf(reader, &mut seq_index_guard).map_err(|e| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("Failed to parse PAF records from {}: {:?}", paf_file, e),
@@ -434,7 +442,13 @@ fn generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize, custom_
         })
         .collect::<Result<Vec<_>, _>>()?;  // Propagate any errors
     
-    let impg = Impg::from_multi_paf_records(&records_by_file).map_err(|e| {
+    // Take back ownership of the SequenceIndex
+    let seq_index = Arc::try_unwrap(seq_index)
+        .unwrap_or_else(|_| panic!("Failed to unwrap SequenceIndex"))
+        .into_inner()
+        .unwrap_or_else(|_| panic!("Failed to get inner SequenceIndex"));
+
+    let impg = Impg::from_multi_paf_records(&records_by_file, seq_index).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("Failed to create index: {:?}", e),
