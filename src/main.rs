@@ -395,9 +395,12 @@ fn generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize, custom_
     let index_file = get_combined_index_filename(paf_files, custom_index);
     info!("No index found at {}. Creating it now.", index_file);
 
+    let num_paf_files = paf_files.len();
+
     let mut records_by_file = Vec::with_capacity(paf_files.len());
     for (file_index, paf_file) in paf_files.iter().enumerate() {
-        debug!("Reading PAF file: {}", paf_file);
+        // print file path and num
+        debug!("Processing PAF file ({}/{}): {}", file_index + 1, num_paf_files, paf_file);
 
         let file = File::open(paf_file)?;
         let reader: Box<dyn io::Read> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
