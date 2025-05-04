@@ -374,14 +374,15 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
     let index_file_ts = index_file_metadata.modified().ok();
     
     if let Some(index_ts) = index_file_ts {
-        for paf_file in paf_files {
-            let paf_file_metadata = std::fs::metadata(paf_file)?;
-            if let Ok(paf_file_ts) = paf_file_metadata.modified() {
-                if paf_file_ts > index_ts {
-                    warn!("WARNING:\tPAF file {} has been modified since impg index creation.", paf_file);
+        paf_files.par_iter().for_each(|paf_file| {
+            if let Ok(paf_file_metadata) = std::fs::metadata(paf_file) {
+                if let Ok(paf_file_ts) = paf_file_metadata.modified() {
+                    if paf_file_ts > index_ts {
+                        warn!("WARNING:\tPAF file {} has been modified since impg index creation.", paf_file);
+                    }
                 }
             }
-        }
+        });
     }
 
     let file = File::open(index_file)?;
@@ -410,7 +411,7 @@ fn generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize, custom_
     // Process PAF files in parallel using Rayon
     let records_by_file: Vec<_> = (0..paf_files.len())
         .into_par_iter()
-        .map(|file_index| -> io::Result<(Vec<PafRecord>, String, u32)> {
+        .map(|file_index| -> io::Result<(Vec<PafRecord>, String)> {
             let paf_file = &paf_files[file_index];
             
             // Increment the counter and get the new value atomically
@@ -438,7 +439,7 @@ fn generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize, custom_
                 )
             })?;
             
-            Ok((records, paf_file.clone(), file_index as u32))
+            Ok((records, paf_file.clone()))
         })
         .collect::<Result<Vec<_>, _>>()?;  // Propagate any errors
     
@@ -717,6 +718,7 @@ fn print_stats(impg: &Impg) {
     // Basic stats
     let num_sequences = impg.seq_index.len();
     let total_sequence_length: usize = (0..num_sequences as u32)
+        .into_par_iter()
         .filter_map(|id| impg.seq_index.get_len_from_id(id))
         .sum();
     let num_overlaps = impg.trees.values().map(|tree| tree.len()).sum::<usize>();
@@ -735,7 +737,10 @@ fn print_stats(impg: &Impg) {
 
     if !entries.is_empty() {
         // Calculate mean and median overlaps
-        let sum: usize = entries.iter().map(|(_, count)| count).sum();
+        let sum: usize = entries
+            .par_iter()
+            .map(|(_, count)| count)
+            .sum();
         let mean = sum as f64 / entries.len() as f64;
 
         let median = if entries.is_empty() {

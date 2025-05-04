@@ -297,29 +297,32 @@ pub struct Impg {
 
 impl Impg {
     pub fn from_multi_paf_records(
-        records_by_file: &[(Vec<PafRecord>, String, u32)],
+        records_by_file: &[(Vec<PafRecord>, String)],
         seq_index: SequenceIndex
     ) -> Result<Self, ParseErr> {
-        let mut paf_files = Vec::with_capacity(records_by_file.len());
-        let mut paf_gzi_indices = Vec::with_capacity(records_by_file.len());
-        
-        for (_, paf_file, _) in records_by_file {
-            let paf_gzi_index = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-                let paf_gzi_file = paf_file.to_owned() + ".gzi";
-                Some(
-                    bgzf::gzi::read(paf_gzi_file.clone())
-                        .unwrap_or_else(|_| panic!("Could not open {}", paf_gzi_file)),
-                )
-            } else {
-                None
-            };
-            paf_files.push(paf_file.clone());
-            paf_gzi_indices.push(paf_gzi_index);
-        }
+        // Use par_iter to process the files in parallel and collect both pieces of information
+        let (paf_files, paf_gzi_indices): (Vec<String>, Vec<Option<bgzf::gzi::Index>>) = records_by_file
+            .par_iter()
+            .map(|(_, paf_file)| {
+                let paf_gzi_index = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
+                    let paf_gzi_file = paf_file.to_owned() + ".gzi";
+                    Some(
+                        bgzf::gzi::read(paf_gzi_file.clone())
+                            .unwrap_or_else(|_| panic!("Could not open {}", paf_gzi_file)),
+                    )
+                } else {
+                    None
+                };
+                
+                // Return both values as a tuple
+                (paf_file.clone(), paf_gzi_index)
+            })
+            .unzip(); // Separate the tuples into two vectors
 
         let intervals: FxHashMap<u32, Vec<Interval<QueryMetadata>>> = records_by_file
             .par_iter()
-            .flat_map(|(records, _, file_index)| {
+            .enumerate()  // Add enumeration to get the position as index
+            .flat_map(|(file_index, (records, _))| {
                 records
                     .par_iter()
                     .filter_map(|record| {
@@ -329,7 +332,7 @@ impl Impg {
                             target_end: record.target_end as i32,
                             query_start: record.query_start as i32,
                             query_end: record.query_end as i32,
-                            paf_file_index: *file_index,
+                            paf_file_index: file_index as u32,
                             strand_and_cigar_offset: record.strand_and_cigar_offset, // Already includes strand bit
                             cigar_bytes: record.cigar_bytes,
                         };
@@ -360,7 +363,7 @@ impl Impg {
             });
 
         let trees: TreeMap = intervals
-            .into_iter()
+            .into_par_iter()
             .map(|(target_id, interval_nodes)| {
                 (target_id, BasicCOITree::new(interval_nodes.as_slice()))
             })
@@ -373,7 +376,7 @@ impl Impg {
             paf_gzi_indices,
         })
     }
-    
+
     pub fn to_serializable(&self) -> SerializableImpg {
         let serializable_trees = self
             .trees
@@ -396,22 +399,23 @@ impl Impg {
     pub fn from_multi_paf_and_serializable(paf_files: &[String], serializable: SerializableImpg) -> Self {
         let (serializable_trees, seq_index) = serializable;
         
-        let mut paf_gzi_indices = Vec::with_capacity(paf_files.len());
-        for paf_file in paf_files {
-            let paf_gzi_index = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-                let paf_gzi_file = paf_file.to_owned() + ".gzi";
-                Some(
-                    bgzf::gzi::read(paf_gzi_file.clone())
-                        .unwrap_or_else(|_| panic!("Could not open {}", paf_gzi_file)),
-                )
-            } else {
-                None
-            };
-            paf_gzi_indices.push(paf_gzi_index);
-        }
+        let paf_gzi_indices: Vec<_> = paf_files
+            .par_iter()
+            .map(|paf_file| {
+                if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
+                    let paf_gzi_file = paf_file.to_owned() + ".gzi";
+                    Some(
+                        bgzf::gzi::read(paf_gzi_file.clone())
+                            .unwrap_or_else(|_| panic!("Could not open {}", paf_gzi_file)),
+                    )
+                } else {
+                    None
+                }
+            })
+            .collect();
         
-        let trees = serializable_trees
-            .into_iter()
+        let trees: TreeMap = serializable_trees
+            .into_par_iter()
             .map(|(target_id, intervals)| {
                 let tree = BasicCOITree::new(
                     intervals
