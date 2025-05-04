@@ -374,14 +374,15 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
     let index_file_ts = index_file_metadata.modified().ok();
     
     if let Some(index_ts) = index_file_ts {
-        for paf_file in paf_files {
-            let paf_file_metadata = std::fs::metadata(paf_file)?;
-            if let Ok(paf_file_ts) = paf_file_metadata.modified() {
-                if paf_file_ts > index_ts {
-                    warn!("WARNING:\tPAF file {} has been modified since impg index creation.", paf_file);
+        paf_files.par_iter().for_each(|paf_file| {
+            if let Ok(paf_file_metadata) = std::fs::metadata(paf_file) {
+                if let Ok(paf_file_ts) = paf_file_metadata.modified() {
+                    if paf_file_ts > index_ts {
+                        warn!("WARNING:\tPAF file {} has been modified since impg index creation.", paf_file);
+                    }
                 }
             }
-        }
+        });
     }
 
     let file = File::open(index_file)?;
