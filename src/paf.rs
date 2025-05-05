@@ -136,16 +136,14 @@ mod tests {
         // IDs should be 0 and 1 as they're the first entries in the SequenceIndex
         let query_id = seq_index.get_id("seq1").unwrap();
         let target_id = seq_index.get_id("seq2").unwrap();
-        
+
         assert_eq!(
             record,
             PartialPafRecord {
                 query_id,
-                query_length: 100,
                 query_start: 0,
                 query_end: 100,
                 target_id,
-                target_length: 100,
                 target_start: 0,
                 target_end: 100,
                 // If no cigar, then the offset is just the length of the line and cigar_bytes=0

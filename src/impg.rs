@@ -1360,13 +1360,11 @@ mod tests {
         let target_id = seq_index.get_or_insert_id("t1", Some(200));
         let reader = BufReader::new(&paf_data[..]);
         let expected_records = vec![
-            PafRecord {
+            PartialPafRecord {
                 query_id: query_id,
-                query_length: 100,
                 query_start: 10,
                 query_end: 20,
                 target_id: target_id,
-                target_length: 200,
                 target_start: 30,
                 target_end: 40,
                 strand_and_cigar_offset: 45, // Forward strand
