@@ -1,4 +1,4 @@
-use crate::paf::{PafRecord, ParseErr, Strand};
+use crate::paf::{PartialPafRecord, ParseErr, Strand};
 use crate::seqidx::SequenceIndex;
 use coitrees::{BasicCOITree, Interval, IntervalTree};
 use log::debug;
@@ -297,7 +297,7 @@ pub struct Impg {
 
 impl Impg {
     pub fn from_multi_paf_records(
-        records_by_file: &[(Vec<PafRecord>, String)],
+        records_by_file: &[(Vec<PartialPafRecord>, String)],
         seq_index: SequenceIndex
     ) -> Result<Self, ParseErr> {
         // Use par_iter to process the files in parallel and collect both pieces of information

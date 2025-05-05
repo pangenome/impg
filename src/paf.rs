@@ -4,13 +4,11 @@ use std::num::ParseIntError;
 use crate::seqidx::SequenceIndex;
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct PafRecord {
+pub struct PartialPafRecord {
     pub query_id: u32,
-    pub query_length: usize,
     pub query_start: usize,
     pub query_end: usize,
     pub target_id: u32,
-    pub target_length: usize,
     pub target_start: usize,
     pub target_end: usize,
     pub strand_and_cigar_offset: u64, // Track strand and cigar offset
@@ -25,7 +23,7 @@ pub enum Strand {
     Reverse,
 }
 
-impl PafRecord {
+impl PartialPafRecord {
     const STRAND_BIT: u64 = 0x8000000000000000; // Most significant bit for u64
 
     pub fn strand(&self) -> Strand {
@@ -86,11 +84,9 @@ impl PafRecord {
         // Create the record and set strand
         let mut record = Self {
             query_id,
-            query_length,
             query_start,
             query_end,
             target_id,
-            target_length,
             target_start,
             target_end,
             strand_and_cigar_offset: cigar_offset,
@@ -113,12 +109,12 @@ pub enum ParseErr {
     InvalidFormat(String),
 }
 
-pub fn parse_paf<R: BufRead>(reader: R, seq_index: &mut SequenceIndex) -> Result<Vec<PafRecord>, ParseErr> {
+pub fn parse_paf<R: BufRead>(reader: R, seq_index: &mut SequenceIndex) -> Result<Vec<PartialPafRecord>, ParseErr> {
     let mut bytes_read: u64 = 0;
     let mut records = Vec::new();
     for line_result in reader.lines() {
         let line = line_result.map_err(ParseErr::IoError)?;
-        let record = PafRecord::parse(&line, bytes_read, seq_index)?;
+        let record = PartialPafRecord::parse(&line, bytes_read, seq_index)?;
         records.push(record);
 
         // Size of line plus newline
@@ -135,7 +131,7 @@ mod tests {
     fn test_parse_paf_valid() {
         let line = "seq1\t100\t0\t100\t+\tseq2\t100\t0\t100\t60\t100\t255";
         let mut seq_index = SequenceIndex::new();
-        let record = PafRecord::parse(line, 0, &mut seq_index).unwrap();
+        let record = PartialPafRecord::parse(line, 0, &mut seq_index).unwrap();
         
         // IDs should be 0 and 1 as they're the first entries in the SequenceIndex
         let query_id = seq_index.get_id("seq1").unwrap();
@@ -143,7 +139,7 @@ mod tests {
         
         assert_eq!(
             record,
-            PafRecord {
+            PartialPafRecord {
                 query_id,
                 query_length: 100,
                 query_start: 0,
@@ -164,7 +160,7 @@ mod tests {
     fn test_parse_paf_valid_2() {
         let line = "seq1\t100\t0\t100\t+\tseq2\t100\t0\t100\t60\t100\t255\tcg:Z:10=";
         let mut seq_index = SequenceIndex::new();
-        assert!(PafRecord::parse(line, 0, &mut seq_index).is_ok());
+        assert!(PartialPafRecord::parse(line, 0, &mut seq_index).is_ok());
     }
 
     #[test]
@@ -172,7 +168,7 @@ mod tests {
         // it's got a character 'z' in the length field
         let line = "seq1\t100\t0\t100\t+\tseq2\t100\tz\t100\t60\t100\t255\tcg:Z:10M";
         let mut seq_index = SequenceIndex::new();
-        assert!(PafRecord::parse(line, 0, &mut seq_index).is_err());
+        assert!(PartialPafRecord::parse(line, 0, &mut seq_index).is_err());
     }
 
     #[test]
@@ -180,6 +176,6 @@ mod tests {
         // it's got Q in the CIGAR string
         let line = "seq1\t100\t0\t100\t+\tseq2\t100\tz\t100\t60\t100\t255\tcg:Z:10Q";
         let mut seq_index = SequenceIndex::new();
-        assert!(PafRecord::parse(line, 0, &mut seq_index).is_err());
+        assert!(PartialPafRecord::parse(line, 0, &mut seq_index).is_err());
     }
 }
