@@ -117,13 +117,13 @@ enum Args {
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
 
-        /// Maximum distance between regions to merge for BED output
+        /// Maximum distance between regions to merge (applies only to BED output)
         #[clap(short = 'd', long, value_parser, conflicts_with = "no_merge_bed", default_value_t = 0)]
         merge_distance: i32,
 
-        /// Disable merging for BED output
+        /// Disable merging for all output formats
         #[clap(long, action, conflicts_with = "merge_distance")]
-        no_merge_bed: bool,
+        no_merge: bool,
 
         /// Enable transitive queries
         #[clap(short = 'x', long, action)]
@@ -191,7 +191,7 @@ fn main() -> io::Result<()> {
             target_bed,
             output_format,
             merge_distance,
-            no_merge_bed,
+            no_merge,
             transitive,
             transitive_bfs,
             max_depth,
@@ -219,14 +219,16 @@ fn main() -> io::Result<()> {
                 match output_format.as_str() {
                     "bedpe" => {
                         // Skip the first element (the input range) for BEDPE output
-                        output_results_bedpe(&impg, results.into_iter().skip(1), None);
+                        results.remove(0);
+                        output_results_bedpe(&impg, &mut results, None, !no_merge);
                     },
                     "paf" => {
                         // Skip the first element (the input range) for PAF output
-                        output_results_paf(&impg, results.into_iter().skip(1), None);
+                        results.remove(0);
+                        output_results_paf(&impg, &mut results, None, !no_merge);
                     },
                     _ => { // 'auto' or 'bed'
-                        let merge_distance = if no_merge_bed { -1 } else { merge_distance };
+                        let merge_distance = if no_merge { -1 } else { merge_distance };
 
                         // BED format - include the first element
                         output_results_bed(&impg, &mut results, merge_distance);
@@ -250,18 +252,20 @@ fn main() -> io::Result<()> {
                     // Output results based on the format
                     match output_format.as_str() {
                         "bed" => {
-                            let merge_distance = if no_merge_bed { -1 } else { merge_distance };
+                            let merge_distance = if no_merge { -1 } else { merge_distance };
 
                             // BED format - include the first element
                             output_results_bed(&impg, &mut results, merge_distance);
                         },
                         "paf" => {
                             // Skip the first element (the input range) for PAF output
-                            output_results_paf(&impg, results.into_iter().skip(1), name);
+                            results.remove(0);
+                            output_results_paf(&impg, &mut results, name, !no_merge);
                         },
                         _ => { // 'auto' or 'bedpe'
                             // Skip the first element (the input range) for BEDPE output
-                            output_results_bedpe(&impg, results.into_iter().skip(1), name);                            
+                            results.remove(0);
+                            output_results_bedpe(&impg, &mut results, name, !no_merge);                 
                         }
                     }
                 }
@@ -667,10 +671,12 @@ fn merge_bed_intervals(results: &mut Vec<AdjustedInterval>, merge_distance: i32)
     }
 }
 
-fn output_results_bedpe<I>(impg: &Impg, results: I, name: Option<String>)
-where
-    I: Iterator<Item = AdjustedInterval>,
-{
+fn output_results_bedpe(impg: &Impg, results: &mut Vec<AdjustedInterval>, name: Option<String>, merge: bool) {
+    // Merge if requested
+    if merge {
+        merge_adjusted_intervals(results);
+    }
+
     for (overlap_query, _, overlap_target) in results {
         let query_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
         let target_name = impg.seq_index.get_name(overlap_target.metadata).unwrap();
@@ -693,10 +699,12 @@ where
     }
 }
 
-fn output_results_paf<I>(impg: &Impg, results: I, name: Option<String>)
-where
-    I: Iterator<Item = AdjustedInterval>,
-{
+fn output_results_paf(impg: &Impg, results: &mut Vec<AdjustedInterval>, name: Option<String>, merge: bool) {       
+    // Merge if requested
+    if merge {
+        merge_adjusted_intervals(results);
+    }
+
     for (overlap_query, cigar, overlap_target) in results {
         let query_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
         let target_name = impg.seq_index.get_name(overlap_target.metadata).unwrap();
@@ -761,6 +769,107 @@ where
                                 target_name, target_length, overlap_target.first, overlap_target.last,
                                 matches, block_len, 255, gi_str, bi_str, cigar_str),
         }
+    }
+}
+
+// Function to merge perfectly contiguous adjusted intervals
+fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>) {
+    if results.len() > 1 {
+        // Sort by query ID, query position, target ID, target position
+        results.par_sort_by_key(|(query_interval, _, target_interval)| {
+            let query_forward = query_interval.first < query_interval.last;
+            
+            (
+                query_interval.metadata,                // Group by query sequence ID
+                query_forward,                          // Group by orientation (keep same orientations together)
+                if query_forward {                      // Use appropriate position based on orientation
+                    query_interval.first                // Forward: use start position
+                } else {
+                    query_interval.last                 // Reverse: use end position 
+                },
+                target_interval.metadata,               // Group by target sequence ID
+                target_interval.first,                  // Target always forward
+            )
+        });
+
+        // Create a new vector to store merged results
+        let mut merged_results = Vec::with_capacity(results.len());
+        
+        // Start with the first element
+        let (mut current_query, mut current_cigar, mut current_target) = results[0].clone();
+        
+        // Iterate through remaining elements
+        for i in 1..results.len() {
+            let (next_query, next_cigar, next_target) = &results[i];
+            
+            // Determine orientations
+            let query_forward = current_query.first <= current_query.last;
+            let next_query_forward = next_query.first <= next_query.last;
+            
+            let target_forward = current_target.first <= current_target.last;
+            let next_target_forward = next_target.first <= next_target.last;
+            if !target_forward || !next_target_forward {
+               panic!("Target intervals should always be in forward!");
+            }
+
+            // Check contiguity
+            let (query_contiguous, target_contiguous) = if query_forward {
+                (current_query.last == next_query.first, current_target.last == next_target.first)
+            } else {
+                (current_query.first == next_query.last, current_target.first == next_target.last)
+            };
+
+            // Check if sequences match, orientations are the same, and intervals are contiguous
+            if current_query.metadata != next_query.metadata || current_target.metadata != next_target.metadata || query_forward != next_query_forward || !query_contiguous || !target_contiguous {
+                // Store current interval
+                merged_results.push((current_query, current_cigar, current_target));
+                // Clone the next as the new current
+                (current_query, current_cigar, current_target) = results[i].clone();
+                continue;
+            }
+            
+            debug!(
+                "Merge! Current/Next query: {}:{}-{} ({}) / {}:{}-{} ({}); Current?Next target: {}:{}-{} ({}) /{}:{}-{} ({})",
+                current_query.metadata,
+                current_query.first,
+                current_query.last,
+                query_forward,
+                next_query.metadata,
+                next_query.first,
+                next_query.last,
+                next_query_forward,
+                current_target.metadata,
+                current_target.first,
+                current_target.last,
+                target_forward,
+                next_target.metadata,
+                next_target.first,
+                next_target.last,
+                next_target_forward,
+            );
+
+            // Merge intervals and CIGAR operations
+            if query_forward {
+                current_query.last = next_query.last;
+                current_target.last = next_target.last;
+
+                current_cigar.extend_from_slice(next_cigar); 
+            } else {
+                current_query.first = next_query.first;
+                current_target.first = next_target.first;
+
+                let mut new_cigar = Vec::with_capacity(current_cigar.len() + next_cigar.len());
+                new_cigar.extend_from_slice(&next_cigar);
+                new_cigar.extend_from_slice(&current_cigar);
+                current_cigar = new_cigar;
+            }
+        }
+        
+        // Don't forget to add the last current element
+        merged_results.push((current_query, current_cigar, current_target));
+        
+        // Replace original results with merged results
+        *results = merged_results;
     }
 }
 
