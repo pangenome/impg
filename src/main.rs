@@ -12,7 +12,7 @@ use std::io::{self, BufReader, BufWriter};
 use std::num::NonZeroUsize;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use crate::paf::PafRecord;
+use crate::paf::PartialPafRecord;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -429,7 +429,7 @@ fn generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize, custom_
     // Process PAF files in parallel using Rayon
     let records_by_file: Vec<_> = (0..paf_files.len())
         .into_par_iter()
-        .map(|file_index| -> io::Result<(Vec<PafRecord>, String)> {
+        .map(|file_index| -> io::Result<(Vec<PartialPafRecord>, String)> {
             let paf_file = &paf_files[file_index];
             
             // Increment the counter and get the new value atomically
