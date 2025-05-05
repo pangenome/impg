@@ -829,7 +829,7 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>) {
             }
             
             debug!(
-                "Merge! Current/Next query: {}:{}-{} ({}) / {}:{}-{} ({}); Current?Next target: {}:{}-{} ({}) /{}:{}-{} ({})",
+                "Merge! Current/Next query: {}:{}-{} ({}) / {}:{}-{} ({}); Current/Next target: {}:{}-{} ({}) /{}:{}-{} ({})",
                 current_query.metadata,
                 current_query.first,
                 current_query.last,
