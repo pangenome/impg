@@ -635,11 +635,15 @@ fn output_results_bed(impg: &Impg, results: &mut Vec<AdjustedInterval>, merge_di
 // New helper function to merge BED intervals
 fn merge_bed_intervals(results: &mut Vec<AdjustedInterval>, merge_distance: i32) {
     if results.len() > 1 && merge_distance >= 0 {
-        // Sort by sequence ID and start position
+        // Sort by sequence ID, strand orientation, and start position
         results.par_sort_by_key(|(query_interval, _, _)| {
+            let is_forward = query_interval.first <= query_interval.last;
+            let start = if is_forward { query_interval.first } else { query_interval.last };
+            
             (
-                query_interval.metadata,
-                std::cmp::min(query_interval.first, query_interval.last),
+                query_interval.metadata,  // First sort by sequence ID
+                is_forward,               // Then by strand orientation
+                start                     // Finally by actual start position
             )
         });
 
@@ -648,19 +652,42 @@ fn merge_bed_intervals(results: &mut Vec<AdjustedInterval>, merge_distance: i32)
             let (curr_interval, _, _) = &results[write_idx];
             let (next_interval, _, _) = &results[read_idx];
 
-            let curr_min = std::cmp::min(curr_interval.first, curr_interval.last);
-            let curr_max = std::cmp::max(curr_interval.first, curr_interval.last);
-            let next_min = std::cmp::min(next_interval.first, next_interval.last);
-            let next_max = std::cmp::max(next_interval.first, next_interval.last);
+            // Check if both intervals are on the same sequence and have same orientation
+            let curr_is_forward = curr_interval.first <= curr_interval.last;
+            let next_is_forward = next_interval.first <= next_interval.last;
+            
+            // Extract actual start/end positions based on orientation
+            let (curr_start, curr_end) = if curr_is_forward {
+                (curr_interval.first, curr_interval.last)
+            } else {
+                (curr_interval.last, curr_interval.first)
+            };
+            
+            let (next_start, next_end) = if next_is_forward {
+                (next_interval.first, next_interval.last)
+            } else {
+                (next_interval.last, next_interval.first)
+            };
 
-            if curr_interval.metadata != next_interval.metadata || next_min > curr_max + merge_distance {
+            // Only merge if same sequence, same orientation, and within merge distance
+            if curr_interval.metadata != next_interval.metadata || 
+               curr_is_forward != next_is_forward ||
+               next_start > curr_end + merge_distance {
                 write_idx += 1;
                 if write_idx != read_idx {
                     results.swap(write_idx, read_idx);
                 }
             } else {
-                results[write_idx].0.first = curr_min.min(next_min);
-                results[write_idx].0.last = curr_max.max(next_max);
+                // Merge while preserving orientation
+                if curr_is_forward {
+                    // Forward orientation
+                    results[write_idx].0.first = curr_start.min(next_start);
+                    results[write_idx].0.last = curr_end.max(next_end);
+                } else {
+                    // Reverse orientation
+                    results[write_idx].0.first = curr_end.max(next_end);
+                    results[write_idx].0.last = curr_start.min(next_start);
+                }
             }
         }
         results.truncate(write_idx + 1);
