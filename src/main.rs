@@ -799,7 +799,10 @@ fn output_results_paf(impg: &Impg, results: &mut Vec<AdjustedInterval>, name: Op
     }
 }
 
-// Function to merge perfectly contiguous adjusted intervals
+use impg::paf::Strand;
+use impg::impg::CigarOp;
+
+// Function to merge perfectly contiguous or overlapping adjusted intervals
 fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>) {
     if results.len() > 1 {
         // Sort by query ID, query position, target ID, target position
@@ -839,57 +842,137 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>) {
                panic!("Target intervals should always be in forward!");
             }
 
-            // Check contiguity
-            let (query_contiguous, target_contiguous) = if query_forward {
-                (current_query.last == next_query.first, current_target.last == next_target.first)
-            } else {
-                (current_query.first == next_query.last, current_target.first == next_target.last)
-            };
-
-            // Check if sequences match, orientations are the same, and intervals are contiguous
-            if current_query.metadata != next_query.metadata || current_target.metadata != next_target.metadata || query_forward != next_query_forward || !query_contiguous || !target_contiguous {
+            // Check if sequences match and orientations are the same
+            if current_query.metadata != next_query.metadata || 
+               current_target.metadata != next_target.metadata || 
+               query_forward != next_query_forward {
                 // Store current interval
                 merged_results.push((current_query, current_cigar, current_target));
                 // Clone the next as the new current
                 (current_query, current_cigar, current_target) = results[i].clone();
                 continue;
             }
-            
-            debug!(
-                "Merge! Current/Next query: {}:{}-{} ({}) / {}:{}-{} ({}); Current/Next target: {}:{}-{} ({}) /{}:{}-{} ({})",
-                current_query.metadata,
-                current_query.first,
-                current_query.last,
-                query_forward,
-                next_query.metadata,
-                next_query.first,
-                next_query.last,
-                next_query_forward,
-                current_target.metadata,
-                current_target.first,
-                current_target.last,
-                target_forward,
-                next_target.metadata,
-                next_target.first,
-                next_target.last,
-                next_target_forward,
-            );
 
-            // Merge intervals and CIGAR operations
-            if query_forward {
-                current_query.last = next_query.last;
-                current_target.last = next_target.last;
-
-                current_cigar.extend_from_slice(next_cigar); 
+            // Check contiguity or overlap
+            let (query_contiguous, target_contiguous, query_overlap, target_overlap) = if query_forward {
+                let q_contig = current_query.last == next_query.first;
+                let t_contig = current_target.last == next_target.first;
+                let q_overlap = current_query.last > next_query.first;
+                let t_overlap = current_target.last > next_target.first;
+                (q_contig, t_contig, q_overlap, t_overlap)
             } else {
-                current_query.first = next_query.first;
-                current_target.first = next_target.first;
+                let q_contig = current_query.first == next_query.last;
+                let t_contig = current_target.first == next_target.last;
+                let q_overlap = current_query.first < next_query.last;
+                let t_overlap = current_target.first < next_target.last;
+                (q_contig, t_contig, q_overlap, t_overlap)
+            };
 
-                let mut new_cigar = Vec::with_capacity(current_cigar.len() + next_cigar.len());
-                new_cigar.extend_from_slice(&next_cigar);
-                new_cigar.extend_from_slice(&current_cigar);
-                current_cigar = new_cigar;
+            // Handle perfect contiguity (existing logic)
+            if query_contiguous && target_contiguous {
+                debug!(
+                    "Merge contiguous! Current/Next query: {}:{}-{} ({}) / {}:{}-{} ({}); Current/Next target: {}:{}-{} ({}) /{}:{}-{} ({})",
+                    current_query.metadata,
+                    current_query.first,
+                    current_query.last,
+                    query_forward,
+                    next_query.metadata,
+                    next_query.first,
+                    next_query.last,
+                    next_query_forward,
+                    current_target.metadata,
+                    current_target.first,
+                    current_target.last,
+                    target_forward,
+                    next_target.metadata,
+                    next_target.first,
+                    next_target.last,
+                    next_target_forward,
+                );
+
+                // Merge intervals and CIGAR operations
+                if query_forward {
+                    current_query.last = next_query.last;
+                    current_target.last = next_target.last;
+                    current_cigar.extend_from_slice(next_cigar); 
+                } else {
+                    current_query.first = next_query.first;
+                    current_target.first = next_target.first;
+
+                    let mut new_cigar = Vec::with_capacity(current_cigar.len() + next_cigar.len());
+                    new_cigar.extend_from_slice(&next_cigar);
+                    new_cigar.extend_from_slice(&current_cigar);
+                    current_cigar = new_cigar;
+                }
+                continue;
             }
+
+            // Handle overlap case
+            if query_overlap && target_overlap {
+                // Calculate overlap lengths
+                let (query_overlap_len, target_overlap_len) = if query_forward {
+                    (current_query.last - next_query.first, current_target.last - next_target.first)
+                } else {
+                    (next_query.last - current_query.first, next_target.last - current_target.first)
+                };
+
+                // Check if overlaps are proportional (same alignment)
+                if query_overlap_len > 0 && target_overlap_len > 0 {
+                    // Check if CIGAR strings are identical in the overlap region
+                    let overlap_matches = check_cigar_overlap_match(
+                        &current_cigar,
+                        &next_cigar,
+                        query_overlap_len,
+                        query_forward
+                    );
+
+                    if overlap_matches {
+                        debug!(
+                            "Merge overlapping! Overlap: query={}, target={}, Current/Next query: {}:{}-{} ({}) / {}:{}-{} ({}); Current/Next target: {}:{}-{} ({}) /{}:{}-{} ({})",
+                            query_overlap_len,
+                            target_overlap_len,
+                            current_query.metadata,
+                            current_query.first,
+                            current_query.last,
+                            query_forward,
+                            next_query.metadata,
+                            next_query.first,
+                            next_query.last,
+                            next_query_forward,
+                            current_target.metadata,
+                            current_target.first,
+                            current_target.last,
+                            target_forward,
+                            next_target.metadata,
+                            next_target.first,
+                            next_target.last,
+                            next_target_forward,
+                        );
+
+                        // Trim the overlap from the next interval and merge
+                        let trimmed_next_cigar = trim_cigar_prefix(&next_cigar, query_overlap_len, target_overlap_len);
+
+                        if query_forward {
+                            current_query.last = next_query.last;
+                            current_target.last = next_target.last;
+                            current_cigar.extend(trimmed_next_cigar);
+                        } else {
+                            current_query.first = next_query.first;
+                            current_target.first = next_target.first;
+
+                            let mut new_cigar = Vec::with_capacity(trimmed_next_cigar.len() + current_cigar.len());
+                            new_cigar.extend(trimmed_next_cigar);
+                            new_cigar.extend_from_slice(&current_cigar);
+                            current_cigar = new_cigar;
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            // No merge possible - store current and move to next
+            merged_results.push((current_query, current_cigar, current_target));
+            (current_query, current_cigar, current_target) = results[i].clone();
         }
         
         // Don't forget to add the last current element
@@ -898,6 +981,139 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>) {
         // Replace original results with merged results
         *results = merged_results;
     }
+}
+
+// Helper function to check if CIGAR strings match in the overlap region
+fn check_cigar_overlap_match(
+    current_cigar: &[CigarOp],
+    next_cigar: &[CigarOp],
+    query_overlap_len: i32,
+    query_forward: bool
+) -> bool {
+    // Extract the suffix of current CIGAR that corresponds to the overlap
+    let current_suffix = extract_cigar_suffix(current_cigar, query_overlap_len, query_forward);
+    
+    // Extract the prefix of next CIGAR that corresponds to the overlap
+    let next_prefix = extract_cigar_prefix(next_cigar, query_overlap_len, query_forward);
+    
+    // Compare if they're identical
+    current_suffix == next_prefix
+}
+
+// Extract the last part of CIGAR that covers query_len bases
+fn extract_cigar_suffix(cigar: &[CigarOp], query_len: i32, forward: bool) -> Vec<CigarOp> {
+    let mut result = Vec::new();
+    let mut remaining_query = query_len;
+    
+    // Traverse CIGAR from end to beginning
+    for op in cigar.iter().rev() {
+        if remaining_query <= 0 {
+            break;
+        }
+        
+        let query_delta = op.query_delta(if forward { Strand::Forward } else { Strand::Reverse }).abs();
+        
+        if query_delta <= remaining_query {
+            // Include entire operation
+            result.push(op.clone());
+            remaining_query -= query_delta;
+        } else if query_delta > 0 {
+            // Include partial operation
+            let scale = remaining_query as f32 / query_delta as f32;
+            let new_len = (op.len() as f32 * scale) as i32;
+            let partial_op = CigarOp::new(new_len, op.op());
+            result.push(partial_op);
+            remaining_query = 0;
+        }
+    }
+    
+    // Reverse to get correct order
+    result.reverse();
+    result
+}
+
+// Extract the first part of CIGAR that covers query_len bases
+fn extract_cigar_prefix(cigar: &[CigarOp], query_len: i32, forward: bool) -> Vec<CigarOp> {
+    let mut result = Vec::new();
+    let mut remaining_query = query_len;
+    
+    for op in cigar.iter() {
+        if remaining_query <= 0 {
+            break;
+        }
+        
+        let query_delta = op.query_delta(if forward { Strand::Forward } else { Strand::Reverse }).abs();
+        
+        if query_delta <= remaining_query {
+            // Include entire operation
+            result.push(op.clone());
+            remaining_query -= query_delta;
+        } else if query_delta > 0 {
+            // Include partial operation
+            let scale = remaining_query as f32 / query_delta as f32;
+            let new_len = (op.len() as f32 * scale) as i32;
+            let partial_op = CigarOp::new(new_len, op.op());
+            result.push(partial_op);
+            remaining_query = 0;
+        }
+    }
+    
+    result
+}
+
+// Trim the prefix of CIGAR by removing operations that cover the first query_len/target_len bases
+fn trim_cigar_prefix(cigar: &[CigarOp], query_len: i32, target_len: i32) -> Vec<CigarOp> {
+    let mut result = Vec::new();
+    let mut query_consumed = 0;
+    let mut target_consumed = 0;
+    let mut start_idx = 0;
+    
+    // Find where to start after trimming
+    for (idx, op) in cigar.iter().enumerate() {
+        let q_delta = op.query_delta(Strand::Forward).abs();
+        let t_delta = op.target_delta();
+        
+        if query_consumed + q_delta > query_len || target_consumed + t_delta > target_len {
+            // This operation partially overlaps - need to trim it
+            let query_remaining = query_len - query_consumed;
+            let target_remaining = target_len - target_consumed;
+            
+            // Calculate how much of this operation to skip
+            let skip_ratio = if q_delta > 0 && t_delta > 0 {
+                (query_remaining as f32 / q_delta as f32).min(target_remaining as f32 / t_delta as f32)
+            } else if q_delta > 0 {
+                query_remaining as f32 / q_delta as f32
+            } else if t_delta > 0 {
+                target_remaining as f32 / t_delta as f32
+            } else {
+                0.0
+            };
+            
+            let skip_len = (op.len() as f32 * skip_ratio) as i32;
+            
+            if skip_len < op.len() {
+                // Create partial operation with remaining length
+                let partial_op = CigarOp::new(op.len() - skip_len, op.op());
+                result.push(partial_op);
+            }
+            
+            // Add all remaining operations
+            start_idx = idx + 1;
+            break;
+        }
+        
+        query_consumed += q_delta;
+        target_consumed += t_delta;
+        
+        if query_consumed >= query_len && target_consumed >= target_len {
+            start_idx = idx + 1;
+            break;
+        }
+    }
+    
+    // Add all remaining operations
+    result.extend_from_slice(&cigar[start_idx..]);
+    result
 }
 
 use rustc_hash::FxHashMap;
