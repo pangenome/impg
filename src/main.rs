@@ -636,7 +636,7 @@ fn output_results_bed(impg: &Impg, results: &mut Vec<AdjustedInterval>, merge_di
     }
 }
 
-// New helper function to merge BED intervals
+//  Optimized for simple genomic interval merging
 fn merge_bed_intervals(results: &mut Vec<AdjustedInterval>, merge_distance: i32) {
     if results.len() > 1 && merge_distance >= 0 {
         // Sort by sequence ID, strand orientation, and start position
@@ -866,23 +866,23 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
             // Handle perfect contiguity (existing logic)
             if query_contiguous && target_contiguous {
                 debug!(
-                    "Merge contiguous! Current/Next query: {}:{}-{} ({}) / {}:{}-{} ({}); Current/Next target: {}:{}-{} ({}) /{}:{}-{} ({})",
+                    "Merge contiguous! Query: current {}:{}-{}({}), next {}:{}-{}({}); Target: current {}:{}-{}({}), next {}:{}-{}({})",
                     current_query.metadata,
                     current_query.first,
                     current_query.last,
-                    query_forward,
+                    if query_forward { "+" } else { "-" },
                     next_query.metadata,
                     next_query.first,
                     next_query.last,
-                    next_query_forward,
+                    if next_query_forward { "+" } else { "-" },
                     current_target.metadata,
                     current_target.first,
                     current_target.last,
-                    target_forward,
+                    if target_forward { "+" } else { "-" },
                     next_target.metadata,
                     next_target.first,
                     next_target.last,
-                    next_target_forward,
+                    if next_target_forward { "+" } else { "-" },
                 );
 
                 // Merge intervals and CIGAR operations
@@ -924,25 +924,25 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
 
                     if overlap_matches {
                         debug!(
-                            "Merge overlapping! Overlap: query={}, target={}, Current/Next query: {}:{}-{} ({}) / {}:{}-{} ({}); Current/Next target: {}:{}-{} ({}) /{}:{}-{} ({})",
+                            "Merge overlapping! Overlap: query={}, target={}, Query: current {}:{}-{}({}), next {}:{}-{}({}); Target: current {}:{}-{}({}), next {}:{}-{}({})",
                             query_overlap_len,
                             target_overlap_len,
                             current_query.metadata,
                             current_query.first,
                             current_query.last,
-                            query_forward,
+                            if query_forward { "+" } else { "-" },
                             next_query.metadata,
                             next_query.first,
                             next_query.last,
-                            next_query_forward,
+                            if next_query_forward { "+" } else { "-" },
                             current_target.metadata,
                             current_target.first,
                             current_target.last,
-                            target_forward,
+                            if target_forward { "+" } else { "-" },
                             next_target.metadata,
                             next_target.first,
                             next_target.last,
-                            next_target_forward,
+                            if next_target_forward { "+" } else { "-" },
                         );
 
                         // Trim the overlap from the next interval and merge
@@ -980,25 +980,25 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
                    query_gap <= merge_distance && target_gap <= merge_distance {
                     
                     debug!(
-                        "Merge gaps! Query gap: {}, Target gap: {}, Current/Next query: {}:{}-{} ({}) / {}:{}-{} ({}); Current/Next target: {}:{}-{} ({}) /{}:{}-{} ({})",
+                        "Merge gaps! Query gap: {}, Target gap: {}, Query: current {}:{}-{}({}), next {}:{}-{}({}); Target: current {}:{}-{}({}), next {}:{}-{}({})",
                         query_gap,
                         target_gap,
                         current_query.metadata,
                         current_query.first,
                         current_query.last,
-                        query_forward,
+                        if query_forward { "+" } else { "-" },
                         next_query.metadata,
                         next_query.first,
                         next_query.last,
-                        next_query_forward,
+                        if next_query_forward { "+" } else { "-" },
                         current_target.metadata,
                         current_target.first,
                         current_target.last,
-                        target_forward,
+                        if target_forward { "+" } else { "-" },
                         next_target.metadata,
                         next_target.first,
                         next_target.last,
-                        next_target_forward,
+                        if next_target_forward { "+" } else { "-" },
                     );
 
                     // Create gap-filling CIGAR operations
