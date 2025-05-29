@@ -117,7 +117,7 @@ enum Args {
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
 
-        /// Maximum distance between regions to merge (applies only to BED output)
+        /// Maximum distance between regions to merge
         #[clap(short = 'd', long, value_parser, conflicts_with = "no_merge_bed", default_value_t = 0)]
         merge_distance: i32,
 
@@ -215,21 +215,21 @@ fn main() -> io::Result<()> {
                     min_distance_between_ranges,
                 );
 
+                let merge_distance = if no_merge { -1 } else { merge_distance };
+
                 // Output results based on the format
                 match output_format.as_str() {
                     "bedpe" => {
                         // Skip the first element (the input range) for BEDPE output
                         results.remove(0);
-                        output_results_bedpe(&impg, &mut results, None, !no_merge);
+                        output_results_bedpe(&impg, &mut results, None, merge_distance);
                     },
                     "paf" => {
                         // Skip the first element (the input range) for PAF output
                         results.remove(0);
-                        output_results_paf(&impg, &mut results, None, !no_merge);
+                        output_results_paf(&impg, &mut results, None, merge_distance);
                     },
                     _ => { // 'auto' or 'bed'
-                        let merge_distance = if no_merge { -1 } else { merge_distance };
-
                         // BED format - include the first element
                         output_results_bed(&impg, &mut results, merge_distance);
                     }
@@ -249,23 +249,23 @@ fn main() -> io::Result<()> {
                         min_distance_between_ranges,
                     );
 
+                    let merge_distance = if no_merge { -1 } else { merge_distance };
+
                     // Output results based on the format
                     match output_format.as_str() {
                         "bed" => {
-                            let merge_distance = if no_merge { -1 } else { merge_distance };
-
                             // BED format - include the first element
                             output_results_bed(&impg, &mut results, merge_distance);
                         },
                         "paf" => {
                             // Skip the first element (the input range) for PAF output
                             results.remove(0);
-                            output_results_paf(&impg, &mut results, name, !no_merge);
+                            output_results_paf(&impg, &mut results, name, merge_distance);
                         },
                         _ => { // 'auto' or 'bedpe'
                             // Skip the first element (the input range) for BEDPE output
                             results.remove(0);
-                            output_results_bedpe(&impg, &mut results, name, !no_merge);                 
+                            output_results_bedpe(&impg, &mut results, name, merge_distance);
                         }
                     }
                 }
@@ -698,11 +698,8 @@ fn merge_bed_intervals(results: &mut Vec<AdjustedInterval>, merge_distance: i32)
     }
 }
 
-fn output_results_bedpe(impg: &Impg, results: &mut Vec<AdjustedInterval>, name: Option<String>, merge: bool) {
-    // Merge if requested
-    if merge {
-        merge_adjusted_intervals(results);
-    }
+fn output_results_bedpe(impg: &Impg, results: &mut Vec<AdjustedInterval>, name: Option<String>, merge_distance: i32) {
+    merge_adjusted_intervals(results, merge_distance);
 
     for (overlap_query, _, overlap_target) in results {
         let query_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
@@ -726,11 +723,8 @@ fn output_results_bedpe(impg: &Impg, results: &mut Vec<AdjustedInterval>, name: 
     }
 }
 
-fn output_results_paf(impg: &Impg, results: &mut Vec<AdjustedInterval>, name: Option<String>, merge: bool) {       
-    // Merge if requested
-    if merge {
-        merge_adjusted_intervals(results);
-    }
+fn output_results_paf(impg: &Impg, results: &mut Vec<AdjustedInterval>, name: Option<String>, merge_distance: i32) {       
+    merge_adjusted_intervals(results, merge_distance);
 
     for (overlap_query, cigar, overlap_target) in results {
         let query_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
@@ -802,9 +796,9 @@ fn output_results_paf(impg: &Impg, results: &mut Vec<AdjustedInterval>, name: Op
 use impg::paf::Strand;
 use impg::impg::CigarOp;
 
-// Function to merge perfectly contiguous or overlapping adjusted intervals
-fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>) {
-    if results.len() > 1 {
+// Function to merge adjusted intervals
+fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance: i32) {
+    if results.len() > 1 && merge_distance >= 0 {
         // Sort by query ID, query position, target ID, target position
         results.par_sort_by_key(|(query_interval, _, target_interval)| {
             let query_forward = query_interval.first < query_interval.last;
@@ -861,9 +855,10 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>) {
                 let t_overlap = current_target.last > next_target.first;
                 (q_contig, t_contig, q_overlap, t_overlap)
             } else {
+                // Reverse orientation (remember that first > last in reverse, so we swap first/last)
                 let q_contig = current_query.first == next_query.last;
                 let t_contig = current_target.first == next_target.last;
-                let q_overlap = current_query.first < next_query.last;
+                let q_overlap = current_query.first > next_query.last;
                 let t_overlap = current_target.first < next_target.last;
                 (q_contig, t_contig, q_overlap, t_overlap)
             };
@@ -911,9 +906,10 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>) {
             if query_overlap && target_overlap {
                 // Calculate overlap lengths
                 let (query_overlap_len, target_overlap_len) = if query_forward {
-                    (current_query.last - next_query.first, current_target.last - next_target.first)
+                    (next_query.first - current_query.last, next_target.first - current_target.last)
                 } else {
-                    (next_query.last - current_query.first, next_target.last - current_target.first)
+                    // Reverse orientation (remember that first > last in reverse, so we swap first/last)
+                    (next_query.last - current_query.first, current_target.first - next_target.last)
                 };
 
                 // Check if overlaps are proportional (same alignment)
@@ -967,6 +963,71 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>) {
                         }
                         continue;
                     }
+                }
+            }
+
+            // Handle gaps within merge distance
+            if !query_overlap && !target_overlap {
+                let (query_gap, target_gap) = if query_forward {
+                    (next_query.first - current_query.last, next_target.first - current_target.last)
+                } else {
+                    (current_query.first - next_query.last, current_target.first - next_target.last)
+                };
+
+                // Check if gaps are within merge distance and at least one gap exists
+                if query_gap >= 0 && target_gap >= 0 && 
+                   (query_gap > 0 || target_gap > 0) &&
+                   query_gap <= merge_distance && target_gap <= merge_distance {
+                    
+                    debug!(
+                        "Merge gaps! Query gap: {}, Target gap: {}, Current/Next query: {}:{}-{} ({}) / {}:{}-{} ({}); Current/Next target: {}:{}-{} ({}) /{}:{}-{} ({})",
+                        query_gap,
+                        target_gap,
+                        current_query.metadata,
+                        current_query.first,
+                        current_query.last,
+                        query_forward,
+                        next_query.metadata,
+                        next_query.first,
+                        next_query.last,
+                        next_query_forward,
+                        current_target.metadata,
+                        current_target.first,
+                        current_target.last,
+                        target_forward,
+                        next_target.metadata,
+                        next_target.first,
+                        next_target.last,
+                        next_target_forward,
+                    );
+
+                    // Create gap-filling CIGAR operations
+                    let mut gap_cigar = Vec::new();
+                    
+                    if query_gap > 0 {
+                        gap_cigar.push(CigarOp::new(query_gap, 'I'));
+                    }
+                    if target_gap > 0 {
+                        gap_cigar.push(CigarOp::new(target_gap, 'D'));
+                    }
+                    
+                    // Merge intervals and CIGAR
+                    if query_forward {
+                        current_query.last = next_query.last;
+                        current_target.last = next_target.last;
+                        current_cigar.extend(gap_cigar);
+                        current_cigar.extend_from_slice(next_cigar);
+                    } else {
+                        current_query.first = next_query.first;
+                        current_target.first = next_target.first;
+                        
+                        let mut new_cigar = Vec::with_capacity(current_cigar.len() + gap_cigar.len() + next_cigar.len());
+                        new_cigar.extend_from_slice(&next_cigar);
+                        new_cigar.extend(gap_cigar);
+                        new_cigar.extend_from_slice(&current_cigar);
+                        current_cigar = new_cigar;
+                    }
+                    continue;
                 }
             }
 
