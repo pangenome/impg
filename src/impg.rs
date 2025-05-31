@@ -443,11 +443,12 @@ impl Impg {
             paf_gzi_indices,
         }
     }
+
     pub fn from_paf_and_serializable(paf_file: &str, serializable: SerializableImpg) -> Self {
         Self::from_multi_paf_and_serializable(&[paf_file.to_string()], serializable)
     }
 
-    pub fn query(&self, target_id: u32, range_start: i32, range_end: i32) -> Vec<AdjustedInterval> {
+    pub fn query(&self, target_id: u32, range_start: i32, range_end: i32, min_gap_compressed_identity: Option<f64>) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
         // Add the input range to the results
         results.push((
@@ -485,7 +486,6 @@ impl Impg {
                         metadata.strand(),
                     ),
                     &metadata.get_cigar_ops(&self.paf_files, self.paf_gzi_indices.as_ref()),
-                    true,
                 );
                 if let Some((
                     adjusted_query_start,
@@ -495,6 +495,13 @@ impl Impg {
                     adjusted_target_end,
                 )) = result
                 {
+                    // Check gap-compressed identity if threshold is provided
+                    if let Some(threshold) = min_gap_compressed_identity {
+                        if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
+                            return; // Skip this result
+                        }
+                    }
+                    
                     let adjusted_interval = (
                         Interval {
                             first: adjusted_query_start,
@@ -528,6 +535,7 @@ impl Impg {
         min_transitive_len: i32,
         min_distance_between_ranges: i32,
         store_cigar: bool,
+        min_gap_compressed_identity: Option<f64>,
     ) -> Vec<AdjustedInterval> {
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
@@ -621,7 +629,6 @@ impl Impg {
                                 metadata.strand(),
                             ),
                             &metadata.get_cigar_ops(&self.paf_files, self.paf_gzi_indices.as_ref()),
-                            store_cigar,
                         );
 
                         if let Some((
@@ -632,13 +639,20 @@ impl Impg {
                             adjusted_target_end,
                         )) = result
                         {
+                            // Check gap-compressed identity if threshold is provided
+                            if let Some(threshold) = min_gap_compressed_identity {
+                                if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
+                                    return None; // Skip this result
+                                }
+                            }
+                                                        
                             Some((
                                 Interval {
                                     first: adjusted_query_start,
                                     last: adjusted_query_end,
                                     metadata: metadata.query_id,
                                 },
-                                adjusted_cigar,
+                                if store_cigar { adjusted_cigar } else { Vec::new() },
                                 Interval {
                                     first: adjusted_target_start,
                                     last: adjusted_target_end,
@@ -757,6 +771,7 @@ impl Impg {
         min_transitive_len: i32,
         min_distance_between_ranges: i32,
         store_cigar: bool,
+        min_gap_compressed_identity: Option<f64>,
     ) -> Vec<AdjustedInterval> {
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
@@ -845,7 +860,6 @@ impl Impg {
                                                 &self.paf_files,
                                                 self.paf_gzi_indices.as_ref(),
                                             ),
-                                            store_cigar,
                                         );
 
                                         if let Some((
@@ -856,11 +870,18 @@ impl Impg {
                                             adjusted_target_end,
                                         )) = result
                                         {
+                                            // Check gap-compressed identity if threshold is provided
+                                            if let Some(threshold) = min_gap_compressed_identity {
+                                                if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
+                                                    return; // Skip this result
+                                                }
+                                            }
+                                       
                                             local_results.push((
                                                 metadata.query_id,
                                                 adjusted_query_start,
                                                 adjusted_query_end,
-                                                adjusted_cigar,
+                                                if store_cigar { adjusted_cigar } else { Vec::new() },
                                                 adjusted_target_start,
                                                 adjusted_target_end,
                                                 *current_target_id,
@@ -1003,7 +1024,6 @@ fn project_target_range_through_alignment(
     requested_target_range: (i32, i32),
     record: (i32, i32, i32, i32, Strand),
     cigar_ops: &[CigarOp],
-    store_cigar: bool,
 ) -> Option<(i32, i32, Vec<CigarOp>, i32, i32)> {
     let (target_start, target_end, query_start, query_end, strand) = record;
 
@@ -1108,23 +1128,15 @@ fn project_target_range_through_alignment(
         && projected_query_start != projected_query_end
         && projected_target_start != projected_target_end
     {
-        let projected_cigar_ops = if store_cigar {
-            let mut projected_cigar_ops = cigar_ops[first_op_idx..last_op_idx].to_vec();
-
-            // Adjust first operation length
-            if first_op_offset > 0 {
-                projected_cigar_ops[0].adjust_len(-first_op_offset);
-            }
-
-            // Adjust last operation length
-            if last_op_remaining < 0 {
-                projected_cigar_ops[last_op_idx - first_op_idx - 1].adjust_len(last_op_remaining);
-            }
-
-            projected_cigar_ops
-        } else {
-            Vec::new()
-        };
+        let mut projected_cigar_ops = cigar_ops[first_op_idx..last_op_idx].to_vec();
+        // Adjust first operation length
+        if first_op_offset > 0 {
+            projected_cigar_ops[0].adjust_len(-first_op_offset);
+        }
+        // Adjust last operation length
+        if last_op_remaining < 0 {
+            projected_cigar_ops[last_op_idx - first_op_idx - 1].adjust_len(last_op_remaining);
+        }
 
         Some((
             projected_query_start,
@@ -1155,6 +1167,29 @@ fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, ParseErr> {
     Ok(ops)
 }
 
+fn calculate_gap_compressed_identity(cigar_ops: &[CigarOp]) -> f64 {
+    let (matches, mismatches, insertions, deletions) = cigar_ops.iter().fold(
+        (0i32, 0i32, 0i32, 0i32),
+        |(m, mm, i, d), op| {
+            let len = op.len();
+            match op.op() {
+                'M' | '=' => (m + len, mm, i, d),  // Assume 'M' represents matches
+                'X' => (m, mm + len, i, d),
+                'I' => (m, mm, i + 1, d),
+                'D' => (m, mm, i, d + 1),
+                _ => (m, mm, i, d),
+            }
+        },
+    );
+    
+    let total = matches + mismatches + insertions + deletions;
+    if total == 0 {
+        0.0
+    } else {
+        (matches as f64) / (total as f64)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1167,7 +1202,7 @@ mod tests {
         let record = (100, 200, 0, 100, Strand::Forward);
         let cigar_ops = vec![CigarOp::new(100, '=')];
         let result =
-            project_target_range_through_alignment(target_range, record, &cigar_ops, true).unwrap();
+            project_target_range_through_alignment(target_range, record, &cigar_ops).unwrap();
 
         assert_eq!(result, (0, 100, cigar_ops.clone(), 100, 200));
     }
@@ -1178,7 +1213,7 @@ mod tests {
         let record = (100, 200, 0, 100, Strand::Reverse);
         let cigar_ops = vec![CigarOp::new(100, '=')];
         let result =
-            project_target_range_through_alignment(target_range, record, &cigar_ops, true).unwrap();
+            project_target_range_through_alignment(target_range, record, &cigar_ops).unwrap();
 
         assert_eq!(result, (100, 0, cigar_ops.clone(), 100, 200));
     }
@@ -1196,17 +1231,17 @@ mod tests {
         let base = (0, 100, 50, 200, Strand::Forward);
         {
             let result =
-                project_target_range_through_alignment((0, 100), base, &cigar_ops, true).unwrap();
+                project_target_range_through_alignment((0, 100), base, &cigar_ops).unwrap();
             assert_eq!(result, (50, 200, cigar_ops.clone(), 0, 100));
         }
         {
             let result =
-                project_target_range_through_alignment((50, 55), base, &cigar_ops, true).unwrap();
+                project_target_range_through_alignment((50, 55), base, &cigar_ops).unwrap();
             assert_eq!(result, (100, 105, vec![CigarOp::new(5, '=')], 50, 55));
         }
         {
             let result =
-                project_target_range_through_alignment((50, 64), base, &cigar_ops, true).unwrap();
+                project_target_range_through_alignment((50, 64), base, &cigar_ops).unwrap();
             assert_eq!(result, (100, 114, vec![CigarOp::new(14, '=')], 50, 64));
         }
         // We no longer output empty target ranges
@@ -1216,13 +1251,13 @@ mod tests {
         // }
         {
             let result =
-                project_target_range_through_alignment((50, 65), base, &cigar_ops, true).unwrap();
+                project_target_range_through_alignment((50, 65), base, &cigar_ops).unwrap();
             let cigar_ops = vec![CigarOp::new(15, '='), CigarOp::new(50, 'I')];
             assert_eq!(result, (100, 165, cigar_ops, 50, 65));
         }
         {
             let result =
-                project_target_range_through_alignment((50, 66), base, &cigar_ops, true).unwrap();
+                project_target_range_through_alignment((50, 66), base, &cigar_ops).unwrap();
             let cigar_ops = vec![
                 CigarOp::new(15, '='),
                 CigarOp::new(50, 'I'),
@@ -1232,7 +1267,7 @@ mod tests {
         }
         {
             let result =
-                project_target_range_through_alignment((70, 95), base, &cigar_ops, true).unwrap();
+                project_target_range_through_alignment((70, 95), base, &cigar_ops).unwrap();
             assert_eq!(result, (170, 195, vec![CigarOp::new(25, '=')], 70, 95));
         }
     }
@@ -1244,7 +1279,7 @@ mod tests {
         let record = (100, 200, 100, 200, Strand::Forward);
         let cigar_ops = vec![CigarOp::new(100, '=')];
         let (query_start, query_end, cigar, target_start, target_end) =
-            project_target_range_through_alignment(target_range, record, &cigar_ops, true).unwrap();
+            project_target_range_through_alignment(target_range, record, &cigar_ops).unwrap();
         assert_eq!(
             (query_start, query_end, cigar, target_start, target_end),
             (100, 200, vec![CigarOp::new(100, '=')], 100, 200)
@@ -1258,7 +1293,7 @@ mod tests {
         let record = (100, 200, 100, 200, Strand::Reverse);
         let cigar_ops = vec![CigarOp::new(100, '=')];
         let (query_start, query_end, cigar, target_start, target_end) =
-            project_target_range_through_alignment(target_range, record, &cigar_ops, true).unwrap();
+            project_target_range_through_alignment(target_range, record, &cigar_ops).unwrap();
         assert_eq!(
             (query_start, query_end, cigar, target_start, target_end),
             (200, 100, vec![CigarOp::new(100, '=')], 100, 200)
@@ -1276,7 +1311,7 @@ mod tests {
             CigarOp::new(50, '='), // Match
         ];
         let (start, end, cigar, _, _) =
-            project_target_range_through_alignment(target_range, record, &cigar_ops, true).unwrap();
+            project_target_range_through_alignment(target_range, record, &cigar_ops).unwrap();
         assert_eq!((start, end, cigar), (50, 160, cigar_ops));
     }
 
@@ -1291,7 +1326,7 @@ mod tests {
             CigarOp::new(40, '='), // Match
         ];
         let (start, end, cigar, _, _) =
-            project_target_range_through_alignment(target_range, record, &cigar_ops, true).unwrap();
+            project_target_range_through_alignment(target_range, record, &cigar_ops).unwrap();
         assert_eq!((start, end, cigar), (50, 140, cigar_ops));
     }
 
@@ -1307,7 +1342,7 @@ mod tests {
             CigarOp::new(40, '='), // 150, 250
         ];
         let (start, end, cigar, _, _) =
-            project_target_range_through_alignment(target_range, record, &cigar_ops, true).unwrap();
+            project_target_range_through_alignment(target_range, record, &cigar_ops).unwrap();
         let cigar_ops = vec![
             CigarOp::new(10, 'D'), // 150, 260
             CigarOp::new(10, 'I'), // 150, 250
@@ -1331,7 +1366,7 @@ mod tests {
             CigarOp::new(10, '='), // Match
         ];
         let (query_start, query_end, cigar, target_start, target_end) =
-            project_target_range_through_alignment(target_range, record, &cigar_ops, true).unwrap();
+            project_target_range_through_alignment(target_range, record, &cigar_ops).unwrap();
         assert_eq!(
             (query_start, query_end, cigar, target_start, target_end),
             (0, 10, vec![CigarOp::new(10, '=')], 0, 10)

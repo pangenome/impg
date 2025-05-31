@@ -15,6 +15,7 @@ pub fn partition_alignments(
     starting_sequences_file: Option<&str>,
     selection_mode: &str,
     merge_distance: i32,
+    min_identity: Option<f64>,
     min_missing_size: i32,
     min_boundary_distance: i32,
     max_depth: u16,
@@ -205,6 +206,7 @@ pub fn partition_alignments(
                 min_transitive_len,
                 min_distance_between_ranges,
                 false, // Don't store CIGAR strings during partitioning
+                min_identity,
             );
             //let query_time = query_start.elapsed();
             debug!("  Collected {} query overlaps", overlaps.len());

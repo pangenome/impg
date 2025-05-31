@@ -63,6 +63,10 @@ enum Args {
         #[clap(short = 'd', long, value_parser, default_value_t = 100000)]
         merge_distance: i32,
 
+        /// Minimum gap-compressed identity threshold (0.0-1.0)
+        #[clap(long, value_parser)]
+        min_identity: Option<f64>,
+
         /// Maximum recursion depth for transitive overlaps (0 for no limit)
         #[clap(short = 'm', long, value_parser, default_value_t = 2)]
         max_depth: u16,
@@ -131,6 +135,10 @@ enum Args {
         #[clap(long, action, conflicts_with = "merge_distance")]
         no_merge: bool,
 
+        /// Minimum gap-compressed identity threshold (0.0-1.0)
+        #[clap(long, value_parser)]
+        min_identity: Option<f64>,
+
         /// Enable transitive queries
         #[clap(short = 'x', long, action)]
         transitive: bool,
@@ -166,6 +174,7 @@ fn main() -> io::Result<()> {
             common,
             window_size,
             merge_distance,
+            min_identity,
             max_depth,
             min_transitive_len,
             min_distance_between_ranges,
@@ -183,6 +192,7 @@ fn main() -> io::Result<()> {
                 starting_sequences_file.as_deref(),
                 &selection_mode,
                 merge_distance,
+                min_identity,
                 min_missing_size,
                 min_boundary_distance,
                 max_depth,
@@ -198,6 +208,7 @@ fn main() -> io::Result<()> {
             output_format,
             merge_distance,
             no_merge,
+            min_identity,
             transitive,
             transitive_bfs,
             max_depth,
@@ -214,6 +225,7 @@ fn main() -> io::Result<()> {
                     &impg,
                     &target_name,
                     target_range,
+                    min_identity,
                     transitive,
                     transitive_bfs,
                     max_depth,
@@ -249,6 +261,7 @@ fn main() -> io::Result<()> {
                         &impg,
                         &target_name,
                         target_range,
+                        min_identity,
                         transitive,
                         transitive_bfs,
                         max_depth,
@@ -601,6 +614,7 @@ fn perform_query(
     impg: &Impg,
     target_name: &str,
     target_range: (i32, i32),
+    min_identity: Option<f64>,
     transitive: bool,
     transitive_bfs: bool,
     max_depth: u16,
@@ -622,6 +636,7 @@ fn perform_query(
             target_end, target_length
         );
     }
+
     if transitive {
         impg.query_transitive(
             target_id,
@@ -632,6 +647,7 @@ fn perform_query(
             min_transitive_len,
             min_distance_between_ranges,
             true,
+            min_identity,
         )
     } else if transitive_bfs {
         impg.query_transitive_bfs(
@@ -643,9 +659,10 @@ fn perform_query(
             min_transitive_len,
             min_distance_between_ranges,
             false,
+            min_identity,
         )
     } else {
-        impg.query(target_id, target_start, target_end)
+        impg.query(target_id, target_start, target_end, min_identity)
     }
 }
 
