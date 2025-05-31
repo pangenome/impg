@@ -658,7 +658,7 @@ fn perform_query(
             max_depth,
             min_transitive_len,
             min_distance_between_ranges,
-            false,
+            true,
             min_identity,
         )
     } else {
