@@ -225,6 +225,7 @@ fn main() -> io::Result<()> {
                     &impg,
                     &target_name,
                     target_range,
+                    output_format == "paf" || output_format == "bedpe", // Store CIGAR for PAF/BEDPE output
                     min_identity,
                     transitive,
                     transitive_bfs,
@@ -261,6 +262,7 @@ fn main() -> io::Result<()> {
                         &impg,
                         &target_name,
                         target_range,
+                        output_format == "paf" || output_format == "bedpe", // Store CIGAR for PAF/BEDPE output
                         min_identity,
                         transitive,
                         transitive_bfs,
@@ -518,11 +520,8 @@ fn generate_multi_index(
     let serializable = impg.to_serializable();
     let file = File::create(index_file)?;
     let writer = BufWriter::new(file);
-    bincode::serialize_into(writer, &serializable).map_err(|e| {
-        io::Error::other(
-            format!("Failed to serialize index: {:?}", e),
-        )
-    })?;
+    bincode::serialize_into(writer, &serializable)
+        .map_err(|e| io::Error::other(format!("Failed to serialize index: {:?}", e)))?;
 
     Ok(impg)
 }
@@ -614,6 +613,7 @@ fn perform_query(
     impg: &Impg,
     target_name: &str,
     target_range: (i32, i32),
+    store_cigar: bool,
     min_identity: Option<f64>,
     transitive: bool,
     transitive_bfs: bool,
@@ -646,7 +646,7 @@ fn perform_query(
             max_depth,
             min_transitive_len,
             min_distance_between_ranges,
-            true,
+            store_cigar,
             min_identity,
         )
     } else if transitive_bfs {
@@ -658,11 +658,17 @@ fn perform_query(
             max_depth,
             min_transitive_len,
             min_distance_between_ranges,
-            false,
+            store_cigar,
             min_identity,
         )
     } else {
-        impg.query(target_id, target_start, target_end, min_identity)
+        impg.query(
+            target_id,
+            target_start,
+            target_end,
+            store_cigar,
+            min_identity,
+        )
     }
 }
 
@@ -1131,7 +1137,7 @@ fn merge_consecutive_cigar_ops(cigar: &mut Vec<CigarOp>) {
     if cigar.len() <= 1 {
         return;
     }
-    
+
     let mut write_idx = 0;
     for read_idx in 1..cigar.len() {
         if cigar[write_idx].op() == cigar[read_idx].op() {
