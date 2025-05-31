@@ -8,13 +8,15 @@ Often, we would like to be able to break a small piece out of a pangenome withou
 
 ## Using `impg`
 
-Getting started with `impg` is straightforward. Here's a basic example of how to use the command-line utility:
+Here's a basic example:
 
 ```bash
 impg query -p cerevisiae.pan.paf.gz -r S288C#1#chrI:50000-100000 -x
 ```
 
-Your alignments must use `wfmash` default or `minimap2 --eqx` type CIGAR strings which have `=` for matches and `X` for mismatches. The `M` positional match character is not allowed.
+- `-p` specifies the path to the PAF file. Your alignments must use `wfmash` default or `minimap2 --eqx` type CIGAR strings which have `=` for matches and `X` for mismatches. The `M` positional match character is not allowed.
+- `-r` defines the target range in the format of `seq_name:start-end`
+- `-x` requests a *transitive closure* of the matches. That is, for each collected range, we then find what sequence ranges are aligned onto it. This is done progressively until we've closed the set of alignments connected to the initial target range.
 
 Depending on your alignments, this might result in the following BED file:
 
@@ -28,32 +30,30 @@ UWOPS034614#1#chrI  36826  86817
 SK1#1#chrI          52740  102721
 ```
 
-In this example, `-p` specifies the path to the PAF file, `-r` defines the target range in the format of `seq_name:start-end`, and `-x` requests a *transitive closure* of the matches.
-That is, for each collected range, we then find what sequence ranges are aligned onto it.
-This is done progressively until we've closed the set of alignments connected to the initial target range.
-
 ## Installation
 
-To compile and install `impg` from source, you'll need a recent rust build toolchain and cargo.
+You need Rust (cargo) installed. Then:
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/pangenome/impg.git
-   ```
-2. Navigate to the `impg` directory:
-   ```bash
-   cd impg
-   ```
-3. Compile the tool:
-   ```bash
-   cargo install --force --path .
-   ```
+```bash
+git clone https://github.com/pangenome/impg.git
+cd impg
+cargo install --force --path .
+```
+
+Alternatively, install from Bioconda:
+
+```bash
+conda install -c bioconda impg
+```
+
 ## Commands
 
 `impg` provides three main commands:
 
 ### Query
+
 Query overlaps in the alignment:
+
 ```bash
 # Query a single region
 impg query -p alignments.paf -r chr1:1000-2000 
@@ -69,17 +69,22 @@ impg query -p alignments.paf -r chr1:1000-2000 -P
 ```
 
 ### Partition
+
 Partition the alignment into smaller pieces:
+
 ```bash
 impg partition -p alignments.paf -w 1000000 -s chr1 -d 10000 -l 5000
 ```
+
 - `-w`: Window size for partitioning
 - `-s`: Prefix of sequence names to start partitioning from
 - `-d`: Maximum distance to merge intervals in each partition
 - `-l`: Minimum length for intervals in each partition (this can lead to overlapping partitions)
 
 ### Stats
+
 Print alignment statistics:
+
 ```bash
 impg stats -p alignments.paf
 ```
@@ -87,9 +92,11 @@ impg stats -p alignments.paf
 ### Common Options
 
 All commands support these options:
-- `-p, --paf-file`: Path to PAF file (gzipped or uncompressed)
-- `-t, --num-threads`: Number of threads (default: 1)
-- `-I, --force-reindex`: Force regeneration of index
+- `-p, --paf-files`: One or more paths to PAF files (gzipped or uncompressed).
+- `--paf-list`: Path to a plain-text file listing one PAF path per line.
+- `-i, --index`: Path to an existing IMPG index file.
+- `-f, --force-reindex`: Always regenerate the IMPG index even if it already exists.
+- `-t, --num-threads`: Number of threads (default: 4)
 - `-v, --verbose`: Verbosity level (0=error, 1=info, 2=debug)
 
 ## What does `impg` do?
@@ -101,7 +108,7 @@ The output is provided in BED, BEDPE and PAF formats, making it straightforward 
 
 ## How does it work?
 
-`impg` uses coitrees (implicit interval trees) to provide efficient range lookup over the input alignments.
+`impg` uses `coitrees` (implicit interval trees) to provide efficient range lookup over the input alignments.
 CIGAR strings are converted to a compact delta encoding.
 This approach allows for fast and memory-efficient projection of sequence ranges through alignments.
 
