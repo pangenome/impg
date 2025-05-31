@@ -265,7 +265,7 @@ pub fn partition_alignments(
                 let num_regions = overlaps.len();
                 let current_partition_length: u64 = overlaps
                     .into_par_iter()
-                    .map(|(interval, _, _)| (interval.last - interval.first).abs() as u64)
+                    .map(|(interval, _, _)| (interval.last - interval.first).unsigned_abs() as u64)
                     .sum();
                 total_partitioned_length += current_partition_length;
 
@@ -490,7 +490,7 @@ fn select_and_window_sequences(
                     .max_by(|&(prefix1, missing1), &(prefix2, missing2)| {
                         // First compare by missing amount
                         missing1
-                            .cmp(&missing2)
+                            .cmp(missing2)
                             // If missing amounts are equal, compare by prefix name for deterministic results
                             .then_with(|| prefix1.cmp(prefix2))
                     })

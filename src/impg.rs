@@ -1365,10 +1365,10 @@ mod tests {
         let reader = BufReader::new(&paf_data[..]);
         let expected_records = vec![
             PartialPafRecord {
-                query_id: query_id,
+                query_id,
                 query_start: 10,
                 query_end: 20,
-                target_id: target_id,
+                target_id,
                 target_start: 30,
                 target_end: 40,
                 strand_and_cigar_offset: 45, // Forward strand

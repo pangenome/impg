@@ -506,8 +506,7 @@ fn generate_multi_index(
     let file = File::create(index_file)?;
     let writer = BufWriter::new(file);
     bincode::serialize_into(writer, &serializable).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::Other,
+        io::Error::other(
             format!("Failed to serialize index: {:?}", e),
         )
     })?;
@@ -941,7 +940,7 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
                     current_target.first = next_target.first;
 
                     let mut new_cigar = Vec::with_capacity(current_cigar.len() + next_cigar.len());
-                    new_cigar.extend_from_slice(&next_cigar);
+                    new_cigar.extend_from_slice(next_cigar);
                     new_cigar.extend_from_slice(&current_cigar);
                     current_cigar = new_cigar;
                 }
@@ -969,7 +968,7 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
                     // Check if CIGAR strings are identical in the overlap region
                     let overlap_matches = check_cigar_overlap_match(
                         &current_cigar,
-                        &next_cigar,
+                        next_cigar,
                         query_overlap_len,
                         query_forward,
                     );
@@ -999,7 +998,7 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
 
                         // Trim the overlap from the next interval and merge
                         let trimmed_next_cigar =
-                            trim_cigar_prefix(&next_cigar, query_overlap_len, target_overlap_len);
+                            trim_cigar_prefix(next_cigar, query_overlap_len, target_overlap_len);
 
                         if query_forward {
                             current_query.last = next_query.last;
@@ -1086,7 +1085,7 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
                         let mut new_cigar = Vec::with_capacity(
                             current_cigar.len() + gap_cigar.len() + next_cigar.len(),
                         );
-                        new_cigar.extend_from_slice(&next_cigar);
+                        new_cigar.extend_from_slice(next_cigar);
                         new_cigar.extend(gap_cigar);
                         new_cigar.extend_from_slice(&current_cigar);
                         current_cigar = new_cigar;
