@@ -1,4 +1,4 @@
-use crate::paf::{PartialPafRecord, ParseErr, Strand};
+use crate::paf::{ParseErr, PartialPafRecord, Strand};
 use crate::seqidx::SequenceIndex;
 use coitrees::{BasicCOITree, Interval, IntervalTree};
 use log::debug;
@@ -86,7 +86,7 @@ pub struct QueryMetadata {
     target_end: i32,
     query_start: i32,
     query_end: i32,
-    paf_file_index: u32, // Track which PAF file this record belongs to
+    paf_file_index: u32,          // Track which PAF file this record belongs to
     strand_and_cigar_offset: u64, // Track strand and cigar offset
     cigar_bytes: usize,
 }
@@ -130,7 +130,7 @@ impl QueryMetadata {
         if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
             // Get the GZI index for the PAF file
             let paf_gzi_index = paf_gzi_indices.get(paf_file_index).and_then(Option::as_ref);
-            
+
             let mut reader = bgzf::Reader::new(File::open(paf_file).unwrap());
             reader
                 .seek_by_uncompressed_position(paf_gzi_index.unwrap(), self.cigar_offset())
@@ -291,37 +291,38 @@ impl SortedRanges {
 pub struct Impg {
     pub trees: TreeMap,
     pub seq_index: SequenceIndex,
-    pub paf_files: Vec<String>,    // List of all PAF files
+    pub paf_files: Vec<String>, // List of all PAF files
     pub paf_gzi_indices: Vec<Option<bgzf::gzi::Index>>, // Corresponding GZI indices
 }
 
 impl Impg {
     pub fn from_multi_paf_records(
         records_by_file: &[(Vec<PartialPafRecord>, String)],
-        seq_index: SequenceIndex
+        seq_index: SequenceIndex,
     ) -> Result<Self, ParseErr> {
         // Use par_iter to process the files in parallel and collect both pieces of information
-        let (paf_files, paf_gzi_indices): (Vec<String>, Vec<Option<bgzf::gzi::Index>>) = records_by_file
-            .par_iter()
-            .map(|(_, paf_file)| {
-                let paf_gzi_index = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-                    let paf_gzi_file = paf_file.to_owned() + ".gzi";
-                    Some(
-                        bgzf::gzi::read(paf_gzi_file.clone())
-                            .unwrap_or_else(|_| panic!("Could not open {}", paf_gzi_file)),
-                    )
-                } else {
-                    None
-                };
-                
-                // Return both values as a tuple
-                (paf_file.clone(), paf_gzi_index)
-            })
-            .unzip(); // Separate the tuples into two vectors
+        let (paf_files, paf_gzi_indices): (Vec<String>, Vec<Option<bgzf::gzi::Index>>) =
+            records_by_file
+                .par_iter()
+                .map(|(_, paf_file)| {
+                    let paf_gzi_index = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
+                        let paf_gzi_file = paf_file.to_owned() + ".gzi";
+                        Some(
+                            bgzf::gzi::read(paf_gzi_file.clone())
+                                .unwrap_or_else(|_| panic!("Could not open {}", paf_gzi_file)),
+                        )
+                    } else {
+                        None
+                    };
+
+                    // Return both values as a tuple
+                    (paf_file.clone(), paf_gzi_index)
+                })
+                .unzip(); // Separate the tuples into two vectors
 
         let intervals: FxHashMap<u32, Vec<Interval<QueryMetadata>>> = records_by_file
             .par_iter()
-            .enumerate()  // Add enumeration to get the position as index
+            .enumerate() // Add enumeration to get the position as index
             .flat_map(|(file_index, (records, _))| {
                 records
                     .par_iter()
@@ -396,9 +397,12 @@ impl Impg {
         (serializable_trees, self.seq_index.clone())
     }
 
-    pub fn from_multi_paf_and_serializable(paf_files: &[String], serializable: SerializableImpg) -> Self {
+    pub fn from_multi_paf_and_serializable(
+        paf_files: &[String],
+        serializable: SerializableImpg,
+    ) -> Self {
         let (serializable_trees, seq_index) = serializable;
-        
+
         let paf_gzi_indices: Vec<_> = paf_files
             .par_iter()
             .map(|paf_file| {
@@ -413,7 +417,7 @@ impl Impg {
                 }
             })
             .collect();
-        
+
         let trees: TreeMap = serializable_trees
             .into_par_iter()
             .map(|(target_id, intervals)| {
@@ -431,7 +435,7 @@ impl Impg {
                 (target_id, tree)
             })
             .collect();
-            
+
         Self {
             trees,
             seq_index,
@@ -442,7 +446,7 @@ impl Impg {
     pub fn from_paf_and_serializable(paf_file: &str, serializable: SerializableImpg) -> Self {
         Self::from_multi_paf_and_serializable(&[paf_file.to_string()], serializable)
     }
-    
+
     pub fn query(&self, target_id: u32, range_start: i32, range_end: i32) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
         // Add the input range to the results

@@ -300,7 +300,6 @@ pub fn partition_alignments(
                     end - start,
                 );
 
-
                 //info!("  Partition {} timings: query={:?}, merge={:?}, merge2={:?}, extend={:?}, mask={:?}, calc={:?}, write={:?}",
                 //    partition_num, query_time, merge_time, merge2_time, extend_time, mask_time, calc_time, write_time);
             } else {
@@ -360,10 +359,13 @@ fn select_and_window_sequences(
                 .par_iter()
                 .flat_map(|(seq_id, ranges)| {
                     // For each sequence, convert its ranges to (seq_id, start, end, length) tuples
-                    ranges.iter().map(|&(start, end)| {
-                        let length = end - start;
-                        (*seq_id, start, end, length)
-                    }).collect::<Vec<_>>()
+                    ranges
+                        .iter()
+                        .map(|&(start, end)| {
+                            let length = end - start;
+                            (*seq_id, start, end, length)
+                        })
+                        .collect::<Vec<_>>()
                 })
                 .max_by(|&(id1, _, _, len1), &(id2, _, _, len2)| {
                     // First compare by length
@@ -401,7 +403,8 @@ fn select_and_window_sequences(
                 })
                 .max_by(|&(id1, missing1), &(id2, missing2)| {
                     // First compare by total missing
-                    missing1.cmp(&missing2)
+                    missing1
+                        .cmp(&missing2)
                         // If total missing is equal, compare by sequence ID for deterministic results
                         .then_with(|| id1.cmp(&id2))
                 });
@@ -434,37 +437,39 @@ fn select_and_window_sequences(
             };
 
             // Group only sequences that still have missing regions.
-            let prefix_to_seqs: FxHashMap<String, Vec<u32>> = missing_regions.keys()
+            let prefix_to_seqs: FxHashMap<String, Vec<u32>> = missing_regions
+                .keys()
                 .par_bridge()
                 .fold(
-                || FxHashMap::with_capacity_and_hasher(0, Default::default()),
-                |mut map: FxHashMap<String, Vec<u32>>, seq_id: &u32| {
-                    let seq_id = *seq_id; // Dereference to get u32
-                    if let Some(name) = impg.seq_index.get_name(seq_id) {
-                        let mut split = name.split(separator);
-                        let prefix = match field_count {
-                            1 => split.next().unwrap_or(name).to_string(),
-                            2 => {
-                                let p1 = split.next().unwrap_or(name);
-                                let p2 = split.next().unwrap_or("");
-                                format!("{p1}{separator}{p2}")
-                            }
-                            _ => name.to_string(),
-                        };
-                        map.entry(prefix).or_default().push(seq_id);
-                    }
-                    map
-                },
-            ).reduce(
-                || FxHashMap::with_capacity_and_hasher(0, Default::default()),
-                |mut map1, map2| {
-                    for (key, vec2) in map2 {
-                        map1.entry(key).or_default().extend(vec2);
-                    }
-                    map1
-                },
-            );
-                
+                    || FxHashMap::with_capacity_and_hasher(0, Default::default()),
+                    |mut map: FxHashMap<String, Vec<u32>>, seq_id: &u32| {
+                        let seq_id = *seq_id; // Dereference to get u32
+                        if let Some(name) = impg.seq_index.get_name(seq_id) {
+                            let mut split = name.split(separator);
+                            let prefix = match field_count {
+                                1 => split.next().unwrap_or(name).to_string(),
+                                2 => {
+                                    let p1 = split.next().unwrap_or(name);
+                                    let p2 = split.next().unwrap_or("");
+                                    format!("{p1}{separator}{p2}")
+                                }
+                                _ => name.to_string(),
+                            };
+                            map.entry(prefix).or_default().push(seq_id);
+                        }
+                        map
+                    },
+                )
+                .reduce(
+                    || FxHashMap::with_capacity_and_hasher(0, Default::default()),
+                    |mut map1, map2| {
+                        for (key, vec2) in map2 {
+                            map1.entry(key).or_default().extend(vec2);
+                        }
+                        map1
+                    },
+                );
+
             // Find the prefix with the most missing bases in total.
             if !prefix_to_seqs.is_empty() {
                 let prefix_with_missing: Vec<(String, i64)> = prefix_to_seqs
@@ -484,7 +489,8 @@ fn select_and_window_sequences(
                     .par_iter()
                     .max_by(|&(prefix1, missing1), &(prefix2, missing2)| {
                         // First compare by missing amount
-                        missing1.cmp(&missing2)
+                        missing1
+                            .cmp(&missing2)
                             // If missing amounts are equal, compare by prefix name for deterministic results
                             .then_with(|| prefix1.cmp(prefix2))
                     })
@@ -535,13 +541,14 @@ fn select_and_window_sequences(
     }
 
     // Create windows from ranges
-    let new_windows: Vec<(u32, i32, i32)> = ranges_to_window.par_iter()
+    let new_windows: Vec<(u32, i32, i32)> = ranges_to_window
+        .par_iter()
         .flat_map(|(seq_id, start, end)| {
             let mut range_windows: Vec<(u32, i32, i32)> = Vec::new();
             let mut pos = *start;
             while pos < *end {
                 let window_end = std::cmp::min(pos + window_size as i32, *end);
-                
+
                 // If this tail-window is too small, merge it into the last one
                 if window_end - pos < window_size as i32 && !range_windows.is_empty() {
                     let last = range_windows.last_mut().unwrap();
@@ -549,19 +556,22 @@ fn select_and_window_sequences(
                 } else {
                     range_windows.push((*seq_id, pos, window_end));
                 }
-                
+
                 pos = window_end;
             }
             range_windows
         })
         .collect();
-        
+
     windows.extend(new_windows);
-    
+
     Ok(())
 }
 
-fn merge_overlaps(overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>, merge_distance: i32) {
+fn merge_overlaps(
+    overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>)>,
+    merge_distance: i32,
+) {
     if overlaps.len() > 1 && merge_distance >= 0 {
         // Sort by sequence ID and start position
         overlaps.par_sort_by_key(|(query_interval, _, _)| {
@@ -581,7 +591,9 @@ fn merge_overlaps(overlaps: &mut Vec<(Interval<u32>, Vec<CigarOp>, Interval<u32>
             let next_min = std::cmp::min(next_interval.first, next_interval.last);
             let next_max = std::cmp::max(next_interval.first, next_interval.last);
 
-            if curr_interval.metadata != next_interval.metadata || next_min > curr_max + merge_distance {
+            if curr_interval.metadata != next_interval.metadata
+                || next_min > curr_max + merge_distance
+            {
                 write_idx += 1;
                 if write_idx != read_idx {
                     overlaps.swap(write_idx, read_idx);

@@ -1,7 +1,7 @@
+use crate::seqidx::SequenceIndex;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Error as IoError};
 use std::num::ParseIntError;
-use crate::seqidx::SequenceIndex;
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct PartialPafRecord {
@@ -40,7 +40,11 @@ impl PartialPafRecord {
         }
     }
 
-    pub fn parse(line: &str, file_pos: u64, seq_index: &mut SequenceIndex) -> Result<Self, ParseErr> {
+    pub fn parse(
+        line: &str,
+        file_pos: u64,
+        seq_index: &mut SequenceIndex,
+    ) -> Result<Self, ParseErr> {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 12 {
             return Err(ParseErr::NotEnoughFields);
@@ -93,7 +97,7 @@ impl PartialPafRecord {
             cigar_bytes,
         };
         record.set_strand(strand);
-        
+
         Ok(record)
     }
 }
@@ -109,7 +113,10 @@ pub enum ParseErr {
     InvalidFormat(String),
 }
 
-pub fn parse_paf<R: BufRead>(reader: R, seq_index: &mut SequenceIndex) -> Result<Vec<PartialPafRecord>, ParseErr> {
+pub fn parse_paf<R: BufRead>(
+    reader: R,
+    seq_index: &mut SequenceIndex,
+) -> Result<Vec<PartialPafRecord>, ParseErr> {
     let mut bytes_read: u64 = 0;
     let mut records = Vec::new();
     for line_result in reader.lines() {
@@ -126,13 +133,13 @@ pub fn parse_paf<R: BufRead>(reader: R, seq_index: &mut SequenceIndex) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_parse_paf_valid() {
         let line = "seq1\t100\t0\t100\t+\tseq2\t100\t0\t100\t60\t100\t255";
         let mut seq_index = SequenceIndex::new();
         let record = PartialPafRecord::parse(line, 0, &mut seq_index).unwrap();
-        
+
         // IDs should be 0 and 1 as they're the first entries in the SequenceIndex
         let query_id = seq_index.get_id("seq1").unwrap();
         let target_id = seq_index.get_id("seq2").unwrap();

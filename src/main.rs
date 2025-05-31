@@ -1,22 +1,22 @@
+use crate::paf::PartialPafRecord;
 use clap::Parser;
 use coitrees::IntervalTree;
 use impg::impg::{AdjustedInterval, Impg, SerializableImpg};
 use impg::paf;
 use impg::partition::partition_alignments;
-use log::{info, debug, warn};
+use impg::seqidx::SequenceIndex;
+use log::{debug, info, warn};
 use noodles::bgzf;
+use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
+use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::io::BufRead;
 use std::io::{self, BufReader, BufWriter};
 use std::num::NonZeroUsize;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use crate::paf::PartialPafRecord;
-use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use impg::seqidx::SequenceIndex;
 
 /// Common options shared between all commands
 #[derive(Parser, Debug)]
@@ -118,7 +118,13 @@ enum Args {
         output_format: String,
 
         /// Maximum distance between regions to merge
-        #[clap(short = 'd', long, value_parser, conflicts_with = "no_merge_bed", default_value_t = 0)]
+        #[clap(
+            short = 'd',
+            long,
+            value_parser,
+            conflicts_with = "no_merge_bed",
+            default_value_t = 0
+        )]
         merge_distance: i32,
 
         /// Disable merging for all output formats
@@ -223,13 +229,14 @@ fn main() -> io::Result<()> {
                         // Skip the first element (the input range) for BEDPE output
                         results.remove(0);
                         output_results_bedpe(&impg, &mut results, None, merge_distance);
-                    },
+                    }
                     "paf" => {
                         // Skip the first element (the input range) for PAF output
                         results.remove(0);
                         output_results_paf(&impg, &mut results, None, merge_distance);
-                    },
-                    _ => { // 'auto' or 'bed'
+                    }
+                    _ => {
+                        // 'auto' or 'bed'
                         // BED format - include the first element
                         output_results_bed(&impg, &mut results, merge_distance);
                     }
@@ -256,13 +263,14 @@ fn main() -> io::Result<()> {
                         "bed" => {
                             // BED format - include the first element
                             output_results_bed(&impg, &mut results, merge_distance);
-                        },
+                        }
                         "paf" => {
                             // Skip the first element (the input range) for PAF output
                             results.remove(0);
                             output_results_paf(&impg, &mut results, name, merge_distance);
-                        },
-                        _ => { // 'auto' or 'bedpe'
+                        }
+                        _ => {
+                            // 'auto' or 'bedpe'
                             // Skip the first element (the input range) for BEDPE output
                             results.remove(0);
                             output_results_bedpe(&impg, &mut results, name, merge_distance);
@@ -303,8 +311,8 @@ fn validate_output_format(mode: &str) -> io::Result<()> {
         "auto" | "bed" | "bedpe" | "paf" => Ok(()),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "Invalid output format. Must be 'auto', 'bed', 'bedpe', or 'paf'."
-        ))
+            "Invalid output format. Must be 'auto', 'bed', 'bedpe', or 'paf'.",
+        )),
     }
 }
 
@@ -342,13 +350,13 @@ fn resolve_paf_files(common: &CommonOpts) -> io::Result<Vec<String>> {
     if !common.paf_files.is_empty() {
         return Ok(common.paf_files.clone());
     }
-    
+
     if let Some(paf_list_file) = &common.paf_list {
         // Read PAF files from the list file
         let file = File::open(paf_list_file)?;
         let reader = BufReader::new(file);
         let mut paf_files = Vec::new();
-        
+
         for line in reader.lines() {
             let line = line?;
             let trimmed = line.trim();
@@ -356,17 +364,17 @@ fn resolve_paf_files(common: &CommonOpts) -> io::Result<Vec<String>> {
                 paf_files.push(trimmed.to_string());
             }
         }
-        
+
         if paf_files.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("No valid PAF files found in list file: {}", paf_list_file),
             ));
         }
-        
+
         return Ok(paf_files);
     }
-    
+
     // Neither paf_files nor paf_list provided
     Err(io::Error::new(
         io::ErrorKind::InvalidInput,
@@ -374,7 +382,11 @@ fn resolve_paf_files(common: &CommonOpts) -> io::Result<Vec<String>> {
     ))
 }
 
-fn load_or_generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize, custom_index: Option<&str>) -> io::Result<Impg> {
+fn load_or_generate_multi_index(
+    paf_files: &[String],
+    num_threads: NonZeroUsize,
+    custom_index: Option<&str>,
+) -> io::Result<Impg> {
     let index_file = get_combined_index_filename(paf_files, custom_index);
     if std::path::Path::new(&index_file).exists() {
         load_multi_index(paf_files, custom_index)
@@ -390,13 +402,16 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
     // Check if all PAF files are newer than the index
     let index_file_metadata = std::fs::metadata(&index_file)?;
     let index_file_ts = index_file_metadata.modified().ok();
-    
+
     if let Some(index_ts) = index_file_ts {
         paf_files.par_iter().for_each(|paf_file| {
             if let Ok(paf_file_metadata) = std::fs::metadata(paf_file) {
                 if let Ok(paf_file_ts) = paf_file_metadata.modified() {
                     if paf_file_ts > index_ts {
-                        warn!("WARNING:\tPAF file {} has been modified since impg index creation.", paf_file);
+                        warn!(
+                            "WARNING:\tPAF file {} has been modified since impg index creation.",
+                            paf_file
+                        );
                     }
                 }
             }
@@ -411,11 +426,18 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
             format!("Failed to deserialize index: {:?}", e),
         )
     })?;
-    
-    Ok(Impg::from_multi_paf_and_serializable(paf_files, serializable))
+
+    Ok(Impg::from_multi_paf_and_serializable(
+        paf_files,
+        serializable,
+    ))
 }
 
-fn generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize, custom_index: Option<&str>) -> io::Result<Impg> {
+fn generate_multi_index(
+    paf_files: &[String],
+    num_threads: NonZeroUsize,
+    custom_index: Option<&str>,
+) -> io::Result<Impg> {
     let index_file = get_combined_index_filename(paf_files, custom_index);
     info!("No index found at {}. Creating it now.", index_file);
 
@@ -429,38 +451,44 @@ fn generate_multi_index(paf_files: &[String], num_threads: NonZeroUsize, custom_
     // Process PAF files in parallel using Rayon
     let records_by_file: Vec<_> = (0..paf_files.len())
         .into_par_iter()
-        .map(|file_index| -> io::Result<(Vec<PartialPafRecord>, String)> {
-            let paf_file = &paf_files[file_index];
-            
-            // Increment the counter and get the new value atomically
-            let current_count = files_processed.fetch_add(1, Ordering::SeqCst) + 1;
-            // Print progress with sequential counter
-            debug!("Processing PAF file ({}/{}): {}", current_count, num_paf_files, paf_file);
+        .map(
+            |file_index| -> io::Result<(Vec<PartialPafRecord>, String)> {
+                let paf_file = &paf_files[file_index];
 
-            let file = File::open(paf_file)?;
-            let reader: Box<dyn io::Read> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-                Box::new(bgzf::MultithreadedReader::with_worker_count(
-                    num_threads,
-                    file,
-                ))
-            } else {
-                Box::new(file)
-            };
-            let reader = BufReader::new(reader);
+                // Increment the counter and get the new value atomically
+                let current_count = files_processed.fetch_add(1, Ordering::SeqCst) + 1;
+                // Print progress with sequential counter
+                debug!(
+                    "Processing PAF file ({}/{}): {}",
+                    current_count, num_paf_files, paf_file
+                );
 
-            // Lock, get IDs, build records
-            let mut seq_index_guard = seq_index.lock().unwrap();
-            let records = paf::parse_paf(reader, &mut seq_index_guard).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Failed to parse PAF records from {}: {:?}", paf_file, e),
-                )
-            })?;
-            
-            Ok((records, paf_file.clone()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;  // Propagate any errors
-    
+                let file = File::open(paf_file)?;
+                let reader: Box<dyn io::Read> =
+                    if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
+                        Box::new(bgzf::MultithreadedReader::with_worker_count(
+                            num_threads,
+                            file,
+                        ))
+                    } else {
+                        Box::new(file)
+                    };
+                let reader = BufReader::new(reader);
+
+                // Lock, get IDs, build records
+                let mut seq_index_guard = seq_index.lock().unwrap();
+                let records = paf::parse_paf(reader, &mut seq_index_guard).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Failed to parse PAF records from {}: {:?}", paf_file, e),
+                    )
+                })?;
+
+                Ok((records, paf_file.clone()))
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?; // Propagate any errors
+
     // Take back ownership of the SequenceIndex
     let seq_index = Arc::try_unwrap(seq_index)
         .unwrap_or_else(|_| panic!("Failed to unwrap SequenceIndex"))
@@ -552,20 +580,20 @@ fn get_combined_index_filename(paf_files: &[String], custom_index: Option<&str>)
     if let Some(index) = custom_index {
         return index.to_string();
     }
-    
+
     if paf_files.len() == 1 {
         format!("{}.impg", paf_files[0])
     } else {
         // For multiple files, create a hash of the sorted filenames
-        
+
         let mut file_refs: Vec<&str> = paf_files.iter().map(|s| s.as_str()).collect();
         file_refs.sort();
-        
+
         let mut hasher = DefaultHasher::new();
         for file in &file_refs {
             file.hash(&mut hasher);
         }
-        
+
         format!("combined_{:016x}.impg", hasher.finish())
     }
 }
@@ -624,7 +652,7 @@ fn perform_query(
 
 fn output_results_bed(impg: &Impg, results: &mut Vec<AdjustedInterval>, merge_distance: i32) {
     merge_bed_intervals(results, merge_distance);
-    
+
     for (overlap, _, _) in results {
         let overlap_name = impg.seq_index.get_name(overlap.metadata).unwrap();
         let (first, last, strand) = if overlap.first <= overlap.last {
@@ -642,12 +670,16 @@ fn merge_bed_intervals(results: &mut Vec<AdjustedInterval>, merge_distance: i32)
         // Sort by sequence ID, strand orientation, and start position
         results.par_sort_by_key(|(query_interval, _, _)| {
             let is_forward = query_interval.first <= query_interval.last;
-            let start = if is_forward { query_interval.first } else { query_interval.last };
-            
+            let start = if is_forward {
+                query_interval.first
+            } else {
+                query_interval.last
+            };
+
             (
-                query_interval.metadata,  // First sort by sequence ID
-                is_forward,               // Then by strand orientation
-                start                     // Finally by actual start position
+                query_interval.metadata, // First sort by sequence ID
+                is_forward,              // Then by strand orientation
+                start,                   // Finally by actual start position
             )
         });
 
@@ -659,14 +691,14 @@ fn merge_bed_intervals(results: &mut Vec<AdjustedInterval>, merge_distance: i32)
             // Check if both intervals are on the same sequence and have same orientation
             let curr_is_forward = curr_interval.first <= curr_interval.last;
             let next_is_forward = next_interval.first <= next_interval.last;
-            
+
             // Extract actual start/end positions based on orientation
             let (curr_start, curr_end) = if curr_is_forward {
                 (curr_interval.first, curr_interval.last)
             } else {
                 (curr_interval.last, curr_interval.first)
             };
-            
+
             let (next_start, next_end) = if next_is_forward {
                 (next_interval.first, next_interval.last)
             } else {
@@ -674,9 +706,10 @@ fn merge_bed_intervals(results: &mut Vec<AdjustedInterval>, merge_distance: i32)
             };
 
             // Only merge if same sequence, same orientation, and within merge distance
-            if curr_interval.metadata != next_interval.metadata || 
-               curr_is_forward != next_is_forward ||
-               next_start > curr_end + merge_distance {
+            if curr_interval.metadata != next_interval.metadata
+                || curr_is_forward != next_is_forward
+                || next_start > curr_end + merge_distance
+            {
                 write_idx += 1;
                 if write_idx != read_idx {
                     results.swap(write_idx, read_idx);
@@ -698,7 +731,12 @@ fn merge_bed_intervals(results: &mut Vec<AdjustedInterval>, merge_distance: i32)
     }
 }
 
-fn output_results_bedpe(impg: &Impg, results: &mut Vec<AdjustedInterval>, name: Option<String>, merge_distance: i32) {
+fn output_results_bedpe(
+    impg: &Impg,
+    results: &mut Vec<AdjustedInterval>,
+    name: Option<String>,
+    merge_distance: i32,
+) {
     merge_adjusted_intervals(results, merge_distance);
 
     for (overlap_query, _, overlap_target) in results {
@@ -723,7 +761,12 @@ fn output_results_bedpe(impg: &Impg, results: &mut Vec<AdjustedInterval>, name: 
     }
 }
 
-fn output_results_paf(impg: &Impg, results: &mut Vec<AdjustedInterval>, name: Option<String>, merge_distance: i32) {       
+fn output_results_paf(
+    impg: &Impg,
+    results: &mut Vec<AdjustedInterval>,
+    name: Option<String>,
+    merge_distance: i32,
+) {
     merge_adjusted_intervals(results, merge_distance);
 
     for (overlap_query, cigar, overlap_target) in results {
@@ -793,8 +836,8 @@ fn output_results_paf(impg: &Impg, results: &mut Vec<AdjustedInterval>, name: Op
     }
 }
 
-use impg::paf::Strand;
 use impg::impg::CigarOp;
+use impg::paf::Strand;
 
 // Function to merge adjusted intervals
 fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance: i32) {
@@ -802,44 +845,46 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
         // Sort by query ID, query position, target ID, target position
         results.par_sort_by_key(|(query_interval, _, target_interval)| {
             let query_forward = query_interval.first < query_interval.last;
-            
+
             (
-                query_interval.metadata,                // Group by query sequence ID
-                query_forward,                          // Group by orientation (keep same orientations together)
-                if query_forward {                      // Use appropriate position based on orientation
-                    query_interval.first                // Forward: use start position
+                query_interval.metadata, // Group by query sequence ID
+                query_forward,           // Group by orientation (keep same orientations together)
+                if query_forward {
+                    // Use appropriate position based on orientation
+                    query_interval.first // Forward: use start position
                 } else {
-                    query_interval.last                 // Reverse: use end position 
+                    query_interval.last // Reverse: use end position
                 },
-                target_interval.metadata,               // Group by target sequence ID
-                target_interval.first,                  // Target always forward
+                target_interval.metadata, // Group by target sequence ID
+                target_interval.first,    // Target always forward
             )
         });
 
         // Create a new vector to store merged results
         let mut merged_results = Vec::with_capacity(results.len());
-        
+
         // Start with the first element
         let (mut current_query, mut current_cigar, mut current_target) = results[0].clone();
-        
+
         // Iterate through remaining elements
         for i in 1..results.len() {
             let (next_query, next_cigar, next_target) = &results[i];
-            
+
             // Determine orientations
             let query_forward = current_query.first <= current_query.last;
             let next_query_forward = next_query.first <= next_query.last;
-            
+
             let target_forward = current_target.first <= current_target.last;
             let next_target_forward = next_target.first <= next_target.last;
             if !target_forward || !next_target_forward {
-               panic!("Target intervals should always be in forward!");
+                panic!("Target intervals should always be in forward!");
             }
 
             // Check if sequences match and orientations are the same
-            if current_query.metadata != next_query.metadata || 
-               current_target.metadata != next_target.metadata || 
-               query_forward != next_query_forward {
+            if current_query.metadata != next_query.metadata
+                || current_target.metadata != next_target.metadata
+                || query_forward != next_query_forward
+            {
                 // Store current interval
                 merged_results.push((current_query, current_cigar, current_target));
                 // Clone the next as the new current
@@ -848,20 +893,21 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
             }
 
             // Check contiguity or overlap
-            let (query_contiguous, target_contiguous, query_overlap, target_overlap) = if query_forward {
-                let q_contig = current_query.last == next_query.first;
-                let t_contig = current_target.last == next_target.first;
-                let q_overlap = current_query.last > next_query.first;
-                let t_overlap = current_target.last > next_target.first;
-                (q_contig, t_contig, q_overlap, t_overlap)
-            } else {
-                // Reverse orientation (remember that first > last in reverse, so we swap first/last)
-                let q_contig = current_query.first == next_query.last;
-                let t_contig = current_target.first == next_target.last;
-                let q_overlap = current_query.first > next_query.last;
-                let t_overlap = current_target.first < next_target.last;
-                (q_contig, t_contig, q_overlap, t_overlap)
-            };
+            let (query_contiguous, target_contiguous, query_overlap, target_overlap) =
+                if query_forward {
+                    let q_contig = current_query.last == next_query.first;
+                    let t_contig = current_target.last == next_target.first;
+                    let q_overlap = current_query.last > next_query.first;
+                    let t_overlap = current_target.last > next_target.first;
+                    (q_contig, t_contig, q_overlap, t_overlap)
+                } else {
+                    // Reverse orientation (remember that first > last in reverse, so we swap first/last)
+                    let q_contig = current_query.first == next_query.last;
+                    let t_contig = current_target.first == next_target.last;
+                    let q_overlap = current_query.first > next_query.last;
+                    let t_overlap = current_target.first < next_target.last;
+                    (q_contig, t_contig, q_overlap, t_overlap)
+                };
 
             // Handle perfect contiguity (existing logic)
             if query_contiguous && target_contiguous {
@@ -889,7 +935,7 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
                 if query_forward {
                     current_query.last = next_query.last;
                     current_target.last = next_target.last;
-                    current_cigar.extend_from_slice(next_cigar); 
+                    current_cigar.extend_from_slice(next_cigar);
                 } else {
                     current_query.first = next_query.first;
                     current_target.first = next_target.first;
@@ -906,10 +952,16 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
             if query_overlap && target_overlap {
                 // Calculate overlap lengths
                 let (query_overlap_len, target_overlap_len) = if query_forward {
-                    (next_query.first - current_query.last, next_target.first - current_target.last)
+                    (
+                        next_query.first - current_query.last,
+                        next_target.first - current_target.last,
+                    )
                 } else {
                     // Reverse orientation (remember that first > last in reverse, so we swap first/last)
-                    (next_query.last - current_query.first, current_target.first - next_target.last)
+                    (
+                        next_query.last - current_query.first,
+                        current_target.first - next_target.last,
+                    )
                 };
 
                 // Check if overlaps are proportional (same alignment)
@@ -919,7 +971,7 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
                         &current_cigar,
                         &next_cigar,
                         query_overlap_len,
-                        query_forward
+                        query_forward,
                     );
 
                     if overlap_matches {
@@ -946,7 +998,8 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
                         );
 
                         // Trim the overlap from the next interval and merge
-                        let trimmed_next_cigar = trim_cigar_prefix(&next_cigar, query_overlap_len, target_overlap_len);
+                        let trimmed_next_cigar =
+                            trim_cigar_prefix(&next_cigar, query_overlap_len, target_overlap_len);
 
                         if query_forward {
                             current_query.last = next_query.last;
@@ -956,7 +1009,8 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
                             current_query.first = next_query.first;
                             current_target.first = next_target.first;
 
-                            let mut new_cigar = Vec::with_capacity(trimmed_next_cigar.len() + current_cigar.len());
+                            let mut new_cigar =
+                                Vec::with_capacity(trimmed_next_cigar.len() + current_cigar.len());
                             new_cigar.extend(trimmed_next_cigar);
                             new_cigar.extend_from_slice(&current_cigar);
                             current_cigar = new_cigar;
@@ -969,16 +1023,24 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
             // Handle gaps within merge distance
             if !query_overlap && !target_overlap {
                 let (query_gap, target_gap) = if query_forward {
-                    (next_query.first - current_query.last, next_target.first - current_target.last)
+                    (
+                        next_query.first - current_query.last,
+                        next_target.first - current_target.last,
+                    )
                 } else {
-                    (current_query.first - next_query.last, current_target.first - next_target.last)
+                    (
+                        current_query.first - next_query.last,
+                        current_target.first - next_target.last,
+                    )
                 };
 
                 // Check if gaps are within merge distance and at least one gap exists
-                if query_gap >= 0 && target_gap >= 0 && 
-                   (query_gap > 0 || target_gap > 0) &&
-                   query_gap <= merge_distance && target_gap <= merge_distance {
-                    
+                if query_gap >= 0
+                    && target_gap >= 0
+                    && (query_gap > 0 || target_gap > 0)
+                    && query_gap <= merge_distance
+                    && target_gap <= merge_distance
+                {
                     debug!(
                         "Merge gaps! Query gap: {}, Target gap: {}, Query: current {}:{}-{}({}), next {}:{}-{}({}); Target: current {}:{}-{}({}), next {}:{}-{}({})",
                         query_gap,
@@ -1003,14 +1065,14 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
 
                     // Create gap-filling CIGAR operations
                     let mut gap_cigar = Vec::new();
-                    
+
                     if query_gap > 0 {
                         gap_cigar.push(CigarOp::new(query_gap, 'I'));
                     }
                     if target_gap > 0 {
                         gap_cigar.push(CigarOp::new(target_gap, 'D'));
                     }
-                    
+
                     // Merge intervals and CIGAR
                     if query_forward {
                         current_query.last = next_query.last;
@@ -1020,8 +1082,10 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
                     } else {
                         current_query.first = next_query.first;
                         current_target.first = next_target.first;
-                        
-                        let mut new_cigar = Vec::with_capacity(current_cigar.len() + gap_cigar.len() + next_cigar.len());
+
+                        let mut new_cigar = Vec::with_capacity(
+                            current_cigar.len() + gap_cigar.len() + next_cigar.len(),
+                        );
                         new_cigar.extend_from_slice(&next_cigar);
                         new_cigar.extend(gap_cigar);
                         new_cigar.extend_from_slice(&current_cigar);
@@ -1035,10 +1099,10 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
             merged_results.push((current_query, current_cigar, current_target));
             (current_query, current_cigar, current_target) = results[i].clone();
         }
-        
+
         // Don't forget to add the last current element
         merged_results.push((current_query, current_cigar, current_target));
-        
+
         // Replace original results with merged results
         *results = merged_results;
     }
@@ -1049,14 +1113,14 @@ fn check_cigar_overlap_match(
     current_cigar: &[CigarOp],
     next_cigar: &[CigarOp],
     query_overlap_len: i32,
-    query_forward: bool
+    query_forward: bool,
 ) -> bool {
     // Extract the suffix of current CIGAR that corresponds to the overlap
     let current_suffix = extract_cigar_suffix(current_cigar, query_overlap_len, query_forward);
-    
+
     // Extract the prefix of next CIGAR that corresponds to the overlap
     let next_prefix = extract_cigar_prefix(next_cigar, query_overlap_len, query_forward);
-    
+
     // Compare if they're identical
     current_suffix == next_prefix
 }
@@ -1065,15 +1129,21 @@ fn check_cigar_overlap_match(
 fn extract_cigar_suffix(cigar: &[CigarOp], query_len: i32, forward: bool) -> Vec<CigarOp> {
     let mut result = Vec::new();
     let mut remaining_query = query_len;
-    
+
     // Traverse CIGAR from end to beginning
     for op in cigar.iter().rev() {
         if remaining_query <= 0 {
             break;
         }
-        
-        let query_delta = op.query_delta(if forward { Strand::Forward } else { Strand::Reverse }).abs();
-        
+
+        let query_delta = op
+            .query_delta(if forward {
+                Strand::Forward
+            } else {
+                Strand::Reverse
+            })
+            .abs();
+
         if query_delta <= remaining_query {
             // Include entire operation
             result.push(op.clone());
@@ -1087,7 +1157,7 @@ fn extract_cigar_suffix(cigar: &[CigarOp], query_len: i32, forward: bool) -> Vec
             remaining_query = 0;
         }
     }
-    
+
     // Reverse to get correct order
     result.reverse();
     result
@@ -1097,14 +1167,20 @@ fn extract_cigar_suffix(cigar: &[CigarOp], query_len: i32, forward: bool) -> Vec
 fn extract_cigar_prefix(cigar: &[CigarOp], query_len: i32, forward: bool) -> Vec<CigarOp> {
     let mut result = Vec::new();
     let mut remaining_query = query_len;
-    
+
     for op in cigar.iter() {
         if remaining_query <= 0 {
             break;
         }
-        
-        let query_delta = op.query_delta(if forward { Strand::Forward } else { Strand::Reverse }).abs();
-        
+
+        let query_delta = op
+            .query_delta(if forward {
+                Strand::Forward
+            } else {
+                Strand::Reverse
+            })
+            .abs();
+
         if query_delta <= remaining_query {
             // Include entire operation
             result.push(op.clone());
@@ -1118,7 +1194,7 @@ fn extract_cigar_prefix(cigar: &[CigarOp], query_len: i32, forward: bool) -> Vec
             remaining_query = 0;
         }
     }
-    
+
     result
 }
 
@@ -1128,20 +1204,21 @@ fn trim_cigar_prefix(cigar: &[CigarOp], query_len: i32, target_len: i32) -> Vec<
     let mut query_consumed = 0;
     let mut target_consumed = 0;
     let mut start_idx = 0;
-    
+
     // Find where to start after trimming
     for (idx, op) in cigar.iter().enumerate() {
         let q_delta = op.query_delta(Strand::Forward).abs();
         let t_delta = op.target_delta();
-        
+
         if query_consumed + q_delta > query_len || target_consumed + t_delta > target_len {
             // This operation partially overlaps - need to trim it
             let query_remaining = query_len - query_consumed;
             let target_remaining = target_len - target_consumed;
-            
+
             // Calculate how much of this operation to skip
             let skip_ratio = if q_delta > 0 && t_delta > 0 {
-                (query_remaining as f32 / q_delta as f32).min(target_remaining as f32 / t_delta as f32)
+                (query_remaining as f32 / q_delta as f32)
+                    .min(target_remaining as f32 / t_delta as f32)
             } else if q_delta > 0 {
                 query_remaining as f32 / q_delta as f32
             } else if t_delta > 0 {
@@ -1149,29 +1226,29 @@ fn trim_cigar_prefix(cigar: &[CigarOp], query_len: i32, target_len: i32) -> Vec<
             } else {
                 0.0
             };
-            
+
             let skip_len = (op.len() as f32 * skip_ratio) as i32;
-            
+
             if skip_len < op.len() {
                 // Create partial operation with remaining length
                 let partial_op = CigarOp::new(op.len() - skip_len, op.op());
                 result.push(partial_op);
             }
-            
+
             // Add all remaining operations
             start_idx = idx + 1;
             break;
         }
-        
+
         query_consumed += q_delta;
         target_consumed += t_delta;
-        
+
         if query_consumed >= query_len && target_consumed >= target_len {
             start_idx = idx + 1;
             break;
         }
     }
-    
+
     // Add all remaining operations
     result.extend_from_slice(&cigar[start_idx..]);
     result
@@ -1201,10 +1278,7 @@ fn print_stats(impg: &Impg) {
 
     if !entries.is_empty() {
         // Calculate mean and median overlaps
-        let sum: usize = entries
-            .par_iter()
-            .map(|(_, count)| count)
-            .sum();
+        let sum: usize = entries.par_iter().map(|(_, count)| count).sum();
         let mean = sum as f64 / entries.len() as f64;
 
         let median = if entries.is_empty() {
