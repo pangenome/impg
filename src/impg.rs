@@ -512,14 +512,18 @@ impl Impg {
                             return; // Skip this result
                         }
                     }
-                    
+
                     let adjusted_interval = (
                         Interval {
                             first: adjusted_query_start,
                             last: adjusted_query_end,
                             metadata: metadata.query_id,
                         },
-                        if store_cigar { adjusted_cigar } else { Vec::new() },
+                        if store_cigar {
+                            adjusted_cigar
+                        } else {
+                            Vec::new()
+                        },
                         Interval {
                             first: adjusted_target_start,
                             last: adjusted_target_end,
@@ -656,14 +660,18 @@ impl Impg {
                                     return None; // Skip this result
                                 }
                             }
-                                                        
+
                             Some((
                                 Interval {
                                     first: adjusted_query_start,
                                     last: adjusted_query_end,
                                     metadata: metadata.query_id,
                                 },
-                                if store_cigar { adjusted_cigar } else { Vec::new() },
+                                if store_cigar {
+                                    adjusted_cigar
+                                } else {
+                                    Vec::new()
+                                },
                                 Interval {
                                     first: adjusted_target_start,
                                     last: adjusted_target_end,
@@ -883,16 +891,23 @@ impl Impg {
                                         {
                                             // Check gap-compressed identity if threshold is provided
                                             if let Some(threshold) = min_gap_compressed_identity {
-                                                if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
+                                                if calculate_gap_compressed_identity(
+                                                    &adjusted_cigar,
+                                                ) < threshold
+                                                {
                                                     return; // Skip this result
                                                 }
                                             }
-                                       
+
                                             local_results.push((
                                                 metadata.query_id,
                                                 adjusted_query_start,
                                                 adjusted_query_end,
-                                                if store_cigar { adjusted_cigar } else { Vec::new() },
+                                                if store_cigar {
+                                                    adjusted_cigar
+                                                } else {
+                                                    Vec::new()
+                                                },
                                                 adjusted_target_start,
                                                 adjusted_target_end,
                                                 *current_target_id,
@@ -1179,20 +1194,20 @@ fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, ParseErr> {
 }
 
 fn calculate_gap_compressed_identity(cigar_ops: &[CigarOp]) -> f64 {
-    let (matches, mismatches, insertions, deletions) = cigar_ops.iter().fold(
-        (0i32, 0i32, 0i32, 0i32),
-        |(m, mm, i, d), op| {
-            let len = op.len();
-            match op.op() {
-                'M' | '=' => (m + len, mm, i, d),  // Assume 'M' represents matches
-                'X' => (m, mm + len, i, d),
-                'I' => (m, mm, i + 1, d),
-                'D' => (m, mm, i, d + 1),
-                _ => (m, mm, i, d),
-            }
-        },
-    );
-    
+    let (matches, mismatches, insertions, deletions) =
+        cigar_ops
+            .iter()
+            .fold((0i32, 0i32, 0i32, 0i32), |(m, mm, i, d), op| {
+                let len = op.len();
+                match op.op() {
+                    'M' | '=' => (m + len, mm, i, d), // Assume 'M' represents matches
+                    'X' => (m, mm + len, i, d),
+                    'I' => (m, mm, i + 1, d),
+                    'D' => (m, mm, i, d + 1),
+                    _ => (m, mm, i, d),
+                }
+            });
+
     let total = matches + mismatches + insertions + deletions;
     if total == 0 {
         0.0

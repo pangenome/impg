@@ -520,11 +520,8 @@ fn generate_multi_index(
     let serializable = impg.to_serializable();
     let file = File::create(index_file)?;
     let writer = BufWriter::new(file);
-    bincode::serialize_into(writer, &serializable).map_err(|e| {
-        io::Error::other(
-            format!("Failed to serialize index: {:?}", e),
-        )
-    })?;
+    bincode::serialize_into(writer, &serializable)
+        .map_err(|e| io::Error::other(format!("Failed to serialize index: {:?}", e)))?;
 
     Ok(impg)
 }
@@ -665,7 +662,13 @@ fn perform_query(
             min_identity,
         )
     } else {
-        impg.query(target_id, target_start, target_end, store_cigar, min_identity)
+        impg.query(
+            target_id,
+            target_start,
+            target_end,
+            store_cigar,
+            min_identity,
+        )
     }
 }
 
@@ -1134,7 +1137,7 @@ fn merge_consecutive_cigar_ops(cigar: &mut Vec<CigarOp>) {
     if cigar.len() <= 1 {
         return;
     }
-    
+
     let mut write_idx = 0;
     for read_idx in 1..cigar.len() {
         if cigar[write_idx].op() == cigar[read_idx].op() {
