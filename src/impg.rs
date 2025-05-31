@@ -448,7 +448,14 @@ impl Impg {
         Self::from_multi_paf_and_serializable(&[paf_file.to_string()], serializable)
     }
 
-    pub fn query(&self, target_id: u32, range_start: i32, range_end: i32, min_gap_compressed_identity: Option<f64>) -> Vec<AdjustedInterval> {
+    pub fn query(
+        &self,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32,
+        store_cigar: bool,
+        min_gap_compressed_identity: Option<f64>,
+    ) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
         // Add the input range to the results
         results.push((
@@ -457,7 +464,11 @@ impl Impg {
                 last: range_end,
                 metadata: target_id,
             },
-            vec![CigarOp::new(range_end - range_start, '=')],
+            if store_cigar {
+                vec![CigarOp::new(range_end - range_start, '=')]
+            } else {
+                Vec::new()
+            },
             Interval {
                 first: range_start,
                 last: range_end,
@@ -508,7 +519,7 @@ impl Impg {
                             last: adjusted_query_end,
                             metadata: metadata.query_id,
                         },
-                        adjusted_cigar,
+                        if store_cigar { adjusted_cigar } else { Vec::new() },
                         Interval {
                             first: adjusted_target_start,
                             last: adjusted_target_end,
