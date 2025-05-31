@@ -18,6 +18,112 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use poasta::graphs::poa::POAGraph;
+use poasta::aligner::PoastaAligner;
+use poasta::aligner::config::AffineMinGapCost;
+use poasta::aligner::scoring::{AlignmentType, GapAffine};
+use rust_htslib::faidx;
+
+// Structure to manage multiple FASTA files
+struct FastaIndex {
+    fasta_paths: Vec<String>,
+    path_key_to_fasta: FxHashMap<String, usize>,
+}
+
+impl FastaIndex {
+    fn new() -> Self {
+        FastaIndex {
+            fasta_paths: Vec::new(),
+            path_key_to_fasta: FxHashMap::default(),
+        }
+    }
+
+    fn build_from_files(fasta_files: &[String]) -> io::Result<Self> {
+        let mut index = FastaIndex::new();
+
+        for (fasta_idx, fasta_path) in fasta_files.iter().enumerate() {
+            index.fasta_paths.push(fasta_path.clone());
+
+            // Read the .fai file to get sequence names
+            let fai_path = format!("{}.fai", fasta_path);
+
+            // Try to open the .fai file, if it doesn't exist, try to create it
+            let fai_content = match std::fs::read_to_string(&fai_path) {
+                Ok(content) => content,
+                Err(_) => {
+                    // Try to create the index using rust-htslib
+                    match faidx::Reader::from_path(fasta_path) {
+                        Ok(_) => {
+                            // Index was created, now read it
+                            std::fs::read_to_string(&fai_path)?
+                        }
+                        Err(e) => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::Other,
+                                format!("Failed to create FASTA index for '{}': {}", fasta_path, e)
+                            ));
+                        }
+                    }
+                }
+            };
+
+            // Parse the .fai file to get sequence names
+            for line in fai_content.lines() {
+                if let Some(seq_name) = line.split('\t').next() {
+                    if !seq_name.is_empty() {
+                        index.path_key_to_fasta.insert(seq_name.to_string(), fasta_idx);
+                    }
+                }
+            }
+        }
+
+        Ok(index)
+    }
+
+    fn get_fasta_path(&self, path_key: &str) -> Option<&str> {
+        self.path_key_to_fasta.get(path_key)
+            .map(|&idx| self.fasta_paths[idx].as_str())
+    }
+
+    fn fetch_sequence(&self, seq_name: &str, start: i32, end: i32) -> io::Result<Vec<u8>> {
+        let fasta_path = self.get_fasta_path(seq_name)
+            .ok_or_else(|| io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Sequence '{}' not found in any FASTA file", seq_name)
+            ))?;
+            
+        let reader = faidx::Reader::from_path(fasta_path)
+            .map_err(|e| io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to open FASTA file '{}': {}", fasta_path, e)
+            ))?;
+            
+        // rust-htslib uses 0-based half-open coordinates internally
+        // but fetch_seq expects 0-based inclusive end coordinate
+        let sequence = reader.fetch_seq(seq_name, start as usize, (end - 1) as usize)
+            .map_err(|e| io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to fetch sequence '{}:{}:{}': {}", seq_name, start, end, e)
+            ))?;
+            
+        Ok(sequence.to_vec())
+    }
+}
+
+fn reverse_complement(seq: &[u8]) -> Vec<u8> {
+    seq.iter()
+        .rev()
+        .map(|&base| match base {
+            b'A' | b'a' => b'T',
+            b'T' | b't' => b'A',
+            b'C' | b'c' => b'G',
+            b'G' | b'g' => b'C',
+            b'N' | b'n' => b'N',
+            _ => base,
+        })
+        .collect()
+}
+
 /// Common options shared between all commands
 #[derive(Parser, Debug)]
 struct CommonOpts {
@@ -117,9 +223,13 @@ enum Args {
         #[clap(short = 'b', long, value_parser)]
         target_bed: Option<String>,
 
-        /// Output format: 'auto' (BED for -r, BEDPE for -b), 'bed', 'bedpe', or 'paf'
+        /// Output format: 'auto' (BED for -r, BEDPE for -b), 'bed', 'bedpe', 'paf', or `gfa' (requires --fasta-list)
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
+
+        /// Path to a text file containing paths to FASTA files (required for GFA output)
+        #[clap(long, value_parser, required_if_eq("output_format", "gfa"))]
+        fasta_list: Option<String>,
 
         /// Maximum distance between regions to merge
         #[clap(
@@ -206,6 +316,7 @@ fn main() -> io::Result<()> {
             target_range,
             target_bed,
             output_format,
+            fasta_list,
             merge_distance,
             no_merge,
             min_identity,
@@ -218,6 +329,18 @@ fn main() -> io::Result<()> {
             validate_output_format(&output_format)?;
 
             let impg = initialize_impg(&common)?;
+
+            // Build FASTA index if GFA output is requested
+            let fasta_index = if output_format == "gfa" {
+                let fasta_list_file = fasta_list.ok_or_else(|| io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--fasta-list is required for GFA output format"
+                ))?;
+                let fasta_files = resolve_fasta_files(&fasta_list_file)?;
+                Some(FastaIndex::build_from_files(&fasta_files)?)
+            } else {
+                None
+            };
 
             if let Some(target_range) = target_range {
                 let (target_name, target_range) = parse_target_range(&target_range)?;
@@ -247,6 +370,10 @@ fn main() -> io::Result<()> {
                         // Skip the first element (the input range) for PAF output
                         results.remove(0);
                         output_results_paf(&impg, &mut results, None, merge_distance);
+                    }
+                    "gfa" => {
+                        results.remove(0);
+                        output_results_gfa(&impg, &mut results, &fasta_index.unwrap(), None, merge_distance)?;
                     }
                     _ => {
                         // 'auto' or 'bed'
@@ -283,6 +410,10 @@ fn main() -> io::Result<()> {
                             // Skip the first element (the input range) for PAF output
                             results.remove(0);
                             output_results_paf(&impg, &mut results, name, merge_distance);
+                        }
+                        "gfa" => {
+                            results.remove(0);
+                            output_results_gfa(&impg, &mut results, &fasta_index.as_ref().unwrap(), name, merge_distance)?;
                         }
                         _ => {
                             // 'auto' or 'bedpe'
@@ -323,12 +454,36 @@ fn validate_selection_mode(mode: &str) -> io::Result<()> {
 
 fn validate_output_format(mode: &str) -> io::Result<()> {
     match mode {
-        "auto" | "bed" | "bedpe" | "paf" => Ok(()),
+        "auto" | "bed" | "bedpe" | "paf" | "gfa" => Ok(()),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "Invalid output format. Must be 'auto', 'bed', 'bedpe', or 'paf'.",
+            "Invalid output format. Must be 'auto', 'bed', 'bedpe', 'paf', or 'gfa'.",
         )),
     }
+}
+
+// Read FASTA list file
+fn resolve_fasta_files(fasta_list_file: &str) -> io::Result<Vec<String>> {
+    let file = File::open(fasta_list_file)?;
+    let reader = BufReader::new(file);
+    let mut fasta_files = Vec::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if !trimmed.is_empty() && !trimmed.starts_with('#') {
+            fasta_files.push(trimmed.to_string());
+        }
+    }
+
+    if fasta_files.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("No valid FASTA files found in list file: {}", fasta_list_file),
+        ));
+    }
+
+    Ok(fasta_files)
 }
 
 /// Initialize thread pool and load/generate index based on common options
@@ -856,6 +1011,93 @@ fn output_results_paf(
                                 matches, block_len, 255, gi_str, bi_str, cigar_str),
         }
     }
+}
+
+fn output_results_gfa(
+    impg: &Impg,
+    results: &mut Vec<AdjustedInterval>,
+    fasta_index: &FastaIndex,
+    name: Option<String>,
+    merge_distance: i32,
+) -> io::Result<()> {
+    // Merge intervals if needed
+    merge_adjusted_intervals(results, merge_distance);
+    
+    // Create a POA graph
+    let mut graph: POAGraph<u32> = POAGraph::new();
+    
+    // Create scoring parameters for alignment
+    let scoring = GapAffine::new(
+        4,  // mismatch cost
+        2,  // gap extend cost
+        6,  // gap open cost
+    );
+    
+    // Create an aligner
+    let aligner = PoastaAligner::new(
+        AffineMinGapCost(scoring),
+        AlignmentType::Global
+    );
+    
+    // Collect sequences for each interval
+    let mut sequences = Vec::new();
+    for (idx, (interval, _, _)) in results.iter().enumerate() {
+        let seq_name = impg.seq_index.get_name(interval.metadata)
+            .ok_or_else(|| io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Sequence name not found for ID {}", interval.metadata)
+            ))?;
+            
+        // Determine actual start and end based on orientation
+        let (start, end) = if interval.first <= interval.last {
+            (interval.first, interval.last)
+        } else {
+            (interval.last, interval.first)
+        };
+        
+        // Fetch the sequence
+        let sequence = fasta_index.fetch_sequence(seq_name, start, end)?;
+        
+        // If reverse strand, reverse complement the sequence
+        let sequence = if interval.first > interval.last {
+            reverse_complement(&sequence)
+        } else {
+            sequence
+        };
+        
+        sequences.push((format!("{}:{}-{}", seq_name, start, end), sequence));
+    }
+    
+    // Add sequences to the POA graph
+    for (idx, (seq_name, sequence)) in sequences.iter().enumerate() {
+        let weights = vec![1; sequence.len()];
+        
+        if idx == 0 {
+            // First sequence - create initial graph
+            graph.add_alignment_with_weights(
+                seq_name,
+                sequence,
+                None,
+                &weights
+            ).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        } else {
+            // Align and add subsequent sequences
+            let result = aligner.align::<u32, _>(&graph, sequence);
+            graph.add_alignment_with_weights(
+                seq_name,
+                sequence,
+                Some(&result.alignment),
+                &weights
+            ).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        }
+    }
+    
+    // Convert to GFA and output
+    let mut stdout = io::stdout();
+    poasta::io::graph::graph_to_gfa(&mut stdout, &graph)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    
+    Ok(())
 }
 
 use impg::impg::CigarOp;
