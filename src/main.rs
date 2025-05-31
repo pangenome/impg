@@ -838,7 +838,7 @@ fn perform_query(
 }
 
 fn output_results_bed(impg: &Impg, results: &mut Vec<AdjustedInterval>, merge_distance: i32) {
-    merge_bed_intervals(results, merge_distance);
+    merge_query_adjusted_intervals(results, merge_distance, false);
 
     for (overlap, _, _) in results {
         let overlap_name = impg.seq_index.get_name(overlap.metadata).unwrap();
@@ -848,73 +848,6 @@ fn output_results_bed(impg: &Impg, results: &mut Vec<AdjustedInterval>, merge_di
             (overlap.last, overlap.first, '-')
         };
         println!("{}\t{}\t{}\t.\t.\t{}", overlap_name, first, last, strand);
-    }
-}
-
-//  Optimized for simple genomic interval merging
-fn merge_bed_intervals(results: &mut Vec<AdjustedInterval>, merge_distance: i32) {
-    if results.len() > 1 && merge_distance >= 0 {
-        // Sort by sequence ID, strand orientation, and start position
-        results.par_sort_by_key(|(query_interval, _, _)| {
-            let is_forward = query_interval.first <= query_interval.last;
-            let start = if is_forward {
-                query_interval.first
-            } else {
-                query_interval.last
-            };
-
-            (
-                query_interval.metadata, // First sort by sequence ID
-                is_forward,              // Then by strand orientation
-                start,                   // Finally by actual start position
-            )
-        });
-
-        let mut write_idx = 0;
-        for read_idx in 1..results.len() {
-            let (curr_interval, _, _) = &results[write_idx];
-            let (next_interval, _, _) = &results[read_idx];
-
-            // Check if both intervals are on the same sequence and have same orientation
-            let curr_is_forward = curr_interval.first <= curr_interval.last;
-            let next_is_forward = next_interval.first <= next_interval.last;
-
-            // Extract actual start/end positions based on orientation
-            let (curr_start, curr_end) = if curr_is_forward {
-                (curr_interval.first, curr_interval.last)
-            } else {
-                (curr_interval.last, curr_interval.first)
-            };
-
-            let (next_start, next_end) = if next_is_forward {
-                (next_interval.first, next_interval.last)
-            } else {
-                (next_interval.last, next_interval.first)
-            };
-
-            // Only merge if same sequence, same orientation, and within merge distance
-            if curr_interval.metadata != next_interval.metadata
-                || curr_is_forward != next_is_forward
-                || next_start > curr_end + merge_distance
-            {
-                write_idx += 1;
-                if write_idx != read_idx {
-                    results.swap(write_idx, read_idx);
-                }
-            } else {
-                // Merge while preserving orientation
-                if curr_is_forward {
-                    // Forward orientation
-                    results[write_idx].0.first = curr_start.min(next_start);
-                    results[write_idx].0.last = curr_end.max(next_end);
-                } else {
-                    // Reverse orientation
-                    results[write_idx].0.first = curr_end.max(next_end);
-                    results[write_idx].0.last = curr_start.min(next_start);
-                }
-            }
-        }
-        results.truncate(write_idx + 1);
     }
 }
 
@@ -1059,8 +992,8 @@ fn output_results_gfa(
     merge_distance: i32,
     scoring_params: (u8, u8, u8),
 ) -> io::Result<()> {
-    // Merge intervals if needed
-    merge_adjusted_intervals(results, merge_distance);
+    // Merge intervals if needed (merge_strands to avoid duplicated seq:start-end query pairs)
+    merge_query_adjusted_intervals(results, merge_distance, true);
     
     // Create a POA graph
     let mut graph: POAGraph<u32> = POAGraph::new();
@@ -1074,7 +1007,7 @@ fn output_results_gfa(
         AffineMinGapCost(scoring),
         AlignmentType::Global
     );
-    
+
     // Collect sequences for each interval
     let mut sequences = Vec::new();
     for (idx, (interval, _, _)) in results.iter().enumerate() {
@@ -1139,7 +1072,80 @@ fn output_results_gfa(
 use impg::impg::CigarOp;
 use impg::paf::Strand;
 
-// Function to merge adjusted intervals
+// Merge adjusted intervals by ignoring the target intervals (optimized for simple genomic interval merging in BED and GFA formats)
+fn merge_query_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance: i32, merge_strands: bool) {
+    if results.len() > 1 && (merge_distance >= 0 || merge_strands) {
+        // Sort by sequence ID, strand orientation, and start position
+        results.par_sort_by_key(|(query_interval, _, _)| {
+            let is_forward = query_interval.first <= query_interval.last;
+            let start = if is_forward {
+                query_interval.first
+            } else {
+                query_interval.last
+            };
+
+            (
+                query_interval.metadata, // First sort by sequence ID
+                !is_forward,             // Then by strand orientation (forward first)
+                start,                   // Finally by actual start position
+            )
+        });
+
+        let mut write_idx = 0;
+        for read_idx in 1..results.len() {
+            let (curr_interval, _, _) = &results[write_idx];
+            let (next_interval, _, _) = &results[read_idx];
+
+            // Check if both intervals are on the same sequence and have same orientation
+            let curr_is_forward = curr_interval.first <= curr_interval.last;
+            let next_is_forward = next_interval.first <= next_interval.last;
+
+            // Extract actual start/end positions based on orientation
+            let (curr_start, curr_end) = if curr_is_forward {
+                (curr_interval.first, curr_interval.last)
+            } else {
+                (curr_interval.last, curr_interval.first)
+            };
+
+            let (next_start, next_end) = if next_is_forward {
+                (next_interval.first, next_interval.last)
+            } else {
+                (next_interval.last, next_interval.first)
+            };
+
+            // Check if they represent the same region (different strands)
+            if merge_strands && curr_start == next_start && curr_end == next_end {
+                // Keep the forward strand version by skipping the reversed one (don't increment write_idx)
+                continue;
+            }
+
+            // Only merge if same sequence, same orientation, and within merge distance
+            if curr_interval.metadata != next_interval.metadata
+                || curr_is_forward != next_is_forward
+                || next_start > curr_end + merge_distance
+            {
+                write_idx += 1;
+                if write_idx != read_idx {
+                    results.swap(write_idx, read_idx);
+                }
+            } else {
+                // Merge while preserving orientation
+                if curr_is_forward {
+                    // Forward orientation
+                    results[write_idx].0.first = curr_start.min(next_start);
+                    results[write_idx].0.last = curr_end.max(next_end);
+                } else {
+                    // Reverse orientation
+                    results[write_idx].0.first = curr_end.max(next_end);
+                    results[write_idx].0.last = curr_start.min(next_start);
+                }
+            }
+        }
+        results.truncate(write_idx + 1);
+    }
+}
+
+// Merge adjusted intervals by considering both query and target intervals and the corresponding CIGAR operations
 fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance: i32) {
     if results.len() > 1 && merge_distance >= 0 {
         // Sort by query ID, query position, target ID, target position
