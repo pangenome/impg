@@ -231,6 +231,10 @@ enum Args {
         #[clap(long, value_parser, required_if_eq("output_format", "gfa"))]
         fasta_list: Option<String>,
 
+        /// POA alignment scoring parameters as mismatch,gap_extend,gap_open (for `gfa` format)
+        #[clap(long, value_parser, default_value = "4,2,6")]
+        poa_scoring: String,
+
         /// Maximum distance between regions to merge
         #[clap(
             short = 'd',
@@ -317,6 +321,7 @@ fn main() -> io::Result<()> {
             target_bed,
             output_format,
             fasta_list,
+            poa_scoring,
             merge_distance,
             no_merge,
             min_identity,
@@ -329,6 +334,13 @@ fn main() -> io::Result<()> {
             validate_output_format(&output_format)?;
 
             let impg = initialize_impg(&common)?;
+
+            // Parse POA scoring parameters if GFA output is requested
+            let scoring_params = if output_format == "gfa" {
+                Some(parse_poa_scoring(&poa_scoring)?)
+            } else {
+                None
+            };
 
             // Build FASTA index if GFA output is requested
             let fasta_index = if output_format == "gfa" {
@@ -372,8 +384,7 @@ fn main() -> io::Result<()> {
                         output_results_paf(&impg, &mut results, None, merge_distance);
                     }
                     "gfa" => {
-                        results.remove(0);
-                        output_results_gfa(&impg, &mut results, &fasta_index.unwrap(), None, merge_distance)?;
+                        output_results_gfa(&impg, &mut results, &fasta_index.unwrap(), None, merge_distance, scoring_params.unwrap())?;
                     }
                     _ => {
                         // 'auto' or 'bed'
@@ -412,8 +423,7 @@ fn main() -> io::Result<()> {
                             output_results_paf(&impg, &mut results, name, merge_distance);
                         }
                         "gfa" => {
-                            results.remove(0);
-                            output_results_gfa(&impg, &mut results, &fasta_index.as_ref().unwrap(), name, merge_distance)?;
+                            output_results_gfa(&impg, &mut results, &fasta_index.as_ref().unwrap(), name, merge_distance, scoring_params.unwrap())?;
                         }
                         _ => {
                             // 'auto' or 'bedpe'
@@ -1013,12 +1023,41 @@ fn output_results_paf(
     }
 }
 
+fn parse_poa_scoring(scoring_str: &str) -> io::Result<(u8, u8, u8)> {
+    let parts: Vec<&str> = scoring_str.split(',').collect();
+    if parts.len() != 3 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "POA scoring format should be 'mismatch,gap_extend,gap_open' (e.g., '4,2,6')"
+        ));
+    }
+    
+    let mismatch = parts[0].parse::<u8>()
+        .map_err(|_| io::Error::new(
+            io::ErrorKind::InvalidInput, 
+            "Invalid mismatch cost value"
+        ))?;
+    let gap_extend = parts[1].parse::<u8>()
+        .map_err(|_| io::Error::new(
+            io::ErrorKind::InvalidInput, 
+            "Invalid gap extend cost value"
+        ))?;
+    let gap_open = parts[2].parse::<u8>()
+        .map_err(|_| io::Error::new(
+            io::ErrorKind::InvalidInput, 
+            "Invalid gap open cost value"
+        ))?;
+    
+    Ok((mismatch, gap_extend, gap_open))
+}
+
 fn output_results_gfa(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
     fasta_index: &FastaIndex,
     name: Option<String>,
     merge_distance: i32,
+    scoring_params: (u8, u8, u8),
 ) -> io::Result<()> {
     // Merge intervals if needed
     merge_adjusted_intervals(results, merge_distance);
@@ -1026,12 +1065,9 @@ fn output_results_gfa(
     // Create a POA graph
     let mut graph: POAGraph<u32> = POAGraph::new();
     
-    // Create scoring parameters for alignment
-    let scoring = GapAffine::new(
-        4,  // mismatch cost
-        2,  // gap extend cost
-        6,  // gap open cost
-    );
+    // Create scoring parameters for alignment using the provided values
+    let (mismatch, gap_extend, gap_open) = scoring_params;
+    let scoring = GapAffine::new(mismatch, gap_extend, gap_open);
     
     // Create an aligner
     let aligner = PoastaAligner::new(
