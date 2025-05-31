@@ -223,11 +223,11 @@ enum Args {
         #[clap(short = 'b', long, value_parser)]
         target_bed: Option<String>,
 
-        /// Output format: 'auto' (BED for -r, BEDPE for -b), 'bed', 'bedpe', 'paf', or `gfa' (requires --fasta-list)
+        /// Output format: 'auto' (BED for -r, BEDPE for -b), 'bed', 'bedpe', 'paf', or `gfa' (v1.0; requires --fasta-list)
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
 
-        /// Path to a text file containing paths to FASTA files (required for GFA output)
+        /// Path to a text file containing paths to FASTA files (required for `gfa` format)
         #[clap(long, value_parser, required_if_eq("output_format", "gfa"))]
         fasta_list: Option<String>,
 
