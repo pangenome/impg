@@ -1,8 +1,8 @@
-use crate::paf::PartialPafRecord;
+use impg::paf::{PartialPafRecord, Strand};
+use impg::faidx::FastaIndex;
 use clap::Parser;
 use coitrees::IntervalTree;
-use impg::impg::{AdjustedInterval, Impg, SerializableImpg};
-use impg::paf;
+use impg::impg::{AdjustedInterval, Impg, SerializableImpg, CigarOp};
 use impg::partition::partition_alignments;
 use impg::seqidx::SequenceIndex;
 use log::{debug, info, warn, error};
@@ -12,117 +12,15 @@ use rayon::ThreadPoolBuilder;
 use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::BufRead;
-use std::io::{self, BufReader, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, BufWriter};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-
 use poasta::graphs::poa::POAGraph;
 use poasta::aligner::PoastaAligner;
 use poasta::aligner::config::AffineMinGapCost;
 use poasta::aligner::scoring::{AlignmentType, GapAffine};
-use rust_htslib::faidx;
-
-// Structure to manage multiple FASTA files
-struct FastaIndex {
-    fasta_paths: Vec<String>,
-    path_key_to_fasta: FxHashMap<String, usize>,
-}
-
-impl FastaIndex {
-    fn new() -> Self {
-        FastaIndex {
-            fasta_paths: Vec::new(),
-            path_key_to_fasta: FxHashMap::default(),
-        }
-    }
-
-    fn build_from_files(fasta_files: &[String]) -> io::Result<Self> {
-        let mut index = FastaIndex::new();
-
-        for (fasta_idx, fasta_path) in fasta_files.iter().enumerate() {
-            index.fasta_paths.push(fasta_path.clone());
-
-            // Read the .fai file to get sequence names
-            let fai_path = format!("{}.fai", fasta_path);
-
-            // Try to open the .fai file, if it doesn't exist, try to create it
-            let fai_content = match std::fs::read_to_string(&fai_path) {
-                Ok(content) => content,
-                Err(_) => {
-                    // Try to create the index using rust-htslib
-                    match faidx::Reader::from_path(fasta_path) {
-                        Ok(_) => {
-                            // Index was created, now read it
-                            std::fs::read_to_string(&fai_path)?
-                        }
-                        Err(e) => {
-                            return Err(io::Error::new(
-                                io::ErrorKind::Other,
-                                format!("Failed to create FASTA index for '{}': {}", fasta_path, e)
-                            ));
-                        }
-                    }
-                }
-            };
-
-            // Parse the .fai file to get sequence names
-            for line in fai_content.lines() {
-                if let Some(seq_name) = line.split('\t').next() {
-                    if !seq_name.is_empty() {
-                        index.path_key_to_fasta.insert(seq_name.to_string(), fasta_idx);
-                    }
-                }
-            }
-        }
-
-        Ok(index)
-    }
-
-    fn get_fasta_path(&self, path_key: &str) -> Option<&str> {
-        self.path_key_to_fasta.get(path_key)
-            .map(|&idx| self.fasta_paths[idx].as_str())
-    }
-
-    fn fetch_sequence(&self, seq_name: &str, start: i32, end: i32) -> io::Result<Vec<u8>> {
-        let fasta_path = self.get_fasta_path(seq_name)
-            .ok_or_else(|| io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("Sequence '{}' not found in any FASTA file", seq_name)
-            ))?;
-            
-        let reader = faidx::Reader::from_path(fasta_path)
-            .map_err(|e| io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to open FASTA file '{}': {}", fasta_path, e)
-            ))?;
-            
-        // rust-htslib uses 0-based half-open coordinates internally
-        // but fetch_seq expects 0-based inclusive end coordinate
-        let sequence = reader.fetch_seq(seq_name, start as usize, (end - 1) as usize)
-            .map_err(|e| io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to fetch sequence '{}:{}:{}': {}", seq_name, start, end, e)
-            ))?;
-            
-        Ok(sequence.to_vec())
-    }
-}
-
-fn reverse_complement(seq: &[u8]) -> Vec<u8> {
-    seq.iter()
-        .rev()
-        .map(|&base| match base {
-            b'A' | b'a' => b'T',
-            b'T' | b't' => b'A',
-            b'C' | b'c' => b'G',
-            b'G' | b'g' => b'C',
-            b'N' | b'n' => b'N',
-            _ => base,
-        })
-        .collect()
-}
+use rustc_hash::FxHashMap;
 
 /// Common options shared between all commands
 #[derive(Parser, Debug)]
@@ -164,6 +62,22 @@ enum Args {
         /// Window size for partitioning
         #[clap(short = 'w', long, value_parser)]
         window_size: usize,
+
+        /// Output format: 'bed' or 'gfa'
+        #[clap(short = 'o', long, value_parser, default_value = "bed")]
+        output_format: String,
+
+        /// List of FASTA file paths (required for `gfa` format)
+        #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["fasta_list"])]
+        fasta_files: Option<Vec<String>>,
+
+        /// Path to a text file containing paths to FASTA files (required for `gfa` format)
+        #[clap(long, value_parser, conflicts_with_all = &["fasta_files"])]
+        fasta_list: Option<String>,
+
+        /// POA alignment scoring parameters as mismatch,gap_extend,gap_open (for `gfa` format)
+        #[clap(long, value_parser, default_value = "4,2,6")]
+        poa_scoring: String,
 
         /// Maximum distance between regions to merge
         #[clap(short = 'd', long, value_parser, default_value_t = 100000)]
@@ -291,6 +205,10 @@ fn main() -> io::Result<()> {
         Args::Partition {
             common,
             window_size,
+            output_format,
+            fasta_files,
+            fasta_list,
+            poa_scoring,
             merge_distance,
             min_identity,
             max_depth,
@@ -302,8 +220,25 @@ fn main() -> io::Result<()> {
             min_boundary_distance,
         } => {
             validate_selection_mode(&selection_mode)?;
+            validate_output_format(&output_format, &["bed", "gfa"])?;
+            
+            // Parse POA scoring parameters if GFA output is requested
+            let scoring_params = if output_format == "gfa" {
+                Some(parse_poa_scoring(&poa_scoring)?)
+            } else {
+                None
+            };
+
+            // Build FASTA index if GFA output is requested
+            let fasta_index = build_fasta_index_if_needed(
+                &output_format,
+                &["gfa"],
+                fasta_files,
+                fasta_list,
+            )?;
 
             let impg = initialize_impg(&common)?;
+
             partition_alignments(
                 &impg,
                 window_size,
@@ -316,6 +251,9 @@ fn main() -> io::Result<()> {
                 max_depth,
                 min_transitive_len,
                 min_distance_between_ranges,
+                &output_format,
+                fasta_index.as_ref(),
+                scoring_params,
                 common.verbose > 1,
             )?;
         }
@@ -336,9 +274,7 @@ fn main() -> io::Result<()> {
             min_transitive_len,
             min_distance_between_ranges,
         } => {
-            validate_output_format(&output_format)?;
-
-            let impg = initialize_impg(&common)?;
+            validate_output_format(&output_format, &["auto", "bed", "bedpe", "paf", "gfa"])?;
 
             // Parse POA scoring parameters if GFA output is requested
             let scoring_params = if output_format == "gfa" {
@@ -348,54 +284,14 @@ fn main() -> io::Result<()> {
             };
 
             // Build FASTA index if GFA output is requested
-            let fasta_index = if output_format == "gfa" {
-                // Get list of FASTA files
-                let fasta_files = match (fasta_files, fasta_list) {
-                    // Handle --fasta-files option
-                    (Some(files), None) => files,
-                    // Handle --fasta-list option
-                    (None, Some(list_file)) => {
-                        match std::fs::read_to_string(&list_file) {
-                            Ok(content) => {
-                                content
-                                    .lines()
-                                    .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
-                                    .map(|line| line.trim().to_string())
-                                    .collect()
-                            }
-                            Err(e) => {
-                                error!("Failed to read FASTA list file '{}': {}", list_file, e);
-                                std::process::exit(1);
-                            }
-                        }
-                    }
-                    _ => {
-                        return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Either --fasta-files or --fasta-list must be provided for GFA output, not both",
-                    ));
-                    }
-                };
+            let fasta_index = build_fasta_index_if_needed(
+                &output_format,
+                &["gfa"],
+                fasta_files,
+                fasta_list,
+            )?;
 
-                if fasta_files.is_empty() {
-                    None
-                } else {
-                    match FastaIndex::build_from_files(&fasta_files) {
-                        Ok(index) => {
-                            info!("Built FASTA index for {} files with {} sequences", 
-                                index.fasta_paths.len(), 
-                                index.path_key_to_fasta.len());
-                            Some(index)
-                        }
-                        Err(e) => {
-                            error!("Failed to build FASTA index: {}", e);
-                            std::process::exit(1);
-                        }
-                    }
-                }
-            } else {
-                None
-            };
+            let impg = initialize_impg(&common)?;
 
             if let Some(target_range) = target_range {
                 let (target_name, target_range) = parse_target_range(&target_range)?;
@@ -505,13 +401,73 @@ fn validate_selection_mode(mode: &str) -> io::Result<()> {
     }
 }
 
-fn validate_output_format(mode: &str) -> io::Result<()> {
-    match mode {
-        "auto" | "bed" | "bedpe" | "paf" | "gfa" => Ok(()),
-        _ => Err(io::Error::new(
+fn validate_output_format(format: &str, valid_formats: &[&str]) -> io::Result<()> {
+    if valid_formats.contains(&format) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "Invalid output format. Must be 'auto', 'bed', 'bedpe', 'paf', or 'gfa'.",
-        )),
+            format!("Invalid output format '{}'. Must be one of: {}", 
+                format, 
+                valid_formats.join(", ")),
+        ))
+    }
+}
+
+/// Build FASTA index if needed for the given output format
+fn build_fasta_index_if_needed(
+    output_format: &str,
+    formats_requiring_fasta: &[&str],
+    fasta_files: Option<Vec<String>>,
+    fasta_list: Option<String>,
+) -> io::Result<Option<FastaIndex>> {
+    if !formats_requiring_fasta.contains(&output_format) {
+        return Ok(None);
+    }
+
+    // Get list of FASTA files
+    let fasta_files = match (fasta_files, fasta_list) {
+        // Handle --fasta-files option
+        (Some(files), None) => files,
+        // Handle --fasta-list option
+        (None, Some(list_file)) => {
+            match std::fs::read_to_string(&list_file) {
+                Ok(content) => {
+                    content
+                        .lines()
+                        .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
+                        .map(|line| line.trim().to_string())
+                        .collect()
+                }
+                Err(e) => {
+                    error!("Failed to read FASTA list file '{}': {}", list_file, e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => {
+            return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Either --fasta-files or --fasta-list must be provided for GFA output, not both",
+        ));
+        }
+    };
+
+    if fasta_files.is_empty() {
+        return Ok(None);
+    } else {
+        match FastaIndex::build_from_files(&fasta_files) {
+            Ok(index) => {
+                info!("Built FASTA index for {} files with {} sequences", 
+                    index.fasta_paths.len(), 
+                    index.path_key_to_fasta.len());
+                return Ok(Some(index));
+            }
+            Err(e) => {
+                error!("Failed to build FASTA index: {}", e);
+                std::process::exit(1);
+            }
+        }
     }
 }
 
@@ -676,7 +632,7 @@ fn generate_multi_index(
 
                 // Lock, get IDs, build records
                 let mut seq_index_guard = seq_index.lock().unwrap();
-                let records = paf::parse_paf(reader, &mut seq_index_guard).map_err(|e| {
+                let records = impg::paf::parse_paf(reader, &mut seq_index_guard).map_err(|e| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("Failed to parse PAF records from {}: {:?}", paf_file, e),
@@ -1048,7 +1004,7 @@ fn output_results_gfa(
         
         // If reverse strand, reverse complement the sequence
         let sequence = if interval.first > interval.last {
-            reverse_complement(&sequence)
+            impg::graph::reverse_complement(&sequence)
         } else {
             sequence
         };
@@ -1093,168 +1049,10 @@ fn output_results_gfa(
     let mut stdout = io::stdout();
 
     // Convert to GFAv1.0 (with P lines) and write line-by-line
-    convert_and_write_gfa(raw_gfa_str, &mut stdout)?;
+    impg::graph::convert_and_write_gfa(raw_gfa_str, &mut stdout)?;
 
     Ok(())
 }
-
-/// Given a raw GFAv1.1 string and a `Write` target, convert it to GFAv1.0:
-///  - Rewrite `H` lines to `H\tVN:Z:1.0`
-///  - Strip leading `s` from every `S` and bump the numeric ID by 1
-///  - Strip leading `s` from every `L` endpoint and bump both numeric IDs by 1
-///  - Convert every `W` line into a `P` line
-fn convert_and_write_gfa<R: AsRef<str>, W: Write>(
-    raw_gfa: R,
-    writer: &mut W,
-) -> io::Result<()> {
-    for line in raw_gfa.as_ref().lines() {
-        // 1) Header → force "H\tVN:Z:1.0"
-        if line.starts_with("H\t") {
-            writeln!(writer, "H\tVN:Z:1.0")?;
-            continue;
-        }
-
-        // 2) Segment lines: S\t<old>\t<seq>[\t<TAGs>...]
-        if line.starts_with("S\t") {
-            // Split out “S”, old-segName, sequence, and any trailing tags
-            let fields: Vec<&str> = line.splitn(4, '\t').collect();
-            if fields.len() < 3 {
-                // Malformed S line: echo raw
-                writeln!(writer, "{}", line)?;
-                continue;
-            }
-
-            let old_seg = fields[1];
-            // Strip leading 's' and bump by 1 if it parses as an integer
-            let new_id = if let Some(stripped) = old_seg.strip_prefix('s') {
-                if let Ok(x) = stripped.parse::<i32>() {
-                    (x + 1).to_string()
-                } else {
-                    old_seg.to_string()
-                }
-            } else {
-                old_seg.to_string()
-            };
-
-            // Reconstruct:
-            if fields.len() == 3 {
-                // No extra tags
-                writeln!(writer, "S\t{}\t{}", new_id, fields[2])?;
-            } else {
-                // fields[3] holds “all trailing content”
-                writeln!(writer, "S\t{}\t{}\t{}", new_id, fields[2], fields[3])?;
-            }
-            continue;
-        }
-
-        // 3) Link lines: L\t<oldFrom>\t<fromOri>\t<oldTo>\t<toOri>\t<overlap>[\t<TAGs>...]
-        if line.starts_with("L\t") {
-            let fields: Vec<&str> = line.splitn(7, '\t').collect();
-            if fields.len() < 6 {
-                // Malformed L line: echo raw
-                writeln!(writer, "{}", line)?;
-                continue;
-            }
-
-            let old_from = fields[1];
-            let old_to   = fields[3];
-
-            let new_from = if let Some(stripped) = old_from.strip_prefix('s') {
-                if let Ok(x) = stripped.parse::<i32>() {
-                    (x + 1).to_string()
-                } else {
-                    old_from.to_string()
-                }
-            } else {
-                old_from.to_string()
-            };
-
-            let new_to = if let Some(stripped) = old_to.strip_prefix('s') {
-                if let Ok(x) = stripped.parse::<i32>() {
-                    (x + 1).to_string()
-                } else {
-                    old_to.to_string()
-                }
-            } else {
-                old_to.to_string()
-            };
-
-            // Reassemble:
-            if fields.len() == 6 {
-                // No extra tags
-                writeln!(
-                    writer,
-                    "L\t{}\t{}\t{}\t{}\t{}",
-                    new_from, fields[2], new_to, fields[4], fields[5]
-                )?;
-            } else {
-                // fields[6] holds trailing tags
-                writeln!(
-                    writer,
-                    "L\t{}\t{}\t{}\t{}\t{}\t{}",
-                    new_from, fields[2], new_to, fields[4], fields[5], fields[6]
-                )?;
-            }
-            continue;
-        }
-
-        // 4) Walk lines: W\t<sampleId>\t<hapIndex>\t<seqId>\t<seqStart>\t<seqEnd>\t<walkStr>[\t<TAGs>...]
-        if line.starts_with("W\t") {
-            let fields: Vec<&str> = line.splitn(8, '\t').collect();
-            if fields.len() < 7 {
-                // Malformed W line: echo raw
-                writeln!(writer, "{}", line)?;
-                continue;
-            }
-
-            // Use the “seqId” field (fields[3]) as the PathName
-            let path_name = fields[3];
-            let walk_str  = fields[6]; // e.g. “>s0>s2>s3...”
-
-            // Parse walk_str into pairs of (orientation, segmentName),
-            // strip leading 's', bump numeric part by 1, then reattach '+' or '-'.
-            let mut segs_oriented = Vec::new();
-            let mut chars = walk_str.chars().peekable();
-            while let Some(c) = chars.next() {
-                if c == '>' || c == '<' {
-                    let orient = if c == '>' { '+' } else { '-' };
-                    let mut segname = String::new();
-                    while let Some(&next) = chars.peek() {
-                        if next == '>' || next == '<' {
-                            break;
-                        }
-                        segname.push(next);
-                        chars.next();
-                    }
-                    // segname is e.g. “s0”. Strip 's' and bump if possible:
-                    let new_seg = if let Some(stripped) = segname.strip_prefix('s') {
-                        if let Ok(x) = stripped.parse::<i32>() {
-                            (x + 1).to_string()
-                        } else {
-                            segname.clone()
-                        }
-                    } else {
-                        segname.clone()
-                    };
-                    segs_oriented.push(format!("{}{}", new_seg, orient));
-                }
-            }
-
-            let joined = segs_oriented.join(",");
-            // Emit as a `P` line, with Overlaps = “*”
-            writeln!(writer, "P\t{}\t{}\t*", path_name, joined)?;
-            continue;
-        }
-
-        // 5) All other lines (including C/J/P/L/W tags not shown above, or comment lines): pass through:
-        writeln!(writer, "{}", line)?;
-    }
-
-    Ok(())
-}
-
-use impg::impg::CigarOp;
-use impg::paf::Strand;
 
 // Merge adjusted intervals by ignoring the target intervals (optimized for simple genomic interval merging in BED and GFA formats)
 fn merge_query_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance: i32, merge_strands: bool) {
@@ -1769,7 +1567,6 @@ fn trim_cigar_prefix(cigar: &[CigarOp], query_len: i32, target_len: i32) -> Vec<
     result
 }
 
-use rustc_hash::FxHashMap;
 fn print_stats(impg: &Impg) {
     // Basic stats
     let num_sequences = impg.seq_index.len();

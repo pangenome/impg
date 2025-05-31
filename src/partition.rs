@@ -1,6 +1,7 @@
 use crate::impg::CigarOp;
 use crate::impg::Impg;
 use crate::impg::SortedRanges;
+use crate::faidx::FastaIndex;
 use coitrees::Interval;
 use log::{debug, info};
 use rayon::prelude::*;
@@ -21,6 +22,9 @@ pub fn partition_alignments(
     max_depth: u16,
     min_transitive_len: i32,
     min_distance_between_ranges: i32,
+    output_format: &str,
+    fasta_index: Option<&FastaIndex>,
+    scoring_params: Option<(u8, u8, u8)>,
     debug: bool,
 ) -> io::Result<()> {
     // Initialize windows from starting sequences if provided
@@ -257,7 +261,7 @@ pub fn partition_alignments(
                 //let merge2_time = merge2_start.elapsed();
 
                 //let write_start = Instant::now();
-                write_partition(partition_num, &overlaps, impg)?;
+                write_partition(partition_num, &overlaps, impg, output_format, fasta_index, scoring_params)?;
                 //let write_time = write_start.elapsed();
 
                 partition_num += 1;
@@ -983,6 +987,32 @@ fn write_partition(
     partition_num: usize,
     overlaps: &[(Interval<u32>, Vec<CigarOp>, Interval<u32>)],
     impg: &Impg,
+    output_format: &str,
+    fasta_index: Option<&FastaIndex>,
+    scoring_params: Option<(u8, u8, u8)>,
+) -> io::Result<()> {
+    match output_format {
+        "bed" => write_partition_bed(partition_num, overlaps, impg),
+        "gfa" => {
+            let fasta_index = fasta_index.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "FASTA index required for GFA output")
+            })?;
+            let scoring_params = scoring_params.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "POA scoring parameters required for GFA output")
+            })?;
+            write_partition_gfa(partition_num, overlaps, impg, fasta_index, scoring_params)
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Unsupported output format: {}", output_format),
+        )),
+    }
+}
+
+fn write_partition_bed(
+    partition_num: usize,
+    overlaps: &[(Interval<u32>, Vec<CigarOp>, Interval<u32>)],
+    impg: &Impg,
 ) -> io::Result<()> {
     // Only performing an actual file system write (a system call) when:
     // - The buffer is full
@@ -1006,6 +1036,105 @@ fn write_partition(
     }
 
     // Ensure all data is written to file
+    writer.flush()?;
+    Ok(())
+}
+
+
+fn write_partition_gfa(
+    partition_num: usize,
+    overlaps: &[(Interval<u32>, Vec<CigarOp>, Interval<u32>)],
+    impg: &Impg,
+    fasta_index: &FastaIndex,
+    scoring_params: (u8, u8, u8),
+) -> io::Result<()> {
+    use poasta::graphs::poa::POAGraph;
+    use poasta::aligner::PoastaAligner;
+    use poasta::aligner::config::AffineMinGapCost;
+    use poasta::aligner::scoring::{AlignmentType, GapAffine};
+    
+    // Create a POA graph
+    let mut graph: POAGraph<u32> = POAGraph::new();
+    
+    // Create scoring parameters for alignment using the provided values
+    let (mismatch, gap_extend, gap_open) = scoring_params;
+    let scoring = GapAffine::new(mismatch, gap_extend, gap_open);
+    
+    // Create an aligner
+    let aligner = PoastaAligner::new(
+        AffineMinGapCost(scoring),
+        AlignmentType::Global
+    );
+
+    // Collect sequences for each interval
+    let mut sequences = Vec::new();
+    for (interval, _, _) in overlaps {
+        let seq_name = impg.seq_index.get_name(interval.metadata)
+            .ok_or_else(|| io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Sequence name not found for ID {}", interval.metadata)
+            ))?;
+            
+        // Determine actual start and end based on orientation
+        let (start, end) = if interval.first <= interval.last {
+            (interval.first, interval.last)
+        } else {
+            (interval.last, interval.first)
+        };
+        
+        // Fetch the sequence
+        let sequence = fasta_index.fetch_sequence(seq_name, start, end)?;
+        
+        // If reverse strand, reverse complement the sequence
+        let sequence = if interval.first > interval.last {
+            crate::graph::reverse_complement(&sequence)
+        } else {
+            sequence
+        };
+        
+        sequences.push((format!("{}:{}-{}", seq_name, start, end), sequence));
+    }
+    
+    // Add sequences to the POA graph
+    for (idx, (seq_name, sequence)) in sequences.iter().enumerate() {
+        let weights = vec![1; sequence.len()];
+        
+        if idx == 0 {
+            // First sequence - create initial graph
+            graph.add_alignment_with_weights(
+                seq_name,
+                sequence,
+                None,
+                &weights
+            ).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        } else {
+            // Align and add subsequent sequences
+            let result = aligner.align::<u32, _>(&graph, sequence);
+            graph.add_alignment_with_weights(
+                seq_name,
+                sequence,
+                Some(&result.alignment),
+                &weights
+            ).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        }
+    }
+    
+    // Create output file
+    let file = File::create(format!("partition{}.gfa", partition_num))?;
+    let mut writer = BufWriter::new(file);
+    
+    // Capture raw GFAv1.1 (with W lines) into a Vec<u8>
+    let mut raw_buffer: Vec<u8> = Vec::new();
+    poasta::io::graph::graph_to_gfa(&mut raw_buffer, &graph)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+    // Convert to UTF-8 string
+    let raw_gfa_str = String::from_utf8(raw_buffer)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Non-UTF8 GFA: {}", e)))?;
+
+    // Convert to GFAv1.0 (with P lines) and write
+    crate::graph::convert_and_write_gfa(raw_gfa_str, &mut writer)?;
+    
     writer.flush()?;
     Ok(())
 }
