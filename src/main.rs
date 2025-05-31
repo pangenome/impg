@@ -5,7 +5,7 @@ use impg::impg::{AdjustedInterval, Impg, SerializableImpg};
 use impg::paf;
 use impg::partition::partition_alignments;
 use impg::seqidx::SequenceIndex;
-use log::{debug, info, warn};
+use log::{debug, info, warn, error};
 use noodles::bgzf;
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
@@ -227,8 +227,12 @@ enum Args {
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
 
+        /// List of FASTA file paths (required for `gfa` format)
+        #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["fasta_list"])]
+        fasta_files: Option<Vec<String>>,
+
         /// Path to a text file containing paths to FASTA files (required for `gfa` format)
-        #[clap(long, value_parser, required_if_eq("output_format", "gfa"))]
+        #[clap(long, value_parser, conflicts_with_all = &["fasta_files"])]
         fasta_list: Option<String>,
 
         /// POA alignment scoring parameters as mismatch,gap_extend,gap_open (for `gfa` format)
@@ -320,6 +324,7 @@ fn main() -> io::Result<()> {
             target_range,
             target_bed,
             output_format,
+            fasta_files,
             fasta_list,
             poa_scoring,
             merge_distance,
@@ -344,12 +349,50 @@ fn main() -> io::Result<()> {
 
             // Build FASTA index if GFA output is requested
             let fasta_index = if output_format == "gfa" {
-                let fasta_list_file = fasta_list.ok_or_else(|| io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "--fasta-list is required for GFA output format"
-                ))?;
-                let fasta_files = resolve_fasta_files(&fasta_list_file)?;
-                Some(FastaIndex::build_from_files(&fasta_files)?)
+                // Get list of FASTA files
+                let fasta_files = match (fasta_files, fasta_list) {
+                    // Handle --fasta-files option
+                    (Some(files), None) => files,
+                    // Handle --fasta-list option
+                    (None, Some(list_file)) => {
+                        match std::fs::read_to_string(&list_file) {
+                            Ok(content) => {
+                                content
+                                    .lines()
+                                    .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
+                                    .map(|line| line.trim().to_string())
+                                    .collect()
+                            }
+                            Err(e) => {
+                                error!("Failed to read FASTA list file '{}': {}", list_file, e);
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Either --fasta-files or --fasta-list must be provided for GFA output, not both",
+                    ));
+                    }
+                };
+
+                if fasta_files.is_empty() {
+                    None
+                } else {
+                    match FastaIndex::build_from_files(&fasta_files) {
+                        Ok(index) => {
+                            info!("Built FASTA index for {} files with {} sequences", 
+                                index.fasta_paths.len(), 
+                                index.path_key_to_fasta.len());
+                            Some(index)
+                        }
+                        Err(e) => {
+                            error!("Failed to build FASTA index: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
             } else {
                 None
             };
@@ -470,30 +513,6 @@ fn validate_output_format(mode: &str) -> io::Result<()> {
             "Invalid output format. Must be 'auto', 'bed', 'bedpe', 'paf', or 'gfa'.",
         )),
     }
-}
-
-// Read FASTA list file
-fn resolve_fasta_files(fasta_list_file: &str) -> io::Result<Vec<String>> {
-    let file = File::open(fasta_list_file)?;
-    let reader = BufReader::new(file);
-    let mut fasta_files = Vec::new();
-
-    for line in reader.lines() {
-        let line = line?;
-        let trimmed = line.trim();
-        if !trimmed.is_empty() && !trimmed.starts_with('#') {
-            fasta_files.push(trimmed.to_string());
-        }
-    }
-
-    if fasta_files.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("No valid FASTA files found in list file: {}", fasta_list_file),
-        ));
-    }
-
-    Ok(fasta_files)
 }
 
 /// Initialize thread pool and load/generate index based on common options
