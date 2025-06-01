@@ -86,6 +86,12 @@ impl FastaIndex {
                 format!("Failed to fetch sequence '{}:{}:{}': {}", seq_name, start, end, e)
             ))?;
             
-        Ok(sequence.to_vec())
+        // Apply the fix for the rust_htslib memory leak bug
+        // https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171
+        let seq_vec = sequence.to_vec();
+        // Free the memory allocated by htslib to prevent memory leak
+        unsafe { libc::free(sequence.as_ptr() as *mut std::ffi::c_void); }
+    
+        Ok(seq_vec)
     }
 }
