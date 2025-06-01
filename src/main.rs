@@ -60,7 +60,7 @@ enum Args {
         #[clap(short = 'w', long, value_parser)]
         window_size: usize,
 
-        /// Output format: 'bed' or 'gfa'
+        /// Output format: 'bed', 'gfa' or 'maf' ('gfa' and 'maf' require --fasta-list)
         #[clap(short = 'o', long, value_parser, default_value = "bed")]
         output_format: String,
 
@@ -134,7 +134,7 @@ enum Args {
         #[clap(short = 'b', long, value_parser)]
         target_bed: Option<String>,
 
-        /// Output format: 'auto' (BED for -r, BEDPE for -b), 'bed', 'bedpe', 'paf', or `gfa' (v1.0; requires --fasta-list)
+        /// Output format: 'auto' (BED for -r, BEDPE for -b), 'bed', 'bedpe', 'paf', `gfa' (v1.0), or 'maf ('gfa' and 'maf' require --fasta-list)
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
 
@@ -217,10 +217,10 @@ fn main() -> io::Result<()> {
             min_boundary_distance,
         } => {
             validate_selection_mode(&selection_mode)?;
-            validate_output_format(&output_format, &["bed", "gfa"])?;
+            validate_output_format(&output_format, &["bed", "gfa", "maf"])?;
             
             // Parse POA scoring parameters if GFA output is requested
-            let scoring_params = if output_format == "gfa" {
+            let scoring_params = if output_format == "gfa" || output_format == "maf" {
                 Some(parse_poa_scoring(&poa_scoring)?)
             } else {
                 None
@@ -229,7 +229,7 @@ fn main() -> io::Result<()> {
             // Build FASTA index if GFA output is requested
             let fasta_index = build_fasta_index_if_needed(
                 &output_format,
-                &["gfa"],
+                &["gfa", "maf"],
                 fasta_files,
                 fasta_list,
             )?;
@@ -271,10 +271,10 @@ fn main() -> io::Result<()> {
             min_transitive_len,
             min_distance_between_ranges,
         } => {
-            validate_output_format(&output_format, &["auto", "bed", "bedpe", "paf", "gfa"])?;
+            validate_output_format(&output_format, &["auto", "bed", "bedpe", "paf", "gfa", "maf"])?;
 
             // Parse POA scoring parameters if GFA output is requested
-            let scoring_params = if output_format == "gfa" {
+            let scoring_params = if output_format == "gfa" || output_format == "maf" {
                 Some(parse_poa_scoring(&poa_scoring)?)
             } else {
                 None
@@ -283,7 +283,7 @@ fn main() -> io::Result<()> {
             // Build FASTA index if GFA output is requested
             let fasta_index = build_fasta_index_if_needed(
                 &output_format,
-                &["gfa"],
+                &["gfa", "maf"],
                 fasta_files,
                 fasta_list,
             )?;
@@ -321,6 +321,9 @@ fn main() -> io::Result<()> {
                     }
                     "gfa" => {
                         output_results_gfa(&impg, &mut results, &fasta_index.unwrap(), None, merge_distance, scoring_params.unwrap())?;
+                    }
+                    "maf" => {
+                        output_results_maf(&impg, &mut results, &fasta_index.unwrap(), None, merge_distance, scoring_params.unwrap())?;
                     }
                     _ => {
                         // 'auto' or 'bed'
@@ -360,6 +363,9 @@ fn main() -> io::Result<()> {
                         }
                         "gfa" => {
                             output_results_gfa(&impg, &mut results, &fasta_index.as_ref().unwrap(), name, merge_distance, scoring_params.unwrap())?;
+                        }
+                        "maf" => {
+                            output_results_maf(&impg, &mut results, &fasta_index.as_ref().unwrap(), name, merge_distance, scoring_params.unwrap())?;
                         }
                         _ => {
                             // 'auto' or 'bedpe'
@@ -979,23 +985,17 @@ pub fn output_results_maf(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
     fasta_index: &FastaIndex,
-    name: Option<String>,
+    _name: Option<String>,
     merge_distance: i32,
     scoring_params: (u8, u8, u8),
 ) -> io::Result<()> {
     // Merge intervals if needed
     merge_query_adjusted_intervals(results, merge_distance, true);
-    
-    // // Prepare POA graph and sequences
-    // let (graph, sequence_metadata) = prepare_poa_graph_and_sequences(
-    //     impg, results, fasta_index, scoring_params
-    // )?;
-    
-    // // Generate MSA from the graph
-    // let msa = graph.generate_msa();
-    
-    // // Convert MSA to MAF format
-    // print_maf_from_msa(&msa, &sequence_metadata, name)?;
+
+    let maf_output = impg::graph::generate_maf_from_intervals(
+        impg, results, fasta_index, scoring_params
+    );
+    print!("{}", maf_output);
     
     Ok(())
 }

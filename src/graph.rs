@@ -34,6 +34,24 @@ pub fn generate_gfa_from_intervals(
     graph.generate_gfa(&headers, false)
 }
 
+pub fn generate_maf_from_intervals(
+    impg: &Impg,
+    results: &[AdjustedInterval],
+    fasta_index: &FastaIndex,
+    scoring_params: (u8, u8, u8),
+) -> String {
+    // Prepare POA graph and sequences
+    let (graph, sequence_metadata) = prepare_poa_graph_and_sequences(
+        impg, results, fasta_index, scoring_params
+    ).unwrap();
+
+    // Generate MSA from the SPOA graph
+    let msa = graph.generate_msa();
+    
+    // Print MAF format to stdout
+    format_maf_from_msa(&msa, &sequence_metadata, None)
+}
+
 fn prepare_poa_graph_and_sequences(
     impg: &Impg,
     results: &[AdjustedInterval],
@@ -116,17 +134,17 @@ fn prepare_poa_graph_and_sequences(
     Ok((graph, sequence_metadata))
 }
 
-fn print_maf_from_msa(
+fn format_maf_from_msa(
     msa: &[String],
     sequence_metadata: &[SequenceMetadata],
     block_name: Option<String>,
-) -> io::Result<()> {
-    let mut stdout = io::stdout();
+) -> String {
+    let mut output = String::new();
     
     // Write MAF header
-    writeln!(stdout, "##maf version=1 scoring=spoa")?;
+    output.push_str("##maf version=1 scoring=spoa\n");
     if let Some(ref name) = block_name {
-        writeln!(stdout, "# {}", name)?;
+        output.push_str(&format!("# {}\n", name));
     }
     
     // Find trimming positions (remove all-gap columns at start and end)
@@ -155,8 +173,8 @@ fn print_maf_from_msa(
     }
     
     // Write alignment block
-    writeln!(stdout)?; // blank line before block
-    writeln!(stdout, "a score=0.0")?; // We don't have a meaningful score from SPOA
+    output.push('\n'); // blank line before block
+    output.push_str("a score=0.0\n"); // We don't have a meaningful score from SPOA
     
     // Write sequence lines
     for (msa_seq, meta) in msa.iter().zip(sequence_metadata.iter()) {
@@ -165,19 +183,18 @@ fn print_maf_from_msa(
         // Count non-gap characters to get the actual aligned size
         let aligned_size = trimmed_seq.chars().filter(|&c| c != '-').count() as i32;
         
-        writeln!(stdout, "s {} {} {} {} {} {}",
+        output.push_str(&format!("s {} {} {} {} {} {}\n",
             meta.name,
             meta.start,
             aligned_size,
             meta.strand,
             meta.total_length,
             trimmed_seq
-        )?;
+        ));
     }
     
-    writeln!(stdout)?; // blank line after block
-    stdout.flush()?;
-    Ok(())
+    output.push('\n'); // blank line after block
+    output
 }
 
 /// Given a raw GFAv1.1 string and a `Write` target, convert it to GFAv1.0:
