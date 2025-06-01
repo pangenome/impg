@@ -21,4 +21,4 @@ rustc-hash = "2.1.0"
 rust-htslib = { version = "0.46.0", default-features = false } # Don't update it, see https://github.com/rust-bio/rust-htslib/issues/434
 libc = "0.2.172"
 
-poasta = { git = "https://github.com/broadinstitute/poasta.git" }
+spoa_rs = { git = "https://github.com/AndreaGuarracino/spoa-rs.git" }

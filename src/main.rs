@@ -16,10 +16,7 @@ use std::io::{self, BufRead, BufReader, BufWriter};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use poasta::graphs::poa::POAGraph;
-use poasta::aligner::PoastaAligner;
-use poasta::aligner::config::AffineMinGapCost;
-use poasta::aligner::scoring::{AlignmentType, GapAffine};
+
 use rustc_hash::FxHashMap;
 
 /// Common options shared between all commands
@@ -75,8 +72,8 @@ enum Args {
         #[clap(long, value_parser, conflicts_with_all = &["fasta_files"])]
         fasta_list: Option<String>,
 
-        /// POA alignment scoring parameters as mismatch,gap_extend,gap_open (for `gfa` format)
-        #[clap(long, value_parser, default_value = "4,2,6")]
+        /// POA alignment scoring parameters as mismatch,gap_open,gap_extend (for `gfa` format)
+        #[clap(long, value_parser, default_value = "4,6,2")]
         poa_scoring: String,
 
         /// Maximum distance between regions to merge
@@ -149,8 +146,8 @@ enum Args {
         #[clap(long, value_parser, conflicts_with_all = &["fasta_files"])]
         fasta_list: Option<String>,
 
-        /// POA alignment scoring parameters as mismatch,gap_extend,gap_open (for `gfa` format)
-        #[clap(long, value_parser, default_value = "4,2,6")]
+        /// POA alignment scoring parameters as mismatch,gap_open,gap_extend (for `gfa` format)
+        #[clap(long, value_parser, default_value = "4,6,2")]
         poa_scoring: String,
 
         /// Maximum distance between regions to merge
@@ -945,21 +942,21 @@ fn parse_poa_scoring(scoring_str: &str) -> io::Result<(u8, u8, u8)> {
             io::ErrorKind::InvalidInput, 
             "Invalid mismatch cost value"
         ))?;
-    let gap_extend = parts[1].parse::<u8>()
-        .map_err(|_| io::Error::new(
-            io::ErrorKind::InvalidInput, 
-            "Invalid gap extend cost value"
-        ))?;
-    let gap_open = parts[2].parse::<u8>()
+    let gap_open = parts[1].parse::<u8>()
         .map_err(|_| io::Error::new(
             io::ErrorKind::InvalidInput, 
             "Invalid gap open cost value"
         ))?;
-    
-    Ok((mismatch, gap_extend, gap_open))
+    let gap_extend = parts[2].parse::<u8>()
+        .map_err(|_| io::Error::new(
+            io::ErrorKind::InvalidInput, 
+            "Invalid gap extend cost value"
+        ))?;
+
+    Ok((mismatch, gap_open, gap_extend))
 }
 
-fn output_results_gfa(
+pub fn output_results_gfa(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
     fasta_index: &FastaIndex,
@@ -967,90 +964,39 @@ fn output_results_gfa(
     merge_distance: i32,
     scoring_params: (u8, u8, u8),
 ) -> io::Result<()> {
-    // Merge intervals if needed (merge_strands to avoid duplicated seq:start-end query pairs)
+    // Merge intervals if needed
+    merge_query_adjusted_intervals(results, merge_distance, true);
+
+    let gfa_output = impg::graph::generate_gfa_from_intervals(
+        impg, results, fasta_index, scoring_params
+    );
+    print!("{}", gfa_output);
+
+    Ok(())
+}
+
+pub fn output_results_maf(
+    impg: &Impg,
+    results: &mut Vec<AdjustedInterval>,
+    fasta_index: &FastaIndex,
+    name: Option<String>,
+    merge_distance: i32,
+    scoring_params: (u8, u8, u8),
+) -> io::Result<()> {
+    // Merge intervals if needed
     merge_query_adjusted_intervals(results, merge_distance, true);
     
-    // Create a POA graph
-    let mut graph: POAGraph<u32> = POAGraph::new();
+    // // Prepare POA graph and sequences
+    // let (graph, sequence_metadata) = prepare_poa_graph_and_sequences(
+    //     impg, results, fasta_index, scoring_params
+    // )?;
     
-    // Create scoring parameters for alignment using the provided values
-    let (mismatch, gap_extend, gap_open) = scoring_params;
-    let scoring = GapAffine::new(mismatch, gap_extend, gap_open);
+    // // Generate MSA from the graph
+    // let msa = graph.generate_msa();
     
-    // Create an aligner
-    let aligner = PoastaAligner::new(
-        AffineMinGapCost(scoring),
-        AlignmentType::Global
-    );
-
-    // Collect sequences for each interval
-    let mut sequences = Vec::new();
-    for (interval, _, _) in results.into_iter() {
-        let seq_name = impg.seq_index.get_name(interval.metadata)
-            .ok_or_else(|| io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("Sequence name not found for ID {}", interval.metadata)
-            ))?;
-            
-        // Determine actual start and end based on orientation
-        let (start, end) = if interval.first <= interval.last {
-            (interval.first, interval.last)
-        } else {
-            (interval.last, interval.first)
-        };
-        
-        // Fetch the sequence
-        let sequence = fasta_index.fetch_sequence(seq_name, start, end)?;
-        
-        // If reverse strand, reverse complement the sequence
-        let sequence = if interval.first > interval.last {
-            impg::graph::reverse_complement(&sequence)
-        } else {
-            sequence
-        };
-        
-        sequences.push((format!("{}:{}-{}", seq_name, start, end), sequence));
-    }
+    // // Convert MSA to MAF format
+    // print_maf_from_msa(&msa, &sequence_metadata, name)?;
     
-    // Add sequences to the POA graph
-    for (idx, (seq_name, sequence)) in sequences.iter().enumerate() {
-        let weights = vec![1; sequence.len()];
-        
-        if idx == 0 {
-            // First sequence - create initial graph
-            graph.add_alignment_with_weights(
-                seq_name,
-                sequence,
-                None,
-                &weights
-            ).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        } else {
-            // Align and add subsequent sequences
-            let result = aligner.align::<u32, _>(&graph, sequence);
-            graph.add_alignment_with_weights(
-                seq_name,
-                sequence,
-                Some(&result.alignment),
-                &weights
-            ).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        }
-    }
-    
-    // Capture raw GFAv1.1 (with W lines) into a Vec<u8>
-    let mut raw_buffer: Vec<u8> = Vec::new();
-    poasta::io::graph::graph_to_gfa(&mut raw_buffer, &graph)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-
-    // Convert to UTF-8 string
-    let raw_gfa_str = String::from_utf8(raw_buffer)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Non-UTF8 GFA: {}", e)))?;
-
-    // Open final writer
-    let mut stdout = io::stdout();
-
-    // Convert to GFAv1.0 (with P lines) and write line-by-line
-    impg::graph::convert_and_write_gfa(raw_gfa_str, &mut stdout)?;
-
     Ok(())
 }
 

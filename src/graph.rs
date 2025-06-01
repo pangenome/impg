@@ -1,11 +1,191 @@
 use std::io::{self, Write};
+use spoa_rs::{Graph as SpoaGraph, AlignmentEngine, AlignmentType as SpoaAlignmentType};
+use crate::faidx::FastaIndex;
+use crate::impg::{AdjustedInterval, Impg};
+
+struct SequenceMetadata {
+    name: String,
+    start: i32,
+    size: i32,
+    strand: char,
+    total_length: usize
+}
+
+pub fn generate_gfa_from_intervals(
+    impg: &Impg,
+    results: &[AdjustedInterval],
+    fasta_index: &FastaIndex,
+    scoring_params: (u8, u8, u8),
+) -> String {
+    // Prepare POA graph and sequences
+    let (graph, sequence_metadata) = prepare_poa_graph_and_sequences(
+        impg, results, fasta_index, scoring_params
+    ).unwrap();
+
+    // Generate headers for GFA
+    let headers: Vec<String> = sequence_metadata.iter()
+        .map(|meta| format!("{}:{}-{}", meta.name, 
+            if meta.strand == '+' { meta.start } else { (meta.total_length as i32) - meta.start - meta.size },
+            if meta.strand == '+' { meta.start + meta.size } else { (meta.total_length as i32) - meta.start }
+        ))
+        .collect();
+    
+    // Generate GFA directly from the graph
+    graph.generate_gfa(&headers, false)
+}
+
+fn prepare_poa_graph_and_sequences(
+    impg: &Impg,
+    results: &[AdjustedInterval],
+    fasta_index: &FastaIndex,
+    scoring_params: (u8, u8, u8),
+) -> io::Result<(SpoaGraph, Vec<SequenceMetadata>)> {
+    // Create a SPOA graph
+    let mut graph = SpoaGraph::new();
+    
+    // Create scoring parameters for alignment
+    let (mismatch, gap_open, gap_extend) = scoring_params;
+    
+    // Create an alignment engine with affine gap penalties
+    let mut engine = AlignmentEngine::new_affine(
+        SpoaAlignmentType::kNW,  // Global alignment (Needleman-Wunsch)
+        5,                        // match score (positive)
+        -(mismatch as i8),        // mismatch penalty (negative)
+        -(gap_open as i8),        // gap open penalty (negative)
+        -(gap_extend as i8),      // gap extend penalty (negative)
+    );
+
+    // Collect sequences and metadata for each interval
+    let mut sequence_metadata = Vec::new();
+    
+    for (interval, _, _) in results.iter() {
+        let seq_name = impg.seq_index.get_name(interval.metadata)
+            .ok_or_else(|| io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Sequence name not found for ID {}", interval.metadata)
+            ))?;
+            
+        // Get total sequence length
+        let total_length = impg.seq_index.get_len_from_id(interval.metadata)
+            .ok_or_else(|| io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Sequence length not found for ID {}", interval.metadata)
+            ))? as usize;
+            
+        // Determine actual start and end based on orientation
+        let (start, end, strand) = if interval.first <= interval.last {
+            (interval.first, interval.last, '+')
+        } else {
+            (interval.last, interval.first, '-')
+        };
+        
+        // Fetch the sequence
+        let sequence = fasta_index.fetch_sequence(seq_name, start, end)?;
+        
+        // If reverse strand, reverse complement the sequence
+        let sequence = if strand == '-' {
+            reverse_complement(&sequence)
+        } else {
+            sequence
+        };
+        
+        let sequence_str = String::from_utf8_lossy(&sequence).to_string();
+        let seq_size = (end - start) as i32;
+        
+        // For MAF format, if strand is "-", start is relative to reverse-complemented sequence
+        let maf_start = if strand == '-' {
+            (total_length as i32) - end
+        } else {
+            start
+        };
+        
+        sequence_metadata.push(SequenceMetadata {
+            name: seq_name.to_string(),
+            start: maf_start,
+            size: seq_size,
+            strand,
+            total_length,
+        });
+        
+        // Add to SPOA graph
+        let weights = vec![1u32; sequence_str.len()];
+        let (_, alignment) = engine.align(&sequence_str, &graph);
+        graph.add_alignment_with_weights(alignment, &sequence_str, &weights);
+    }
+    
+    Ok((graph, sequence_metadata))
+}
+
+fn print_maf_from_msa(
+    msa: &[String],
+    sequence_metadata: &[SequenceMetadata],
+    block_name: Option<String>,
+) -> io::Result<()> {
+    let mut stdout = io::stdout();
+    
+    // Write MAF header
+    writeln!(stdout, "##maf version=1 scoring=spoa")?;
+    if let Some(ref name) = block_name {
+        writeln!(stdout, "# {}", name)?;
+    }
+    
+    // Find trimming positions (remove all-gap columns at start and end)
+    let msa_len = msa.first().map(|s| s.len()).unwrap_or(0);
+    let mut start_trim = 0;
+    let mut end_trim = msa_len;
+    
+    // Find first non-gap column
+    'outer: for pos in 0..msa_len {
+        for seq in msa {
+            if seq.chars().nth(pos).unwrap_or('-') != '-' {
+                start_trim = pos;
+                break 'outer;
+            }
+        }
+    }
+    
+    // Find last non-gap column
+    'outer2: for pos in (0..msa_len).rev() {
+        for seq in msa {
+            if seq.chars().nth(pos).unwrap_or('-') != '-' {
+                end_trim = pos + 1;
+                break 'outer2;
+            }
+        }
+    }
+    
+    // Write alignment block
+    writeln!(stdout)?; // blank line before block
+    writeln!(stdout, "a score=0.0")?; // We don't have a meaningful score from SPOA
+    
+    // Write sequence lines
+    for (msa_seq, meta) in msa.iter().zip(sequence_metadata.iter()) {
+        let trimmed_seq = &msa_seq[start_trim..end_trim];
+        
+        // Count non-gap characters to get the actual aligned size
+        let aligned_size = trimmed_seq.chars().filter(|&c| c != '-').count() as i32;
+        
+        writeln!(stdout, "s {} {} {} {} {} {}",
+            meta.name,
+            meta.start,
+            aligned_size,
+            meta.strand,
+            meta.total_length,
+            trimmed_seq
+        )?;
+    }
+    
+    writeln!(stdout)?; // blank line after block
+    stdout.flush()?;
+    Ok(())
+}
 
 /// Given a raw GFAv1.1 string and a `Write` target, convert it to GFAv1.0:
 ///  - Rewrite `H` lines to `H\tVN:Z:1.0`
 ///  - Strip leading `s` from every `S` and bump the numeric ID by 1
 ///  - Strip leading `s` from every `L` endpoint and bump both numeric IDs by 1
 ///  - Convert every `W` line into a `P` line
-pub fn convert_and_write_gfa<R: AsRef<str>, W: Write>(
+fn _convert_and_write_gfa<R: AsRef<str>, W: Write>(
     raw_gfa: R,
     writer: &mut W,
 ) -> io::Result<()> {
@@ -155,7 +335,7 @@ pub fn convert_and_write_gfa<R: AsRef<str>, W: Write>(
     Ok(())
 }
 
-pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
+fn reverse_complement(seq: &[u8]) -> Vec<u8> {
     seq.iter()
         .rev()
         .map(|&base| match base {
