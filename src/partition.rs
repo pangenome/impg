@@ -24,7 +24,7 @@ pub fn partition_alignments(
     min_distance_between_ranges: i32,
     output_format: &str,
     fasta_index: Option<&FastaIndex>,
-    scoring_params: Option<(u8, u8, u8)>,
+    scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
     debug: bool,
 ) -> io::Result<()> {
     // Initialize windows from starting sequences if provided
@@ -989,7 +989,7 @@ fn write_partition(
     impg: &Impg,
     output_format: &str,
     fasta_index: Option<&FastaIndex>,
-    scoring_params: Option<(u8, u8, u8)>,
+    scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
 ) -> io::Result<()> {
     match output_format {
         "bed" => write_partition_bed(partition_num, overlaps, impg),
@@ -1045,7 +1045,7 @@ fn write_partition_gfa(
     overlaps: &[(Interval<u32>, Vec<CigarOp>, Interval<u32>)],
     impg: &Impg,
     fasta_index: &FastaIndex,
-    scoring_params: (u8, u8, u8),
+    scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<()> {
     let gfa_output = crate::graph::generate_gfa_from_intervals(
         impg, overlaps, fasta_index, scoring_params

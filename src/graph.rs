@@ -15,7 +15,7 @@ pub fn generate_gfa_from_intervals(
     impg: &Impg,
     results: &[AdjustedInterval],
     fasta_index: &FastaIndex,
-    scoring_params: (u8, u8, u8),
+    scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> String {
     // Prepare POA graph and sequences
     let (graph, sequence_metadata) = prepare_poa_graph_and_sequences(
@@ -102,7 +102,7 @@ pub fn generate_maf_from_intervals(
     impg: &Impg,
     results: &[AdjustedInterval],
     fasta_index: &FastaIndex,
-    scoring_params: (u8, u8, u8),
+    scoring_params: (u8, u8, u8, u8, u8, u8)
 ) -> String {
     // Prepare POA graph and sequences
     let (graph, sequence_metadata) = prepare_poa_graph_and_sequences(
@@ -120,21 +120,23 @@ fn prepare_poa_graph_and_sequences(
     impg: &Impg,
     results: &[AdjustedInterval],
     fasta_index: &FastaIndex,
-    scoring_params: (u8, u8, u8),
+    scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<(SpoaGraph, Vec<SequenceMetadata>)> {
     // Create a SPOA graph
     let mut graph = SpoaGraph::new();
     
     // Create scoring parameters for alignment
-    let (mismatch, gap_open, gap_extend) = scoring_params;
-    
+    let (match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2) = scoring_params;
+
     // Create an alignment engine with affine gap penalties
-    let mut engine = AlignmentEngine::new_affine(
-        SpoaAlignmentType::kNW,  // Global alignment (Needleman-Wunsch)
-        5,                        // match score (positive)
-        -(mismatch as i8),        // mismatch penalty (negative)
-        -(gap_open as i8),        // gap open penalty (negative)
-        -(gap_extend as i8),      // gap extend penalty (negative)
+    let mut engine = AlignmentEngine::new_convex(
+        SpoaAlignmentType::kSW,  // Local alignment (Smith-Waterman)
+        match_score as i8,       // match score (positive)
+        -(mismatch as i8),       // mismatch penalty (negative)
+        -(gap_open1 as i8),      // gap open penalty (negative)
+        -(gap_extend1 as i8),    // gap extend penalty (negative)
+        -(gap_open2 as i8),      // gap open penalty (negative)
+        -(gap_extend2 as i8),    // gap extend penalty (negative)
     );
 
     // Collect sequences and metadata for each interval
@@ -166,7 +168,6 @@ fn prepare_poa_graph_and_sequences(
         
         // If reverse strand, reverse complement the sequence
         let sequence = if strand == '-' {
-            eprintln!("Reverse complementing sequence: {}", seq_name);
             reverse_complement(&sequence)
         } else {
             sequence

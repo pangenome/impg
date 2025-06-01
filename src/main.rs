@@ -64,16 +64,16 @@ enum Args {
         #[clap(short = 'o', long, value_parser, default_value = "bed")]
         output_format: String,
 
-        /// List of FASTA file paths (required for `gfa` format)
+        /// List of FASTA file paths (required for 'gfa' and 'maf' formats)
         #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["fasta_list"])]
         fasta_files: Option<Vec<String>>,
 
-        /// Path to a text file containing paths to FASTA files (required for `gfa` format)
+        /// Path to a text file containing paths to FASTA files (required for 'gfa' and 'maf' formats)
         #[clap(long, value_parser, conflicts_with_all = &["fasta_files"])]
         fasta_list: Option<String>,
 
-        /// POA alignment scoring parameters as mismatch,gap_open,gap_extend (for `gfa` format)
-        #[clap(long, value_parser, default_value = "4,6,2")]
+        /// POA alignment scoring parameters as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for for 'gfa' and 'maf' formats)
+        #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
         poa_scoring: String,
 
         /// Maximum distance between regions to merge
@@ -146,8 +146,8 @@ enum Args {
         #[clap(long, value_parser, conflicts_with_all = &["fasta_files"])]
         fasta_list: Option<String>,
 
-        /// POA alignment scoring parameters as mismatch,gap_open,gap_extend (for `gfa` format)
-        #[clap(long, value_parser, default_value = "4,6,2")]
+        /// POA alignment scoring parameters as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for for 'gfa' and 'maf' formats)
+        #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
         poa_scoring: String,
 
         /// Maximum distance between regions to merge
@@ -934,32 +934,47 @@ fn output_results_paf(
     }
 }
 
-fn parse_poa_scoring(scoring_str: &str) -> io::Result<(u8, u8, u8)> {
+fn parse_poa_scoring(scoring_str: &str) -> io::Result<(u8, u8, u8, u8, u8, u8)> {
     let parts: Vec<&str> = scoring_str.split(',').collect();
-    if parts.len() != 3 {
+    if parts.len() != 6 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "POA scoring format should be 'mismatch,gap_extend,gap_open' (e.g., '4,2,6')"
         ));
     }
     
-    let mismatch = parts[0].parse::<u8>()
+    let match_score = parts[0].parse::<u8>()
         .map_err(|_| io::Error::new(
-            io::ErrorKind::InvalidInput, 
+            io::ErrorKind::InvalidInput,
+            "Invalid match score value"
+        ))?;
+    let mismatch = parts[1].parse::<u8>()
+        .map_err(|_| io::Error::new(
+            io::ErrorKind::InvalidInput,
             "Invalid mismatch cost value"
         ))?;
-    let gap_open = parts[1].parse::<u8>()
+    let gap_open1 = parts[2].parse::<u8>()
         .map_err(|_| io::Error::new(
-            io::ErrorKind::InvalidInput, 
-            "Invalid gap open cost value"
+            io::ErrorKind::InvalidInput,
+            "Invalid gap opening 1 cost value"
         ))?;
-    let gap_extend = parts[2].parse::<u8>()
+    let gap_extend1 = parts[3].parse::<u8>()
         .map_err(|_| io::Error::new(
-            io::ErrorKind::InvalidInput, 
-            "Invalid gap extend cost value"
+            io::ErrorKind::InvalidInput,
+            "Invalid gap extension 1 cost value"
+        ))?;
+    let gap_open2 = parts[4].parse::<u8>()
+        .map_err(|_| io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid gap extension 2 cost value"
+        ))?;
+    let gap_extend2 = parts[5].parse::<u8>()
+        .map_err(|_| io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid gap extension 2 cost value"
         ))?;
 
-    Ok((mismatch, gap_open, gap_extend))
+    Ok((match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2))
 }
 
 pub fn output_results_gfa(
@@ -968,7 +983,7 @@ pub fn output_results_gfa(
     fasta_index: &FastaIndex,
     _name: Option<String>,
     merge_distance: i32,
-    scoring_params: (u8, u8, u8),
+    scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<()> {
     // Merge intervals if needed
     merge_query_adjusted_intervals(results, merge_distance, true);
@@ -987,7 +1002,7 @@ pub fn output_results_maf(
     fasta_index: &FastaIndex,
     _name: Option<String>,
     merge_distance: i32,
-    scoring_params: (u8, u8, u8),
+    scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<()> {
     // Merge intervals if needed
     merge_query_adjusted_intervals(results, merge_distance, true);
