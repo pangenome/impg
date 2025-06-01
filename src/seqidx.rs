@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SequenceIndex {
-    name_to_id: FxHashMap<String, u32>,
+    pub name_to_id: FxHashMap<String, u32>,
     id_to_name: FxHashMap<u32, String>,
     id_to_len: FxHashMap<u32, usize>,
     next_id: u32,
