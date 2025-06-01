@@ -31,7 +31,71 @@ pub fn generate_gfa_from_intervals(
         .collect();
     
     // Generate GFA directly from the graph
-    graph.generate_gfa(&headers, false)
+    let gfa_output = graph.generate_gfa(&headers, false);
+    
+    // Post-process GFA to handle strand information
+    post_process_gfa_for_strands(gfa_output, &sequence_metadata)
+}
+
+fn post_process_gfa_for_strands(gfa: String, sequence_metadata: &[SequenceMetadata]) -> String {
+    let mut output = String::new();
+    
+    // Create a map of sequence names to their strand information
+    let strand_map: std::collections::HashMap<String, char> = sequence_metadata.iter()
+        .map(|meta| {
+            let header = format!("{}:{}-{}", meta.name, 
+                if meta.strand == '+' { meta.start } else { (meta.total_length as i32) - meta.start - meta.size },
+                if meta.strand == '+' { meta.start + meta.size } else { (meta.total_length as i32) - meta.start }
+            );
+            (header, meta.strand)
+        })
+        .collect();
+    
+    // Process each line
+    for line in gfa.lines() {
+        if line.starts_with("P\t") {
+            // Path line - need to adjust orientations for reverse strand sequences
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() >= 3 {
+                let path_name = parts[1];
+                let path_segments = parts[2];
+                
+                // Check if this path corresponds to a reverse strand sequence
+                if let Some(&strand) = strand_map.get(path_name) {
+                    if strand == '-' {
+                        // Reverse the path and flip all orientations
+                        let segments: Vec<&str> = path_segments.split(',').collect();
+                        let reversed_path: Vec<String> = segments.iter()
+                            .rev()
+                            .map(|seg| {
+                                if seg.ends_with('+') {
+                                    format!("{}-", &seg[..seg.len()-1])
+                                } else if seg.ends_with('-') {
+                                    format!("{}+", &seg[..seg.len()-1])
+                                } else {
+                                    seg.to_string()
+                                }
+                            })
+                            .collect();
+                        
+                        output.push_str(&format!("P\t{}\t{}", path_name, reversed_path.join(",")));
+                        if parts.len() > 3 {
+                            output.push('\t');
+                            output.push_str(&parts[3..].join("\t"));
+                        }
+                        output.push('\n');
+                        continue;
+                    }
+                }
+            }
+        }
+        
+        // For all other lines (or unmodified path lines), output as-is
+        output.push_str(line);
+        output.push('\n');
+    }
+    
+    output
 }
 
 pub fn generate_maf_from_intervals(
@@ -102,6 +166,7 @@ fn prepare_poa_graph_and_sequences(
         
         // If reverse strand, reverse complement the sequence
         let sequence = if strand == '-' {
+            eprintln!("Reverse complementing sequence: {}", seq_name);
             reverse_complement(&sequence)
         } else {
             sequence
