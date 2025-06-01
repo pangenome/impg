@@ -1014,8 +1014,8 @@ fn merge_query_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_dis
 
             (
                 query_interval.metadata, // First sort by sequence ID
-                !is_forward,             // Then by strand orientation (forward first)
-                start,                   // Finally by actual start position
+                start,                   // Then by actual start position
+                !is_forward,             // Finally by strand orientation (forward first)
             )
         });
 
