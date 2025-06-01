@@ -1336,13 +1336,6 @@ fn print_stats(impg: &Impg) {
     println!("Total sequence length: {} bp", total_sequence_length);
     println!("Number of overlaps: {}", num_overlaps);
 
-    // Print seq_index seq_name and id
-    println!("\nSequence Index:");
-    for (_, id) in impg.seq_index.name_to_id.iter() {
-        let name = impg.seq_index.get_name(*id).unwrap_or("Unknown");
-        println!("ID: {}, Name: {}", id, name);
-    }
-
     // Overlap distribution stats
     let mut overlaps_per_seq: FxHashMap<u32, usize> = FxHashMap::default();
     for (&target_id, tree) in &impg.trees {
