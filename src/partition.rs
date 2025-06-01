@@ -1002,6 +1002,15 @@ fn write_partition(
             })?;
             write_partition_gfa(partition_num, overlaps, impg, fasta_index, scoring_params)
         }
+        "maf" => {
+            let fasta_index = fasta_index.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "FASTA index required for MAF output")
+            })?;
+            let scoring_params = scoring_params.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "POA scoring parameters required for MAF output")
+            })?;
+            write_partition_maf(partition_num, overlaps, impg, fasta_index, scoring_params)
+        }
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("Unsupported output format: {}", output_format),
@@ -1047,6 +1056,7 @@ fn write_partition_gfa(
     fasta_index: &FastaIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<()> {
+    // Generate a GFA-formatted string from the list of intervals
     let gfa_output = crate::graph::generate_gfa_from_intervals(
         impg, overlaps, fasta_index, scoring_params
     );
@@ -1055,8 +1065,30 @@ fn write_partition_gfa(
     let file = File::create(format!("partition{}.gfa", partition_num))?;
     let mut writer = BufWriter::new(file);
 
+    // Write the GFA output to the file
     writeln!(writer, "{}", gfa_output)?;
+    writer.flush()?;
+    Ok(())
+}
 
+fn write_partition_maf(
+    partition_num: usize,
+    overlaps: &[(Interval<u32>, Vec<CigarOp>, Interval<u32>)],
+    impg: &Impg,
+    fasta_index: &FastaIndex,
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+) -> io::Result<()> {
+    // Generate a MAF-formatted string from the list of intervals
+    let maf_output = crate::graph::generate_maf_from_intervals(
+        impg, overlaps, fasta_index, scoring_params
+    );
+    
+    // Create output file
+    let file = File::create(format!("partition{}.maf", partition_num))?;
+    let mut writer = BufWriter::new(file);
+
+    // Write the MAF output to the file
+    write!(writer, "{}", maf_output)?;
     writer.flush()?;
     Ok(())
 }
