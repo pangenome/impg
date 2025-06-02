@@ -1,7 +1,8 @@
 use std::io::{self, Write};
 use spoa_rs::{Graph as SpoaGraph, AlignmentEngine, AlignmentType as SpoaAlignmentType};
 use crate::faidx::FastaIndex;
-use crate::impg::{AdjustedInterval, Impg};
+use crate::impg::Impg;
+use coitrees::Interval;
 
 struct SequenceMetadata {
     name: String,
@@ -13,7 +14,7 @@ struct SequenceMetadata {
 
 pub fn generate_gfa_from_intervals(
     impg: &Impg,
-    results: &[AdjustedInterval],
+    results: &[Interval<u32>],
     fasta_index: &FastaIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> String {
@@ -100,7 +101,7 @@ fn post_process_gfa_for_strands(gfa: String, sequence_metadata: &[SequenceMetada
 
 pub fn generate_maf_from_intervals(
     impg: &Impg,
-    results: &[AdjustedInterval],
+    results: &[Interval<u32>],
     fasta_index: &FastaIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8)
 ) -> String {
@@ -118,7 +119,7 @@ pub fn generate_maf_from_intervals(
 
 fn prepare_poa_graph_and_sequences(
     impg: &Impg,
-    results: &[AdjustedInterval],
+    results: &[Interval<u32>],
     fasta_index: &FastaIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<(SpoaGraph, Vec<SequenceMetadata>)> {
@@ -142,7 +143,7 @@ fn prepare_poa_graph_and_sequences(
     // Collect sequences and metadata for each interval
     let mut sequence_metadata = Vec::new();
     
-    for (interval, _, _) in results.iter() {
+    for interval in results.iter() {
         let seq_name = impg.seq_index.get_name(interval.metadata)
             .ok_or_else(|| io::Error::new(
                 io::ErrorKind::NotFound,

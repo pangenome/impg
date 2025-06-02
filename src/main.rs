@@ -1,7 +1,7 @@
 use impg::paf::{PartialPafRecord, Strand};
 use impg::faidx::FastaIndex;
 use clap::Parser;
-use coitrees::IntervalTree;
+use coitrees::{IntervalTree, Interval};
 use impg::impg::{AdjustedInterval, Impg, SerializableImpg, CigarOp};
 use impg::partition::partition_alignments;
 use impg::seqidx::SequenceIndex;
@@ -16,7 +16,6 @@ use std::io::{self, BufRead, BufReader, BufWriter};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-
 use rustc_hash::FxHashMap;
 
 /// Common options shared between all commands
@@ -988,8 +987,13 @@ pub fn output_results_gfa(
     // Merge intervals if needed
     merge_query_adjusted_intervals(results, merge_distance, true);
 
+    // Extract query intervals by consuming results - no cloning
+    let query_intervals: Vec<Interval<u32>> = results
+        .drain(..)
+        .map(|(query_interval, _, _)| query_interval)
+        .collect();
     let gfa_output = impg::graph::generate_gfa_from_intervals(
-        impg, results, fasta_index, scoring_params
+        impg, &query_intervals, fasta_index, scoring_params
     );
     print!("{}", gfa_output);
 
@@ -1007,8 +1011,12 @@ pub fn output_results_maf(
     // Merge intervals if needed
     merge_query_adjusted_intervals(results, merge_distance, true);
 
+    let query_intervals: Vec<Interval<u32>> = results
+        .drain(..)
+        .map(|(query_interval, _, _)| query_interval)
+        .collect();
     let maf_output = impg::graph::generate_maf_from_intervals(
-        impg, results, fasta_index, scoring_params
+        impg, &query_intervals, fasta_index, scoring_params
     );
     print!("{}", maf_output);
     
