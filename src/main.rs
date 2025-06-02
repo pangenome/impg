@@ -644,7 +644,7 @@ fn generate_multi_index(
 
                 // Lock, get IDs, build records
                 let mut seq_index_guard = tmp_seq_index.lock().unwrap();
-                let records = paf::parse_paf(reader, &mut seq_index_guard).map_err(|e| {
+                let records = impg::paf::parse_paf(reader, &mut seq_index_guard).map_err(|e| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("Failed to parse PAF records from {}: {:?}", paf_file, e),
