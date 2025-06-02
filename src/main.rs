@@ -50,6 +50,11 @@ struct CommonOpts {
 #[derive(Parser, Debug)]
 #[command(author, version, about, disable_help_subcommand = true)]
 enum Args {
+    /// Create an IMPG index
+    Index {
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
     /// Partition the alignment
     Partition {
         #[clap(flatten)]
@@ -170,6 +175,11 @@ fn main() -> io::Result<()> {
     let args = Args::parse();
 
     match args {
+        Args::Index { common } => {
+            let _ = initialize_impg(&common)?;
+            
+            info!("Index created successfully");
+        }
         Args::Partition {
             common,
             window_size,
