@@ -700,6 +700,7 @@ fn perform_query(
             target_end,
             store_cigar,
             min_identity,
+            false
         )
     }
 }
@@ -999,7 +1000,7 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
                     new_cigar.extend_from_slice(&current_cigar);
                     current_cigar = new_cigar;
                 }
-                merge_consecutive_cigar_ops(&mut current_cigar);
+                impg::impg::merge_consecutive_cigar_ops(&mut current_cigar);
                 continue;
             }
 
@@ -1146,7 +1147,7 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
                         new_cigar.extend_from_slice(&current_cigar);
                         current_cigar = new_cigar;
                     }
-                    merge_consecutive_cigar_ops(&mut current_cigar);
+                    impg::impg::merge_consecutive_cigar_ops(&mut current_cigar);
                     continue;
                 }
             }
@@ -1162,29 +1163,6 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
         // Replace original results with merged results
         *results = merged_results;
     }
-}
-
-// Merge consecutive operations of the same type
-fn merge_consecutive_cigar_ops(cigar: &mut Vec<CigarOp>) {
-    if cigar.len() <= 1 {
-        return;
-    }
-
-    let mut write_idx = 0;
-    for read_idx in 1..cigar.len() {
-        if cigar[write_idx].op() == cigar[read_idx].op() {
-            // Same operation type - merge by adding lengths
-            let combined_len = cigar[write_idx].len() + cigar[read_idx].len();
-            cigar[write_idx] = CigarOp::new(combined_len, cigar[write_idx].op());
-        } else {
-            // Different operation types - keep separate
-            write_idx += 1;
-            if write_idx != read_idx {
-                cigar[write_idx] = cigar[read_idx].clone();
-            }
-        }
-    }
-    cigar.truncate(write_idx + 1);
 }
 
 // Check if CIGAR strings match in the overlap region

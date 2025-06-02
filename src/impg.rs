@@ -455,6 +455,7 @@ impl Impg {
         range_end: i32,
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
+        preserve_target_ranges: bool,
     ) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
         // Add the input range to the results
@@ -512,6 +513,49 @@ impl Impg {
                             return; // Skip this result
                         }
                     }
+
+                    // Check if we need to adjust the CIGAR and target start/end to preserve input target ranges
+                    let (adjusted_query_start, adjusted_query_end, adjusted_cigar, adjusted_target_start, adjusted_target_end) = 
+                        if preserve_target_ranges {
+                            let missing_at_start = if adjusted_target_start > range_start {
+                                adjusted_target_start - range_start
+                            } else {
+                                0
+                            };
+                            let missing_at_end = if adjusted_target_end < range_end {
+                                range_end - adjusted_target_end
+                            } else {
+                                0
+                            };
+                            
+                            let mut padded_adjusted_cigar = Vec::new();
+                            if store_cigar {
+                                // Add deletions at the beginning if needed
+                                if missing_at_start > 0 {
+                                    padded_adjusted_cigar.push(CigarOp::new(missing_at_start, 'D'));
+                                }
+
+                                padded_adjusted_cigar.extend(adjusted_cigar);
+
+                                // Add deletions at the end if needed
+                                if missing_at_end > 0 {
+                                    padded_adjusted_cigar.push(CigarOp::new(missing_at_end, 'D'));
+                                }
+
+                                merge_consecutive_cigar_ops(&mut padded_adjusted_cigar);
+                            }
+
+                            // Query coordinates remain the same since deletions don't consume query sequence
+                            (
+                                adjusted_query_start,
+                                adjusted_query_end,
+                                padded_adjusted_cigar,
+                                range_start,        // Preserve the original target start
+                                range_end,          // Preserve the original target end
+                            )
+                        } else {
+                            (adjusted_query_start, adjusted_query_end, adjusted_cigar, adjusted_target_start, adjusted_target_end)
+                        };
 
                     let adjusted_interval = (
                         Interval {
@@ -1044,6 +1088,29 @@ impl Impg {
 
         results
     }
+}
+
+// Merge consecutive operations of the same type
+pub fn merge_consecutive_cigar_ops(cigar: &mut Vec<CigarOp>) {
+    if cigar.len() <= 1 {
+        return;
+    }
+
+    let mut write_idx = 0;
+    for read_idx in 1..cigar.len() {
+        if cigar[write_idx].op() == cigar[read_idx].op() {
+            // Same operation type - merge by adding lengths
+            let combined_len = cigar[write_idx].len() + cigar[read_idx].len();
+            cigar[write_idx] = CigarOp::new(combined_len, cigar[write_idx].op());
+        } else {
+            // Different operation types - keep separate
+            write_idx += 1;
+            if write_idx != read_idx {
+                cigar[write_idx] = cigar[read_idx].clone();
+            }
+        }
+    }
+    cigar.truncate(write_idx + 1);
 }
 
 fn project_target_range_through_alignment(
