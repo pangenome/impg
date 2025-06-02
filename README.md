@@ -48,8 +48,6 @@ conda install -c bioconda impg
 
 ## Commands
 
-`impg` provides three main commands:
-
 ### Query
 
 Query overlaps in the alignment:
@@ -64,8 +62,18 @@ impg query -p alignments.paf -b regions.bed
 # Enable transitive overlap search
 impg query -p alignments.paf -r chr1:1000-2000 -x
 
-# Output in PAF format
-impg query -p alignments.paf -r chr1:1000-2000 -P
+# Set maximum transitive depth (default: 0 = unlimited)
+impg query -p alignments.paf -r chr1:1000-2000 -x -m 3
+
+# Filter by minimum gap-compressed identity
+impg query -p alignments.paf -r chr1:1000-2000 --min-identity 0.9
+
+# Output formats (auto/bed/bedpe/paf)
+impg query -p alignments.paf -r chr1:1000-2000 -o bedpe
+impg query -p alignments.paf -b regions.bed -o paf
+
+# Merge nearby regions (default: 0)
+impg query -p alignments.paf -r chr1:1000-2000 -d 1000
 ```
 
 ### Partition
@@ -73,13 +81,24 @@ impg query -p alignments.paf -r chr1:1000-2000 -P
 Partition the alignment into smaller pieces:
 
 ```bash
-impg partition -p alignments.paf -w 1000000 -s chr1 -d 10000 -l 5000
-```
+# Basic partitioning with 1Mb windows
+impg partition -p alignments.paf -w 1000000
 
-- `-w`: Window size for partitioning
-- `-s`: Prefix of sequence names to start partitioning from
-- `-d`: Maximum distance to merge intervals in each partition
-- `-l`: Minimum length for intervals in each partition (this can lead to overlapping partitions)
+# Start from specific sequences (one per line)
+impg partition -p alignments.paf -w 1000000 --starting-sequences-file seqs.txt
+
+# Merge nearby intervals within partitions
+impg partition -p alignments.paf -w 1000000 -d 10000
+
+# Selection strategies for next sequence
+impg partition -p alignments.paf -w 1000000 --selection-mode longest        # longest missing region
+impg partition -p alignments.paf -w 1000000 --selection-mode total          # most total missing
+impg partition -p alignments.paf -w 1000000 --selection-mode sample         # by sample (PanSN)
+impg partition -p alignments.paf -w 1000000 --selection-mode haplotype,#    # by haplotype
+
+# Control transitive search depth and minimum sizes
+impg partition -p alignments.paf -w 1000000 -m 2 -l 10000
+```
 
 ### Stats
 
@@ -88,6 +107,25 @@ Print alignment statistics:
 ```bash
 impg stats -p alignments.paf
 ```
+
+### Index
+
+Create an IMPG index from PAF files:
+
+```bash
+# Index a single PAF file
+impg index -p alignments.paf
+
+# Index multiple PAF files
+impg index -p file1.paf file2.paf file3.paf
+
+# Create index with custom name
+impg index -p alignments.paf -i custom.impg
+
+# Index from a list of PAF files
+impg index --paf-list paf_files.txt
+```
+
 
 ### Common Options
 
