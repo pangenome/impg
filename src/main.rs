@@ -444,14 +444,13 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
     }
 
     let file = File::open(index_file)?;
-    let reader = BufReader::new(file);
-    let serializable: SerializableImpg = bincode::deserialize_from(reader).map_err(|e| {
+    let mut reader = BufReader::new(file);
+    let serializable: SerializableImpg = bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard()).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("Failed to deserialize index: {:?}", e),
         )
-    })?;
-
+})?;
     Ok(Impg::from_multi_paf_and_serializable(
         paf_files,
         serializable,
@@ -551,8 +550,8 @@ fn generate_multi_index(
 
     let serializable = impg.to_serializable();
     let file = File::create(index_file)?;
-    let writer = BufWriter::new(file);
-    bincode::serialize_into(writer, &serializable)
+    let mut writer = BufWriter::new(file);
+    bincode::serde::encode_into_std_write(&serializable, &mut writer, bincode::config::standard())
         .map_err(|e| io::Error::other(format!("Failed to serialize index: {:?}", e)))?;
 
     Ok(impg)
