@@ -260,8 +260,6 @@ pub fn partition_alignments(
                 write_partition(partition_num, &overlaps, impg)?;
                 //let write_time = write_start.elapsed();
 
-                partition_num += 1;
-
                 //let calc_start = Instant::now();
                 // Calculate current partition length
                 let num_regions = overlaps.len();
@@ -304,6 +302,8 @@ pub fn partition_alignments(
 
                 //info!("  Partition {} timings: query={:?}, merge={:?}, merge2={:?}, extend={:?}, mask={:?}, calc={:?}, write={:?}",
                 //    partition_num, query_time, merge_time, merge2_time, extend_time, mask_time, calc_time, write_time);
+
+                partition_num += 1;
             } else {
                 debug!(
                     "  No overlaps found for region {}:{}-{}, len: {}",
