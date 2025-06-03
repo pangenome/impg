@@ -1,23 +1,24 @@
 [package]
 name = "impg"
-version = "0.2.4"
+version = "0.3.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bincode = "1.3.3"
-clap = { version = "4.5.23", features = ["derive"] }
+bincode = { version = "2.0.1", features = ["serde"] }
+clap = { version = "4.5.39", features = ["derive"] }
 coitrees = "0.4.0"
-num_cpus = "1.16.0"
+num_cpus = "1.17.0"
 rayon = "1.10.0"
-serde = { version = "1.0.216", features = ["derive"] }
-noodles = { version = "0.87.0", features = ["bgzf"] }
+serde = { version = "1.0.219", features = ["derive"] }
+noodles = { version = "0.99.0", features = ["bgzf"] }
 regex = "1.11.1"
-log = "0.4.22"
-env_logger = "0.11.5"
+log = "0.4.27"
+env_logger = "0.11.8"
 natord = "1.0.9"
-rustc-hash = "2.1.0"
+rustc-hash = "2.1.1"
+
 rust-htslib = { version = "0.46.0", default-features = false } # Don't update it, see https://github.com/rust-bio/rust-htslib/issues/434
 libc = "0.2.172"
 
