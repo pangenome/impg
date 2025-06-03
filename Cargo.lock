@@ -254,7 +254,7 @@ checksum = "f154ce46856750ed433c8649605bf7ed2de3bc35fd9d2a9f30cddd873c80cb08"
 
 [[package]]
 name = "impg"
-version = "0.2.4"
+version = "0.3.0"
 dependencies = [
  "bincode",
  "clap",
