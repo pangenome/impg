@@ -12,7 +12,7 @@ coitrees = "0.4.0"
 num_cpus = "1.16.0"
 rayon = "1.10.0"
 serde = { version = "1.0.216", features = ["derive"] }
-noodles = { version = "0.87.0", features = ["bgzf"] }
+noodles = { version = "0.99.0", features = ["bgzf"] }
 regex = "1.11.1"
 log = "0.4.22"
 env_logger = "0.11.5"
