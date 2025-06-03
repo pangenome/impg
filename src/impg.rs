@@ -131,7 +131,7 @@ impl QueryMetadata {
             // Get the GZI index for the PAF file
             let paf_gzi_index = paf_gzi_indices.get(paf_file_index).and_then(Option::as_ref);
 
-            let mut reader = bgzf::Reader::new(File::open(paf_file).unwrap());
+            let mut reader = bgzf::io::Reader::new(File::open(paf_file).unwrap());
             reader
                 .seek_by_uncompressed_position(paf_gzi_index.unwrap(), self.cigar_offset())
                 .unwrap();
@@ -308,7 +308,7 @@ impl Impg {
                     let paf_gzi_index = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
                         let paf_gzi_file = paf_file.to_owned() + ".gzi";
                         Some(
-                            bgzf::gzi::read(paf_gzi_file.clone())
+                            bgzf::gzi::fs::read(paf_gzi_file.clone())
                                 .unwrap_or_else(|_| panic!("Could not open {}", paf_gzi_file)),
                         )
                     } else {
@@ -409,7 +409,7 @@ impl Impg {
                 if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
                     let paf_gzi_file = paf_file.to_owned() + ".gzi";
                     Some(
-                        bgzf::gzi::read(paf_gzi_file.clone())
+                        bgzf::gzi::fs::read(paf_gzi_file.clone())
                             .unwrap_or_else(|_| panic!("Could not open {}", paf_gzi_file)),
                     )
                 } else {
