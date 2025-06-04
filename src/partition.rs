@@ -302,7 +302,7 @@ pub fn partition_alignments(
                 };
                 //let calc_time = calc_start.elapsed();
 
-                info!("  Wrote partition {} with {} regions: {} bp this partition ({}), {} bp total ({}) - (query {}:{}-{}, len: {})", 
+                info!("  Wrote partition{}.bed with {} regions: {} bp this partition ({}), {} bp total ({}) - (query {}:{}-{}, len: {})", 
                     partition_num,
                     num_regions,
                     current_partition_length,   // Current partition size in bp
