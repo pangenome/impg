@@ -18,7 +18,7 @@ pub fn partition_alignments(
     min_identity: Option<f64>,
     min_missing_size: i32,
     min_boundary_distance: i32,
-    transitive_bfs: bool,
+    transitive_dfs: bool,
     max_depth: u16,
     min_transitive_len: i32,
     min_distance_between_ranges: i32,
@@ -198,8 +198,8 @@ pub fn partition_alignments(
 
             // Query overlaps for current window
             //let query_start = Instant::now();
-            let mut overlaps = if transitive_bfs {
-                impg.query_transitive_bfs(
+            let mut overlaps = if transitive_dfs {
+                impg.query_transitive(
                 seq_id,
                 start,
                 end,
@@ -211,7 +211,7 @@ pub fn partition_alignments(
                 min_identity,
             )
             } else {
-                impg.query_transitive(
+                impg.query_transitive_bfs(
                     seq_id,
                     start,
                     end,
