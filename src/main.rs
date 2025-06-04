@@ -72,9 +72,9 @@ enum Args {
         #[clap(long, value_parser)]
         min_identity: Option<f64>,
 
-        /// Enable transitive queries with breadth-first search (faster, but returns more overlapping results)
+        /// Enable transitive queries with Depth-First Search (slower, but returns fewer overlapping results)
         #[clap(long, action)]
-        transitive_bfs: bool,
+        transitive_dfs: bool,
 
         /// Maximum recursion depth for transitive overlaps (0 for no limit)
         #[clap(short = 'm', long, value_parser, default_value_t = 2)]
@@ -148,13 +148,13 @@ enum Args {
         #[clap(long, value_parser)]
         min_identity: Option<f64>,
 
-        /// Enable transitive queries
+        /// Enable transitive queries (with Breadth-First Search)
         #[clap(short = 'x', long, action)]
         transitive: bool,
 
-        /// Enable transitive queries with breadth-first search (faster, but returns more overlapping results)
+        /// Enable transitive queries with Depth-First Search (slower, but returns fewer overlapping results)
         #[clap(long, action)]
-        transitive_bfs: bool,
+        transitive_dfs: bool,
 
         /// Maximum recursion depth for transitive overlaps (0 for no limit)
         #[clap(short = 'm', long, value_parser, default_value_t = 0)]
@@ -189,7 +189,7 @@ fn main() -> io::Result<()> {
             window_size,
             merge_distance,
             min_identity,
-            transitive_bfs,
+            transitive_dfs,
             max_depth,
             min_transitive_len,
             min_distance_between_ranges,
@@ -210,7 +210,7 @@ fn main() -> io::Result<()> {
                 min_identity,
                 min_missing_size,
                 min_boundary_distance,
-                transitive_bfs,
+                transitive_dfs,
                 max_depth,
                 min_transitive_len,
                 min_distance_between_ranges,
@@ -226,7 +226,7 @@ fn main() -> io::Result<()> {
             no_merge,
             min_identity,
             transitive,
-            transitive_bfs,
+            transitive_dfs,
             max_depth,
             min_transitive_len,
             min_distance_between_ranges,
@@ -244,7 +244,7 @@ fn main() -> io::Result<()> {
                     output_format == "paf" || output_format == "bedpe", // Store CIGAR for PAF/BEDPE output
                     min_identity,
                     transitive,
-                    transitive_bfs,
+                    transitive_dfs,
                     max_depth,
                     min_transitive_len,
                     min_distance_between_ranges,
@@ -281,7 +281,7 @@ fn main() -> io::Result<()> {
                         output_format == "paf" || output_format == "bedpe", // Store CIGAR for PAF/BEDPE output
                         min_identity,
                         transitive,
-                        transitive_bfs,
+                        transitive_dfs,
                         max_depth,
                         min_transitive_len,
                         min_distance_between_ranges,
@@ -653,7 +653,7 @@ fn perform_query(
     store_cigar: bool,
     min_identity: Option<f64>,
     transitive: bool,
-    transitive_bfs: bool,
+    transitive_dfs: bool,
     max_depth: u16,
     min_transitive_len: i32,
     min_distance_between_ranges: i32,
@@ -675,7 +675,7 @@ fn perform_query(
     }
 
     if transitive {
-        impg.query_transitive(
+        impg.query_transitive_bfs(
             target_id,
             target_start,
             target_end,
@@ -686,8 +686,8 @@ fn perform_query(
             store_cigar,
             min_identity,
         )
-    } else if transitive_bfs {
-        impg.query_transitive_bfs(
+    } else if transitive_dfs {
+        impg.query_transitive(
             target_id,
             target_start,
             target_end,
