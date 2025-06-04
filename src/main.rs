@@ -149,11 +149,11 @@ enum Args {
         min_identity: Option<f64>,
 
         /// Enable transitive queries (with Breadth-First Search)
-        #[clap(short = 'x', long, action)]
+        #[clap(short = 'x', long, action, conflicts_with = "transitive_dfs")]
         transitive: bool,
 
         /// Enable transitive queries with Depth-First Search (slower, but returns fewer overlapping results)
-        #[clap(long, action)]
+        #[clap(long, action, conflicts_with = "transitive")]
         transitive_dfs: bool,
 
         /// Maximum recursion depth for transitive overlaps (0 for no limit)
