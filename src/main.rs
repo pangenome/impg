@@ -88,6 +88,10 @@ enum Args {
         #[clap(long, value_parser)]
         min_identity: Option<f64>,
 
+        /// Enable transitive queries with breadth-first search (faster, but returns more overlapping results)
+        #[clap(long, action)]
+        transitive_bfs: bool,
+
         /// Maximum recursion depth for transitive overlaps (0 for no limit)
         #[clap(short = 'm', long, value_parser, default_value_t = 2)]
         max_depth: u16,
@@ -217,6 +221,7 @@ fn main() -> io::Result<()> {
             poa_scoring,
             merge_distance,
             min_identity,
+            transitive_bfs,
             max_depth,
             min_transitive_len,
             min_distance_between_ranges,
@@ -254,6 +259,7 @@ fn main() -> io::Result<()> {
                 min_identity,
                 min_missing_size,
                 min_boundary_distance,
+                transitive_bfs,
                 max_depth,
                 min_transitive_len,
                 min_distance_between_ranges,
