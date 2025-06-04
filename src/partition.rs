@@ -18,6 +18,7 @@ pub fn partition_alignments(
     min_identity: Option<f64>,
     min_missing_size: i32,
     min_boundary_distance: i32,
+    transitive_bfs: bool,
     max_depth: u16,
     min_transitive_len: i32,
     min_distance_between_ranges: i32,
@@ -197,7 +198,8 @@ pub fn partition_alignments(
 
             // Query overlaps for current window
             //let query_start = Instant::now();
-            let mut overlaps = impg.query_transitive(
+            let mut overlaps = if transitive_bfs {
+                impg.query_transitive(
                 seq_id,
                 start,
                 end,
@@ -207,7 +209,20 @@ pub fn partition_alignments(
                 min_distance_between_ranges,
                 false, // Don't store CIGAR strings during partitioning
                 min_identity,
-            );
+            )
+            } else {
+                impg.query_transitive_bfs(
+                    seq_id,
+                    start,
+                    end,
+                    Some(&masked_regions),
+                    max_depth,
+                    min_transitive_len,
+                    min_distance_between_ranges,
+                    false, // Don't store CIGAR strings during partitioning
+                    min_identity,
+                )
+            };
             //let query_time = query_start.elapsed();
             debug!("  Collected {} query overlaps", overlaps.len());
 
