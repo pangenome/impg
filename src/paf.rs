@@ -1,9 +1,7 @@
 use crate::seqidx::SequenceIndex;
-use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Error as IoError};
 use std::num::ParseIntError;
 
-#[derive(Debug, PartialEq, Clone)]
 pub struct PartialPafRecord {
     pub query_id: u32,
     pub query_start: usize,
@@ -15,7 +13,7 @@ pub struct PartialPafRecord {
     pub cigar_bytes: usize,
 }
 
-#[derive(Default, Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
+#[derive(Default, PartialEq, Clone, Copy)]
 #[repr(u8)]
 pub enum Strand {
     #[default]
