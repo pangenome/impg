@@ -540,7 +540,7 @@ fn generate_multi_index(
     let mut seq_index = SequenceIndex::new();
     for (name, id) in &tmp_seq_index.name_to_id {
         let length = tmp_seq_index.get_len_from_id(*id).unwrap();
-        seq_index.get_or_insert_id(&name, Some(length));
+        seq_index.get_or_insert_id(name, Some(length));
     }
 
     // Update query and target IDs with the new SequenceIndex

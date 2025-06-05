@@ -12,7 +12,7 @@ use std::io::{Read, Seek, SeekFrom};
 
 /// Parse a CIGAR string into a vector of CigarOp
 // Note that the query_delta is negative for reverse strand alignments
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CigarOp {
     pub val: u32,
 }

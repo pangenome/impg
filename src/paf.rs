@@ -2,6 +2,7 @@ use crate::seqidx::SequenceIndex;
 use std::io::{BufRead, Error as IoError};
 use std::num::ParseIntError;
 
+#[derive(Debug, PartialEq)]
 pub struct PartialPafRecord {
     pub query_id: u32,
     pub query_start: usize,
