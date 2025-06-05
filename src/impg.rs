@@ -12,7 +12,7 @@ use std::io::{Read, Seek, SeekFrom};
 
 /// Parse a CIGAR string into a vector of CigarOp
 // Note that the query_delta is negative for reverse strand alignments
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CigarOp {
     pub val: u32,
 }
@@ -79,7 +79,7 @@ impl CigarOp {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct QueryMetadata {
     query_id: u32,
     target_start: i32,
@@ -151,14 +151,14 @@ pub type AdjustedInterval = (Interval<u32>, Vec<CigarOp>, Interval<u32>);
 type TreeMap = FxHashMap<u32, BasicCOITree<QueryMetadata, u32>>;
 pub type SerializableImpg = (FxHashMap<u32, Vec<SerializableInterval>>, SequenceIndex);
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct SerializableInterval {
     first: i32,
     last: i32,
     metadata: QueryMetadata,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct SortedRanges {
     pub ranges: Vec<(i32, i32)>,
     sequence_length: i32,
@@ -287,7 +287,6 @@ impl SortedRanges {
     }
 }
 
-#[derive(Clone)]
 pub struct Impg {
     pub trees: TreeMap,
     pub seq_index: SequenceIndex,

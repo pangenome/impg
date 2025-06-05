@@ -207,16 +207,16 @@ pub fn partition_alignments(
             //let query_start = Instant::now();
             let mut overlaps = if transitive_dfs {
                 impg.query_transitive(
-                seq_id,
-                start,
-                end,
-                Some(&masked_regions),
-                max_depth,
-                min_transitive_len,
-                min_distance_between_ranges,
-                false, // Don't store CIGAR strings during partitioning
-                min_identity,
-            )
+                    seq_id,
+                    start,
+                    end,
+                    Some(&masked_regions),
+                    max_depth,
+                    min_transitive_len,
+                    min_distance_between_ranges,
+                    false, // Don't store CIGAR strings during partitioning
+                    min_identity,
+                )
             } else {
                 impg.query_transitive_bfs(
                     seq_id,
