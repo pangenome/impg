@@ -196,6 +196,47 @@ enum Args {
         #[clap(long, value_parser, default_value_t = 0)]
         min_distance_between_ranges: i32,
     },
+    /// Compute pairwise similarity between sequences in a region
+    Similarity {
+        #[clap(flatten)]
+        common: CommonOpts,
+
+        /// Target range in the format `seq_name:start-end`
+        #[clap(short = 'r', long, value_parser, required = true)]
+        target_range: String,
+
+        /// List of FASTA file paths
+        #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["fasta_list"])]
+        fasta_files: Option<Vec<String>>,
+
+        /// Path to a text file containing paths to FASTA files
+        #[clap(long, value_parser, conflicts_with_all = &["fasta_files"])]
+        fasta_list: Option<String>,
+
+        /// POA alignment scoring parameters as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2
+        #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
+        poa_scoring: String,
+
+        /// Minimum gap-compressed identity threshold (0.0-1.0)
+        #[clap(long, value_parser)]
+        min_identity: Option<f64>,
+
+        /// Enable transitive queries (with Breadth-First Search)
+        #[clap(short = 'x', long, action)]
+        transitive: bool,
+
+        /// Maximum recursion depth for transitive overlaps (0 for no limit)
+        #[clap(short = 'm', long, value_parser, default_value_t = 0)]
+        max_depth: u16,
+
+        /// Minimum region size to consider for transitive queries
+        #[clap(short = 'l', long, value_parser, default_value_t = 0)]
+        min_transitive_len: i32,
+
+        /// Output distances instead of similarities
+        #[clap(short = 'd', long, action)]
+        distances: bool,
+    },
     /// Print alignment statistics
     Stats {
         #[clap(flatten)]
@@ -321,7 +362,7 @@ fn main() -> io::Result<()> {
                 );
 
                 let merge_distance = if no_merge { -1 } else { merge_distance };
-
+                
                 // Output results based on the format
                 match output_format.as_str() {
                     "bedpe" => {
@@ -396,6 +437,70 @@ fn main() -> io::Result<()> {
                     "Either --target-range or --target-bed must be provided for query subcommand",
                 ));
             }
+        }
+        Args::Similarity {
+            common,
+            target_range,
+            fasta_files,
+            fasta_list,
+            poa_scoring,
+            min_identity,
+            transitive,
+            max_depth,
+            min_transitive_len,
+            distances,
+        } => {
+            // Parse POA scoring parameters
+            let scoring_params = parse_poa_scoring(&poa_scoring)?;
+
+            // Build FASTA index
+            let fasta_index = build_fasta_index_if_needed(
+                "similarity", // Always need FASTA for similarity
+                &["similarity"],
+                fasta_files,
+                fasta_list,
+            )?;
+
+            let fasta_index = fasta_index.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "FASTA files are required for similarity computation",
+                )
+            })?;
+
+            let impg = initialize_impg(&common)?;
+
+            // Parse target range
+            let (target_name, target_range) = parse_target_range(&target_range)?;
+
+            // Perform query
+            let results = perform_query(
+                &impg,
+                &target_name,
+                target_range,
+                false, // Don't need CIGAR for similarity
+                min_identity,
+                transitive,
+                false, // No DFS option for simplicity
+                max_depth,
+                min_transitive_len,
+                0, // No min distance between ranges for simplicity
+            );
+
+            // Extract query intervals
+            let query_intervals: Vec<Interval<u32>> = results
+                .iter()
+                .map(|(query_interval, _, _)| query_interval.clone())
+                .collect();
+
+            // Compute and output similarities
+            impg::graph::compute_and_output_similarities(
+                &impg,
+                &query_intervals,
+                &fasta_index,
+                scoring_params,
+                distances,
+            )?;
         }
         Args::Stats { common } => {
             let impg = initialize_impg(&common)?;
