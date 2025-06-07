@@ -1,6 +1,7 @@
 use crate::impg::CigarOp;
 use crate::impg::Impg;
 use crate::impg::SortedRanges;
+use crate::faidx::FastaIndex;
 use coitrees::Interval;
 use log::{debug, info};
 use rayon::prelude::*;
@@ -22,8 +23,11 @@ pub fn partition_alignments(
     max_depth: u16,
     min_transitive_len: i32,
     min_distance_between_ranges: i32,
+    output_format: &str,
+    fasta_index: Option<&FastaIndex>,
+    scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
     debug: bool,
-) -> io::Result<()> {
+) -> io::Result<()> {   
     // Initialize windows from starting sequences if provided
     let mut windows = Vec::<(u32, i32, i32)>::new();
     if let Some(path) = starting_sequences_file {
@@ -133,6 +137,9 @@ pub fn partition_alignments(
             window_size,
         )?;
     }
+
+    // Collect partitions to write - just a vector of query intervals (not huge)
+    let mut partitions_to_write: Vec<Vec<Interval<u32>>> = Vec::new();
 
     while !windows.is_empty() {
         if debug {
@@ -271,15 +278,11 @@ pub fn partition_alignments(
                 );
                 //let merge2_time = merge2_start.elapsed();
 
-                //let write_start = Instant::now();
-                write_partition(partition_num, &overlaps, impg)?;
-                //let write_time = write_start.elapsed();
-
                 //let calc_start = Instant::now();
                 // Calculate current partition length
                 let num_regions = overlaps.len();
                 let current_partition_length: u64 = overlaps
-                    .into_par_iter()
+                    .par_iter()
                     .map(|(interval, _, _)| (interval.last - interval.first).unsigned_abs() as u64)
                     .sum();
                 total_partitioned_length += current_partition_length;
@@ -302,7 +305,14 @@ pub fn partition_alignments(
                 };
                 //let calc_time = calc_start.elapsed();
 
-                info!("  Wrote partition{}.bed with {} regions: {} bp this partition ({}), {} bp total ({}) - (query {}:{}-{}, len: {})", 
+                // Extract query intervals by consuming overlaps - no cloning
+                let query_intervals: Vec<Interval<u32>> = overlaps
+                    .drain(..)
+                    .map(|(query_interval, _, _)| query_interval)
+                    .collect();
+                partitions_to_write.push(query_intervals);
+
+                info!("  Computed partition{} with {} regions: {} bp this partition ({}), {} bp total ({}) - (query {}:{}-{}, len: {})", 
                     partition_num,
                     num_regions,
                     current_partition_length,   // Current partition size in bp
@@ -340,6 +350,50 @@ pub fn partition_alignments(
         )?;
         //let window_time = window_start.elapsed();
         //info!("  select_and_window_sequences={:?}", window_time);
+    }
+
+    // Now write all partitions
+    info!("Writing {} partitions ({} format)", partitions_to_write.len(), output_format);
+
+    match output_format {
+        "bed" => {
+            // Write BED files sequentially (fast enough)
+            for (index, query_intervals) in partitions_to_write.iter().enumerate() {
+                write_partition(
+                    index,
+                    query_intervals,
+                    impg,
+                    output_format,
+                    fasta_index,
+                    scoring_params,
+                )?;
+            }
+        }
+        "gfa" | "maf" => {
+            // Compute and write GFA/MAF files in parallel
+            partitions_to_write
+                .into_par_iter()
+                .enumerate()
+                .try_for_each(|(index, query_intervals)| {
+                    write_partition(
+                        index,
+                        &query_intervals,
+                        impg,
+                        output_format,
+                        fasta_index,
+                        scoring_params,
+                    )
+                })?;
+        }
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Unsupported output format: {}. Supported formats are 'bed', 'gfa', and 'maf'.",
+                    output_format
+                ),
+            ));
+        }
     }
 
     // Calculate final percentage
@@ -996,7 +1050,42 @@ fn extend_to_close_boundaries(
 
 fn write_partition(
     partition_num: usize,
-    overlaps: &[(Interval<u32>, Vec<CigarOp>, Interval<u32>)],
+    query_intervals: &[Interval<u32>],
+    impg: &Impg,
+    output_format: &str,
+    fasta_index: Option<&FastaIndex>,
+    scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
+) -> io::Result<()> {
+    match output_format {
+        "bed" => write_partition_bed(partition_num, query_intervals, impg),
+        "gfa" => {
+            let fasta_index = fasta_index.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "FASTA index required for GFA output")
+            })?;
+            let scoring_params = scoring_params.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "POA scoring parameters required for GFA output")
+            })?;
+            write_partition_gfa(partition_num, query_intervals, impg, fasta_index, scoring_params)
+        }
+        "maf" => {
+            let fasta_index = fasta_index.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "FASTA index required for MAF output")
+            })?;
+            let scoring_params = scoring_params.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "POA scoring parameters required for MAF output")
+            })?;
+            write_partition_maf(partition_num, query_intervals, impg, fasta_index, scoring_params)
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Unsupported output format: {}", output_format),
+        )),
+    }
+}
+
+fn write_partition_bed(
+    partition_num: usize,
+    query_intervals: &[Interval<u32>],
     impg: &Impg,
 ) -> io::Result<()> {
     // Only performing an actual file system write (a system call) when:
@@ -1008,8 +1097,7 @@ fn write_partition(
     let file = File::create(format!("partition{}.bed", partition_num))?;
     let mut writer = BufWriter::new(file);
 
-    // Write all overlaps to buffered writer
-    for (query_interval, _, _) in overlaps {
+    for query_interval in query_intervals {
         let name = impg.seq_index.get_name(query_interval.metadata).unwrap();
         let (start, end) = if query_interval.first <= query_interval.last {
             (query_interval.first, query_interval.last)
@@ -1020,7 +1108,49 @@ fn write_partition(
         writeln!(writer, "{}\t{}\t{}", name, start, end)?;
     }
 
-    // Ensure all data is written to file
+    writer.flush()?;
+    Ok(())
+}
+fn write_partition_gfa(
+    partition_num: usize,
+    query_intervals: &[Interval<u32>],
+    impg: &Impg,
+    fasta_index: &FastaIndex,
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+) -> io::Result<()> {
+    // Generate a GFA-formatted string from the list of intervals
+    let gfa_output = crate::graph::generate_gfa_from_intervals(
+        impg, &query_intervals, fasta_index, scoring_params
+    );
+    
+    // Create output file
+    let file = File::create(format!("partition{}.gfa", partition_num))?;
+    let mut writer = BufWriter::new(file);
+
+    // Write the GFA output to the file
+    writeln!(writer, "{}", gfa_output)?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_partition_maf(
+    partition_num: usize,
+    query_intervals: &[Interval<u32>],
+    impg: &Impg,
+    fasta_index: &FastaIndex,
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+) -> io::Result<()> {
+    // Generate a MAF-formatted string from the list of intervals
+    let maf_output = crate::graph::generate_maf_from_intervals(
+        impg, query_intervals, fasta_index, scoring_params
+    );
+    
+    // Create output file
+    let file = File::create(format!("partition{}.maf", partition_num))?;
+    let mut writer = BufWriter::new(file);
+
+    // Write the MAF output to the file
+    write!(writer, "{}", maf_output)?;
     writer.flush()?;
     Ok(())
 }
