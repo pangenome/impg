@@ -1109,7 +1109,7 @@ fn merge_query_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_dis
             };
 
             // Check if they represent the same region (different strands)
-            if merge_strands && curr_start == next_start && curr_end == next_end {
+            if merge_strands && curr_interval.metadata == next_interval.metadata && curr_start == next_start && curr_end == next_end {
                 // Keep the forward strand version by skipping the reversed one (don't increment write_idx)
                 continue;
             }
