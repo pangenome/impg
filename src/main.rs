@@ -474,7 +474,7 @@ fn main() -> io::Result<()> {
             let (target_name, target_range) = parse_target_range(&target_range)?;
 
             // Perform query
-            let results = perform_query(
+            let mut results = perform_query(
                 &impg,
                 &target_name,
                 target_range,
@@ -486,6 +486,9 @@ fn main() -> io::Result<()> {
                 min_transitive_len,
                 0, // No min distance between ranges for simplicity
             );
+
+            // Merge intervals if needed
+            merge_query_adjusted_intervals(&mut results, 0, true);
 
             // Extract query intervals
             let query_intervals: Vec<Interval<u32>> = results

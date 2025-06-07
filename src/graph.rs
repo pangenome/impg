@@ -451,7 +451,7 @@ pub fn compute_and_output_similarities2(
     let msa = graph.generate_msa();
 
     // Print header
-    println!("sequence.a\tsequence.b\tseq.a.length\tseq.b.length\tintersection\t{}", 
+    println!("group.a\tgroup.b\tseq.a.length\tseq.b.length\tintersection\t{}", 
         if emit_distances {
             "jaccard.distance\tcosine.distance\tdice.distance\testimated.difference.rate"
         } else {
@@ -505,18 +505,23 @@ pub fn compute_and_output_similarities2(
             print!("{}\t{}\t{}\t{}\t{}\t", name_a, name_b, len_a, len_b, matches);
 
             if emit_distances {
-                println!("{:.6}\t{:.6}\t{:.6}\t{:.6}",
-                    1.0 - jaccard,
-                    1.0 - cosine,
-                    1.0 - dice,
-                    1.0 - estimated_identity
+                let jaccard_dist = 1.0 - jaccard;
+                let cosine_dist = 1.0 - cosine;
+                let dice_dist = 1.0 - dice;
+                let est_diff = 1.0 - estimated_identity;
+                
+                println!("{}\t{}\t{}\t{}",
+                    format_similarity_value(jaccard_dist),
+                    format_similarity_value(cosine_dist),
+                    format_similarity_value(dice_dist),
+                    format_similarity_value(est_diff)
                 );
             } else {
-                println!("{:.6}\t{:.6}\t{:.6}\t{:.6}",
-                    jaccard,
-                    cosine,
-                    dice,
-                    estimated_identity
+                println!("{}\t{}\t{}\t{}",
+                    format_similarity_value(jaccard),
+                    format_similarity_value(cosine),
+                    format_similarity_value(dice),
+                    format_similarity_value(estimated_identity)
                 );
             }
         }
@@ -533,7 +538,7 @@ pub fn compute_and_output_similarities(
     emit_distances: bool,
 ) -> io::Result<()> {
     use rustc_hash::FxHashMap;
-    
+
     // Generate POA graph and get sequences
     let (graph, sequence_metadata) = prepare_poa_graph_and_sequences(
         impg,
@@ -583,7 +588,7 @@ pub fn compute_and_output_similarities(
     }
 
     // Print header
-    println!("sequence.a\tsequence.b\tseq.a.length\tseq.b.length\tintersection\t{}", 
+    println!("group.a\tgroup.b\tseq.a.length\tseq.b.length\tintersection\t{}", 
         if emit_distances {
             "jaccard.distance\tcosine.distance\tdice.distance\testimated.difference.rate"
         } else {
@@ -629,22 +634,37 @@ pub fn compute_and_output_similarities(
             print!("{}\t{}\t{}\t{}\t{}\t", name_a, name_b, len_a, len_b, intersection);
 
             if emit_distances {
-                println!("{:.6}\t{:.6}\t{:.6}\t{:.6}",
-                    1.0 - jaccard,
-                    1.0 - cosine,
-                    1.0 - dice,
-                    1.0 - estimated_identity
+                let jaccard_dist = 1.0 - jaccard;
+                let cosine_dist = 1.0 - cosine;
+                let dice_dist = 1.0 - dice;
+                let est_diff = 1.0 - estimated_identity;
+                
+                println!("{}\t{}\t{}\t{}",
+                    format_similarity_value(jaccard_dist),
+                    format_similarity_value(cosine_dist),
+                    format_similarity_value(dice_dist),
+                    format_similarity_value(est_diff)
                 );
             } else {
-                println!("{:.6}\t{:.6}\t{:.6}\t{:.6}",
-                    jaccard,
-                    cosine,
-                    dice,
-                    estimated_identity
+                println!("{}\t{}\t{}\t{}",
+                    format_similarity_value(jaccard),
+                    format_similarity_value(cosine),
+                    format_similarity_value(dice),
+                    format_similarity_value(estimated_identity)
                 );
             }
         }
     }
 
     Ok(())
+}
+
+fn format_similarity_value(value: f64) -> String {
+    if value == 0.0 {
+        "0".to_string()
+    } else if value == 1.0 {
+        "1".to_string()
+    } else {
+        format!("{:.7}", value)
+    }
 }
