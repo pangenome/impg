@@ -1,14 +1,15 @@
-use impg::paf::{PartialPafRecord, Strand};
-use impg::faidx::FastaIndex;
 use clap::Parser;
-use coitrees::{IntervalTree, Interval};
-use impg::impg::{AdjustedInterval, Impg, SerializableImpg, CigarOp};
+use coitrees::{Interval, IntervalTree};
+use impg::faidx::FastaIndex;
+use impg::impg::{AdjustedInterval, CigarOp, Impg, SerializableImpg};
+use impg::paf::{PartialPafRecord, Strand};
 use impg::partition::partition_alignments;
 use impg::seqidx::SequenceIndex;
-use log::{debug, info, warn, error};
+use log::{debug, error, info, warn};
 use noodles::bgzf;
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
+use rustc_hash::FxHashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
@@ -16,7 +17,6 @@ use std::io::{self, BufRead, BufReader, BufWriter};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use rustc_hash::FxHashMap;
 
 /// Common options shared between all commands
 #[derive(Parser, Debug)]
@@ -232,7 +232,7 @@ fn main() -> io::Result<()> {
         } => {
             validate_selection_mode(&selection_mode)?;
             validate_output_format(&output_format, &["bed", "gfa", "maf"])?;
-            
+
             // Parse POA scoring parameters if GFA output is requested
             let scoring_params = if output_format == "gfa" || output_format == "maf" {
                 Some(parse_poa_scoring(&poa_scoring)?)
@@ -286,7 +286,10 @@ fn main() -> io::Result<()> {
             min_transitive_len,
             min_distance_between_ranges,
         } => {
-            validate_output_format(&output_format, &["auto", "bed", "bedpe", "paf", "gfa", "maf"])?;
+            validate_output_format(
+                &output_format,
+                &["auto", "bed", "bedpe", "paf", "gfa", "maf"],
+            )?;
 
             // Parse POA scoring parameters if GFA output is requested
             let scoring_params = if output_format == "gfa" || output_format == "maf" {
@@ -335,10 +338,24 @@ fn main() -> io::Result<()> {
                         output_results_paf(&impg, &mut results, None, merge_distance);
                     }
                     "gfa" => {
-                        output_results_gfa(&impg, &mut results, &fasta_index.unwrap(), None, merge_distance, scoring_params.unwrap())?;
+                        output_results_gfa(
+                            &impg,
+                            &mut results,
+                            &fasta_index.unwrap(),
+                            None,
+                            merge_distance,
+                            scoring_params.unwrap(),
+                        )?;
                     }
                     "maf" => {
-                        output_results_maf(&impg, &mut results, &fasta_index.unwrap(), None, merge_distance, scoring_params.unwrap())?;
+                        output_results_maf(
+                            &impg,
+                            &mut results,
+                            &fasta_index.unwrap(),
+                            None,
+                            merge_distance,
+                            scoring_params.unwrap(),
+                        )?;
                     }
                     _ => {
                         // 'auto' or 'bed'
@@ -377,10 +394,24 @@ fn main() -> io::Result<()> {
                             output_results_paf(&impg, &mut results, name, merge_distance);
                         }
                         "gfa" => {
-                            output_results_gfa(&impg, &mut results, fasta_index.as_ref().unwrap(), name, merge_distance, scoring_params.unwrap())?;
+                            output_results_gfa(
+                                &impg,
+                                &mut results,
+                                fasta_index.as_ref().unwrap(),
+                                name,
+                                merge_distance,
+                                scoring_params.unwrap(),
+                            )?;
                         }
                         "maf" => {
-                            output_results_maf(&impg, &mut results, fasta_index.as_ref().unwrap(), name, merge_distance, scoring_params.unwrap())?;
+                            output_results_maf(
+                                &impg,
+                                &mut results,
+                                fasta_index.as_ref().unwrap(),
+                                name,
+                                merge_distance,
+                                scoring_params.unwrap(),
+                            )?;
                         }
                         _ => {
                             // 'auto' or 'bedpe'
@@ -425,9 +456,11 @@ fn validate_output_format(format: &str, valid_formats: &[&str]) -> io::Result<()
     } else {
         Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("Invalid output format '{}'. Must be one of: {}", 
-                format, 
-                valid_formats.join(", ")),
+            format!(
+                "Invalid output format '{}'. Must be one of: {}",
+                format,
+                valid_formats.join(", ")
+            ),
         ))
     }
 }
@@ -448,26 +481,22 @@ fn build_fasta_index_if_needed(
         // Handle --fasta-files option
         (Some(files), None) => files,
         // Handle --fasta-list option
-        (None, Some(list_file)) => {
-            match std::fs::read_to_string(&list_file) {
-                Ok(content) => {
-                    content
-                        .lines()
-                        .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
-                        .map(|line| line.trim().to_string())
-                        .collect()
-                }
-                Err(e) => {
-                    error!("Failed to read FASTA list file '{}': {}", list_file, e);
-                    std::process::exit(1);
-                }
+        (None, Some(list_file)) => match std::fs::read_to_string(&list_file) {
+            Ok(content) => content
+                .lines()
+                .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
+                .map(|line| line.trim().to_string())
+                .collect(),
+            Err(e) => {
+                error!("Failed to read FASTA list file '{}': {}", list_file, e);
+                std::process::exit(1);
             }
-        }
+        },
         _ => {
             return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Either --fasta-files or --fasta-list must be provided for GFA output, not both",
-        ));
+                io::ErrorKind::InvalidInput,
+                "Either --fasta-files or --fasta-list must be provided for GFA output, not both",
+            ));
         }
     };
 
@@ -476,9 +505,11 @@ fn build_fasta_index_if_needed(
     } else {
         match FastaIndex::build_from_files(&fasta_files) {
             Ok(index) => {
-                info!("Built FASTA index for {} files with {} sequences", 
-                    index.fasta_paths.len(), 
-                    index.path_key_to_fasta.len());
+                info!(
+                    "Built FASTA index for {} files with {} sequences",
+                    index.fasta_paths.len(),
+                    index.path_key_to_fasta.len()
+                );
                 Ok(Some(index))
             }
             Err(e) => {
@@ -934,42 +965,49 @@ fn parse_poa_scoring(scoring_str: &str) -> io::Result<(u8, u8, u8, u8, u8, u8)> 
     if parts.len() != 6 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "POA scoring format should be 'mismatch,gap_extend,gap_open' (e.g., '4,2,6')"
+            "POA scoring format should be 'mismatch,gap_extend,gap_open' (e.g., '4,2,6')",
         ));
     }
-    
-    let match_score = parts[0].parse::<u8>()
-        .map_err(|_| io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Invalid match score value"
-        ))?;
-    let mismatch = parts[1].parse::<u8>()
-        .map_err(|_| io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Invalid mismatch cost value"
-        ))?;
-    let gap_open1 = parts[2].parse::<u8>()
-        .map_err(|_| io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Invalid gap opening 1 cost value"
-        ))?;
-    let gap_extend1 = parts[3].parse::<u8>()
-        .map_err(|_| io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Invalid gap extension 1 cost value"
-        ))?;
-    let gap_open2 = parts[4].parse::<u8>()
-        .map_err(|_| io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Invalid gap extension 2 cost value"
-        ))?;
-    let gap_extend2 = parts[5].parse::<u8>()
-        .map_err(|_| io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Invalid gap extension 2 cost value"
-        ))?;
 
-    Ok((match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2))
+    let match_score = parts[0]
+        .parse::<u8>()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid match score value"))?;
+    let mismatch = parts[1]
+        .parse::<u8>()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid mismatch cost value"))?;
+    let gap_open1 = parts[2].parse::<u8>().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid gap opening 1 cost value",
+        )
+    })?;
+    let gap_extend1 = parts[3].parse::<u8>().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid gap extension 1 cost value",
+        )
+    })?;
+    let gap_open2 = parts[4].parse::<u8>().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid gap extension 2 cost value",
+        )
+    })?;
+    let gap_extend2 = parts[5].parse::<u8>().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid gap extension 2 cost value",
+        )
+    })?;
+
+    Ok((
+        match_score,
+        mismatch,
+        gap_open1,
+        gap_extend1,
+        gap_open2,
+        gap_extend2,
+    ))
 }
 
 pub fn output_results_gfa(
@@ -989,7 +1027,10 @@ pub fn output_results_gfa(
         .map(|(query_interval, _, _)| query_interval)
         .collect();
     let gfa_output = impg::graph::generate_gfa_from_intervals(
-        impg, &query_intervals, fasta_index, scoring_params
+        impg,
+        &query_intervals,
+        fasta_index,
+        scoring_params,
     );
     print!("{}", gfa_output);
 
@@ -1012,15 +1053,22 @@ pub fn output_results_maf(
         .map(|(query_interval, _, _)| query_interval)
         .collect();
     let maf_output = impg::graph::generate_maf_from_intervals(
-        impg, &query_intervals, fasta_index, scoring_params
+        impg,
+        &query_intervals,
+        fasta_index,
+        scoring_params,
     );
     print!("{}", maf_output);
-    
+
     Ok(())
 }
 
 // Merge adjusted intervals by ignoring the target intervals (optimized for simple genomic interval merging in BED and GFA formats)
-fn merge_query_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance: i32, merge_strands: bool) {
+fn merge_query_adjusted_intervals(
+    results: &mut Vec<AdjustedInterval>,
+    merge_distance: i32,
+    merge_strands: bool,
+) {
     if results.len() > 1 && (merge_distance >= 0 || merge_strands) {
         // Sort by sequence ID, strand orientation, and start position
         results.par_sort_by_key(|(query_interval, _, _)| {
@@ -1061,7 +1109,11 @@ fn merge_query_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_dis
             };
 
             // Check if they represent the same region (different strands)
-            if merge_strands && curr_interval.metadata == next_interval.metadata && curr_start == next_start && curr_end == next_end {
+            if merge_strands
+                && curr_interval.metadata == next_interval.metadata
+                && curr_start == next_start
+                && curr_end == next_end
+            {
                 // Keep the forward strand version by skipping the reversed one (don't increment write_idx)
                 continue;
             }
