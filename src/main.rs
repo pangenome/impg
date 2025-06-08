@@ -1165,190 +1165,61 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
             )
         });
 
-        // Create a new vector to store merged results
-        let mut merged_results = Vec::with_capacity(results.len());
+        let num_results = results.len();
 
-        // Start with the first element
-        let (mut current_query, mut current_cigar, mut current_target) = results[0].clone();
+        // Drain off all entries, taking ownership
+        let mut results_iter = results.drain(..);
 
-        // Iterate through remaining elements
-        for (next_query, next_cigar, next_target) in results.into_iter().skip(1) {
-            // Determine orientations
-            let query_forward = current_query.first <= current_query.last;
-            let next_query_forward = next_query.first <= next_query.last;
+        // Take the first as the current "in-progress" interval
+        if let Some((mut current_query, mut current_cigar, mut current_target)) = results_iter.next() {
+            // Create a new vector to store merged results
+            let mut merged_results = Vec::with_capacity(num_results);
 
-            let target_forward = current_target.first <= current_target.last;
-            let next_target_forward = next_target.first <= next_target.last;
-            if !target_forward || !next_target_forward {
-                panic!("Target intervals should always be in forward!");
-            }
+            // Iterate through remaining elements
+            for (next_query, next_cigar, next_target) in results_iter {
+                // Determine orientations
+                let query_forward = current_query.first <= current_query.last;
+                let next_query_forward = next_query.first <= next_query.last;
 
-            // Check if sequences match and orientations are the same
-            if current_query.metadata != next_query.metadata
-                || current_target.metadata != next_target.metadata
-                || query_forward != next_query_forward
-            {
-                // Store current interval
-                merged_results.push((current_query, current_cigar, current_target));
-                // Clone the next as the new current
-                (current_query, current_cigar, current_target) = (next_query.clone(), next_cigar.clone(), next_target.clone());
-                continue;
-            }
-
-            // Check contiguity or overlap
-            let (query_contiguous, target_contiguous, query_overlap, target_overlap) =
-                if query_forward {
-                    let q_contig = current_query.last == next_query.first;
-                    let t_contig = current_target.last == next_target.first;
-                    let q_overlap = current_query.last > next_query.first;
-                    let t_overlap = current_target.last > next_target.first;
-                    (q_contig, t_contig, q_overlap, t_overlap)
-                } else {
-                    // Reverse orientation (remember that first > last in reverse, so we swap first/last)
-                    let q_contig = current_query.first == next_query.last;
-                    let t_contig = current_target.first == next_target.last;
-                    let q_overlap = current_query.first > next_query.last;
-                    let t_overlap = current_target.first < next_target.last;
-                    (q_contig, t_contig, q_overlap, t_overlap)
-                };
-
-            // Handle perfect contiguity (existing logic)
-            if query_contiguous && target_contiguous {
-                debug!(
-                    "Merge contiguous! Query: current {}:{}-{}({}), next {}:{}-{}({}); Target: current {}:{}-{}({}), next {}:{}-{}({})",
-                    current_query.metadata,
-                    current_query.first,
-                    current_query.last,
-                    if query_forward { "+" } else { "-" },
-                    next_query.metadata,
-                    next_query.first,
-                    next_query.last,
-                    if next_query_forward { "+" } else { "-" },
-                    current_target.metadata,
-                    current_target.first,
-                    current_target.last,
-                    if target_forward { "+" } else { "-" },
-                    next_target.metadata,
-                    next_target.first,
-                    next_target.last,
-                    if next_target_forward { "+" } else { "-" },
-                );
-
-                // Merge intervals and CIGAR operations
-                if query_forward {
-                    current_query.last = next_query.last;
-                    current_target.last = next_target.last;
-                    current_cigar.extend_from_slice(next_cigar);
-                } else {
-                    current_query.first = next_query.first;
-                    current_target.first = next_target.first;
-
-                    let mut new_cigar = Vec::with_capacity(current_cigar.len() + next_cigar.len());
-                    new_cigar.extend_from_slice(next_cigar);
-                    new_cigar.extend_from_slice(&current_cigar);
-                    current_cigar = new_cigar;
+                let target_forward = current_target.first <= current_target.last;
+                let next_target_forward = next_target.first <= next_target.last;
+                if !target_forward || !next_target_forward {
+                    panic!("Target intervals should always be in forward!");
                 }
-                merge_consecutive_cigar_ops(&mut current_cigar);
-                continue;
-            }
 
-            // Handle overlap case
-            if query_overlap && target_overlap {
-                // Calculate overlap lengths
-                let (query_overlap_len, target_overlap_len) = if query_forward {
-                    (
-                        next_query.first - current_query.last,
-                        next_target.first - current_target.last,
-                    )
-                } else {
-                    // Reverse orientation (remember that first > last in reverse, so we swap first/last)
-                    (
-                        next_query.last - current_query.first,
-                        current_target.first - next_target.last,
-                    )
-                };
-
-                // Check if overlaps are proportional (same alignment)
-                if query_overlap_len > 0 && target_overlap_len > 0 {
-                    // Check if CIGAR strings are identical in the overlap region
-                    let overlap_matches = check_cigar_overlap_match(
-                        &current_cigar,
-                        next_cigar,
-                        query_overlap_len,
-                        query_forward,
-                    );
-
-                    if overlap_matches {
-                        debug!(
-                            "Merge overlapping! Overlap: query={}, target={}, Query: current {}:{}-{}({}), next {}:{}-{}({}); Target: current {}:{}-{}({}), next {}:{}-{}({})",
-                            query_overlap_len,
-                            target_overlap_len,
-                            current_query.metadata,
-                            current_query.first,
-                            current_query.last,
-                            if query_forward { "+" } else { "-" },
-                            next_query.metadata,
-                            next_query.first,
-                            next_query.last,
-                            if next_query_forward { "+" } else { "-" },
-                            current_target.metadata,
-                            current_target.first,
-                            current_target.last,
-                            if target_forward { "+" } else { "-" },
-                            next_target.metadata,
-                            next_target.first,
-                            next_target.last,
-                            if next_target_forward { "+" } else { "-" },
-                        );
-
-                        // Trim the overlap from the next interval and merge
-                        let trimmed_next_cigar =
-                            trim_cigar_prefix(next_cigar, query_overlap_len, target_overlap_len);
-
-                        if query_forward {
-                            current_query.last = next_query.last;
-                            current_target.last = next_target.last;
-                            current_cigar.extend(trimmed_next_cigar);
-                        } else {
-                            current_query.first = next_query.first;
-                            current_target.first = next_target.first;
-
-                            let mut new_cigar =
-                                Vec::with_capacity(trimmed_next_cigar.len() + current_cigar.len());
-                            new_cigar.extend(trimmed_next_cigar);
-                            new_cigar.extend_from_slice(&current_cigar);
-                            current_cigar = new_cigar;
-                        }
-                        continue;
-                    }
-                }
-            }
-
-            // Handle gaps within merge distance
-            if !query_overlap && !target_overlap {
-                let (query_gap, target_gap) = if query_forward {
-                    (
-                        next_query.first - current_query.last,
-                        next_target.first - current_target.last,
-                    )
-                } else {
-                    (
-                        current_query.first - next_query.last,
-                        current_target.first - next_target.last,
-                    )
-                };
-
-                // Check if gaps are within merge distance and at least one gap exists
-                if query_gap >= 0
-                    && target_gap >= 0
-                    && (query_gap > 0 || target_gap > 0)
-                    && query_gap <= merge_distance
-                    && target_gap <= merge_distance
+                // Check if sequences match and orientations are the same
+                if current_query.metadata != next_query.metadata
+                    || current_target.metadata != next_target.metadata
+                    || query_forward != next_query_forward
                 {
+                    // Store current interval
+                    merged_results.push((current_query, current_cigar, current_target));
+                    // Clone the next as the new current
+                    (current_query, current_cigar, current_target) = (next_query, next_cigar, next_target);
+                    continue;
+                }
+
+                // Check contiguity or overlap
+                let (query_contiguous, target_contiguous, query_overlap, target_overlap) =
+                    if query_forward {
+                        let q_contig = current_query.last == next_query.first;
+                        let t_contig = current_target.last == next_target.first;
+                        let q_overlap = current_query.last > next_query.first;
+                        let t_overlap = current_target.last > next_target.first;
+                        (q_contig, t_contig, q_overlap, t_overlap)
+                    } else {
+                        // Reverse orientation (remember that first > last in reverse, so we swap first/last)
+                        let q_contig = current_query.first == next_query.last;
+                        let t_contig = current_target.first == next_target.last;
+                        let q_overlap = current_query.first > next_query.last;
+                        let t_overlap = current_target.first < next_target.last;
+                        (q_contig, t_contig, q_overlap, t_overlap)
+                    };
+
+                // Handle perfect contiguity (existing logic)
+                if query_contiguous && target_contiguous {
                     debug!(
-                        "Merge gaps! Query gap: {}, Target gap: {}, Query: current {}:{}-{}({}), next {}:{}-{}({}); Target: current {}:{}-{}({}), next {}:{}-{}({})",
-                        query_gap,
-                        target_gap,
+                        "Merge contiguous! Query: current {}:{}-{}({}), next {}:{}-{}({}); Target: current {}:{}-{}({}), next {}:{}-{}({})",
                         current_query.metadata,
                         current_query.first,
                         current_query.last,
@@ -1367,49 +1238,183 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
                         if next_target_forward { "+" } else { "-" },
                     );
 
-                    // Create gap-filling CIGAR operations
-                    let mut gap_cigar = Vec::new();
-
-                    if query_gap > 0 {
-                        gap_cigar.push(CigarOp::new(query_gap, 'I'));
-                    }
-                    if target_gap > 0 {
-                        gap_cigar.push(CigarOp::new(target_gap, 'D'));
-                    }
-
-                    // Merge intervals and CIGAR
+                    // Merge intervals and CIGAR operations
                     if query_forward {
                         current_query.last = next_query.last;
                         current_target.last = next_target.last;
-                        current_cigar.extend(gap_cigar);
-                        current_cigar.extend_from_slice(next_cigar);
+                        current_cigar.extend_from_slice(&next_cigar);
                     } else {
                         current_query.first = next_query.first;
                         current_target.first = next_target.first;
 
-                        let mut new_cigar = Vec::with_capacity(
-                            current_cigar.len() + gap_cigar.len() + next_cigar.len(),
-                        );
-                        new_cigar.extend_from_slice(next_cigar);
-                        new_cigar.extend(gap_cigar);
+                        let mut new_cigar = Vec::with_capacity(current_cigar.len() + next_cigar.len());
+                        new_cigar.extend_from_slice(&next_cigar);
                         new_cigar.extend_from_slice(&current_cigar);
                         current_cigar = new_cigar;
                     }
                     merge_consecutive_cigar_ops(&mut current_cigar);
                     continue;
                 }
+
+                // Handle overlap case
+                if query_overlap && target_overlap {
+                    // Calculate overlap lengths
+                    let (query_overlap_len, target_overlap_len) = if query_forward {
+                        (
+                            next_query.first - current_query.last,
+                            next_target.first - current_target.last,
+                        )
+                    } else {
+                        // Reverse orientation (remember that first > last in reverse, so we swap first/last)
+                        (
+                            next_query.last - current_query.first,
+                            current_target.first - next_target.last,
+                        )
+                    };
+
+                    // Check if overlaps are proportional (same alignment)
+                    if query_overlap_len > 0 && target_overlap_len > 0 {
+                        // Check if CIGAR strings are identical in the overlap region
+                        let overlap_matches = check_cigar_overlap_match(
+                            &current_cigar,
+                            &next_cigar,
+                            query_overlap_len,
+                            query_forward,
+                        );
+
+                        if overlap_matches {
+                            debug!(
+                                "Merge overlapping! Overlap: query={}, target={}, Query: current {}:{}-{}({}), next {}:{}-{}({}); Target: current {}:{}-{}({}), next {}:{}-{}({})",
+                                query_overlap_len,
+                                target_overlap_len,
+                                current_query.metadata,
+                                current_query.first,
+                                current_query.last,
+                                if query_forward { "+" } else { "-" },
+                                next_query.metadata,
+                                next_query.first,
+                                next_query.last,
+                                if next_query_forward { "+" } else { "-" },
+                                current_target.metadata,
+                                current_target.first,
+                                current_target.last,
+                                if target_forward { "+" } else { "-" },
+                                next_target.metadata,
+                                next_target.first,
+                                next_target.last,
+                                if next_target_forward { "+" } else { "-" },
+                            );
+
+                            // Trim the overlap from the next interval and merge
+                            let trimmed_next_cigar =
+                                trim_cigar_prefix(&next_cigar, query_overlap_len, target_overlap_len);
+
+                            if query_forward {
+                                current_query.last = next_query.last;
+                                current_target.last = next_target.last;
+                                current_cigar.extend(trimmed_next_cigar);
+                            } else {
+                                current_query.first = next_query.first;
+                                current_target.first = next_target.first;
+
+                                let mut new_cigar =
+                                    Vec::with_capacity(trimmed_next_cigar.len() + current_cigar.len());
+                                new_cigar.extend(trimmed_next_cigar);
+                                new_cigar.extend_from_slice(&current_cigar);
+                                current_cigar = new_cigar;
+                            }
+                            continue;
+                        }
+                    }
+                }
+
+                // Handle gaps within merge distance
+                if !query_overlap && !target_overlap {
+                    let (query_gap, target_gap) = if query_forward {
+                        (
+                            next_query.first - current_query.last,
+                            next_target.first - current_target.last,
+                        )
+                    } else {
+                        (
+                            current_query.first - next_query.last,
+                            current_target.first - next_target.last,
+                        )
+                    };
+
+                    // Check if gaps are within merge distance and at least one gap exists
+                    if query_gap >= 0
+                        && target_gap >= 0
+                        && (query_gap > 0 || target_gap > 0)
+                        && query_gap <= merge_distance
+                        && target_gap <= merge_distance
+                    {
+                        debug!(
+                            "Merge gaps! Query gap: {}, Target gap: {}, Query: current {}:{}-{}({}), next {}:{}-{}({}); Target: current {}:{}-{}({}), next {}:{}-{}({})",
+                            query_gap,
+                            target_gap,
+                            current_query.metadata,
+                            current_query.first,
+                            current_query.last,
+                            if query_forward { "+" } else { "-" },
+                            next_query.metadata,
+                            next_query.first,
+                            next_query.last,
+                            if next_query_forward { "+" } else { "-" },
+                            current_target.metadata,
+                            current_target.first,
+                            current_target.last,
+                            if target_forward { "+" } else { "-" },
+                            next_target.metadata,
+                            next_target.first,
+                            next_target.last,
+                            if next_target_forward { "+" } else { "-" },
+                        );
+
+                        // Create gap-filling CIGAR operations
+                        let mut gap_cigar = Vec::new();
+
+                        if query_gap > 0 {
+                            gap_cigar.push(CigarOp::new(query_gap, 'I'));
+                        }
+                        if target_gap > 0 {
+                            gap_cigar.push(CigarOp::new(target_gap, 'D'));
+                        }
+
+                        // Merge intervals and CIGAR
+                        if query_forward {
+                            current_query.last = next_query.last;
+                            current_target.last = next_target.last;
+                            current_cigar.extend(gap_cigar);
+                            current_cigar.extend_from_slice(&next_cigar);
+                        } else {
+                            current_query.first = next_query.first;
+                            current_target.first = next_target.first;
+
+                            let mut new_cigar = Vec::with_capacity(
+                                current_cigar.len() + gap_cigar.len() + next_cigar.len(),
+                            );
+                            new_cigar.extend_from_slice(&next_cigar);
+                            new_cigar.extend(gap_cigar);
+                            new_cigar.extend_from_slice(&current_cigar);
+                            current_cigar = new_cigar;
+                        }
+                        merge_consecutive_cigar_ops(&mut current_cigar);
+                        continue;
+                    }
+                }
+
+                // No merge possible - store current and move to next
+                merged_results.push((current_query, current_cigar, current_target));
+                (current_query, current_cigar, current_target) = (next_query, next_cigar, next_target);
             }
 
-            // No merge possible - store current and move to next
+            // Don't forget to add the last current element
             merged_results.push((current_query, current_cigar, current_target));
-            (current_query, current_cigar, current_target) = (next_query.clone(), next_cigar.clone(), next_target.clone());
+
+            // Replace original results with merged results
+            *results = merged_results;
         }
-
-        // Don't forget to add the last current element
-        merged_results.push((current_query, current_cigar, current_target));
-
-        // Replace original results with merged results
-        *results = merged_results;
     }
 }
 
