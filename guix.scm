@@ -4,7 +4,7 @@
 ;;
 ;; To get a development container using a recent guix (see `guix pull`)
 ;;
-;;   guix shell --share=$HOME/.cargo -C -L . impg-shell-git
+;;   guix shell --share=$HOME/.cargo -C -N -L . impg-shell-git
 ;;
 ;; and inside the container
 ;;
@@ -109,7 +109,7 @@ intervals.")
     (version %version)
     (source (local-file %source-dir #:recursive? #t))
     (build-system cargo-build-system)
-    (inputs (list curl gnutls lzip openssl pkg-config zlib xz)) ;; mostly for htslib
+    (inputs (list cmake curl gnutls lzip openssl pkg-config zlib xz)) ;; mostly for htslib
     (arguments
      `(#:cargo-inputs (("rust-bincode" ,rust-bincode-1)
                        ("rust-coitrees" ,rust-coitrees-0.4)
