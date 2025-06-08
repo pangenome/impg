@@ -1,7 +1,7 @@
 use crate::paf::{ParseErr, PartialPafRecord, Strand};
 use crate::seqidx::SequenceIndex;
 use coitrees::{BasicCOITree, Interval, IntervalTree};
-use log::{debug, info};
+use log::debug;
 use noodles::bgzf;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -534,8 +534,6 @@ impl Impg {
             });
         }
 
-        info!("Collected {} results", results.len());
-
         results
     }
 
@@ -775,8 +773,6 @@ impl Impg {
             stack.truncate(write + 1);
             debug!("Merged stack size from {} to {}", stack_size, stack.len());
         }
-
-        info!("Collected {} results", results.len());
 
         results
     }
@@ -1042,8 +1038,6 @@ impl Impg {
             // Set up for next iteration
             current_ranges = next_depth_ranges;
         }
-
-        info!("Collected {} results", results.len());
 
         results
     }

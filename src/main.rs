@@ -217,6 +217,20 @@ enum Args {
         #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
         poa_scoring: String,
 
+        /// Maximum distance between regions to merge
+        #[clap(
+            short = 'd',
+            long,
+            value_parser,
+            conflicts_with = "no_merge_bed",
+            default_value_t = 0
+        )]
+        merge_distance: i32,
+
+        /// Disable merging for all output formats
+        #[clap(long, action, conflicts_with = "merge_distance")]
+        no_merge: bool,
+
         /// Minimum gap-compressed identity threshold (0.0-1.0)
         #[clap(long, value_parser)]
         min_identity: Option<f64>,
@@ -234,7 +248,7 @@ enum Args {
         min_transitive_len: i32,
 
         /// Output distances instead of similarities
-        #[clap(short = 'd', long, action)]
+        #[clap(long, action)]
         distances: bool,
     },
     /// Print alignment statistics
@@ -475,6 +489,8 @@ fn main() -> io::Result<()> {
             fasta_files,
             fasta_list,
             poa_scoring,
+            merge_distance,
+            no_merge,
             min_identity,
             transitive,
             max_depth,
@@ -519,7 +535,8 @@ fn main() -> io::Result<()> {
             );
 
             // Merge intervals if needed
-            merge_query_adjusted_intervals(&mut results, 0, true);
+            let merge_distance = if no_merge { -1 } else { merge_distance };
+            merge_query_adjusted_intervals(&mut results, merge_distance, true);
 
             // Extract query intervals
             let query_intervals: Vec<Interval<u32>> = results
@@ -914,7 +931,7 @@ fn perform_query(
         );
     }
 
-    if transitive {
+    let results = if transitive {
         impg.query_transitive_bfs(
             target_id,
             target_start,
@@ -946,7 +963,11 @@ fn perform_query(
             store_cigar,
             min_identity,
         )
-    }
+    };
+
+    info!("Collected {} results", results.len());
+
+    results
 }
 
 fn output_results_bed(impg: &Impg, results: &mut Vec<AdjustedInterval>, merge_distance: i32) {
@@ -1160,6 +1181,7 @@ pub fn output_results_maf(
         .drain(..)
         .map(|(query_interval, _, _)| query_interval)
         .collect();
+
     let maf_output = impg::graph::generate_maf_from_intervals(
         impg,
         &query_intervals,
@@ -1249,6 +1271,8 @@ fn merge_query_adjusted_intervals(
             }
         }
         results.truncate(write_idx + 1);
+
+        info!("Collected {} merged intervals", results.len());
     }
 }
 
@@ -1522,6 +1546,8 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
 
             // Replace original results with merged results
             *results = merged_results;
+
+            info!("Collected {} merged intervals", results.len());
         }
     }
 }
