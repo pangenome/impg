@@ -328,7 +328,7 @@ fn main() -> io::Result<()> {
 fn validate_selection_mode(mode: &str) -> io::Result<()> {
     match mode {
         "longest" | "total" => Ok(()),
-        mode if mode == "sample" || mode == "haplotype" 
+        mode if mode == "sample" || mode == "haplotype"
             || mode.starts_with("sample,") || mode.starts_with("haplotype,") => Ok(()),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -451,15 +451,14 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
 
     let file = File::open(index_file)?;
     let mut reader = BufReader::new(file);
-    let serializable: SerializableImpg =
-        bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard()).map_err(
-            |e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Failed to deserialize index: {:?}", e),
-                )
-            },
-        )?;
+     let serializable: SerializableImpg = bincode::deserialize_from(&mut reader).map_err(
+        |e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to deserialize index: {:?}", e),
+            )
+        },
+    )?;
     Ok(Impg::from_multi_paf_and_serializable(
         paf_files,
         serializable,
@@ -564,9 +563,8 @@ fn generate_multi_index(
     let serializable = impg.to_serializable();
     let file = File::create(index_file)?;
     let mut writer = BufWriter::new(file);
-    bincode::serde::encode_into_std_write(&serializable, &mut writer, bincode::config::standard())
+    bincode::serialize_into(&mut writer, &serializable)
         .map_err(|e| io::Error::other(format!("Failed to serialize index: {:?}", e)))?;
-
     Ok(impg)
 }
 
