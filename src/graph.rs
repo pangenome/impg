@@ -532,17 +532,17 @@ pub fn compute_and_output_similarities2(
                 let est_diff = 1.0 - estimated_identity;
                 
                 println!("{}\t{}\t{}\t{}",
-                    format_similarity_value(jaccard_dist),
-                    format_similarity_value(cosine_dist),
-                    format_similarity_value(dice_dist),
-                    format_similarity_value(est_diff)
+                    jaccard_dist,
+                    cosine_dist,
+                    dice_dist,
+                    est_diff
                 );
             } else {
                 println!("{}\t{}\t{}\t{}",
-                    format_similarity_value(jaccard),
-                    format_similarity_value(cosine),
-                    format_similarity_value(dice),
-                    format_similarity_value(estimated_identity)
+                    jaccard,
+                    cosine,
+                    dice,
+                    estimated_identity
                 );
             }
         }
@@ -569,7 +569,7 @@ pub fn compute_and_output_similarities(
     )?;
 
     // Since we can't traverse the graph directly, we'll use the MSA to compute similarities
-    // This is equivalent to what the C++ code does, just computed differently
+    // This is equivalent to what "odgi similarity" does, just computed differently
     let msa = graph.generate_msa();
     
     // Compute sequence lengths (non-gap positions)
@@ -579,7 +579,7 @@ pub fn compute_and_output_similarities(
     }
 
     // Compute pairwise intersections
-    // In the C++ code, this is done by traversing nodes and tracking which sequences visit each node
+    // In "odgi similarity", this is done by traversing nodes and tracking which sequences visit each node.
     // Here we compute it from the MSA alignment
     let mut path_intersection_length: FxHashMap<(usize, usize), usize> = FxHashMap::default();
     
@@ -590,26 +590,31 @@ pub fn compute_and_output_similarities(
         }
     }
 
-    // Count shared positions (equivalent to shared nodes in the graph)
+    // Count matches at each position (not just shared positions)
     for pos in 0..msa[0].len() {
-        // Get sequences that have non-gap at this position
-        let mut seqs_at_pos: Vec<usize> = Vec::new();
-        for (seq_idx, seq) in msa.iter().enumerate() {
-            if seq.chars().nth(pos).unwrap_or('-') != '-' {
-                seqs_at_pos.push(seq_idx);
+        // Check all pairs of sequences at this position
+        for i in 0..msa.len() {
+            let char_i = msa[i].chars().nth(pos).unwrap_or('-');
+            if char_i == '-' {
+                continue; // Skip if sequence i has a gap
             }
-        }
-        
-        // Update intersection counts for all pairs at this position
-        for &i in &seqs_at_pos {
-            for &j in &seqs_at_pos {
-                *path_intersection_length.get_mut(&(i, j)).unwrap() += 1;
+            
+            for j in 0..msa.len() {
+                let char_j = msa[j].chars().nth(pos).unwrap_or('-');
+                if char_j == '-' {
+                    continue; // Skip if sequence j has a gap
+                }
+                
+                // Only count if characters match
+                if char_i == char_j {
+                    *path_intersection_length.get_mut(&(i, j)).unwrap() += 1;
+                }
             }
         }
     }
 
     // Print header
-    println!("group.a\tgroup.b\tseq.a.length\tseq.b.length\tintersection\t{}", 
+    println!("group.a\tgroup.b\tgroup.a.length\tgroup.b.length\tintersection\t{}", 
         if emit_distances {
             "jaccard.distance\tcosine.distance\tdice.distance\testimated.difference.rate"
         } else {
@@ -661,31 +666,21 @@ pub fn compute_and_output_similarities(
                 let est_diff = 1.0 - estimated_identity;
                 
                 println!("{}\t{}\t{}\t{}",
-                    format_similarity_value(jaccard_dist),
-                    format_similarity_value(cosine_dist),
-                    format_similarity_value(dice_dist),
-                    format_similarity_value(est_diff)
+                    jaccard_dist,
+                    cosine_dist,
+                    dice_dist,
+                    est_diff
                 );
             } else {
                 println!("{}\t{}\t{}\t{}",
-                    format_similarity_value(jaccard),
-                    format_similarity_value(cosine),
-                    format_similarity_value(dice),
-                    format_similarity_value(estimated_identity)
+                    jaccard,
+                    cosine,
+                    dice,
+                    estimated_identity
                 );
             }
         }
     }
 
     Ok(())
-}
-
-fn format_similarity_value(value: f64) -> String {
-    if value == 0.0 {
-        "0".to_string()
-    } else if value == 1.0 {
-        "1".to_string()
-    } else {
-        format!("{:.7}", value)
-    }
 }
