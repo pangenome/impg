@@ -138,8 +138,8 @@ pub fn partition_alignments(
         )?;
     }
 
-    // Collect partitions to write - just a vector of query intervals (not huge)
-    let mut partitions_to_write: Vec<Vec<Interval<u32>>> = Vec::new();
+    // Track temporary BED files for GFA/MAF conversion
+    let mut temp_bed_files = Vec::new();
 
     while !windows.is_empty() {
         if debug {
@@ -310,7 +310,25 @@ pub fn partition_alignments(
                     .drain(..)
                     .map(|(query_interval, _, _)| query_interval)
                     .collect();
-                partitions_to_write.push(query_intervals);
+
+                // Write partition
+                match output_format {
+                    "bed" => {
+                        // Write BED file directly
+                        write_partition_bed(partition_num, &query_intervals, impg, None)?;
+                    }
+                    "gfa" | "maf" => {
+                        // Write temporary BED file with .tmp suffix
+                        write_partition_bed(partition_num, &query_intervals, impg, Some(".tmp"))?;
+                        temp_bed_files.push(partition_num);
+                    }
+                    _ => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Unsupported output format: {}", output_format),
+                        ));
+                    }
+                }
 
                 info!("  Computed partition{} with {} regions: {} bp this partition ({}), {} bp total ({}) - (query {}:{}-{}, len: {})", 
                     partition_num,
@@ -352,48 +370,48 @@ pub fn partition_alignments(
         //info!("  select_and_window_sequences={:?}", window_time);
     }
 
-    // Now write all partitions
-    info!("Writing {} partitions ({} format)", partitions_to_write.len(), output_format);
+    // Convert temporary BED files to GFA/MAF if needed
+    if temp_bed_files.len() > 0 {
+        info!("Converting {} temporary BED files to {} format", temp_bed_files.len(), output_format);
+        
+        // Process temp files in parallel
+        temp_bed_files
+        .into_par_iter()
+        .try_for_each(|partition_idx| -> io::Result<()> {
+            let temp_bed_file = format!("partition{}.bed.tmp", partition_idx);
+            
+            // Read intervals from temporary BED file using parse_bed_file
+            let bed_entries = parse_bed_file(&temp_bed_file)?;
+            
+            // Convert to intervals
+            let query_intervals: Vec<Interval<u32>> = bed_entries
+                .into_iter()
+                .filter_map(|(seq_name, (start, end), _)| {
+                    impg.seq_index.get_id(&seq_name).map(|seq_id| {
+                        Interval {
+                            first: start,
+                            last: end,
+                            metadata: seq_id,
+                        }
+                    })
+                })
+                .collect();
+            
+            // Use existing write_partition function
+            write_partition(
+                partition_idx,
+                &query_intervals,
+                impg,
+                output_format,
+                fasta_index,
+                scoring_params,
+            )?;
+            
+            // Delete temporary BED file
+            std::fs::remove_file(temp_bed_file)?;
 
-    match output_format {
-        "bed" => {
-            // Write BED files sequentially (fast enough)
-            for (index, query_intervals) in partitions_to_write.iter().enumerate() {
-                write_partition(
-                    index,
-                    query_intervals,
-                    impg,
-                    output_format,
-                    fasta_index,
-                    scoring_params,
-                )?;
-            }
-        }
-        "gfa" | "maf" => {
-            // Compute and write GFA/MAF files in parallel
-            partitions_to_write
-                .into_par_iter()
-                .enumerate()
-                .try_for_each(|(index, query_intervals)| {
-                    write_partition(
-                        index,
-                        &query_intervals,
-                        impg,
-                        output_format,
-                        fasta_index,
-                        scoring_params,
-                    )
-                })?;
-        }
-        _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Unsupported output format: {}. Supported formats are 'bed', 'gfa', and 'maf'.",
-                    output_format
-                ),
-            ));
-        }
+            Ok(())
+        })?;
     }
 
     // Calculate final percentage
@@ -1057,7 +1075,7 @@ fn write_partition(
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
 ) -> io::Result<()> {
     match output_format {
-        "bed" => write_partition_bed(partition_num, query_intervals, impg),
+        "bed" => write_partition_bed(partition_num, query_intervals, impg, None),
         "gfa" => {
             let fasta_index = fasta_index.ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "FASTA index required for GFA output")
@@ -1087,14 +1105,16 @@ fn write_partition_bed(
     partition_num: usize,
     query_intervals: &[Interval<u32>],
     impg: &Impg,
+    suffix: Option<&str>,
 ) -> io::Result<()> {
-    // Only performing an actual file system write (a system call) when:
-    // - The buffer is full
-    // - flush() is called
-    // - The BufWriter is dropped
-
+    // Create filename with optional suffix
+    let filename = match suffix {
+        Some(s) => format!("partition{}.bed{}", partition_num, s),
+        None => format!("partition{}.bed", partition_num),
+    };
+    
     // Create file with buffer
-    let file = File::create(format!("partition{}.bed", partition_num))?;
+    let file = File::create(filename)?;
     let mut writer = BufWriter::new(file);
 
     for query_interval in query_intervals {
@@ -1111,6 +1131,7 @@ fn write_partition_bed(
     writer.flush()?;
     Ok(())
 }
+
 fn write_partition_gfa(
     partition_num: usize,
     query_intervals: &[Interval<u32>],
@@ -1153,4 +1174,52 @@ fn write_partition_maf(
     write!(writer, "{}", maf_output)?;
     writer.flush()?;
     Ok(())
+}
+
+pub fn parse_bed_file(bed_file: &str) -> io::Result<Vec<(String, (i32, i32), Option<String>)>> {
+    let file = File::open(bed_file)?;
+    let reader = BufReader::new(file);
+    let mut ranges = Vec::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 3 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid BED file format",
+            ));
+        }
+
+        let (start, end) = parse_range(&parts[1..=2])?;
+        let name = parts.get(3).map(|s| s.to_string());
+        ranges.push((parts[0].to_string(), (start, end), name));
+    }
+
+    Ok(ranges)
+}
+
+pub fn parse_range(range_parts: &[&str]) -> io::Result<(i32, i32)> {
+    if range_parts.len() != 2 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Range format should be `start-end`",
+        ));
+    }
+
+    let start = range_parts[0]
+        .parse::<i32>()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid start value"))?;
+    let end = range_parts[1]
+        .parse::<i32>()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid end value"))?;
+
+    if start >= end {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Start value must be less than end value",
+        ));
+    }
+
+    Ok((start, end))
 }

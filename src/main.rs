@@ -388,7 +388,7 @@ fn main() -> io::Result<()> {
                     }
                 }
             } else if let Some(target_bed) = target_bed {
-                let targets = parse_bed_file(&target_bed)?;
+                let targets = impg::partition::parse_bed_file(&target_bed)?;
                 info!("Parsed {} target ranges from BED file", targets.len());
                 for (target_name, target_range, name) in targets {
                     let mut results = perform_query(
@@ -829,56 +829,8 @@ fn parse_target_range(target_range: &str) -> io::Result<(String, (i32, i32))> {
         ));
     }
 
-    let (start, end) = parse_range(&parts[0].split('-').collect::<Vec<_>>())?;
+    let (start, end) = impg::partition::parse_range(&parts[0].split('-').collect::<Vec<_>>())?;
     Ok((parts[1].to_string(), (start, end)))
-}
-
-fn parse_bed_file(bed_file: &str) -> io::Result<Vec<(String, (i32, i32), Option<String>)>> {
-    let file = File::open(bed_file)?;
-    let reader = BufReader::new(file);
-    let mut ranges = Vec::new();
-
-    for line in reader.lines() {
-        let line = line?;
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 3 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Invalid BED file format",
-            ));
-        }
-
-        let (start, end) = parse_range(&parts[1..=2])?;
-        let name = parts.get(3).map(|s| s.to_string());
-        ranges.push((parts[0].to_string(), (start, end), name));
-    }
-
-    Ok(ranges)
-}
-
-fn parse_range(range_parts: &[&str]) -> io::Result<(i32, i32)> {
-    if range_parts.len() != 2 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Range format should be `start-end`",
-        ));
-    }
-
-    let start = range_parts[0]
-        .parse::<i32>()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid start value"))?;
-    let end = range_parts[1]
-        .parse::<i32>()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid end value"))?;
-
-    if start >= end {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Start value must be less than end value",
-        ));
-    }
-
-    Ok((start, end))
 }
 
 fn get_combined_index_filename(paf_files: &[String], custom_index: Option<&str>) -> String {
