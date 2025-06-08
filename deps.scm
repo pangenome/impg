@@ -41,6 +41,27 @@
   #:use-module (ice-9 rdelim)
   #:use-module (deps))
 
+(define-public rust-spoa-rs-0.1
+  (package
+    (name "rust-spoa-rs")
+    (version "0.1.0")
+    (source
+     (origin
+       (method url-fetch)
+       (uri (crate-uri "spoa_rs" version))
+       (file-name (string-append name "-" version ".tar.gz"))
+       (sha256
+        (base32 "014q4d9y4imm6s1njxnw06wmax5kq77irv1nsbc3n4swkpnl7a5h"))))
+    (build-system cargo-build-system)
+    (arguments
+     `(#:cargo-inputs (("rust-cmake" ,rust-cmake-0.1)
+                       ("rust-cxx" ,rust-cxx-1)
+                       ("rust-cxx-build" ,rust-cxx-build-1))))
+    (home-page "https://github.com/AndreaGuarracino/spoa-rs")
+    (synopsis "Rust bindings for SPOA (SIMD POA)")
+    (description "This package provides Rust bindings for SPOA (SIMD POA).")
+    (license license:bsd-3)))
+
 (define-public rust-noodles-refget-0.7
   (package
     (name "rust-noodles-refget")
