@@ -37,8 +37,7 @@ impl FastaIndex {
                             std::fs::read_to_string(&fai_path)?
                         }
                         Err(e) => {
-                            return Err(io::Error::new(
-                                io::ErrorKind::Other,
+                            return Err(io::Error::other(
                                 format!("Failed to create FASTA index for '{}': {}", fasta_path, e)
                             ));
                         }
@@ -72,16 +71,14 @@ impl FastaIndex {
             ))?;
             
         let reader = faidx::Reader::from_path(fasta_path)
-            .map_err(|e| io::Error::new(
-                io::ErrorKind::Other,
+            .map_err(|e| io::Error::other(
                 format!("Failed to open FASTA file '{}': {}", fasta_path, e)
             ))?;
             
         // rust-htslib uses 0-based half-open coordinates internally
         // but fetch_seq expects 0-based inclusive end coordinate
         let sequence = reader.fetch_seq(seq_name, start as usize, (end - 1) as usize)
-            .map_err(|e| io::Error::new(
-                io::ErrorKind::Other,
+            .map_err(|e| io::Error::other(
                 format!("Failed to fetch sequence '{}:{}:{}': {}", seq_name, start, end, e)
             ))?;
             

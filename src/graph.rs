@@ -155,7 +155,7 @@ fn prepare_poa_graph_and_sequences(
             .ok_or_else(|| io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("Sequence length not found for ID {}", interval.metadata)
-            ))? as usize;
+            ))?;
             
         // Determine actual start and end based on orientation
         let (start, end, strand) = if interval.first <= interval.last {
@@ -175,7 +175,7 @@ fn prepare_poa_graph_and_sequences(
         };
         
         let sequence_str = String::from_utf8_lossy(&sequence).to_string();
-        let seq_size = (end - start) as i32;
+        let seq_size = end - start;
         
         // For MAF format, if strand is "-", start is relative to reverse-complemented sequence
         let maf_start = if strand == '-' {

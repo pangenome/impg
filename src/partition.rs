@@ -371,7 +371,7 @@ pub fn partition_alignments(
     }
 
     // Convert temporary BED files to GFA/MAF if needed
-    if temp_bed_files.len() > 0 {
+    if !temp_bed_files.is_empty() {
         info!("Converting {} temporary BED files to {} format", temp_bed_files.len(), output_format);
         
         // Process temp files in parallel
@@ -1141,7 +1141,7 @@ fn write_partition_gfa(
 ) -> io::Result<()> {
     // Generate a GFA-formatted string from the list of intervals
     let gfa_output = crate::graph::generate_gfa_from_intervals(
-        impg, &query_intervals, fasta_index, scoring_params
+        impg, query_intervals, fasta_index, scoring_params
     );
     
     // Create output file

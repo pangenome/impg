@@ -377,10 +377,10 @@ fn main() -> io::Result<()> {
                             output_results_paf(&impg, &mut results, name, merge_distance);
                         }
                         "gfa" => {
-                            output_results_gfa(&impg, &mut results, &fasta_index.as_ref().unwrap(), name, merge_distance, scoring_params.unwrap())?;
+                            output_results_gfa(&impg, &mut results, fasta_index.as_ref().unwrap(), name, merge_distance, scoring_params.unwrap())?;
                         }
                         "maf" => {
-                            output_results_maf(&impg, &mut results, &fasta_index.as_ref().unwrap(), name, merge_distance, scoring_params.unwrap())?;
+                            output_results_maf(&impg, &mut results, fasta_index.as_ref().unwrap(), name, merge_distance, scoring_params.unwrap())?;
                         }
                         _ => {
                             // 'auto' or 'bedpe'
@@ -472,14 +472,14 @@ fn build_fasta_index_if_needed(
     };
 
     if fasta_files.is_empty() {
-        return Ok(None);
+        Ok(None)
     } else {
         match FastaIndex::build_from_files(&fasta_files) {
             Ok(index) => {
                 info!("Built FASTA index for {} files with {} sequences", 
                     index.fasta_paths.len(), 
                     index.path_key_to_fasta.len());
-                return Ok(Some(index));
+                Ok(Some(index))
             }
             Err(e) => {
                 error!("Failed to build FASTA index: {}", e);
