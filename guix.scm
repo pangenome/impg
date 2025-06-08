@@ -111,7 +111,8 @@ intervals.")
     (build-system cargo-build-system)
     (inputs (list curl gnutls lzip openssl pkg-config zlib xz)) ;; mostly for htslib
     (arguments
-     `(#:cargo-inputs (("rust-coitrees" ,rust-coitrees-0.4)
+     `(#:cargo-inputs (("rust-bincode" ,rust-bincode-1)
+                       ("rust-coitrees" ,rust-coitrees-0.4)
                        ("rust-env-logger" ,rust-env-logger-0.11)
                        ("rust-natord" ,rust-natord-1)
                        ("rust-noodles" ,rust-noodles-0.99)
