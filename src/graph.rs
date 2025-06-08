@@ -460,6 +460,7 @@ pub fn compute_and_output_similarities(
     fasta_index: &FastaIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
     emit_distances: bool,
+    emit_all_pairs: bool,
 ) -> io::Result<()> {
     // Generate POA graph and get sequences
     let (graph, sequence_metadata) = prepare_poa_graph_and_sequences(
@@ -510,6 +511,12 @@ pub fn compute_and_output_similarities(
 
             // Compute similarity metrics
             let intersection = matches as f64;
+
+            if intersection == 0.0 && !emit_all_pairs {
+                // If no matches and not emitting all pairs, skip this pair
+                continue;
+            }
+
             let union = (len_a + len_b - matches) as f64;
             
             let jaccard = if union > 0.0 { intersection / union } else { 0.0 };

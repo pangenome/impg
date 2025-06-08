@@ -250,6 +250,10 @@ enum Args {
         /// Output distances instead of similarities
         #[clap(long, action)]
         distances: bool,
+
+        /// Emit entries for all pairs of groups, including those with zero intersection
+        #[clap(short = 'a', long, action, default_value_t = false)]
+        all: bool,
     },
     /// Print alignment statistics
     Stats {
@@ -496,6 +500,7 @@ fn main() -> io::Result<()> {
             max_depth,
             min_transitive_len,
             distances,
+            all,
         } => {
             // Parse POA scoring parameters
             let scoring_params = parse_poa_scoring(&poa_scoring)?;
@@ -551,6 +556,7 @@ fn main() -> io::Result<()> {
                 &fasta_index,
                 scoring_params,
                 distances,
+                all,
             )?;
         }
         Args::Stats { common } => {
