@@ -1,7 +1,7 @@
 use crate::paf::{ParseErr, PartialPafRecord, Strand};
 use crate::seqidx::SequenceIndex;
 use coitrees::{BasicCOITree, Interval, IntervalTree};
-use log::debug;
+use log::{debug, info};
 use noodles::bgzf;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -534,12 +534,12 @@ impl Impg {
             });
         }
 
-        debug!("Collected {} results", results.len());
+        info!("Collected {} results", results.len());
 
         results
     }
 
-    pub fn query_transitive(
+    pub fn query_transitive_dfs(
         &self,
         target_id: u32,
         range_start: i32,
@@ -775,6 +775,8 @@ impl Impg {
             stack.truncate(write + 1);
             debug!("Merged stack size from {} to {}", stack_size, stack.len());
         }
+
+        info!("Collected {} results", results.len());
 
         results
     }
@@ -1040,6 +1042,8 @@ impl Impg {
             // Set up for next iteration
             current_ranges = next_depth_ranges;
         }
+
+        info!("Collected {} results", results.len());
 
         results
     }

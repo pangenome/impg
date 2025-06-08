@@ -927,7 +927,7 @@ fn perform_query(
             min_identity,
         )
     } else if transitive_dfs {
-        impg.query_transitive(
+        impg.query_transitive_dfs(
             target_id,
             target_start,
             target_end,
