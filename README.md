@@ -6,7 +6,7 @@ Pangenome graphs and whole genome multiple alignments are powerful tools, but th
 Often, we would like to be able to break a small piece out of a pangenome without constructing the whole thing.
 `impg` lets us do this by projecting sequence ranges through many-way (e.g. all-vs-all) pairwise alignments built by tools like `wfmash` and `minimap2`.
 
-## Using `impg`
+## Usage
 
 Here's a basic example:
 
@@ -14,7 +14,7 @@ Here's a basic example:
 impg query -p cerevisiae.pan.paf.gz -r S288C#1#chrI:50000-100000 -x
 ```
 
-- `-p` specifies the path to the PAF file. Your alignments must use `wfmash` default or `minimap2 --eqx` type CIGAR strings which have `=` for matches and `X` for mismatches. The `M` positional match character is not allowed.
+- `-p` specifies the path to the PAF file. Your alignments must use `wfmash` default or `minimap2 --eqx` type CIGAR strings which have `=` for matches and `X` for mismatches.
 - `-r` defines the target range in the format of `seq_name:start-end`
 - `-x` requests a *transitive closure* of the matches. That is, for each collected range, we then find what sequence ranges are aligned onto it. This is done progressively until we've closed the set of alignments connected to the initial target range.
 
@@ -32,7 +32,7 @@ SK1#1#chrI          52740  102721
 
 ## Installation
 
-You need Rust (cargo) installed. Then:
+You need Rust (`cargo`) installed. Then:
 
 ```bash
 git clone https://github.com/pangenome/impg.git
@@ -68,12 +68,19 @@ impg query -p alignments.paf -r chr1:1000-2000 -x -m 3
 # Filter by minimum gap-compressed identity
 impg query -p alignments.paf -r chr1:1000-2000 --min-identity 0.9
 
-# Output formats (auto/bed/bedpe/paf)
+# Output formats (auto/bed/bedpe/paf/gfa/maf)
 impg query -p alignments.paf -r chr1:1000-2000 -o bedpe
 impg query -p alignments.paf -b regions.bed -o paf
 
+# GFA/MAF output requires FASTA files
+impg query -p alignments.paf -r chr1:1000-2000 -o gfa --fasta-files ref.fa genomes.fa
+impg query -p alignments.paf -r chr1:1000-2000 -o maf --fasta-list fastas.txt
+
 # Merge nearby regions (default: 0)
 impg query -p alignments.paf -r chr1:1000-2000 -d 1000
+
+# Use DFS for transitive search (slower but fewer overlapping results)
+impg query -p alignments.paf -r chr1:1000-2000 --transitive-dfs
 ```
 
 ### Partition
@@ -98,6 +105,10 @@ impg partition -p alignments.paf -w 1000000 --selection-mode haplotype,#    # by
 
 # Control transitive search depth and minimum sizes
 impg partition -p alignments.paf -w 1000000 -m 2 -l 10000
+
+# Output as GFA or MAF (requires FASTA files)
+impg partition -p alignments.paf -w 1000000 -o gfa --fasta-files *.fa
+impg partition -p alignments.paf -w 1000000 -o maf --fasta-list fastas.txt
 ```
 
 ### Stats
@@ -127,7 +138,7 @@ impg index --paf-list paf_files.txt
 ```
 
 
-### Common Options
+### Common options
 
 All commands support these options:
 - `-p, --paf-files`: One or more paths to PAF files (gzipped or uncompressed).
@@ -136,6 +147,14 @@ All commands support these options:
 - `-f, --force-reindex`: Always regenerate the IMPG index even if it already exists.
 - `-t, --num-threads`: Number of threads (default: 4)
 - `-v, --verbose`: Verbosity level (0=error, 1=info, 2=debug)
+
+### FASTA options
+
+For GFA/MAF output and similarity computation:
+
+- `--fasta-files`: List of FASTA files
+- `--fasta-list`: Text file listing FASTA files (one per line)
+- `--poa-scoring`: POA scoring parameters as `match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2` (default: `1,4,6,2,26,1`)
 
 ## What does `impg` do?
 
@@ -146,15 +165,15 @@ The output is provided in BED, BEDPE and PAF formats, making it straightforward 
 
 ## How does it work?
 
-`impg` uses `coitrees` (implicit interval trees) to provide efficient range lookup over the input alignments.
+`impg` uses [`coitrees`](https://github.com/dcjones/coitrees) (Cache Oblivious Interval Trees) to provide efficient range lookup over the input alignments.
 CIGAR strings are converted to a compact delta encoding.
 This approach allows for fast and memory-efficient projection of sequence ranges through alignments.
 
 ## Authors
 
+Andrea Guarracino <aguarra1@uthsc.edu> \
+Bryce Kille <brycekille@gmail.com> \
 Erik Garrison <erik.garrison@gmail.com>
-Andrea Guarracino <aguarra1@uthsc.edu>
-Bryce Kille <brycekille@gmail.com>
 
 ## License
 
