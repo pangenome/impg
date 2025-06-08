@@ -1172,9 +1172,7 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
         let (mut current_query, mut current_cigar, mut current_target) = results[0].clone();
 
         // Iterate through remaining elements
-        for i in 1..results.len() {
-            let (next_query, next_cigar, next_target) = &results[i];
-
+        for (next_query, next_cigar, next_target) in results.into_iter().skip(1) {
             // Determine orientations
             let query_forward = current_query.first <= current_query.last;
             let next_query_forward = next_query.first <= next_query.last;
@@ -1193,7 +1191,7 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
                 // Store current interval
                 merged_results.push((current_query, current_cigar, current_target));
                 // Clone the next as the new current
-                (current_query, current_cigar, current_target) = results[i].clone();
+                (current_query, current_cigar, current_target) = (next_query.clone(), next_cigar.clone(), next_target.clone());
                 continue;
             }
 
@@ -1404,7 +1402,7 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
 
             // No merge possible - store current and move to next
             merged_results.push((current_query, current_cigar, current_target));
-            (current_query, current_cigar, current_target) = results[i].clone();
+            (current_query, current_cigar, current_target) = (next_query.clone(), next_cigar.clone(), next_target.clone());
         }
 
         // Don't forget to add the last current element

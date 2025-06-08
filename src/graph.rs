@@ -93,12 +93,12 @@ fn post_process_gfa_for_strands(gfa: String, sequence_metadata: &[SequenceMetada
                             .iter()
                             .rev()
                             .map(|seg| {
-                                if seg.ends_with('+') {
-                                    format!("{}-", &seg[..seg.len() - 1])
-                                } else if seg.ends_with('-') {
-                                    format!("{}+", &seg[..seg.len() - 1])
+                                if let Some(seg_stripped) = seg.strip_suffix('+') {
+                                    format!("{}-", seg_stripped)
+                                } else if let Some(seg_stripped) = seg.strip_suffix('-') {
+                                    format!("{}+", seg_stripped)
                                 } else {
-                                    seg.to_string()
+                                    panic!("Missing segment orientation in path: {}", path_name);
                                 }
                             })
                             .collect();
