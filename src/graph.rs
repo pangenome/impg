@@ -454,14 +454,14 @@ fn reverse_complement(seq: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-pub fn compute_and_output_similarities2(
+pub fn compute_and_output_similarities(
     impg: &Impg,
     results: &[Interval<u32>],
     fasta_index: &FastaIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
     emit_distances: bool,
 ) -> io::Result<()> {
-    // Generate MSA using existing functionality
+    // Generate POA graph and get sequences
     let (graph, sequence_metadata) = prepare_poa_graph_and_sequences(
         impg,
         results,
@@ -469,10 +469,12 @@ pub fn compute_and_output_similarities2(
         scoring_params,
     )?;
 
+    // Since we can't traverse the graph directly, we'll use the MSA to compute similarities
+    // This is equivalent to what "odgi similarity" does, just computed differently
     let msa = graph.generate_msa();
 
     // Print header
-    println!("group.a\tgroup.b\tseq.a.length\tseq.b.length\tintersection\t{}", 
+    println!("group.a\tgroup.b\tgroup.a.length\tgroup.b.length\tintersection\t{}", 
         if emit_distances {
             "jaccard.distance\tcosine.distance\tdice.distance\testimated.difference.rate"
         } else {
@@ -532,17 +534,17 @@ pub fn compute_and_output_similarities2(
                 let est_diff = 1.0 - estimated_identity;
                 
                 println!("{}\t{}\t{}\t{}",
-                    jaccard_dist,
-                    cosine_dist,
-                    dice_dist,
-                    est_diff
+                    format_similarity_value(jaccard_dist),
+                    format_similarity_value(cosine_dist),
+                    format_similarity_value(dice_dist),
+                    format_similarity_value(est_diff)
                 );
             } else {
                 println!("{}\t{}\t{}\t{}",
-                    jaccard,
-                    cosine,
-                    dice,
-                    estimated_identity
+                    format_similarity_value(jaccard),
+                    format_similarity_value(cosine),
+                    format_similarity_value(dice),
+                    format_similarity_value(estimated_identity)
                 );
             }
         }
@@ -551,136 +553,14 @@ pub fn compute_and_output_similarities2(
     Ok(())
 }
 
-pub fn compute_and_output_similarities(
-    impg: &Impg,
-    results: &[Interval<u32>],
-    fasta_index: &FastaIndex,
-    scoring_params: (u8, u8, u8, u8, u8, u8),
-    emit_distances: bool,
-) -> io::Result<()> {
-    use rustc_hash::FxHashMap;
-
-    // Generate POA graph and get sequences
-    let (graph, sequence_metadata) = prepare_poa_graph_and_sequences(
-        impg,
-        results,
-        fasta_index,
-        scoring_params,
-    )?;
-
-    // Since we can't traverse the graph directly, we'll use the MSA to compute similarities
-    // This is equivalent to what "odgi similarity" does, just computed differently
-    let msa = graph.generate_msa();
-    
-    // Compute sequence lengths (non-gap positions)
-    let mut seq_lengths: Vec<usize> = vec![0; msa.len()];
-    for (i, seq) in msa.iter().enumerate() {
-        seq_lengths[i] = seq.chars().filter(|&c| c != '-').count();
+fn format_similarity_value(value: f64) -> String {
+    let formatted = format!("{:.7}", value);
+    // Trim trailing zeros
+    let trimmed = formatted.trim_end_matches('0');
+    if trimmed.ends_with('.') {
+        // If we removed all decimal places, remove the decimal point too
+        trimmed.trim_end_matches('.').to_string()
+    } else {
+        trimmed.to_string()
     }
-
-    // Compute pairwise intersections
-    // In "odgi similarity", this is done by traversing nodes and tracking which sequences visit each node.
-    // Here we compute it from the MSA alignment
-    let mut path_intersection_length: FxHashMap<(usize, usize), usize> = FxHashMap::default();
-    
-    // Initialize all pairs
-    for i in 0..msa.len() {
-        for j in 0..msa.len() {
-            path_intersection_length.insert((i, j), 0);
-        }
-    }
-
-    // Count matches at each position (not just shared positions)
-    for pos in 0..msa[0].len() {
-        // Check all pairs of sequences at this position
-        for i in 0..msa.len() {
-            let char_i = msa[i].chars().nth(pos).unwrap_or('-');
-            if char_i == '-' {
-                continue; // Skip if sequence i has a gap
-            }
-            
-            for j in 0..msa.len() {
-                let char_j = msa[j].chars().nth(pos).unwrap_or('-');
-                if char_j == '-' {
-                    continue; // Skip if sequence j has a gap
-                }
-                
-                // Only count if characters match
-                if char_i == char_j {
-                    *path_intersection_length.get_mut(&(i, j)).unwrap() += 1;
-                }
-            }
-        }
-    }
-
-    // Print header
-    println!("group.a\tgroup.b\tgroup.a.length\tgroup.b.length\tintersection\t{}", 
-        if emit_distances {
-            "jaccard.distance\tcosine.distance\tdice.distance\testimated.difference.rate"
-        } else {
-            "jaccard.similarity\tcosine.similarity\tdice.similarity\testimated.identity"
-        }
-    );
-
-    // Output similarities for all pairs
-    for i in 0..msa.len() {
-        for j in 0..msa.len() {
-            let meta_a = &sequence_metadata[i];
-            let meta_b = &sequence_metadata[j];
-            
-            let len_a = seq_lengths[i];
-            let len_b = seq_lengths[j];
-            let intersection = path_intersection_length[&(i, j)];
-            
-            // Compute similarity metrics (same as C++ code)
-            let jaccard = if len_a + len_b > intersection {
-                intersection as f64 / (len_a + len_b - intersection) as f64
-            } else { 
-                0.0 
-            };
-            
-            let cosine = if len_a > 0 && len_b > 0 {
-                intersection as f64 / ((len_a as f64).sqrt() * (len_b as f64).sqrt())
-            } else {
-                0.0
-            };
-            
-            let dice = if len_a + len_b > 0 {
-                2.0 * intersection as f64 / (len_a + len_b) as f64
-            } else {
-                0.0
-            };
-            
-            let estimated_identity = 2.0 * jaccard / (1.0 + jaccard);
-
-            // Format sequence names with coordinates
-            let name_a = format!("{}:{}-{}", meta_a.name, meta_a.start, meta_a.start + meta_a.size);
-            let name_b = format!("{}:{}-{}", meta_b.name, meta_b.start, meta_b.start + meta_b.size);
-
-            print!("{}\t{}\t{}\t{}\t{}\t", name_a, name_b, len_a, len_b, intersection);
-
-            if emit_distances {
-                let jaccard_dist = 1.0 - jaccard;
-                let cosine_dist = 1.0 - cosine;
-                let dice_dist = 1.0 - dice;
-                let est_diff = 1.0 - estimated_identity;
-                
-                println!("{}\t{}\t{}\t{}",
-                    jaccard_dist,
-                    cosine_dist,
-                    dice_dist,
-                    est_diff
-                );
-            } else {
-                println!("{}\t{}\t{}\t{}",
-                    jaccard,
-                    cosine,
-                    dice,
-                    estimated_identity
-                );
-            }
-        }
-    }
-
-    Ok(())
 }
