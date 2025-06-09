@@ -30,13 +30,25 @@
 ;;
 ;; If things do not work you may also have to update the guix-daemon in systemd. Guix mostly downloads binary
 ;; substitutes. If it wants to build a lot of software you probably have substitutes misconfigured.
-
+;;
+;; export PATH=~/.cargo/bin:$PATH
+;;
+;; Also it is possible to run a latest Rust in a guix shell:
+;;
+;; guix shell --share=$HOME/.cargo -C -N -F -L . impg-shell-rust-latest-git
+;; curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |sh
+;; . ~/.cargo/env
+;; env LD_LIBRARY_PATH=$GUIX_ENVIRONMENT/lib CC=gcc cargo --version
+;;   cargo 1.87.0 (99624be96 2025-05-06)
+;; env LD_LIBRARY_PATH=$GUIX_ENVIRONMENT/lib CC=gcc cargo build
+;;   builds impg using latest rustc
+;;
 ;; by Pjotr Prins (c) 2025
 
 (define-module (guix)
   #:use-module ((guix licenses) #:prefix license:)
-  ;; #:use-module (guix build-system cmake)
   #:use-module (guix build-system cargo)
+  #:use-module (guix build-system trivial)
   #:use-module (guix download)
   #:use-module (guix gexp)
   #:use-module (guix git-download)
@@ -70,7 +82,8 @@
   #:use-module (srfi srfi-1)
   #:use-module (ice-9 popen)
   #:use-module (ice-9 rdelim)
-  #:use-module (deps))
+  #:use-module (deps)
+  )
 
 (define %source-dir (dirname (current-filename)))
 
@@ -109,9 +122,10 @@ intervals.")
     (version %version)
     (source (local-file %source-dir #:recursive? #t))
     (build-system cargo-build-system)
-    (inputs (list cmake curl gnutls lzip openssl pkg-config zlib xz)) ;; mostly for htslib
+    (inputs (list cmake gcc-toolchain curl gnutls lzip openssl pkg-config zlib xz)) ;; mostly for htslib
     (arguments
-     `(#:cargo-inputs (("rust-bincode" ,rust-bincode-1)
+     `(#:cargo-inputs (
+                       ("rust-bincode" ,rust-bincode-1)
                        ("rust-coitrees" ,rust-coitrees-0.4)
                        ("rust-env-logger" ,rust-env-logger-0.11)
                        ("rust-natord" ,rust-natord-1)
@@ -137,12 +151,14 @@ intervals.")
      (modify-inputs (package-inputs impg-base-git)
          (append binutils coreutils-minimal ;; for the shell
                  )))
-    (propagated-inputs (list cmake rust rust-cargo nss-certs openssl perl gnu-make-4.2
+    (propagated-inputs (list curl bash grep ;; for rust bootstrap
+                             cmake rust rust-cargo nss-certs openssl perl gnu-make-4.2
                              coreutils-minimal which perl binutils gcc-toolchain pkg-config zlib
                              )) ;; to run cargo build in the shell
     (arguments
      `(
-       #:cargo-development-inputs ()
+       #:cargo-development-inputs (
+                                   )
        #:cargo-package-flags '("--no-metadata" "--no-verify" "--allow-dirty")
        #:phases (modify-phases %standard-phases
                                (delete 'check-for-pregenerated-files)
@@ -152,5 +168,35 @@ intervals.")
                                (delete 'check)
                                (delete 'install)
                                )))))
+
+(define-public impg-shell-rust-latest-git
+  "Shell version to use 'cargo build' from rustup bootstrap"
+  (package
+    (name "impg-shell-rust-latest-git")
+    (version %version)
+    (source (local-file %source-dir #:recursive? #t))
+    (build-system trivial-build-system)
+    (inputs
+     (list gnutls lzip openssl pkg-config zlib xz
+           binutils coreutils-minimal))
+    (propagated-inputs
+     (list curl bash grep
+           cmake nss-certs openssl perl gnu-make-4.2
+           coreutils-minimal which perl binutils gcc-toolchain pkg-config zlib))
+    (arguments
+     `(#:modules ((guix build utils))
+       #:builder
+       (begin
+         (use-modules (guix build utils))
+         (let ((target (string-append (assoc-ref %outputs "out") "/share")))
+           (write target)
+           (mkdir-p target)
+           #t))))
+    (home-page "https://github.com/impg")
+    (synopsis
+     "Build shell for Rust latest.")
+    (description ".")
+    (license license:expat)))
+
 
 impg-base-git ;; default deployment build with debug info

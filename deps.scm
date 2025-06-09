@@ -1,6 +1,5 @@
 (define-module (deps)
   #:use-module ((guix licenses) #:prefix license:)
-  ;; #:use-module (guix build-system cmake)
   #:use-module (guix build-system cargo)
   #:use-module (guix download)
   #:use-module (guix gexp)
@@ -39,7 +38,7 @@
   #:use-module (srfi srfi-1)
   #:use-module (ice-9 popen)
   #:use-module (ice-9 rdelim)
-  #:use-module (deps))
+  )
 
 (define-public rust-spoa-rs-0.1
   (package
