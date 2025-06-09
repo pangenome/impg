@@ -49,15 +49,15 @@ struct CommonOpts {
 /// Common FASTA and POA scoring options
 #[derive(Parser, Debug)]
 struct GfaMafOpts {
-    /// List of FASTA file paths (required for 'gfa' and 'maf' formats)
+    /// List of FASTA file paths (required for 'gfa' and 'maf')
     #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["fasta_list"])]
     fasta_files: Option<Vec<String>>,
 
-    /// Path to a text file containing paths to FASTA files (required for 'gfa' and 'maf' formats)
+    /// Path to a text file containing paths to FASTA files (required for 'gfa' and 'maf')
     #[clap(long, value_parser, conflicts_with_all = &["fasta_files"])]
     fasta_list: Option<String>,
 
-    /// POA alignment scoring parameters as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for 'gfa' and 'maf' formats)
+    /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for 'gfa' and 'maf')
     #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
     poa_scoring: String,
 }
@@ -138,6 +138,55 @@ impl GfaMafOpts {
                 }
             }
         }
+    }
+}
+
+/// Common query and filtering options
+#[derive(Parser, Debug, Clone)]
+struct QueryOpts {
+        /// Maximum distance between regions to merge
+        #[clap(
+            short = 'd',
+            long,
+            value_parser,
+            conflicts_with = "no_merge_bed",
+            default_value_t = 0
+        )]
+        merge_distance: i32,
+
+        /// Disable merging for all output formats
+        #[clap(long, action, conflicts_with = "merge_distance")]
+        no_merge: bool,
+
+        /// Minimum gap-compressed identity threshold (0.0-1.0)
+        #[clap(long, value_parser)]
+        min_identity: Option<f64>,
+
+        /// Enable transitive queries (with Breadth-First Search)
+        #[clap(short = 'x', long, action, conflicts_with = "transitive_dfs")]
+        transitive: bool,
+
+        /// Enable transitive queries with Depth-First Search (slower, but returns fewer overlapping results)
+        #[clap(long, action, conflicts_with = "transitive")]
+        transitive_dfs: bool,
+
+        /// Maximum recursion depth for transitive overlaps (0 for no limit)
+        #[clap(short = 'm', long, value_parser, default_value_t = 0)]
+        max_depth: u16,
+
+        /// Minimum region size to consider for transitive queries
+        #[clap(short = 'l', long, value_parser, default_value_t = 0)]
+        min_transitive_len: i32,
+
+        /// Minimum distance between transitive ranges to consider on the same sequence
+        #[clap(long, value_parser, default_value_t = 0)]
+        min_distance_between_ranges: i32,
+}
+
+impl QueryOpts {
+    /// Get effective merge distance (-1 if merging is disabled)
+    fn effective_merge_distance(&self) -> i32 {
+        if self.no_merge { -1 } else { self.merge_distance }
     }
 }
 
@@ -228,50 +277,15 @@ enum Args {
         #[clap(short = 'b', long, value_parser)]
         target_bed: Option<String>,
 
-        /// Output format: 'auto' (BED for -r, BEDPE for -b), 'bed', 'bedpe', 'paf', `gfa' (v1.0), or 'maf ('gfa' and 'maf' require --fasta-list)
+        /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', `gfa' (v1.0), or 'maf
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
 
         #[clap(flatten)]
         gfa_maf: GfaMafOpts,
 
-        /// Maximum distance between regions to merge
-        #[clap(
-            short = 'd',
-            long,
-            value_parser,
-            conflicts_with = "no_merge_bed",
-            default_value_t = 0
-        )]
-        merge_distance: i32,
-
-        /// Disable merging for all output formats
-        #[clap(long, action, conflicts_with = "merge_distance")]
-        no_merge: bool,
-
-        /// Minimum gap-compressed identity threshold (0.0-1.0)
-        #[clap(long, value_parser)]
-        min_identity: Option<f64>,
-
-        /// Enable transitive queries (with Breadth-First Search)
-        #[clap(short = 'x', long, action, conflicts_with = "transitive_dfs")]
-        transitive: bool,
-
-        /// Enable transitive queries with Depth-First Search (slower, but returns fewer overlapping results)
-        #[clap(long, action, conflicts_with = "transitive")]
-        transitive_dfs: bool,
-
-        /// Maximum recursion depth for transitive overlaps (0 for no limit)
-        #[clap(short = 'm', long, value_parser, default_value_t = 0)]
-        max_depth: u16,
-
-        /// Minimum region size to consider for transitive queries
-        #[clap(short = 'l', long, value_parser, default_value_t = 0)]
-        min_transitive_len: i32,
-
-        /// Minimum distance between transitive ranges to consider on the same sequence
-        #[clap(long, value_parser, default_value_t = 0)]
-        min_distance_between_ranges: i32,
+        #[clap(flatten)]
+        query: QueryOpts,
     },
     /// Compute pairwise similarity between sequences in a region
     Similarity {
@@ -285,35 +299,8 @@ enum Args {
         #[clap(flatten)]
         gfa_maf: GfaMafOpts,
 
-        /// Maximum distance between regions to merge
-        #[clap(
-            short = 'd',
-            long,
-            value_parser,
-            conflicts_with = "no_merge_bed",
-            default_value_t = 0
-        )]
-        merge_distance: i32,
-
-        /// Disable merging for all output formats
-        #[clap(long, action, conflicts_with = "merge_distance")]
-        no_merge: bool,
-
-        /// Minimum gap-compressed identity threshold (0.0-1.0)
-        #[clap(long, value_parser)]
-        min_identity: Option<f64>,
-
-        /// Enable transitive queries (with Breadth-First Search)
-        #[clap(short = 'x', long, action)]
-        transitive: bool,
-
-        /// Maximum recursion depth for transitive overlaps (0 for no limit)
-        #[clap(short = 'm', long, value_parser, default_value_t = 0)]
-        max_depth: u16,
-
-        /// Minimum region size to consider for transitive queries
-        #[clap(short = 'l', long, value_parser, default_value_t = 0)]
-        min_transitive_len: i32,
+        #[clap(flatten)]
+        query: QueryOpts,
 
         /// Output distances instead of similarities
         #[clap(long, action)]
@@ -399,14 +386,7 @@ fn main() -> io::Result<()> {
             target_bed,
             output_format,
             gfa_maf,
-            merge_distance,
-            no_merge,
-            min_identity,
-            transitive,
-            transitive_dfs,
-            max_depth,
-            min_transitive_len,
-            min_distance_between_ranges,
+            query,
         } => {
             validate_output_format(
                 &output_format,
@@ -436,27 +416,25 @@ fn main() -> io::Result<()> {
                     &target_name,
                     target_range,
                     output_format == "paf" || output_format == "bedpe", // Store CIGAR for PAF/BEDPE output
-                    min_identity,
-                    transitive,
-                    transitive_dfs,
-                    max_depth,
-                    min_transitive_len,
-                    min_distance_between_ranges,
+                    query.min_identity,
+                    query.transitive,
+                    query.transitive_dfs,
+                    query.max_depth,
+                    query.min_transitive_len,
+                    query.min_distance_between_ranges,
                 );
-
-                let merge_distance = if no_merge { -1 } else { merge_distance };
                 
                 // Output results based on the format
                 match output_format.as_str() {
                     "bedpe" => {
                         // Skip the first element (the input range) for BEDPE output
                         results.remove(0);
-                        output_results_bedpe(&impg, &mut results, None, merge_distance);
+                        output_results_bedpe(&impg, &mut results, None, query.effective_merge_distance());
                     }
                     "paf" => {
                         // Skip the first element (the input range) for PAF output
                         results.remove(0);
-                        output_results_paf(&impg, &mut results, None, merge_distance);
+                        output_results_paf(&impg, &mut results, None, query.effective_merge_distance());
                     }
                     "gfa" => {
                         output_results_gfa(
@@ -464,7 +442,7 @@ fn main() -> io::Result<()> {
                             &mut results,
                             &fasta_index.unwrap(),
                             None,
-                            merge_distance,
+                            query.effective_merge_distance(),
                             scoring_params.unwrap(),
                         )?;
                     }
@@ -474,14 +452,14 @@ fn main() -> io::Result<()> {
                             &mut results,
                             &fasta_index.unwrap(),
                             None,
-                            merge_distance,
+                            query.effective_merge_distance(),
                             scoring_params.unwrap(),
                         )?;
                     }
                     _ => {
                         // 'auto' or 'bed'
                         // BED format - include the first element
-                        output_results_bed(&impg, &mut results, merge_distance);
+                        output_results_bed(&impg, &mut results, query.effective_merge_distance());
                     }
                 }
             } else if let Some(target_bed) = target_bed {
@@ -493,26 +471,24 @@ fn main() -> io::Result<()> {
                         &target_name,
                         target_range,
                         output_format == "paf" || output_format == "bedpe", // Store CIGAR for PAF/BEDPE output
-                        min_identity,
-                        transitive,
-                        transitive_dfs,
-                        max_depth,
-                        min_transitive_len,
-                        min_distance_between_ranges,
+                        query.min_identity,
+                        query.transitive,
+                        query.transitive_dfs,
+                        query.max_depth,
+                        query.min_transitive_len,
+                        query.min_distance_between_ranges,
                     );
-
-                    let merge_distance = if no_merge { -1 } else { merge_distance };
 
                     // Output results based on the format
                     match output_format.as_str() {
                         "bed" => {
                             // BED format - include the first element
-                            output_results_bed(&impg, &mut results, merge_distance);
+                            output_results_bed(&impg, &mut results, query.effective_merge_distance());
                         }
                         "paf" => {
                             // Skip the first element (the input range) for PAF output
                             results.remove(0);
-                            output_results_paf(&impg, &mut results, name, merge_distance);
+                            output_results_paf(&impg, &mut results, name, query.effective_merge_distance());
                         }
                         "gfa" => {
                             output_results_gfa(
@@ -520,7 +496,7 @@ fn main() -> io::Result<()> {
                                 &mut results,
                                 fasta_index.as_ref().unwrap(),
                                 name,
-                                merge_distance,
+                                query.effective_merge_distance(),
                                 scoring_params.unwrap(),
                             )?;
                         }
@@ -530,7 +506,7 @@ fn main() -> io::Result<()> {
                                 &mut results,
                                 fasta_index.as_ref().unwrap(),
                                 name,
-                                merge_distance,
+                                query.effective_merge_distance(),
                                 scoring_params.unwrap(),
                             )?;
                         }
@@ -538,7 +514,7 @@ fn main() -> io::Result<()> {
                             // 'auto' or 'bedpe'
                             // Skip the first element (the input range) for BEDPE output
                             results.remove(0);
-                            output_results_bedpe(&impg, &mut results, name, merge_distance);
+                            output_results_bedpe(&impg, &mut results, name, query.effective_merge_distance());
                         }
                     }
                 }
@@ -553,12 +529,7 @@ fn main() -> io::Result<()> {
             common,
             target_range,
             gfa_maf,
-            merge_distance,
-            no_merge,
-            min_identity,
-            transitive,
-            max_depth,
-            min_transitive_len,
+            query,
             distances,
             all,
         } => {
@@ -584,17 +555,16 @@ fn main() -> io::Result<()> {
                 &target_name,
                 target_range,
                 false, // Don't need CIGAR for similarity
-                min_identity,
-                transitive,
-                false, // No DFS option for simplicity
-                max_depth,
-                min_transitive_len,
-                0, // No min distance between ranges for simplicity
+                query.min_identity,
+                query.transitive,
+                query.transitive_dfs,
+                query.max_depth,
+                query.min_transitive_len,
+                query.min_distance_between_ranges,
             );
 
             // Merge intervals if needed
-            let merge_distance = if no_merge { -1 } else { merge_distance };
-            merge_query_adjusted_intervals(&mut results, merge_distance, true);
+            merge_query_adjusted_intervals(&mut results, query.effective_merge_distance(), true);
 
             // Extract query intervals
             let query_intervals: Vec<Interval<u32>> = results
