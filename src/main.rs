@@ -46,6 +46,101 @@ struct CommonOpts {
     verbose: u8,
 }
 
+/// Common FASTA and POA scoring options
+#[derive(Parser, Debug)]
+struct GfaMafOpts {
+    /// List of FASTA file paths (required for 'gfa' and 'maf' formats)
+    #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["fasta_list"])]
+    fasta_files: Option<Vec<String>>,
+
+    /// Path to a text file containing paths to FASTA files (required for 'gfa' and 'maf' formats)
+    #[clap(long, value_parser, conflicts_with_all = &["fasta_files"])]
+    fasta_list: Option<String>,
+
+    /// POA alignment scoring parameters as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for 'gfa' and 'maf' formats)
+    #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
+    poa_scoring: String,
+}
+
+impl GfaMafOpts {
+    /// Resolve FASTA files from either --fasta-files or --fasta-list
+    fn resolve_fasta_files(self) -> io::Result<Vec<String>> {
+        match (self.fasta_files, self.fasta_list) {
+            // Handle --fasta-files option - no clone needed!
+            (Some(files), None) => Ok(files),
+            // Handle --fasta-list option
+            (None, Some(list_file)) => {
+                let content = std::fs::read_to_string(&list_file)
+                    .map_err(|e| io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("Failed to read FASTA list file '{}': {}", list_file, e)
+                    ))?;
+                
+                Ok(content
+                    .lines()
+                    .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
+                    .map(|line| line.trim().to_string())
+                    .collect())
+            }
+            (None, None) => Ok(Vec::new()),
+            (Some(_), Some(_)) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Cannot specify both --fasta-files and --fasta-list"
+            )),
+        }
+    }
+
+    /// Parse POA scoring parameters
+    fn parse_poa_scoring(&self) -> io::Result<(u8, u8, u8, u8, u8, u8)> {
+        let parts: Vec<&str> = self.poa_scoring.split(',').collect();
+        if parts.len() != 6 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "POA scoring format should be 'match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2'",
+            ));
+        }
+
+        let parse_u8 = |s: &str, name: &str| {
+            s.parse::<u8>().map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid {} value", name))
+            })
+        };
+
+        Ok((
+            parse_u8(parts[0], "match score")?,
+            parse_u8(parts[1], "mismatch cost")?,
+            parse_u8(parts[2], "gap opening 1 cost")?,
+            parse_u8(parts[3], "gap extension 1 cost")?,
+            parse_u8(parts[4], "gap opening 2 cost")?,
+            parse_u8(parts[5], "gap extension 2 cost")?,
+        ))
+    }
+
+    /// Build FASTA index if files are provided
+    fn build_fasta_index(self) -> io::Result<Option<FastaIndex>> {
+        let fasta_files = self.resolve_fasta_files()?;
+        
+        if fasta_files.is_empty() {
+            Ok(None)
+        } else {
+            match FastaIndex::build_from_files(&fasta_files) {
+                Ok(index) => {
+                    info!(
+                        "Built FASTA index for {} files with {} sequences",
+                        index.fasta_paths.len(),
+                        index.path_key_to_fasta.len()
+                    );
+                    Ok(Some(index))
+                }
+                Err(e) => {
+                    error!("Failed to build FASTA index: {}", e);
+                    Err(e)
+                }
+            }
+        }
+    }
+}
+
 /// Command-line tool for querying overlaps in PAF files.
 #[derive(Parser, Debug)]
 #[command(author, version, about, disable_help_subcommand = true)]
@@ -68,17 +163,8 @@ enum Args {
         #[clap(short = 'o', long, value_parser, default_value = "bed")]
         output_format: String,
 
-        /// List of FASTA file paths (required for 'gfa' and 'maf' formats)
-        #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["fasta_list"])]
-        fasta_files: Option<Vec<String>>,
-
-        /// Path to a text file containing paths to FASTA files (required for 'gfa' and 'maf' formats)
-        #[clap(long, value_parser, conflicts_with_all = &["fasta_files"])]
-        fasta_list: Option<String>,
-
-        /// POA alignment scoring parameters as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for for 'gfa' and 'maf' formats)
-        #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
-        poa_scoring: String,
+        #[clap(flatten)]
+        gfa_maf: GfaMafOpts,
 
         /// Maximum distance between regions to merge
         #[clap(short = 'd', long, value_parser, default_value_t = 100000)]
@@ -146,17 +232,8 @@ enum Args {
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
 
-        /// List of FASTA file paths (required for `gfa` format)
-        #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["fasta_list"])]
-        fasta_files: Option<Vec<String>>,
-
-        /// Path to a text file containing paths to FASTA files (required for `gfa` format)
-        #[clap(long, value_parser, conflicts_with_all = &["fasta_files"])]
-        fasta_list: Option<String>,
-
-        /// POA alignment scoring parameters as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for for 'gfa' and 'maf' formats)
-        #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
-        poa_scoring: String,
+        #[clap(flatten)]
+        gfa_maf: GfaMafOpts,
 
         /// Maximum distance between regions to merge
         #[clap(
@@ -205,17 +282,8 @@ enum Args {
         #[clap(short = 'r', long, value_parser, required = true)]
         target_range: String,
 
-        /// List of FASTA file paths
-        #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["fasta_list"])]
-        fasta_files: Option<Vec<String>>,
-
-        /// Path to a text file containing paths to FASTA files
-        #[clap(long, value_parser, conflicts_with_all = &["fasta_files"])]
-        fasta_list: Option<String>,
-
-        /// POA alignment scoring parameters as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2
-        #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
-        poa_scoring: String,
+        #[clap(flatten)]
+        gfa_maf: GfaMafOpts,
 
         /// Maximum distance between regions to merge
         #[clap(
@@ -275,9 +343,7 @@ fn main() -> io::Result<()> {
             common,
             window_size,
             output_format,
-            fasta_files,
-            fasta_list,
-            poa_scoring,
+            gfa_maf,
             merge_distance,
             min_identity,
             transitive_dfs,
@@ -292,21 +358,20 @@ fn main() -> io::Result<()> {
             validate_selection_mode(&selection_mode)?;
             validate_output_format(&output_format, &["bed", "gfa", "maf"])?;
 
-            // Parse POA scoring parameters if GFA output is requested
+            // Parse POA scoring parameters if GFA/MAF output is requested
             let scoring_params = if output_format == "gfa" || output_format == "maf" {
-                Some(parse_poa_scoring(&poa_scoring)?)
+                Some(gfa_maf.parse_poa_scoring()?)
             } else {
                 None
             };
 
-            // Build FASTA index if GFA output is requested
-            let fasta_index = build_fasta_index_if_needed(
-                &output_format,
-                &["gfa", "maf"],
-                fasta_files,
-                fasta_list,
-            )?;
-
+            // Build FASTA index if GFA/MAF output is requested
+            let fasta_index = if output_format == "gfa" || output_format == "maf" {
+                gfa_maf.build_fasta_index()?
+            } else {
+                None
+            };
+            
             let impg = initialize_impg(&common)?;
 
             partition_alignments(
@@ -333,9 +398,7 @@ fn main() -> io::Result<()> {
             target_range,
             target_bed,
             output_format,
-            fasta_files,
-            fasta_list,
-            poa_scoring,
+            gfa_maf,
             merge_distance,
             no_merge,
             min_identity,
@@ -350,20 +413,19 @@ fn main() -> io::Result<()> {
                 &["auto", "bed", "bedpe", "paf", "gfa", "maf"],
             )?;
 
-            // Parse POA scoring parameters if GFA output is requested
+            // Parse POA scoring parameters if GFA/MAF output is requested
             let scoring_params = if output_format == "gfa" || output_format == "maf" {
-                Some(parse_poa_scoring(&poa_scoring)?)
+                Some(gfa_maf.parse_poa_scoring()?)
             } else {
                 None
             };
 
-            // Build FASTA index if GFA output is requested
-            let fasta_index = build_fasta_index_if_needed(
-                &output_format,
-                &["gfa", "maf"],
-                fasta_files,
-                fasta_list,
-            )?;
+            // Build FASTA index if GFA/MAF output is requested
+            let fasta_index = if output_format == "gfa" || output_format == "maf" {
+                gfa_maf.build_fasta_index()?
+            } else {
+                None
+            };
 
             let impg = initialize_impg(&common)?;
 
@@ -490,9 +552,7 @@ fn main() -> io::Result<()> {
         Args::Similarity {
             common,
             target_range,
-            fasta_files,
-            fasta_list,
-            poa_scoring,
+            gfa_maf,
             merge_distance,
             no_merge,
             min_identity,
@@ -503,17 +563,10 @@ fn main() -> io::Result<()> {
             all,
         } => {
             // Parse POA scoring parameters
-            let scoring_params = parse_poa_scoring(&poa_scoring)?;
+            let scoring_params = gfa_maf.parse_poa_scoring()?;
 
-            // Build FASTA index
-            let fasta_index = build_fasta_index_if_needed(
-                "similarity", // Always need FASTA for similarity
-                &["similarity"],
-                fasta_files,
-                fasta_list,
-            )?;
-
-            let fasta_index = fasta_index.ok_or_else(|| {
+            // Build FASTA index (always required for similarity)
+            let fasta_index = gfa_maf.build_fasta_index()?.ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "FASTA files are required for similarity computation",
@@ -593,61 +646,6 @@ fn validate_output_format(format: &str, valid_formats: &[&str]) -> io::Result<()
                 valid_formats.join(", ")
             ),
         ))
-    }
-}
-
-/// Build FASTA index if needed for the given output format
-fn build_fasta_index_if_needed(
-    output_format: &str,
-    formats_requiring_fasta: &[&str],
-    fasta_files: Option<Vec<String>>,
-    fasta_list: Option<String>,
-) -> io::Result<Option<FastaIndex>> {
-    if !formats_requiring_fasta.contains(&output_format) {
-        return Ok(None);
-    }
-
-    // Get list of FASTA files
-    let fasta_files = match (fasta_files, fasta_list) {
-        // Handle --fasta-files option
-        (Some(files), None) => files,
-        // Handle --fasta-list option
-        (None, Some(list_file)) => match std::fs::read_to_string(&list_file) {
-            Ok(content) => content
-                .lines()
-                .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
-                .map(|line| line.trim().to_string())
-                .collect(),
-            Err(e) => {
-                error!("Failed to read FASTA list file '{}': {}", list_file, e);
-                std::process::exit(1);
-            }
-        },
-        _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Either --fasta-files or --fasta-list must be provided for GFA output, not both",
-            ));
-        }
-    };
-
-    if fasta_files.is_empty() {
-        Ok(None)
-    } else {
-        match FastaIndex::build_from_files(&fasta_files) {
-            Ok(index) => {
-                info!(
-                    "Built FASTA index for {} files with {} sequences",
-                    index.fasta_paths.len(),
-                    index.path_key_to_fasta.len()
-                );
-                Ok(Some(index))
-            }
-            Err(e) => {
-                error!("Failed to build FASTA index: {}", e);
-                std::process::exit(1);
-            }
-        }
     }
 }
 
@@ -1093,56 +1091,6 @@ fn output_results_paf(
                                 matches, block_len, 255, gi_str, bi_str, cigar_str),
         }
     }
-}
-
-fn parse_poa_scoring(scoring_str: &str) -> io::Result<(u8, u8, u8, u8, u8, u8)> {
-    let parts: Vec<&str> = scoring_str.split(',').collect();
-    if parts.len() != 6 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "POA scoring format should be 'mismatch,gap_extend,gap_open' (e.g., '4,2,6')",
-        ));
-    }
-
-    let match_score = parts[0]
-        .parse::<u8>()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid match score value"))?;
-    let mismatch = parts[1]
-        .parse::<u8>()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid mismatch cost value"))?;
-    let gap_open1 = parts[2].parse::<u8>().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Invalid gap opening 1 cost value",
-        )
-    })?;
-    let gap_extend1 = parts[3].parse::<u8>().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Invalid gap extension 1 cost value",
-        )
-    })?;
-    let gap_open2 = parts[4].parse::<u8>().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Invalid gap extension 2 cost value",
-        )
-    })?;
-    let gap_extend2 = parts[5].parse::<u8>().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Invalid gap extension 2 cost value",
-        )
-    })?;
-
-    Ok((
-        match_score,
-        mismatch,
-        gap_open1,
-        gap_extend1,
-        gap_open2,
-        gap_extend2,
-    ))
 }
 
 pub fn output_results_gfa(
