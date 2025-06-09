@@ -1206,8 +1206,9 @@ fn merge_query_adjusted_intervals(
                 continue;
             }
 
-            // Only merge if same sequence, same orientation, and within merge distance
-            if curr_interval.metadata != next_interval.metadata
+            // Only merge if same sequence, same orientation, and within merge distance (if merge_distance >= 0)
+            if merge_distance < 0 
+                || curr_interval.metadata != next_interval.metadata
                 || curr_is_forward != next_is_forward
                 || next_start > curr_end + merge_distance
             {
