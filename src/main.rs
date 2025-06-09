@@ -305,6 +305,14 @@ enum Args {
         /// Emit entries for all pairs of groups, including those with zero intersection
         #[clap(short = 'a', long, action, default_value_t = false)]
         all: bool,
+
+        /// The part of each path name before this delimiter is a group identifier
+        #[clap(long, value_parser)]
+        delim: Option<char>,
+
+        /// Consider the N-th occurrence of the delimiter (1-indexed, default: 1)
+        #[clap(long, value_parser, default_value_t = 1)]
+        delim_pos: u16,
     },
     /// Print alignment statistics
     Stats {
@@ -525,7 +533,17 @@ fn main() -> io::Result<()> {
             gfa_maf,
             distances,
             all,
+            delim,
+            delim_pos,
         } => {
+            // Validate delim_pos
+            if delim_pos < 1 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "delim-pos must be greater than 0",
+                ));
+            }
+
             // Parse POA scoring parameters
             let scoring_params = gfa_maf.parse_poa_scoring()?;
 
@@ -572,6 +590,8 @@ fn main() -> io::Result<()> {
                     scoring_params,
                     distances,
                     all,
+                    delim,
+                    delim_pos,
                 )?;
             } else if let Some(target_bed) = &query.target_bed {
                 let targets = impg::partition::parse_bed_file(&target_bed)?;
@@ -607,6 +627,8 @@ fn main() -> io::Result<()> {
                         scoring_params,
                         distances,
                         all,
+                        delim,
+                        delim_pos,
                     )?;
                 }
             } else {
