@@ -144,6 +144,14 @@ impl GfaMafOpts {
 /// Common query and filtering options
 #[derive(Parser, Debug, Clone)]
 struct QueryOpts {
+        /// Target range in the format `seq_name:start-end`
+        #[clap(short = 'r', long, value_parser)]
+        target_range: Option<String>,
+
+        /// Path to the BED file containing target regions
+        #[clap(short = 'b', long, value_parser)]
+        target_bed: Option<String>,
+
         /// Maximum distance between regions to merge
         #[clap(
             short = 'd',
@@ -269,13 +277,8 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
 
-        /// Target range in the format `seq_name:start-end`
-        #[clap(short = 'r', long, value_parser)]
-        target_range: Option<String>,
-
-        /// Path to the BED file containing target regions
-        #[clap(short = 'b', long, value_parser)]
-        target_bed: Option<String>,
+        #[clap(flatten)]
+        query: QueryOpts,
 
         /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', `gfa' (v1.0), or 'maf
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
@@ -283,24 +286,17 @@ enum Args {
 
         #[clap(flatten)]
         gfa_maf: GfaMafOpts,
-
-        #[clap(flatten)]
-        query: QueryOpts,
     },
     /// Compute pairwise similarity between sequences in a region
     Similarity {
         #[clap(flatten)]
         common: CommonOpts,
 
-        /// Target range in the format `seq_name:start-end`
-        #[clap(short = 'r', long, value_parser, required = true)]
-        target_range: String,
+        #[clap(flatten)]
+        query: QueryOpts,
 
         #[clap(flatten)]
         gfa_maf: GfaMafOpts,
-
-        #[clap(flatten)]
-        query: QueryOpts,
 
         /// Output distances instead of similarities
         #[clap(long, action)]
@@ -382,11 +378,9 @@ fn main() -> io::Result<()> {
         }
         Args::Query {
             common,
-            target_range,
-            target_bed,
+            query,
             output_format,
             gfa_maf,
-            query,
         } => {
             validate_output_format(
                 &output_format,
@@ -409,7 +403,7 @@ fn main() -> io::Result<()> {
 
             let impg = initialize_impg(&common)?;
 
-            if let Some(target_range) = target_range {
+            if let Some(target_range) = &query.target_range {
                 let (target_name, target_range) = parse_target_range(&target_range)?;
                 let mut results = perform_query(
                     &impg,
@@ -462,7 +456,7 @@ fn main() -> io::Result<()> {
                         output_results_bed(&impg, &mut results, query.effective_merge_distance());
                     }
                 }
-            } else if let Some(target_bed) = target_bed {
+            } else if let Some(target_bed) = &query.target_bed {
                 let targets = impg::partition::parse_bed_file(&target_bed)?;
                 info!("Parsed {} target ranges from BED file", targets.len());
                 for (target_name, target_range, name) in targets {
@@ -527,9 +521,8 @@ fn main() -> io::Result<()> {
         }
         Args::Similarity {
             common,
-            target_range,
-            gfa_maf,
             query,
+            gfa_maf,
             distances,
             all,
         } => {
@@ -546,41 +539,82 @@ fn main() -> io::Result<()> {
 
             let impg = initialize_impg(&common)?;
 
-            // Parse target range
-            let (target_name, target_range) = parse_target_range(&target_range)?;
+            if let Some(target_range) = &query.target_range {
+                let (target_name, target_range) = parse_target_range(&target_range)?;
 
-            // Perform query
-            let mut results = perform_query(
-                &impg,
-                &target_name,
-                target_range,
-                false, // Don't need CIGAR for similarity
-                query.min_identity,
-                query.transitive,
-                query.transitive_dfs,
-                query.max_depth,
-                query.min_transitive_len,
-                query.min_distance_between_ranges,
-            );
+                let mut results = perform_query(
+                    &impg,
+                    &target_name,
+                    target_range,
+                    false, // Don't need CIGAR for similarity
+                    query.min_identity,
+                    query.transitive,
+                    query.transitive_dfs,
+                    query.max_depth,
+                    query.min_transitive_len,
+                    query.min_distance_between_ranges,
+                );
 
-            // Merge intervals if needed
-            merge_query_adjusted_intervals(&mut results, query.effective_merge_distance(), true);
+                // Merge intervals if needed
+                merge_query_adjusted_intervals(&mut results, query.effective_merge_distance(), true);
 
-            // Extract query intervals
-            let query_intervals: Vec<Interval<u32>> = results
-                .iter()
-                .map(|(query_interval, _, _)| query_interval.clone())
-                .collect();
+                // Extract query intervals
+                let query_intervals: Vec<Interval<u32>> = results
+                    .iter()
+                    .map(|(query_interval, _, _)| query_interval.clone())
+                    .collect();
 
-            // Compute and output similarities
-            impg::graph::compute_and_output_similarities(
-                &impg,
-                &query_intervals,
-                &fasta_index,
-                scoring_params,
-                distances,
-                all,
-            )?;
+                // Compute and output similarities
+                impg::graph::compute_and_output_similarities(
+                    &impg,
+                    &query_intervals,
+                    &fasta_index,
+                    scoring_params,
+                    distances,
+                    all,
+                )?;
+            } else if let Some(target_bed) = &query.target_bed {
+                let targets = impg::partition::parse_bed_file(&target_bed)?;
+                info!("Parsed {} target ranges from BED file", targets.len());
+                for (target_name, target_range, _name) in targets {
+                    let mut results = perform_query(
+                        &impg,
+                        &target_name,
+                        target_range,
+                        false, // Don't need CIGAR for similarity
+                        query.min_identity,
+                        query.transitive,
+                        query.transitive_dfs,
+                        query.max_depth,
+                        query.min_transitive_len,
+                        query.min_distance_between_ranges,
+                    );
+
+                    // Merge intervals if needed
+                    merge_query_adjusted_intervals(&mut results, query.effective_merge_distance(), true);
+
+                    // Extract query intervals
+                    let query_intervals: Vec<Interval<u32>> = results
+                        .iter()
+                        .map(|(query_interval, _, _)| query_interval.clone())
+                        .collect();
+
+                    // Compute and output similarities
+                    impg::graph::compute_and_output_similarities(
+                        &impg,
+                        &query_intervals,
+                        &fasta_index,
+                        scoring_params,
+                        distances,
+                        all,
+                    )?;
+                }
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Either --target-range or --target-bed must be provided for query subcommand",
+                ));
+            }
         }
         Args::Stats { common } => {
             let impg = initialize_impg(&common)?;
