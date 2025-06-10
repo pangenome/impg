@@ -25,6 +25,7 @@ pub fn compute_and_output_similarities(
     perform_pca: bool,
     n_components: usize,
     pca_similarity: &str,
+    region: Option<&str>,
 ) -> io::Result<()> {
     // Generate POA graph and get sequences
     let (graph, sequence_metadata) =
@@ -117,12 +118,26 @@ pub fn compute_and_output_similarities(
 
         match mds.fit_transform(&distance_matrix, labels) {
             Ok(pca_result) => {
-                print!("{}", pca_result.to_tsv());
+                print!("{}", pca_result.to_tsv(region));
             }
             Err(e) => {
-                return Err(io::Error::other(
-                    format!("PCA/MDS failed: {}", e),
-                ));
+                // Check if it's an insufficient samples error
+                if e.contains("fewer than 2 samples") || e.contains("theoretical maximum") {
+                    // Create empty result with appropriate labels
+                    let labels: Vec<String> = groups.iter().map(|g| g.name.clone()).collect();
+                    let empty_pca_result = PcaResult {
+                        coordinates: vec![vec![0.0; n_components]; labels.len()],
+                        eigenvalues: vec![0.0; n_components],
+                        explained_variance_ratio: vec![0.0; n_components],
+                        sample_labels: labels,
+                        n_components: 0,
+                    };
+                    print!("{}", empty_pca_result.to_tsv(region));
+                } else {
+                    return Err(io::Error::other(
+                        format!("PCA/MDS failed: {}", e),
+                    ));
+                }
             }
         }
     } else {
@@ -411,10 +426,16 @@ pub struct PcaResult {
 }
 
 impl PcaResult {
-    pub fn to_tsv(&self) -> String {
+    pub fn to_tsv(&self, region: Option<&str>) -> String {
         let mut output = String::new();
 
         // Metadata header
+
+        // Add genomic region if provided
+        if let Some(region) = region {
+            output.push_str(&format!("# Region: {}\n", region));
+        }
+
         // output.push_str(&format!("# PCA Results\n"));
         // output.push_str(&format!("# Components: {}\n", self.n_components));
         // output.push_str(&format!("# Total Explained Variance: {:.4}\n",

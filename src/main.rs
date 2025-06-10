@@ -655,6 +655,7 @@ fn main() -> io::Result<()> {
                     .collect();
 
                 // Compute and output similarities
+                let region = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
                 impg::similarity::compute_and_output_similarities(
                     &impg,
                     &query_intervals,
@@ -667,6 +668,7 @@ fn main() -> io::Result<()> {
                     pca,
                     pca_components,
                     &pca_measure,
+                    Some(&region),
                 )?;
             } else if let Some(target_bed) = &query.target_bed {
                 let targets = impg::partition::parse_bed_file(target_bed)?;
@@ -699,6 +701,7 @@ fn main() -> io::Result<()> {
                         .collect();
 
                     // Compute and output similarities
+                    let region = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
                     impg::similarity::compute_and_output_similarities(
                         &impg,
                         &query_intervals,
@@ -711,6 +714,7 @@ fn main() -> io::Result<()> {
                         pca,
                         pca_components,
                         &pca_measure,
+                        Some(&region)
                     )?;
                 }
             } else {
