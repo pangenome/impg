@@ -24,7 +24,13 @@
 ;;
 ;; Use the update guix to build impg:
 ;;
-;;   ~/opt/guix/bin/guix build -L . -f guix.scm
+;;   unset GUIX_PROFILE                           # for Debian Guix
+;;   source ~/opt/guix/etc/profile                # set the environment
+;;   guix describe                                # make sure it is latest
+;;   guix build -L . -f guix.scm --tune=native    # build SIMD using native architecture
+;;
+;; For cross-compiling to different architectures you can tweak --tune
+;; switch (see GNU C -march option)
 ;;
 ;; Or get a shell (see above)
 ;;
@@ -135,7 +141,9 @@ intervals.")
                        )
        ;; #:cargo-development-inputs ()))
        #:cargo-package-flags '("--no-metadata" "--no-verify" "--allow-dirty")
-     ))
+       #:phases (modify-phases %standard-phases
+                               (delete 'package) ;; no need to create a package
+                               )))
     (synopsis "impg")
     (description
      "Tool for implicit graphs - i.e. building smaller 'local' pangenomes from positioned sequences.")
