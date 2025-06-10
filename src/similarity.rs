@@ -120,8 +120,7 @@ pub fn compute_and_output_similarities(
                 print!("{}", pca_result.to_tsv());
             }
             Err(e) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
+                return Err(io::Error::other(
                     format!("PCA/MDS failed: {}", e),
                 ));
             }
@@ -477,7 +476,7 @@ impl ClassicalMDS {
         }
 
         // Theoretical maximum number of components for N points is N-1
-        let max_components = if n > 1 { n - 1 } else { 0 };
+        let max_components = n.saturating_sub(1);
         let actual_components = self.n_components.min(max_components);
 
         if self.n_components > max_components {
