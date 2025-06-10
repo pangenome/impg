@@ -111,6 +111,18 @@ impg partition -p alignments.paf -w 1000000 -o gfa --fasta-files *.fa
 impg partition -p alignments.paf -w 1000000 -o maf --fasta-list fastas.txt
 ```
 
+### Similarity
+
+Compute pairwise similarity between sequences in a region:
+
+```bash
+# Basic similarity computation
+impg similarity -p alignments.paf -r chr1:1000-2000 --fasta-files ref.fa genomes.fa
+
+# Output distances instead of similarities
+impg similarity -p alignments.paf -r chr1:1000-2000 --fasta-files *.fa --distances
+```
+
 ### Stats
 
 Print alignment statistics:

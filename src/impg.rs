@@ -534,12 +534,10 @@ impl Impg {
             });
         }
 
-        debug!("Collected {} results", results.len());
-
         results
     }
 
-    pub fn query_transitive(
+    pub fn query_transitive_dfs(
         &self,
         target_id: u32,
         range_start: i32,

@@ -4,12 +4,12 @@ use coitrees::Interval;
 use spoa_rs::{AlignmentEngine, AlignmentType as SpoaAlignmentType, Graph as SpoaGraph};
 use std::io::{self, Write};
 
-struct SequenceMetadata {
-    name: String,
-    start: i32,
-    size: i32,
-    strand: char,
-    total_length: usize,
+pub struct SequenceMetadata {
+    pub name: String,
+    pub start: i32,
+    pub size: i32,
+    pub strand: char,
+    pub total_length: usize,
 }
 
 pub fn generate_gfa_from_intervals(
@@ -140,7 +140,7 @@ pub fn generate_maf_from_intervals(
     format_maf_from_msa(&msa, &sequence_metadata, None)
 }
 
-fn prepare_poa_graph_and_sequences(
+pub fn prepare_poa_graph_and_sequences(
     impg: &Impg,
     results: &[Interval<u32>],
     fasta_index: &FastaIndex,

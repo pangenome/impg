@@ -206,7 +206,7 @@ pub fn partition_alignments(
             // Query overlaps for current window
             //let query_start = Instant::now();
             let mut overlaps = if transitive_dfs {
-                impg.query_transitive(
+                impg.query_transitive_dfs(
                     seq_id,
                     start,
                     end,

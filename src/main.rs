@@ -46,6 +46,166 @@ struct CommonOpts {
     verbose: u8,
 }
 
+/// Common FASTA and POA scoring options
+#[derive(Parser, Debug)]
+struct GfaMafOpts {
+    /// List of FASTA file paths (required for 'gfa' and 'maf')
+    #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["fasta_list"])]
+    fasta_files: Option<Vec<String>>,
+
+    /// Path to a text file containing paths to FASTA files (required for 'gfa' and 'maf')
+    #[clap(long, value_parser, conflicts_with_all = &["fasta_files"])]
+    fasta_list: Option<String>,
+
+    /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for 'gfa' and 'maf')
+    #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
+    poa_scoring: String,
+}
+
+impl GfaMafOpts {
+    /// Resolve FASTA files from either --fasta-files or --fasta-list
+    fn resolve_fasta_files(self) -> io::Result<Vec<String>> {
+        match (self.fasta_files, self.fasta_list) {
+            // Handle --fasta-files option - no clone needed!
+            (Some(files), None) => Ok(files),
+            // Handle --fasta-list option
+            (None, Some(list_file)) => {
+                let content = std::fs::read_to_string(&list_file).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("Failed to read FASTA list file '{}': {}", list_file, e),
+                    )
+                })?;
+
+                Ok(content
+                    .lines()
+                    .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
+                    .map(|line| line.trim().to_string())
+                    .collect())
+            }
+            (None, None) => Ok(Vec::new()),
+            (Some(_), Some(_)) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Cannot specify both --fasta-files and --fasta-list",
+            )),
+        }
+    }
+
+    /// Parse POA scoring parameters
+    fn parse_poa_scoring(&self) -> io::Result<(u8, u8, u8, u8, u8, u8)> {
+        let parts: Vec<&str> = self.poa_scoring.split(',').collect();
+        if parts.len() != 6 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "POA scoring format should be 'match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2'",
+            ));
+        }
+
+        let parse_u8 = |s: &str, name: &str| {
+            s.parse::<u8>().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Invalid {} value", name),
+                )
+            })
+        };
+
+        Ok((
+            parse_u8(parts[0], "match score")?,
+            parse_u8(parts[1], "mismatch cost")?,
+            parse_u8(parts[2], "gap opening 1 cost")?,
+            parse_u8(parts[3], "gap extension 1 cost")?,
+            parse_u8(parts[4], "gap opening 2 cost")?,
+            parse_u8(parts[5], "gap extension 2 cost")?,
+        ))
+    }
+
+    /// Build FASTA index if files are provided
+    fn build_fasta_index(self) -> io::Result<Option<FastaIndex>> {
+        let fasta_files = self.resolve_fasta_files()?;
+
+        if fasta_files.is_empty() {
+            Ok(None)
+        } else {
+            match FastaIndex::build_from_files(&fasta_files) {
+                Ok(index) => {
+                    info!(
+                        "Built FASTA index for {} files with {} sequences",
+                        index.fasta_paths.len(),
+                        index.path_key_to_fasta.len()
+                    );
+                    Ok(Some(index))
+                }
+                Err(e) => {
+                    error!("Failed to build FASTA index: {}", e);
+                    Err(e)
+                }
+            }
+        }
+    }
+}
+
+/// Common query and filtering options
+#[derive(Parser, Debug, Clone)]
+struct QueryOpts {
+    /// Target range in the format `seq_name:start-end`
+    #[clap(short = 'r', long, value_parser)]
+    target_range: Option<String>,
+
+    /// Path to the BED file containing target regions
+    #[clap(short = 'b', long, value_parser)]
+    target_bed: Option<String>,
+
+    /// Maximum distance between regions to merge
+    #[clap(
+        short = 'd',
+        long,
+        value_parser,
+        conflicts_with = "no_merge_bed",
+        default_value_t = 0
+    )]
+    merge_distance: i32,
+
+    /// Disable merging for all output formats
+    #[clap(long, action, conflicts_with = "merge_distance")]
+    no_merge: bool,
+
+    /// Minimum gap-compressed identity threshold (0.0-1.0)
+    #[clap(long, value_parser)]
+    min_identity: Option<f64>,
+
+    /// Enable transitive queries (with Breadth-First Search)
+    #[clap(short = 'x', long, action, conflicts_with = "transitive_dfs")]
+    transitive: bool,
+
+    /// Enable transitive queries with Depth-First Search (slower, but returns fewer overlapping results)
+    #[clap(long, action, conflicts_with = "transitive")]
+    transitive_dfs: bool,
+
+    /// Maximum recursion depth for transitive overlaps (0 for no limit)
+    #[clap(short = 'm', long, value_parser, default_value_t = 0)]
+    max_depth: u16,
+
+    /// Minimum region size to consider for transitive queries
+    #[clap(short = 'l', long, value_parser, default_value_t = 0)]
+    min_transitive_len: i32,
+
+    /// Minimum distance between transitive ranges to consider on the same sequence
+    #[clap(long, value_parser, default_value_t = 0)]
+    min_distance_between_ranges: i32,
+}
+
+impl QueryOpts {
+    /// Get effective merge distance (-1 if merging is disabled)
+    fn effective_merge_distance(&self) -> i32 {
+        if self.no_merge {
+            -1
+        } else {
+            self.merge_distance
+        }
+    }
+}
+
 /// Command-line tool for querying overlaps in PAF files.
 #[derive(Parser, Debug)]
 #[command(author, version, about, disable_help_subcommand = true)]
@@ -68,17 +228,8 @@ enum Args {
         #[clap(short = 'o', long, value_parser, default_value = "bed")]
         output_format: String,
 
-        /// List of FASTA file paths (required for 'gfa' and 'maf' formats)
-        #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["fasta_list"])]
-        fasta_files: Option<Vec<String>>,
-
-        /// Path to a text file containing paths to FASTA files (required for 'gfa' and 'maf' formats)
-        #[clap(long, value_parser, conflicts_with_all = &["fasta_files"])]
-        fasta_list: Option<String>,
-
-        /// POA alignment scoring parameters as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for for 'gfa' and 'maf' formats)
-        #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
-        poa_scoring: String,
+        #[clap(flatten)]
+        gfa_maf: GfaMafOpts,
 
         /// Maximum distance between regions to merge
         #[clap(short = 'd', long, value_parser, default_value_t = 100000)]
@@ -134,67 +285,54 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
 
-        /// Target range in the format `seq_name:start-end`
-        #[clap(short = 'r', long, value_parser)]
-        target_range: Option<String>,
+        #[clap(flatten)]
+        query: QueryOpts,
 
-        /// Path to the BED file containing target regions
-        #[clap(short = 'b', long, value_parser)]
-        target_bed: Option<String>,
-
-        /// Output format: 'auto' (BED for -r, BEDPE for -b), 'bed', 'bedpe', 'paf', `gfa' (v1.0), or 'maf ('gfa' and 'maf' require --fasta-list)
+        /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', `gfa' (v1.0), or 'maf
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
 
-        /// List of FASTA file paths (required for `gfa` format)
-        #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["fasta_list"])]
-        fasta_files: Option<Vec<String>>,
+        #[clap(flatten)]
+        gfa_maf: GfaMafOpts,
+    },
+    /// Compute pairwise similarity between sequences in a region
+    Similarity {
+        #[clap(flatten)]
+        common: CommonOpts,
 
-        /// Path to a text file containing paths to FASTA files (required for `gfa` format)
-        #[clap(long, value_parser, conflicts_with_all = &["fasta_files"])]
-        fasta_list: Option<String>,
+        #[clap(flatten)]
+        query: QueryOpts,
 
-        /// POA alignment scoring parameters as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for for 'gfa' and 'maf' formats)
-        #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
-        poa_scoring: String,
+        #[clap(flatten)]
+        gfa_maf: GfaMafOpts,
 
-        /// Maximum distance between regions to merge
-        #[clap(
-            short = 'd',
-            long,
-            value_parser,
-            conflicts_with = "no_merge_bed",
-            default_value_t = 0
-        )]
-        merge_distance: i32,
+        /// Output distances instead of similarities
+        #[clap(long, action)]
+        distances: bool,
 
-        /// Disable merging for all output formats
-        #[clap(long, action, conflicts_with = "merge_distance")]
-        no_merge: bool,
+        /// Emit entries for all pairs of groups, including those with zero intersection
+        #[clap(short = 'a', long, action, default_value_t = false)]
+        all: bool,
 
-        /// Minimum gap-compressed identity threshold (0.0-1.0)
+        /// The part of each path name before this delimiter is a group identifier
         #[clap(long, value_parser)]
-        min_identity: Option<f64>,
+        delim: Option<char>,
 
-        /// Enable transitive queries (with Breadth-First Search)
-        #[clap(short = 'x', long, action, conflicts_with = "transitive_dfs")]
-        transitive: bool,
+        /// Consider the N-th occurrence of the delimiter (1-indexed, default: 1)
+        #[clap(long, value_parser, default_value_t = 1)]
+        delim_pos: u16,
 
-        /// Enable transitive queries with Depth-First Search (slower, but returns fewer overlapping results)
-        #[clap(long, action, conflicts_with = "transitive")]
-        transitive_dfs: bool,
+        /// Perform PCA/MDS dimensionality reduction on the distance matrix
+        #[clap(long, action)]
+        pca: bool,
 
-        /// Maximum recursion depth for transitive overlaps (0 for no limit)
-        #[clap(short = 'm', long, value_parser, default_value_t = 0)]
-        max_depth: u16,
+        /// Number of PCA components to output (default: 2)
+        #[clap(long, value_parser, requires = "pca", default_value_t = 2)]
+        pca_components: usize,
 
-        /// Minimum region size to consider for transitive queries
-        #[clap(short = 'l', long, value_parser, default_value_t = 0)]
-        min_transitive_len: i32,
-
-        /// Minimum distance between transitive ranges to consider on the same sequence
-        #[clap(long, value_parser, default_value_t = 0)]
-        min_distance_between_ranges: i32,
+        /// Similarity measure to use for PCA distance matrix ("jaccard", "cosine", or "dice")
+        #[clap(long, value_parser, default_value = "jaccard")]
+        pca_measure: String,
     },
     /// Print alignment statistics
     Stats {
@@ -216,9 +354,7 @@ fn main() -> io::Result<()> {
             common,
             window_size,
             output_format,
-            fasta_files,
-            fasta_list,
-            poa_scoring,
+            gfa_maf,
             merge_distance,
             min_identity,
             transitive_dfs,
@@ -233,20 +369,19 @@ fn main() -> io::Result<()> {
             validate_selection_mode(&selection_mode)?;
             validate_output_format(&output_format, &["bed", "gfa", "maf"])?;
 
-            // Parse POA scoring parameters if GFA output is requested
+            // Parse POA scoring parameters if GFA/MAF output is requested
             let scoring_params = if output_format == "gfa" || output_format == "maf" {
-                Some(parse_poa_scoring(&poa_scoring)?)
+                Some(gfa_maf.parse_poa_scoring()?)
             } else {
                 None
             };
 
-            // Build FASTA index if GFA output is requested
-            let fasta_index = build_fasta_index_if_needed(
-                &output_format,
-                &["gfa", "maf"],
-                fasta_files,
-                fasta_list,
-            )?;
+            // Build FASTA index if GFA/MAF output is requested
+            let fasta_index = if output_format == "gfa" || output_format == "maf" {
+                gfa_maf.build_fasta_index()?
+            } else {
+                None
+            };
 
             let impg = initialize_impg(&common)?;
 
@@ -271,71 +406,67 @@ fn main() -> io::Result<()> {
         }
         Args::Query {
             common,
-            target_range,
-            target_bed,
+            query,
             output_format,
-            fasta_files,
-            fasta_list,
-            poa_scoring,
-            merge_distance,
-            no_merge,
-            min_identity,
-            transitive,
-            transitive_dfs,
-            max_depth,
-            min_transitive_len,
-            min_distance_between_ranges,
+            gfa_maf,
         } => {
             validate_output_format(
                 &output_format,
                 &["auto", "bed", "bedpe", "paf", "gfa", "maf"],
             )?;
 
-            // Parse POA scoring parameters if GFA output is requested
+            // Parse POA scoring parameters if GFA/MAF output is requested
             let scoring_params = if output_format == "gfa" || output_format == "maf" {
-                Some(parse_poa_scoring(&poa_scoring)?)
+                Some(gfa_maf.parse_poa_scoring()?)
             } else {
                 None
             };
 
-            // Build FASTA index if GFA output is requested
-            let fasta_index = build_fasta_index_if_needed(
-                &output_format,
-                &["gfa", "maf"],
-                fasta_files,
-                fasta_list,
-            )?;
+            // Build FASTA index if GFA/MAF output is requested
+            let fasta_index = if output_format == "gfa" || output_format == "maf" {
+                gfa_maf.build_fasta_index()?
+            } else {
+                None
+            };
 
             let impg = initialize_impg(&common)?;
 
-            if let Some(target_range) = target_range {
-                let (target_name, target_range) = parse_target_range(&target_range)?;
+            if let Some(target_range) = &query.target_range {
+                let (target_name, target_range) = parse_target_range(target_range)?;
                 let mut results = perform_query(
                     &impg,
                     &target_name,
                     target_range,
                     output_format == "paf" || output_format == "bedpe", // Store CIGAR for PAF/BEDPE output
-                    min_identity,
-                    transitive,
-                    transitive_dfs,
-                    max_depth,
-                    min_transitive_len,
-                    min_distance_between_ranges,
+                    query.min_identity,
+                    query.transitive,
+                    query.transitive_dfs,
+                    query.max_depth,
+                    query.min_transitive_len,
+                    query.min_distance_between_ranges,
                 );
-
-                let merge_distance = if no_merge { -1 } else { merge_distance };
 
                 // Output results based on the format
                 match output_format.as_str() {
                     "bedpe" => {
                         // Skip the first element (the input range) for BEDPE output
                         results.remove(0);
-                        output_results_bedpe(&impg, &mut results, None, merge_distance);
+                        output_results_bedpe(
+                            &impg,
+                            &mut results,
+                            None,
+                            query.effective_merge_distance(),
+                        );
                     }
                     "paf" => {
                         // Skip the first element (the input range) for PAF output
                         results.remove(0);
-                        output_results_paf(&impg, &mut results, None, merge_distance);
+                        output_results_paf(
+                            &impg,
+                            &mut results,
+                            None,
+                            query.effective_merge_distance(),
+                        );
                     }
                     "gfa" => {
                         output_results_gfa(
@@ -343,7 +474,7 @@ fn main() -> io::Result<()> {
                             &mut results,
                             &fasta_index.unwrap(),
                             None,
-                            merge_distance,
+                            query.effective_merge_distance(),
                             scoring_params.unwrap(),
                         )?;
                     }
@@ -353,18 +484,18 @@ fn main() -> io::Result<()> {
                             &mut results,
                             &fasta_index.unwrap(),
                             None,
-                            merge_distance,
+                            query.effective_merge_distance(),
                             scoring_params.unwrap(),
                         )?;
                     }
                     _ => {
                         // 'auto' or 'bed'
                         // BED format - include the first element
-                        output_results_bed(&impg, &mut results, merge_distance);
+                        output_results_bed(&impg, &mut results, query.effective_merge_distance());
                     }
                 }
-            } else if let Some(target_bed) = target_bed {
-                let targets = impg::partition::parse_bed_file(&target_bed)?;
+            } else if let Some(target_bed) = &query.target_bed {
+                let targets = impg::partition::parse_bed_file(target_bed)?;
                 info!("Parsed {} target ranges from BED file", targets.len());
                 for (target_name, target_range, name) in targets {
                     let mut results = perform_query(
@@ -372,26 +503,33 @@ fn main() -> io::Result<()> {
                         &target_name,
                         target_range,
                         output_format == "paf" || output_format == "bedpe", // Store CIGAR for PAF/BEDPE output
-                        min_identity,
-                        transitive,
-                        transitive_dfs,
-                        max_depth,
-                        min_transitive_len,
-                        min_distance_between_ranges,
+                        query.min_identity,
+                        query.transitive,
+                        query.transitive_dfs,
+                        query.max_depth,
+                        query.min_transitive_len,
+                        query.min_distance_between_ranges,
                     );
-
-                    let merge_distance = if no_merge { -1 } else { merge_distance };
 
                     // Output results based on the format
                     match output_format.as_str() {
                         "bed" => {
                             // BED format - include the first element
-                            output_results_bed(&impg, &mut results, merge_distance);
+                            output_results_bed(
+                                &impg,
+                                &mut results,
+                                query.effective_merge_distance(),
+                            );
                         }
                         "paf" => {
                             // Skip the first element (the input range) for PAF output
                             results.remove(0);
-                            output_results_paf(&impg, &mut results, name, merge_distance);
+                            output_results_paf(
+                                &impg,
+                                &mut results,
+                                name,
+                                query.effective_merge_distance(),
+                            );
                         }
                         "gfa" => {
                             output_results_gfa(
@@ -399,7 +537,7 @@ fn main() -> io::Result<()> {
                                 &mut results,
                                 fasta_index.as_ref().unwrap(),
                                 name,
-                                merge_distance,
+                                query.effective_merge_distance(),
                                 scoring_params.unwrap(),
                             )?;
                         }
@@ -409,7 +547,7 @@ fn main() -> io::Result<()> {
                                 &mut results,
                                 fasta_index.as_ref().unwrap(),
                                 name,
-                                merge_distance,
+                                query.effective_merge_distance(),
                                 scoring_params.unwrap(),
                             )?;
                         }
@@ -417,9 +555,167 @@ fn main() -> io::Result<()> {
                             // 'auto' or 'bedpe'
                             // Skip the first element (the input range) for BEDPE output
                             results.remove(0);
-                            output_results_bedpe(&impg, &mut results, name, merge_distance);
+                            output_results_bedpe(
+                                &impg,
+                                &mut results,
+                                name,
+                                query.effective_merge_distance(),
+                            );
                         }
                     }
+                }
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Either --target-range or --target-bed must be provided for query subcommand",
+                ));
+            }
+        }
+        Args::Similarity {
+            common,
+            query,
+            gfa_maf,
+            distances,
+            all,
+            delim,
+            delim_pos,
+            pca,
+            pca_components,
+            pca_measure,
+        } => {
+            // Validate delim_pos
+            if delim_pos < 1 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "delim-pos must be greater than 0",
+                ));
+            }
+
+            if pca {
+                // Validate components
+                if pca_components == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Number of components must be greater than 0",
+                    ));
+                }
+
+                // Validate pca_measure
+                if !["jaccard", "cosine", "dice"].contains(&pca_measure.as_str()) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid PCA similarity measure '{}'. Must be one of: jaccard, cosine, dice",
+                            pca_measure
+                        ),
+                    ));
+                }
+            }
+
+            // Parse POA scoring parameters
+            let scoring_params = gfa_maf.parse_poa_scoring()?;
+
+            // Build FASTA index (always required for similarity)
+            let fasta_index = gfa_maf.build_fasta_index()?.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "FASTA files are required for similarity computation",
+                )
+            })?;
+
+            let impg = initialize_impg(&common)?;
+
+            if let Some(target_range) = &query.target_range {
+                let (target_name, target_range) = parse_target_range(target_range)?;
+
+                let mut results = perform_query(
+                    &impg,
+                    &target_name,
+                    target_range,
+                    false, // Don't need CIGAR for similarity
+                    query.min_identity,
+                    query.transitive,
+                    query.transitive_dfs,
+                    query.max_depth,
+                    query.min_transitive_len,
+                    query.min_distance_between_ranges,
+                );
+
+                // Merge intervals if needed
+                merge_query_adjusted_intervals(
+                    &mut results,
+                    query.effective_merge_distance(),
+                    true,
+                );
+
+                // Extract query intervals
+                let query_intervals: Vec<Interval<u32>> = results
+                    .iter()
+                    .map(|(query_interval, _, _)| *query_interval)
+                    .collect();
+
+                // Compute and output similarities
+                let region = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
+                impg::similarity::compute_and_output_similarities(
+                    &impg,
+                    &query_intervals,
+                    &fasta_index,
+                    scoring_params,
+                    distances,
+                    all,
+                    delim,
+                    delim_pos,
+                    pca,
+                    pca_components,
+                    &pca_measure,
+                    Some(&region),
+                )?;
+            } else if let Some(target_bed) = &query.target_bed {
+                let targets = impg::partition::parse_bed_file(target_bed)?;
+                info!("Parsed {} target ranges from BED file", targets.len());
+                for (target_name, target_range, _name) in targets {
+                    let mut results = perform_query(
+                        &impg,
+                        &target_name,
+                        target_range,
+                        false, // Don't need CIGAR for similarity
+                        query.min_identity,
+                        query.transitive,
+                        query.transitive_dfs,
+                        query.max_depth,
+                        query.min_transitive_len,
+                        query.min_distance_between_ranges,
+                    );
+
+                    // Merge intervals if needed
+                    merge_query_adjusted_intervals(
+                        &mut results,
+                        query.effective_merge_distance(),
+                        true,
+                    );
+
+                    // Extract query intervals
+                    let query_intervals: Vec<Interval<u32>> = results
+                        .iter()
+                        .map(|(query_interval, _, _)| *query_interval)
+                        .collect();
+
+                    // Compute and output similarities
+                    let region = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
+                    impg::similarity::compute_and_output_similarities(
+                        &impg,
+                        &query_intervals,
+                        &fasta_index,
+                        scoring_params,
+                        distances,
+                        all,
+                        delim,
+                        delim_pos,
+                        pca,
+                        pca_components,
+                        &pca_measure,
+                        Some(&region)
+                    )?;
                 }
             } else {
                 return Err(io::Error::new(
@@ -462,61 +758,6 @@ fn validate_output_format(format: &str, valid_formats: &[&str]) -> io::Result<()
                 valid_formats.join(", ")
             ),
         ))
-    }
-}
-
-/// Build FASTA index if needed for the given output format
-fn build_fasta_index_if_needed(
-    output_format: &str,
-    formats_requiring_fasta: &[&str],
-    fasta_files: Option<Vec<String>>,
-    fasta_list: Option<String>,
-) -> io::Result<Option<FastaIndex>> {
-    if !formats_requiring_fasta.contains(&output_format) {
-        return Ok(None);
-    }
-
-    // Get list of FASTA files
-    let fasta_files = match (fasta_files, fasta_list) {
-        // Handle --fasta-files option
-        (Some(files), None) => files,
-        // Handle --fasta-list option
-        (None, Some(list_file)) => match std::fs::read_to_string(&list_file) {
-            Ok(content) => content
-                .lines()
-                .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
-                .map(|line| line.trim().to_string())
-                .collect(),
-            Err(e) => {
-                error!("Failed to read FASTA list file '{}': {}", list_file, e);
-                std::process::exit(1);
-            }
-        },
-        _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Either --fasta-files or --fasta-list must be provided for GFA output, not both",
-            ));
-        }
-    };
-
-    if fasta_files.is_empty() {
-        Ok(None)
-    } else {
-        match FastaIndex::build_from_files(&fasta_files) {
-            Ok(index) => {
-                info!(
-                    "Built FASTA index for {} files with {} sequences",
-                    index.fasta_paths.len(),
-                    index.path_key_to_fasta.len()
-                );
-                Ok(Some(index))
-            }
-            Err(e) => {
-                error!("Failed to build FASTA index: {}", e);
-                std::process::exit(1);
-            }
-        }
     }
 }
 
@@ -806,7 +1047,7 @@ fn perform_query(
         );
     }
 
-    if transitive {
+    let results = if transitive {
         impg.query_transitive_bfs(
             target_id,
             target_start,
@@ -819,7 +1060,7 @@ fn perform_query(
             min_identity,
         )
     } else if transitive_dfs {
-        impg.query_transitive(
+        impg.query_transitive_dfs(
             target_id,
             target_start,
             target_end,
@@ -838,7 +1079,11 @@ fn perform_query(
             store_cigar,
             min_identity,
         )
-    }
+    };
+
+    info!("Collected {} results", results.len());
+
+    results
 }
 
 fn output_results_bed(impg: &Impg, results: &mut Vec<AdjustedInterval>, merge_distance: i32) {
@@ -960,56 +1205,6 @@ fn output_results_paf(
     }
 }
 
-fn parse_poa_scoring(scoring_str: &str) -> io::Result<(u8, u8, u8, u8, u8, u8)> {
-    let parts: Vec<&str> = scoring_str.split(',').collect();
-    if parts.len() != 6 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "POA scoring format should be 'mismatch,gap_extend,gap_open' (e.g., '4,2,6')",
-        ));
-    }
-
-    let match_score = parts[0]
-        .parse::<u8>()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid match score value"))?;
-    let mismatch = parts[1]
-        .parse::<u8>()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid mismatch cost value"))?;
-    let gap_open1 = parts[2].parse::<u8>().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Invalid gap opening 1 cost value",
-        )
-    })?;
-    let gap_extend1 = parts[3].parse::<u8>().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Invalid gap extension 1 cost value",
-        )
-    })?;
-    let gap_open2 = parts[4].parse::<u8>().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Invalid gap extension 2 cost value",
-        )
-    })?;
-    let gap_extend2 = parts[5].parse::<u8>().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Invalid gap extension 2 cost value",
-        )
-    })?;
-
-    Ok((
-        match_score,
-        mismatch,
-        gap_open1,
-        gap_extend1,
-        gap_open2,
-        gap_extend2,
-    ))
-}
-
 pub fn output_results_gfa(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
@@ -1052,6 +1247,7 @@ pub fn output_results_maf(
         .drain(..)
         .map(|(query_interval, _, _)| query_interval)
         .collect();
+
     let maf_output = impg::graph::generate_maf_from_intervals(
         impg,
         &query_intervals,
@@ -1118,8 +1314,9 @@ fn merge_query_adjusted_intervals(
                 continue;
             }
 
-            // Only merge if same sequence, same orientation, and within merge distance
-            if curr_interval.metadata != next_interval.metadata
+            // Only merge if same sequence, same orientation, and within merge distance (if merge_distance >= 0)
+            if merge_distance < 0
+                || curr_interval.metadata != next_interval.metadata
                 || curr_is_forward != next_is_forward
                 || next_start > curr_end + merge_distance
             {
@@ -1141,6 +1338,8 @@ fn merge_query_adjusted_intervals(
             }
         }
         results.truncate(write_idx + 1);
+
+        info!("Collected {} merged intervals", results.len());
     }
 }
 
@@ -1171,7 +1370,9 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
         let mut results_iter = results.drain(..);
 
         // Take the first as the current "in-progress" interval
-        if let Some((mut current_query, mut current_cigar, mut current_target)) = results_iter.next() {
+        if let Some((mut current_query, mut current_cigar, mut current_target)) =
+            results_iter.next()
+        {
             // Create a new vector to store merged results
             let mut merged_results = Vec::with_capacity(num_results);
 
@@ -1195,7 +1396,8 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
                     // Store current interval
                     merged_results.push((current_query, current_cigar, current_target));
                     // Clone the next as the new current
-                    (current_query, current_cigar, current_target) = (next_query, next_cigar, next_target);
+                    (current_query, current_cigar, current_target) =
+                        (next_query, next_cigar, next_target);
                     continue;
                 }
 
@@ -1247,7 +1449,8 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
                         current_query.first = next_query.first;
                         current_target.first = next_target.first;
 
-                        let mut new_cigar = Vec::with_capacity(current_cigar.len() + next_cigar.len());
+                        let mut new_cigar =
+                            Vec::with_capacity(current_cigar.len() + next_cigar.len());
                         new_cigar.extend_from_slice(&next_cigar);
                         new_cigar.extend_from_slice(&current_cigar);
                         current_cigar = new_cigar;
@@ -1306,8 +1509,11 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
                             );
 
                             // Trim the overlap from the next interval and merge
-                            let trimmed_next_cigar =
-                                trim_cigar_prefix(&next_cigar, query_overlap_len, target_overlap_len);
+                            let trimmed_next_cigar = trim_cigar_prefix(
+                                &next_cigar,
+                                query_overlap_len,
+                                target_overlap_len,
+                            );
 
                             if query_forward {
                                 current_query.last = next_query.last;
@@ -1317,8 +1523,9 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
                                 current_query.first = next_query.first;
                                 current_target.first = next_target.first;
 
-                                let mut new_cigar =
-                                    Vec::with_capacity(trimmed_next_cigar.len() + current_cigar.len());
+                                let mut new_cigar = Vec::with_capacity(
+                                    trimmed_next_cigar.len() + current_cigar.len(),
+                                );
                                 new_cigar.extend(trimmed_next_cigar);
                                 new_cigar.extend_from_slice(&current_cigar);
                                 current_cigar = new_cigar;
@@ -1406,7 +1613,8 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
 
                 // No merge possible - store current and move to next
                 merged_results.push((current_query, current_cigar, current_target));
-                (current_query, current_cigar, current_target) = (next_query, next_cigar, next_target);
+                (current_query, current_cigar, current_target) =
+                    (next_query, next_cigar, next_target);
             }
 
             // Don't forget to add the last current element
@@ -1414,6 +1622,8 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
 
             // Replace original results with merged results
             *results = merged_results;
+
+            info!("Collected {} merged intervals", results.len());
         }
     }
 }
