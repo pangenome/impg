@@ -669,11 +669,12 @@ fn main() -> io::Result<()> {
                     pca_components,
                     &pca_measure,
                     Some(&region),
+                    true
                 )?;
             } else if let Some(target_bed) = &query.target_bed {
                 let targets = impg::partition::parse_bed_file(target_bed)?;
                 info!("Parsed {} target ranges from BED file", targets.len());
-                for (target_name, target_range, _name) in targets {
+                for (idx, (target_name, target_range, _name)) in targets.into_iter().enumerate() {
                     let mut results = perform_query(
                         &impg,
                         &target_name,
@@ -714,7 +715,8 @@ fn main() -> io::Result<()> {
                         pca,
                         pca_components,
                         &pca_measure,
-                        Some(&region)
+                        Some(&region),
+                        idx == 0, // Only include header for the first region
                     )?;
                 }
             } else {

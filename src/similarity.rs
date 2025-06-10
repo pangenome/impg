@@ -26,6 +26,7 @@ pub fn compute_and_output_similarities(
     n_components: usize,
     pca_similarity: &str,
     region: Option<&str>,
+    include_header: bool,
 ) -> io::Result<()> {
     // Generate POA graph and get sequences
     let (graph, sequence_metadata) =
@@ -118,7 +119,7 @@ pub fn compute_and_output_similarities(
 
         match mds.fit_transform(&distance_matrix, labels) {
             Ok(pca_result) => {
-                print!("{}", pca_result.to_tsv(region));
+                print!("{}", pca_result.to_tsv(region, include_header));
             }
             Err(e) => {
                 // Check if it's an insufficient samples error
@@ -132,7 +133,7 @@ pub fn compute_and_output_similarities(
                         sample_labels: labels,
                         n_components: 0,
                     };
-                    print!("{}", empty_pca_result.to_tsv(region));
+                    print!("{}", empty_pca_result.to_tsv(region, include_header));
                 } else {
                     return Err(io::Error::other(
                         format!("PCA/MDS failed: {}", e),
@@ -426,46 +427,44 @@ pub struct PcaResult {
 }
 
 impl PcaResult {
-    pub fn to_tsv(&self, region: Option<&str>) -> String {
+    pub fn to_tsv(&self, region: Option<&str>, include_header: bool) -> String {
         let mut output = String::new();
 
-        // Metadata header
-
-        // Add genomic region if provided
-        if let Some(region) = region {
-            output.push_str(&format!("# Region: {}\n", region));
-        }
-
-        // output.push_str(&format!("# PCA Results\n"));
-        // output.push_str(&format!("# Components: {}\n", self.n_components));
-        // output.push_str(&format!("# Total Explained Variance: {:.4}\n",
-        //     self.explained_variance_ratio.iter().sum::<f64>()));
-
-        // Component summary
-        output.push_str("#Component\tEigenvalue\tExplained.variance\n");
-        for (i, (eigenval, ratio)) in self
-            .eigenvalues
-            .iter()
-            .zip(&self.explained_variance_ratio)
-            .enumerate()
-        {
-            output.push_str(&format!("#PC{}\t{:.7}\t{:.7}\n", i + 1, eigenval, ratio));
-        }
-
-        // Coordinates header
-        output.push_str("#Group");
-        for i in 0..self.n_components {
-            output.push_str(&format!("\tPC{}", i + 1));
-        }
-        output.push('\n');
-
-        // Coordinates data
-        for (i, label) in self.sample_labels.iter().enumerate() {
-            output.push_str(label);
-            for j in 0..self.n_components {
-                output.push_str(&format!("\t{:.7}", self.coordinates[i][j]));
+        // Parse region to extract chrom, start, end
+        let (chrom, start, end) = if let Some(region_str) = region {
+            if let Some(colon_pos) = region_str.rfind(':') {
+                let chrom = &region_str[..colon_pos];
+                let range_part = &region_str[colon_pos + 1..];
+                if let Some(dash_pos) = range_part.find('-') {
+                    let start_str = &range_part[..dash_pos];
+                    let end_str = &range_part[dash_pos + 1..];
+                    (chrom.to_string(), start_str.to_string(), end_str.to_string())
+                } else {
+                    (region_str.to_string(), "0".to_string(), "0".to_string())
+                }
+            } else {
+                (region_str.to_string(), "0".to_string(), "0".to_string())
             }
-            output.push('\n');
+        } else {
+            ("unknown".to_string(), "0".to_string(), "0".to_string())
+        };
+
+        // Header
+        if include_header {
+            output.push_str("chrom\tstart\tend\tgroup\tPC.rank\tPC.value\n");
+        }
+        
+        // Data rows - one row per group per PC component
+        for (group_idx, group_name) in self.sample_labels.iter().enumerate() {
+            for pc_idx in 0..self.n_components {
+                let pc_rank = pc_idx + 1;
+                let pc_value = self.coordinates[group_idx][pc_idx];
+                
+                output.push_str(&format!(
+                    "{}\t{}\t{}\t{}\t{}\t{:.7}\n",
+                    chrom, start, end, group_name, pc_rank, pc_value
+                ));
+            }
         }
 
         output
