@@ -420,7 +420,7 @@ fn main() -> io::Result<()> {
             let impg = initialize_impg(&common)?;
 
             if let Some(target_range) = &query.target_range {
-                let (target_name, target_range) = parse_target_range(&target_range)?;
+                let (target_name, target_range) = parse_target_range(target_range)?;
                 let mut results = perform_query(
                     &impg,
                     &target_name,
@@ -483,7 +483,7 @@ fn main() -> io::Result<()> {
                     }
                 }
             } else if let Some(target_bed) = &query.target_bed {
-                let targets = impg::partition::parse_bed_file(&target_bed)?;
+                let targets = impg::partition::parse_bed_file(target_bed)?;
                 info!("Parsed {} target ranges from BED file", targets.len());
                 for (target_name, target_range, name) in targets {
                     let mut results = perform_query(
@@ -590,7 +590,7 @@ fn main() -> io::Result<()> {
             let impg = initialize_impg(&common)?;
 
             if let Some(target_range) = &query.target_range {
-                let (target_name, target_range) = parse_target_range(&target_range)?;
+                let (target_name, target_range) = parse_target_range(target_range)?;
 
                 let mut results = perform_query(
                     &impg,
@@ -615,7 +615,7 @@ fn main() -> io::Result<()> {
                 // Extract query intervals
                 let query_intervals: Vec<Interval<u32>> = results
                     .iter()
-                    .map(|(query_interval, _, _)| query_interval.clone())
+                    .map(|(query_interval, _, _)| *query_interval)
                     .collect();
 
                 // Compute and output similarities
@@ -630,7 +630,7 @@ fn main() -> io::Result<()> {
                     delim_pos,
                 )?;
             } else if let Some(target_bed) = &query.target_bed {
-                let targets = impg::partition::parse_bed_file(&target_bed)?;
+                let targets = impg::partition::parse_bed_file(target_bed)?;
                 info!("Parsed {} target ranges from BED file", targets.len());
                 for (target_name, target_range, _name) in targets {
                     let mut results = perform_query(
@@ -656,7 +656,7 @@ fn main() -> io::Result<()> {
                     // Extract query intervals
                     let query_intervals: Vec<Interval<u32>> = results
                         .iter()
-                        .map(|(query_interval, _, _)| query_interval.clone())
+                        .map(|(query_interval, _, _)| *query_interval)
                         .collect();
 
                     // Compute and output similarities
