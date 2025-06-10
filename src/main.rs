@@ -583,7 +583,7 @@ fn main() -> io::Result<()> {
                     .collect();
 
                 // Compute and output similarities
-                impg::graph::compute_and_output_similarities(
+                impg::similarity::compute_and_output_similarities(
                     &impg,
                     &query_intervals,
                     &fasta_index,
@@ -620,7 +620,7 @@ fn main() -> io::Result<()> {
                         .collect();
 
                     // Compute and output similarities
-                    impg::graph::compute_and_output_similarities(
+                    impg::similarity::compute_and_output_similarities(
                         &impg,
                         &query_intervals,
                         &fasta_index,

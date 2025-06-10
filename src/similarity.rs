@@ -1,0 +1,253 @@
+use crate::faidx::FastaIndex;
+use crate::graph::prepare_poa_graph_and_sequences;
+use crate::impg::Impg;
+use coitrees::Interval;
+use std::collections::BTreeMap;
+use std::io;
+
+#[derive(Clone)]
+struct GroupInfo {
+    name: String,
+    sequence_indices: Vec<usize>,
+    total_length: usize,
+}
+
+pub fn compute_and_output_similarities(
+    impg: &Impg,
+    results: &[Interval<u32>],
+    fasta_index: &FastaIndex,
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+    emit_distances: bool,
+    emit_all_pairs: bool,
+    delim: Option<char>,
+    delim_pos: u16,
+) -> io::Result<()> {
+    // Generate POA graph and get sequences
+    let (graph, sequence_metadata) = prepare_poa_graph_and_sequences(
+        impg,
+        results,
+        fasta_index,
+        scoring_params,
+    )?;
+
+    let msa = graph.generate_msa();
+
+    // Convert MSA strings to Vec<char> once for efficient indexing
+    let msa_chars: Vec<Vec<char>> = msa.iter().map(|s| s.chars().collect()).collect();
+
+    // Create groups and calculate their lengths
+    let groups = create_groups(&sequence_metadata, delim, delim_pos)?;
+
+    // Print header
+    println!("group.a\tgroup.b\tgroup.a.length\tgroup.b.length\tintersection\t{}", 
+        if emit_distances {
+            "jaccard.distance\tcosine.distance\tdice.distance\testimated.difference.rate"
+        } else {
+            "jaccard.similarity\tcosine.similarity\tdice.similarity\testimated.identity"
+        }
+    );
+
+    // Compute only upper triangle (including diagonal) and output both (i,j) and (j,i)
+    for i in 0..groups.len() {
+        for j in i..groups.len() {
+            let group_a = &groups[i];
+            let group_b = &groups[j];
+            
+            let intersection = if delim.is_none() && group_a.sequence_indices.len() == 1 && group_b.sequence_indices.len() == 1 {
+                // Fast path for individual sequences (no grouping)
+                calculate_pairwise_intersection(&msa_chars[group_a.sequence_indices[0]], &msa_chars[group_b.sequence_indices[0]])
+            } else {
+                // General case for groups
+                calculate_group_intersection(&msa_chars, &group_a.sequence_indices, &group_b.sequence_indices)
+            };
+            
+            if intersection == 0 && !emit_all_pairs {
+                // Skip both (i,j) and (j,i) if no intersection
+                continue;
+            }
+
+            // Compute metrics once
+            let union = (group_a.total_length + group_b.total_length).saturating_sub(intersection);
+            let jaccard = if union > 0 { intersection as f64 / union as f64 } else { 0.0 };
+            let cosine = if group_a.total_length > 0 && group_b.total_length > 0 { 
+                (intersection as f64) / ((group_a.total_length as f64).sqrt() * (group_b.total_length as f64).sqrt())
+            } else { 0.0 };
+            let dice = if (group_a.total_length + group_b.total_length) > 0 { 
+                2.0 * (intersection as f64) / (group_a.total_length + group_b.total_length) as f64 
+            } else { 0.0 };
+            let estimated_identity = if jaccard > 0.0 { 2.0 * jaccard / (1.0 + jaccard) } else { 0.0 };
+
+            // Output (i,j)
+            output_similarity_line(
+                &group_a.name, &group_b.name, 
+                group_a.total_length, group_b.total_length, 
+                intersection, jaccard, cosine, dice, estimated_identity, 
+                emit_distances
+            );
+
+            // Output (j,i) if different from (i,j)
+            if i != j {
+                output_similarity_line(
+                    &group_b.name, &group_a.name, 
+                    group_b.total_length, group_a.total_length, 
+                    intersection, jaccard, cosine, dice, estimated_identity, 
+                    emit_distances
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn output_similarity_line(
+    name_a: &str, name_b: &str,
+    len_a: usize, len_b: usize,
+    intersection: usize,
+    jaccard: f64, cosine: f64, dice: f64, estimated_identity: f64,
+    emit_distances: bool
+) {
+    print!("{}\t{}\t{}\t{}\t{}\t", name_a, name_b, len_a, len_b, intersection);
+
+    if emit_distances {
+        println!("{}\t{}\t{}\t{}",
+            format_similarity_value(1.0 - jaccard),
+            format_similarity_value(1.0 - cosine),
+            format_similarity_value(1.0 - dice),
+            format_similarity_value(1.0 - estimated_identity)
+        );
+    } else {
+        println!("{}\t{}\t{}\t{}",
+            format_similarity_value(jaccard),
+            format_similarity_value(cosine),
+            format_similarity_value(dice),
+            format_similarity_value(estimated_identity)
+        );
+    }
+}
+
+fn create_groups(
+    sequence_metadata: &[crate::graph::SequenceMetadata],
+    delim: Option<char>,
+    delim_pos: u16,
+) -> io::Result<Vec<GroupInfo>> {
+    if let Some(delim_char) = delim {
+        // Group by delimiter
+        let mut group_map: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        
+        for (seq_idx, meta) in sequence_metadata.iter().enumerate() {
+            let group_name = extract_group_name(&meta.name, delim_char, delim_pos)?;
+            group_map.entry(group_name).or_default().push(seq_idx);
+        }
+        
+        let mut groups = Vec::new();
+        for (group_name, indices) in group_map {
+            // Simply sum all metadata.size values in the group
+            let total_length: usize = indices.iter()
+                .map(|&idx| sequence_metadata[idx].size as usize)
+                .sum();
+            
+            groups.push(GroupInfo {
+                name: group_name,
+                sequence_indices: indices,
+                total_length,
+            });
+        }
+        
+        Ok(groups)
+    } else {
+        // Each sequence is its own group
+        let groups = sequence_metadata
+            .iter()
+            .enumerate()
+            .map(|(i, meta)| {
+                let name = format!("{}:{}-{}", meta.name, meta.start, meta.start + meta.size);
+                GroupInfo {
+                    name,
+                    sequence_indices: vec![i],
+                    total_length: meta.size as usize,
+                }
+            })
+            .collect();
+        
+        Ok(groups)
+    }
+}
+
+fn extract_group_name(path_name: &str, delim: char, delim_pos: u16) -> io::Result<String> {
+    let mut delimiter_positions = Vec::new();
+    let mut start = 0;
+    
+    // Find all delimiter positions
+    while let Some(pos) = path_name[start..].find(delim) {
+        delimiter_positions.push(start + pos);
+        start += pos + 1;
+    }
+    
+    let target_index = (delim_pos as usize).saturating_sub(1);
+    
+    if target_index < delimiter_positions.len() {
+        Ok(path_name[..delimiter_positions[target_index]].to_string())
+    } else {
+        // Not enough delimiters, use the whole name
+        Ok(path_name.to_string())
+    }
+}
+
+// Fast path for comparing two individual sequences
+fn calculate_pairwise_intersection(seq_a: &[char], seq_b: &[char]) -> usize {
+    seq_a.iter()
+        .zip(seq_b.iter())
+        .filter(|&(&char_a, &char_b)| char_a != '-' && char_b != '-' && char_a == char_b)
+        .count()
+}
+
+// General case for comparing groups of sequences
+fn calculate_group_intersection(msa_chars: &[Vec<char>], group_a_indices: &[usize], group_b_indices: &[usize]) -> usize {    
+    let msa_len = msa_chars[0].len();
+    let mut intersection = 0;
+    
+    for pos in 0..msa_len {
+        // For each position, check all pairwise comparisons between groups and count matches
+        let mut position_matches = 0;
+        
+        for &idx_a in group_a_indices {
+            let char_a = msa_chars[idx_a][pos];
+            if char_a != '-' {
+                for &idx_b in group_b_indices {
+                    let char_b = msa_chars[idx_b][pos];
+                    if char_b != '-' && char_a == char_b {
+                        position_matches += 1;
+                    }
+                }
+            }
+        }
+        
+        // For this position, add the minimum of:
+        // - number of non-gap characters in group A
+        // - number of non-gap characters in group B  
+        // - number of actual matches found
+        let group_a_count = group_a_indices.iter()
+            .filter(|&&idx| msa_chars[idx][pos] != '-')
+            .count();
+        let group_b_count = group_b_indices.iter()
+            .filter(|&&idx| msa_chars[idx][pos] != '-')
+            .count();
+        
+        intersection += position_matches.min(group_a_count).min(group_b_count);
+    }
+    
+    intersection
+}
+
+fn format_similarity_value(value: f64) -> String {
+    let formatted = format!("{:.7}", value);
+    // Trim trailing zeros
+    let trimmed = formatted.trim_end_matches('0');
+    if trimmed.ends_with('.') {
+        // If we removed all decimal places, remove the decimal point too
+        trimmed.trim_end_matches('.').to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
