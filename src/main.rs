@@ -70,12 +70,13 @@ impl GfaMafOpts {
             (Some(files), None) => Ok(files),
             // Handle --fasta-list option
             (None, Some(list_file)) => {
-                let content = std::fs::read_to_string(&list_file)
-                    .map_err(|e| io::Error::new(
+                let content = std::fs::read_to_string(&list_file).map_err(|e| {
+                    io::Error::new(
                         io::ErrorKind::NotFound,
-                        format!("Failed to read FASTA list file '{}': {}", list_file, e)
-                    ))?;
-                
+                        format!("Failed to read FASTA list file '{}': {}", list_file, e),
+                    )
+                })?;
+
                 Ok(content
                     .lines()
                     .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
@@ -85,7 +86,7 @@ impl GfaMafOpts {
             (None, None) => Ok(Vec::new()),
             (Some(_), Some(_)) => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "Cannot specify both --fasta-files and --fasta-list"
+                "Cannot specify both --fasta-files and --fasta-list",
             )),
         }
     }
@@ -102,7 +103,10 @@ impl GfaMafOpts {
 
         let parse_u8 = |s: &str, name: &str| {
             s.parse::<u8>().map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid {} value", name))
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Invalid {} value", name),
+                )
             })
         };
 
@@ -119,7 +123,7 @@ impl GfaMafOpts {
     /// Build FASTA index if files are provided
     fn build_fasta_index(self) -> io::Result<Option<FastaIndex>> {
         let fasta_files = self.resolve_fasta_files()?;
-        
+
         if fasta_files.is_empty() {
             Ok(None)
         } else {
@@ -144,57 +148,61 @@ impl GfaMafOpts {
 /// Common query and filtering options
 #[derive(Parser, Debug, Clone)]
 struct QueryOpts {
-        /// Target range in the format `seq_name:start-end`
-        #[clap(short = 'r', long, value_parser)]
-        target_range: Option<String>,
+    /// Target range in the format `seq_name:start-end`
+    #[clap(short = 'r', long, value_parser)]
+    target_range: Option<String>,
 
-        /// Path to the BED file containing target regions
-        #[clap(short = 'b', long, value_parser)]
-        target_bed: Option<String>,
+    /// Path to the BED file containing target regions
+    #[clap(short = 'b', long, value_parser)]
+    target_bed: Option<String>,
 
-        /// Maximum distance between regions to merge
-        #[clap(
-            short = 'd',
-            long,
-            value_parser,
-            conflicts_with = "no_merge_bed",
-            default_value_t = 0
-        )]
-        merge_distance: i32,
+    /// Maximum distance between regions to merge
+    #[clap(
+        short = 'd',
+        long,
+        value_parser,
+        conflicts_with = "no_merge_bed",
+        default_value_t = 0
+    )]
+    merge_distance: i32,
 
-        /// Disable merging for all output formats
-        #[clap(long, action, conflicts_with = "merge_distance")]
-        no_merge: bool,
+    /// Disable merging for all output formats
+    #[clap(long, action, conflicts_with = "merge_distance")]
+    no_merge: bool,
 
-        /// Minimum gap-compressed identity threshold (0.0-1.0)
-        #[clap(long, value_parser)]
-        min_identity: Option<f64>,
+    /// Minimum gap-compressed identity threshold (0.0-1.0)
+    #[clap(long, value_parser)]
+    min_identity: Option<f64>,
 
-        /// Enable transitive queries (with Breadth-First Search)
-        #[clap(short = 'x', long, action, conflicts_with = "transitive_dfs")]
-        transitive: bool,
+    /// Enable transitive queries (with Breadth-First Search)
+    #[clap(short = 'x', long, action, conflicts_with = "transitive_dfs")]
+    transitive: bool,
 
-        /// Enable transitive queries with Depth-First Search (slower, but returns fewer overlapping results)
-        #[clap(long, action, conflicts_with = "transitive")]
-        transitive_dfs: bool,
+    /// Enable transitive queries with Depth-First Search (slower, but returns fewer overlapping results)
+    #[clap(long, action, conflicts_with = "transitive")]
+    transitive_dfs: bool,
 
-        /// Maximum recursion depth for transitive overlaps (0 for no limit)
-        #[clap(short = 'm', long, value_parser, default_value_t = 0)]
-        max_depth: u16,
+    /// Maximum recursion depth for transitive overlaps (0 for no limit)
+    #[clap(short = 'm', long, value_parser, default_value_t = 0)]
+    max_depth: u16,
 
-        /// Minimum region size to consider for transitive queries
-        #[clap(short = 'l', long, value_parser, default_value_t = 0)]
-        min_transitive_len: i32,
+    /// Minimum region size to consider for transitive queries
+    #[clap(short = 'l', long, value_parser, default_value_t = 0)]
+    min_transitive_len: i32,
 
-        /// Minimum distance between transitive ranges to consider on the same sequence
-        #[clap(long, value_parser, default_value_t = 0)]
-        min_distance_between_ranges: i32,
+    /// Minimum distance between transitive ranges to consider on the same sequence
+    #[clap(long, value_parser, default_value_t = 0)]
+    min_distance_between_ranges: i32,
 }
 
 impl QueryOpts {
     /// Get effective merge distance (-1 if merging is disabled)
     fn effective_merge_distance(&self) -> i32 {
-        if self.no_merge { -1 } else { self.merge_distance }
+        if self.no_merge {
+            -1
+        } else {
+            self.merge_distance
+        }
     }
 }
 
@@ -362,7 +370,7 @@ fn main() -> io::Result<()> {
             } else {
                 None
             };
-            
+
             let impg = initialize_impg(&common)?;
 
             partition_alignments(
@@ -425,18 +433,28 @@ fn main() -> io::Result<()> {
                     query.min_transitive_len,
                     query.min_distance_between_ranges,
                 );
-                
+
                 // Output results based on the format
                 match output_format.as_str() {
                     "bedpe" => {
                         // Skip the first element (the input range) for BEDPE output
                         results.remove(0);
-                        output_results_bedpe(&impg, &mut results, None, query.effective_merge_distance());
+                        output_results_bedpe(
+                            &impg,
+                            &mut results,
+                            None,
+                            query.effective_merge_distance(),
+                        );
                     }
                     "paf" => {
                         // Skip the first element (the input range) for PAF output
                         results.remove(0);
-                        output_results_paf(&impg, &mut results, None, query.effective_merge_distance());
+                        output_results_paf(
+                            &impg,
+                            &mut results,
+                            None,
+                            query.effective_merge_distance(),
+                        );
                     }
                     "gfa" => {
                         output_results_gfa(
@@ -485,12 +503,21 @@ fn main() -> io::Result<()> {
                     match output_format.as_str() {
                         "bed" => {
                             // BED format - include the first element
-                            output_results_bed(&impg, &mut results, query.effective_merge_distance());
+                            output_results_bed(
+                                &impg,
+                                &mut results,
+                                query.effective_merge_distance(),
+                            );
                         }
                         "paf" => {
                             // Skip the first element (the input range) for PAF output
                             results.remove(0);
-                            output_results_paf(&impg, &mut results, name, query.effective_merge_distance());
+                            output_results_paf(
+                                &impg,
+                                &mut results,
+                                name,
+                                query.effective_merge_distance(),
+                            );
                         }
                         "gfa" => {
                             output_results_gfa(
@@ -516,7 +543,12 @@ fn main() -> io::Result<()> {
                             // 'auto' or 'bedpe'
                             // Skip the first element (the input range) for BEDPE output
                             results.remove(0);
-                            output_results_bedpe(&impg, &mut results, name, query.effective_merge_distance());
+                            output_results_bedpe(
+                                &impg,
+                                &mut results,
+                                name,
+                                query.effective_merge_distance(),
+                            );
                         }
                     }
                 }
@@ -574,7 +606,11 @@ fn main() -> io::Result<()> {
                 );
 
                 // Merge intervals if needed
-                merge_query_adjusted_intervals(&mut results, query.effective_merge_distance(), true);
+                merge_query_adjusted_intervals(
+                    &mut results,
+                    query.effective_merge_distance(),
+                    true,
+                );
 
                 // Extract query intervals
                 let query_intervals: Vec<Interval<u32>> = results
@@ -611,7 +647,11 @@ fn main() -> io::Result<()> {
                     );
 
                     // Merge intervals if needed
-                    merge_query_adjusted_intervals(&mut results, query.effective_merge_distance(), true);
+                    merge_query_adjusted_intervals(
+                        &mut results,
+                        query.effective_merge_distance(),
+                        true,
+                    );
 
                     // Extract query intervals
                     let query_intervals: Vec<Interval<u32>> = results
@@ -1229,7 +1269,7 @@ fn merge_query_adjusted_intervals(
             }
 
             // Only merge if same sequence, same orientation, and within merge distance (if merge_distance >= 0)
-            if merge_distance < 0 
+            if merge_distance < 0
                 || curr_interval.metadata != next_interval.metadata
                 || curr_is_forward != next_is_forward
                 || next_start > curr_end + merge_distance
@@ -1284,7 +1324,9 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
         let mut results_iter = results.drain(..);
 
         // Take the first as the current "in-progress" interval
-        if let Some((mut current_query, mut current_cigar, mut current_target)) = results_iter.next() {
+        if let Some((mut current_query, mut current_cigar, mut current_target)) =
+            results_iter.next()
+        {
             // Create a new vector to store merged results
             let mut merged_results = Vec::with_capacity(num_results);
 
@@ -1308,7 +1350,8 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
                     // Store current interval
                     merged_results.push((current_query, current_cigar, current_target));
                     // Clone the next as the new current
-                    (current_query, current_cigar, current_target) = (next_query, next_cigar, next_target);
+                    (current_query, current_cigar, current_target) =
+                        (next_query, next_cigar, next_target);
                     continue;
                 }
 
@@ -1360,7 +1403,8 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
                         current_query.first = next_query.first;
                         current_target.first = next_target.first;
 
-                        let mut new_cigar = Vec::with_capacity(current_cigar.len() + next_cigar.len());
+                        let mut new_cigar =
+                            Vec::with_capacity(current_cigar.len() + next_cigar.len());
                         new_cigar.extend_from_slice(&next_cigar);
                         new_cigar.extend_from_slice(&current_cigar);
                         current_cigar = new_cigar;
@@ -1419,8 +1463,11 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
                             );
 
                             // Trim the overlap from the next interval and merge
-                            let trimmed_next_cigar =
-                                trim_cigar_prefix(&next_cigar, query_overlap_len, target_overlap_len);
+                            let trimmed_next_cigar = trim_cigar_prefix(
+                                &next_cigar,
+                                query_overlap_len,
+                                target_overlap_len,
+                            );
 
                             if query_forward {
                                 current_query.last = next_query.last;
@@ -1430,8 +1477,9 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
                                 current_query.first = next_query.first;
                                 current_target.first = next_target.first;
 
-                                let mut new_cigar =
-                                    Vec::with_capacity(trimmed_next_cigar.len() + current_cigar.len());
+                                let mut new_cigar = Vec::with_capacity(
+                                    trimmed_next_cigar.len() + current_cigar.len(),
+                                );
                                 new_cigar.extend(trimmed_next_cigar);
                                 new_cigar.extend_from_slice(&current_cigar);
                                 current_cigar = new_cigar;
@@ -1519,7 +1567,8 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
 
                 // No merge possible - store current and move to next
                 merged_results.push((current_query, current_cigar, current_target));
-                (current_query, current_cigar, current_target) = (next_query, next_cigar, next_target);
+                (current_query, current_cigar, current_target) =
+                    (next_query, next_cigar, next_target);
             }
 
             // Don't forget to add the last current element
