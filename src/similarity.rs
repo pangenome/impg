@@ -26,6 +26,7 @@ pub fn compute_and_output_similarities(
     n_components: usize,
     pca_similarity: &str,
     region: Option<&str>,
+    include_header: bool,
 ) -> io::Result<()> {
     // Generate POA graph and get sequences
     let (graph, sequence_metadata) =
@@ -118,7 +119,7 @@ pub fn compute_and_output_similarities(
 
         match mds.fit_transform(&distance_matrix, labels) {
             Ok(pca_result) => {
-                print!("{}", pca_result.to_tsv(region));
+                print!("{}", pca_result.to_tsv(region, include_header));
             }
             Err(e) => {
                 // Check if it's an insufficient samples error
@@ -132,7 +133,7 @@ pub fn compute_and_output_similarities(
                         sample_labels: labels,
                         n_components: 0,
                     };
-                    print!("{}", empty_pca_result.to_tsv(region));
+                    print!("{}", empty_pca_result.to_tsv(region, include_header));
                 } else {
                     return Err(io::Error::other(
                         format!("PCA/MDS failed: {}", e),
@@ -426,7 +427,7 @@ pub struct PcaResult {
 }
 
 impl PcaResult {
-    pub fn to_tsv(&self, region: Option<&str>) -> String {
+    pub fn to_tsv(&self, region: Option<&str>, include_header: bool) -> String {
         let mut output = String::new();
 
         // Parse region to extract chrom, start, end
@@ -449,8 +450,10 @@ impl PcaResult {
         };
 
         // Header
-        output.push_str("chrom\tstart\tend\tgroup\tPC.rank\tPC.value\n");
-
+        if include_header {
+            output.push_str("chrom\tstart\tend\tgroup\tPC.rank\tPC.value\n");
+        }
+        
         // Data rows - one row per group per PC component
         for (group_idx, group_name) in self.sample_labels.iter().enumerate() {
             for pc_idx in 0..self.n_components {
