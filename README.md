@@ -120,7 +120,7 @@ Compute pairwise similarity between sequences in a region:
 impg similarity -p alignments.paf -r chr1:1000-2000 --fasta-files ref.fa genomes.fa
 
 # Output distances instead of similarities
-impg similarity -p alignments.paf -r chr1:1000-2000 --fasta-files *.fa -d
+impg similarity -p alignments.paf -r chr1:1000-2000 --fasta-files *.fa --distances
 ```
 
 ### Stats
