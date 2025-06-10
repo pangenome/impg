@@ -23,3 +23,5 @@ rust-htslib = { version = "0.46.0", default-features = false } # Don't update it
 libc = "0.2.172"
 
 spoa_rs = { git = "https://github.com/AndreaGuarracino/spoa-rs.git" }
+
+nalgebra = "0.33.2"

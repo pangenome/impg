@@ -321,6 +321,18 @@ enum Args {
         /// Consider the N-th occurrence of the delimiter (1-indexed, default: 1)
         #[clap(long, value_parser, default_value_t = 1)]
         delim_pos: u16,
+
+        /// Perform PCA/MDS dimensionality reduction on the distance matrix
+        #[clap(long, action)]
+        pca: bool,
+
+        /// Number of PCA components to output (default: 2)
+        #[clap(long, value_parser, requires = "pca", default_value_t = 2)]
+        pca_components: usize,
+
+        /// Similarity measure to use for PCA distance matrix ("jaccard", "cosine", or "dice")
+        #[clap(long, value_parser, default_value = "jaccard")]
+        pca_measure: String,
     },
     /// Print alignment statistics
     Stats {
@@ -567,6 +579,9 @@ fn main() -> io::Result<()> {
             all,
             delim,
             delim_pos,
+            pca,
+            pca_components,
+            pca_measure,
         } => {
             // Validate delim_pos
             if delim_pos < 1 {
@@ -574,6 +589,27 @@ fn main() -> io::Result<()> {
                     io::ErrorKind::InvalidInput,
                     "delim-pos must be greater than 0",
                 ));
+            }
+
+            if pca {
+                // Validate components
+                if pca_components == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Number of components must be greater than 0",
+                    ));
+                }
+
+                // Validate pca_measure
+                if !["jaccard", "cosine", "dice"].contains(&pca_measure.as_str()) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid PCA similarity measure '{}'. Must be one of: jaccard, cosine, dice",
+                            pca_measure
+                        ),
+                    ));
+                }
             }
 
             // Parse POA scoring parameters
@@ -628,6 +664,9 @@ fn main() -> io::Result<()> {
                     all,
                     delim,
                     delim_pos,
+                    pca,
+                    pca_components,
+                    &pca_measure,
                 )?;
             } else if let Some(target_bed) = &query.target_bed {
                 let targets = impg::partition::parse_bed_file(target_bed)?;
@@ -669,6 +708,9 @@ fn main() -> io::Result<()> {
                         all,
                         delim,
                         delim_pos,
+                        pca,
+                        pca_components,
+                        &pca_measure,
                     )?;
                 }
             } else {
