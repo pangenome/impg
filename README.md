@@ -119,8 +119,29 @@ Compute pairwise similarity between sequences in a region:
 # Basic similarity computation
 impg similarity -p alignments.paf -r chr1:1000-2000 --fasta-files ref.fa genomes.fa
 
+# Query multiple regions from a BED file (it produces multiple similarity matrices)
+impg similarity -p alignments.paf -b regions.bed --fasta-files *.fa
+
 # Output distances instead of similarities
 impg similarity -p alignments.paf -r chr1:1000-2000 --fasta-files *.fa --distances
+
+# Include all pairs (even those with zero similarity)
+impg similarity -p alignments.paf -r chr1:1000-2000 --fasta-files *.fa -a
+
+# Group sequences by delimiter (e.g., for PanSN naming, "sample#haplotype#chr" -> "sample")
+impg similarity -p alignments.paf -r chr1:1000-2000 --fasta-files *.fa --delim '#'
+
+# Use 2nd occurrence of delimiter for grouping (e.g., for PanSN naming, "sample#haplotype#chr" -> "sample#haplotype")
+impg similarity -p alignments.paf -r chr1:1000-2000 --fasta-files *.fa --delim '#' --delim-pos 2
+
+# Perform PCA/MDS dimensionality reduction
+impg similarity -p alignments.paf -r chr1:1000-2000 --fasta-files *.fa --pca
+
+# Specify number of PCA components (default: 2)
+impg similarity -p alignments.paf -r chr1:1000-2000 --fasta-files *.fa --pca --pca-components 3
+
+# Choose similarity measure for PCA distance matrix (jaccard/cosine/dice, default: jaccard)
+impg similarity -p alignments.paf -r chr1:1000-2000 --fasta-files *.fa --pca --pca-measure cosine
 ```
 
 ### Stats
