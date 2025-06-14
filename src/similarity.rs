@@ -2,7 +2,7 @@ use crate::faidx::FastaIndex;
 use crate::graph::prepare_poa_graph_and_sequences;
 use crate::impg::Impg;
 use coitrees::Interval;
-use log::warn;
+use log::{debug, warn};
 use std::collections::BTreeMap;
 use std::io;
 
@@ -266,20 +266,36 @@ fn polarize_pca_result(
     // Process each PC component
     for pc_idx in 0..pca_result.n_components {
         // Extract PC values for this component
+        debug!("Processing PC{}", pc_idx + 1);
+        
         let pc_values: Vec<f64> = pca_result.coordinates
             .iter()
             .map(|coords| coords.get(pc_idx).copied().unwrap_or(0.0))
             .collect();
+        
+        // Debug: show PC values for all samples
+        debug!("Current window PC values:");
+        for (i, (label, value)) in pca_result.sample_labels.iter().zip(&pc_values).enumerate() {
+            debug!("  [{}] {}: {:.3}", i, label, value);
+        }
         
         // Find current polarizer
         let (current_polarizer_idx, _) = pc_values
             .iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
-            .unwrap_or((0, &0.0));
+            .unwrap();
+        
+        debug!("Current polarizer: [{}] {} (value: {:.3}, abs: {:.3})",
+            current_polarizer_idx,
+            pca_result.sample_labels.get(current_polarizer_idx).unwrap(),
+            pc_values[current_polarizer_idx],
+            pc_values[current_polarizer_idx].abs()
+        );
         
         if polarization_window.is_empty() || pc_idx >= polarization_window[0].polarizer_indices.len() {
             // First window: no flipping
+            debug!("First window for PC{} - no flipping needed", pc_idx + 1);
             polarizer_indices.push(current_polarizer_idx);
             polarizer_signs.push(pc_values[current_polarizer_idx] > 0.0);
         } else {
@@ -295,7 +311,14 @@ fn polarize_pca_result(
                 .iter()
                 .max_by_key(|(_, &count)| count)
                 .map(|(&idx, _)| idx)
-                .unwrap_or(current_polarizer_idx);
+                .unwrap();
+            
+            debug!("Most frequent previous polarizer: [{}] {} (appeared {}/{} times)",
+                most_frequent_polarizer,
+                pca_result.sample_labels.get(most_frequent_polarizer).unwrap(),
+                polarizer_counts.get(&most_frequent_polarizer).unwrap(),
+                polarization_window.len()
+            );
             
             // Determine flipping based on whether polarizer changed
             let mut flip_votes = 0;
@@ -303,13 +326,21 @@ fn polarize_pca_result(
             
             if current_polarizer_idx == most_frequent_polarizer {
                 // Same polarizer: compare signs at current polarizer position
+                debug!("Polarizer unchanged - comparing signs at position [{}]", current_polarizer_idx);
                 let current_sign = pc_values[current_polarizer_idx] > 0.0;
+                debug!("  Current sign: {}", if current_sign { "positive" } else { "negative" });
                 
-                for prev_data in polarization_window {
+                for (win_idx, prev_data) in polarization_window.iter().enumerate() {
                     if let Some(&prev_idx) = prev_data.polarizer_indices.get(pc_idx) {
                         if prev_idx == current_polarizer_idx {
                             if let Some(&prev_sign) = prev_data.polarizer_signs.get(pc_idx) {
-                                if current_sign != prev_sign {
+                                let same_sign = current_sign == prev_sign;
+                                debug!("  Window {}: {} (vote: {})",
+                                    win_idx + 1,
+                                    if prev_sign { "positive" } else { "negative" },
+                                    if same_sign { "keep" } else { "flip" }
+                                );
+                                if !same_sign {
                                     flip_votes += 1;
                                 }
                                 total_votes += 1;
@@ -319,14 +350,28 @@ fn polarize_pca_result(
                 }
             } else {
                 // Different polarizer: compare signs at most frequent polarizer position
+                debug!("Polarizer changed from [{}] to [{}] - comparing signs at position [{}]",
+                    most_frequent_polarizer, current_polarizer_idx, most_frequent_polarizer);
+                
                 if let Some(&value) = pc_values.get(most_frequent_polarizer) {
                     let current_sign_at_prev = value > 0.0;
+                    debug!("  Current value at [{}]: {:.3} ({})",
+                        most_frequent_polarizer,
+                        value,
+                        if current_sign_at_prev { "positive" } else { "negative" }
+                    );
                     
-                    for prev_data in polarization_window {
+                    for (win_idx, prev_data) in polarization_window.iter().enumerate() {
                         if let Some(&prev_idx) = prev_data.polarizer_indices.get(pc_idx) {
                             if prev_idx == most_frequent_polarizer {
                                 if let Some(&prev_sign) = prev_data.polarizer_signs.get(pc_idx) {
-                                    if current_sign_at_prev != prev_sign {
+                                    let same_sign = current_sign_at_prev == prev_sign;
+                                    debug!("  Window {}: {} (vote: {})",
+                                        win_idx + 1,
+                                        if prev_sign { "positive" } else { "negative" },
+                                        if same_sign { "keep" } else { "flip" }
+                                    );
+                                    if !same_sign {
                                         flip_votes += 1;
                                     }
                                     total_votes += 1;
@@ -337,15 +382,12 @@ fn polarize_pca_result(
                 }
             }
             
-            // Flip if majority vote
-            let should_flip = total_votes > 0 && flip_votes > total_votes / 2;
+            debug!("Vote summary: {}/{} votes to flip", flip_votes, total_votes);
             
+            // Flip if majority vote
+            let should_flip = total_votes > 0 && flip_votes > total_votes / 2;            
             if should_flip {
-                eprintln!(
-                    "Flipping PC {} polarizer from {} to {}",
-                    pc_idx, current_polarizer_idx, most_frequent_polarizer
-                );
-                // Flip all values for this component
+                debug!("Flipping all PC{} values", pc_idx + 1);
                 for coords in pca_result.coordinates.iter_mut() {
                     if let Some(val) = coords.get_mut(pc_idx) {
                         *val *= -1.0;
