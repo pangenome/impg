@@ -330,8 +330,12 @@ enum Args {
         #[clap(long, value_parser, requires = "pca", default_value_t = 2)]
         pca_components: usize,
 
+        /// Number of previous regions to use for adaptive polarization (0 to disable)
+        #[clap(long, value_parser, requires = "pca", default_value_t = 3)]
+        polarize_n_prev: usize,
+
         /// Similarity measure to use for PCA distance matrix ("jaccard", "cosine", or "dice")
-        #[clap(long, value_parser, default_value = "jaccard")]
+        #[clap(long, value_parser, requires = "pca", default_value = "jaccard")]
         pca_measure: String,
     },
     /// Print alignment statistics
@@ -582,6 +586,7 @@ fn main() -> io::Result<()> {
             pca,
             pca_components,
             pca_measure,
+            polarize_n_prev,
         } => {
             // Validate delim_pos
             if delim_pos < 1 {
@@ -669,11 +674,17 @@ fn main() -> io::Result<()> {
                     pca_components,
                     &pca_measure,
                     Some(&region),
-                    true
+                    true,
+                    None, // No polarization window for single query
+                    0,
                 )?;
             } else if let Some(target_bed) = &query.target_bed {
                 let targets = impg::partition::parse_bed_file(target_bed)?;
                 info!("Parsed {} target ranges from BED file", targets.len());
+
+                // Rolling window for polarization
+                let mut polarization_window: Vec<impg::similarity::PolarizationData> = Vec::new();
+
                 for (idx, (target_name, target_range, _name)) in targets.into_iter().enumerate() {
                     let mut results = perform_query(
                         &impg,
@@ -717,6 +728,12 @@ fn main() -> io::Result<()> {
                         &pca_measure,
                         Some(&region),
                         idx == 0, // Only include header for the first region
+                        if pca && polarize_n_prev > 0 {
+                            Some(&mut polarization_window)
+                        } else {
+                            None
+                        },
+                        polarize_n_prev,
                     )?;
                 }
             } else {

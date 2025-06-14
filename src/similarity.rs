@@ -27,6 +27,8 @@ pub fn compute_and_output_similarities(
     pca_similarity: &str,
     region: Option<&str>,
     include_header: bool,
+    polarization_window: Option<&mut Vec<PolarizationData>>,
+    polarize_n_prev: usize,
 ) -> io::Result<()> {
     // Generate POA graph and get sequences
     let (graph, sequence_metadata) =
@@ -118,7 +120,17 @@ pub fn compute_and_output_similarities(
         let mds = ClassicalMDS::new(n_components);
 
         match mds.fit_transform(&distance_matrix, labels) {
-            Ok(pca_result) => {
+            Ok(mut pca_result) => {
+                // Apply polarization if enabled
+                if let Some(window) = polarization_window {
+                    let polarization_data = polarize_pca_result(&mut pca_result, window);
+                    
+                    // Update rolling window
+                    window.push(polarization_data);
+                    if window.len() > polarize_n_prev {
+                        window.remove(0);
+                    }
+                }
                 print!("{}", pca_result.to_tsv(region, include_header));
             }
             Err(e) => {
@@ -242,6 +254,87 @@ pub fn compute_and_output_similarities(
     }
 
     Ok(())
+}
+
+fn polarize_pca_result(
+    pca_result: &mut PcaResult,
+    polarization_window: &[PolarizationData],
+) -> PolarizationData {
+    let mut polarizer_indices = Vec::new();
+    let mut polarizer_signs = Vec::new();
+    
+    // Process each PC component
+    for pc_idx in 0..pca_result.n_components {
+        // Extract PC values for this component
+        let pc_values: Vec<f64> = pca_result.coordinates
+            .iter()
+            .map(|coords| coords.get(pc_idx).copied().unwrap_or(0.0))
+            .collect();
+        
+        // Find current polarizer (sample with max absolute value)
+        let (current_polarizer_idx, _) = pc_values
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
+            .unwrap_or((0, &0.0));
+        
+        let current_sign = pc_values[current_polarizer_idx] > 0.0;
+        
+        if polarization_window.is_empty() || pc_idx >= polarization_window[0].polarizer_indices.len() {
+            // First window or new component: no flipping needed
+            polarizer_indices.push(current_polarizer_idx);
+            polarizer_signs.push(current_sign);
+        } else {
+            // Count votes from previous windows
+            let mut flip_votes = 0;
+            let mut total_votes = 0;
+            
+            for prev_data in polarization_window {
+                if let (Some(&prev_idx), Some(&prev_sign)) = 
+                    (prev_data.polarizer_indices.get(pc_idx), prev_data.polarizer_signs.get(pc_idx)) {
+                    
+                    // Check sign at the previous polarizer's position
+                    if let Some(&value) = pc_values.get(prev_idx) {
+                        let current_sign_at_prev = value > 0.0;
+                        if current_sign_at_prev != prev_sign {
+                            flip_votes += 1;
+                        }
+                        total_votes += 1;
+                    }
+                }
+            }
+            
+            // Flip if majority vote says so
+            let should_flip = total_votes > 0 && flip_votes > total_votes / 2;
+            
+            if should_flip {
+                eprintln!(
+                    "Flipping PC {} polarizer from {} (sign: {}) to {} (sign: {})",
+                    pc_idx + 1,
+                    pca_result.sample_labels[current_polarizer_idx],
+                    current_sign,
+                    pca_result.sample_labels[polarizer_indices.last().copied().unwrap_or(0)],
+                    !current_sign
+                );
+                // Flip all values for this component
+                for coords in pca_result.coordinates.iter_mut() {
+                    if let Some(val) = coords.get_mut(pc_idx) {
+                        *val *= -1.0;
+                    }
+                }
+                polarizer_indices.push(current_polarizer_idx);
+                polarizer_signs.push(!current_sign);
+            } else {
+                polarizer_indices.push(current_polarizer_idx);
+                polarizer_signs.push(current_sign);
+            }
+        }
+    }
+    
+    PolarizationData {
+        polarizer_indices,
+        polarizer_signs,
+    }
 }
 
 fn output_similarity_line(
@@ -587,6 +680,12 @@ impl ClassicalMDS {
             n_components: actual_components,
         })
     }
+}
+
+#[derive(Clone)]
+pub struct PolarizationData {
+    pub polarizer_indices: Vec<usize>,  // One per PC component
+    pub polarizer_signs: Vec<bool>,     // One per PC component
 }
 
 pub fn build_distance_matrix(
