@@ -655,19 +655,17 @@ fn polarize_pca_result(
                         }
                     }
                 }
-            } else {
-                if let Some(&value) = pc_values.get(most_frequent_polarizer) {
-                    let current_sign_at_prev = value > 0.0;
-                    
-                    for prev_data in polarization_window.iter() {
-                        if let Some(&prev_idx) = prev_data.polarizer_indices.get(pc_idx) {
-                            if prev_idx == most_frequent_polarizer {
-                                if let Some(&prev_sign) = prev_data.polarizer_signs.get(pc_idx) {
-                                    if current_sign_at_prev != prev_sign {
-                                        flip_votes += 1;
-                                    }
-                                    total_votes += 1;
+            } else if let Some(&value) = pc_values.get(most_frequent_polarizer) {
+                let current_sign_at_prev = value > 0.0;
+                
+                for prev_data in polarization_window.iter() {
+                    if let Some(&prev_idx) = prev_data.polarizer_indices.get(pc_idx) {
+                        if prev_idx == most_frequent_polarizer {
+                            if let Some(&prev_sign) = prev_data.polarizer_signs.get(pc_idx) {
+                                if current_sign_at_prev != prev_sign {
+                                    flip_votes += 1;
                                 }
+                                total_votes += 1;
                             }
                         }
                     }
