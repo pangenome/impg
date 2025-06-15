@@ -7,6 +7,9 @@ use std::collections::BTreeMap;
 use std::io;
 use rayon::prelude::*;
 
+use std::sync::{Arc, Mutex};
+use std::io::Write;
+
 #[derive(Clone)]
 struct GroupInfo {
     name: String,
@@ -109,7 +112,7 @@ pub fn compute_and_output_similarities(
     } else {
         if include_header {
             println!(
-                "group.a\tgroup.b\tgroup.a.length\tgroup.b.length\tintersection\t{}",
+                "chrom\tstart\tend\tgroup.a\tgroup.b\tgroup.a.length\tgroup.b.length\tintersection\t{}",
                 if emit_distances {
                     "jaccard.distance\tcosine.distance\tdice.distance\testimated.difference.rate"
                 } else {
@@ -117,7 +120,7 @@ pub fn compute_and_output_similarities(
                 }
             );
         }
-        
+
         let output = compute_similarities_for_region(
             impg,
             results,
@@ -127,6 +130,7 @@ pub fn compute_and_output_similarities(
             emit_all_pairs,
             delim,
             delim_pos,
+            region
         )?;
         print!("{}", output);
     }
@@ -150,11 +154,27 @@ pub fn compute_and_output_similarities_parallel(
     polarize_n_prev: usize,
 ) -> io::Result<()> {
     if !perform_pca {
-        // Case 1: No PCA - compute similarities in parallel
-        let similarities_results: Vec<_> = all_query_data
+        // Case 1: No PCA - compute similarities in parallel and write directly
+
+        // Write header once before parallel processing
+        println!(
+            "chrom\tstart\tend\tgroup.a\tgroup.b\tgroup.a.length\tgroup.b.length\tintersection\t{}",
+            if emit_distances {
+                "jaccard.distance\tcosine.distance\tdice.distance\testimated.difference.rate"
+            } else {
+                "jaccard.similarity\tcosine.similarity\tdice.similarity\testimated.identity"
+            }
+        );
+
+        // Create a mutex to protect stdout
+        let stdout_mutex = Arc::new(Mutex::new(io::stdout()));
+
+        // Process in parallel and write results directly
+        all_query_data
             .par_iter()
-            .map(|(query_intervals, _)| {
-                compute_similarities_for_region(
+            .try_for_each(|(query_intervals, region)| -> io::Result<()> {
+                // Compute similarities for this region
+                let similarity_output = compute_similarities_for_region(
                     impg,
                     query_intervals,
                     fasta_index,
@@ -163,24 +183,17 @@ pub fn compute_and_output_similarities_parallel(
                     emit_all_pairs,
                     delim,
                     delim_pos,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        println!(
-            "group.a\tgroup.b\tgroup.a.length\tgroup.b.length\tintersection\t{}",
-            if emit_distances {
-                "jaccard.distance\tcosine.distance\tdice.distance\testimated.difference.rate"
-            } else {
-                "jaccard.similarity\tcosine.similarity\tdice.similarity\testimated.identity"
-            }
-        );
-
-        // Output results (with header only for first)
-        for similarity_output in similarities_results.iter() {
-            print!("{}", similarity_output);
-        }
-    } else {
+                    Some(region.as_str()),  // Pass the region
+                )?;
+                
+                // Lock stdout and write both header and results
+                let stdout = stdout_mutex.lock().unwrap();
+                let mut handle = stdout.lock();
+                write!(handle, "{}", similarity_output)?;
+                
+                Ok(())
+            })?;
+        } else {
         // Case 2 & 3: PCA with or without polarization
         let mut pca_results: Vec<_> = all_query_data
             .par_iter()
@@ -231,10 +244,14 @@ fn compute_similarities_for_region(
     emit_all_pairs: bool,
     delim: Option<char>,
     delim_pos: u16,
+    region: Option<&str>,
 ) -> io::Result<String> {
     let (groups, msa_chars) = prepare_groups_and_msa(
         impg, results, fasta_index, scoring_params, delim, delim_pos
     )?;
+
+    // Parse region once
+    let (chrom, start, end) = parse_region_string(region);
 
     let mut output = String::new();
 
@@ -259,6 +276,9 @@ fn compute_similarities_for_region(
             // Output (i,j)
             format_similarity_line(
                 &mut output,
+                &chrom,
+                &start,
+                &end,
                 &group_a.name,
                 &group_b.name,
                 group_a.total_length,
@@ -272,6 +292,9 @@ fn compute_similarities_for_region(
             if i != j {
                 format_similarity_line(
                     &mut output,
+                    &chrom,
+                    &start,
+                    &end,
                     &group_b.name,
                     &group_a.name,
                     group_b.total_length,
@@ -400,6 +423,9 @@ fn calculate_intersection(
 // Unified function for formatting similarity output
 fn format_similarity_line(
     output: &mut String,
+    chrom: &str,
+    start: &str,
+    end: &str,
     name_a: &str,
     name_b: &str,
     len_a: usize,
@@ -409,8 +435,8 @@ fn format_similarity_line(
     emit_distances: bool,
 ) {
     output.push_str(&format!(
-        "{}\t{}\t{}\t{}\t{}\t",
-        name_a, name_b, len_a, len_b, intersection
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t",
+        chrom, start, end, name_a, name_b, len_a, len_b, intersection
     ));
 
     if emit_distances {
@@ -689,23 +715,7 @@ impl PcaResult {
         let mut output = String::new();
 
         // Parse region to extract chrom, start, end
-        let (chrom, start, end) = if let Some(region_str) = region {
-            if let Some(colon_pos) = region_str.rfind(':') {
-                let chrom = &region_str[..colon_pos];
-                let range_part = &region_str[colon_pos + 1..];
-                if let Some(dash_pos) = range_part.find('-') {
-                    let start_str = &range_part[..dash_pos];
-                    let end_str = &range_part[dash_pos + 1..];
-                    (chrom.to_string(), start_str.to_string(), end_str.to_string())
-                } else {
-                    (region_str.to_string(), "0".to_string(), "0".to_string())
-                }
-            } else {
-                (region_str.to_string(), "0".to_string(), "0".to_string())
-            }
-        } else {
-            ("unknown".to_string(), "0".to_string(), "0".to_string())
-        };
+        let (chrom, start, end) = parse_region_string(region);
 
         // Header
         if include_header {
@@ -890,4 +900,25 @@ pub fn build_distance_matrix(
     }
 
     Ok((distance_matrix, labels))
+}
+
+// Add this function to the similarity module
+fn parse_region_string(region: Option<&str>) -> (String, String, String) {
+    if let Some(region_str) = region {
+        if let Some(colon_pos) = region_str.rfind(':') {
+            let chrom = &region_str[..colon_pos];
+            let range_part = &region_str[colon_pos + 1..];
+            if let Some(dash_pos) = range_part.find('-') {
+                let start_str = &range_part[..dash_pos];
+                let end_str = &range_part[dash_pos + 1..];
+                (chrom.to_string(), start_str.to_string(), end_str.to_string())
+            } else {
+                (region_str.to_string(), "0".to_string(), "0".to_string())
+            }
+        } else {
+            (region_str.to_string(), "0".to_string(), "0".to_string())
+        }
+    } else {
+        ("unknown".to_string(), "0".to_string(), "0".to_string())
+    }
 }
