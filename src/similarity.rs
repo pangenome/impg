@@ -19,27 +19,27 @@ struct GroupInfo {
 
 #[derive(Clone)]
 struct SimilarityMetrics {
-    jaccard: f64,
-    cosine: f64,
-    dice: f64,
-    estimated_identity: f64,
+    jaccard: f32,
+    cosine: f32,
+    dice: f32,
+    estimated_identity: f32,
 }
 
 impl SimilarityMetrics {
     fn new(intersection: usize, len_a: usize, len_b: usize) -> Self {
         let union = (len_a + len_b).saturating_sub(intersection);
         let jaccard = if union > 0 {
-            intersection as f64 / union as f64
+            intersection as f32 / union as f32
         } else {
             0.0
         };
         let cosine = if len_a > 0 && len_b > 0 {
-            (intersection as f64) / ((len_a as f64).sqrt() * (len_b as f64).sqrt())
+            (intersection as f32) / ((len_a as f32).sqrt() * (len_b as f32).sqrt())
         } else {
             0.0
         };
         let dice = if (len_a + len_b) > 0 {
-            2.0 * (intersection as f64) / (len_a + len_b) as f64
+            2.0 * (intersection as f32) / (len_a + len_b) as f32
         } else {
             0.0
         };
@@ -57,7 +57,7 @@ impl SimilarityMetrics {
         }
     }
 
-    fn get_by_name(&self, name: &str) -> f64 {
+    fn get_by_name(&self, name: &str) -> f32 {
         match name {
             "jaccard" => self.jaccard,
             "cosine" => self.cosine,
@@ -458,7 +458,7 @@ fn format_similarity_line(
     }
 }
 
-fn format_value(value: f64) -> String {
+fn format_value(value: f32) -> String {
     let formatted = format!("{:.7}", value);
     let trimmed = formatted.trim_end_matches('0');
     if trimmed.ends_with('.') {
@@ -600,7 +600,7 @@ fn polarize_pca_result(
     for pc_idx in 0..pca_result.n_components {
         debug!("Processing PC{}", pc_idx + 1);
         
-        let pc_values: Vec<f64> = pca_result.coordinates
+        let pc_values: Vec<f32> = pca_result.coordinates
             .iter()
             .map(|coords| coords.get(pc_idx).copied().unwrap_or(0.0))
             .collect();
@@ -703,9 +703,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PcaResult {
-    pub coordinates: Vec<Vec<f64>>,
-    pub eigenvalues: Vec<f64>,
-    pub explained_variance_ratio: Vec<f64>,
+    pub coordinates: Vec<Vec<f32>>,
+    pub eigenvalues: Vec<f32>,
+    pub explained_variance_ratio: Vec<f32>,
     pub sample_labels: Vec<String>,
     pub n_components: usize,
 }
@@ -750,7 +750,7 @@ impl ClassicalMDS {
 
     pub fn fit_transform(
         &self,
-        distance_matrix: &DMatrix<f64>,
+        distance_matrix: &DMatrix<f32>,
         labels: Vec<String>,
     ) -> Result<PcaResult, String> {
         let n = distance_matrix.nrows();
@@ -782,7 +782,7 @@ impl ClassicalMDS {
         let d_squared = distance_matrix.map(|x| x * x);
 
         // Step 2: Double centering: B = -0.5 * C * D^2 * C
-        let ones_matrix = DMatrix::from_element(n, n, 1.0 / n as f64);
+        let ones_matrix = DMatrix::from_element(n, n, 1.0 / n as f32);
         let identity = DMatrix::identity(n, n);
         let centering_matrix = identity - ones_matrix;
         let b_matrix = -0.5 * &centering_matrix * d_squared * &centering_matrix;
@@ -793,7 +793,7 @@ impl ClassicalMDS {
         let eigenvectors = eigen_decomp.eigenvectors;
 
         // Step 4: Sort eigenvalues and eigenvectors in descending order
-        let mut eigen_pairs: Vec<(f64, usize)> = eigenvalues
+        let mut eigen_pairs: Vec<(f32, usize)> = eigenvalues
             .iter()
             .enumerate()
             .map(|(i, &val)| (val, i))
@@ -828,15 +828,15 @@ impl ClassicalMDS {
         }
 
         // Calculate explained variance ratios using all positive eigenvalues
-        let positive_eigenvalues: Vec<f64> = eigen_pairs
+        let positive_eigenvalues: Vec<f32> = eigen_pairs
             .iter()
             .filter(|(val, _)| *val > 1e-10)
             .map(|(val, _)| *val)
             .collect();
 
-        let total_variance: f64 = positive_eigenvalues.iter().sum();
+        let total_variance: f32 = positive_eigenvalues.iter().sum();
 
-        let explained_variance_ratio: Vec<f64> = result_eigenvalues
+        let explained_variance_ratio: Vec<f32> = result_eigenvalues
             .iter()
             .map(|val| if total_variance > 0.0 { val / total_variance } else { 0.0 })
             .collect();
@@ -858,9 +858,9 @@ pub struct PolarizationData {
 }
 
 pub fn build_distance_matrix(
-    similarities: &[(String, String, f64)],
+    similarities: &[(String, String, f32)],
     similarity_type: &str,
-) -> Result<(DMatrix<f64>, Vec<String>), io::Error> {
+) -> Result<(DMatrix<f32>, Vec<String>), io::Error> {
     // Collect unique labels
     let mut labels = std::collections::BTreeSet::new();
     for (a, b, _) in similarities {
