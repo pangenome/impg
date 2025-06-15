@@ -682,10 +682,9 @@ fn main() -> io::Result<()> {
                 let targets = impg::partition::parse_bed_file(target_bed)?;
                 info!("Parsed {} target ranges from BED file", targets.len());
 
-                // Rolling window for polarization
-                let mut polarization_window: Vec<impg::similarity::PolarizationData> = Vec::new();
-
-                for (idx, (target_name, target_range, _name)) in targets.into_iter().enumerate() {
+                // Query all regions serially (already parallelized internally)
+                let mut all_query_data = Vec::new();
+                for (target_name, target_range, _name) in targets {
                     let mut results = perform_query(
                         &impg,
                         &target_name,
@@ -712,30 +711,25 @@ fn main() -> io::Result<()> {
                         .map(|(query_interval, _, _)| *query_interval)
                         .collect();
 
-                    // Compute and output similarities
                     let region = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
-                    impg::similarity::compute_and_output_similarities(
-                        &impg,
-                        &query_intervals,
-                        &fasta_index,
-                        scoring_params,
-                        distances,
-                        all,
-                        delim,
-                        delim_pos,
-                        pca,
-                        pca_components,
-                        &pca_measure,
-                        Some(&region),
-                        idx == 0, // Only include header for the first region
-                        if pca && polarize_n_prev > 0 {
-                            Some(&mut polarization_window)
-                        } else {
-                            None
-                        },
-                        polarize_n_prev,
-                    )?;
+                    all_query_data.push((query_intervals, region));
                 }
+
+                // Process all regions in parallel
+                impg::similarity::compute_and_output_similarities_parallel(
+                    &impg,
+                    all_query_data,
+                    &fasta_index,
+                    scoring_params,
+                    distances,
+                    all,
+                    delim,
+                    delim_pos,
+                    pca,
+                    pca_components,
+                    &pca_measure,
+                    polarize_n_prev,
+                )?;
             } else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -1861,3 +1855,4 @@ fn print_stats(impg: &Impg) {
         }
     }
 }
+

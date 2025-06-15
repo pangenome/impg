@@ -5,6 +5,7 @@ use coitrees::Interval;
 use log::{debug, warn};
 use std::collections::BTreeMap;
 use std::io;
+use rayon::prelude::*;
 
 #[derive(Clone)]
 struct GroupInfo {
@@ -803,4 +804,401 @@ pub fn build_distance_matrix(
     }
 
     Ok((distance_matrix, labels))
+}
+
+// Parallel batch processing for multiple regions
+pub fn compute_and_output_similarities_parallel(
+    impg: &Impg,
+    all_query_data: Vec<(Vec<Interval<u32>>, String)>, // (intervals, region)
+    fasta_index: &FastaIndex,
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+    emit_distances: bool,
+    emit_all_pairs: bool,
+    delim: Option<char>,
+    delim_pos: u16,
+    perform_pca: bool,
+    n_components: usize,
+    pca_similarity: &str,
+    polarize_n_prev: usize,
+) -> io::Result<()> {
+    if !perform_pca {
+        // Case 1: No PCA - compute similarities in parallel, output directly
+        let similarities_results: Vec<_> = all_query_data
+            .par_iter()
+            .map(|(query_intervals, region)| {
+                compute_similarities_for_region(
+                    impg,
+                    query_intervals,
+                    fasta_index,
+                    scoring_params,
+                    emit_distances,
+                    emit_all_pairs,
+                    delim,
+                    delim_pos,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Output results (with header only for first)
+        for (idx, similarity_output) in similarities_results.iter().enumerate() {
+            if idx == 0 {
+                println!(
+                    "group.a\tgroup.b\tgroup.a.length\tgroup.b.length\tintersection\t{}",
+                    if emit_distances {
+                        "jaccard.distance\tcosine.distance\tdice.distance\testimated.difference.rate"
+                    } else {
+                        "jaccard.similarity\tcosine.similarity\tdice.similarity\testimated.identity"
+                    }
+                );
+            }
+            print!("{}", similarity_output);
+        }
+    } else if polarize_n_prev == 0 {
+        // Case 2: PCA without polarization - compute PCA in parallel, output directly
+        let pca_results: Vec<_> = all_query_data
+            .par_iter()
+            .map(|(query_intervals, region)| {
+                compute_pca_for_region(
+                    impg,
+                    query_intervals,
+                    fasta_index,
+                    scoring_params,
+                    emit_all_pairs,
+                    delim,
+                    delim_pos,
+                    n_components,
+                    pca_similarity,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Output results directly
+        for (idx, pca_result) in pca_results.iter().enumerate() {
+            print!("{}", pca_result.to_tsv(
+                Some(&all_query_data[idx].1),
+                idx == 0
+            ));
+        }
+    } else {
+        // Case 3: PCA with polarization - compute PCA in parallel, collect results, then polarize
+        let mut pca_results: Vec<_> = all_query_data
+            .par_iter()
+            .map(|(query_intervals, region)| {
+                compute_pca_for_region(
+                    impg,
+                    query_intervals,
+                    fasta_index,
+                    scoring_params,
+                    emit_all_pairs,
+                    delim,
+                    delim_pos,
+                    n_components,
+                    pca_similarity,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Apply polarization and output sequentially
+        let mut polarization_window: Vec<PolarizationData> = Vec::new();
+        
+        for (idx, pca_result) in pca_results.iter_mut().enumerate() {
+            // Apply polarization
+            let polarization_data = polarize_pca_result(
+                pca_result,
+                &polarization_window
+            );
+            
+            // Update rolling window
+            polarization_window.push(polarization_data);
+            if polarization_window.len() > polarize_n_prev {
+                polarization_window.remove(0);
+            }
+
+            // Output result
+            print!("{}", pca_result.to_tsv(
+                Some(&all_query_data[idx].1),
+                idx == 0
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+// Helper function for computing similarities for a single region
+fn compute_similarities_for_region(
+    impg: &Impg,
+    results: &[Interval<u32>],
+    fasta_index: &FastaIndex,
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+    emit_distances: bool,
+    emit_all_pairs: bool,
+    delim: Option<char>,
+    delim_pos: u16,
+) -> io::Result<String> {
+    // Generate POA graph and get sequences
+    let (graph, sequence_metadata) =
+        prepare_poa_graph_and_sequences(impg, results, fasta_index, scoring_params)?;
+
+    let msa = graph.generate_msa();
+
+    // Convert MSA strings to Vec<char> once for efficient indexing
+    let msa_chars: Vec<Vec<char>> = msa.iter().map(|s| s.chars().collect()).collect();
+
+    // Create groups and calculate their lengths
+    let groups = create_groups(&sequence_metadata, delim, delim_pos)?;
+
+    let mut output = String::new();
+
+    // Compute only upper triangle (including diagonal) and output both (i,j) and (j,i)
+    for i in 0..groups.len() {
+        for j in i..groups.len() {
+            let group_a = &groups[i];
+            let group_b = &groups[j];
+
+            let intersection = if delim.is_none()
+                && group_a.sequence_indices.len() == 1
+                && group_b.sequence_indices.len() == 1
+            {
+                // Fast path for individual sequences (no grouping)
+                calculate_pairwise_intersection(
+                    &msa_chars[group_a.sequence_indices[0]],
+                    &msa_chars[group_b.sequence_indices[0]],
+                )
+            } else {
+                // General case for groups
+                calculate_group_intersection(
+                    &msa_chars,
+                    &group_a.sequence_indices,
+                    &group_b.sequence_indices,
+                )
+            };
+
+            if intersection == 0 && !emit_all_pairs {
+                // Skip both (i,j) and (j,i) if no intersection
+                continue;
+            }
+
+            // Compute metrics once
+            let union =
+                (group_a.total_length + group_b.total_length).saturating_sub(intersection);
+            let jaccard = if union > 0 {
+                intersection as f64 / union as f64
+            } else {
+                0.0
+            };
+            let cosine = if group_a.total_length > 0 && group_b.total_length > 0 {
+                (intersection as f64)
+                    / ((group_a.total_length as f64).sqrt()
+                        * (group_b.total_length as f64).sqrt())
+            } else {
+                0.0
+            };
+            let dice = if (group_a.total_length + group_b.total_length) > 0 {
+                2.0 * (intersection as f64)
+                    / (group_a.total_length + group_b.total_length) as f64
+            } else {
+                0.0
+            };
+            let estimated_identity = if jaccard > 0.0 {
+                2.0 * jaccard / (1.0 + jaccard)
+            } else {
+                0.0
+            };
+
+            // Format output for (i,j)
+            format_similarity_line(
+                &mut output,
+                &group_a.name,
+                &group_b.name,
+                group_a.total_length,
+                group_b.total_length,
+                intersection,
+                jaccard,
+                cosine,
+                dice,
+                estimated_identity,
+                emit_distances,
+            );
+
+            // Output (j,i) if different from (i,j)
+            if i != j {
+                format_similarity_line(
+                    &mut output,
+                    &group_b.name,
+                    &group_a.name,
+                    group_b.total_length,
+                    group_a.total_length,
+                    intersection,
+                    jaccard,
+                    cosine,
+                    dice,
+                    estimated_identity,
+                    emit_distances,
+                );
+            }
+        }
+    }
+
+    Ok(output)
+}
+
+// Helper function for formatting similarity line
+fn format_similarity_line(
+    output: &mut String,
+    name_a: &str,
+    name_b: &str,
+    len_a: usize,
+    len_b: usize,
+    intersection: usize,
+    jaccard: f64,
+    cosine: f64,
+    dice: f64,
+    estimated_identity: f64,
+    emit_distances: bool,
+) {
+    output.push_str(&format!(
+        "{}\t{}\t{}\t{}\t{}\t",
+        name_a, name_b, len_a, len_b, intersection
+    ));
+
+    if emit_distances {
+        output.push_str(&format!(
+            "{}\t{}\t{}\t{}\n",
+            format_similarity_value(1.0 - jaccard),
+            format_similarity_value(1.0 - cosine),
+            format_similarity_value(1.0 - dice),
+            format_similarity_value(1.0 - estimated_identity)
+        ));
+    } else {
+        output.push_str(&format!(
+            "{}\t{}\t{}\t{}\n",
+            format_similarity_value(jaccard),
+            format_similarity_value(cosine),
+            format_similarity_value(dice),
+            format_similarity_value(estimated_identity)
+        ));
+    }
+}
+
+// Helper function for computing PCA for a single region
+fn compute_pca_for_region(
+    impg: &Impg,
+    results: &[Interval<u32>],
+    fasta_index: &FastaIndex,
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+    emit_all_pairs: bool,
+    delim: Option<char>,
+    delim_pos: u16,
+    n_components: usize,
+    pca_similarity: &str,
+) -> io::Result<PcaResult> {
+    // Generate POA graph and get sequences
+    let (graph, sequence_metadata) =
+        prepare_poa_graph_and_sequences(impg, results, fasta_index, scoring_params)?;
+
+    let msa = graph.generate_msa();
+
+    // Convert MSA strings to Vec<char> once for efficient indexing
+    let msa_chars: Vec<Vec<char>> = msa.iter().map(|s| s.chars().collect()).collect();
+
+    // Create groups and calculate their lengths
+    let groups = create_groups(&sequence_metadata, delim, delim_pos)?;
+
+    // Collect all similarities for PCA
+    let mut similarities = Vec::new();
+
+    for i in 0..groups.len() {
+        for j in i..groups.len() {
+            let group_a = &groups[i];
+            let group_b = &groups[j];
+
+            let intersection = if delim.is_none()
+                && group_a.sequence_indices.len() == 1
+                && group_b.sequence_indices.len() == 1
+            {
+                // Fast path for individual sequences (no grouping)
+                calculate_pairwise_intersection(
+                    &msa_chars[group_a.sequence_indices[0]],
+                    &msa_chars[group_b.sequence_indices[0]],
+                )
+            } else {
+                // General case for groups
+                calculate_group_intersection(
+                    &msa_chars,
+                    &group_a.sequence_indices,
+                    &group_b.sequence_indices,
+                )
+            };
+
+            if intersection > 0 || emit_all_pairs {
+                // Compute the requested similarity measure
+                let similarity = match pca_similarity {
+                    "jaccard" => {
+                        let union = (group_a.total_length + group_b.total_length)
+                            .saturating_sub(intersection);
+                        if union > 0 {
+                            intersection as f64 / union as f64
+                        } else {
+                            0.0
+                        }
+                    }
+                    "cosine" => {
+                        if group_a.total_length > 0 && group_b.total_length > 0 {
+                            (intersection as f64)
+                                / ((group_a.total_length as f64).sqrt()
+                                    * (group_b.total_length as f64).sqrt())
+                        } else {
+                            0.0
+                        }
+                    }
+                    "dice" => {
+                        if (group_a.total_length + group_b.total_length) > 0 {
+                            2.0 * (intersection as f64)
+                                / (group_a.total_length + group_b.total_length) as f64
+                        } else {
+                            0.0
+                        }
+                    }
+                    _ => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Unknown similarity measure: {}", pca_similarity),
+                        ))
+                    }
+                };
+
+                // Add both (i,j) and (j,i) if different
+                similarities.push((group_a.name.clone(), group_b.name.clone(), similarity));
+                if i != j {
+                    similarities.push((group_b.name.clone(), group_a.name.clone(), similarity));
+                }
+            }
+        }
+    }
+
+    // Build distance matrix and perform MDS
+    let (distance_matrix, labels) = build_distance_matrix(&similarities, pca_similarity)?;
+    let mds = ClassicalMDS::new(n_components);
+
+    match mds.fit_transform(&distance_matrix, labels) {
+        Ok(pca_result) => Ok(pca_result),
+        Err(e) => {
+            // Check if it's an insufficient samples error
+            if e.contains("fewer than 2 samples") || e.contains("theoretical maximum") {
+                // Create empty result with appropriate labels
+                let labels: Vec<String> = groups.iter().map(|g| g.name.clone()).collect();
+                let empty_pca_result = PcaResult {
+                    coordinates: vec![vec![0.0; n_components]; labels.len()],
+                    eigenvalues: vec![0.0; n_components],
+                    explained_variance_ratio: vec![0.0; n_components],
+                    sample_labels: labels,
+                    n_components: 0,
+                };
+                Ok(empty_pca_result)
+            } else {
+                Err(io::Error::other(format!("PCA/MDS failed: {}", e)))
+            }
+        }
+    }
 }
