@@ -193,7 +193,7 @@ pub fn compute_and_output_similarities_parallel(
                 
                 Ok(())
             })?;
-        } else {
+    } else {
         // Case 2 & 3: PCA with or without polarization
         let mut pca_results: Vec<_> = all_query_data
             .par_iter()
