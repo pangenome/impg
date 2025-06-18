@@ -331,8 +331,12 @@ enum Args {
         pca_components: usize,
 
         /// Number of previous regions to use for adaptive polarization (0 to disable)
-        #[clap(long, value_parser, requires = "pca", default_value_t = 3)]
+        #[clap(long, value_parser, requires = "pca", conflicts_with = "polarize_guide_samples", default_value_t = 3)]
         polarize_n_prev: usize,
+
+        /// Comma-separated names of the samples to use for adaptive polarization
+        #[clap(long, value_parser, conflicts_with = "polarize_n_prev", value_delimiter = ',')]
+        polarize_guide_samples: Option<Vec<String>>,
 
         /// Similarity measure to use for PCA distance matrix ("jaccard", "cosine", or "dice")
         #[clap(long, value_parser, requires = "pca", default_value = "jaccard")]
@@ -587,6 +591,7 @@ fn main() -> io::Result<()> {
             pca_components,
             pca_measure,
             polarize_n_prev,
+            polarize_guide_samples,
         } => {
             // Validate delim_pos
             if delim_pos < 1 {
@@ -729,6 +734,7 @@ fn main() -> io::Result<()> {
                     pca_components,
                     &pca_measure,
                     polarize_n_prev,
+                    polarize_guide_samples.as_deref(),
                 )?;
             } else {
                 return Err(io::Error::new(

@@ -152,6 +152,8 @@ pub fn compute_and_output_similarities_parallel(
     n_components: usize,
     pca_similarity: &str,
     polarize_n_prev: usize,
+    guide_samples: Option<&[String]>,
+    
 ) -> io::Result<()> {
     if !perform_pca {
         // Case 1: No PCA - compute similarities in parallel and write directly
@@ -212,18 +214,25 @@ pub fn compute_and_output_similarities_parallel(
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Apply polarization if needed and output
-        let mut polarization_window: Vec<PolarizationData> = Vec::new();
-        
-        for (idx, pca_result) in pca_results.iter_mut().enumerate() {
-            if polarize_n_prev > 0 {
+        // Apply polarization if needed
+        if let Some(guide_samples) = guide_samples {
+            // Guide sample polarization
+            polarize_pca_result_with_guides(&mut pca_results, &guide_samples)?;
+        } else if polarize_n_prev > 0 {
+            // Adaptive polarization
+            let mut polarization_window: Vec<PolarizationData> = Vec::new();
+            
+            for pca_result in pca_results.iter_mut() {
                 let polarization_data = polarize_pca_result(pca_result, &polarization_window);
                 polarization_window.push(polarization_data);
                 if polarization_window.len() > polarize_n_prev {
                     polarization_window.remove(0);
                 }
             }
+        }
 
+         // Output results
+        for (idx, pca_result) in pca_results.iter().enumerate() {
             print!("{}", pca_result.to_tsv(
                 Some(&all_query_data[idx].1),
                 idx == 0
@@ -590,6 +599,54 @@ fn calculate_group_intersection(
     intersection
 }
 
+// PCA/MDS related structures and implementations
+use nalgebra::{DMatrix, SymmetricEigen};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PcaResult {
+    pub coordinates: Vec<Vec<f32>>,
+    pub eigenvalues: Vec<f32>,
+    pub explained_variance_ratio: Vec<f32>,
+    pub sample_labels: Vec<String>,
+    pub n_components: usize,
+}
+
+impl PcaResult {
+    pub fn to_tsv(&self, region: Option<&str>, include_header: bool) -> String {
+        let mut output = String::new();
+
+        // Parse region to extract chrom, start, end
+        let (chrom, start, end) = parse_region_string(region);
+
+        // Header
+        if include_header {
+            output.push_str("chrom\tstart\tend\tgroup\tPC.rank\tPC.value\n");
+        }
+        
+        // Data rows - one row per group per PC component
+        for (group_idx, group_name) in self.sample_labels.iter().enumerate() {
+            for pc_idx in 0..self.n_components {
+                let pc_rank = pc_idx + 1;
+                let pc_value = self.coordinates[group_idx][pc_idx];
+                
+                output.push_str(&format!(
+                    "{}\t{}\t{}\t{}\t{}\t{:.7}\n",
+                    chrom, start, end, group_name, pc_rank, pc_value
+                ));
+            }
+        }
+
+        output
+    }
+}
+
+#[derive(Clone)]
+pub struct PolarizationData {
+    pub polarizer_indices: Vec<usize>,  // One per PC component
+    pub polarizer_signs: Vec<bool>,     // One per PC component
+}
+
 fn polarize_pca_result(
     pca_result: &mut PcaResult,
     polarization_window: &[PolarizationData],
@@ -695,46 +752,99 @@ fn polarize_pca_result(
     }
 }
 
-// PCA/MDS related structures and implementations
-use nalgebra::{DMatrix, SymmetricEigen};
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PcaResult {
-    pub coordinates: Vec<Vec<f32>>,
-    pub eigenvalues: Vec<f32>,
-    pub explained_variance_ratio: Vec<f32>,
-    pub sample_labels: Vec<String>,
-    pub n_components: usize,
-}
-
-impl PcaResult {
-    pub fn to_tsv(&self, region: Option<&str>, include_header: bool) -> String {
-        let mut output = String::new();
-
-        // Parse region to extract chrom, start, end
-        let (chrom, start, end) = parse_region_string(region);
-
-        // Header
-        if include_header {
-            output.push_str("chrom\tstart\tend\tgroup\tPC.rank\tPC.value\n");
+fn polarize_pca_result_with_guides(
+    pca_results: &mut [PcaResult],
+    guide_samples: &[String],
+) -> io::Result<()> {
+    // Find guide sample indices
+    let mut guide_indices: Vec<Vec<Option<usize>>> = Vec::new();
+    
+    for guide_name in guide_samples {
+        let mut indices = Vec::new();
+        for result in pca_results.iter() {
+            let idx = result.sample_labels
+                .iter()
+                .position(|label| label == guide_name);
+            indices.push(idx);
         }
+        guide_indices.push(indices);
+    }
+    
+    // Check if all guide samples exist in at least one window
+    for (i, guide_name) in guide_samples.iter().enumerate() {
+        if guide_indices[i].iter().all(|idx| idx.is_none()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Guide sample '{}' not found in any window", guide_name),
+            ));
+        }
+    }
+    
+    // Process each PC component
+    let n_components = pca_results.get(0).map(|r| r.n_components).unwrap_or(0);
+    
+    for pc_idx in 0..n_components {
+        // For each guide sample, track flip decisions
+        let mut guide_flip_decisions: Vec<Vec<i32>> = vec![vec![0; pca_results.len()]; guide_samples.len()];
         
-        // Data rows - one row per group per PC component
-        for (group_idx, group_name) in self.sample_labels.iter().enumerate() {
-            for pc_idx in 0..self.n_components {
-                let pc_rank = pc_idx + 1;
-                let pc_value = self.coordinates[group_idx][pc_idx];
-                
-                output.push_str(&format!(
-                    "{}\t{}\t{}\t{}\t{}\t{:.7}\n",
-                    chrom, start, end, group_name, pc_rank, pc_value
-                ));
+        for (guide_idx, guide_sample_indices) in guide_indices.iter().enumerate() {
+            let mut prev_value: Option<f32> = None;
+            
+            for (window_idx, result) in pca_results.iter().enumerate() {
+                if window_idx == 0 {
+                    // First window: no flip
+                    guide_flip_decisions[guide_idx][window_idx] = 0;
+                    
+                    // Set prev_value if guide sample exists in this window
+                    if let Some(sample_idx) = guide_sample_indices[window_idx] {
+                        prev_value = result.coordinates[sample_idx].get(pc_idx).copied();
+                    }
+                } else if let Some(sample_idx) = guide_sample_indices[window_idx] {
+                    if let Some(current_value) = result.coordinates[sample_idx].get(pc_idx).copied() {
+                        if let Some(prev) = prev_value {
+                            // Check if closer to flipped or unflipped previous value
+                            let dist_to_prev = (current_value - prev).abs();
+                            let dist_to_flipped = (current_value - (-prev)).abs();
+                            
+                            if dist_to_flipped < dist_to_prev {
+                                guide_flip_decisions[guide_idx][window_idx] = 1; // Flip
+                                prev_value = Some(-current_value); // Update with flipped value
+                            } else {
+                                guide_flip_decisions[guide_idx][window_idx] = -1; // Don't flip
+                                prev_value = Some(current_value);
+                            }
+                        } else {
+                            guide_flip_decisions[guide_idx][window_idx] = 0;
+                        }
+                    } else {
+                        guide_flip_decisions[guide_idx][window_idx] = 0;
+                    }
+                } else {
+                    // Guide sample not present in this window
+                    guide_flip_decisions[guide_idx][window_idx] = 0;
+                }
             }
         }
-
-        output
+        
+        // Get consensus flip decision for each window
+        for window_idx in 0..pca_results.len() {
+            let consensus: i32 = guide_flip_decisions
+                .iter()
+                .map(|decisions| decisions[window_idx])
+                .sum();
+            
+            if consensus > 0 {
+                // Flip this window's PC values
+                for coords in pca_results[window_idx].coordinates.iter_mut() {
+                    if let Some(val) = coords.get_mut(pc_idx) {
+                        *val *= -1.0;
+                    }
+                }
+            }
+        }
     }
+    
+    Ok(())
 }
 
 pub struct ClassicalMDS {
@@ -847,12 +957,6 @@ impl ClassicalMDS {
             n_components: actual_components,
         })
     }
-}
-
-#[derive(Clone)]
-pub struct PolarizationData {
-    pub polarizer_indices: Vec<usize>,  // One per PC component
-    pub polarizer_signs: Vec<bool>,     // One per PC component
 }
 
 pub fn build_distance_matrix(
