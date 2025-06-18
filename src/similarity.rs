@@ -69,79 +69,7 @@ impl SimilarityMetrics {
 
 pub fn compute_and_output_similarities(
     impg: &Impg,
-    results: &[Interval<u32>],
-    fasta_index: &FastaIndex,
-    scoring_params: (u8, u8, u8, u8, u8, u8),
-    emit_distances: bool,
-    emit_all_pairs: bool,
-    delim: Option<char>,
-    delim_pos: u16,
-    perform_pca: bool,
-    n_components: usize,
-    pca_similarity: &str,
-    region: Option<&str>,
-    include_header: bool,
-    polarization_window: Option<&mut Vec<PolarizationData>>,
-    polarize_n_prev: usize,
-) -> io::Result<()> {
-    if perform_pca {
-        let mut pca_result = compute_pca_for_region(
-            impg,
-            results,
-            fasta_index,
-            scoring_params,
-            emit_all_pairs,
-            delim,
-            delim_pos,
-            n_components,
-            pca_similarity,
-        )?;
-
-        // Apply polarization if enabled
-        if let Some(window) = polarization_window {
-            let polarization_data = polarize_pca_result(&mut pca_result, window);
-            
-            // Update rolling window
-            window.push(polarization_data);
-            if window.len() > polarize_n_prev {
-                window.remove(0);
-            }
-        }
-        
-        print!("{}", pca_result.to_tsv(region, include_header));
-    } else {
-        if include_header {
-            println!(
-                "chrom\tstart\tend\tgroup.a\tgroup.b\tgroup.a.length\tgroup.b.length\tintersection\t{}",
-                if emit_distances {
-                    "jaccard.distance\tcosine.distance\tdice.distance\testimated.difference.rate"
-                } else {
-                    "jaccard.similarity\tcosine.similarity\tdice.similarity\testimated.identity"
-                }
-            );
-        }
-
-        let output = compute_similarities_for_region(
-            impg,
-            results,
-            fasta_index,
-            scoring_params,
-            emit_distances,
-            emit_all_pairs,
-            delim,
-            delim_pos,
-            region
-        )?;
-        print!("{}", output);
-    }
-
-    Ok(())
-}
-
-// Parallel batch processing for multiple regions
-pub fn compute_and_output_similarities_parallel(
-    impg: &Impg,
-    all_query_data: Vec<(Vec<Interval<u32>>, String)>,
+    query_data: Vec<(Vec<Interval<u32>>, String)>,
     fasta_index: &FastaIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
     emit_distances: bool,
@@ -153,7 +81,6 @@ pub fn compute_and_output_similarities_parallel(
     pca_similarity: &str,
     polarize_n_prev: usize,
     guide_samples: Option<&[String]>,
-    
 ) -> io::Result<()> {
     if !perform_pca {
         // Case 1: No PCA - compute similarities in parallel and write directly
@@ -172,7 +99,7 @@ pub fn compute_and_output_similarities_parallel(
         let stdout_mutex = Arc::new(Mutex::new(io::stdout()));
 
         // Process in parallel and write results directly
-        all_query_data
+        query_data
             .par_iter()
             .try_for_each(|(query_intervals, region)| -> io::Result<()> {
                 // Compute similarities for this region
@@ -185,7 +112,7 @@ pub fn compute_and_output_similarities_parallel(
                     emit_all_pairs,
                     delim,
                     delim_pos,
-                    Some(region.as_str()),  // Pass the region
+                    Some(region),
                 )?;
                 
                 // Lock stdout and write both header and results
@@ -197,7 +124,7 @@ pub fn compute_and_output_similarities_parallel(
             })?;
     } else {
         // Case 2 & 3: PCA with or without polarization
-        let mut pca_results: Vec<_> = all_query_data
+        let mut pca_results: Vec<_> = query_data
             .par_iter()
             .map(|(query_intervals, _)| {
                 compute_pca_for_region(
@@ -231,10 +158,10 @@ pub fn compute_and_output_similarities_parallel(
             }
         }
 
-         // Output results
+        // Output results
         for (idx, pca_result) in pca_results.iter().enumerate() {
             print!("{}", pca_result.to_tsv(
-                Some(&all_query_data[idx].1),
+                Some(&query_data[idx].1),
                 idx == 0
             ));
         }
@@ -781,7 +708,7 @@ fn polarize_pca_result_with_guides(
     }
     
     // Process each PC component
-    let n_components = pca_results.get(0).map(|r| r.n_components).unwrap_or(0);
+    let n_components = pca_results.get(0).map(|r| r.n_components).unwrap();
     
     for pc_idx in 0..n_components {
         // For each guide sample, track flip decisions

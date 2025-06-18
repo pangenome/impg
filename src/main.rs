@@ -663,12 +663,13 @@ fn main() -> io::Result<()> {
                     .iter()
                     .map(|(query_interval, _, _)| *query_interval)
                     .collect();
-
-                // Compute and output similarities
                 let region = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
+                let query_data = vec![(query_intervals, region)];
+                
+                // Compute and output similarities
                 impg::similarity::compute_and_output_similarities(
                     &impg,
-                    &query_intervals,
+                    query_data,
                     &fasta_index,
                     scoring_params,
                     distances,
@@ -678,10 +679,8 @@ fn main() -> io::Result<()> {
                     pca,
                     pca_components,
                     &pca_measure,
-                    Some(&region),
-                    true,
-                    None, // No polarization window for single query
-                    0,
+                    0,  // No polarization for single query
+                    None, // No polarization for single query
                 )?;
             } else if let Some(target_bed) = &query.target_bed {
                 let targets = impg::partition::parse_bed_file(target_bed)?;
@@ -721,7 +720,7 @@ fn main() -> io::Result<()> {
                 }
 
                 // Process all regions in parallel
-                impg::similarity::compute_and_output_similarities_parallel(
+                impg::similarity::compute_and_output_similarities(
                     &impg,
                     all_query_data,
                     &fasta_index,
