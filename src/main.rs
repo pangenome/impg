@@ -330,8 +330,16 @@ enum Args {
         #[clap(long, value_parser, requires = "pca", default_value_t = 2)]
         pca_components: usize,
 
+        /// Number of previous regions to use for adaptive polarization (0 to disable)
+        #[clap(long, value_parser, requires = "pca", conflicts_with = "polarize_guide_samples", default_value_t = 3)]
+        polarize_n_prev: usize,
+
+        /// Comma-separated names of the samples to use for adaptive polarization
+        #[clap(long, value_parser, conflicts_with = "polarize_n_prev", value_delimiter = ',')]
+        polarize_guide_samples: Option<Vec<String>>,
+
         /// Similarity measure to use for PCA distance matrix ("jaccard", "cosine", or "dice")
-        #[clap(long, value_parser, default_value = "jaccard")]
+        #[clap(long, value_parser, requires = "pca", default_value = "jaccard")]
         pca_measure: String,
     },
     /// Print alignment statistics
@@ -582,6 +590,8 @@ fn main() -> io::Result<()> {
             pca,
             pca_components,
             pca_measure,
+            polarize_n_prev,
+            polarize_guide_samples,
         } => {
             // Validate delim_pos
             if delim_pos < 1 {
@@ -653,12 +663,13 @@ fn main() -> io::Result<()> {
                     .iter()
                     .map(|(query_interval, _, _)| *query_interval)
                     .collect();
-
-                // Compute and output similarities
                 let region = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
+                let query_data = vec![(query_intervals, region)];
+                
+                // Compute and output similarities
                 impg::similarity::compute_and_output_similarities(
                     &impg,
-                    &query_intervals,
+                    query_data,
                     &fasta_index,
                     scoring_params,
                     distances,
@@ -668,13 +679,16 @@ fn main() -> io::Result<()> {
                     pca,
                     pca_components,
                     &pca_measure,
-                    Some(&region),
-                    true
+                    0,  // No polarization for single query
+                    None, // No polarization for single query
                 )?;
             } else if let Some(target_bed) = &query.target_bed {
                 let targets = impg::partition::parse_bed_file(target_bed)?;
                 info!("Parsed {} target ranges from BED file", targets.len());
-                for (idx, (target_name, target_range, _name)) in targets.into_iter().enumerate() {
+
+                // Query all regions serially (already parallelized internally)
+                let mut all_query_data = Vec::new();
+                for (target_name, target_range, _name) in targets {
                     let mut results = perform_query(
                         &impg,
                         &target_name,
@@ -701,24 +715,26 @@ fn main() -> io::Result<()> {
                         .map(|(query_interval, _, _)| *query_interval)
                         .collect();
 
-                    // Compute and output similarities
                     let region = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
-                    impg::similarity::compute_and_output_similarities(
-                        &impg,
-                        &query_intervals,
-                        &fasta_index,
-                        scoring_params,
-                        distances,
-                        all,
-                        delim,
-                        delim_pos,
-                        pca,
-                        pca_components,
-                        &pca_measure,
-                        Some(&region),
-                        idx == 0, // Only include header for the first region
-                    )?;
+                    all_query_data.push((query_intervals, region));
                 }
+
+                // Process all regions in parallel
+                impg::similarity::compute_and_output_similarities(
+                    &impg,
+                    all_query_data,
+                    &fasta_index,
+                    scoring_params,
+                    distances,
+                    all,
+                    delim,
+                    delim_pos,
+                    pca,
+                    pca_components,
+                    &pca_measure,
+                    polarize_n_prev,
+                    polarize_guide_samples.as_deref(),
+                )?;
             } else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -1844,3 +1860,4 @@ fn print_stats(impg: &Impg) {
         }
     }
 }
+

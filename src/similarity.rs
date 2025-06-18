@@ -2,9 +2,13 @@ use crate::faidx::FastaIndex;
 use crate::graph::prepare_poa_graph_and_sequences;
 use crate::impg::Impg;
 use coitrees::Interval;
-use log::warn;
+use log::{debug, warn};
 use std::collections::BTreeMap;
 use std::io;
+use rayon::prelude::*;
+
+use std::sync::{Arc, Mutex};
+use std::io::Write;
 
 #[derive(Clone)]
 struct GroupInfo {
@@ -13,9 +17,59 @@ struct GroupInfo {
     total_length: usize,
 }
 
+#[derive(Clone)]
+struct SimilarityMetrics {
+    jaccard: f32,
+    cosine: f32,
+    dice: f32,
+    estimated_identity: f32,
+}
+
+impl SimilarityMetrics {
+    fn new(intersection: usize, len_a: usize, len_b: usize) -> Self {
+        let union = (len_a + len_b).saturating_sub(intersection);
+        let jaccard = if union > 0 {
+            intersection as f32 / union as f32
+        } else {
+            0.0
+        };
+        let cosine = if len_a > 0 && len_b > 0 {
+            (intersection as f32) / ((len_a as f32).sqrt() * (len_b as f32).sqrt())
+        } else {
+            0.0
+        };
+        let dice = if (len_a + len_b) > 0 {
+            2.0 * (intersection as f32) / (len_a + len_b) as f32
+        } else {
+            0.0
+        };
+        let estimated_identity = if jaccard > 0.0 {
+            2.0 * jaccard / (1.0 + jaccard)
+        } else {
+            0.0
+        };
+
+        Self {
+            jaccard,
+            cosine,
+            dice,
+            estimated_identity,
+        }
+    }
+
+    fn get_by_name(&self, name: &str) -> f32 {
+        match name {
+            "jaccard" => self.jaccard,
+            "cosine" => self.cosine,
+            "dice" => self.dice,
+            _ => self.jaccard,
+        }
+    }
+}
+
 pub fn compute_and_output_similarities(
     impg: &Impg,
-    results: &[Interval<u32>],
+    query_data: Vec<(Vec<Interval<u32>>, String)>,
     fasta_index: &FastaIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
     emit_distances: bool,
@@ -25,126 +79,15 @@ pub fn compute_and_output_similarities(
     perform_pca: bool,
     n_components: usize,
     pca_similarity: &str,
-    region: Option<&str>,
-    include_header: bool,
+    polarize_n_prev: usize,
+    guide_samples: Option<&[String]>,
 ) -> io::Result<()> {
-    // Generate POA graph and get sequences
-    let (graph, sequence_metadata) =
-        prepare_poa_graph_and_sequences(impg, results, fasta_index, scoring_params)?;
+    if !perform_pca {
+        // Case 1: No PCA - compute similarities in parallel and write directly
 
-    let msa = graph.generate_msa();
-
-    // Convert MSA strings to Vec<char> once for efficient indexing
-    let msa_chars: Vec<Vec<char>> = msa.iter().map(|s| s.chars().collect()).collect();
-
-    // Create groups and calculate their lengths
-    let groups = create_groups(&sequence_metadata, delim, delim_pos)?;
-
-    if perform_pca {
-        // Collect all similarities for PCA
-        let mut similarities = Vec::new();
-
-        for i in 0..groups.len() {
-            for j in i..groups.len() {
-                let group_a = &groups[i];
-                let group_b = &groups[j];
-
-                let intersection = if delim.is_none()
-                    && group_a.sequence_indices.len() == 1
-                    && group_b.sequence_indices.len() == 1
-                {
-                    // Fast path for individual sequences (no grouping)
-                    calculate_pairwise_intersection(
-                        &msa_chars[group_a.sequence_indices[0]],
-                        &msa_chars[group_b.sequence_indices[0]],
-                    )
-                } else {
-                    // General case for groups
-                    calculate_group_intersection(
-                        &msa_chars,
-                        &group_a.sequence_indices,
-                        &group_b.sequence_indices,
-                    )
-                };
-
-                if intersection > 0 || emit_all_pairs {
-                    // Compute the requested similarity measure
-                    let similarity = match pca_similarity {
-                        "jaccard" => {
-                            let union = (group_a.total_length + group_b.total_length)
-                                .saturating_sub(intersection);
-                            if union > 0 {
-                                intersection as f64 / union as f64
-                            } else {
-                                0.0
-                            }
-                        }
-                        "cosine" => {
-                            if group_a.total_length > 0 && group_b.total_length > 0 {
-                                (intersection as f64)
-                                    / ((group_a.total_length as f64).sqrt()
-                                        * (group_b.total_length as f64).sqrt())
-                            } else {
-                                0.0
-                            }
-                        }
-                        "dice" => {
-                            if (group_a.total_length + group_b.total_length) > 0 {
-                                2.0 * (intersection as f64)
-                                    / (group_a.total_length + group_b.total_length) as f64
-                            } else {
-                                0.0
-                            }
-                        }
-                        _ => {
-                            return Err(io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                format!("Unknown similarity measure: {}", pca_similarity),
-                            ))
-                        }
-                    };
-
-                    // Add both (i,j) and (j,i) if different
-                    similarities.push((group_a.name.clone(), group_b.name.clone(), similarity));
-                    if i != j {
-                        similarities.push((group_b.name.clone(), group_a.name.clone(), similarity));
-                    }
-                }
-            }
-        }
-
-        // Build distance matrix and perform MDS
-        let (distance_matrix, labels) = build_distance_matrix(&similarities, pca_similarity)?;
-        let mds = ClassicalMDS::new(n_components);
-
-        match mds.fit_transform(&distance_matrix, labels) {
-            Ok(pca_result) => {
-                print!("{}", pca_result.to_tsv(region, include_header));
-            }
-            Err(e) => {
-                // Check if it's an insufficient samples error
-                if e.contains("fewer than 2 samples") || e.contains("theoretical maximum") {
-                    // Create empty result with appropriate labels
-                    let labels: Vec<String> = groups.iter().map(|g| g.name.clone()).collect();
-                    let empty_pca_result = PcaResult {
-                        coordinates: vec![vec![0.0; n_components]; labels.len()],
-                        eigenvalues: vec![0.0; n_components],
-                        explained_variance_ratio: vec![0.0; n_components],
-                        sample_labels: labels,
-                        n_components: 0,
-                    };
-                    print!("{}", empty_pca_result.to_tsv(region, include_header));
-                } else {
-                    return Err(io::Error::other(
-                        format!("PCA/MDS failed: {}", e),
-                    ));
-                }
-            }
-        }
-    } else {
-        // Output all similarities
+        // Write header once before parallel processing
         println!(
-            "group.a\tgroup.b\tgroup.a.length\tgroup.b.length\tintersection\t{}",
+            "chrom\tstart\tend\tgroup.a\tgroup.b\tgroup.a.length\tgroup.b.length\tintersection\t{}",
             if emit_distances {
                 "jaccard.distance\tcosine.distance\tdice.distance\testimated.difference.rate"
             } else {
@@ -152,131 +95,312 @@ pub fn compute_and_output_similarities(
             }
         );
 
-        // Compute only upper triangle (including diagonal) and output both (i,j) and (j,i)
-        for i in 0..groups.len() {
-            for j in i..groups.len() {
-                let group_a = &groups[i];
-                let group_b = &groups[j];
+        // Create a mutex to protect stdout
+        let stdout_mutex = Arc::new(Mutex::new(io::stdout()));
 
-                let intersection = if delim.is_none()
-                    && group_a.sequence_indices.len() == 1
-                    && group_b.sequence_indices.len() == 1
-                {
-                    // Fast path for individual sequences (no grouping)
-                    calculate_pairwise_intersection(
-                        &msa_chars[group_a.sequence_indices[0]],
-                        &msa_chars[group_b.sequence_indices[0]],
-                    )
-                } else {
-                    // General case for groups
-                    calculate_group_intersection(
-                        &msa_chars,
-                        &group_a.sequence_indices,
-                        &group_b.sequence_indices,
-                    )
-                };
-
-                if intersection == 0 && !emit_all_pairs {
-                    // Skip both (i,j) and (j,i) if no intersection
-                    continue;
-                }
-
-                // Compute metrics once
-                let union =
-                    (group_a.total_length + group_b.total_length).saturating_sub(intersection);
-                let jaccard = if union > 0 {
-                    intersection as f64 / union as f64
-                } else {
-                    0.0
-                };
-                let cosine = if group_a.total_length > 0 && group_b.total_length > 0 {
-                    (intersection as f64)
-                        / ((group_a.total_length as f64).sqrt()
-                            * (group_b.total_length as f64).sqrt())
-                } else {
-                    0.0
-                };
-                let dice = if (group_a.total_length + group_b.total_length) > 0 {
-                    2.0 * (intersection as f64)
-                        / (group_a.total_length + group_b.total_length) as f64
-                } else {
-                    0.0
-                };
-                let estimated_identity = if jaccard > 0.0 {
-                    2.0 * jaccard / (1.0 + jaccard)
-                } else {
-                    0.0
-                };
-
-                // Output (i,j)
-                output_similarity_line(
-                    &group_a.name,
-                    &group_b.name,
-                    group_a.total_length,
-                    group_b.total_length,
-                    intersection,
-                    jaccard,
-                    cosine,
-                    dice,
-                    estimated_identity,
+        // Process in parallel and write results directly
+        query_data
+            .par_iter()
+            .try_for_each(|(query_intervals, region)| -> io::Result<()> {
+                // Compute similarities for this region
+                let similarity_output = compute_similarities_for_region(
+                    impg,
+                    query_intervals,
+                    fasta_index,
+                    scoring_params,
                     emit_distances,
-                );
+                    emit_all_pairs,
+                    delim,
+                    delim_pos,
+                    Some(region),
+                )?;
+                
+                // Lock stdout and write both header and results
+                let stdout = stdout_mutex.lock().unwrap();
+                let mut handle = stdout.lock();
+                write!(handle, "{}", similarity_output)?;
+                
+                Ok(())
+            })?;
+    } else {
+        // Case 2 & 3: PCA with or without polarization
+        let mut pca_results: Vec<_> = query_data
+            .par_iter()
+            .map(|(query_intervals, _)| {
+                compute_pca_for_region(
+                    impg,
+                    query_intervals,
+                    fasta_index,
+                    scoring_params,
+                    emit_all_pairs,
+                    delim,
+                    delim_pos,
+                    n_components,
+                    pca_similarity,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
-                // Output (j,i) if different from (i,j)
-                if i != j {
-                    output_similarity_line(
-                        &group_b.name,
-                        &group_a.name,
-                        group_b.total_length,
-                        group_a.total_length,
-                        intersection,
-                        jaccard,
-                        cosine,
-                        dice,
-                        estimated_identity,
-                        emit_distances,
-                    );
+        // Apply polarization if needed
+        if let Some(guide_samples) = guide_samples {
+            // Guide sample polarization
+            polarize_pca_result_with_guides(&mut pca_results, &guide_samples)?;
+        } else if polarize_n_prev > 0 {
+            // Adaptive polarization
+            let mut polarization_window: Vec<PolarizationData> = Vec::new();
+            
+            for pca_result in pca_results.iter_mut() {
+                let polarization_data = polarize_pca_result(pca_result, &polarization_window);
+                polarization_window.push(polarization_data);
+                if polarization_window.len() > polarize_n_prev {
+                    polarization_window.remove(0);
                 }
             }
+        }
+
+        // Output results
+        for (idx, pca_result) in pca_results.iter().enumerate() {
+            print!("{}", pca_result.to_tsv(
+                Some(&query_data[idx].1),
+                idx == 0
+            ));
         }
     }
 
     Ok(())
 }
 
-fn output_similarity_line(
+// Helper function for computing similarities for a single region
+fn compute_similarities_for_region(
+    impg: &Impg,
+    results: &[Interval<u32>],
+    fasta_index: &FastaIndex,
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+    emit_distances: bool,
+    emit_all_pairs: bool,
+    delim: Option<char>,
+    delim_pos: u16,
+    region: Option<&str>,
+) -> io::Result<String> {
+    let (groups, msa_chars) = prepare_groups_and_msa(
+        impg, results, fasta_index, scoring_params, delim, delim_pos
+    )?;
+
+    // Parse region once
+    let (chrom, start, end) = parse_region_string(region);
+
+    let mut output = String::new();
+
+    // Compute only upper triangle (including diagonal) and output both (i,j) and (j,i)
+    for i in 0..groups.len() {
+        for j in i..groups.len() {
+            let group_a = &groups[i];
+            let group_b = &groups[j];
+
+            let intersection = calculate_intersection(&msa_chars, group_a, group_b, delim.is_none());
+
+            if intersection == 0 && !emit_all_pairs {
+                continue;
+            }
+
+            let metrics = SimilarityMetrics::new(
+                intersection,
+                group_a.total_length,
+                group_b.total_length,
+            );
+
+            // Output (i,j)
+            format_similarity_line(
+                &mut output,
+                &chrom,
+                &start,
+                &end,
+                &group_a.name,
+                &group_b.name,
+                group_a.total_length,
+                group_b.total_length,
+                intersection,
+                &metrics,
+                emit_distances,
+            );
+
+            // Output (j,i) if different
+            if i != j {
+                format_similarity_line(
+                    &mut output,
+                    &chrom,
+                    &start,
+                    &end,
+                    &group_b.name,
+                    &group_a.name,
+                    group_b.total_length,
+                    group_a.total_length,
+                    intersection,
+                    &metrics,
+                    emit_distances,
+                );
+            }
+        }
+    }
+
+    Ok(output)
+}
+
+// Helper function for computing PCA for a single region
+fn compute_pca_for_region(
+    impg: &Impg,
+    results: &[Interval<u32>],
+    fasta_index: &FastaIndex,
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+    emit_all_pairs: bool,
+    delim: Option<char>,
+    delim_pos: u16,
+    n_components: usize,
+    pca_similarity: &str,
+) -> io::Result<PcaResult> {
+    let (groups, msa_chars) = prepare_groups_and_msa(
+        impg, results, fasta_index, scoring_params, delim, delim_pos
+    )?;
+
+    // Collect all similarities for PCA
+    let mut similarities = Vec::new();
+
+    for i in 0..groups.len() {
+        for j in i..groups.len() {
+            let group_a = &groups[i];
+            let group_b = &groups[j];
+
+            let intersection = calculate_intersection(&msa_chars, group_a, group_b, delim.is_none());
+
+            if intersection > 0 || emit_all_pairs {
+                let metrics = SimilarityMetrics::new(
+                    intersection,
+                    group_a.total_length,
+                    group_b.total_length,
+                );
+                let similarity = metrics.get_by_name(pca_similarity);
+
+                similarities.push((group_a.name.clone(), group_b.name.clone(), similarity));
+                if i != j {
+                    similarities.push((group_b.name.clone(), group_a.name.clone(), similarity));
+                }
+            }
+        }
+    }
+
+    // Build distance matrix and perform MDS
+    let (distance_matrix, labels) = build_distance_matrix(&similarities, pca_similarity)?;
+    let mds = ClassicalMDS::new(n_components);
+
+    match mds.fit_transform(&distance_matrix, labels) {
+        Ok(pca_result) => Ok(pca_result),
+        Err(e) => {
+            if e.contains("fewer than 2 samples") || e.contains("theoretical maximum") {
+                let labels: Vec<String> = groups.iter().map(|g| g.name.clone()).collect();
+                Ok(PcaResult {
+                    coordinates: vec![vec![0.0; n_components]; labels.len()],
+                    eigenvalues: vec![0.0; n_components],
+                    explained_variance_ratio: vec![0.0; n_components],
+                    sample_labels: labels,
+                    n_components: 0,
+                })
+            } else {
+                Err(io::Error::other(format!("PCA/MDS failed: {}", e)))
+            }
+        }
+    }
+}
+
+// Helper to prepare groups and MSA characters
+fn prepare_groups_and_msa(
+    impg: &Impg,
+    results: &[Interval<u32>],
+    fasta_index: &FastaIndex,
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+    delim: Option<char>,
+    delim_pos: u16,
+) -> io::Result<(Vec<GroupInfo>, Vec<Vec<char>>)> {
+    let (graph, sequence_metadata) =
+        prepare_poa_graph_and_sequences(impg, results, fasta_index, scoring_params)?;
+
+    let msa = graph.generate_msa();
+    let msa_chars: Vec<Vec<char>> = msa.iter().map(|s| s.chars().collect()).collect();
+    let groups = create_groups(&sequence_metadata, delim, delim_pos)?;
+
+    Ok((groups, msa_chars))
+}
+
+// Calculate intersection between two groups
+fn calculate_intersection(
+    msa_chars: &[Vec<char>],
+    group_a: &GroupInfo,
+    group_b: &GroupInfo,
+    is_individual: bool,
+) -> usize {
+    if is_individual
+        && group_a.sequence_indices.len() == 1
+        && group_b.sequence_indices.len() == 1
+    {
+        // Fast path for individual sequences
+        calculate_pairwise_intersection(
+            &msa_chars[group_a.sequence_indices[0]],
+            &msa_chars[group_b.sequence_indices[0]],
+        )
+    } else {
+        // General case for groups
+        calculate_group_intersection(
+            msa_chars,
+            &group_a.sequence_indices,
+            &group_b.sequence_indices,
+        )
+    }
+}
+
+// Unified function for formatting similarity output
+fn format_similarity_line(
+    output: &mut String,
+    chrom: &str,
+    start: &str,
+    end: &str,
     name_a: &str,
     name_b: &str,
     len_a: usize,
     len_b: usize,
     intersection: usize,
-    jaccard: f64,
-    cosine: f64,
-    dice: f64,
-    estimated_identity: f64,
+    metrics: &SimilarityMetrics,
     emit_distances: bool,
 ) {
-    print!(
-        "{}\t{}\t{}\t{}\t{}\t",
-        name_a, name_b, len_a, len_b, intersection
-    );
+    output.push_str(&format!(
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t",
+        chrom, start, end, name_a, name_b, len_a, len_b, intersection
+    ));
 
     if emit_distances {
-        println!(
-            "{}\t{}\t{}\t{}",
-            format_similarity_value(1.0 - jaccard),
-            format_similarity_value(1.0 - cosine),
-            format_similarity_value(1.0 - dice),
-            format_similarity_value(1.0 - estimated_identity)
-        );
+        output.push_str(&format!(
+            "{}\t{}\t{}\t{}\n",
+            format_value(1.0 - metrics.jaccard),
+            format_value(1.0 - metrics.cosine),
+            format_value(1.0 - metrics.dice),
+            format_value(1.0 - metrics.estimated_identity)
+        ));
     } else {
-        println!(
-            "{}\t{}\t{}\t{}",
-            format_similarity_value(jaccard),
-            format_similarity_value(cosine),
-            format_similarity_value(dice),
-            format_similarity_value(estimated_identity)
-        );
+        output.push_str(&format!(
+            "{}\t{}\t{}\t{}\n",
+            format_value(metrics.jaccard),
+            format_value(metrics.cosine),
+            format_value(metrics.dice),
+            format_value(metrics.estimated_identity)
+        ));
+    }
+}
+
+fn format_value(value: f32) -> String {
+    let formatted = format!("{:.7}", value);
+    let trimmed = formatted.trim_end_matches('0');
+    if trimmed.ends_with('.') {
+        trimmed.trim_end_matches('.').to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -402,26 +526,15 @@ fn calculate_group_intersection(
     intersection
 }
 
-fn format_similarity_value(value: f64) -> String {
-    let formatted = format!("{:.7}", value);
-    // Trim trailing zeros
-    let trimmed = formatted.trim_end_matches('0');
-    if trimmed.ends_with('.') {
-        // If we removed all decimal places, remove the decimal point too
-        trimmed.trim_end_matches('.').to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
+// PCA/MDS related structures and implementations
 use nalgebra::{DMatrix, SymmetricEigen};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PcaResult {
-    pub coordinates: Vec<Vec<f64>>,
-    pub eigenvalues: Vec<f64>,
-    pub explained_variance_ratio: Vec<f64>,
+    pub coordinates: Vec<Vec<f32>>,
+    pub eigenvalues: Vec<f32>,
+    pub explained_variance_ratio: Vec<f32>,
     pub sample_labels: Vec<String>,
     pub n_components: usize,
 }
@@ -431,23 +544,7 @@ impl PcaResult {
         let mut output = String::new();
 
         // Parse region to extract chrom, start, end
-        let (chrom, start, end) = if let Some(region_str) = region {
-            if let Some(colon_pos) = region_str.rfind(':') {
-                let chrom = &region_str[..colon_pos];
-                let range_part = &region_str[colon_pos + 1..];
-                if let Some(dash_pos) = range_part.find('-') {
-                    let start_str = &range_part[..dash_pos];
-                    let end_str = &range_part[dash_pos + 1..];
-                    (chrom.to_string(), start_str.to_string(), end_str.to_string())
-                } else {
-                    (region_str.to_string(), "0".to_string(), "0".to_string())
-                }
-            } else {
-                (region_str.to_string(), "0".to_string(), "0".to_string())
-            }
-        } else {
-            ("unknown".to_string(), "0".to_string(), "0".to_string())
-        };
+        let (chrom, start, end) = parse_region_string(region);
 
         // Header
         if include_header {
@@ -471,6 +568,212 @@ impl PcaResult {
     }
 }
 
+#[derive(Clone)]
+pub struct PolarizationData {
+    pub polarizer_indices: Vec<usize>,  // One per PC component
+    pub polarizer_signs: Vec<bool>,     // One per PC component
+}
+
+fn polarize_pca_result(
+    pca_result: &mut PcaResult,
+    polarization_window: &[PolarizationData],
+) -> PolarizationData {
+    let mut polarizer_indices = Vec::new();
+    let mut polarizer_signs = Vec::new();
+    
+    for pc_idx in 0..pca_result.n_components {
+        debug!("Processing PC{}", pc_idx + 1);
+        
+        let pc_values: Vec<f32> = pca_result.coordinates
+            .iter()
+            .map(|coords| coords.get(pc_idx).copied().unwrap_or(0.0))
+            .collect();
+        
+        // Find current polarizer
+        let (current_polarizer_idx, _) = pc_values
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
+            .unwrap();
+        
+        debug!("Current polarizer: [{}] {} (value: {:.3})",
+            current_polarizer_idx,
+            pca_result.sample_labels.get(current_polarizer_idx).unwrap(),
+            pc_values[current_polarizer_idx]
+        );
+        
+        if polarization_window.is_empty() || pc_idx >= polarization_window[0].polarizer_indices.len() {
+            polarizer_indices.push(current_polarizer_idx);
+            polarizer_signs.push(pc_values[current_polarizer_idx] > 0.0);
+        } else {
+            // Find most frequent polarizer from previous windows
+            let mut polarizer_counts: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+            for prev_data in polarization_window {
+                if let Some(&prev_idx) = prev_data.polarizer_indices.get(pc_idx) {
+                    *polarizer_counts.entry(prev_idx).or_insert(0) += 1;
+                }
+            }
+            
+            let most_frequent_polarizer = polarizer_counts
+                .iter()
+                .max_by_key(|(_, &count)| count)
+                .map(|(&idx, _)| idx)
+                .unwrap();
+            
+            // Determine flipping
+            let mut flip_votes = 0;
+            let mut total_votes = 0;
+            
+            if current_polarizer_idx == most_frequent_polarizer {
+                let current_sign = pc_values[current_polarizer_idx] > 0.0;
+                
+                for prev_data in polarization_window.iter() {
+                    if let Some(&prev_idx) = prev_data.polarizer_indices.get(pc_idx) {
+                        if prev_idx == current_polarizer_idx {
+                            if let Some(&prev_sign) = prev_data.polarizer_signs.get(pc_idx) {
+                                if current_sign != prev_sign {
+                                    flip_votes += 1;
+                                }
+                                total_votes += 1;
+                            }
+                        }
+                    }
+                }
+            } else if let Some(&value) = pc_values.get(most_frequent_polarizer) {
+                let current_sign_at_prev = value > 0.0;
+                
+                for prev_data in polarization_window.iter() {
+                    if let Some(&prev_idx) = prev_data.polarizer_indices.get(pc_idx) {
+                        if prev_idx == most_frequent_polarizer {
+                            if let Some(&prev_sign) = prev_data.polarizer_signs.get(pc_idx) {
+                                if current_sign_at_prev != prev_sign {
+                                    flip_votes += 1;
+                                }
+                                total_votes += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            let should_flip = total_votes > 0 && flip_votes > total_votes / 2;            
+            if should_flip {
+                debug!("Flipping all PC{} values", pc_idx + 1);
+                for coords in pca_result.coordinates.iter_mut() {
+                    if let Some(val) = coords.get_mut(pc_idx) {
+                        *val *= -1.0;
+                    }
+                }
+                polarizer_indices.push(current_polarizer_idx);
+                polarizer_signs.push(pc_values[current_polarizer_idx] <= 0.0);
+            } else {
+                polarizer_indices.push(current_polarizer_idx);
+                polarizer_signs.push(pc_values[current_polarizer_idx] > 0.0);
+            }
+        }
+    }
+    
+    PolarizationData {
+        polarizer_indices,
+        polarizer_signs,
+    }
+}
+
+fn polarize_pca_result_with_guides(
+    pca_results: &mut [PcaResult],
+    guide_samples: &[String],
+) -> io::Result<()> {
+    // Find guide sample indices
+    let mut guide_indices: Vec<Vec<Option<usize>>> = Vec::new();
+    
+    for guide_name in guide_samples {
+        let mut indices = Vec::new();
+        for result in pca_results.iter() {
+            let idx = result.sample_labels
+                .iter()
+                .position(|label| label == guide_name);
+            indices.push(idx);
+        }
+        guide_indices.push(indices);
+    }
+    
+    // Check if all guide samples exist in at least one window
+    for (i, guide_name) in guide_samples.iter().enumerate() {
+        if guide_indices[i].iter().all(|idx| idx.is_none()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Guide sample '{}' not found in any window", guide_name),
+            ));
+        }
+    }
+    
+    // Process each PC component
+    let n_components = pca_results.get(0).map(|r| r.n_components).unwrap();
+    
+    for pc_idx in 0..n_components {
+        // For each guide sample, track flip decisions
+        let mut guide_flip_decisions: Vec<Vec<i32>> = vec![vec![0; pca_results.len()]; guide_samples.len()];
+        
+        for (guide_idx, guide_sample_indices) in guide_indices.iter().enumerate() {
+            let mut prev_value: Option<f32> = None;
+            
+            for (window_idx, result) in pca_results.iter().enumerate() {
+                if window_idx == 0 {
+                    // First window: no flip
+                    guide_flip_decisions[guide_idx][window_idx] = 0;
+                    
+                    // Set prev_value if guide sample exists in this window
+                    if let Some(sample_idx) = guide_sample_indices[window_idx] {
+                        prev_value = result.coordinates[sample_idx].get(pc_idx).copied();
+                    }
+                } else if let Some(sample_idx) = guide_sample_indices[window_idx] {
+                    if let Some(current_value) = result.coordinates[sample_idx].get(pc_idx).copied() {
+                        if let Some(prev) = prev_value {
+                            // Check if closer to flipped or unflipped previous value
+                            let dist_to_prev = (current_value - prev).abs();
+                            let dist_to_flipped = (current_value - (-prev)).abs();
+                            
+                            if dist_to_flipped < dist_to_prev {
+                                guide_flip_decisions[guide_idx][window_idx] = 1; // Flip
+                                prev_value = Some(-current_value); // Update with flipped value
+                            } else {
+                                guide_flip_decisions[guide_idx][window_idx] = -1; // Don't flip
+                                prev_value = Some(current_value);
+                            }
+                        } else {
+                            guide_flip_decisions[guide_idx][window_idx] = 0;
+                        }
+                    } else {
+                        guide_flip_decisions[guide_idx][window_idx] = 0;
+                    }
+                } else {
+                    // Guide sample not present in this window
+                    guide_flip_decisions[guide_idx][window_idx] = 0;
+                }
+            }
+        }
+        
+        // Get consensus flip decision for each window
+        for window_idx in 0..pca_results.len() {
+            let consensus: i32 = guide_flip_decisions
+                .iter()
+                .map(|decisions| decisions[window_idx])
+                .sum();
+            
+            if consensus > 0 {
+                // Flip this window's PC values
+                for coords in pca_results[window_idx].coordinates.iter_mut() {
+                    if let Some(val) = coords.get_mut(pc_idx) {
+                        *val *= -1.0;
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(())
+}
+
 pub struct ClassicalMDS {
     n_components: usize,
 }
@@ -482,7 +785,7 @@ impl ClassicalMDS {
 
     pub fn fit_transform(
         &self,
-        distance_matrix: &DMatrix<f64>,
+        distance_matrix: &DMatrix<f32>,
         labels: Vec<String>,
     ) -> Result<PcaResult, String> {
         let n = distance_matrix.nrows();
@@ -514,7 +817,7 @@ impl ClassicalMDS {
         let d_squared = distance_matrix.map(|x| x * x);
 
         // Step 2: Double centering: B = -0.5 * C * D^2 * C
-        let ones_matrix = DMatrix::from_element(n, n, 1.0 / n as f64);
+        let ones_matrix = DMatrix::from_element(n, n, 1.0 / n as f32);
         let identity = DMatrix::identity(n, n);
         let centering_matrix = identity - ones_matrix;
         let b_matrix = -0.5 * &centering_matrix * d_squared * &centering_matrix;
@@ -525,7 +828,7 @@ impl ClassicalMDS {
         let eigenvectors = eigen_decomp.eigenvectors;
 
         // Step 4: Sort eigenvalues and eigenvectors in descending order
-        let mut eigen_pairs: Vec<(f64, usize)> = eigenvalues
+        let mut eigen_pairs: Vec<(f32, usize)> = eigenvalues
             .iter()
             .enumerate()
             .map(|(i, &val)| (val, i))
@@ -560,23 +863,17 @@ impl ClassicalMDS {
         }
 
         // Calculate explained variance ratios using all positive eigenvalues
-        let positive_eigenvalues: Vec<f64> = eigen_pairs
+        let positive_eigenvalues: Vec<f32> = eigen_pairs
             .iter()
             .filter(|(val, _)| *val > 1e-10)
             .map(|(val, _)| *val)
             .collect();
 
-        let total_variance: f64 = positive_eigenvalues.iter().sum();
+        let total_variance: f32 = positive_eigenvalues.iter().sum();
 
-        let explained_variance_ratio: Vec<f64> = result_eigenvalues
+        let explained_variance_ratio: Vec<f32> = result_eigenvalues
             .iter()
-            .map(|val| {
-                if total_variance > 0.0 {
-                    val / total_variance
-                } else {
-                    0.0
-                }
-            })
+            .map(|val| if total_variance > 0.0 { val / total_variance } else { 0.0 })
             .collect();
 
         Ok(PcaResult {
@@ -590,9 +887,9 @@ impl ClassicalMDS {
 }
 
 pub fn build_distance_matrix(
-    similarities: &[(String, String, f64)],
+    similarities: &[(String, String, f32)],
     similarity_type: &str,
-) -> Result<(DMatrix<f64>, Vec<String>), io::Error> {
+) -> Result<(DMatrix<f32>, Vec<String>), io::Error> {
     // Collect unique labels
     let mut labels = std::collections::BTreeSet::new();
     for (a, b, _) in similarities {
@@ -616,7 +913,7 @@ pub fn build_distance_matrix(
     for (label_a, label_b, similarity) in similarities {
         let i = label_to_idx[label_a];
         let j = label_to_idx[label_b];
-
+        
         // Convert similarity to distance based on similarity type
         let distance = match similarity_type {
             "jaccard" | "dice" | "cosine" => 1.0 - similarity,
@@ -627,10 +924,30 @@ pub fn build_distance_matrix(
                 ))
             }
         };
-
+        
         distance_matrix[(i, j)] = distance;
-        distance_matrix[(j, i)] = distance; // Ensure symmetry
     }
 
     Ok((distance_matrix, labels))
+}
+
+// Add this function to the similarity module
+fn parse_region_string(region: Option<&str>) -> (String, String, String) {
+    if let Some(region_str) = region {
+        if let Some(colon_pos) = region_str.rfind(':') {
+            let chrom = &region_str[..colon_pos];
+            let range_part = &region_str[colon_pos + 1..];
+            if let Some(dash_pos) = range_part.find('-') {
+                let start_str = &range_part[..dash_pos];
+                let end_str = &range_part[dash_pos + 1..];
+                (chrom.to_string(), start_str.to_string(), end_str.to_string())
+            } else {
+                (region_str.to_string(), "0".to_string(), "0".to_string())
+            }
+        } else {
+            (region_str.to_string(), "0".to_string(), "0".to_string())
+        }
+    } else {
+        ("unknown".to_string(), "0".to_string(), "0".to_string())
+    }
 }
