@@ -16,7 +16,7 @@ pub fn generate_gfa_from_intervals(
     impg: &Impg,
     results: &[Interval<u32>],
     fasta_index: &FastaIndex,
-    scoring_params: (u8, u8, u8, u8, u8, u8),
+    scoring_params: (i32, i32, i32, i32, i32, i32),
 ) -> String {
     // Prepare POA graph and sequences
     let (graph, sequence_metadata) =
@@ -127,7 +127,7 @@ pub fn generate_maf_from_intervals(
     impg: &Impg,
     results: &[Interval<u32>],
     fasta_index: &FastaIndex,
-    scoring_params: (u8, u8, u8, u8, u8, u8),
+    scoring_params: (i32, i32, i32, i32, i32, i32),
 ) -> String {
     // Prepare POA graph and sequences
     let (graph, sequence_metadata) =
@@ -144,7 +144,7 @@ pub fn prepare_poa_graph_and_sequences(
     impg: &Impg,
     results: &[Interval<u32>],
     fasta_index: &FastaIndex,
-    scoring_params: (u8, u8, u8, u8, u8, u8),
+    scoring_params: (i32, i32, i32, i32, i32, i32),
 ) -> io::Result<(SpoaGraph, Vec<SequenceMetadata>)> {
     // Create a SPOA graph
     let mut graph = SpoaGraph::new();
@@ -440,7 +440,7 @@ fn _convert_and_write_gfa<R: AsRef<str>, W: Write>(raw_gfa: R, writer: &mut W) -
     Ok(())
 }
 
-fn reverse_complement(seq: &[u8]) -> Vec<u8> {
+pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
     seq.iter()
         .rev()
         .map(|&base| match base {

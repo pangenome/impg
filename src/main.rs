@@ -92,7 +92,7 @@ impl GfaMafOpts {
     }
 
     /// Parse POA scoring parameters
-    fn parse_poa_scoring(&self) -> io::Result<(u8, u8, u8, u8, u8, u8)> {
+    fn parse_poa_scoring(&self) -> io::Result<(i32, i32, i32, i32, i32, i32)> {
         let parts: Vec<&str> = self.poa_scoring.split(',').collect();
         if parts.len() != 6 {
             return Err(io::Error::new(
@@ -101,8 +101,8 @@ impl GfaMafOpts {
             ));
         }
 
-        let parse_u8 = |s: &str, name: &str| {
-            s.parse::<u8>().map_err(|_| {
+        let parse_i32 = |s: &str, name: &str| {
+            s.parse::<i32>().map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!("Invalid {} value", name),
@@ -111,12 +111,12 @@ impl GfaMafOpts {
         };
 
         Ok((
-            parse_u8(parts[0], "match score")?,
-            parse_u8(parts[1], "mismatch cost")?,
-            parse_u8(parts[2], "gap opening 1 cost")?,
-            parse_u8(parts[3], "gap extension 1 cost")?,
-            parse_u8(parts[4], "gap opening 2 cost")?,
-            parse_u8(parts[5], "gap extension 2 cost")?,
+            parse_i32(parts[0], "match score")?,
+            parse_i32(parts[1], "mismatch cost")?,
+            parse_i32(parts[2], "gap opening 1 cost")?,
+            parse_i32(parts[3], "gap extension 1 cost")?,
+            parse_i32(parts[4], "gap opening 2 cost")?,
+            parse_i32(parts[5], "gap extension 2 cost")?,
         ))
     }
 
@@ -437,19 +437,48 @@ fn main() -> io::Result<()> {
                 None
             };
 
-            // Build FASTA index if GFA/MAF output is requested
-            let fasta_index = if output_format == "gfa" || output_format == "maf" {
-                let index = gfa_maf.build_fasta_index()?;
-                if index.is_none() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("FASTA files are required for '{}' output format. Use --fasta-files or --fasta-list", output_format),
-                    ));
+        // Build FASTA index if GFA/MAF output is requested or if FASTA files are provided
+        let fasta_index = {
+            // Check if FASTA files were specified
+            let fasta_specified = gfa_maf.fasta_files.is_some() || gfa_maf.fasta_list.is_some();
+            
+            // Check if FASTA is required for output format
+            let fasta_required = output_format == "gfa" || output_format == "maf";
+            
+            if fasta_required && !fasta_specified {
+                // Error: GFA/MAF output requires FASTA files but none were provided
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("FASTA files are required for '{}' output format. Use --fasta-files or --fasta-list", output_format),
+                ));
+            }
+            
+            if fasta_specified || fasta_required {
+                // Try to build the index
+                match gfa_maf.build_fasta_index() {
+                    Ok(Some(index)) => Some(index),
+                    Ok(None) => {
+                        // This shouldn't happen if fasta_specified is true, but handle it anyway
+                        if fasta_required {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!("FASTA files are required for '{}' output format but could not be loaded", output_format),
+                            ));
+                        }
+                        None
+                    }
+                    Err(e) => {
+                        // Error reading FASTA files
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Failed to build FASTA index: {}", e),
+                        ));
+                    }
                 }
-                index
             } else {
                 None
-            };
+            }
+        };
 
             let impg = initialize_impg(&common)?;
 
@@ -466,6 +495,8 @@ fn main() -> io::Result<()> {
                     query.max_depth,
                     query.min_transitive_len,
                     query.min_distance_between_ranges,
+                    fasta_index.as_ref(),
+                    scoring_params
                 );
 
                 // Output results based on the format
@@ -531,6 +562,8 @@ fn main() -> io::Result<()> {
                         query.max_depth,
                         query.min_transitive_len,
                         query.min_distance_between_ranges,
+                        fasta_index.as_ref(),
+                        scoring_params
                     );
 
                     // Output results based on the format
@@ -663,6 +696,8 @@ fn main() -> io::Result<()> {
                     query.max_depth,
                     query.min_transitive_len,
                     query.min_distance_between_ranges,
+                    None,
+                    None
                 );
 
                 // Merge intervals if needed
@@ -714,6 +749,8 @@ fn main() -> io::Result<()> {
                         query.max_depth,
                         query.min_transitive_len,
                         query.min_distance_between_ranges,
+                        None,
+                        None
                     );
 
                     // Merge intervals if needed
@@ -1062,6 +1099,8 @@ fn perform_query(
     max_depth: u16,
     min_transitive_len: i32,
     min_distance_between_ranges: i32,
+    fasta_index: Option<&FastaIndex>,
+    penalties: Option<(i32, i32, i32, i32, i32, i32)>,
 ) -> Vec<AdjustedInterval> {
     let (target_start, target_end) = target_range;
     let target_id = impg
@@ -1110,6 +1149,8 @@ fn perform_query(
             target_end,
             store_cigar,
             min_identity,
+            fasta_index,
+            penalties,
         )
     };
 
@@ -1243,7 +1284,7 @@ pub fn output_results_gfa(
     fasta_index: &FastaIndex,
     _name: Option<String>,
     merge_distance: i32,
-    scoring_params: (u8, u8, u8, u8, u8, u8),
+    scoring_params: (i32, i32, i32, i32, i32, i32),
 ) -> io::Result<()> {
     // Merge intervals if needed
     merge_query_adjusted_intervals(results, merge_distance, true);
@@ -1270,7 +1311,7 @@ pub fn output_results_maf(
     fasta_index: &FastaIndex,
     _name: Option<String>,
     merge_distance: i32,
-    scoring_params: (u8, u8, u8, u8, u8, u8),
+    scoring_params: (i32, i32, i32, i32, i32, i32),
 ) -> io::Result<()> {
     // Merge intervals if needed
     merge_query_adjusted_intervals(results, merge_distance, true);

@@ -25,3 +25,4 @@ libc = "0.2.174"
 spoa_rs = { git = "https://github.com/AndreaGuarracino/spoa-rs.git" }
 
 nalgebra = "0.33.2"
+lib_tracepoints = { git = "https://github.com/AndreaGuarracino/lib_tracepoints"}

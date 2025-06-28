@@ -596,6 +596,7 @@ dependencies = [
  "clap",
  "coitrees",
  "env_logger",
+ "lib_tracepoints",
  "libc",
  "log",
  "nalgebra",
@@ -655,6 +656,19 @@ name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+
+[[package]]
+name = "lib_tracepoints"
+version = "0.1.0"
+source = "git+https://github.com/AndreaGuarracino/lib_tracepoints#a27b40b12cdd15790be6be5fe2bc0517301014cc"
+dependencies = [
+ "lib_wfa2",
+]
+
+[[package]]
+name = "lib_wfa2"
+version = "0.1.0"
+source = "git+https://github.com/AndreaGuarracino/lib_wfa2#879c59adc1ffe67056ba38b7a27adf33d3595348"
 
 [[package]]
 name = "libc"
