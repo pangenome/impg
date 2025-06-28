@@ -567,11 +567,11 @@ impl Impg {
                                 )
                             }
                             (Err(e), _) => {
-                                debug!("Failed to fetch query sequence: {}", e);
+                                error!("Failed to fetch query sequence: {}", e);
                                 panic!("");
                             }
                             (_, Err(e)) => {
-                                debug!("Failed to fetch target sequence: {}", e);
+                                error!("Failed to fetch target sequence: {}", e);
                                 panic!("");
                             }
                         }
