@@ -384,19 +384,48 @@ fn main() -> io::Result<()> {
                 None
             };
 
-            // Build FASTA index if GFA/MAF output is requested
-            let fasta_index = if output_format == "gfa" || output_format == "maf" {
-                let index = gfa_maf.build_fasta_index()?;
-                if index.is_none() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("FASTA files are required for '{}' output format. Use --fasta-files or --fasta-list", output_format),
-                    ));
+        // Build FASTA index if GFA/MAF output is requested or if FASTA files are provided
+        let fasta_index = {
+            // Check if FASTA files were specified
+            let fasta_specified = gfa_maf.fasta_files.is_some() || gfa_maf.fasta_list.is_some();
+            
+            // Check if FASTA is required for output format
+            let fasta_required = output_format == "gfa" || output_format == "maf";
+            
+            if fasta_required && !fasta_specified {
+                // Error: GFA/MAF output requires FASTA files but none were provided
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("FASTA files are required for '{}' output format. Use --fasta-files or --fasta-list", output_format),
+                ));
+            }
+            
+            if fasta_specified || fasta_required {
+                // Try to build the index
+                match gfa_maf.build_fasta_index() {
+                    Ok(Some(index)) => Some(index),
+                    Ok(None) => {
+                        // This shouldn't happen if fasta_specified is true, but handle it anyway
+                        if fasta_required {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!("FASTA files are required for '{}' output format but could not be loaded", output_format),
+                            ));
+                        }
+                        None
+                    }
+                    Err(e) => {
+                        // Error reading FASTA files
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Failed to build FASTA index: {}", e),
+                        ));
+                    }
                 }
-                index
             } else {
                 None
-            };
+            }
+        };
 
             let impg = initialize_impg(&common)?;
 
@@ -672,13 +701,45 @@ fn main() -> io::Result<()> {
             // Parse POA scoring parameters
             let scoring_params = gfa_maf.parse_poa_scoring()?;
 
-            // Build FASTA index (always required for similarity)
-            let fasta_index = gfa_maf.build_fasta_index()?.ok_or_else(|| {
-                io::Error::new(
+        // Build FASTA index (always required for similarity or if FASTA files are provided)
+        let fasta_index = {
+            // Check if FASTA files were specified
+            let fasta_specified = gfa_maf.fasta_files.is_some() || gfa_maf.fasta_list.is_some();
+            
+            // FASTA is always required for similarity computation
+            let fasta_required = true;
+            
+            if fasta_required && !fasta_specified {
+                // Error: similarity requires FASTA files but none were provided
+                return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "FASTA files are required for similarity computation",
-                )
-            })?;
+                    "FASTA files are required for similarity computation. Use --fasta-files or --fasta-list",
+                ));
+            }
+            
+            if fasta_specified || fasta_required {
+                // Try to build the index
+                match gfa_maf.build_fasta_index() {
+                    Ok(Some(index)) => index,
+                    Ok(None) => {
+                        // This shouldn't happen if fasta_specified is true, but handle it anyway
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "FASTA files are required for similarity computation but could not be loaded",
+                        ));
+                    }
+                    Err(e) => {
+                        // Error reading FASTA files
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Failed to build FASTA index: {}", e),
+                        ));
+                    }
+                }
+            } else {
+                unreachable!("FASTA is always required for similarity")
+            }
+        };
 
             let impg = initialize_impg(&common)?;
 
