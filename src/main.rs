@@ -386,7 +386,14 @@ fn main() -> io::Result<()> {
 
             // Build FASTA index if GFA/MAF output is requested
             let fasta_index = if output_format == "gfa" || output_format == "maf" {
-                gfa_maf.build_fasta_index()?
+                let index = gfa_maf.build_fasta_index()?;
+                if index.is_none() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("FASTA files are required for '{}' output format. Use --fasta-files or --fasta-list", output_format),
+                    ));
+                }
+                index
             } else {
                 None
             };
@@ -432,7 +439,14 @@ fn main() -> io::Result<()> {
 
             // Build FASTA index if GFA/MAF output is requested
             let fasta_index = if output_format == "gfa" || output_format == "maf" {
-                gfa_maf.build_fasta_index()?
+                let index = gfa_maf.build_fasta_index()?;
+                if index.is_none() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("FASTA files are required for '{}' output format. Use --fasta-files or --fasta-list", output_format),
+                    ));
+                }
+                index
             } else {
                 None
             };
