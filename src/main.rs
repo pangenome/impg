@@ -1129,6 +1129,8 @@ fn perform_query(
             min_distance_between_ranges,
             store_cigar,
             min_identity,
+            fasta_index,
+            penalties,
         )
     } else if transitive_dfs {
         impg.query_transitive_dfs(
@@ -1141,6 +1143,8 @@ fn perform_query(
             min_distance_between_ranges,
             store_cigar,
             min_identity,
+            fasta_index,
+            penalties,
         )
     } else {
         impg.query(

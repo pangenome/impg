@@ -644,7 +644,12 @@ impl Impg {
         min_distance_between_ranges: i32,
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
+        fasta_index: Option<&FastaIndex>,
+        penalties: Option<(i32, i32, i32, i32, i32, i32)>,
     ) -> Vec<AdjustedInterval> {
+        // Use default penalties if not provided
+        let (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) = penalties.unwrap_or((0, 4, 6, 2, 26, 1));
+
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
             m.iter().map(|(&k, v)| (k, (*v).clone())).collect()
@@ -727,17 +732,84 @@ impl Impg {
                 let processed_results: Vec<_> = intervals
                     .into_par_iter()
                     .filter_map(|metadata| {
-                        let result = project_target_range_through_alignment(
-                            (current_target_start, current_target_end),
-                            (
-                                metadata.target_start,
-                                metadata.target_end,
-                                metadata.query_start,
-                                metadata.query_end,
-                                metadata.strand(),
-                            ),
-                            &metadata.get_cigar_ops(&self.paf_files, self.paf_gzi_indices.as_ref()),
-                        );
+                        let result = if metadata.is_tracepoints() {
+                            // Handle tracepoints conversion
+                            if let Some(fasta_idx) = fasta_index {
+                                // Get the tracepoints
+                                let tracepoints = metadata.get_tracepoints(&self.paf_files, self.paf_gzi_indices.as_ref());
+                                
+                                // Fetch query sequence
+                                let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
+                                let query_seq_result = if metadata.strand() == Strand::Forward {
+                                    fasta_idx.fetch_sequence(query_name, metadata.query_start, metadata.query_end)
+                                } else {
+                                    // For reverse strand, fetch and reverse complement
+                                    match fasta_idx.fetch_sequence(query_name, metadata.query_start, metadata.query_end) {
+                                        Ok(seq) => Ok(reverse_complement(&seq)),
+                                        Err(e) => Err(e),
+                                    }
+                                };
+
+                                // Fetch target sequence
+                                let target_name = self.seq_index.get_name(current_target_id).unwrap();
+                                let target_seq_result = fasta_idx.fetch_sequence(target_name, metadata.target_start, metadata.target_end);
+
+                                // Convert tracepoints to CIGAR if we successfully fetched both sequences
+                                match (query_seq_result, target_seq_result) {
+                                    (Ok(query_seq), Ok(target_seq)) => {
+                                        // Convert tracepoints to CIGAR operations
+                                        let cigar_str = variable_tracepoints_to_cigar(
+                                            &tracepoints,
+                                            &query_seq,
+                                            &target_seq,
+                                            0,
+                                            0,
+                                            (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
+                                        );
+                                        
+                                        // Parse the CIGAR string to CigarOp vector
+                                        let cigar_ops = parse_cigar_to_delta(&cigar_str).ok().unwrap_or_default();
+                                        
+                                        // Project through alignment
+                                        project_target_range_through_alignment(
+                                            (current_target_start, current_target_end),
+                                            (
+                                                metadata.target_start,
+                                                metadata.target_end,
+                                                metadata.query_start,
+                                                metadata.query_end,
+                                                metadata.strand(),
+                                            ),
+                                            &cigar_ops,
+                                        )
+                                    }
+                                    (Err(e), _) => {
+                                        debug!("Failed to fetch query sequence: {}", e);
+                                        return None;
+                                    }
+                                    (_, Err(e)) => {
+                                        debug!("Failed to fetch target sequence: {}", e);
+                                        return None;
+                                    }
+                                }
+                            } else {
+                                error!("Failed to parse tracepoints record - no FASTA index provided");
+                                return None;
+                            }
+                        } else {
+                            // Handle regular CIGAR
+                            project_target_range_through_alignment(
+                                (current_target_start, current_target_end),
+                                (
+                                    metadata.target_start,
+                                    metadata.target_end,
+                                    metadata.query_start,
+                                    metadata.query_end,
+                                    metadata.strand(),
+                                ),
+                                &metadata.get_cigar_ops(&self.paf_files, self.paf_gzi_indices.as_ref()),
+                            )
+                        };
 
                         if let Some((
                             adjusted_query_start,
@@ -884,7 +956,12 @@ impl Impg {
         min_distance_between_ranges: i32,
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
+        fasta_index: Option<&FastaIndex>,
+        penalties: Option<(i32, i32, i32, i32, i32, i32)>,
     ) -> Vec<AdjustedInterval> {
+        // Use default penalties if not provided
+        let (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) = penalties.unwrap_or((0, 4, 6, 2, 26, 1));
+
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
             m.iter().map(|(&k, v)| (k, (*v).clone())).collect()
@@ -959,20 +1036,87 @@ impl Impg {
                                     *current_target_end,
                                     |interval| {
                                         let metadata = &interval.metadata;
-                                        let result = project_target_range_through_alignment(
-                                            (*current_target_start, *current_target_end),
-                                            (
-                                                metadata.target_start,
-                                                metadata.target_end,
-                                                metadata.query_start,
-                                                metadata.query_end,
-                                                metadata.strand(),
-                                            ),
-                                            &metadata.get_cigar_ops(
-                                                &self.paf_files,
-                                                self.paf_gzi_indices.as_ref(),
-                                            ),
-                                        );
+                                        let result = if metadata.is_tracepoints() {
+                                            // Handle tracepoints conversion
+                                            if let Some(fasta_idx) = fasta_index {
+                                                // Get the tracepoints
+                                                let tracepoints = metadata.get_tracepoints(&self.paf_files, self.paf_gzi_indices.as_ref());
+                                                
+                                                // Fetch query sequence
+                                                let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
+                                                let query_seq_result = if metadata.strand() == Strand::Forward {
+                                                    fasta_idx.fetch_sequence(query_name, metadata.query_start, metadata.query_end)
+                                                } else {
+                                                    // For reverse strand, fetch and reverse complement
+                                                    match fasta_idx.fetch_sequence(query_name, metadata.query_start, metadata.query_end) {
+                                                        Ok(seq) => Ok(reverse_complement(&seq)),
+                                                        Err(e) => Err(e),
+                                                    }
+                                                };
+
+                                                // Fetch target sequence
+                                                let target_name = self.seq_index.get_name(*current_target_id).unwrap();
+                                                let target_seq_result = fasta_idx.fetch_sequence(target_name, metadata.target_start, metadata.target_end);
+
+                                                // Convert tracepoints to CIGAR if we successfully fetched both sequences
+                                                match (query_seq_result, target_seq_result) {
+                                                    (Ok(query_seq), Ok(target_seq)) => {
+                                                        // Convert tracepoints to CIGAR operations
+                                                        let cigar_str = variable_tracepoints_to_cigar(
+                                                            &tracepoints,
+                                                            &query_seq,
+                                                            &target_seq,
+                                                            0,
+                                                            0,
+                                                            (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
+                                                        );
+                                                        
+                                                        // Parse the CIGAR string to CigarOp vector
+                                                        let cigar_ops = parse_cigar_to_delta(&cigar_str).ok().unwrap_or_default();
+                                                        
+                                                        // Project through alignment
+                                                        project_target_range_through_alignment(
+                                                            (*current_target_start, *current_target_end),
+                                                            (
+                                                                metadata.target_start,
+                                                                metadata.target_end,
+                                                                metadata.query_start,
+                                                                metadata.query_end,
+                                                                metadata.strand(),
+                                                            ),
+                                                            &cigar_ops,
+                                                        )
+                                                    }
+                                                    (Err(e), _) => {
+                                                        debug!("Failed to fetch query sequence: {}", e);
+                                                        return;
+                                                    }
+                                                    (_, Err(e)) => {
+                                                        debug!("Failed to fetch target sequence: {}", e);
+                                                        return;
+                                                    }
+                                                }
+                                            } else {
+                                                error!("Failed to parse tracepoints record - no FASTA index provided");
+                                                return;
+                                            }
+                                        } else {
+                                            // Handle regular CIGAR
+                                            project_target_range_through_alignment(
+                                                (*current_target_start, *current_target_end),
+                                                (
+                                                    metadata.target_start,
+                                                    metadata.target_end,
+                                                    metadata.query_start,
+                                                    metadata.query_end,
+                                                    metadata.strand(),
+                                                ),
+                                                &metadata.get_cigar_ops(
+                                                    &self.paf_files,
+                                                    self.paf_gzi_indices.as_ref(),
+                                                ),
+                                            )
+                                        };
 
                                         if let Some((
                                             adjusted_query_start,
