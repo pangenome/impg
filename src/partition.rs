@@ -26,6 +26,7 @@ pub fn partition_alignments(
     output_format: &str,
     fasta_index: Option<&FastaIndex>,
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
+    reverse_complement: bool,
     debug: bool,
 ) -> io::Result<()> {
     // Initialize windows from starting sequences if provided
@@ -322,6 +323,10 @@ pub fn partition_alignments(
                         write_partition_bed(partition_num, &query_intervals, impg, Some(".tmp"))?;
                         temp_bed_files.push(partition_num);
                     }
+                    "fasta" => {
+                        // Write FASTA file directly
+                        write_partition_fasta(partition_num, &query_intervals, impg, fasta_index.expect("FASTA index not found"), reverse_complement)?;
+                    }
                     _ => {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
@@ -407,6 +412,7 @@ pub fn partition_alignments(
                     output_format,
                     fasta_index,
                     scoring_params,
+                    reverse_complement,
                 )?;
 
                 // Delete temporary BED file
@@ -1075,6 +1081,7 @@ fn write_partition(
     output_format: &str,
     fasta_index: Option<&FastaIndex>,
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
+    reverse_complement: bool,
 ) -> io::Result<()> {
     match output_format {
         "bed" => write_partition_bed(partition_num, query_intervals, impg, None),
@@ -1118,6 +1125,21 @@ fn write_partition(
                 impg,
                 fasta_index,
                 scoring_params,
+            )
+        }
+        "fasta" => {
+            let fasta_index = fasta_index.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "FASTA index required for FASTA output",
+                )
+            })?;
+            write_partition_fasta(
+                partition_num,
+                query_intervals,
+                impg,
+                fasta_index,
+                reverse_complement,
             )
         }
         _ => Err(io::Error::new(
@@ -1204,6 +1226,56 @@ fn write_partition_maf(
 
     // Write the MAF output to the file
     write!(writer, "{}", maf_output)?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_partition_fasta(
+    partition_num: usize,
+    query_intervals: &[Interval<u32>],
+    impg: &Impg,
+    fasta_index: &FastaIndex,
+    reverse_complement: bool,
+) -> io::Result<()> {
+    // Create output file
+    let file = File::create(format!("partition{}.fasta", partition_num))?;
+    let mut writer = BufWriter::new(file);
+
+    for query_interval in query_intervals {
+        let query_name = impg.seq_index.get_name(query_interval.metadata).unwrap();
+
+        // Determine actual start and end based on orientation
+        let (start, end, strand) = if query_interval.first <= query_interval.last {
+            (query_interval.first, query_interval.last, '+')
+        } else {
+            (query_interval.last, query_interval.first, '-')
+        };
+
+        // Fetch the sequence
+        let sequence = fasta_index.fetch_sequence(query_name, start, end)?;
+
+        // If reverse strand and reverse_complement strand, reverse complement the sequence
+        let sequence = if strand == '-' && reverse_complement {
+            crate::graph::reverse_complement(&sequence)
+        } else {
+            sequence
+        };
+
+        // Write FASTA format
+        let header_suffix = if strand == '-' && reverse_complement {
+            "/rc"
+        } else {
+            ""
+        };
+        writeln!(writer, ">{}:{}-{}{}", query_name, start, end, header_suffix)?;
+        
+        // Write sequence in lines of 80 characters
+        let sequence_str = String::from_utf8_lossy(&sequence);
+        for line in sequence_str.as_bytes().chunks(80) {
+            writeln!(writer, "{}", String::from_utf8_lossy(line))?;
+        }
+    }
+
     writer.flush()?;
     Ok(())
 }
