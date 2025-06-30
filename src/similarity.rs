@@ -144,7 +144,7 @@ pub fn compute_and_output_similarities(
         // Apply polarization if needed
         if let Some(guide_samples) = guide_samples {
             // Guide sample polarization
-            polarize_pca_result_with_guides(&mut pca_results, &guide_samples)?;
+            polarize_pca_result_with_guides(&mut pca_results, guide_samples)?;
         } else if polarize_n_prev > 0 {
             // Adaptive polarization
             let mut polarization_window: Vec<PolarizationData> = Vec::new();
@@ -708,7 +708,7 @@ fn polarize_pca_result_with_guides(
     }
     
     // Process each PC component
-    let n_components = pca_results.get(0).map(|r| r.n_components).unwrap();
+    let n_components = pca_results.first().map(|r| r.n_components).unwrap();
     
     for pc_idx in 0..n_components {
         // For each guide sample, track flip decisions
