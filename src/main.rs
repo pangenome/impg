@@ -872,39 +872,51 @@ fn initialize_impg(common: &CommonOpts) -> io::Result<Impg> {
 
 /// Resolve the list of PAF files from either --paf-files or --paf-list
 fn resolve_paf_files(common: &CommonOpts) -> io::Result<Vec<String>> {
-    if !common.paf_files.is_empty() {
-        return Ok(common.paf_files.clone());
-    }
-
-    if let Some(paf_list_file) = &common.paf_list {
+    let paf_files = if !common.paf_files.is_empty() {
+        common.paf_files.clone()
+    } else if let Some(paf_list_file) = &common.paf_list {
         // Read PAF files from the list file
         let file = File::open(paf_list_file)?;
         let reader = BufReader::new(file);
-        let mut paf_files = Vec::new();
+        let mut files = Vec::new();
 
         for line in reader.lines() {
             let line = line?;
             let trimmed = line.trim();
             if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                paf_files.push(trimmed.to_string());
+                files.push(trimmed.to_string());
             }
         }
 
-        if paf_files.is_empty() {
+        if files.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("No valid PAF files found in list file: {}", paf_list_file),
             ));
         }
 
-        return Ok(paf_files);
+        files
+    } else {
+        // Neither paf_files nor paf_list provided
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Either --paf-files or --paf-list must be provided",
+        ));
+    };
+
+    // Check if the number of PAF files exceeds u16::MAX
+    if paf_files.len() > u16::MAX as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Too many PAF files specified: {} (maximum allowed: {})",
+                paf_files.len(),
+                u16::MAX
+            ),
+        ));
     }
 
-    // Neither paf_files nor paf_list provided
-    Err(io::Error::new(
-        io::ErrorKind::InvalidInput,
-        "Either --paf-files or --paf-list must be provided",
-    ))
+    Ok(paf_files)
 }
 
 fn load_or_generate_multi_index(
