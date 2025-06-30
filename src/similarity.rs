@@ -3,12 +3,12 @@ use crate::graph::prepare_poa_graph_and_sequences;
 use crate::impg::Impg;
 use coitrees::Interval;
 use log::{debug, warn};
+use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::io;
-use rayon::prelude::*;
 
-use std::sync::{Arc, Mutex};
 use std::io::Write;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 struct GroupInfo {
@@ -114,12 +114,12 @@ pub fn compute_and_output_similarities(
                     delim_pos,
                     Some(region),
                 )?;
-                
+
                 // Lock stdout and write both header and results
                 let stdout = stdout_mutex.lock().unwrap();
                 let mut handle = stdout.lock();
                 write!(handle, "{}", similarity_output)?;
-                
+
                 Ok(())
             })?;
     } else {
@@ -148,7 +148,7 @@ pub fn compute_and_output_similarities(
         } else if polarize_n_prev > 0 {
             // Adaptive polarization
             let mut polarization_window: Vec<PolarizationData> = Vec::new();
-            
+
             for pca_result in pca_results.iter_mut() {
                 let polarization_data = polarize_pca_result(pca_result, &polarization_window);
                 polarization_window.push(polarization_data);
@@ -160,10 +160,7 @@ pub fn compute_and_output_similarities(
 
         // Output results
         for (idx, pca_result) in pca_results.iter().enumerate() {
-            print!("{}", pca_result.to_tsv(
-                Some(&query_data[idx].1),
-                idx == 0
-            ));
+            print!("{}", pca_result.to_tsv(Some(&query_data[idx].1), idx == 0));
         }
     }
 
@@ -182,9 +179,8 @@ fn compute_similarities_for_region(
     delim_pos: u16,
     region: Option<&str>,
 ) -> io::Result<String> {
-    let (groups, msa_chars) = prepare_groups_and_msa(
-        impg, results, fasta_index, scoring_params, delim, delim_pos
-    )?;
+    let (groups, msa_chars) =
+        prepare_groups_and_msa(impg, results, fasta_index, scoring_params, delim, delim_pos)?;
 
     // Parse region once
     let (chrom, start, end) = parse_region_string(region);
@@ -197,17 +193,15 @@ fn compute_similarities_for_region(
             let group_a = &groups[i];
             let group_b = &groups[j];
 
-            let intersection = calculate_intersection(&msa_chars, group_a, group_b, delim.is_none());
+            let intersection =
+                calculate_intersection(&msa_chars, group_a, group_b, delim.is_none());
 
             if intersection == 0 && !emit_all_pairs {
                 continue;
             }
 
-            let metrics = SimilarityMetrics::new(
-                intersection,
-                group_a.total_length,
-                group_b.total_length,
-            );
+            let metrics =
+                SimilarityMetrics::new(intersection, group_a.total_length, group_b.total_length);
 
             // Output (i,j)
             format_similarity_line(
@@ -258,9 +252,8 @@ fn compute_pca_for_region(
     n_components: usize,
     pca_similarity: &str,
 ) -> io::Result<PcaResult> {
-    let (groups, msa_chars) = prepare_groups_and_msa(
-        impg, results, fasta_index, scoring_params, delim, delim_pos
-    )?;
+    let (groups, msa_chars) =
+        prepare_groups_and_msa(impg, results, fasta_index, scoring_params, delim, delim_pos)?;
 
     // Collect all similarities for PCA
     let mut similarities = Vec::new();
@@ -270,7 +263,8 @@ fn compute_pca_for_region(
             let group_a = &groups[i];
             let group_b = &groups[j];
 
-            let intersection = calculate_intersection(&msa_chars, group_a, group_b, delim.is_none());
+            let intersection =
+                calculate_intersection(&msa_chars, group_a, group_b, delim.is_none());
 
             if intersection > 0 || emit_all_pairs {
                 let metrics = SimilarityMetrics::new(
@@ -337,10 +331,7 @@ fn calculate_intersection(
     group_b: &GroupInfo,
     is_individual: bool,
 ) -> usize {
-    if is_individual
-        && group_a.sequence_indices.len() == 1
-        && group_b.sequence_indices.len() == 1
-    {
+    if is_individual && group_a.sequence_indices.len() == 1 && group_b.sequence_indices.len() == 1 {
         // Fast path for individual sequences
         calculate_pairwise_intersection(
             &msa_chars[group_a.sequence_indices[0]],
@@ -550,13 +541,13 @@ impl PcaResult {
         if include_header {
             output.push_str("chrom\tstart\tend\tgroup\tPC.rank\tPC.value\n");
         }
-        
+
         // Data rows - one row per group per PC component
         for (group_idx, group_name) in self.sample_labels.iter().enumerate() {
             for pc_idx in 0..self.n_components {
                 let pc_rank = pc_idx + 1;
                 let pc_value = self.coordinates[group_idx][pc_idx];
-                
+
                 output.push_str(&format!(
                     "{}\t{}\t{}\t{}\t{}\t{:.7}\n",
                     chrom, start, end, group_name, pc_rank, pc_value
@@ -570,8 +561,8 @@ impl PcaResult {
 
 #[derive(Clone)]
 pub struct PolarizationData {
-    pub polarizer_indices: Vec<usize>,  // One per PC component
-    pub polarizer_signs: Vec<bool>,     // One per PC component
+    pub polarizer_indices: Vec<usize>, // One per PC component
+    pub polarizer_signs: Vec<bool>,    // One per PC component
 }
 
 fn polarize_pca_result(
@@ -580,53 +571,58 @@ fn polarize_pca_result(
 ) -> PolarizationData {
     let mut polarizer_indices = Vec::new();
     let mut polarizer_signs = Vec::new();
-    
+
     for pc_idx in 0..pca_result.n_components {
         debug!("Processing PC{}", pc_idx + 1);
-        
-        let pc_values: Vec<f32> = pca_result.coordinates
+
+        let pc_values: Vec<f32> = pca_result
+            .coordinates
             .iter()
             .map(|coords| coords.get(pc_idx).copied().unwrap_or(0.0))
             .collect();
-        
+
         // Find current polarizer
         let (current_polarizer_idx, _) = pc_values
             .iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
             .unwrap();
-        
-        debug!("Current polarizer: [{}] {} (value: {:.3})",
+
+        debug!(
+            "Current polarizer: [{}] {} (value: {:.3})",
             current_polarizer_idx,
             pca_result.sample_labels.get(current_polarizer_idx).unwrap(),
             pc_values[current_polarizer_idx]
         );
-        
-        if polarization_window.is_empty() || pc_idx >= polarization_window[0].polarizer_indices.len() {
+
+        if polarization_window.is_empty()
+            || pc_idx >= polarization_window[0].polarizer_indices.len()
+        {
             polarizer_indices.push(current_polarizer_idx);
             polarizer_signs.push(pc_values[current_polarizer_idx] > 0.0);
         } else {
             // Find most frequent polarizer from previous windows
-            let mut polarizer_counts: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+            let mut polarizer_counts: std::collections::HashMap<usize, usize> =
+                std::collections::HashMap::new();
             for prev_data in polarization_window {
                 if let Some(&prev_idx) = prev_data.polarizer_indices.get(pc_idx) {
                     *polarizer_counts.entry(prev_idx).or_insert(0) += 1;
                 }
             }
-            
+
             let most_frequent_polarizer = polarizer_counts
                 .iter()
                 .max_by_key(|(_, &count)| count)
                 .map(|(&idx, _)| idx)
                 .unwrap();
-            
+
             // Determine flipping
             let mut flip_votes = 0;
             let mut total_votes = 0;
-            
+
             if current_polarizer_idx == most_frequent_polarizer {
                 let current_sign = pc_values[current_polarizer_idx] > 0.0;
-                
+
                 for prev_data in polarization_window.iter() {
                     if let Some(&prev_idx) = prev_data.polarizer_indices.get(pc_idx) {
                         if prev_idx == current_polarizer_idx {
@@ -641,7 +637,7 @@ fn polarize_pca_result(
                 }
             } else if let Some(&value) = pc_values.get(most_frequent_polarizer) {
                 let current_sign_at_prev = value > 0.0;
-                
+
                 for prev_data in polarization_window.iter() {
                     if let Some(&prev_idx) = prev_data.polarizer_indices.get(pc_idx) {
                         if prev_idx == most_frequent_polarizer {
@@ -655,8 +651,8 @@ fn polarize_pca_result(
                     }
                 }
             }
-            
-            let should_flip = total_votes > 0 && flip_votes > total_votes / 2;            
+
+            let should_flip = total_votes > 0 && flip_votes > total_votes / 2;
             if should_flip {
                 debug!("Flipping all PC{} values", pc_idx + 1);
                 for coords in pca_result.coordinates.iter_mut() {
@@ -672,7 +668,7 @@ fn polarize_pca_result(
             }
         }
     }
-    
+
     PolarizationData {
         polarizer_indices,
         polarizer_signs,
@@ -685,18 +681,19 @@ fn polarize_pca_result_with_guides(
 ) -> io::Result<()> {
     // Find guide sample indices
     let mut guide_indices: Vec<Vec<Option<usize>>> = Vec::new();
-    
+
     for guide_name in guide_samples {
         let mut indices = Vec::new();
         for result in pca_results.iter() {
-            let idx = result.sample_labels
+            let idx = result
+                .sample_labels
                 .iter()
                 .position(|label| label == guide_name);
             indices.push(idx);
         }
         guide_indices.push(indices);
     }
-    
+
     // Check if all guide samples exist in at least one window
     for (i, guide_name) in guide_samples.iter().enumerate() {
         if guide_indices[i].iter().all(|idx| idx.is_none()) {
@@ -706,33 +703,35 @@ fn polarize_pca_result_with_guides(
             ));
         }
     }
-    
+
     // Process each PC component
     let n_components = pca_results.first().map(|r| r.n_components).unwrap();
-    
+
     for pc_idx in 0..n_components {
         // For each guide sample, track flip decisions
-        let mut guide_flip_decisions: Vec<Vec<i32>> = vec![vec![0; pca_results.len()]; guide_samples.len()];
-        
+        let mut guide_flip_decisions: Vec<Vec<i32>> =
+            vec![vec![0; pca_results.len()]; guide_samples.len()];
+
         for (guide_idx, guide_sample_indices) in guide_indices.iter().enumerate() {
             let mut prev_value: Option<f32> = None;
-            
+
             for (window_idx, result) in pca_results.iter().enumerate() {
                 if window_idx == 0 {
                     // First window: no flip
                     guide_flip_decisions[guide_idx][window_idx] = 0;
-                    
+
                     // Set prev_value if guide sample exists in this window
                     if let Some(sample_idx) = guide_sample_indices[window_idx] {
                         prev_value = result.coordinates[sample_idx].get(pc_idx).copied();
                     }
                 } else if let Some(sample_idx) = guide_sample_indices[window_idx] {
-                    if let Some(current_value) = result.coordinates[sample_idx].get(pc_idx).copied() {
+                    if let Some(current_value) = result.coordinates[sample_idx].get(pc_idx).copied()
+                    {
                         if let Some(prev) = prev_value {
                             // Check if closer to flipped or unflipped previous value
                             let dist_to_prev = (current_value - prev).abs();
                             let dist_to_flipped = (current_value - (-prev)).abs();
-                            
+
                             if dist_to_flipped < dist_to_prev {
                                 guide_flip_decisions[guide_idx][window_idx] = 1; // Flip
                                 prev_value = Some(-current_value); // Update with flipped value
@@ -752,14 +751,14 @@ fn polarize_pca_result_with_guides(
                 }
             }
         }
-        
+
         // Get consensus flip decision for each window
         for window_idx in 0..pca_results.len() {
             let consensus: i32 = guide_flip_decisions
                 .iter()
                 .map(|decisions| decisions[window_idx])
                 .sum();
-            
+
             if consensus > 0 {
                 // Flip this window's PC values
                 for coords in pca_results[window_idx].coordinates.iter_mut() {
@@ -770,7 +769,7 @@ fn polarize_pca_result_with_guides(
             }
         }
     }
-    
+
     Ok(())
 }
 
@@ -873,7 +872,13 @@ impl ClassicalMDS {
 
         let explained_variance_ratio: Vec<f32> = result_eigenvalues
             .iter()
-            .map(|val| if total_variance > 0.0 { val / total_variance } else { 0.0 })
+            .map(|val| {
+                if total_variance > 0.0 {
+                    val / total_variance
+                } else {
+                    0.0
+                }
+            })
             .collect();
 
         Ok(PcaResult {
@@ -913,7 +918,7 @@ pub fn build_distance_matrix(
     for (label_a, label_b, similarity) in similarities {
         let i = label_to_idx[label_a];
         let j = label_to_idx[label_b];
-        
+
         // Convert similarity to distance based on similarity type
         let distance = match similarity_type {
             "jaccard" | "dice" | "cosine" => 1.0 - similarity,
@@ -924,7 +929,7 @@ pub fn build_distance_matrix(
                 ))
             }
         };
-        
+
         distance_matrix[(i, j)] = distance;
     }
 
@@ -940,7 +945,11 @@ fn parse_region_string(region: Option<&str>) -> (String, String, String) {
             if let Some(dash_pos) = range_part.find('-') {
                 let start_str = &range_part[..dash_pos];
                 let end_str = &range_part[dash_pos + 1..];
-                (chrom.to_string(), start_str.to_string(), end_str.to_string())
+                (
+                    chrom.to_string(),
+                    start_str.to_string(),
+                    end_str.to_string(),
+                )
             } else {
                 (region_str.to_string(), "0".to_string(), "0".to_string())
             }

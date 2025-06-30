@@ -325,7 +325,13 @@ pub fn partition_alignments(
                     }
                     "fasta" => {
                         // Write FASTA file directly
-                        write_partition_fasta(partition_num, &query_intervals, impg, fasta_index.expect("FASTA index not found"), reverse_complement)?;
+                        write_partition_fasta(
+                            partition_num,
+                            &query_intervals,
+                            impg,
+                            fasta_index.expect("FASTA index not found"),
+                            reverse_complement,
+                        )?;
                     }
                     _ => {
                         return Err(io::Error::new(
@@ -1268,7 +1274,7 @@ fn write_partition_fasta(
             ""
         };
         writeln!(writer, ">{}:{}-{}{}", query_name, start, end, header_suffix)?;
-        
+
         // Write sequence in lines of 80 characters
         let sequence_str = String::from_utf8_lossy(&sequence);
         for line in sequence_str.as_bytes().chunks(80) {

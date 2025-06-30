@@ -335,11 +335,22 @@ enum Args {
         pca_components: usize,
 
         /// Number of previous regions to use for adaptive polarization (0 to disable)
-        #[clap(long, value_parser, requires = "pca", conflicts_with = "polarize_guide_samples", default_value_t = 3)]
+        #[clap(
+            long,
+            value_parser,
+            requires = "pca",
+            conflicts_with = "polarize_guide_samples",
+            default_value_t = 3
+        )]
         polarize_n_prev: usize,
 
         /// Comma-separated names of the samples to use for adaptive polarization
-        #[clap(long, value_parser, conflicts_with = "polarize_n_prev", value_delimiter = ',')]
+        #[clap(
+            long,
+            value_parser,
+            conflicts_with = "polarize_n_prev",
+            value_delimiter = ','
+        )]
         polarize_guide_samples: Option<Vec<String>>,
 
         /// Similarity measure to use for PCA distance matrix ("jaccard", "cosine", or "dice")
@@ -392,7 +403,10 @@ fn main() -> io::Result<()> {
             };
 
             // Build FASTA index if GFA/MAF/FASTA output is requested
-            let fasta_index = if output_format == "gfa" || output_format == "maf" || output_format == "fasta" {
+            let fasta_index = if output_format == "gfa"
+                || output_format == "maf"
+                || output_format == "fasta"
+            {
                 let index = gfa_maf_fasta.build_fasta_index()?;
                 if index.is_none() {
                     return Err(io::Error::new(
@@ -449,7 +463,10 @@ fn main() -> io::Result<()> {
             };
 
             // Build FASTA index if GFA/MAF/FASTA output is requested
-            let fasta_index = if output_format == "gfa" || output_format == "maf" || output_format == "fasta" {
+            let fasta_index = if output_format == "gfa"
+                || output_format == "maf"
+                || output_format == "fasta"
+            {
                 let index = gfa_maf_fasta.build_fasta_index()?;
                 if index.is_none() {
                     return Err(io::Error::new(
@@ -710,7 +727,7 @@ fn main() -> io::Result<()> {
                     .collect();
                 let region = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
                 let query_data = vec![(query_intervals, region)];
-                
+
                 // Compute and output similarities
                 impg::similarity::compute_and_output_similarities(
                     &impg,
@@ -724,7 +741,7 @@ fn main() -> io::Result<()> {
                     pca,
                     pca_components,
                     &pca_measure,
-                    0,  // No polarization for single query
+                    0,    // No polarization for single query
                     None, // No polarization for single query
                 )?;
             } else if let Some(target_bed) = &query.target_bed {
@@ -1334,7 +1351,7 @@ pub fn output_results_fasta(
             ""
         };
         println!(">{}:{}-{}{}", query_name, start, end, header_suffix);
-        
+
         // Print sequence in lines of 80 characters
         let sequence_str = String::from_utf8_lossy(&sequence);
         for line in sequence_str.as_bytes().chunks(80) {
@@ -1955,4 +1972,3 @@ fn print_stats(impg: &Impg) {
         }
     }
 }
-
