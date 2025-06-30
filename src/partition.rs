@@ -26,6 +26,7 @@ pub fn partition_alignments(
     output_format: &str,
     fasta_index: Option<&FastaIndex>,
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
+    reverse_complement: bool,
     debug: bool,
 ) -> io::Result<()> {
     // Initialize windows from starting sequences if provided
@@ -324,7 +325,7 @@ pub fn partition_alignments(
                     }
                     "fasta" => {
                         // Write FASTA file directly
-                        write_partition_fasta(partition_num, &query_intervals, impg, fasta_index.expect("FASTA index not found"))?;
+                        write_partition_fasta(partition_num, &query_intervals, impg, fasta_index.expect("FASTA index not found"), reverse_complement)?;
                     }
                     _ => {
                         return Err(io::Error::new(
@@ -411,6 +412,7 @@ pub fn partition_alignments(
                     output_format,
                     fasta_index,
                     scoring_params,
+                    reverse_complement,
                 )?;
 
                 // Delete temporary BED file
@@ -1079,6 +1081,7 @@ fn write_partition(
     output_format: &str,
     fasta_index: Option<&FastaIndex>,
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
+    reverse_complement: bool,
 ) -> io::Result<()> {
     match output_format {
         "bed" => write_partition_bed(partition_num, query_intervals, impg, None),
@@ -1136,6 +1139,7 @@ fn write_partition(
                 query_intervals,
                 impg,
                 fasta_index,
+                reverse_complement,
             )
         }
         _ => Err(io::Error::new(
@@ -1231,6 +1235,7 @@ fn write_partition_fasta(
     query_intervals: &[Interval<u32>],
     impg: &Impg,
     fasta_index: &FastaIndex,
+    reverse_complement: bool,
 ) -> io::Result<()> {
     // Create output file
     let file = File::create(format!("partition{}.fasta", partition_num))?;
@@ -1249,15 +1254,20 @@ fn write_partition_fasta(
         // Fetch the sequence
         let sequence = fasta_index.fetch_sequence(query_name, start, end)?;
 
-        // If reverse strand, reverse complement the sequence
-        let sequence = if strand == '-' {
+        // If reverse strand and reverse_complement strand, reverse complement the sequence
+        let sequence = if strand == '-' && reverse_complement {
             crate::graph::reverse_complement(&sequence)
         } else {
             sequence
         };
 
         // Write FASTA format
-        writeln!(writer, ">{}:{}-{}{}", query_name, start, end, if strand == '-' { "/rc" } else { "" })?;
+        let header_suffix = if strand == '-' && reverse_complement {
+            "/rc"
+        } else {
+            ""
+        };
+        writeln!(writer, ">{}:{}-{}{}", query_name, start, end, header_suffix)?;
         
         // Write sequence in lines of 80 characters
         let sequence_str = String::from_utf8_lossy(&sequence);

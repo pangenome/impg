@@ -60,6 +60,10 @@ struct GfaMafFastaOpts {
     /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for 'gfa' and 'maf')
     #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
     poa_scoring: String,
+
+    /// Reverse complement reverse strand sequences (for 'fasta' output)
+    #[clap(long, action)]
+    reverse_complement: bool,
 }
 
 impl GfaMafFastaOpts {
@@ -377,6 +381,9 @@ fn main() -> io::Result<()> {
             validate_selection_mode(&selection_mode)?;
             validate_output_format(&output_format, &["bed", "gfa", "maf", "fasta"])?;
 
+            // Extract reverse_complement before moving gfa_maf_fasta
+            let reverse_complement = gfa_maf_fasta.reverse_complement;
+
             // Parse POA scoring parameters if GFA/MAF output is requested
             let scoring_params = if output_format == "gfa" || output_format == "maf" {
                 Some(gfa_maf_fasta.parse_poa_scoring()?)
@@ -416,6 +423,7 @@ fn main() -> io::Result<()> {
                 &output_format,
                 fasta_index.as_ref(),
                 scoring_params,
+                reverse_complement,
                 common.verbose > 1,
             )?;
         }
@@ -429,6 +437,9 @@ fn main() -> io::Result<()> {
                 &output_format,
                 &["auto", "bed", "bedpe", "paf", "gfa", "maf", "fasta"],
             )?;
+
+            // Extract reverse_complement before moving gfa_maf_fasta
+            let reverse_complement = gfa_maf_fasta.reverse_complement;
 
             // Parse POA scoring parameters if GFA/MAF output is requested
             let scoring_params = if output_format == "gfa" || output_format == "maf" {
@@ -517,6 +528,7 @@ fn main() -> io::Result<()> {
                             &fasta_index.unwrap(),
                             None,
                             query.effective_merge_distance(),
+                            reverse_complement,
                         )?;
                     }
                     _ => {
@@ -589,6 +601,7 @@ fn main() -> io::Result<()> {
                                 fasta_index.as_ref().unwrap(),
                                 name,
                                 query.effective_merge_distance(),
+                                reverse_complement,
                             )?;
                         }
                         _ => {
@@ -1288,6 +1301,7 @@ pub fn output_results_fasta(
     fasta_index: &FastaIndex,
     _name: Option<String>,
     merge_distance: i32,
+    reverse_complement: bool,
 ) -> io::Result<()> {
     // Merge intervals if needed
     merge_query_adjusted_intervals(results, merge_distance, false);
@@ -1306,15 +1320,20 @@ pub fn output_results_fasta(
         // Fetch the sequence
         let sequence = fasta_index.fetch_sequence(query_name, start, end)?;
 
-        // If reverse strand, reverse complement the sequence
-        let sequence = if strand == '-' {
+        // If reverse strand and reverse complementing, reverse complement the sequence
+        let sequence = if strand == '-' && reverse_complement {
             impg::graph::reverse_complement(&sequence)
         } else {
             sequence
         };
 
         // Output FASTA format
-        println!(">{}:{}-{}{}", query_name, start, end, if strand == '-' { "/rc" } else { "" });
+        let header_suffix = if strand == '-' && reverse_complement {
+            "/rc"
+        } else {
+            ""
+        };
+        println!(">{}:{}-{}{}", query_name, start, end, header_suffix);
         
         // Print sequence in lines of 80 characters
         let sequence_str = String::from_utf8_lossy(&sequence);
