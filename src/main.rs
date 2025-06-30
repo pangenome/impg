@@ -48,12 +48,12 @@ struct CommonOpts {
 
 /// Common FASTA and POA scoring options
 #[derive(Parser, Debug)]
-struct GfaMafOpts {
-    /// List of FASTA file paths (required for 'gfa' and 'maf')
+struct GfaMafFastaOpts {
+    /// List of FASTA file paths (required for 'gfa', 'maf', and 'fasta')
     #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["fasta_list"])]
     fasta_files: Option<Vec<String>>,
 
-    /// Path to a text file containing paths to FASTA files (required for 'gfa' and 'maf')
+    /// Path to a text file containing paths to FASTA files (required for 'gfa', 'maf', and 'fasta')
     #[clap(long, value_parser, conflicts_with_all = &["fasta_files"])]
     fasta_list: Option<String>,
 
@@ -62,7 +62,7 @@ struct GfaMafOpts {
     poa_scoring: String,
 }
 
-impl GfaMafOpts {
+impl GfaMafFastaOpts {
     /// Resolve FASTA files from either --fasta-files or --fasta-list
     fn resolve_fasta_files(self) -> io::Result<Vec<String>> {
         match (self.fasta_files, self.fasta_list) {
@@ -161,7 +161,7 @@ struct QueryOpts {
         short = 'd',
         long,
         value_parser,
-        conflicts_with = "no_merge_bed",
+        conflicts_with = "no_merge",
         default_value_t = 0
     )]
     merge_distance: i32,
@@ -224,12 +224,12 @@ enum Args {
         #[clap(short = 'w', long, value_parser)]
         window_size: usize,
 
-        /// Output format: 'bed', 'gfa' or 'maf' ('gfa' and 'maf' require --fasta-list)
+        /// Output format: 'bed', 'gfa' (v1.0), 'maf', or 'fasta' ('gfa', 'maf', and 'fasta' require --fasta-files or --fasta-list)
         #[clap(short = 'o', long, value_parser, default_value = "bed")]
         output_format: String,
 
         #[clap(flatten)]
-        gfa_maf: GfaMafOpts,
+        gfa_maf_fasta: GfaMafFastaOpts,
 
         /// Maximum distance between regions to merge
         #[clap(short = 'd', long, value_parser, default_value_t = 100000)]
@@ -288,12 +288,12 @@ enum Args {
         #[clap(flatten)]
         query: QueryOpts,
 
-        /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', `gfa' (v1.0), or 'maf
+        /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', 'gfa' (v1.0), 'maf', or 'fasta' ('gfa', 'maf', and 'fasta' require --fasta-files or --fasta-list)
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
 
         #[clap(flatten)]
-        gfa_maf: GfaMafOpts,
+        gfa_maf_fasta: GfaMafFastaOpts,
     },
     /// Compute pairwise similarity between sequences in a region
     Similarity {
@@ -304,7 +304,7 @@ enum Args {
         query: QueryOpts,
 
         #[clap(flatten)]
-        gfa_maf: GfaMafOpts,
+        gfa_maf_fasta: GfaMafFastaOpts,
 
         /// Output distances instead of similarities
         #[clap(long, action)]
@@ -362,7 +362,7 @@ fn main() -> io::Result<()> {
             common,
             window_size,
             output_format,
-            gfa_maf,
+            gfa_maf_fasta,
             merge_distance,
             min_identity,
             transitive_dfs,
@@ -375,18 +375,18 @@ fn main() -> io::Result<()> {
             min_boundary_distance,
         } => {
             validate_selection_mode(&selection_mode)?;
-            validate_output_format(&output_format, &["bed", "gfa", "maf"])?;
+            validate_output_format(&output_format, &["bed", "gfa", "maf", "fasta"])?;
 
             // Parse POA scoring parameters if GFA/MAF output is requested
             let scoring_params = if output_format == "gfa" || output_format == "maf" {
-                Some(gfa_maf.parse_poa_scoring()?)
+                Some(gfa_maf_fasta.parse_poa_scoring()?)
             } else {
                 None
             };
 
-            // Build FASTA index if GFA/MAF output is requested
-            let fasta_index = if output_format == "gfa" || output_format == "maf" {
-                let index = gfa_maf.build_fasta_index()?;
+            // Build FASTA index if GFA/MAF/FASTA output is requested
+            let fasta_index = if output_format == "gfa" || output_format == "maf" || output_format == "fasta" {
+                let index = gfa_maf_fasta.build_fasta_index()?;
                 if index.is_none() {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -423,23 +423,23 @@ fn main() -> io::Result<()> {
             common,
             query,
             output_format,
-            gfa_maf,
+            gfa_maf_fasta,
         } => {
             validate_output_format(
                 &output_format,
-                &["auto", "bed", "bedpe", "paf", "gfa", "maf"],
+                &["auto", "bed", "bedpe", "paf", "gfa", "maf", "fasta"],
             )?;
 
             // Parse POA scoring parameters if GFA/MAF output is requested
             let scoring_params = if output_format == "gfa" || output_format == "maf" {
-                Some(gfa_maf.parse_poa_scoring()?)
+                Some(gfa_maf_fasta.parse_poa_scoring()?)
             } else {
                 None
             };
 
-            // Build FASTA index if GFA/MAF output is requested
-            let fasta_index = if output_format == "gfa" || output_format == "maf" {
-                let index = gfa_maf.build_fasta_index()?;
+            // Build FASTA index if GFA/MAF/FASTA output is requested
+            let fasta_index = if output_format == "gfa" || output_format == "maf" || output_format == "fasta" {
+                let index = gfa_maf_fasta.build_fasta_index()?;
                 if index.is_none() {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -510,6 +510,15 @@ fn main() -> io::Result<()> {
                             scoring_params.unwrap(),
                         )?;
                     }
+                    "fasta" => {
+                        output_results_fasta(
+                            &impg,
+                            &mut results,
+                            &fasta_index.unwrap(),
+                            None,
+                            query.effective_merge_distance(),
+                        )?;
+                    }
                     _ => {
                         // 'auto' or 'bed'
                         // BED format - include the first element
@@ -573,6 +582,15 @@ fn main() -> io::Result<()> {
                                 scoring_params.unwrap(),
                             )?;
                         }
+                        "fasta" => {
+                            output_results_fasta(
+                                &impg,
+                                &mut results,
+                                fasta_index.as_ref().unwrap(),
+                                name,
+                                query.effective_merge_distance(),
+                            )?;
+                        }
                         _ => {
                             // 'auto' or 'bedpe'
                             // Skip the first element (the input range) for BEDPE output
@@ -596,7 +614,7 @@ fn main() -> io::Result<()> {
         Args::Similarity {
             common,
             query,
-            gfa_maf,
+            gfa_maf_fasta,
             distances,
             all,
             delim,
@@ -637,10 +655,10 @@ fn main() -> io::Result<()> {
             }
 
             // Parse POA scoring parameters
-            let scoring_params = gfa_maf.parse_poa_scoring()?;
+            let scoring_params = gfa_maf_fasta.parse_poa_scoring()?;
 
             // Build FASTA index (always required for similarity)
-            let fasta_index = gfa_maf.build_fasta_index()?.ok_or_else(|| {
+            let fasta_index = gfa_maf_fasta.build_fasta_index()?.ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "FASTA files are required for similarity computation",
@@ -1121,14 +1139,14 @@ fn perform_query(
 fn output_results_bed(impg: &Impg, results: &mut Vec<AdjustedInterval>, merge_distance: i32) {
     merge_query_adjusted_intervals(results, merge_distance, false);
 
-    for (overlap, _, _) in results {
-        let overlap_name = impg.seq_index.get_name(overlap.metadata).unwrap();
-        let (first, last, strand) = if overlap.first <= overlap.last {
-            (overlap.first, overlap.last, '+')
+    for (query_interval, _, _) in results {
+        let query_name = impg.seq_index.get_name(query_interval.metadata).unwrap();
+        let (first, last, strand) = if query_interval.first <= query_interval.last {
+            (query_interval.first, query_interval.last, '+')
         } else {
-            (overlap.last, overlap.first, '-')
+            (query_interval.last, query_interval.first, '-')
         };
-        println!("{}\t{}\t{}\t.\t.\t{}", overlap_name, first, last, strand);
+        println!("{}\t{}\t{}\t.\t.\t{}", query_name, first, last, strand);
     }
 }
 
@@ -1260,6 +1278,50 @@ pub fn output_results_gfa(
         scoring_params,
     );
     print!("{}", gfa_output);
+
+    Ok(())
+}
+
+pub fn output_results_fasta(
+    impg: &Impg,
+    results: &mut Vec<AdjustedInterval>,
+    fasta_index: &FastaIndex,
+    _name: Option<String>,
+    merge_distance: i32,
+) -> io::Result<()> {
+    // Merge intervals if needed
+    merge_query_adjusted_intervals(results, merge_distance, false);
+
+    // Output each sequence as FASTA
+    for (query_interval, _, _) in results {
+        let query_name = impg.seq_index.get_name(query_interval.metadata).unwrap();
+
+        // Determine actual start and end based on orientation
+        let (start, end, strand) = if query_interval.first <= query_interval.last {
+            (query_interval.first, query_interval.last, '+')
+        } else {
+            (query_interval.last, query_interval.first, '-')
+        };
+
+        // Fetch the sequence
+        let sequence = fasta_index.fetch_sequence(query_name, start, end)?;
+
+        // If reverse strand, reverse complement the sequence
+        let sequence = if strand == '-' {
+            impg::graph::reverse_complement(&sequence)
+        } else {
+            sequence
+        };
+
+        // Output FASTA format
+        println!(">{}:{}-{}{}", query_name, start, end, if strand == '-' { "/rc" } else { "" });
+        
+        // Print sequence in lines of 80 characters
+        let sequence_str = String::from_utf8_lossy(&sequence);
+        for line in sequence_str.as_bytes().chunks(80) {
+            println!("{}", String::from_utf8_lossy(line));
+        }
+    }
 
     Ok(())
 }

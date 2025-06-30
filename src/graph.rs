@@ -440,7 +440,7 @@ fn _convert_and_write_gfa<R: AsRef<str>, W: Write>(raw_gfa: R, writer: &mut W) -
     Ok(())
 }
 
-fn reverse_complement(seq: &[u8]) -> Vec<u8> {
+pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
     seq.iter()
         .rev()
         .map(|&base| match base {

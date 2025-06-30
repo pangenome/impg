@@ -322,6 +322,10 @@ pub fn partition_alignments(
                         write_partition_bed(partition_num, &query_intervals, impg, Some(".tmp"))?;
                         temp_bed_files.push(partition_num);
                     }
+                    "fasta" => {
+                        // Write FASTA file directly
+                        write_partition_fasta(partition_num, &query_intervals, impg, fasta_index.expect("FASTA index not found"))?;
+                    }
                     _ => {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
@@ -1120,6 +1124,20 @@ fn write_partition(
                 scoring_params,
             )
         }
+        "fasta" => {
+            let fasta_index = fasta_index.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "FASTA index required for FASTA output",
+                )
+            })?;
+            write_partition_fasta(
+                partition_num,
+                query_intervals,
+                impg,
+                fasta_index,
+            )
+        }
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("Unsupported output format: {}", output_format),
@@ -1204,6 +1222,50 @@ fn write_partition_maf(
 
     // Write the MAF output to the file
     write!(writer, "{}", maf_output)?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_partition_fasta(
+    partition_num: usize,
+    query_intervals: &[Interval<u32>],
+    impg: &Impg,
+    fasta_index: &FastaIndex,
+) -> io::Result<()> {
+    // Create output file
+    let file = File::create(format!("partition{}.fasta", partition_num))?;
+    let mut writer = BufWriter::new(file);
+
+    for query_interval in query_intervals {
+        let query_name = impg.seq_index.get_name(query_interval.metadata).unwrap();
+
+        // Determine actual start and end based on orientation
+        let (start, end, strand) = if query_interval.first <= query_interval.last {
+            (query_interval.first, query_interval.last, '+')
+        } else {
+            (query_interval.last, query_interval.first, '-')
+        };
+
+        // Fetch the sequence
+        let sequence = fasta_index.fetch_sequence(query_name, start, end)?;
+
+        // If reverse strand, reverse complement the sequence
+        let sequence = if strand == '-' {
+            crate::graph::reverse_complement(&sequence)
+        } else {
+            sequence
+        };
+
+        // Write FASTA format
+        writeln!(writer, ">{}:{}-{}{}", query_name, start, end, if strand == '-' { "/rc" } else { "" })?;
+        
+        // Write sequence in lines of 80 characters
+        let sequence_str = String::from_utf8_lossy(&sequence);
+        for line in sequence_str.as_bytes().chunks(80) {
+            writeln!(writer, "{}", String::from_utf8_lossy(line))?;
+        }
+    }
+
     writer.flush()?;
     Ok(())
 }
