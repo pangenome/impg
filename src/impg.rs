@@ -86,39 +86,19 @@ pub struct QueryMetadata {
     target_end: i32,
     query_start: i32,
     query_end: i32,
-    cigar_offset: u64, // Packed: leftmost 15 bits = paf_file_index, remaining 49 bits = cigar offset
+    paf_file_index: u16,
+    cigar_offset: u64,
     cigar_bytes: usize,
 }
 
 impl QueryMetadata {
-    // Constants for bit manipulation
-    const PAF_FILE_INDEX_BITS: u64 = 15;
-    const PAF_FILE_INDEX_MASK: u64 = (1 << Self::PAF_FILE_INDEX_BITS) - 1; // 0x7FFF
-    
-    // Getter for strand
+    // Getter for strand based on query coordinates
     fn strand(&self) -> Strand {
         if self.query_start <= self.query_end {
             Strand::Forward
         } else {
             Strand::Reverse
         }
-    }
-    
-    // Extract paf_file_index from packed field
-    fn paf_file_index(&self) -> u16 {
-        ((self.cigar_offset >> (64 - Self::PAF_FILE_INDEX_BITS)) & Self::PAF_FILE_INDEX_MASK) as u16
-    }
-    
-    // Extract cigar_offset from packed field  
-    fn cigar_offset_value(&self) -> u64 {
-        self.cigar_offset & ((1u64 << (64 - Self::PAF_FILE_INDEX_BITS)) - 1)
-    }
-    
-    // Create packed cigar_offset field
-    fn pack_cigar_data(paf_file_index: u16, cigar_offset: u64) -> u64 {
-        let paf_index_shifted = (paf_file_index as u64) << (64 - Self::PAF_FILE_INDEX_BITS);
-        let cigar_offset_masked = cigar_offset & ((1u64 << (64 - Self::PAF_FILE_INDEX_BITS)) - 1);
-        paf_index_shifted | cigar_offset_masked
     }
 
 
@@ -131,7 +111,7 @@ impl QueryMetadata {
         let mut cigar_buffer = vec![0; self.cigar_bytes];
 
         // Get the correct PAF file
-        let paf_file_index = self.paf_file_index() as usize;
+        let paf_file_index = self.paf_file_index as usize;
         let paf_file = &paf_files[paf_file_index];
 
         // Get reader and seek start of cigar str
@@ -141,12 +121,12 @@ impl QueryMetadata {
 
             let mut reader = bgzf::io::Reader::new(File::open(paf_file).unwrap());
             reader
-                .seek_by_uncompressed_position(paf_gzi_index.unwrap(), self.cigar_offset_value())
+                .seek_by_uncompressed_position(paf_gzi_index.unwrap(), self.cigar_offset)
                 .unwrap();
             reader.read_exact(&mut cigar_buffer).unwrap();
         } else {
             let mut reader = File::open(paf_file).unwrap();
-            reader.seek(SeekFrom::Start(self.cigar_offset_value())).unwrap();
+            reader.seek(SeekFrom::Start(self.cigar_offset)).unwrap();
             reader.read_exact(&mut cigar_buffer).unwrap();
         };
 
@@ -340,7 +320,8 @@ impl Impg {
                             target_end: record.target_end as i32,
                             query_start: record.query_start as i32,
                             query_end: record.query_end as i32,
-                            cigar_offset: QueryMetadata::pack_cigar_data(file_index as u16, record.cigar_offset),
+                            paf_file_index: file_index as u16,
+                            cigar_offset: record.cigar_offset,
                             cigar_bytes: record.cigar_bytes,
                         };
 
@@ -1445,65 +1426,4 @@ mod tests {
         assert_eq!(records, expected_records);
     }
 
-    #[test]
-    fn test_packed_cigar_data() {
-        // Test packing and unpacking of paf_file_index and cigar_offset
-        let paf_file_index: u16 = 12345; // Use a value that fits in 15 bits (max 32767)
-        let cigar_offset: u64 = 0x1FFFFFFFFFFFF; // Use a large offset that fits in 49 bits
-        
-        // Create packed data
-        let packed = QueryMetadata::pack_cigar_data(paf_file_index, cigar_offset);
-        
-        // Create a dummy QueryMetadata to test extraction
-        let metadata = QueryMetadata {
-            query_id: 0,
-            target_start: 0,
-            target_end: 0,
-            query_start: 0,
-            query_end: 0,
-            cigar_offset: packed,
-            cigar_bytes: 0,
-        };
-        
-        // Test extraction
-        assert_eq!(metadata.paf_file_index(), paf_file_index);
-        assert_eq!(metadata.cigar_offset_value(), cigar_offset);
-    }
-
-    #[test]
-    fn test_packed_cigar_data_edge_cases() {
-        // Test with maximum values
-        let max_paf_index: u16 = (1 << 15) - 1; // 32767 (15 bits)
-        let max_cigar_offset: u64 = (1u64 << 49) - 1; // Maximum 49-bit value
-        
-        let packed = QueryMetadata::pack_cigar_data(max_paf_index, max_cigar_offset);
-        
-        let metadata = QueryMetadata {
-            query_id: 0,
-            target_start: 0,
-            target_end: 0,
-            query_start: 0,
-            query_end: 0,
-            cigar_offset: packed,
-            cigar_bytes: 0,
-        };
-        
-        assert_eq!(metadata.paf_file_index(), max_paf_index);
-        assert_eq!(metadata.cigar_offset_value(), max_cigar_offset);
-        
-        // Test with minimum values
-        let packed_min = QueryMetadata::pack_cigar_data(0, 0);
-        let metadata_min = QueryMetadata {
-            query_id: 0,
-            target_start: 0,
-            target_end: 0,
-            query_start: 0,
-            query_end: 0,
-            cigar_offset: packed_min,
-            cigar_bytes: 0,
-        };
-        
-        assert_eq!(metadata_min.paf_file_index(), 0);
-        assert_eq!(metadata_min.cigar_offset_value(), 0);
-    }
 }
