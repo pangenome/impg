@@ -468,6 +468,20 @@ fn main() -> io::Result<()> {
                 &["auto", "bed", "bedpe", "paf", "gfa", "maf", "fasta"],
             )?;
 
+            // Early validation for target_range before ANY expensive operations
+            if let Some(target_range_str) = &query.target_range {
+                let (_, target_range) = parse_target_range(target_range_str)?;
+                validate_region_size(target_range, &output_format, force_large_region)?;
+            }
+
+            // Early validation for target_bed before ANY expensive operations  
+            if let Some(target_bed) = &query.target_bed {
+                let targets = impg::partition::parse_bed_file(target_bed)?;
+                for (_, target_range, _) in &targets {
+                    validate_region_size(*target_range, &output_format, force_large_region)?;
+                }
+            }
+
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
 
@@ -499,7 +513,6 @@ fn main() -> io::Result<()> {
 
             if let Some(target_range) = &query.target_range {
                 let (target_name, target_range) = parse_target_range(target_range)?;
-                validate_region_size(target_range, &output_format, force_large_region)?;
 
                 let mut results = perform_query(
                     &impg,
@@ -512,7 +525,7 @@ fn main() -> io::Result<()> {
                     query.max_depth,
                     query.min_transitive_len,
                     query.min_distance_between_ranges,
-                );
+                )?;
 
                 // Output results based on the format
                 match output_format.as_str() {
@@ -576,8 +589,6 @@ fn main() -> io::Result<()> {
                 let targets = impg::partition::parse_bed_file(target_bed)?;
                 info!("Parsed {} target ranges from BED file", targets.len());
                 for (target_name, target_range, name) in targets {
-                    validate_region_size(target_range, &output_format, force_large_region)?;
-
                     let mut results = perform_query(
                         &impg,
                         &target_name,
@@ -589,7 +600,7 @@ fn main() -> io::Result<()> {
                         query.max_depth,
                         query.min_transitive_len,
                         query.min_distance_between_ranges,
-                    );
+                    )?;
 
                     // Output results based on the format
                     match output_format.as_str() {
@@ -705,6 +716,20 @@ fn main() -> io::Result<()> {
                 }
             }
 
+            // Early validation for target_range before expensive operations
+            if let Some(target_range_str) = &query.target_range {
+                let (_, target_range) = parse_target_range(target_range_str)?;
+                validate_region_size(target_range, "gfa", force_large_region)?; // Similarity always uses SPOA
+            }
+
+            // Early validation for target_bed before expensive operations
+            if let Some(target_bed) = &query.target_bed {
+                let targets = impg::partition::parse_bed_file(target_bed)?;
+                for (_, target_range, _) in &targets {
+                    validate_region_size(*target_range, "gfa", force_large_region)?; // Similarity always uses SPOA
+                }
+            }
+
             // Parse POA scoring parameters
             let scoring_params = gfa_maf_fasta.parse_poa_scoring()?;
 
@@ -720,7 +745,6 @@ fn main() -> io::Result<()> {
 
             if let Some(target_range) = &query.target_range {
                 let (target_name, target_range) = parse_target_range(target_range)?;
-                validate_region_size(target_range, "gfa", force_large_region)?; // Similarity always uses SPOA
 
                 let mut results = perform_query(
                     &impg,
@@ -733,7 +757,7 @@ fn main() -> io::Result<()> {
                     query.max_depth,
                     query.min_transitive_len,
                     query.min_distance_between_ranges,
-                );
+                )?;
 
                 // Merge intervals if needed
                 merge_query_adjusted_intervals(
@@ -773,7 +797,6 @@ fn main() -> io::Result<()> {
                 // Query all regions serially (already parallelized internally)
                 let mut all_query_data = Vec::new();
                 for (target_name, target_range, _name) in targets {
-                    validate_region_size(target_range, "gfa", force_large_region)?; // Similarity always uses SPOA
                     let mut results = perform_query(
                         &impg,
                         &target_name,
@@ -785,7 +808,7 @@ fn main() -> io::Result<()> {
                         query.max_depth,
                         query.min_transitive_len,
                         query.min_distance_between_ranges,
-                    );
+                    )?;
 
                     // Merge intervals if needed
                     merge_query_adjusted_intervals(
@@ -864,8 +887,36 @@ fn validate_output_format(format: &str, valid_formats: &[&str]) -> io::Result<()
     }
 }
 
-/// Validate region size for maf/gfa output formats
+/// Validate region size
 fn validate_region_size(target_range: (i32, i32), output_format: &str, force_large_region: bool) -> io::Result<()> {
+    let (start, end) = target_range;
+    
+    // Check that start and end are non-negative
+    if start < 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Target range start ({}) cannot be negative", start),
+        ));
+    }
+    
+    if end < 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Target range end ({}) cannot be negative", end),
+        ));
+    }
+    
+    // Check that start <= end
+    if start > end {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Target range start ({}) cannot be greater than end ({})",
+                start, end
+            ),
+        ));
+    }
+    
     let region_size = (target_range.1 - target_range.0).abs() as u64;
     const SIZE_LIMIT: u64 = 10_000; // 10kbp limit
     
@@ -1166,21 +1217,30 @@ fn perform_query(
     max_depth: u16,
     min_transitive_len: i32,
     min_distance_between_ranges: i32,
-) -> Vec<AdjustedInterval> {
+) -> io::Result<Vec<AdjustedInterval>> {
     let (target_start, target_end) = target_range;
     let target_id = impg
         .seq_index
         .get_id(target_name)
-        .expect("Target name not found in index");
+        .ok_or_else(|| io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Target sequence '{}' not found in index", target_name)
+        ))?;
     let target_length = impg
         .seq_index
         .get_len_from_id(target_id)
-        .expect("Target length not found in index");
+        .ok_or_else(|| io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Target sequence '{}' length not found in index", target_name)
+        ))?;
     if target_end > target_length as i32 {
-        panic!(
-            "Target range end ({}) exceeds the target sequence length ({})",
-            target_end, target_length
-        );
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Target range end ({}) exceeds the target sequence length ({})",
+                target_end, target_length
+            ),
+        ));
     }
 
     let results = if transitive {
@@ -1219,7 +1279,7 @@ fn perform_query(
 
     info!("Collected {} results", results.len());
 
-    results
+    Ok(results)
 }
 
 fn output_results_bed(impg: &Impg, results: &mut Vec<AdjustedInterval>, merge_distance: i32) {
