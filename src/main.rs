@@ -283,6 +283,10 @@ enum Args {
         /// Minimum distance from sequence start/end - closer regions will be extended to the boundaries
         #[clap(long, value_parser, default_value_t = 3000)]
         min_boundary_distance: i32,
+
+        /// Force processing of large regions (>10kbp) with maf/gfa output formats
+        #[clap(long, action)]
+        force_large_region: bool,
     },
     /// Query overlaps in the alignment
     Query {
@@ -298,6 +302,10 @@ enum Args {
 
         #[clap(flatten)]
         gfa_maf_fasta: GfaMafFastaOpts,
+
+        /// Force processing of large regions (>10kbp) with maf/gfa output formats
+        #[clap(long, action)]
+        force_large_region: bool,
     },
     /// Compute pairwise similarity between sequences in a region
     Similarity {
@@ -356,6 +364,10 @@ enum Args {
         /// Similarity measure to use for PCA distance matrix ("jaccard", "cosine", or "dice")
         #[clap(long, value_parser, requires = "pca", default_value = "jaccard")]
         pca_measure: String,
+
+        /// Force processing of large regions (>10kbp)
+        #[clap(long, action)]
+        force_large_region: bool,
     },
     /// Print alignment statistics
     Stats {
@@ -388,9 +400,12 @@ fn main() -> io::Result<()> {
             selection_mode,
             min_missing_size,
             min_boundary_distance,
+            force_large_region  ,
         } => {
             validate_selection_mode(&selection_mode)?;
             validate_output_format(&output_format, &["bed", "gfa", "maf", "fasta"])?;
+
+            validate_region_size((0, window_size as i32), &output_format, force_large_region)?;
 
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
@@ -446,6 +461,7 @@ fn main() -> io::Result<()> {
             query,
             output_format,
             gfa_maf_fasta,
+            force_large_region,
         } => {
             validate_output_format(
                 &output_format,
@@ -483,6 +499,8 @@ fn main() -> io::Result<()> {
 
             if let Some(target_range) = &query.target_range {
                 let (target_name, target_range) = parse_target_range(target_range)?;
+                validate_region_size(target_range, &output_format, force_large_region)?;
+
                 let mut results = perform_query(
                     &impg,
                     &target_name,
@@ -558,6 +576,8 @@ fn main() -> io::Result<()> {
                 let targets = impg::partition::parse_bed_file(target_bed)?;
                 info!("Parsed {} target ranges from BED file", targets.len());
                 for (target_name, target_range, name) in targets {
+                    validate_region_size(target_range, &output_format, force_large_region)?;
+
                     let mut results = perform_query(
                         &impg,
                         &target_name,
@@ -654,6 +674,7 @@ fn main() -> io::Result<()> {
             pca_measure,
             polarize_n_prev,
             polarize_guide_samples,
+            force_large_region,
         } => {
             // Validate delim_pos
             if delim_pos < 1 {
@@ -699,6 +720,7 @@ fn main() -> io::Result<()> {
 
             if let Some(target_range) = &query.target_range {
                 let (target_name, target_range) = parse_target_range(target_range)?;
+                validate_region_size(target_range, "gfa", force_large_region)?; // Similarity always uses SPOA
 
                 let mut results = perform_query(
                     &impg,
@@ -751,6 +773,7 @@ fn main() -> io::Result<()> {
                 // Query all regions serially (already parallelized internally)
                 let mut all_query_data = Vec::new();
                 for (target_name, target_range, _name) in targets {
+                    validate_region_size(target_range, "gfa", force_large_region)?; // Similarity always uses SPOA
                     let mut results = perform_query(
                         &impg,
                         &target_name,
@@ -839,6 +862,27 @@ fn validate_output_format(format: &str, valid_formats: &[&str]) -> io::Result<()
             ),
         ))
     }
+}
+
+/// Validate region size for maf/gfa output formats
+fn validate_region_size(target_range: (i32, i32), output_format: &str, force_large_region: bool) -> io::Result<()> {
+    let region_size = (target_range.1 - target_range.0).abs() as u64;
+    const SIZE_LIMIT: u64 = 10_000; // 10kbp limit
+    
+    // Check if this is a maf/gfa output format that uses SPOA
+    let uses_spoa = matches!(output_format, "maf" | "gfa");
+    
+    if uses_spoa && region_size > SIZE_LIMIT && !force_large_region {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Region size ({} bp) exceeds 10kbp for '{}' output format, which may require large time and memory. Use --force-large-region to proceed anyway.",
+                region_size, output_format
+            ),
+        ));
+    }
+    
+    Ok(())
 }
 
 /// Initialize thread pool and load/generate index based on common options
