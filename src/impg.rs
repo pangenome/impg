@@ -86,33 +86,21 @@ pub struct QueryMetadata {
     target_end: i32,
     query_start: i32,
     query_end: i32,
-    paf_file_index: u32,          // Track which PAF file this record belongs to
-    strand_and_cigar_offset: u64, // Track strand and cigar offset
+    paf_file_index: u16,
+    cigar_offset: u64,
     cigar_bytes: usize,
 }
 
 impl QueryMetadata {
-    // Constants for bit manipulation
-    const STRAND_BIT: u64 = 0x8000000000000000; // Most significant bit for u64
-
-    // Getter for strand
+    // Getter for strand based on query coordinates
     fn strand(&self) -> Strand {
-        if (self.strand_and_cigar_offset & Self::STRAND_BIT) != 0 {
-            Strand::Reverse
-        } else {
+        if self.query_start <= self.query_end {
             Strand::Forward
+        } else {
+            Strand::Reverse
         }
     }
-    // fn set_strand(&mut self, strand: Strand) {
-    //     match strand {
-    //         Strand::Forward => self.strand_and_cigar_offset &= !Self::STRAND_BIT,
-    //         Strand::Reverse => self.strand_and_cigar_offset |= Self::STRAND_BIT,
-    //     }
-    // }
 
-    fn cigar_offset(&self) -> u64 {
-        self.strand_and_cigar_offset & !Self::STRAND_BIT
-    }
 
     fn get_cigar_ops(
         &self,
@@ -133,12 +121,12 @@ impl QueryMetadata {
 
             let mut reader = bgzf::io::Reader::new(File::open(paf_file).unwrap());
             reader
-                .seek_by_uncompressed_position(paf_gzi_index.unwrap(), self.cigar_offset())
+                .seek_by_uncompressed_position(paf_gzi_index.unwrap(), self.cigar_offset)
                 .unwrap();
             reader.read_exact(&mut cigar_buffer).unwrap();
         } else {
             let mut reader = File::open(paf_file).unwrap();
-            reader.seek(SeekFrom::Start(self.cigar_offset())).unwrap();
+            reader.seek(SeekFrom::Start(self.cigar_offset)).unwrap();
             reader.read_exact(&mut cigar_buffer).unwrap();
         };
 
@@ -332,8 +320,8 @@ impl Impg {
                             target_end: record.target_end as i32,
                             query_start: record.query_start as i32,
                             query_end: record.query_end as i32,
-                            paf_file_index: file_index as u32,
-                            strand_and_cigar_offset: record.strand_and_cigar_offset, // Already includes strand bit
+                            paf_file_index: file_index as u16,
+                            cigar_offset: record.cigar_offset,
                             cigar_bytes: record.cigar_bytes,
                         };
 
@@ -1429,7 +1417,7 @@ mod tests {
                 target_id,
                 target_start: 30,
                 target_end: 40,
-                strand_and_cigar_offset: 45, // Forward strand
+                cigar_offset: 45,
                 cigar_bytes: 3,
             },
             // Add more test records as needed
@@ -1437,4 +1425,5 @@ mod tests {
         let records = parse_paf(reader, &mut seq_index).unwrap();
         assert_eq!(records, expected_records);
     }
+
 }

@@ -283,6 +283,10 @@ enum Args {
         /// Minimum distance from sequence start/end - closer regions will be extended to the boundaries
         #[clap(long, value_parser, default_value_t = 3000)]
         min_boundary_distance: i32,
+
+        /// Force processing of large regions (>10kbp) with maf/gfa output formats
+        #[clap(long, action)]
+        force_large_region: bool,
     },
     /// Query overlaps in the alignment
     Query {
@@ -298,6 +302,10 @@ enum Args {
 
         #[clap(flatten)]
         gfa_maf_fasta: GfaMafFastaOpts,
+
+        /// Force processing of large regions (>10kbp) with maf/gfa output formats
+        #[clap(long, action)]
+        force_large_region: bool,
     },
     /// Compute pairwise similarity between sequences in a region
     Similarity {
@@ -356,6 +364,10 @@ enum Args {
         /// Similarity measure to use for PCA distance matrix ("jaccard", "cosine", or "dice")
         #[clap(long, value_parser, requires = "pca", default_value = "jaccard")]
         pca_measure: String,
+
+        /// Force processing of large regions (>10kbp)
+        #[clap(long, action)]
+        force_large_region: bool,
     },
     /// Print alignment statistics
     Stats {
@@ -388,9 +400,12 @@ fn main() -> io::Result<()> {
             selection_mode,
             min_missing_size,
             min_boundary_distance,
+            force_large_region  ,
         } => {
             validate_selection_mode(&selection_mode)?;
             validate_output_format(&output_format, &["bed", "gfa", "maf", "fasta"])?;
+
+            validate_region_size((0, window_size as i32), &output_format, force_large_region)?;
 
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
@@ -446,11 +461,26 @@ fn main() -> io::Result<()> {
             query,
             output_format,
             gfa_maf_fasta,
+            force_large_region,
         } => {
             validate_output_format(
                 &output_format,
                 &["auto", "bed", "bedpe", "paf", "gfa", "maf", "fasta"],
             )?;
+
+            // Early validation for target_range before ANY expensive operations
+            if let Some(target_range_str) = &query.target_range {
+                let (_, target_range) = parse_target_range(target_range_str)?;
+                validate_region_size(target_range, &output_format, force_large_region)?;
+            }
+
+            // Early validation for target_bed before ANY expensive operations  
+            if let Some(target_bed) = &query.target_bed {
+                let targets = impg::partition::parse_bed_file(target_bed)?;
+                for (_, target_range, _) in &targets {
+                    validate_region_size(*target_range, &output_format, force_large_region)?;
+                }
+            }
 
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
@@ -483,6 +513,7 @@ fn main() -> io::Result<()> {
 
             if let Some(target_range) = &query.target_range {
                 let (target_name, target_range) = parse_target_range(target_range)?;
+
                 let mut results = perform_query(
                     &impg,
                     &target_name,
@@ -494,7 +525,7 @@ fn main() -> io::Result<()> {
                     query.max_depth,
                     query.min_transitive_len,
                     query.min_distance_between_ranges,
-                );
+                )?;
 
                 // Output results based on the format
                 match output_format.as_str() {
@@ -569,7 +600,7 @@ fn main() -> io::Result<()> {
                         query.max_depth,
                         query.min_transitive_len,
                         query.min_distance_between_ranges,
-                    );
+                    )?;
 
                     // Output results based on the format
                     match output_format.as_str() {
@@ -654,6 +685,7 @@ fn main() -> io::Result<()> {
             pca_measure,
             polarize_n_prev,
             polarize_guide_samples,
+            force_large_region,
         } => {
             // Validate delim_pos
             if delim_pos < 1 {
@@ -684,6 +716,20 @@ fn main() -> io::Result<()> {
                 }
             }
 
+            // Early validation for target_range before expensive operations
+            if let Some(target_range_str) = &query.target_range {
+                let (_, target_range) = parse_target_range(target_range_str)?;
+                validate_region_size(target_range, "gfa", force_large_region)?; // Similarity always uses SPOA
+            }
+
+            // Early validation for target_bed before expensive operations
+            if let Some(target_bed) = &query.target_bed {
+                let targets = impg::partition::parse_bed_file(target_bed)?;
+                for (_, target_range, _) in &targets {
+                    validate_region_size(*target_range, "gfa", force_large_region)?; // Similarity always uses SPOA
+                }
+            }
+
             // Parse POA scoring parameters
             let scoring_params = gfa_maf_fasta.parse_poa_scoring()?;
 
@@ -711,7 +757,7 @@ fn main() -> io::Result<()> {
                     query.max_depth,
                     query.min_transitive_len,
                     query.min_distance_between_ranges,
-                );
+                )?;
 
                 // Merge intervals if needed
                 merge_query_adjusted_intervals(
@@ -762,7 +808,7 @@ fn main() -> io::Result<()> {
                         query.max_depth,
                         query.min_transitive_len,
                         query.min_distance_between_ranges,
-                    );
+                    )?;
 
                     // Merge intervals if needed
                     merge_query_adjusted_intervals(
@@ -841,6 +887,55 @@ fn validate_output_format(format: &str, valid_formats: &[&str]) -> io::Result<()
     }
 }
 
+/// Validate region size
+fn validate_region_size(target_range: (i32, i32), output_format: &str, force_large_region: bool) -> io::Result<()> {
+    let (start, end) = target_range;
+    
+    // Check that start and end are non-negative
+    if start < 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Target range start ({}) cannot be negative", start),
+        ));
+    }
+    
+    if end < 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Target range end ({}) cannot be negative", end),
+        ));
+    }
+    
+    // Check that start <= end
+    if start > end {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Target range start ({}) cannot be greater than end ({})",
+                start, end
+            ),
+        ));
+    }
+    
+    let region_size = (target_range.1 - target_range.0).abs() as u64;
+    const SIZE_LIMIT: u64 = 10_000; // 10kbp limit
+    
+    // Check if this is a maf/gfa output format that uses SPOA
+    let uses_spoa = matches!(output_format, "maf" | "gfa");
+    
+    if uses_spoa && region_size > SIZE_LIMIT && !force_large_region {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Region size ({} bp) exceeds 10kbp for '{}' output format, which may require large time and memory. Use --force-large-region to proceed anyway.",
+                region_size, output_format
+            ),
+        ));
+    }
+    
+    Ok(())
+}
+
 /// Initialize thread pool and load/generate index based on common options
 fn initialize_impg(common: &CommonOpts) -> io::Result<Impg> {
     // Initialize logger based on verbosity
@@ -872,39 +967,51 @@ fn initialize_impg(common: &CommonOpts) -> io::Result<Impg> {
 
 /// Resolve the list of PAF files from either --paf-files or --paf-list
 fn resolve_paf_files(common: &CommonOpts) -> io::Result<Vec<String>> {
-    if !common.paf_files.is_empty() {
-        return Ok(common.paf_files.clone());
-    }
-
-    if let Some(paf_list_file) = &common.paf_list {
+    let paf_files = if !common.paf_files.is_empty() {
+        common.paf_files.clone()
+    } else if let Some(paf_list_file) = &common.paf_list {
         // Read PAF files from the list file
         let file = File::open(paf_list_file)?;
         let reader = BufReader::new(file);
-        let mut paf_files = Vec::new();
+        let mut files = Vec::new();
 
         for line in reader.lines() {
             let line = line?;
             let trimmed = line.trim();
             if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                paf_files.push(trimmed.to_string());
+                files.push(trimmed.to_string());
             }
         }
 
-        if paf_files.is_empty() {
+        if files.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("No valid PAF files found in list file: {}", paf_list_file),
             ));
         }
 
-        return Ok(paf_files);
+        files
+    } else {
+        // Neither paf_files nor paf_list provided
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Either --paf-files or --paf-list must be provided",
+        ));
+    };
+
+    // Check if the number of PAF files exceeds u16::MAX
+    if paf_files.len() > u16::MAX as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Too many PAF files specified: {} (maximum allowed: {})",
+                paf_files.len(),
+                u16::MAX
+            ),
+        ));
     }
 
-    // Neither paf_files nor paf_list provided
-    Err(io::Error::new(
-        io::ErrorKind::InvalidInput,
-        "Either --paf-files or --paf-list must be provided",
-    ))
+    Ok(paf_files)
 }
 
 fn load_or_generate_multi_index(
@@ -1110,21 +1217,30 @@ fn perform_query(
     max_depth: u16,
     min_transitive_len: i32,
     min_distance_between_ranges: i32,
-) -> Vec<AdjustedInterval> {
+) -> io::Result<Vec<AdjustedInterval>> {
     let (target_start, target_end) = target_range;
     let target_id = impg
         .seq_index
         .get_id(target_name)
-        .expect("Target name not found in index");
+        .ok_or_else(|| io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Target sequence '{}' not found in index", target_name)
+        ))?;
     let target_length = impg
         .seq_index
         .get_len_from_id(target_id)
-        .expect("Target length not found in index");
+        .ok_or_else(|| io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Target sequence '{}' length not found in index", target_name)
+        ))?;
     if target_end > target_length as i32 {
-        panic!(
-            "Target range end ({}) exceeds the target sequence length ({})",
-            target_end, target_length
-        );
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Target range end ({}) exceeds the target sequence length ({})",
+                target_end, target_length
+            ),
+        ));
     }
 
     let results = if transitive {
@@ -1163,7 +1279,7 @@ fn perform_query(
 
     info!("Collected {} results", results.len());
 
-    results
+    Ok(results)
 }
 
 fn output_results_bed(impg: &Impg, results: &mut Vec<AdjustedInterval>, merge_distance: i32) {
