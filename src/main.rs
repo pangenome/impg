@@ -474,13 +474,16 @@ fn main() -> io::Result<()> {
                 validate_region_size(target_range, &output_format, force_large_region)?;
             }
 
-            // Early validation for target_bed before ANY expensive operations  
-            if let Some(target_bed) = &query.target_bed {
+            // Early validation for target_bed and cache parsed data to avoid re-parsing
+            let cached_targets = if let Some(target_bed) = &query.target_bed {
                 let targets = impg::partition::parse_bed_file(target_bed)?;
                 for (_, target_range, _) in &targets {
                     validate_region_size(*target_range, &output_format, force_large_region)?;
                 }
-            }
+                Some(targets)
+            } else {
+                None
+            };
 
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
@@ -585,8 +588,7 @@ fn main() -> io::Result<()> {
                         output_results_bed(&impg, &mut results, query.effective_merge_distance());
                     }
                 }
-            } else if let Some(target_bed) = &query.target_bed {
-                let targets = impg::partition::parse_bed_file(target_bed)?;
+            } else if let Some(targets) = cached_targets {
                 info!("Parsed {} target ranges from BED file", targets.len());
                 for (target_name, target_range, name) in targets {
                     let mut results = perform_query(
@@ -722,13 +724,16 @@ fn main() -> io::Result<()> {
                 validate_region_size(target_range, "gfa", force_large_region)?; // Similarity always uses SPOA
             }
 
-            // Early validation for target_bed before expensive operations
-            if let Some(target_bed) = &query.target_bed {
+            // Early validation for target_bed and cache parsed data to avoid re-parsing
+            let cached_targets = if let Some(target_bed) = &query.target_bed {
                 let targets = impg::partition::parse_bed_file(target_bed)?;
                 for (_, target_range, _) in &targets {
                     validate_region_size(*target_range, "gfa", force_large_region)?; // Similarity always uses SPOA
                 }
-            }
+                Some(targets)
+            } else {
+                None
+            };
 
             // Parse POA scoring parameters
             let scoring_params = gfa_maf_fasta.parse_poa_scoring()?;
@@ -790,8 +795,7 @@ fn main() -> io::Result<()> {
                     0,    // No polarization for single query
                     None, // No polarization for single query
                 )?;
-            } else if let Some(target_bed) = &query.target_bed {
-                let targets = impg::partition::parse_bed_file(target_bed)?;
+            } else if let Some(targets) = cached_targets {
                 info!("Parsed {} target ranges from BED file", targets.len());
 
                 // Query all regions serially (already parallelized internally)
