@@ -1,7 +1,7 @@
 use clap::Parser;
 use coitrees::{Interval, IntervalTree};
 use impg::faidx::FastaIndex;
-use impg::impg::{AdjustedInterval, CigarOp, Impg, SerializableImpg};
+use impg::impg::{AdjustedInterval, CigarOp, Impg, ImpgIndexHeader};
 use impg::paf::{PartialPafRecord, Strand};
 use impg::partition::partition_alignments;
 use impg::seqidx::SequenceIndex;
@@ -1052,6 +1052,7 @@ fn load_or_generate_multi_index(
 
 fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Result<Impg> {
     let index_file = get_combined_index_filename(paf_files, custom_index);
+    let index_file_path = index_file.clone();
     info!("Reading IMPG index from {}", index_file);
 
     // Check if all PAF files are newer than the index
@@ -1075,20 +1076,20 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
 
     let file = File::open(index_file)?;
     let mut reader = BufReader::new(file);
-    let serializable: SerializableImpg =
+    
+    // Read the header first
+    let header: ImpgIndexHeader =
         bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard()).map_err(
             |e| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("Failed to deserialize index: {:?}", e),
+                    format!("Failed to deserialize index header: {:?}", e),
                 )
             },
         )?;
 
-    Ok(Impg::from_multi_paf_and_serializable(
-        paf_files,
-        serializable,
-    ))
+    // Create lazy-loading IMPG index
+    Ok(Impg::from_lazy_index(paf_files, header, index_file_path))
 }
 
 fn generate_multi_index(
@@ -1185,11 +1186,41 @@ fn generate_multi_index(
         )
     })?;
 
-    let serializable = impg.to_serializable();
+    // Use new lazy serialization format
+    let (mut header, trees_data) = impg.to_lazy_serializable();
     let file = File::create(index_file)?;
     let mut writer = BufWriter::new(file);
-    bincode::serde::encode_into_std_write(&serializable, &mut writer, bincode::config::standard())
-        .map_err(|e| io::Error::other(format!("Failed to serialize index: {:?}", e)))?;
+    
+    // First, serialize a placeholder header to calculate its size
+    let header_bytes = bincode::serde::encode_to_vec(&header, bincode::config::standard())
+        .map_err(|e| io::Error::other(format!("Failed to calculate header size: {:?}", e)))?;
+    let header_size = header_bytes.len() as u64;
+    
+    // Calculate actual offsets for each tree
+    let mut current_offset = header_size;
+    let mut updated_offsets = FxHashMap::default();
+    
+    for (target_id, intervals) in &trees_data {
+        updated_offsets.insert(*target_id, current_offset);
+        
+        // Calculate size of this tree when serialized
+        let tree_bytes = bincode::serde::encode_to_vec(intervals, bincode::config::standard())
+            .map_err(|e| io::Error::other(format!("Failed to calculate tree size: {:?}", e)))?;
+        current_offset += tree_bytes.len() as u64;
+    }
+    
+    // Update header with correct offsets
+    header.target_offsets = updated_offsets;
+    
+    // Serialize the final header
+    bincode::serde::encode_into_std_write(&header, &mut writer, bincode::config::standard())
+        .map_err(|e| io::Error::other(format!("Failed to serialize index header: {:?}", e)))?;
+    
+    // Then, serialize each tree sequentially
+    for (target_id, intervals) in trees_data {
+        bincode::serde::encode_into_std_write(&intervals, &mut writer, bincode::config::standard())
+            .map_err(|e| io::Error::other(format!("Failed to serialize tree for target {}: {:?}", target_id, e)))?;
+    }
 
     Ok(impg)
 }

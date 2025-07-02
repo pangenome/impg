@@ -8,7 +8,8 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::cmp::{max, min};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, BufReader};
+use std::sync::{Arc, RwLock};
 
 /// Parse a CIGAR string into a vector of CigarOp
 // Note that the query_delta is negative for reverse strand alignments
@@ -142,7 +143,45 @@ impl QueryMetadata {
 
 pub type AdjustedInterval = (Interval<u32>, Vec<CigarOp>, Interval<u32>);
 type TreeMap = FxHashMap<u32, BasicCOITree<QueryMetadata, u32>>;
+type LazyTreeMap = FxHashMap<u32, Arc<RwLock<LazyIntervalTree>>>;
 pub type SerializableImpg = (FxHashMap<u32, Vec<SerializableInterval>>, SequenceIndex);
+
+/// Index header containing target_id -> file offset mapping
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ImpgIndexHeader {
+    pub target_offsets: FxHashMap<u32, u64>,
+    pub seq_index: SequenceIndex,
+}
+
+/// Lazy-loaded interval tree with file position tracking
+pub struct LazyIntervalTree {
+    tree: Option<BasicCOITree<QueryMetadata, u32>>,
+    file_offset: u64,
+    loaded: bool,
+}
+
+impl LazyIntervalTree {
+    fn new(file_offset: u64) -> Self {
+        Self {
+            tree: None,
+            file_offset,
+            loaded: false,
+        }
+    }
+    
+    fn is_loaded(&self) -> bool {
+        self.loaded
+    }
+    
+    fn get_tree(&self) -> Option<&BasicCOITree<QueryMetadata, u32>> {
+        self.tree.as_ref()
+    }
+    
+    fn set_tree(&mut self, tree: BasicCOITree<QueryMetadata, u32>) {
+        self.tree = Some(tree);
+        self.loaded = true;
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct SerializableInterval {
@@ -282,6 +321,8 @@ impl SortedRanges {
 
 pub struct Impg {
     pub trees: TreeMap,
+    pub lazy_trees: Option<LazyTreeMap>,
+    pub index_file_path: Option<String>,
     pub seq_index: SequenceIndex,
     pub paf_files: Vec<String>, // List of all PAF files
     pub paf_gzi_indices: Vec<Option<bgzf::gzi::Index>>, // Corresponding GZI indices
@@ -364,6 +405,8 @@ impl Impg {
 
         Ok(Self {
             trees,
+            lazy_trees: None,
+            index_file_path: None,
             seq_index,
             paf_files,
             paf_gzi_indices,
@@ -387,6 +430,45 @@ impl Impg {
             })
             .collect();
         (serializable_trees, self.seq_index.clone())
+    }
+
+    /// Convert to lazy index format with header and tree data separated
+    /// Returns (header_to_serialize, sorted_trees_by_target_id)
+    pub fn to_lazy_serializable(&self) -> (ImpgIndexHeader, Vec<(u32, Vec<SerializableInterval>)>) {
+        // First, prepare all the tree data
+        let mut trees_data: Vec<(u32, Vec<SerializableInterval>)> = self
+            .trees
+            .iter()
+            .map(|(target_id, tree)| {
+                let intervals: Vec<SerializableInterval> = tree
+                    .iter()
+                    .map(|interval| SerializableInterval {
+                        first: interval.first,
+                        last: interval.last,
+                        metadata: interval.metadata.clone(),
+                    })
+                    .collect();
+                (*target_id, intervals)
+            })
+            .collect();
+        
+        // Sort by target_id for deterministic output
+        trees_data.sort_by_key(|(target_id, _)| *target_id);
+        
+        // Calculate actual offsets (will be set properly during serialization)
+        // For now, create a placeholder - the actual offsets will be calculated during write
+        let target_offsets: FxHashMap<u32, u64> = trees_data
+            .iter()
+            .enumerate()
+            .map(|(idx, (target_id, _))| (*target_id, idx as u64))
+            .collect();
+        
+        let header = ImpgIndexHeader {
+            target_offsets,
+            seq_index: self.seq_index.clone(),
+        };
+        
+        (header, trees_data)
     }
 
     pub fn from_multi_paf_and_serializable(
@@ -430,6 +512,8 @@ impl Impg {
 
         Self {
             trees,
+            lazy_trees: None,
+            index_file_path: None,
             seq_index,
             paf_files: paf_files.to_vec(),
             paf_gzi_indices,
@@ -438,6 +522,113 @@ impl Impg {
 
     pub fn from_paf_and_serializable(paf_file: &str, serializable: SerializableImpg) -> Self {
         Self::from_multi_paf_and_serializable(&[paf_file.to_string()], serializable)
+    }
+
+    /// Create a lazy-loading IMPG index from header and index file path
+    pub fn from_lazy_index(
+        paf_files: &[String],
+        header: ImpgIndexHeader,
+        index_file_path: String,
+    ) -> Self {
+        let paf_gzi_indices: Vec<_> = paf_files
+            .par_iter()
+            .map(|paf_file| {
+                if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
+                    let paf_gzi_file = paf_file.to_owned() + ".gzi";
+                    Some(
+                        bgzf::gzi::fs::read(paf_gzi_file.clone())
+                            .unwrap_or_else(|_| panic!("Could not open {}", paf_gzi_file)),
+                    )
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Create lazy trees with file offsets
+        let lazy_trees: LazyTreeMap = header
+            .target_offsets
+            .into_iter()
+            .map(|(target_id, offset)| {
+                (target_id, Arc::new(RwLock::new(LazyIntervalTree::new(offset))))
+            })
+            .collect();
+
+        Self {
+            trees: FxHashMap::default(), // Start with empty eager trees
+            lazy_trees: Some(lazy_trees),
+            index_file_path: Some(index_file_path),
+            seq_index: header.seq_index,
+            paf_files: paf_files.to_vec(),
+            paf_gzi_indices,
+        }
+    }
+
+    /// Load a specific target tree from disk if not already loaded
+    fn ensure_tree_loaded(&self, target_id: u32) -> Result<(), std::io::Error> {
+        if let (Some(lazy_trees), Some(index_file_path)) = (&self.lazy_trees, &self.index_file_path) {
+            if let Some(lazy_tree_arc) = lazy_trees.get(&target_id) {
+                let mut lazy_tree = lazy_tree_arc.write().unwrap();
+                
+                if !lazy_tree.is_loaded() {
+                    // Load the tree from disk
+                    let mut file = File::open(index_file_path)?;
+                    file.seek(SeekFrom::Start(lazy_tree.file_offset))?;
+                    let mut reader = BufReader::new(file);
+                    
+                    let intervals: Vec<SerializableInterval> = 
+                        bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
+                            .map_err(|e| std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("Failed to deserialize tree for target {}: {:?}", target_id, e)
+                            ))?;
+                    
+                    let tree = BasicCOITree::new(
+                        intervals
+                            .iter()
+                            .map(|interval| Interval {
+                                first: interval.first,
+                                last: interval.last,
+                                metadata: interval.metadata.clone(),
+                            })
+                            .collect::<Vec<_>>()
+                            .as_slice(),
+                    );
+                    
+                    lazy_tree.set_tree(tree);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Execute a closure with access to the tree, loading from disk if necessary
+    fn with_tree<T, F>(&self, target_id: u32, mut func: F) -> Option<T>
+    where
+        F: FnMut(&BasicCOITree<QueryMetadata, u32>) -> T,
+    {
+        // First check eager trees
+        if let Some(tree) = self.trees.get(&target_id) {
+            return Some(func(tree));
+        }
+        
+        // Then check lazy trees
+        if let Some(lazy_trees) = &self.lazy_trees {
+            if let Some(lazy_tree_arc) = lazy_trees.get(&target_id) {
+                // Try to load if not loaded
+                if let Err(e) = self.ensure_tree_loaded(target_id) {
+                    debug!("Failed to load tree for target {}: {}", target_id, e);
+                    return None;
+                }
+                
+                let lazy_tree = lazy_tree_arc.read().unwrap();
+                if let Some(tree) = lazy_tree.get_tree() {
+                    return Some(func(tree));
+                }
+            }
+        }
+        
+        None
     }
 
     pub fn query(
@@ -476,7 +667,7 @@ impl Impg {
             range_end - range_start
         );
 
-        if let Some(tree) = self.trees.get(&target_id) {
+        self.with_tree(target_id, |tree| {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
                 let result = project_target_range_through_alignment(
@@ -525,7 +716,7 @@ impl Impg {
                     results.push(adjusted_interval);
                 }
             });
-        }
+        });
 
         results
     }
@@ -612,17 +803,17 @@ impl Impg {
 
             let prec_num_results = results.len();
 
-            if let Some(tree) = self.trees.get(&current_target_id) {
-                // Collect intervals first to process them in parallel
+            let intervals = self.with_tree(current_target_id, |tree| {
                 let mut intervals = Vec::new();
-
                 tree.query(current_target_start, current_target_end, |interval| {
                     intervals.push(interval.metadata.clone());
                 });
+                intervals
+            }).unwrap_or_default();
 
-                // Process the intervals in parallel
-                let processed_results: Vec<_> = intervals
-                    .into_par_iter()
+            // Process the intervals in parallel
+            let processed_results: Vec<_> = intervals
+                .into_par_iter()
                     .filter_map(|metadata| {
                         let result = project_target_range_through_alignment(
                             (current_target_start, current_target_end),
@@ -742,7 +933,6 @@ impl Impg {
                         }
                     }
                 }
-            }
 
             debug!("Collected {} results", results.len() - prec_num_results);
 
@@ -848,9 +1038,8 @@ impl Impg {
                     .par_iter()
                     .map(
                         |(current_target_id, current_target_start, current_target_end)| {
-                            let mut local_results = Vec::new();
-
-                            if let Some(tree) = self.trees.get(current_target_id) {
+                            self.with_tree(*current_target_id, |tree| {
+                                let mut local_results = Vec::new();
                                 tree.query(
                                     *current_target_start,
                                     *current_target_end,
@@ -905,9 +1094,8 @@ impl Impg {
                                         }
                                     },
                                 );
-                            }
-
-                            local_results
+                                local_results
+                            }).unwrap_or_default()
                         },
                     )
                     .collect();
