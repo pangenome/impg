@@ -519,9 +519,8 @@ fn calculate_group_intersection(
 
 // PCA/MDS related structures and implementations
 use nalgebra::{DMatrix, SymmetricEigen};
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct PcaResult {
     pub coordinates: Vec<Vec<f32>>,
     pub eigenvalues: Vec<f32>,

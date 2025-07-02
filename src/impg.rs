@@ -80,7 +80,6 @@ impl CigarOp {
 }
 
 #[derive(Clone, Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
 pub struct QueryMetadata {
     query_id: u32,
     target_start: i32,
@@ -146,7 +145,6 @@ type TreeMap = FxHashMap<u32, BasicCOITree<QueryMetadata, u32>>;
 pub type SerializableImpg = (FxHashMap<u32, Vec<SerializableInterval>>, SequenceIndex);
 
 #[derive(Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
 pub struct SerializableInterval {
     first: i32,
     last: i32,

@@ -17,7 +17,6 @@ use std::io::{self, BufRead, BufReader};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use rkyv::Deserialize;
 
 /// Common options shared between all commands
 #[derive(Parser, Debug)]
@@ -1063,13 +1062,7 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
     // Use rkyv for zero-copy deserialization
     let bytes = std::fs::read(&index_file)?;
     
-    let archived = rkyv::check_archived_root::<SerializableImpg>(&bytes)
-        .map_err(|e| io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("Failed to validate index: {:?}", e),
-        ))?;
-    
-    let serializable: SerializableImpg = archived.deserialize(&mut rkyv::Infallible)
+    let serializable: SerializableImpg = rkyv::from_bytes::<_, rkyv::rancor::Error>(&bytes)
         .map_err(|e| io::Error::new(
             io::ErrorKind::InvalidData,
             format!("Failed to deserialize index: {:?}", e),
@@ -1180,7 +1173,7 @@ fn generate_multi_index(
     let mut file = File::create(index_file)?;
     
     // Use rkyv instead of bincode
-    let bytes = rkyv::to_bytes::<_, 256>(&serializable)
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&serializable)
         .map_err(|e| io::Error::other(format!("Failed to serialize index: {:?}", e)))?;
     
     use std::io::Write;
