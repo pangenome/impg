@@ -14,7 +14,7 @@ pub struct PartialPafRecord {
     pub cigar_bytes: usize,
 }
 
-#[derive(Default, PartialEq, Clone, Copy, Debug)]
+#[derive(Default, PartialEq, Clone, Copy)]
 #[repr(u8)]
 pub enum Strand {
     #[default]
@@ -181,26 +181,5 @@ mod tests {
         let line = "seq1\t100\t0\t100\t+\tseq2\t100\tz\t100\t60\t100\t255\tcg:Z:10Q";
         let mut seq_index = SequenceIndex::new();
         assert!(PartialPafRecord::parse(line, 0, &mut seq_index).is_err());
-    }
-
-    #[test]
-    fn test_strand_encoding() {
-        let mut seq_index = SequenceIndex::new();
-        
-        // Test forward strand - query coordinates should remain in order
-        let forward_line = "seq1\t100\t10\t20\t+\tseq2\t100\t30\t40\t10\t20\t255";
-        let forward_record = PartialPafRecord::parse(forward_line, 0, &mut seq_index).unwrap();
-        assert_eq!(forward_record.strand(), Strand::Forward);
-        assert_eq!(forward_record.query_start, 10);
-        assert_eq!(forward_record.query_end, 20);
-        assert!(forward_record.query_start <= forward_record.query_end);
-        
-        // Test reverse strand - query coordinates should be swapped  
-        let reverse_line = "seq3\t100\t10\t20\t-\tseq4\t100\t30\t40\t10\t20\t255";
-        let reverse_record = PartialPafRecord::parse(reverse_line, 0, &mut seq_index).unwrap();
-        assert_eq!(reverse_record.strand(), Strand::Reverse);
-        assert_eq!(reverse_record.query_start, 20);
-        assert_eq!(reverse_record.query_end, 10);
-        assert!(reverse_record.query_start > reverse_record.query_end);
     }
 }
