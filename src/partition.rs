@@ -8,7 +8,20 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::path::Path;
 //use std::time::Instant;
+
+/// Helper function to create output file path with optional output folder
+fn create_output_path(output_folder: Option<&str>, filename: &str) -> io::Result<String> {
+    match output_folder {
+        Some(folder) => {
+            // Create output directory if it doesn't exist
+            std::fs::create_dir_all(folder)?;
+            Ok(Path::new(folder).join(filename).to_string_lossy().to_string())
+        }
+        None => Ok(filename.to_string()),
+    }
+}
 
 pub fn partition_alignments(
     impg: &Impg,
@@ -24,6 +37,7 @@ pub fn partition_alignments(
     min_transitive_len: i32,
     min_distance_between_ranges: i32,
     output_format: &str,
+    output_folder: Option<&str>,
     fasta_index: Option<&FastaIndex>,
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
     reverse_complement: bool,
@@ -316,11 +330,11 @@ pub fn partition_alignments(
                 match output_format {
                     "bed" => {
                         // Write BED file directly
-                        write_partition_bed(partition_num, &query_intervals, impg, None)?;
+                        write_partition_bed(partition_num, &query_intervals, impg, output_folder, None)?;
                     }
                     "gfa" | "maf" => {
                         // Write temporary BED file with .tmp suffix
-                        write_partition_bed(partition_num, &query_intervals, impg, Some(".tmp"))?;
+                        write_partition_bed(partition_num, &query_intervals, impg, output_folder, Some(".tmp"))?;
                         temp_bed_files.push(partition_num);
                     }
                     "fasta" => {
@@ -329,6 +343,7 @@ pub fn partition_alignments(
                             partition_num,
                             &query_intervals,
                             impg,
+                            output_folder,
                             fasta_index.expect("FASTA index not found"),
                             reverse_complement,
                         )?;
@@ -393,7 +408,7 @@ pub fn partition_alignments(
         temp_bed_files
             .into_par_iter()
             .try_for_each(|partition_idx| -> io::Result<()> {
-                let temp_bed_file = format!("partition{}.bed.tmp", partition_idx);
+                let temp_bed_file = create_output_path(output_folder, &format!("partition{}.bed.tmp", partition_idx))?;
 
                 // Read intervals from temporary BED file using parse_bed_file
                 let bed_entries = parse_bed_file(&temp_bed_file)?;
@@ -416,6 +431,7 @@ pub fn partition_alignments(
                     &query_intervals,
                     impg,
                     output_format,
+                    output_folder,
                     fasta_index,
                     scoring_params,
                     reverse_complement,
@@ -1085,12 +1101,13 @@ fn write_partition(
     query_intervals: &[Interval<u32>],
     impg: &Impg,
     output_format: &str,
+    output_folder: Option<&str>,
     fasta_index: Option<&FastaIndex>,
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
     reverse_complement: bool,
 ) -> io::Result<()> {
     match output_format {
-        "bed" => write_partition_bed(partition_num, query_intervals, impg, None),
+        "bed" => write_partition_bed(partition_num, query_intervals, impg, output_folder, None),
         "gfa" => {
             let fasta_index = fasta_index.ok_or_else(|| {
                 io::Error::new(
@@ -1108,6 +1125,7 @@ fn write_partition(
                 partition_num,
                 query_intervals,
                 impg,
+                output_folder,
                 fasta_index,
                 scoring_params,
             )
@@ -1129,6 +1147,7 @@ fn write_partition(
                 partition_num,
                 query_intervals,
                 impg,
+                output_folder,
                 fasta_index,
                 scoring_params,
             )
@@ -1144,6 +1163,7 @@ fn write_partition(
                 partition_num,
                 query_intervals,
                 impg,
+                output_folder,
                 fasta_index,
                 reverse_complement,
             )
@@ -1159,6 +1179,7 @@ fn write_partition_bed(
     partition_num: usize,
     query_intervals: &[Interval<u32>],
     impg: &Impg,
+    output_folder: Option<&str>,
     suffix: Option<&str>,
 ) -> io::Result<()> {
     // Create filename with optional suffix
@@ -1167,8 +1188,11 @@ fn write_partition_bed(
         None => format!("partition{}.bed", partition_num),
     };
 
+    // Create full path with output folder
+    let full_path = create_output_path(output_folder, &filename)?;
+
     // Create file with buffer
-    let file = File::create(filename)?;
+    let file = File::create(full_path)?;
     let mut writer = BufWriter::new(file);
 
     for query_interval in query_intervals {
@@ -1190,6 +1214,7 @@ fn write_partition_gfa(
     partition_num: usize,
     query_intervals: &[Interval<u32>],
     impg: &Impg,
+    output_folder: Option<&str>,
     fasta_index: &FastaIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<()> {
@@ -1202,7 +1227,9 @@ fn write_partition_gfa(
     );
 
     // Create output file
-    let file = File::create(format!("partition{}.gfa", partition_num))?;
+    let filename = format!("partition{}.gfa", partition_num);
+    let full_path = create_output_path(output_folder, &filename)?;
+    let file = File::create(full_path)?;
     let mut writer = BufWriter::new(file);
 
     // Write the GFA output to the file
@@ -1215,6 +1242,7 @@ fn write_partition_maf(
     partition_num: usize,
     query_intervals: &[Interval<u32>],
     impg: &Impg,
+    output_folder: Option<&str>,
     fasta_index: &FastaIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<()> {
@@ -1227,7 +1255,9 @@ fn write_partition_maf(
     );
 
     // Create output file
-    let file = File::create(format!("partition{}.maf", partition_num))?;
+    let filename = format!("partition{}.maf", partition_num);
+    let full_path = create_output_path(output_folder, &filename)?;
+    let file = File::create(full_path)?;
     let mut writer = BufWriter::new(file);
 
     // Write the MAF output to the file
@@ -1240,11 +1270,14 @@ fn write_partition_fasta(
     partition_num: usize,
     query_intervals: &[Interval<u32>],
     impg: &Impg,
+    output_folder: Option<&str>,
     fasta_index: &FastaIndex,
     reverse_complement: bool,
 ) -> io::Result<()> {
     // Create output file
-    let file = File::create(format!("partition{}.fasta", partition_num))?;
+    let filename = format!("partition{}.fasta", partition_num);
+    let full_path = create_output_path(output_folder, &filename)?;
+    let file = File::create(full_path)?;
     let mut writer = BufWriter::new(file);
 
     for query_interval in query_intervals {
