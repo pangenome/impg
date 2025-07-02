@@ -523,6 +523,7 @@ fn main() -> io::Result<()> {
 
             if let Some(target_range) = &query.target_range {
                 let (target_name, target_range) = parse_target_range(target_range)?;
+                let name =  format!("{}:{}-{}", target_name, target_range.0, target_range.1);
 
                 let mut results = perform_query(
                     &impg,
@@ -545,7 +546,7 @@ fn main() -> io::Result<()> {
                         output_results_bedpe(
                             &impg,
                             &mut results,
-                            None,
+                            Some(name),
                             query.effective_merge_distance(),
                         );
                     }
@@ -555,7 +556,7 @@ fn main() -> io::Result<()> {
                         output_results_paf(
                             &impg,
                             &mut results,
-                            None,
+                            Some(name),
                             query.effective_merge_distance(),
                         );
                     }
@@ -564,7 +565,7 @@ fn main() -> io::Result<()> {
                             &impg,
                             &mut results,
                             &fasta_index.unwrap(),
-                            None,
+                            Some(name),
                             query.effective_merge_distance(),
                             scoring_params.unwrap(),
                         )?;
@@ -574,7 +575,7 @@ fn main() -> io::Result<()> {
                             &impg,
                             &mut results,
                             &fasta_index.unwrap(),
-                            None,
+                            Some(name),
                             query.effective_merge_distance(),
                             scoring_params.unwrap(),
                         )?;
@@ -584,7 +585,7 @@ fn main() -> io::Result<()> {
                             &impg,
                             &mut results,
                             &fasta_index.unwrap(),
-                            None,
+                            Some(name),
                             query.effective_merge_distance(),
                             reverse_complement,
                         )?;
@@ -592,7 +593,7 @@ fn main() -> io::Result<()> {
                     _ => {
                         // 'auto' or 'bed'
                         // BED format - include the first element
-                        output_results_bed(&impg, &mut results, query.effective_merge_distance());
+                        output_results_bed(&impg, &mut results, Some(name), query.effective_merge_distance());
                     }
                 }
             } else if let Some(targets) = cached_targets {
@@ -618,6 +619,7 @@ fn main() -> io::Result<()> {
                             output_results_bed(
                                 &impg,
                                 &mut results,
+                                Some(name),
                                 query.effective_merge_distance(),
                             );
                         }
@@ -627,7 +629,7 @@ fn main() -> io::Result<()> {
                             output_results_paf(
                                 &impg,
                                 &mut results,
-                                name,
+                                Some(name),
                                 query.effective_merge_distance(),
                             );
                         }
@@ -636,7 +638,7 @@ fn main() -> io::Result<()> {
                                 &impg,
                                 &mut results,
                                 fasta_index.as_ref().unwrap(),
-                                name,
+                                Some(name),
                                 query.effective_merge_distance(),
                                 scoring_params.unwrap(),
                             )?;
@@ -646,7 +648,7 @@ fn main() -> io::Result<()> {
                                 &impg,
                                 &mut results,
                                 fasta_index.as_ref().unwrap(),
-                                name,
+                                Some(name),
                                 query.effective_merge_distance(),
                                 scoring_params.unwrap(),
                             )?;
@@ -656,7 +658,7 @@ fn main() -> io::Result<()> {
                                 &impg,
                                 &mut results,
                                 fasta_index.as_ref().unwrap(),
-                                name,
+                                Some(name),
                                 query.effective_merge_distance(),
                                 reverse_complement,
                             )?;
@@ -668,7 +670,7 @@ fn main() -> io::Result<()> {
                             output_results_bedpe(
                                 &impg,
                                 &mut results,
-                                name,
+                                Some(name),
                                 query.effective_merge_distance(),
                             );
                         }
@@ -1299,7 +1301,7 @@ fn perform_query(
     Ok(results)
 }
 
-fn output_results_bed(impg: &Impg, results: &mut Vec<AdjustedInterval>, merge_distance: i32) {
+fn output_results_bed(impg: &Impg, results: &mut Vec<AdjustedInterval>, name: Option<String>, merge_distance: i32) {
     merge_query_adjusted_intervals(results, merge_distance, false);
 
     for (query_interval, _, _) in results {
@@ -1309,7 +1311,7 @@ fn output_results_bed(impg: &Impg, results: &mut Vec<AdjustedInterval>, merge_di
         } else {
             (query_interval.last, query_interval.first, '-')
         };
-        println!("{}\t{}\t{}\t.\t.\t{}", query_name, first, last, strand);
+        println!("{}\t{}\t{}\t{}\t.\t{}", query_name, first, last, name.as_deref().unwrap_or("."), strand);
     }
 }
 

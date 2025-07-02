@@ -125,7 +125,7 @@ pub fn compute_and_output_similarities(
                     emit_all_pairs,
                     delim,
                     delim_pos,
-                    Some(region),
+                    region,
                 )?;
 
                 // Lock stdout and write both header and results
@@ -192,7 +192,7 @@ fn compute_similarities_for_region(
     emit_all_pairs: bool,
     delim: Option<char>,
     delim_pos: u16,
-    region: Option<&str>,
+    region: &str,
 ) -> io::Result<String> {
     debug!("Computing similarities for region {:?}", region);
 
@@ -553,7 +553,11 @@ impl PcaResult {
         let mut output = String::new();
 
         // Parse region to extract chrom, start, end
-        let (chrom, start, end) = parse_region_string(region);
+        let (chrom, start, end) = if let Some(region_str) = region {
+            parse_region_string(region_str)
+        } else {
+            ("unknown".to_string(), "0".to_string(), "0".to_string())
+        };
 
         // Header
         if include_header {
@@ -969,26 +973,22 @@ pub fn build_distance_matrix(
 }
 
 // Add this function to the similarity module
-fn parse_region_string(region: Option<&str>) -> (String, String, String) {
-    if let Some(region_str) = region {
-        if let Some(colon_pos) = region_str.rfind(':') {
-            let chrom = &region_str[..colon_pos];
-            let range_part = &region_str[colon_pos + 1..];
-            if let Some(dash_pos) = range_part.find('-') {
-                let start_str = &range_part[..dash_pos];
-                let end_str = &range_part[dash_pos + 1..];
-                (
-                    chrom.to_string(),
-                    start_str.to_string(),
-                    end_str.to_string(),
-                )
-            } else {
-                (region_str.to_string(), "0".to_string(), "0".to_string())
-            }
+fn parse_region_string(region_str: &str) -> (String, String, String) {
+    if let Some(colon_pos) = region_str.rfind(':') {
+        let chrom = &region_str[..colon_pos];
+        let range_part = &region_str[colon_pos + 1..];
+        if let Some(dash_pos) = range_part.find('-') {
+            let start_str = &range_part[..dash_pos];
+            let end_str = &range_part[dash_pos + 1..];
+            (
+                chrom.to_string(),
+                start_str.to_string(),
+                end_str.to_string(),
+            )
         } else {
             (region_str.to_string(), "0".to_string(), "0".to_string())
         }
     } else {
-        ("unknown".to_string(), "0".to_string(), "0".to_string())
+        (region_str.to_string(), "0".to_string(), "0".to_string())
     }
 }
