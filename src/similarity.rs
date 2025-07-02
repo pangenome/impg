@@ -2,7 +2,7 @@ use crate::faidx::FastaIndex;
 use crate::graph::prepare_poa_graph_and_sequences;
 use crate::impg::Impg;
 use coitrees::Interval;
-use log::{debug, warn};
+use log::{debug, info, warn};
 use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::io;
@@ -83,6 +83,8 @@ pub fn compute_and_output_similarities(
     guide_samples: Option<&[String]>,
 ) -> io::Result<()> {
     if !perform_pca {
+        info!("Computing similarities for {} regions", query_data.len());
+
         // Case 1: No PCA - compute similarities in parallel and write directly
 
         // Write header once before parallel processing
@@ -123,6 +125,8 @@ pub fn compute_and_output_similarities(
                 Ok(())
             })?;
     } else {
+        info!("Performing PCA for {} regions", query_data.len());
+
         // Case 2 & 3: PCA with or without polarization
         let mut pca_results: Vec<_> = query_data
             .par_iter()

@@ -17,7 +17,10 @@ fn create_output_path(output_folder: Option<&str>, filename: &str) -> io::Result
         Some(folder) => {
             // Create output directory if it doesn't exist
             std::fs::create_dir_all(folder)?;
-            Ok(Path::new(folder).join(filename).to_string_lossy().to_string())
+            Ok(Path::new(folder)
+                .join(filename)
+                .to_string_lossy()
+                .to_string())
         }
         None => Ok(filename.to_string()),
     }
@@ -330,11 +333,23 @@ pub fn partition_alignments(
                 match output_format {
                     "bed" => {
                         // Write BED file directly
-                        write_partition_bed(partition_num, &query_intervals, impg, output_folder, None)?;
+                        write_partition_bed(
+                            partition_num,
+                            &query_intervals,
+                            impg,
+                            output_folder,
+                            None,
+                        )?;
                     }
                     "gfa" | "maf" => {
                         // Write temporary BED file with .tmp suffix
-                        write_partition_bed(partition_num, &query_intervals, impg, output_folder, Some(".tmp"))?;
+                        write_partition_bed(
+                            partition_num,
+                            &query_intervals,
+                            impg,
+                            output_folder,
+                            Some(".tmp"),
+                        )?;
                         temp_bed_files.push(partition_num);
                     }
                     "fasta" => {
@@ -408,7 +423,10 @@ pub fn partition_alignments(
         temp_bed_files
             .into_par_iter()
             .try_for_each(|partition_idx| -> io::Result<()> {
-                let temp_bed_file = create_output_path(output_folder, &format!("partition{}.bed.tmp", partition_idx))?;
+                let temp_bed_file = create_output_path(
+                    output_folder,
+                    &format!("partition{}.bed.tmp", partition_idx),
+                )?;
 
                 // Read intervals from temporary BED file using parse_bed_file
                 let bed_entries = parse_bed_file(&temp_bed_file)?;
