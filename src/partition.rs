@@ -1337,7 +1337,7 @@ fn write_partition_fasta(
     Ok(())
 }
 
-pub fn parse_bed_file(bed_file: &str) -> io::Result<Vec<(String, (i32, i32), Option<String>)>> {
+pub fn parse_bed_file(bed_file: &str) -> io::Result<Vec<(String, (i32, i32), String)>> {
     let file = File::open(bed_file)?;
     let reader = BufReader::new(file);
     let mut ranges = Vec::new();
@@ -1353,7 +1353,10 @@ pub fn parse_bed_file(bed_file: &str) -> io::Result<Vec<(String, (i32, i32), Opt
         }
 
         let (start, end) = parse_range(&parts[1..=2])?;
-        let name = parts.get(3).map(|s| s.to_string());
+        let name = parts
+            .get(3)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("{}:{}-{}", parts[0], start, end));
         ranges.push((parts[0].to_string(), (start, end), name));
     }
 
