@@ -27,23 +27,34 @@ struct SimilarityMetrics {
 
 impl SimilarityMetrics {
     fn new(intersection: usize, len_a: usize, len_b: usize) -> Self {
+        // Check for perfect match first
+        let is_perfect_match = len_a == len_b && intersection == len_a;
+        
         let union = (len_a + len_b).saturating_sub(intersection);
-        let jaccard = if union > 0 {
+        let jaccard = if is_perfect_match {
+            1.0
+        } else if union > 0 {
             intersection as f32 / union as f32
         } else {
             0.0
         };
-        let cosine = if len_a > 0 && len_b > 0 {
+        let cosine = if is_perfect_match {
+            1.0
+        } else if len_a > 0 && len_b > 0 {
             (intersection as f32) / ((len_a as f32).sqrt() * (len_b as f32).sqrt())
         } else {
             0.0
         };
-        let dice = if (len_a + len_b) > 0 {
+        let dice = if is_perfect_match {
+            1.0
+        } else if (len_a + len_b) > 0 {
             2.0 * (intersection as f32) / (len_a + len_b) as f32
         } else {
             0.0
         };
-        let estimated_identity = if jaccard > 0.0 {
+        let estimated_identity = if is_perfect_match {
+            1.0
+        } else if jaccard > 0.0 {
             2.0 * jaccard / (1.0 + jaccard)
         } else {
             0.0
