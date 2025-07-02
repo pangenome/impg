@@ -13,10 +13,11 @@ use rustc_hash::FxHashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::{self, BufRead, BufReader, BufWriter};
+use std::io::{self, BufRead, BufReader};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use rkyv::Deserialize;
 
 /// Common options shared between all commands
 #[derive(Parser, Debug)]
@@ -1059,17 +1060,21 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
         });
     }
 
-    let file = File::open(index_file)?;
-    let mut reader = BufReader::new(file);
-    let serializable: SerializableImpg =
-        bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard()).map_err(
-            |e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Failed to deserialize index: {:?}", e),
-                )
-            },
-        )?;
+    // Use rkyv for zero-copy deserialization
+    let bytes = std::fs::read(&index_file)?;
+    
+    let archived = rkyv::check_archived_root::<SerializableImpg>(&bytes)
+        .map_err(|e| io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Failed to validate index: {:?}", e),
+        ))?;
+    
+    let serializable: SerializableImpg = archived.deserialize(&mut rkyv::Infallible)
+        .map_err(|e| io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Failed to deserialize index: {:?}", e),
+        ))?;
+    
     Ok(Impg::from_multi_paf_and_serializable(
         paf_files,
         serializable,
@@ -1172,10 +1177,14 @@ fn generate_multi_index(
     })?;
 
     let serializable = impg.to_serializable();
-    let file = File::create(index_file)?;
-    let mut writer = BufWriter::new(file);
-    bincode::serde::encode_into_std_write(&serializable, &mut writer, bincode::config::standard())
+    let mut file = File::create(index_file)?;
+    
+    // Use rkyv instead of bincode
+    let bytes = rkyv::to_bytes::<_, 256>(&serializable)
         .map_err(|e| io::Error::other(format!("Failed to serialize index: {:?}", e)))?;
+    
+    use std::io::Write;
+    file.write_all(&bytes)?;
 
     Ok(impg)
 }

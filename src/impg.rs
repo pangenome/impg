@@ -5,10 +5,10 @@ use log::debug;
 use noodles::bgzf;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
-use serde::{Deserialize, Serialize};
 use std::cmp::{max, min};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use rkyv::{Archive, Deserialize, Serialize};
 
 /// Parse a CIGAR string into a vector of CigarOp
 // Note that the query_delta is negative for reverse strand alignments
@@ -79,7 +79,8 @@ impl CigarOp {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Archive, Serialize, Deserialize)]
+#[archive(check_bytes)]
 pub struct QueryMetadata {
     query_id: u32,
     target_start: i32,
@@ -144,7 +145,8 @@ pub type AdjustedInterval = (Interval<u32>, Vec<CigarOp>, Interval<u32>);
 type TreeMap = FxHashMap<u32, BasicCOITree<QueryMetadata, u32>>;
 pub type SerializableImpg = (FxHashMap<u32, Vec<SerializableInterval>>, SequenceIndex);
 
-#[derive(Serialize, Deserialize)]
+#[derive(Archive, Serialize, Deserialize)]
+#[archive(check_bytes)]
 pub struct SerializableInterval {
     first: i32,
     last: i32,

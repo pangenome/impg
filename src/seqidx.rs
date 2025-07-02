@@ -1,7 +1,8 @@
 use rustc_hash::FxHashMap;
-use serde::{Deserialize, Serialize};
+use rkyv::{Archive, Deserialize, Serialize};
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Archive, Serialize, Deserialize)]
+#[archive(check_bytes)]
 pub struct SequenceIndex {
     pub name_to_id: FxHashMap<String, u32>,
     id_to_name: FxHashMap<u32, String>,
