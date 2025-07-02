@@ -72,9 +72,13 @@ impg query -p alignments.paf -r chr1:1000-2000 --min-identity 0.9
 impg query -p alignments.paf -r chr1:1000-2000 -o bedpe
 impg query -p alignments.paf -b regions.bed -o paf
 
-# GFA/MAF output requires FASTA files
+# GFA/MAF/FASTA output requires FASTA files (--fasta-files or --fasta-list)
 impg query -p alignments.paf -r chr1:1000-2000 -o gfa --fasta-files ref.fa genomes.fa
 impg query -p alignments.paf -r chr1:1000-2000 -o maf --fasta-list fastas.txt
+impg query -p alignments.paf -r chr1:1000-2000 -o fasta --fasta-files *.fa
+
+# FASTA output with reverse complement for reverse strand sequences
+impg query -p alignments.paf -r chr1:1000-2000 -o fasta --fasta-files *.fa --reverse-complement
 
 # Merge nearby regions (default: 0)
 impg query -p alignments.paf -r chr1:1000-2000 -d 1000
@@ -101,14 +105,15 @@ impg partition -p alignments.paf -w 1000000 -d 10000
 impg partition -p alignments.paf -w 1000000 --selection-mode longest        # longest missing region
 impg partition -p alignments.paf -w 1000000 --selection-mode total          # most total missing
 impg partition -p alignments.paf -w 1000000 --selection-mode sample         # by sample (PanSN)
-impg partition -p alignments.paf -w 1000000 --selection-mode haplotype,#    # by haplotype
+impg partition -p alignments.paf -w 1000000 --selection-mode haplotype      # by haplotype (PanSN)
 
 # Control transitive search depth and minimum sizes
 impg partition -p alignments.paf -w 1000000 -m 2 -l 10000
 
-# Output as GFA or MAF (requires FASTA files)
+# Output as GFA, MAF or FASTA requires FASTA files (--fasta-files or --fasta-list)
 impg partition -p alignments.paf -w 1000000 -o gfa --fasta-files *.fa
 impg partition -p alignments.paf -w 1000000 -o maf --fasta-list fastas.txt
+impg partition -p alignments.paf -w 1000000 -o fasta --fasta-files *.fa
 ```
 
 ### Similarity
@@ -142,6 +147,12 @@ impg similarity -p alignments.paf -r chr1:1000-2000 --fasta-files *.fa --pca --p
 
 # Choose similarity measure for PCA distance matrix (jaccard/cosine/dice, default: jaccard)
 impg similarity -p alignments.paf -r chr1:1000-2000 --fasta-files *.fa --pca --pca-measure cosine
+
+# PCA with adaptive polarization using previous regions
+impg similarity -p alignments.paf -b regions.bed --fasta-files *.fa --pca --polarize-n-prev 3
+
+# PCA with sample-guided polarization
+impg similarity -p alignments.paf -b regions.bed --fasta-files *.fa --pca --polarize-guide-samples sample1,sample2
 ```
 
 ### Stats
@@ -178,16 +189,17 @@ All commands support these options:
 - `--paf-list`: Path to a plain-text file listing one PAF path per line.
 - `-i, --index`: Path to an existing IMPG index file.
 - `-f, --force-reindex`: Always regenerate the IMPG index even if it already exists.
-- `-t, --num-threads`: Number of threads (default: 4)
+- `-t, --threads`: Number of threads (default: 4)
 - `-v, --verbose`: Verbosity level (0=error, 1=info, 2=debug)
 
 ### FASTA options
 
-For GFA/MAF output and similarity computation:
+For GFA/MAF/FASTA output and similarity computation:
 
 - `--fasta-files`: List of FASTA files
 - `--fasta-list`: Text file listing FASTA files (one per line)
 - `--poa-scoring`: POA scoring parameters as `match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2` (default: `1,4,6,2,26,1`)
+- `--reverse-complement`: Reverse complement sequences on the reverse strand (for FASTA output)
 
 ## What does `impg` do?
 
