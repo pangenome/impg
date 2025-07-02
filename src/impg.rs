@@ -92,7 +92,7 @@ pub struct QueryMetadata {
 }
 
 impl QueryMetadata {
-// Constants for bit manipulation
+    // Constants for bit manipulation
     const STRAND_BIT: u64 = 0x8000000000000000; // Most significant bit for u64
 
     fn strand(&self) -> Strand {
@@ -1430,5 +1430,4 @@ mod tests {
         let records = parse_paf(reader, &mut seq_index).unwrap();
         assert_eq!(records, expected_records);
     }
-
 }

@@ -39,7 +39,7 @@ struct CommonOpts {
 
     /// Number of threads for parallel processing.
     #[clap(short = 't', long, value_parser, default_value_t = NonZeroUsize::new(4).unwrap())]
-    num_threads: NonZeroUsize,
+    threads: NonZeroUsize,
 
     /// Verbosity level (0 = error, 1 = info, 2 = debug)
     #[clap(short, long, default_value = "0")]
@@ -400,7 +400,7 @@ fn main() -> io::Result<()> {
             selection_mode,
             min_missing_size,
             min_boundary_distance,
-            force_large_region  ,
+            force_large_region,
         } => {
             validate_selection_mode(&selection_mode)?;
             validate_output_format(&output_format, &["bed", "gfa", "maf", "fasta"])?;
@@ -728,7 +728,8 @@ fn main() -> io::Result<()> {
             let cached_targets = if let Some(target_bed) = &query.target_bed {
                 let targets = impg::partition::parse_bed_file(target_bed)?;
                 for (_, target_range, _) in &targets {
-                    validate_region_size(*target_range, "gfa", force_large_region)?; // Similarity always uses SPOA
+                    // Similarity always uses SPOA
+                    validate_region_size(*target_range, "gfa", force_large_region)?;
                 }
                 Some(targets)
             } else {
@@ -892,9 +893,13 @@ fn validate_output_format(format: &str, valid_formats: &[&str]) -> io::Result<()
 }
 
 /// Validate region size
-fn validate_region_size(target_range: (i32, i32), output_format: &str, force_large_region: bool) -> io::Result<()> {
+fn validate_region_size(
+    target_range: (i32, i32),
+    output_format: &str,
+    force_large_region: bool,
+) -> io::Result<()> {
     let (start, end) = target_range;
-    
+
     // Check that start and end are non-negative
     if start < 0 {
         return Err(io::Error::new(
@@ -902,14 +907,14 @@ fn validate_region_size(target_range: (i32, i32), output_format: &str, force_lar
             format!("Target range start ({}) cannot be negative", start),
         ));
     }
-    
+
     if end < 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("Target range end ({}) cannot be negative", end),
         ));
     }
-    
+
     // Check that start <= end
     if start > end {
         return Err(io::Error::new(
@@ -920,13 +925,13 @@ fn validate_region_size(target_range: (i32, i32), output_format: &str, force_lar
             ),
         ));
     }
-    
+
     let region_size = (target_range.1 - target_range.0).unsigned_abs() as u64;
     const SIZE_LIMIT: u64 = 10_000; // 10kbp limit
-    
+
     // Check if this is a maf/gfa output format that uses SPOA
     let uses_spoa = matches!(output_format, "maf" | "gfa");
-    
+
     if uses_spoa && region_size > SIZE_LIMIT && !force_large_region {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -936,7 +941,7 @@ fn validate_region_size(target_range: (i32, i32), output_format: &str, force_lar
             ),
         ));
     }
-    
+
     Ok(())
 }
 
@@ -953,7 +958,7 @@ fn initialize_impg(common: &CommonOpts) -> io::Result<Impg> {
 
     // Configure thread pool
     ThreadPoolBuilder::new()
-        .num_threads(common.num_threads.into())
+        .num_threads(common.threads.into())
         .build_global()
         .unwrap();
 
@@ -963,9 +968,9 @@ fn initialize_impg(common: &CommonOpts) -> io::Result<Impg> {
 
     // Load or generate index
     if common.force_reindex {
-        generate_multi_index(&paf_files, common.num_threads, common.index.as_deref())
+        generate_multi_index(&paf_files, common.threads, common.index.as_deref())
     } else {
-        load_or_generate_multi_index(&paf_files, common.num_threads, common.index.as_deref())
+        load_or_generate_multi_index(&paf_files, common.threads, common.index.as_deref())
     }
 }
 
@@ -1020,14 +1025,14 @@ fn resolve_paf_files(common: &CommonOpts) -> io::Result<Vec<String>> {
 
 fn load_or_generate_multi_index(
     paf_files: &[String],
-    num_threads: NonZeroUsize,
+    threads: NonZeroUsize,
     custom_index: Option<&str>,
 ) -> io::Result<Impg> {
     let index_file = get_combined_index_filename(paf_files, custom_index);
     if std::path::Path::new(&index_file).exists() {
         load_multi_index(paf_files, custom_index)
     } else {
-        generate_multi_index(paf_files, num_threads, custom_index)
+        generate_multi_index(paf_files, threads, custom_index)
     }
 }
 
@@ -1073,7 +1078,7 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
 
 fn generate_multi_index(
     paf_files: &[String],
-    num_threads: NonZeroUsize,
+    threads: NonZeroUsize,
     custom_index: Option<&str>,
 ) -> io::Result<Impg> {
     let index_file = get_combined_index_filename(paf_files, custom_index);
@@ -1105,7 +1110,7 @@ fn generate_multi_index(
                 let reader: Box<dyn io::Read> =
                     if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
                         Box::new(bgzf::io::MultithreadedReader::with_worker_count(
-                            num_threads,
+                            threads,
                             file,
                         ))
                     } else {
@@ -1223,20 +1228,21 @@ fn perform_query(
     min_distance_between_ranges: i32,
 ) -> io::Result<Vec<AdjustedInterval>> {
     let (target_start, target_end) = target_range;
-    let target_id = impg
-        .seq_index
-        .get_id(target_name)
-        .ok_or_else(|| io::Error::new(
+    let target_id = impg.seq_index.get_id(target_name).ok_or_else(|| {
+        io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("Target sequence '{}' not found in index", target_name)
-        ))?;
-    let target_length = impg
-        .seq_index
-        .get_len_from_id(target_id)
-        .ok_or_else(|| io::Error::new(
+            format!("Target sequence '{}' not found in index", target_name),
+        )
+    })?;
+    let target_length = impg.seq_index.get_len_from_id(target_id).ok_or_else(|| {
+        io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Target sequence '{}' length not found in index", target_name)
-        ))?;
+            format!(
+                "Target sequence '{}' length not found in index",
+                target_name
+            ),
+        )
+    })?;
     if target_end > target_length as i32 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
