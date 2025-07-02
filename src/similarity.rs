@@ -29,7 +29,7 @@ impl SimilarityMetrics {
     fn new(intersection: usize, len_a: usize, len_b: usize) -> Self {
         // Check for perfect match first
         let is_perfect_match = len_a == len_b && intersection == len_a;
-        
+
         let union = (len_a + len_b).saturating_sub(intersection);
         let jaccard = if is_perfect_match {
             1.0
@@ -270,7 +270,7 @@ fn compute_pca_for_region(
     pca_similarity: &str,
 ) -> io::Result<PcaResult> {
     debug!("Computing PCA for region with {} intervals", results.len());
-    
+
     let (groups, msa_chars) =
         prepare_groups_and_msa(impg, results, fasta_index, scoring_params, delim, delim_pos)?;
 

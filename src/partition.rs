@@ -1353,7 +1353,8 @@ pub fn parse_bed_file(bed_file: &str) -> io::Result<Vec<(String, (i32, i32), Str
         }
 
         let (start, end) = parse_range(&parts[1..=2])?;
-        let name = parts.get(3)
+        let name = parts
+            .get(3)
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("{}:{}-{}", parts[0], start, end));
         ranges.push((parts[0].to_string(), (start, end), name));
