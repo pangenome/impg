@@ -1060,7 +1060,7 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
     }
 
     let file = File::open(index_file)?;
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::with_capacity(1024 * 1024, file); // 1MB buffer
     let serializable: SerializableImpg =
         bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard()).map_err(
             |e| {
