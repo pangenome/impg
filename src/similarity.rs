@@ -183,6 +183,8 @@ fn compute_similarities_for_region(
     delim_pos: u16,
     region: Option<&str>,
 ) -> io::Result<String> {
+    debug!("Computing similarities for region {:?}", region);
+
     let (groups, msa_chars) =
         prepare_groups_and_msa(impg, results, fasta_index, scoring_params, delim, delim_pos)?;
 
@@ -256,6 +258,8 @@ fn compute_pca_for_region(
     n_components: usize,
     pca_similarity: &str,
 ) -> io::Result<PcaResult> {
+    debug!("Computing PCA for region with {} intervals", results.len());
+    
     let (groups, msa_chars) =
         prepare_groups_and_msa(impg, results, fasta_index, scoring_params, delim, delim_pos)?;
 
