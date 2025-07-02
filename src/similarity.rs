@@ -832,7 +832,21 @@ impl ClassicalMDS {
             .enumerate()
             .map(|(i, &val)| (val, i))
             .collect();
-        eigen_pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        eigen_pairs.sort_by(|a, b| {
+            match b.0.partial_cmp(&a.0) {
+                Some(ordering) => ordering,
+                None => {
+                    // Handle NaN values - treat NaN as smaller than any finite value
+                    if b.0.is_nan() && a.0.is_nan() {
+                        std::cmp::Ordering::Equal
+                    } else if b.0.is_nan() {
+                        std::cmp::Ordering::Greater
+                    } else {
+                        std::cmp::Ordering::Less
+                    }
+                }
+            }
+        });
 
         // Step 5: Compute coordinates using positive eigenvalues only
         let mut coordinates = vec![vec![0.0; actual_components]; n];
