@@ -14,6 +14,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, BufWriter};
+
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1070,6 +1071,7 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
                 )
             },
         )?;
+
     Ok(Impg::from_multi_paf_and_serializable(
         paf_files,
         serializable,
@@ -1110,8 +1112,7 @@ fn generate_multi_index(
                 let reader: Box<dyn io::Read> =
                     if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
                         Box::new(bgzf::io::MultithreadedReader::with_worker_count(
-                            threads,
-                            file,
+                            threads, file,
                         ))
                     } else {
                         Box::new(file)
