@@ -1112,8 +1112,7 @@ fn generate_multi_index(
                 let reader: Box<dyn io::Read> =
                     if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
                         Box::new(bgzf::io::MultithreadedReader::with_worker_count(
-                            threads,
-                            file,
+                            threads, file,
                         ))
                     } else {
                         Box::new(file)

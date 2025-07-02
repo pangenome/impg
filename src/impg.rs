@@ -5,10 +5,10 @@ use log::debug;
 use noodles::bgzf;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
 use std::cmp::{max, min};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use serde::{Deserialize, Serialize};
 
 /// Parse a CIGAR string into a vector of CigarOp
 // Note that the query_delta is negative for reverse strand alignments
