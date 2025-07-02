@@ -87,20 +87,25 @@ pub struct QueryMetadata {
     query_start: i32,
     query_end: i32,
     paf_file_index: u16,
-    cigar_offset: u64,
+    strand_and_cigar_offset: u64, // Track strand and cigar offset
     cigar_bytes: usize,
 }
 
 impl QueryMetadata {
-    // Getter for strand based on query coordinates
+// Constants for bit manipulation
+    const STRAND_BIT: u64 = 0x8000000000000000; // Most significant bit for u64
+
     fn strand(&self) -> Strand {
-        if self.query_start <= self.query_end {
-            Strand::Forward
-        } else {
+        if (self.strand_and_cigar_offset & Self::STRAND_BIT) != 0 {
             Strand::Reverse
+        } else {
+            Strand::Forward
         }
     }
 
+    fn cigar_offset(&self) -> u64 {
+        self.strand_and_cigar_offset & !Self::STRAND_BIT
+    }
 
     fn get_cigar_ops(
         &self,
@@ -121,12 +126,12 @@ impl QueryMetadata {
 
             let mut reader = bgzf::io::Reader::new(File::open(paf_file).unwrap());
             reader
-                .seek_by_uncompressed_position(paf_gzi_index.unwrap(), self.cigar_offset)
+                .seek_by_uncompressed_position(paf_gzi_index.unwrap(), self.cigar_offset())
                 .unwrap();
             reader.read_exact(&mut cigar_buffer).unwrap();
         } else {
             let mut reader = File::open(paf_file).unwrap();
-            reader.seek(SeekFrom::Start(self.cigar_offset)).unwrap();
+            reader.seek(SeekFrom::Start(self.cigar_offset())).unwrap();
             reader.read_exact(&mut cigar_buffer).unwrap();
         };
 
@@ -321,7 +326,7 @@ impl Impg {
                             query_start: record.query_start as i32,
                             query_end: record.query_end as i32,
                             paf_file_index: file_index as u16,
-                            cigar_offset: record.cigar_offset,
+                            strand_and_cigar_offset: record.strand_and_cigar_offset, // Already includes strand bit
                             cigar_bytes: record.cigar_bytes,
                         };
 
@@ -1417,7 +1422,7 @@ mod tests {
                 target_id,
                 target_start: 30,
                 target_end: 40,
-                cigar_offset: 45,
+                strand_and_cigar_offset: 45, // Forward strand
                 cigar_bytes: 3,
             },
             // Add more test records as needed

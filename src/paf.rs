@@ -10,7 +10,7 @@ pub struct PartialPafRecord {
     pub target_id: u32,
     pub target_start: usize,
     pub target_end: usize,
-    pub cigar_offset: u64, // Track cigar offset
+    pub strand_and_cigar_offset: u64, // Track strand and cigar offset
     pub cigar_bytes: usize,
 }
 
@@ -23,11 +23,19 @@ pub enum Strand {
 }
 
 impl PartialPafRecord {
+    const STRAND_BIT: u64 = 0x8000000000000000; // Most significant bit for u64
+
     pub fn strand(&self) -> Strand {
-        if self.query_start <= self.query_end {
-            Strand::Forward
-        } else {
+        if (self.strand_and_cigar_offset & Self::STRAND_BIT) != 0 {
             Strand::Reverse
+        } else {
+            Strand::Forward
+        }
+    }
+    pub fn set_strand(&mut self, strand: Strand) {
+        match strand {
+            Strand::Forward => self.strand_and_cigar_offset &= !Self::STRAND_BIT,
+            Strand::Reverse => self.strand_and_cigar_offset |= Self::STRAND_BIT,
         }
     }
 
@@ -53,10 +61,9 @@ impl PartialPafRecord {
             .chars()
             .next()
             .ok_or_else(|| ParseErr::InvalidFormat("Expected '+' or '-' for strand".to_string()))?;
-        // Adjust query coordinates based on strand to encode strand information
-        let (adjusted_query_start, adjusted_query_end) = match strand_char {
-            '+' => (query_start, query_end),
-            '-' => (query_end, query_start), // Swap to encode reverse strand
+        let strand = match strand_char {
+            '+' => Strand::Forward,
+            '-' => Strand::Reverse,
             _ => return Err(ParseErr::InvalidStrand),
         };
 
@@ -77,17 +84,18 @@ impl PartialPafRecord {
             }
         }
 
-        // Create the record
-        let record = Self {
+        // Create the record and set strand
+        let mut record = Self {
             query_id,
-            query_start: adjusted_query_start,
-            query_end: adjusted_query_end,
+            query_start,
+            query_end,
             target_id,
             target_start,
             target_end,
-            cigar_offset,
+            strand_and_cigar_offset: cigar_offset,
             cigar_bytes,
         };
+        record.set_strand(strand);
 
         Ok(record)
     }
@@ -146,7 +154,7 @@ mod tests {
                 target_end: 100,
                 // If no cigar, then the offset is just the length of the line and cigar_bytes=0
                 // Should we use Option<> instead?
-                cigar_offset: (line.len() + 1) as u64,
+                strand_and_cigar_offset: (line.len() + 1) as u64,
                 cigar_bytes: 0,
             }
         );
