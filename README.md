@@ -95,6 +95,9 @@ Partition the alignment into smaller pieces:
 # Basic partitioning with 1Mb windows
 impg partition -p alignments.paf -w 1000000
 
+# Specify output folder for partition files (directory will be created if it doesn't exist)
+impg partition -p alignments.paf -w 1000000 --output-folder results
+
 # Start from specific sequences (one per line)
 impg partition -p alignments.paf -w 1000000 --starting-sequences-file seqs.txt
 
@@ -111,9 +114,9 @@ impg partition -p alignments.paf -w 1000000 --selection-mode haplotype      # by
 impg partition -p alignments.paf -w 1000000 -m 2 -l 10000
 
 # Output as GFA, MAF or FASTA requires FASTA files (--fasta-files or --fasta-list)
-impg partition -p alignments.paf -w 1000000 -o gfa --fasta-files *.fa
-impg partition -p alignments.paf -w 1000000 -o maf --fasta-list fastas.txt
-impg partition -p alignments.paf -w 1000000 -o fasta --fasta-files *.fa
+impg partition -p alignments.paf -w 1000000 -o gfa --fasta-files *.fa --output-folder gfa_partitions
+impg partition -p alignments.paf -w 1000000 -o maf --fasta-list fastas.txt --output-folder maf_partitions
+impg partition -p alignments.paf -w 1000000 -o fasta --fasta-files *.fa --output-folder fasta_partitions
 ```
 
 ### Similarity

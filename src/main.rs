@@ -233,6 +233,10 @@ enum Args {
         #[clap(short = 'o', long, value_parser, default_value = "bed")]
         output_format: String,
 
+        /// Output folder for partition files (default: current directory)
+        #[clap(long, value_parser)]
+        output_folder: Option<String>,
+
         #[clap(flatten)]
         gfa_maf_fasta: GfaMafFastaOpts,
 
@@ -390,6 +394,7 @@ fn main() -> io::Result<()> {
             common,
             window_size,
             output_format,
+            output_folder,
             gfa_maf_fasta,
             merge_distance,
             min_identity,
@@ -451,6 +456,7 @@ fn main() -> io::Result<()> {
                 min_transitive_len,
                 min_distance_between_ranges,
                 &output_format,
+                output_folder.as_deref(),
                 fasta_index.as_ref(),
                 scoring_params,
                 reverse_complement,
