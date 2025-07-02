@@ -921,7 +921,7 @@ fn validate_region_size(target_range: (i32, i32), output_format: &str, force_lar
         ));
     }
     
-    let region_size = (target_range.1 - target_range.0).abs() as u64;
+    let region_size = (target_range.1 - target_range.0).unsigned_abs() as u64;
     const SIZE_LIMIT: u64 = 10_000; // 10kbp limit
     
     // Check if this is a maf/gfa output format that uses SPOA

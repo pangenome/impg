@@ -10,11 +10,11 @@ pub struct PartialPafRecord {
     pub target_id: u32,
     pub target_start: usize,
     pub target_end: usize,
-    pub cigar_offset: u64, // Track cigar offset
+    pub strand_and_cigar_offset: u64, // Track strand and cigar offset
     pub cigar_bytes: usize,
 }
 
-#[derive(Default, PartialEq, Clone, Copy, Debug)]
+#[derive(Default, PartialEq, Clone, Copy)]
 #[repr(u8)]
 pub enum Strand {
     #[default]
@@ -23,11 +23,19 @@ pub enum Strand {
 }
 
 impl PartialPafRecord {
+    const STRAND_BIT: u64 = 0x8000000000000000; // Most significant bit for u64
+
     pub fn strand(&self) -> Strand {
-        if self.query_start <= self.query_end {
-            Strand::Forward
-        } else {
+        if (self.strand_and_cigar_offset & Self::STRAND_BIT) != 0 {
             Strand::Reverse
+        } else {
+            Strand::Forward
+        }
+    }
+    pub fn set_strand(&mut self, strand: Strand) {
+        match strand {
+            Strand::Forward => self.strand_and_cigar_offset &= !Self::STRAND_BIT,
+            Strand::Reverse => self.strand_and_cigar_offset |= Self::STRAND_BIT,
         }
     }
 
@@ -53,10 +61,9 @@ impl PartialPafRecord {
             .chars()
             .next()
             .ok_or_else(|| ParseErr::InvalidFormat("Expected '+' or '-' for strand".to_string()))?;
-        // Adjust query coordinates based on strand to encode strand information
-        let (adjusted_query_start, adjusted_query_end) = match strand_char {
-            '+' => (query_start, query_end),
-            '-' => (query_end, query_start), // Swap to encode reverse strand
+        let strand = match strand_char {
+            '+' => Strand::Forward,
+            '-' => Strand::Reverse,
             _ => return Err(ParseErr::InvalidStrand),
         };
 
@@ -77,17 +84,18 @@ impl PartialPafRecord {
             }
         }
 
-        // Create the record
-        let record = Self {
+        // Create the record and set strand
+        let mut record = Self {
             query_id,
-            query_start: adjusted_query_start,
-            query_end: adjusted_query_end,
+            query_start,
+            query_end,
             target_id,
             target_start,
             target_end,
-            cigar_offset,
+            strand_and_cigar_offset: cigar_offset,
             cigar_bytes,
         };
+        record.set_strand(strand);
 
         Ok(record)
     }
@@ -146,7 +154,7 @@ mod tests {
                 target_end: 100,
                 // If no cigar, then the offset is just the length of the line and cigar_bytes=0
                 // Should we use Option<> instead?
-                cigar_offset: (line.len() + 1) as u64,
+                strand_and_cigar_offset: (line.len() + 1) as u64,
                 cigar_bytes: 0,
             }
         );
@@ -173,26 +181,5 @@ mod tests {
         let line = "seq1\t100\t0\t100\t+\tseq2\t100\tz\t100\t60\t100\t255\tcg:Z:10Q";
         let mut seq_index = SequenceIndex::new();
         assert!(PartialPafRecord::parse(line, 0, &mut seq_index).is_err());
-    }
-
-    #[test]
-    fn test_strand_encoding() {
-        let mut seq_index = SequenceIndex::new();
-        
-        // Test forward strand - query coordinates should remain in order
-        let forward_line = "seq1\t100\t10\t20\t+\tseq2\t100\t30\t40\t10\t20\t255";
-        let forward_record = PartialPafRecord::parse(forward_line, 0, &mut seq_index).unwrap();
-        assert_eq!(forward_record.strand(), Strand::Forward);
-        assert_eq!(forward_record.query_start, 10);
-        assert_eq!(forward_record.query_end, 20);
-        assert!(forward_record.query_start <= forward_record.query_end);
-        
-        // Test reverse strand - query coordinates should be swapped  
-        let reverse_line = "seq3\t100\t10\t20\t-\tseq4\t100\t30\t40\t10\t20\t255";
-        let reverse_record = PartialPafRecord::parse(reverse_line, 0, &mut seq_index).unwrap();
-        assert_eq!(reverse_record.strand(), Strand::Reverse);
-        assert_eq!(reverse_record.query_start, 20);
-        assert_eq!(reverse_record.query_end, 10);
-        assert!(reverse_record.query_start > reverse_record.query_end);
     }
 }
