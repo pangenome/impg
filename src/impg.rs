@@ -8,7 +8,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::cmp::{max, min};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 
 /// Parse a CIGAR string into a vector of CigarOp
 // Note that the query_delta is negative for reverse strand alignments
@@ -142,7 +142,21 @@ impl QueryMetadata {
 
 pub type AdjustedInterval = (Interval<u32>, Vec<CigarOp>, Interval<u32>);
 type TreeMap = FxHashMap<u32, BasicCOITree<QueryMetadata, u32>>;
+type ForestMap = FxHashMap<u32, u64>; // target_id -> tree_offset in index file
 pub type SerializableImpg = (FxHashMap<u32, Vec<SerializableInterval>>, SequenceIndex);
+
+#[derive(Serialize, Deserialize)]
+pub struct SerializableImpgV2 {
+    pub forest_map: Vec<ForestMapEntry>,
+    pub seq_index: SequenceIndex,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ForestMapEntry {
+    pub target_id: u32,
+    pub tree_offset: u64,
+    pub tree_size: u64,
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct SerializableInterval {
@@ -281,7 +295,9 @@ impl SortedRanges {
 }
 
 pub struct Impg {
-    pub trees: TreeMap,
+    pub trees: TreeMap, // Cached trees in memory
+    pub forest_map: ForestMap, // Maps target_id to tree offset in index file
+    pub index_file_path: Option<String>, // Path to the index file for lazy loading
     pub seq_index: SequenceIndex,
     pub paf_files: Vec<String>, // List of all PAF files
     pub paf_gzi_indices: Vec<Option<bgzf::gzi::Index>>, // Corresponding GZI indices
@@ -364,6 +380,8 @@ impl Impg {
 
         Ok(Self {
             trees,
+            forest_map: FxHashMap::default(), // Empty forest map for in-memory creation
+            index_file_path: None,
             seq_index,
             paf_files,
             paf_gzi_indices,
@@ -392,6 +410,7 @@ impl Impg {
     pub fn from_multi_paf_and_serializable(
         paf_files: &[String],
         serializable: SerializableImpg,
+        index_file_path: &str,
     ) -> Self {
         let (serializable_trees, seq_index) = serializable;
 
@@ -410,38 +429,84 @@ impl Impg {
             })
             .collect();
 
-        let trees: TreeMap = serializable_trees
-            .into_par_iter()
-            .map(|(target_id, intervals)| {
-                let tree = BasicCOITree::new(
-                    intervals
-                        .iter()
-                        .map(|interval| Interval {
-                            first: interval.first,
-                            last: interval.last,
-                            metadata: interval.metadata.clone(),
-                        })
-                        .collect::<Vec<_>>()
-                        .as_slice(),
-                );
-                (target_id, tree)
-            })
+        // Create forest map with placeholder offsets for now 
+        let forest_map: ForestMap = serializable_trees
+            .keys()
+            .enumerate()
+            .map(|(idx, &target_id)| (target_id, idx as u64 * 1024)) // Placeholder offsets
             .collect();
 
         Self {
-            trees,
+            trees: FxHashMap::default(), // Start with empty cache
+            forest_map,
+            index_file_path: Some(index_file_path.to_string()),
             seq_index,
             paf_files: paf_files.to_vec(),
             paf_gzi_indices,
         }
     }
 
-    pub fn from_paf_and_serializable(paf_file: &str, serializable: SerializableImpg) -> Self {
-        Self::from_multi_paf_and_serializable(&[paf_file.to_string()], serializable)
+    pub fn from_paf_and_serializable(paf_file: &str, serializable: SerializableImpg, index_file_path: &str) -> Self {
+        Self::from_multi_paf_and_serializable(&[paf_file.to_string()], serializable, index_file_path)
+    }
+
+    fn load_tree(&mut self, target_id: u32) -> bool {
+        // If tree is already in cache, return success
+        if self.trees.contains_key(&target_id) {
+            return true;
+        }
+
+        // Get tree offset from forest map
+        let tree_offset = match self.forest_map.get(&target_id) {
+            Some(offset) => *offset,
+            None => return false,
+        };
+        
+        let index_file_path = match self.index_file_path.as_ref() {
+            Some(path) => path,
+            None => return false,
+        };
+
+        // Load tree from disk
+        if let Ok(tree) = self.load_tree_from_disk(index_file_path, tree_offset) {
+            self.trees.insert(target_id, tree);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn load_tree_from_disk(
+        &self,
+        index_file_path: &str,
+        tree_offset: u64,
+    ) -> Result<BasicCOITree<QueryMetadata, u32>, std::io::Error> {
+        let file = File::open(index_file_path)?;
+        let mut reader = BufReader::new(file);
+        
+        // Seek to the tree offset in the file
+        reader.seek(SeekFrom::Start(tree_offset))?;
+        
+        // Read the serialized tree data
+        let serializable_intervals: Vec<SerializableInterval> = 
+            bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to deserialize tree: {:?}", e)))?;
+
+        // Convert to interval tree
+        let intervals: Vec<Interval<QueryMetadata>> = serializable_intervals
+            .into_iter()
+            .map(|interval| Interval {
+                first: interval.first,
+                last: interval.last,
+                metadata: interval.metadata,
+            })
+            .collect();
+
+        Ok(BasicCOITree::new(&intervals))
     }
 
     pub fn query(
-        &self,
+        &mut self,
         target_id: u32,
         range_start: i32,
         range_end: i32,
@@ -476,6 +541,9 @@ impl Impg {
             range_end - range_start
         );
 
+        // Ensure tree is loaded
+        self.load_tree(target_id);
+        
         if let Some(tree) = self.trees.get(&target_id) {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
@@ -531,7 +599,7 @@ impl Impg {
     }
 
     pub fn query_transitive_dfs(
-        &self,
+        &mut self,
         target_id: u32,
         range_start: i32,
         range_end: i32,
@@ -612,6 +680,9 @@ impl Impg {
 
             let prec_num_results = results.len();
 
+            // Ensure tree is loaded
+            self.load_tree(current_target_id);
+            
             if let Some(tree) = self.trees.get(&current_target_id) {
                 // Collect intervals first to process them in parallel
                 let mut intervals = Vec::new();
@@ -771,7 +842,7 @@ impl Impg {
     }
 
     pub fn query_transitive_bfs(
-        &self,
+        &mut self,
         target_id: u32,
         range_start: i32,
         range_end: i32,
@@ -842,6 +913,11 @@ impl Impg {
                 current_ranges.len()
             );
 
+            // Load all trees for current ranges first
+            for (current_target_id, _, _) in &current_ranges {
+                self.load_tree(*current_target_id);
+            }
+
             // Process current depth ranges in parallel
             let query_results: Vec<Vec<(u32, i32, i32, Vec<CigarOp>, i32, i32, u32)>> =
                 current_ranges
@@ -849,7 +925,7 @@ impl Impg {
                     .map(
                         |(current_target_id, current_target_start, current_target_end)| {
                             let mut local_results = Vec::new();
-
+                            
                             if let Some(tree) = self.trees.get(current_target_id) {
                                 tree.query(
                                     *current_target_start,

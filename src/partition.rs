@@ -27,7 +27,7 @@ fn create_output_path(output_folder: Option<&str>, filename: &str) -> io::Result
 }
 
 pub fn partition_alignments(
-    impg: &Impg,
+    impg: &mut Impg,
     window_size: usize,
     starting_sequences_file: Option<&str>,
     selection_mode: &str,
@@ -175,7 +175,7 @@ pub fn partition_alignments(
         }
 
         for (seq_id, start, end) in windows.drain(..) {
-            let chrom = impg.seq_index.get_name(seq_id).unwrap();
+            let chrom = impg.seq_index.get_name(seq_id).unwrap().to_string();
 
             if debug {
                 debug!(

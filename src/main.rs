@@ -440,10 +440,10 @@ fn main() -> io::Result<()> {
                 None
             };
 
-            let impg = initialize_impg(&common)?;
+            let mut impg = initialize_impg(&common)?;
 
             partition_alignments(
-                &impg,
+                &mut impg,
                 window_size,
                 starting_sequences_file.as_deref(),
                 &selection_mode,
@@ -519,14 +519,14 @@ fn main() -> io::Result<()> {
                 None
             };
 
-            let impg = initialize_impg(&common)?;
+            let mut impg = initialize_impg(&common)?;
 
             if let Some(target_range) = &query.target_range {
                 let (target_name, target_range) = parse_target_range(target_range)?;
                 let name = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
 
                 let mut results = perform_query(
-                    &impg,
+                    &mut impg,
                     &target_name,
                     target_range,
                     output_format == "paf" || output_format == "bedpe", // Store CIGAR for PAF/BEDPE output
@@ -605,7 +605,7 @@ fn main() -> io::Result<()> {
                 info!("Parsed {} target ranges from BED file", targets.len());
                 for (target_name, target_range, name) in targets {
                     let mut results = perform_query(
-                        &impg,
+                        &mut impg,
                         &target_name,
                         target_range,
                         output_format == "paf" || output_format == "bedpe", // Store CIGAR for PAF/BEDPE output
@@ -761,13 +761,13 @@ fn main() -> io::Result<()> {
                 )
             })?;
 
-            let impg = initialize_impg(&common)?;
+            let mut impg = initialize_impg(&common)?;
 
             if let Some(target_range) = &query.target_range {
                 let (target_name, target_range) = parse_target_range(target_range)?;
 
                 let mut results = perform_query(
-                    &impg,
+                    &mut impg,
                     &target_name,
                     target_range,
                     false, // Don't need CIGAR for similarity
@@ -817,7 +817,7 @@ fn main() -> io::Result<()> {
                 let mut all_query_data = Vec::new();
                 for (target_name, target_range, _name) in targets {
                     let mut results = perform_query(
-                        &impg,
+                        &mut impg,
                         &target_name,
                         target_range,
                         false, // Don't need CIGAR for similarity
@@ -1073,7 +1073,7 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
         });
     }
 
-    let file = File::open(index_file)?;
+    let file = File::open(&index_file)?;
     let mut reader = BufReader::new(file);
     let serializable: SerializableImpg =
         bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard()).map_err(
@@ -1088,6 +1088,7 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
     Ok(Impg::from_multi_paf_and_serializable(
         paf_files,
         serializable,
+        &index_file,
     ))
 }
 
@@ -1230,7 +1231,7 @@ fn get_combined_index_filename(paf_files: &[String], custom_index: Option<&str>)
 }
 
 fn perform_query(
-    impg: &Impg,
+    impg: &mut Impg,
     target_name: &str,
     target_range: (i32, i32),
     store_cigar: bool,
