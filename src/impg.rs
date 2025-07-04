@@ -428,12 +428,6 @@ impl Impg {
                 format!("Failed to deserialize sequence index: {:?}", e),
             ))?;
         
-        // Skip tree count (we don't need it for lazy loading)
-        let _tree_count: u32 = bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
-            .map_err(|e| std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Failed to deserialize tree count: {:?}", e),
-            ))?;
         
         // Create IMPG instance with forest map for lazy loading
         Ok(Self::with_forest_map(paf_files, seq_index, forest_map, index_file_path))
@@ -499,8 +493,6 @@ impl Impg {
         let seq_index_data = bincode::serde::encode_to_vec(&self.seq_index, bincode::config::standard())
             .map_err(|e| std::io::Error::other(format!("Failed to encode sequence index: {:?}", e)))?;
         
-        let tree_count_data = bincode::serde::encode_to_vec(&(trees.len() as u32), bincode::config::standard())
-            .map_err(|e| std::io::Error::other(format!("Failed to encode tree count: {:?}", e)))?;
         
         // Calculate sizes for all trees
         let mut tree_data_vec = Vec::new();
@@ -534,7 +526,7 @@ impl Impg {
         
         // Clear and rebuild with correct offsets
         forest_map = ForestMap::new();
-        let mut current_offset = forest_map_actual_size + seq_index_data.len() as u64 + tree_count_data.len() as u64;
+        let mut current_offset = forest_map_actual_size + seq_index_data.len() as u64;
         
         for (target_id, tree_data) in &tree_data_vec {
             forest_map.add_entry(*target_id, current_offset);
@@ -549,8 +541,6 @@ impl Impg {
         // Write the sequence index
         writer.write_all(&seq_index_data)?;
         
-        // Write the tree count
-        writer.write_all(&tree_count_data)?;
         
         // Write all trees
         for (_, tree_data) in tree_data_vec {
