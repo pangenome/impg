@@ -2145,7 +2145,7 @@ fn trim_cigar_prefix(cigar: &[CigarOp], query_len: i32, target_len: i32) -> Vec<
 
 fn compute_stats_memory_efficient(impg: &Impg) -> io::Result<(usize, FxHashMap<u32, usize>)> {
     if let Some(forest_map) = &impg.forest_map {
-        info!("Computing statistics for {} trees in parallel (memory-efficient mode)...", forest_map.entries.len());
+        info!("Computing statistics for {} trees...", forest_map.entries.len());
         
         // Collect target IDs to process
         let target_ids: Vec<u32> = forest_map.entries.keys().copied().collect();
