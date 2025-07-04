@@ -1077,7 +1077,7 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
     // Check if forest map exists
     let forest_map_file = ForestMap::get_forest_map_filename(&index_file);
     if std::path::Path::new(&forest_map_file).exists() {
-        info!("Forest map found at {}. Loading with lazy tree loading.", forest_map_file);
+        info!("Forest map found at {}. Lazy index enabled.", forest_map_file);
         
         // Load only the sequence index from the IMPG index
         let file = File::open(&index_file)?;
@@ -2117,6 +2117,17 @@ fn trim_cigar_prefix(cigar: &[CigarOp], query_len: i32, target_len: i32) -> Vec<
     result
 }
 
+fn load_all_trees_for_stats(impg: &Impg) -> io::Result<()> {
+    if let Some(forest_map) = &impg.forest_map {
+        info!("Loading all trees for statistics calculation...");
+        // Load all trees from the forest map
+        for &target_id in forest_map.entries.keys() {
+            impg.ensure_tree_loaded(target_id)?;
+        }
+    }
+    Ok(())
+}
+
 fn print_stats(impg: &Impg) {
     // Basic stats
     let num_sequences = impg.seq_index.len();
@@ -2124,16 +2135,20 @@ fn print_stats(impg: &Impg) {
         .into_par_iter()
         .filter_map(|id| impg.seq_index.get_len_from_id(id))
         .sum();
-    let num_overlaps = impg.trees.read().unwrap().values().map(|tree| tree.len()).sum::<usize>();
+    
+    // If using lazy loading, load all trees first
+    if let Err(e) = load_all_trees_for_stats(impg) {
+        warn!("Failed to load all trees for stats: {}. Using currently loaded trees only.", e);
+    }
+    
+    // Now calculate stats from loaded trees
+    let trees = impg.trees.read().unwrap();
+    let num_overlaps = trees.values().map(|tree| tree.len()).sum::<usize>();
+    let overlaps_per_seq: FxHashMap<u32, usize> = trees.iter().map(|(&id, tree)| (id, tree.len())).collect();
+    
     println!("Number of sequences: {}", num_sequences);
     println!("Total sequence length: {} bp", total_sequence_length);
     println!("Number of overlaps: {}", num_overlaps);
-
-    // Overlap distribution stats
-    let mut overlaps_per_seq: FxHashMap<u32, usize> = FxHashMap::default();
-    for (&target_id, tree) in impg.trees.read().unwrap().iter() {
-        overlaps_per_seq.insert(target_id, tree.len());
-    }
 
     let mut entries: Vec<(u32, usize)> = overlaps_per_seq.into_iter().collect();
     entries.sort_by(|a, b| b.1.cmp(&a.1));

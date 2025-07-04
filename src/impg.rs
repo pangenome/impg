@@ -571,7 +571,7 @@ impl Impg {
     }
 
     /// Ensure a tree is loaded in memory, loading it from disk if necessary
-    fn ensure_tree_loaded(&self, target_id: u32) -> std::io::Result<bool> {
+    pub fn ensure_tree_loaded(&self, target_id: u32) -> std::io::Result<bool> {
         if self.trees.read().unwrap().contains_key(&target_id) {
             Ok(true) // Tree already loaded
         } else {
