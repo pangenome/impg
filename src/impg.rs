@@ -515,20 +515,18 @@ impl Impg {
         // PASS 2: Build forest map with calculated offsets
         let mut forest_map = ForestMap::new();
         
-        // First, fill with fake "worst case" offsets to get accurate size estimate
-        let fake_offset = u64::MAX; // Largest possible offset for maximum serialization size
-        for (target_id, _) in &tree_data_vec {
-            forest_map.add_entry(*target_id, fake_offset);
-        }
         
-        // Get forest map size with worst-case offsets
-        let forest_map_size = bincode::serde::encode_to_vec(&forest_map, bincode::config::standard())
+        // Add entries to get actual size
+        for (target_id, _) in &tree_data_vec {
+            forest_map.add_entry(*target_id, 0); // Placeholder offset
+        }
+        let forest_map_actual_size = bincode::serde::encode_to_vec(&forest_map, bincode::config::standard())
             .map_err(|e| std::io::Error::other(format!("Failed to encode forest map: {:?}", e)))?
             .len() as u64;
         
-        // Now clear and rebuild with real offsets
+        // Clear and rebuild with correct offsets
         forest_map = ForestMap::new();
-        let mut current_offset = forest_map_size + seq_index_data.len() as u64;
+        let mut current_offset = forest_map_actual_size + seq_index_data.len() as u64;
         
         for (target_id, tree_data) in &tree_data_vec {
             forest_map.add_entry(*target_id, current_offset);
