@@ -1,6 +1,7 @@
 use clap::Parser;
 use coitrees::{Interval, IntervalTree};
 use impg::faidx::FastaIndex;
+use impg::forest_map::ForestMap;
 use impg::impg::{AdjustedInterval, CigarOp, Impg, SerializableImpg};
 use impg::paf::{PartialPafRecord, Strand};
 use impg::partition::partition_alignments;
@@ -1073,22 +1074,54 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
         });
     }
 
-    let file = File::open(index_file)?;
-    let mut reader = BufReader::new(file);
-    let serializable: SerializableImpg =
-        bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard()).map_err(
-            |e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Failed to deserialize index: {:?}", e),
-                )
-            },
-        )?;
+    // Check if forest map exists
+    let forest_map_file = ForestMap::get_forest_map_filename(&index_file);
+    if std::path::Path::new(&forest_map_file).exists() {
+        info!("Forest map found at {}. Loading with lazy tree loading.", forest_map_file);
+        
+        // Load only the sequence index from the IMPG index
+        let file = File::open(&index_file)?;
+        let mut reader = BufReader::new(file);
+        let seq_index: SequenceIndex =
+            bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard()).map_err(
+                |e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Failed to deserialize sequence index: {:?}", e),
+                    )
+                },
+            )?;
+        
+        // Load the forest map
+        let forest_map = ForestMap::load_from_file(&forest_map_file)?;
+        
+        Ok(Impg::with_forest_map(
+            paf_files,
+            seq_index,
+            forest_map,
+            index_file,
+        ))
+    } else {
+        info!("No forest map found. Loading full index.");
+        
+        // Load full index as before
+        let file = File::open(index_file)?;
+        let mut reader = BufReader::new(file);
+        let serializable: SerializableImpg =
+            bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard()).map_err(
+                |e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Failed to deserialize index: {:?}", e),
+                    )
+                },
+            )?;
 
-    Ok(Impg::from_multi_paf_and_serializable(
-        paf_files,
-        serializable,
-    ))
+        Ok(Impg::from_multi_paf_and_serializable(
+            paf_files,
+            serializable,
+        ))
+    }
 }
 
 fn generate_multi_index(
@@ -1185,11 +1218,16 @@ fn generate_multi_index(
         )
     })?;
 
-    let serializable = impg.to_serializable();
-    let file = File::create(index_file)?;
+    // Serialize the index with forest map creation
+    let index_file_path = index_file.clone();
+    let file = File::create(&index_file_path)?;
     let mut writer = BufWriter::new(file);
-    bincode::serde::encode_into_std_write(&serializable, &mut writer, bincode::config::standard())
-        .map_err(|e| io::Error::other(format!("Failed to serialize index: {:?}", e)))?;
+    let forest_map = impg.serialize_with_forest_map(&mut writer)?;
+    
+    // Save the forest map to a separate file
+    let forest_map_file = ForestMap::get_forest_map_filename(&index_file_path);
+    info!("Saving forest map to {}", forest_map_file);
+    forest_map.save_to_file(&forest_map_file)?;
 
     Ok(impg)
 }
@@ -2086,14 +2124,14 @@ fn print_stats(impg: &Impg) {
         .into_par_iter()
         .filter_map(|id| impg.seq_index.get_len_from_id(id))
         .sum();
-    let num_overlaps = impg.trees.values().map(|tree| tree.len()).sum::<usize>();
+    let num_overlaps = impg.trees.read().unwrap().values().map(|tree| tree.len()).sum::<usize>();
     println!("Number of sequences: {}", num_sequences);
     println!("Total sequence length: {} bp", total_sequence_length);
     println!("Number of overlaps: {}", num_overlaps);
 
     // Overlap distribution stats
     let mut overlaps_per_seq: FxHashMap<u32, usize> = FxHashMap::default();
-    for (&target_id, tree) in &impg.trees {
+    for (&target_id, tree) in impg.trees.read().unwrap().iter() {
         overlaps_per_seq.insert(target_id, tree.len());
     }
 
