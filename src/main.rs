@@ -2119,11 +2119,28 @@ fn trim_cigar_prefix(cigar: &[CigarOp], query_len: i32, target_len: i32) -> Vec<
 
 fn load_all_trees_for_stats(impg: &Impg) -> io::Result<()> {
     if let Some(forest_map) = &impg.forest_map {
-        info!("Loading all trees for statistics calculation...");
-        // Load all trees from the forest map
-        for &target_id in forest_map.entries.keys() {
-            impg.ensure_tree_loaded(target_id)?;
+        info!("Loading all {} trees in parallel for statistics calculation...", forest_map.entries.len());
+        
+        // Collect target IDs to load
+        let target_ids: Vec<u32> = forest_map.entries.keys().copied().collect();
+        
+        // Load trees in parallel
+        let results: Vec<Result<bool, io::Error>> = target_ids
+            .par_iter()
+            .map(|&target_id| impg.ensure_tree_loaded(target_id))
+            .collect();
+        
+        // Check for any errors
+        for (i, result) in results.into_iter().enumerate() {
+            if let Err(e) = result {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Failed to load tree {}: {}", target_ids[i], e)
+                ));
+            }
         }
+        
+        info!("Successfully loaded {} trees", target_ids.len());
     }
     Ok(())
 }
