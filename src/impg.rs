@@ -408,37 +408,6 @@ impl Impg {
         }
     }
 
-    /// Load IMPG from embedded forest map format (single file with forest map at beginning)
-    pub fn load_from_embedded_forest_map<R: std::io::Read>(
-        mut reader: R,
-        paf_files: &[String],
-        index_file_path: String,
-    ) -> std::io::Result<Self> {
-        // Read forest map from beginning of file
-        let forest_map: ForestMap = bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
-            .map_err(|e| std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Failed to deserialize forest map: {:?}", e),
-            ))?;
-        
-        // Read sequence index
-        let seq_index: SequenceIndex = bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
-            .map_err(|e| std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Failed to deserialize sequence index: {:?}", e),
-            ))?;
-        
-        // Skip tree count (we don't need it for lazy loading)
-        let _tree_count: u32 = bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
-            .map_err(|e| std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Failed to deserialize tree count: {:?}", e),
-            ))?;
-        
-        // Create IMPG instance with forest map for lazy loading
-        Ok(Self::with_forest_map(paf_files, seq_index, forest_map, index_file_path))
-    }
-
     /// Serialize the IMPG index to a writer and create a forest map
     pub fn serialize_with_forest_map<W: std::io::Write>(
         &self,
@@ -486,78 +455,6 @@ impl Impg {
         }
         
         Ok(forest_map)
-    }
-
-    /// Serialize the IMPG index with forest map embedded at the beginning (single file)
-    pub fn serialize_with_embedded_forest_map<W: std::io::Write>(
-        &self,
-        mut writer: W,
-    ) -> std::io::Result<()> {
-        let trees = self.trees.read().unwrap();
-        
-        // PASS 1: Calculate all sizes without writing
-        let seq_index_data = bincode::serde::encode_to_vec(&self.seq_index, bincode::config::standard())
-            .map_err(|e| std::io::Error::other(format!("Failed to encode sequence index: {:?}", e)))?;
-        
-        let tree_count_data = bincode::serde::encode_to_vec(&(trees.len() as u32), bincode::config::standard())
-            .map_err(|e| std::io::Error::other(format!("Failed to encode tree count: {:?}", e)))?;
-        
-        // Calculate sizes for all trees
-        let mut tree_data_vec = Vec::new();
-        for (&target_id, tree) in trees.iter() {
-            let intervals: Vec<SerializableInterval> = tree
-                .iter()
-                .map(|interval| SerializableInterval {
-                    first: interval.first,
-                    last: interval.last,
-                    metadata: interval.metadata.clone(),
-                })
-                .collect();
-            
-            let tree_data = bincode::serde::encode_to_vec(&(target_id, intervals), bincode::config::standard())
-                .map_err(|e| std::io::Error::other(format!("Failed to encode tree for target {}: {:?}", target_id, e)))?;
-            
-            tree_data_vec.push((target_id, tree_data));
-        }
-        
-        // PASS 2: Build forest map with calculated offsets
-        let mut forest_map = ForestMap::new();
-        
-        
-        // Add entries to get actual size
-        for (target_id, _) in &tree_data_vec {
-            forest_map.add_entry(*target_id, 0); // Placeholder offset
-        }
-        let forest_map_actual_size = bincode::serde::encode_to_vec(&forest_map, bincode::config::standard())
-            .map_err(|e| std::io::Error::other(format!("Failed to encode forest map: {:?}", e)))?
-            .len() as u64;
-        
-        // Clear and rebuild with correct offsets
-        forest_map = ForestMap::new();
-        let mut current_offset = forest_map_actual_size + seq_index_data.len() as u64 + tree_count_data.len() as u64;
-        
-        for (target_id, tree_data) in &tree_data_vec {
-            forest_map.add_entry(*target_id, current_offset);
-            current_offset += tree_data.len() as u64;
-        }
-        
-        // Write forest map first
-        let forest_map_data = bincode::serde::encode_to_vec(&forest_map, bincode::config::standard())
-            .map_err(|e| std::io::Error::other(format!("Failed to encode final forest map: {:?}", e)))?;
-        writer.write_all(&forest_map_data)?;
-        
-        // Write the sequence index
-        writer.write_all(&seq_index_data)?;
-        
-        // Write the tree count
-        writer.write_all(&tree_count_data)?;
-        
-        // Write all trees
-        for (_, tree_data) in tree_data_vec {
-            writer.write_all(&tree_data)?;
-        }
-        
-        Ok(())
     }
 
     /// Load a specific tree from disk using the forest map
