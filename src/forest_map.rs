@@ -75,7 +75,7 @@ impl ForestMap {
 
     /// Generate forest map filename based on the index filename
     pub fn get_forest_map_filename(index_filename: &str) -> String {
-        format!("{}.forest", index_filename)
+        format!("{}.map", index_filename)
     }
 }
 
