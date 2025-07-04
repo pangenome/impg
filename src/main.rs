@@ -1104,7 +1104,7 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
             index_file,
         ))
     } else {
-        info!("No forest map found. Loading full index into memory.");
+        info!("No forest map found. Loading full index.");
         
         // Load full index into memory
         let file = File::open(&index_file)?;
@@ -1181,7 +1181,7 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
         
         // Try to save forest map for future use (optional - don't fail if it doesn't work)
         match forest_map.save_to_file(&forest_map_file) {
-            Ok(_) => info!("Forest map created for future lazy loading."),
+            Ok(_) => info!("Forest map created for future lazy loading: {}.", forest_map_file),
             Err(e) => warn!("Failed to create forest map: {}. Index will work without it.", e),
         }
         
