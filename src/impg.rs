@@ -144,13 +144,12 @@ impl QueryMetadata {
 
 pub type AdjustedInterval = (Interval<u32>, Vec<CigarOp>, Interval<u32>);
 type TreeMap = FxHashMap<u32, BasicCOITree<QueryMetadata, u32>>;
-pub type SerializableImpg = (FxHashMap<u32, Vec<SerializableInterval>>, SequenceIndex);
 
 #[derive(Serialize, Deserialize)]
 pub struct SerializableInterval {
-    first: i32,
-    last: i32,
-    metadata: QueryMetadata,
+    pub first: i32,
+    pub last: i32,
+    pub metadata: QueryMetadata,
 }
 
 #[derive(Default, Clone)]
@@ -376,79 +375,6 @@ impl Impg {
         })
     }
 
-    pub fn to_serializable(&self) -> SerializableImpg {
-        let serializable_trees = self
-            .trees
-            .read()
-            .unwrap()
-            .iter()
-            .map(|(target_id, tree)| {
-                let intervals = tree
-                    .iter()
-                    .map(|interval| SerializableInterval {
-                        first: interval.first,
-                        last: interval.last,
-                        metadata: interval.metadata.clone(),
-                    })
-                    .collect();
-                (*target_id, intervals)
-            })
-            .collect();
-        (serializable_trees, self.seq_index.clone())
-    }
-
-    pub fn from_multi_paf_and_serializable(
-        paf_files: &[String],
-        serializable: SerializableImpg,
-    ) -> Self {
-        let (serializable_trees, seq_index) = serializable;
-
-        let paf_gzi_indices: Vec<_> = paf_files
-            .par_iter()
-            .map(|paf_file| {
-                if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-                    let paf_gzi_file = paf_file.to_owned() + ".gzi";
-                    Some(
-                        bgzf::gzi::fs::read(paf_gzi_file.clone())
-                            .unwrap_or_else(|_| panic!("Could not open {}", paf_gzi_file)),
-                    )
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let trees: TreeMap = serializable_trees
-            .into_par_iter()
-            .map(|(target_id, intervals)| {
-                let tree = BasicCOITree::new(
-                    intervals
-                        .iter()
-                        .map(|interval| Interval {
-                            first: interval.first,
-                            last: interval.last,
-                            metadata: interval.metadata.clone(),
-                        })
-                        .collect::<Vec<_>>()
-                        .as_slice(),
-                );
-                (target_id, tree)
-            })
-            .collect();
-
-        Self {
-            trees: RwLock::new(trees),
-            seq_index,
-            paf_files: paf_files.to_vec(),
-            paf_gzi_indices,
-            forest_map: None,
-            index_file_path: None,
-        }
-    }
-
-    pub fn from_paf_and_serializable(paf_file: &str, serializable: SerializableImpg) -> Self {
-        Self::from_multi_paf_and_serializable(&[paf_file.to_string()], serializable)
-    }
 
     /// Create an IMPG instance with lazy loading using a forest map
     pub fn with_forest_map(
@@ -488,18 +414,17 @@ impl Impg {
         mut writer: W,
     ) -> std::io::Result<ForestMap> {
         let mut forest_map = ForestMap::new();
-        let serializable = self.to_serializable();
         
-        // We need to manually serialize to track offsets
         // Start with the sequence index
-        let seq_index_data = bincode::serde::encode_to_vec(&serializable.1, bincode::config::standard())
+        let seq_index_data = bincode::serde::encode_to_vec(&self.seq_index, bincode::config::standard())
             .map_err(|e| std::io::Error::other(format!("Failed to encode sequence index: {:?}", e)))?;
         
         writer.write_all(&seq_index_data)?;
         let mut current_offset = seq_index_data.len() as u64;
         
-        // Serialize the tree map with offset tracking
-        let tree_count = serializable.0.len() as u32;
+        // Serialize the tree count
+        let trees = self.trees.read().unwrap();
+        let tree_count = trees.len() as u32;
         let tree_count_data = bincode::serde::encode_to_vec(&tree_count, bincode::config::standard())
             .map_err(|e| std::io::Error::other(format!("Failed to encode tree count: {:?}", e)))?;
         
@@ -507,12 +432,22 @@ impl Impg {
         current_offset += tree_count_data.len() as u64;
         
         // Serialize each tree and track its offset
-        for (target_id, intervals) in &serializable.0 {
+        for (&target_id, tree) in trees.iter() {
             // Record the offset before serializing this tree
-            forest_map.add_entry(*target_id, current_offset);
+            forest_map.add_entry(target_id, current_offset);
+            
+            // Convert tree to serializable format
+            let intervals: Vec<SerializableInterval> = tree
+                .iter()
+                .map(|interval| SerializableInterval {
+                    first: interval.first,
+                    last: interval.last,
+                    metadata: interval.metadata.clone(),
+                })
+                .collect();
             
             // Serialize the target_id and intervals
-            let tree_data = bincode::serde::encode_to_vec(&(*target_id, intervals), bincode::config::standard())
+            let tree_data = bincode::serde::encode_to_vec(&(target_id, intervals), bincode::config::standard())
                 .map_err(|e| std::io::Error::other(format!("Failed to encode tree for target {}: {:?}", target_id, e)))?;
             
             writer.write_all(&tree_data)?;

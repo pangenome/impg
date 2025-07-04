@@ -1,8 +1,8 @@
 use clap::Parser;
-use coitrees::{Interval, IntervalTree};
+use coitrees::{BasicCOITree, Interval, IntervalTree};
 use impg::faidx::FastaIndex;
 use impg::forest_map::ForestMap;
-use impg::impg::{AdjustedInterval, CigarOp, Impg, SerializableImpg};
+use impg::impg::{AdjustedInterval, CigarOp, Impg, SerializableInterval};
 use impg::paf::{PartialPafRecord, Strand};
 use impg::partition::partition_alignments;
 use impg::seqidx::SequenceIndex;
@@ -15,6 +15,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, BufWriter};
+use std::sync::RwLock;
 
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1074,12 +1075,13 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
         });
     }
 
-    // Check if forest map exists
+    // Check if forest map exists for lazy loading
     let forest_map_file = ForestMap::get_forest_map_filename(&index_file);
+    
     if std::path::Path::new(&forest_map_file).exists() {
-        info!("Forest map found at {}. Lazy index enabled.", forest_map_file);
+        info!("Forest map found. Lazy loading enabled.");
         
-        // Load only the sequence index from the IMPG index
+        // Load sequence index only
         let file = File::open(&index_file)?;
         let mut reader = BufReader::new(file);
         let seq_index: SequenceIndex =
@@ -1087,12 +1089,12 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
                 |e| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("Failed to deserialize sequence index: {:?}", e),
+                        format!("Failed to load sequence index: {:?}", e),
                     )
                 },
             )?;
         
-        // Load the forest map
+        // Load forest map
         let forest_map = ForestMap::load_from_file(&forest_map_file)?;
         
         Ok(Impg::with_forest_map(
@@ -1102,53 +1104,115 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
             index_file,
         ))
     } else {
-        info!("No forest map found. Loading full index.");
+        info!("No forest map found. Loading full index into memory.");
         
-        // Load full index as before
+        // Load full index into memory
         let file = File::open(&index_file)?;
         let mut reader = BufReader::new(file);
-        let serializable: SerializableImpg =
+        
+        // Load sequence index
+        let seq_index: SequenceIndex =
             bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard()).map_err(
                 |e| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("Failed to deserialize index: {:?}", e),
+                        format!("Failed to load sequence index: {:?}", e),
                     )
                 },
             )?;
-
-        let impg = Impg::from_multi_paf_and_serializable(paf_files, serializable);
         
-        // Generate forest map for future use
-        info!("Generating forest map for future lazy loading...");
-        match generate_forest_map_from_loaded_index(&impg, &index_file) {
-            Ok(_) => info!("Forest map generated successfully."),
-            Err(e) => warn!("Failed to generate forest map: {}. Index will work without it.", e),
+        // Load tree count
+        let tree_count: u32 =
+            bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard()).map_err(
+                |e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Failed to load tree count: {:?}", e),
+                    )
+                },
+            )?;
+        
+        // Load all trees into memory
+        let mut trees = FxHashMap::default();
+        let mut forest_map = ForestMap::new();
+        let seq_index_size = bincode::serde::encode_to_vec(&seq_index, bincode::config::standard())
+            .map(|v| v.len() as u64)
+            .unwrap_or(0);
+        let tree_count_size = bincode::serde::encode_to_vec(&tree_count, bincode::config::standard())
+            .map(|v| v.len() as u64)
+            .unwrap_or(0);
+        let mut current_offset = seq_index_size + tree_count_size;
+        
+        for _ in 0..tree_count {
+            let tree_start_offset = current_offset;
+            let (target_id, intervals): (u32, Vec<SerializableInterval>) =
+                bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard()).map_err(
+                    |e| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Failed to load tree data: {:?}", e),
+                        )
+                    },
+                )?;
+            
+            // Add to forest map for future use
+            forest_map.add_entry(target_id, tree_start_offset);
+            
+            // Reconstruct tree and load into memory
+            let tree = BasicCOITree::new(
+                intervals
+                    .iter()
+                    .map(|interval| Interval {
+                        first: interval.first,
+                        last: interval.last,
+                        metadata: interval.metadata.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            );
+            trees.insert(target_id, tree);
+            
+            // Calculate size for next offset
+            let tree_size = bincode::serde::encode_to_vec(&(target_id, &intervals), bincode::config::standard())
+                .map(|v| v.len() as u64)
+                .unwrap_or(0);
+            current_offset += tree_size;
         }
         
-        Ok(impg)
+        // Try to save forest map for future use (optional - don't fail if it doesn't work)
+        match forest_map.save_to_file(&forest_map_file) {
+            Ok(_) => info!("Forest map created for future lazy loading."),
+            Err(e) => warn!("Failed to create forest map: {}. Index will work without it.", e),
+        }
+        
+        // Build paf_gzi_indices
+        let paf_gzi_indices: Vec<_> = paf_files
+            .par_iter()
+            .map(|paf_file| {
+                if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
+                    let paf_gzi_file = paf_file.to_owned() + ".gzi";
+                    Some(
+                        bgzf::gzi::fs::read(paf_gzi_file.clone())
+                            .unwrap_or_else(|_| panic!("Could not open {}", paf_gzi_file)),
+                    )
+                } else {
+                    None
+                }
+            })
+            .collect();
+        
+        // Return IMPG with all trees loaded (no forest map needed)
+        Ok(Impg {
+            trees: RwLock::new(trees),
+            seq_index,
+            paf_files: paf_files.to_vec(),
+            paf_gzi_indices,
+            forest_map: None, // No forest map - all trees are loaded
+            index_file_path: None,
+        })
     }
 }
 
-fn generate_forest_map_from_loaded_index(impg: &Impg, index_file_path: &str) -> io::Result<()> {
-    // Re-serialize the index with forest map generation
-    let temp_index_file = format!("{}.tmp", index_file_path);
-    
-    {
-        let file = File::create(&temp_index_file)?;
-        let mut writer = BufWriter::new(file);
-        let forest_map = impg.serialize_with_forest_map(&mut writer)?;
-        
-        // Save the forest map
-        let forest_map_file = ForestMap::get_forest_map_filename(index_file_path);
-        forest_map.save_to_file(&forest_map_file)?;
-    }
-    
-    // Replace the old index file with the new one
-    std::fs::rename(&temp_index_file, index_file_path)?;
-    
-    Ok(())
-}
 
 fn generate_multi_index(
     paf_files: &[String],
