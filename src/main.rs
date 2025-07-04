@@ -1105,7 +1105,7 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
         info!("No forest map found. Loading full index.");
         
         // Load full index as before
-        let file = File::open(index_file)?;
+        let file = File::open(&index_file)?;
         let mut reader = BufReader::new(file);
         let serializable: SerializableImpg =
             bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard()).map_err(
@@ -1117,11 +1117,37 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
                 },
             )?;
 
-        Ok(Impg::from_multi_paf_and_serializable(
-            paf_files,
-            serializable,
-        ))
+        let impg = Impg::from_multi_paf_and_serializable(paf_files, serializable);
+        
+        // Generate forest map for future use
+        info!("Generating forest map for future lazy loading...");
+        match generate_forest_map_from_loaded_index(&impg, &index_file) {
+            Ok(_) => info!("Forest map generated successfully."),
+            Err(e) => warn!("Failed to generate forest map: {}. Index will work without it.", e),
+        }
+        
+        Ok(impg)
     }
+}
+
+fn generate_forest_map_from_loaded_index(impg: &Impg, index_file_path: &str) -> io::Result<()> {
+    // Re-serialize the index with forest map generation
+    let temp_index_file = format!("{}.tmp", index_file_path);
+    
+    {
+        let file = File::create(&temp_index_file)?;
+        let mut writer = BufWriter::new(file);
+        let forest_map = impg.serialize_with_forest_map(&mut writer)?;
+        
+        // Save the forest map
+        let forest_map_file = ForestMap::get_forest_map_filename(index_file_path);
+        forest_map.save_to_file(&forest_map_file)?;
+    }
+    
+    // Replace the old index file with the new one
+    std::fs::rename(&temp_index_file, index_file_path)?;
+    
+    Ok(())
 }
 
 fn generate_multi_index(
