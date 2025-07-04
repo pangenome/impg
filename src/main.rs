@@ -2117,32 +2117,55 @@ fn trim_cigar_prefix(cigar: &[CigarOp], query_len: i32, target_len: i32) -> Vec<
     result
 }
 
-fn load_all_trees_for_stats(impg: &Impg) -> io::Result<()> {
+fn compute_stats_memory_efficient(impg: &Impg) -> io::Result<(usize, FxHashMap<u32, usize>)> {
     if let Some(forest_map) = &impg.forest_map {
-        info!("Loading all {} trees in parallel for statistics calculation...", forest_map.entries.len());
+        info!("Computing statistics for {} trees in parallel (memory-efficient mode)...", forest_map.entries.len());
         
-        // Collect target IDs to load
+        // Collect target IDs to process
         let target_ids: Vec<u32> = forest_map.entries.keys().copied().collect();
         
-        // Load trees in parallel
-        let results: Vec<Result<bool, io::Error>> = target_ids
+        // Process trees in parallel, computing stats without keeping them in memory
+        let results: Vec<Result<(u32, usize), io::Error>> = target_ids
             .par_iter()
-            .map(|&target_id| impg.ensure_tree_loaded(target_id))
+            .map(|&target_id| {
+                // Load tree temporarily
+                if let Err(e) = impg.ensure_tree_loaded(target_id) {
+                    return Err(e);
+                }
+                
+                // Get the tree count and then remove it from memory
+                let count = {
+                    let mut trees = impg.trees.write().unwrap();
+                    if let Some(tree) = trees.remove(&target_id) {
+                        tree.len()
+                    } else {
+                        0
+                    }
+                };
+                
+                Ok((target_id, count))
+            })
             .collect();
         
-        // Check for any errors
-        for (i, result) in results.into_iter().enumerate() {
-            if let Err(e) = result {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Failed to load tree {}: {}", target_ids[i], e)
-                ));
-            }
+        // Collect results
+        let mut total_overlaps = 0;
+        let mut overlaps_per_seq = FxHashMap::default();
+        
+        for result in results {
+            let (target_id, count) = result?;
+            total_overlaps += count;
+            overlaps_per_seq.insert(target_id, count);
         }
         
-        info!("Successfully loaded {} trees", target_ids.len());
+        info!("Processed {} trees, total overlaps: {}", target_ids.len(), total_overlaps);
+        Ok((total_overlaps, overlaps_per_seq))
+    } else {
+        // No forest map - use already loaded trees
+        let trees = impg.trees.read().unwrap();
+        let total_overlaps = trees.values().map(|tree| tree.len()).sum::<usize>();
+        let overlaps_per_seq: FxHashMap<u32, usize> = trees.iter().map(|(&id, tree)| (id, tree.len())).collect();
+        Ok((total_overlaps, overlaps_per_seq))
     }
-    Ok(())
 }
 
 fn print_stats(impg: &Impg) {
@@ -2153,15 +2176,18 @@ fn print_stats(impg: &Impg) {
         .filter_map(|id| impg.seq_index.get_len_from_id(id))
         .sum();
     
-    // If using lazy loading, load all trees first
-    if let Err(e) = load_all_trees_for_stats(impg) {
-        warn!("Failed to load all trees for stats: {}. Using currently loaded trees only.", e);
-    }
-    
-    // Now calculate stats from loaded trees
-    let trees = impg.trees.read().unwrap();
-    let num_overlaps = trees.values().map(|tree| tree.len()).sum::<usize>();
-    let overlaps_per_seq: FxHashMap<u32, usize> = trees.iter().map(|(&id, tree)| (id, tree.len())).collect();
+    // Compute overlap stats efficiently
+    let (num_overlaps, overlaps_per_seq) = match compute_stats_memory_efficient(impg) {
+        Ok((overlaps, per_seq)) => (overlaps, per_seq),
+        Err(e) => {
+            warn!("Failed to compute stats efficiently: {}. Using fallback method.", e);
+            // Fallback: use any currently loaded trees
+            let trees = impg.trees.read().unwrap();
+            let overlaps = trees.values().map(|tree| tree.len()).sum::<usize>();
+            let per_seq: FxHashMap<u32, usize> = trees.iter().map(|(&id, tree)| (id, tree.len())).collect();
+            (overlaps, per_seq)
+        }
+    };
     
     println!("Number of sequences: {}", num_sequences);
     println!("Total sequence length: {} bp", total_sequence_length);
