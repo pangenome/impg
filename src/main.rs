@@ -1,10 +1,10 @@
 use clap::Parser;
 use coitrees::{Interval, IntervalTree};
-use impg::faidx::FastaIndex;
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::paf::{PartialPafRecord, Strand};
 use impg::partition::partition_alignments;
 use impg::seqidx::SequenceIndex;
+use impg::sequence_index::{SequenceIndex as SeqFetchIndex, UnifiedSequenceIndex};
 use log::{debug, error, info, warn};
 use noodles::bgzf;
 use rayon::prelude::*;
@@ -50,11 +50,11 @@ struct CommonOpts {
 /// Common FASTA and POA scoring options
 #[derive(Parser, Debug)]
 struct GfaMafFastaOpts {
-    /// List of FASTA file paths (required for 'gfa', 'maf', and 'fasta')
+    /// List of FASTA or AGC file paths (required for 'gfa', 'maf', and 'fasta')
     #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["fasta_list"])]
     fasta_files: Option<Vec<String>>,
 
-    /// Path to a text file containing paths to FASTA files (required for 'gfa', 'maf', and 'fasta')
+    /// Path to a text file containing paths to FASTA or AGC files (required for 'gfa', 'maf', and 'fasta')
     #[clap(long, value_parser, conflicts_with_all = &["fasta_files"])]
     fasta_list: Option<String>,
 
@@ -125,20 +125,24 @@ impl GfaMafFastaOpts {
         ))
     }
 
-    /// Build FASTA index if files are provided
-    fn build_fasta_index(self) -> io::Result<Option<FastaIndex>> {
-        let fasta_files = self.resolve_fasta_files()?;
+    /// Build sequence index if files are provided
+    fn build_sequence_index(self) -> io::Result<Option<UnifiedSequenceIndex>> {
+        let seq_files = self.resolve_fasta_files()?;
 
-        if fasta_files.is_empty() {
+        if seq_files.is_empty() {
             Ok(None)
         } else {
-            match FastaIndex::build_from_files(&fasta_files) {
+            match UnifiedSequenceIndex::from_files(&seq_files) {
                 Ok(index) => {
-                    info!(
-                        "Built FASTA index for {} files with {} sequences",
-                        index.fasta_paths.len(),
-                        index.path_key_to_fasta.len()
-                    );
+                    let (file_type, num_files) = match &index {
+                        UnifiedSequenceIndex::Fasta(fasta_index) => {
+                            ("FASTA", fasta_index.fasta_paths.len())
+                        }
+                        UnifiedSequenceIndex::Agc(agc_index) => {
+                            ("AGC", agc_index.agc_paths.len())
+                        }
+                    };
+                    info!("Built {} index for {} files", file_type, num_files);
                     Ok(Some(index))
                 }
                 Err(e) => {
@@ -424,11 +428,11 @@ fn main() -> io::Result<()> {
             };
 
             // Build FASTA index if GFA/MAF/FASTA output is requested
-            let fasta_index = if output_format == "gfa"
+            let sequence_index = if output_format == "gfa"
                 || output_format == "maf"
                 || output_format == "fasta"
             {
-                let index = gfa_maf_fasta.build_fasta_index()?;
+                let index = gfa_maf_fasta.build_sequence_index()?;
                 if index.is_none() {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -457,7 +461,7 @@ fn main() -> io::Result<()> {
                 min_distance_between_ranges,
                 &output_format,
                 output_folder.as_deref(),
-                fasta_index.as_ref(),
+                sequence_index.as_ref(),
                 scoring_params,
                 reverse_complement,
                 common.verbose > 1,
@@ -503,11 +507,11 @@ fn main() -> io::Result<()> {
             };
 
             // Build FASTA index if GFA/MAF/FASTA output is requested
-            let fasta_index = if output_format == "gfa"
+            let sequence_index = if output_format == "gfa"
                 || output_format == "maf"
                 || output_format == "fasta"
             {
-                let index = gfa_maf_fasta.build_fasta_index()?;
+                let index = gfa_maf_fasta.build_sequence_index()?;
                 if index.is_none() {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -564,7 +568,7 @@ fn main() -> io::Result<()> {
                         output_results_gfa(
                             &impg,
                             &mut results,
-                            &fasta_index.unwrap(),
+                            &sequence_index.unwrap(),
                             Some(name),
                             query.effective_merge_distance(),
                             scoring_params.unwrap(),
@@ -574,7 +578,7 @@ fn main() -> io::Result<()> {
                         output_results_maf(
                             &impg,
                             &mut results,
-                            &fasta_index.unwrap(),
+                            &sequence_index.unwrap(),
                             Some(name),
                             query.effective_merge_distance(),
                             scoring_params.unwrap(),
@@ -584,7 +588,7 @@ fn main() -> io::Result<()> {
                         output_results_fasta(
                             &impg,
                             &mut results,
-                            &fasta_index.unwrap(),
+                            &sequence_index.unwrap(),
                             Some(name),
                             query.effective_merge_distance(),
                             reverse_complement,
@@ -642,7 +646,7 @@ fn main() -> io::Result<()> {
                             output_results_gfa(
                                 &impg,
                                 &mut results,
-                                fasta_index.as_ref().unwrap(),
+                                sequence_index.as_ref().unwrap(),
                                 Some(name),
                                 query.effective_merge_distance(),
                                 scoring_params.unwrap(),
@@ -652,7 +656,7 @@ fn main() -> io::Result<()> {
                             output_results_maf(
                                 &impg,
                                 &mut results,
-                                fasta_index.as_ref().unwrap(),
+                                sequence_index.as_ref().unwrap(),
                                 Some(name),
                                 query.effective_merge_distance(),
                                 scoring_params.unwrap(),
@@ -662,7 +666,7 @@ fn main() -> io::Result<()> {
                             output_results_fasta(
                                 &impg,
                                 &mut results,
-                                fasta_index.as_ref().unwrap(),
+                                sequence_index.as_ref().unwrap(),
                                 Some(name),
                                 query.effective_merge_distance(),
                                 reverse_complement,
@@ -754,7 +758,7 @@ fn main() -> io::Result<()> {
             let scoring_params = gfa_maf_fasta.parse_poa_scoring()?;
 
             // Build FASTA index (always required for similarity)
-            let fasta_index = gfa_maf_fasta.build_fasta_index()?.ok_or_else(|| {
+            let sequence_index = gfa_maf_fasta.build_sequence_index()?.ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "FASTA files are required for similarity computation",
@@ -798,7 +802,7 @@ fn main() -> io::Result<()> {
                 impg::similarity::compute_and_output_similarities(
                     &impg,
                     query_data,
-                    &fasta_index,
+                    &sequence_index,
                     scoring_params,
                     distances,
                     all,
@@ -850,7 +854,7 @@ fn main() -> io::Result<()> {
                 impg::similarity::compute_and_output_similarities(
                     &impg,
                     all_query_data,
-                    &fasta_index,
+                    &sequence_index,
                     scoring_params,
                     distances,
                     all,
@@ -1429,7 +1433,7 @@ fn output_results_paf(
 pub fn output_results_gfa(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
-    fasta_index: &FastaIndex,
+    sequence_index: &UnifiedSequenceIndex,
     _name: Option<String>,
     merge_distance: i32,
     scoring_params: (u8, u8, u8, u8, u8, u8),
@@ -1445,7 +1449,7 @@ pub fn output_results_gfa(
     let gfa_output = impg::graph::generate_gfa_from_intervals(
         impg,
         &query_intervals,
-        fasta_index,
+        sequence_index,
         scoring_params,
     );
     print!("{}", gfa_output);
@@ -1456,7 +1460,7 @@ pub fn output_results_gfa(
 pub fn output_results_fasta(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
-    fasta_index: &FastaIndex,
+    sequence_index: &UnifiedSequenceIndex,
     _name: Option<String>,
     merge_distance: i32,
     reverse_complement: bool,
@@ -1476,7 +1480,7 @@ pub fn output_results_fasta(
         };
 
         // Fetch the sequence
-        let sequence = fasta_index.fetch_sequence(query_name, start, end)?;
+        let sequence = sequence_index.fetch_sequence(query_name, start, end)?;
 
         // If reverse strand and reverse complementing, reverse complement the sequence
         let sequence = if strand == '-' && reverse_complement {
@@ -1506,7 +1510,7 @@ pub fn output_results_fasta(
 pub fn output_results_maf(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
-    fasta_index: &FastaIndex,
+    sequence_index: &UnifiedSequenceIndex,
     _name: Option<String>,
     merge_distance: i32,
     scoring_params: (u8, u8, u8, u8, u8, u8),
@@ -1522,7 +1526,7 @@ pub fn output_results_maf(
     let maf_output = impg::graph::generate_maf_from_intervals(
         impg,
         &query_intervals,
-        fasta_index,
+        sequence_index,
         scoring_params,
     );
     print!("{}", maf_output);

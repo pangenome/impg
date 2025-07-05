@@ -1,5 +1,5 @@
-use crate::faidx::FastaIndex;
 use crate::impg::Impg;
+use crate::sequence_index::{SequenceIndex as SeqFetchIndex, UnifiedSequenceIndex};
 use coitrees::Interval;
 use spoa_rs::{AlignmentEngine, AlignmentType as SpoaAlignmentType, Graph as SpoaGraph};
 use std::io::{self, Write};
@@ -15,12 +15,12 @@ pub struct SequenceMetadata {
 pub fn generate_gfa_from_intervals(
     impg: &Impg,
     results: &[Interval<u32>],
-    fasta_index: &FastaIndex,
+    sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> String {
     // Prepare POA graph and sequences
     let (graph, sequence_metadata) =
-        prepare_poa_graph_and_sequences(impg, results, fasta_index, scoring_params).unwrap();
+        prepare_poa_graph_and_sequences(impg, results, sequence_index, scoring_params).unwrap();
 
     // Generate headers for GFA
     let headers: Vec<String> = sequence_metadata
@@ -126,12 +126,12 @@ fn post_process_gfa_for_strands(gfa: String, sequence_metadata: &[SequenceMetada
 pub fn generate_maf_from_intervals(
     impg: &Impg,
     results: &[Interval<u32>],
-    fasta_index: &FastaIndex,
+    sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> String {
     // Prepare POA graph and sequences
     let (graph, sequence_metadata) =
-        prepare_poa_graph_and_sequences(impg, results, fasta_index, scoring_params).unwrap();
+        prepare_poa_graph_and_sequences(impg, results, sequence_index, scoring_params).unwrap();
 
     // Generate MSA from the SPOA graph
     let msa = graph.generate_msa();
@@ -143,7 +143,7 @@ pub fn generate_maf_from_intervals(
 pub fn prepare_poa_graph_and_sequences(
     impg: &Impg,
     results: &[Interval<u32>],
-    fasta_index: &FastaIndex,
+    sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<(SpoaGraph, Vec<SequenceMetadata>)> {
     // Create a SPOA graph
@@ -193,7 +193,7 @@ pub fn prepare_poa_graph_and_sequences(
         };
 
         // Fetch the sequence
-        let sequence = fasta_index.fetch_sequence(seq_name, start, end)?;
+        let sequence = sequence_index.fetch_sequence(seq_name, start, end)?;
 
         // If reverse strand, reverse complement the sequence
         let sequence = if strand == '-' {
