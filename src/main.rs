@@ -2082,19 +2082,13 @@ fn compute_stats_memory_efficient(impg: &Impg) -> io::Result<(usize, FxHashMap<u
         let results: Vec<Result<(u32, usize), io::Error>> = target_ids
             .par_iter()
             .map(|&target_id| {
-                // Load tree temporarily
-                if let Err(e) = impg.ensure_tree_loaded(target_id) {
-                    return Err(e);
-                }
-
-                // Get the tree count and then remove it from memory
-                let count = {
-                    let mut trees = impg.trees.write().unwrap();
-                    if let Some(tree) = trees.remove(&target_id) {
-                        tree.len()
-                    } else {
-                        0
-                    }
+                // Get tree and count, removing it from memory for efficiency
+                let count = if let Some(tree) = impg.get_or_load_tree(target_id) {
+                    let len = tree.len();
+                    impg.trees.write().unwrap().remove(&target_id);
+                    len
+                } else {
+                    0
                 };
 
                 Ok((target_id, count))

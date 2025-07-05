@@ -508,22 +508,16 @@ impl Impg {
         }
     }
 
-    /// Ensure a tree is loaded in memory, loading it from disk if necessary
-    pub fn ensure_tree_loaded(&self, target_id: u32) -> std::io::Result<bool> {
-        if self.trees.read().unwrap().contains_key(&target_id) {
-            Ok(true) // Tree already loaded
-        } else {
-            self.load_tree_from_disk(target_id)
-        }
-    }
-
     /// Get a tree from memory or load it from disk if necessary
-    /// Returns None if the tree doesn't exist (which is valid - not all sequences have overlaps)
-    // Get a clone of the Arc<tree> (incrementing the reference count, so cheap) to use in the query
-    // We clone to avoid holding the RwLock for the duration of the query
-    fn get_or_load_tree(&self, target_id: u32) -> Option<Arc<BasicCOITree<QueryMetadata, u32>>> {
+    pub fn get_or_load_tree(
+        &self,
+        target_id: u32,
+    ) -> Option<Arc<BasicCOITree<QueryMetadata, u32>>> {
         // First check if tree is already in memory
         if let Some(tree) = self.trees.read().unwrap().get(&target_id) {
+            // Get a clone of the Arc<tree> (incrementing the reference count, so cheap) to use in the query
+            // We clone to avoid holding the RwLock for the duration of the query
+
             return Some(Arc::clone(tree));
         }
 
