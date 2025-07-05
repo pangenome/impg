@@ -475,11 +475,11 @@ impl Impg {
             // Reconstruct the tree
             let tree = BasicCOITree::new(
                 intervals
-                    .iter()
+                    .into_iter()
                     .map(|interval| Interval {
                         first: interval.first,
                         last: interval.last,
-                        metadata: interval.metadata.clone(),
+                        metadata: interval.metadata, // Move instead of clone
                     })
                     .collect::<Vec<_>>()
                     .as_slice(),
@@ -504,7 +504,7 @@ impl Impg {
         &self,
         target_id: u32,
     ) -> Option<Arc<BasicCOITree<QueryMetadata, u32>>> {
-        // First check if tree is already in memory
+        // First check if the tree is already in memory
         if let Some(tree) = self.trees.read().unwrap().get(&target_id) {
             // Get a clone of the Arc<tree> (incrementing the reference count, a cheap operation)
             // We clone to avoid holding the RwLock for the duration of the operation using the tree
