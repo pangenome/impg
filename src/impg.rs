@@ -287,7 +287,7 @@ pub struct Impg {
     pub seq_index: SequenceIndex,
     pub paf_files: Vec<String>, // List of all PAF files
     pub paf_gzi_indices: Vec<Option<bgzf::gzi::Index>>, // Corresponding GZI indices
-    pub forest_map: ForestMap, // Forest map for lazy loading
+    pub forest_map: ForestMap,  // Forest map for lazy loading
     pub index_file_path: String, // Path to the index file for lazy loading
 }
 
@@ -451,33 +451,25 @@ impl Impg {
     }
 
     /// Load a specific tree from disk using the forest map
-    fn load_tree_from_disk(&self, target_id: u32) -> std::io::Result<bool> {
+    fn load_tree_from_disk(&self, target_id: u32) -> Option<Arc<BasicCOITree<QueryMetadata, u32>>> {
         if let Some(tree_offset) = self.forest_map.get_tree_offset(target_id) {
-            let mut file = File::open(&self.index_file_path)?;
-            file.seek(std::io::SeekFrom::Start(tree_offset))?;
+            let mut file = File::open(&self.index_file_path).expect("Failed to open index file");
+            file.seek(std::io::SeekFrom::Start(tree_offset))
+                .expect("Failed to seek in index file");
 
             let mut reader = BufReader::new(file);
             let (loaded_target_id, intervals): (u32, Vec<SerializableInterval>) =
                 bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
-                    .map_err(|e| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!(
-                                "Failed to deserialize tree for target {}: {:?}",
-                                target_id, e
-                            ),
-                        )
-                    })?;
+                    .expect(
+                        format!("Failed to deserialize tree for target {}", target_id).as_str(),
+                    );
 
             // Verify we loaded the correct tree
             if loaded_target_id != target_id {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "Tree mismatch: expected {}, got {}",
-                        target_id, loaded_target_id
-                    ),
-                ));
+                panic!(
+                    "Tree mismatch: expected {}, got {}",
+                    target_id, loaded_target_id
+                );
             }
 
             // Reconstruct the tree
@@ -493,13 +485,17 @@ impl Impg {
                     .as_slice(),
             );
 
+            let arc_tree = Arc::new(tree);
+
+            // Cache the tree for future use
             self.trees
                 .write()
                 .unwrap()
-                .insert(target_id, Arc::new(tree));
-            Ok(true)
+                .insert(target_id, Arc::clone(&arc_tree));
+
+            Some(arc_tree)
         } else {
-            Ok(false) // Tree not found in forest map
+            None // Tree not found in forest map
         }
     }
 
@@ -517,13 +513,7 @@ impl Impg {
         }
 
         // Not in memory - try to load from disk
-        if let Ok(true) = self.load_tree_from_disk(target_id) {
-            // Successfully loaded - now get it from memory
-            self.trees.read().unwrap().get(&target_id).cloned()
-        } else {
-            // Tree doesn't exist (no overlaps for this target)
-            None
-        }
+        self.load_tree_from_disk(target_id)
     }
 
     /// Load IMPG index from the format with embedded forest map at the end
