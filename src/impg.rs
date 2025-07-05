@@ -142,8 +142,9 @@ impl QueryMetadata {
     }
 }
 
+use std::sync::Arc;
 pub type AdjustedInterval = (Interval<u32>, Vec<CigarOp>, Interval<u32>);
-type TreeMap = FxHashMap<u32, BasicCOITree<QueryMetadata, u32>>;
+type TreeMap = FxHashMap<u32, Arc<BasicCOITree<QueryMetadata, u32>>>;
 
 #[derive(Serialize, Deserialize)]
 pub struct SerializableInterval {
@@ -361,7 +362,7 @@ impl Impg {
         let trees: TreeMap = intervals
             .into_par_iter()
             .map(|(target_id, interval_nodes)| {
-                (target_id, BasicCOITree::new(interval_nodes.as_slice()))
+                (target_id, Arc::new(BasicCOITree::new(interval_nodes.as_slice())))
             })
             .collect();
 
@@ -473,8 +474,8 @@ impl Impg {
                         .collect::<Vec<_>>()
                         .as_slice(),
                 );
-                
-                self.trees.write().unwrap().insert(target_id, tree);
+
+                self.trees.write().unwrap().insert(target_id, Arc::new(tree));
                 Ok(true)
             } else {
                 Ok(false) // Tree not found in forest map
@@ -599,9 +600,9 @@ impl Impg {
             return results;
         }
         
-        // Get a clone of the tree to use in the query
-        let tree_opt = self.trees.read().unwrap().get(&target_id).cloned();
-        if let Some(tree) = tree_opt {
+        // Get a clone of the Arc<tree> (incrementing the reference count, so cheap) to use in the query
+        // We clone to avoid holding the RwLock for the duration of the query
+        if let Some(tree) = self.trees.read().unwrap().get(&target_id).cloned() {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
                 let result = project_target_range_through_alignment(
@@ -743,6 +744,8 @@ impl Impg {
                 continue;
             }
             
+            // Get a clone of the Arc<tree> (incrementing the reference count, so cheap) to use in the query
+            // We clone to avoid holding the RwLock for the duration of the query
             if let Some(tree) = self.trees.read().unwrap().get(&current_target_id).cloned() {
                 // Collect intervals first to process them in parallel
                 let mut intervals = Vec::new();
@@ -986,6 +989,8 @@ impl Impg {
                                 return local_results;
                             }
                             
+                            // Get a clone of the Arc<tree> (incrementing the reference count, so cheap) to use in the query
+                            // We clone to avoid holding the RwLock for the duration of the query
                             if let Some(tree) = self.trees.read().unwrap().get(current_target_id).cloned() {
                                 tree.query(
                                     *current_target_start,
