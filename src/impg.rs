@@ -506,8 +506,8 @@ impl Impg {
     ) -> Option<Arc<BasicCOITree<QueryMetadata, u32>>> {
         // First check if tree is already in memory
         if let Some(tree) = self.trees.read().unwrap().get(&target_id) {
-            // Get a clone of the Arc<tree> (incrementing the reference count, so cheap) to use in the query
-            // We clone to avoid holding the RwLock for the duration of the query
+            // Get a clone of the Arc<tree> (incrementing the reference count, a cheap operation)
+            // We clone to avoid holding the RwLock for the duration of the operation using the tree
 
             return Some(Arc::clone(tree));
         }
@@ -759,8 +759,6 @@ impl Impg {
 
             let prec_num_results = results.len();
 
-            // Get a clone of the Arc<tree> (incrementing the reference count, so cheap) to use in the query
-            // We clone to avoid holding the RwLock for the duration of the query
             // Get or load the tree - if None, no overlaps exist for this target
             if let Some(tree) = self.get_or_load_tree(current_target_id) {
                 // Collect intervals first to process them in parallel
