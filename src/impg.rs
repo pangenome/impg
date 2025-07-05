@@ -148,9 +148,9 @@ type TreeMap = FxHashMap<u32, Arc<BasicCOITree<QueryMetadata, u32>>>;
 
 #[derive(Serialize, Deserialize)]
 pub struct SerializableInterval {
-    pub first: i32,
-    pub last: i32,
-    pub metadata: QueryMetadata,
+    first: i32,
+    last: i32,
+    metadata: QueryMetadata,
 }
 
 #[derive(Default, Clone)]
