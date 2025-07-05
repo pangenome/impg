@@ -10,13 +10,14 @@ use serde::{Deserialize, Serialize};
 use std::cmp::{max, min};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::sync::Arc;
 use std::sync::RwLock;
 
 /// Parse a CIGAR string into a vector of CigarOp
 // Note that the query_delta is negative for reverse strand alignments
 #[derive(Debug, Clone, PartialEq)]
 pub struct CigarOp {
-    pub val: u32,
+    val: u32,
 }
 
 impl CigarOp {
@@ -142,12 +143,11 @@ impl QueryMetadata {
     }
 }
 
-use std::sync::Arc;
 pub type AdjustedInterval = (Interval<u32>, Vec<CigarOp>, Interval<u32>);
 type TreeMap = FxHashMap<u32, Arc<BasicCOITree<QueryMetadata, u32>>>;
 
 #[derive(Serialize, Deserialize)]
-pub struct SerializableInterval {
+struct SerializableInterval {
     first: i32,
     last: i32,
     metadata: QueryMetadata,
@@ -285,10 +285,10 @@ impl SortedRanges {
 pub struct Impg {
     pub trees: RwLock<TreeMap>,
     pub seq_index: SequenceIndex,
-    pub paf_files: Vec<String>, // List of all PAF files
-    pub paf_gzi_indices: Vec<Option<bgzf::gzi::Index>>, // Corresponding GZI indices
+    paf_files: Vec<String>, // List of all PAF files
+    paf_gzi_indices: Vec<Option<bgzf::gzi::Index>>, // Corresponding GZI indices
     pub forest_map: ForestMap,  // Forest map for lazy loading
-    pub index_file_path: String, // Path to the index file for lazy loading
+    index_file_path: String, // Path to the index file for lazy loading
 }
 
 impl Impg {
