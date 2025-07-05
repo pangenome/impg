@@ -362,7 +362,10 @@ impl Impg {
         let trees: TreeMap = intervals
             .into_par_iter()
             .map(|(target_id, interval_nodes)| {
-                (target_id, Arc::new(BasicCOITree::new(interval_nodes.as_slice())))
+                (
+                    target_id,
+                    Arc::new(BasicCOITree::new(interval_nodes.as_slice())),
+                )
             })
             .collect();
 
@@ -383,28 +386,30 @@ impl Impg {
     ) -> std::io::Result<()> {
         const MAGIC: &[u8] = b"IMPGIDX1";
         let mut forest_map = ForestMap::new();
-        
+
         // Write magic bytes
         writer.write_all(MAGIC)?;
-        
+
         // Write placeholder for forest map offset (will be updated later)
         writer.write_all(&[0u8; 8])?;
-        
+
         let mut current_offset = 16u64; // Header size
-        
+
         // Serialize sequence index
-        let seq_index_data = bincode::serde::encode_to_vec(&self.seq_index, bincode::config::standard())
-            .map_err(|e| std::io::Error::other(format!("Failed to encode sequence index: {:?}", e)))?;
-        
+        let seq_index_data =
+            bincode::serde::encode_to_vec(&self.seq_index, bincode::config::standard()).map_err(
+                |e| std::io::Error::other(format!("Failed to encode sequence index: {:?}", e)),
+            )?;
+
         writer.write_all(&seq_index_data)?;
         current_offset += seq_index_data.len() as u64;
-        
+
         // Serialize each tree and track its offset
         let trees = self.trees.read().unwrap();
         for (&target_id, tree) in trees.iter() {
             // Record the offset before serializing this tree
             forest_map.add_entry(target_id, current_offset);
-            
+
             // Convert tree to serializable format
             let intervals: Vec<SerializableInterval> = tree
                 .iter()
@@ -414,54 +419,69 @@ impl Impg {
                     metadata: interval.metadata.clone(),
                 })
                 .collect();
-            
+
             // Serialize the target_id and intervals
-            let tree_data = bincode::serde::encode_to_vec(&(target_id, intervals), bincode::config::standard())
-                .map_err(|e| std::io::Error::other(format!("Failed to encode tree for target {}: {:?}", target_id, e)))?;
-            
+            let tree_data =
+                bincode::serde::encode_to_vec(&(target_id, intervals), bincode::config::standard())
+                    .map_err(|e| {
+                        std::io::Error::other(format!(
+                            "Failed to encode tree for target {}: {:?}",
+                            target_id, e
+                        ))
+                    })?;
+
             writer.write_all(&tree_data)?;
             current_offset += tree_data.len() as u64;
         }
-        
+
         // Now write the forest map at the end
         let forest_map_offset = current_offset;
-        let forest_map_data = bincode::serde::encode_to_vec(&forest_map, bincode::config::standard())
-            .map_err(|e| std::io::Error::other(format!("Failed to encode forest map: {:?}", e)))?;
-        
+        let forest_map_data =
+            bincode::serde::encode_to_vec(&forest_map, bincode::config::standard()).map_err(
+                |e| std::io::Error::other(format!("Failed to encode forest map: {:?}", e)),
+            )?;
+
         writer.write_all(&forest_map_data)?;
-        
+
         // Go back and update the forest map offset in the header
         writer.seek(SeekFrom::Start(8))?;
         writer.write_all(&forest_map_offset.to_le_bytes())?;
-        
+
         Ok(())
     }
 
     /// Load a specific tree from disk using the forest map
     fn load_tree_from_disk(&self, target_id: u32) -> std::io::Result<bool> {
-        if let (Some(forest_map), Some(index_file_path)) = (&self.forest_map, &self.index_file_path) {
+        if let (Some(forest_map), Some(index_file_path)) = (&self.forest_map, &self.index_file_path)
+        {
             if let Some(tree_offset) = forest_map.get_tree_offset(target_id) {
                 let mut file = File::open(index_file_path)?;
                 file.seek(std::io::SeekFrom::Start(tree_offset))?;
-                
+
                 let mut reader = BufReader::new(file);
                 let (loaded_target_id, intervals): (u32, Vec<SerializableInterval>) =
                     bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
                         .map_err(|e| {
                             std::io::Error::new(
                                 std::io::ErrorKind::InvalidData,
-                                format!("Failed to deserialize tree for target {}: {:?}", target_id, e),
+                                format!(
+                                    "Failed to deserialize tree for target {}: {:?}",
+                                    target_id, e
+                                ),
                             )
                         })?;
-                
+
                 // Verify we loaded the correct tree
                 if loaded_target_id != target_id {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        format!("Tree mismatch: expected {}, got {}", target_id, loaded_target_id),
+                        format!(
+                            "Tree mismatch: expected {}, got {}",
+                            target_id, loaded_target_id
+                        ),
                     ));
                 }
-                
+
                 // Reconstruct the tree
                 let tree = BasicCOITree::new(
                     intervals
@@ -475,7 +495,10 @@ impl Impg {
                         .as_slice(),
                 );
 
-                self.trees.write().unwrap().insert(target_id, Arc::new(tree));
+                self.trees
+                    .write()
+                    .unwrap()
+                    .insert(target_id, Arc::new(tree));
                 Ok(true)
             } else {
                 Ok(false) // Tree not found in forest map
@@ -503,7 +526,7 @@ impl Impg {
         if let Some(tree) = self.trees.read().unwrap().get(&target_id) {
             return Some(Arc::clone(tree));
         }
-        
+
         // Not in memory - try to load from disk
         if let Ok(true) = self.load_tree_from_disk(target_id) {
             // Successfully loaded - now get it from memory
@@ -521,7 +544,7 @@ impl Impg {
         index_file_path: String,
     ) -> std::io::Result<Self> {
         const MAGIC: &[u8] = b"IMPGIDX1";
-        
+
         // Read and verify magic bytes
         let mut magic_buf = [0u8; 8];
         reader.read_exact(&mut magic_buf)?;
@@ -531,27 +554,33 @@ impl Impg {
                 "Invalid magic bytes - not a valid IMPG index file",
             ));
         }
-        
+
         // Read forest map offset
         let mut offset_buf = [0u8; 8];
         reader.read_exact(&mut offset_buf)?;
         let forest_map_offset = u64::from_le_bytes(offset_buf);
-        
+
         // Read sequence index
-        let seq_index: SequenceIndex = bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
-            .map_err(|e| std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Failed to load sequence index: {:?}", e),
-            ))?;
-        
+        let seq_index: SequenceIndex =
+            bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
+                .map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Failed to load sequence index: {:?}", e),
+                    )
+                })?;
+
         // Seek to forest map and read it
         reader.seek(SeekFrom::Start(forest_map_offset))?;
-        let forest_map: ForestMap = bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
-            .map_err(|e| std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Failed to load forest map: {:?}", e),
-            ))?;
-        
+        let forest_map: ForestMap =
+            bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
+                .map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Failed to load forest map: {:?}", e),
+                    )
+                })?;
+
         // Determine PAF GZI indices
         let paf_gzi_indices = paf_files
             .iter()
@@ -567,7 +596,7 @@ impl Impg {
                 }
             })
             .collect::<Vec<_>>();
-        
+
         Ok(Self {
             trees: RwLock::new(FxHashMap::default()), // Start with empty trees - load on demand
             seq_index,
@@ -615,58 +644,57 @@ impl Impg {
         );
 
         // Get or load the tree - if None, no overlaps exist for this target
-        if let Some(tree) = self.get_or_load_tree(target_id) {           
+        if let Some(tree) = self.get_or_load_tree(target_id) {
             tree.query(range_start, range_end, |interval| {
-                    let metadata = &interval.metadata;
-                    let result = project_target_range_through_alignment(
-                        (range_start, range_end),
-                        (
-                            metadata.target_start,
-                            metadata.target_end,
-                            metadata.query_start,
-                            metadata.query_end,
-                            metadata.strand(),
-                        ),
-                        &metadata.get_cigar_ops(&self.paf_files, self.paf_gzi_indices.as_ref()),
-                    );
-                    if let Some((
-                        adjusted_query_start,
-                        adjusted_query_end,
-                        adjusted_cigar,
-                        adjusted_target_start,
-                        adjusted_target_end,
-                    )) = result
-                    {
-                        // Check gap-compressed identity if threshold is provided
-                        if let Some(threshold) = min_gap_compressed_identity {
-                            if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
-                                return; // Skip this result
-                            }
+                let metadata = &interval.metadata;
+                let result = project_target_range_through_alignment(
+                    (range_start, range_end),
+                    (
+                        metadata.target_start,
+                        metadata.target_end,
+                        metadata.query_start,
+                        metadata.query_end,
+                        metadata.strand(),
+                    ),
+                    &metadata.get_cigar_ops(&self.paf_files, self.paf_gzi_indices.as_ref()),
+                );
+                if let Some((
+                    adjusted_query_start,
+                    adjusted_query_end,
+                    adjusted_cigar,
+                    adjusted_target_start,
+                    adjusted_target_end,
+                )) = result
+                {
+                    // Check gap-compressed identity if threshold is provided
+                    if let Some(threshold) = min_gap_compressed_identity {
+                        if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
+                            return; // Skip this result
                         }
-
-                        let adjusted_interval = (
-                            Interval {
-                                first: adjusted_query_start,
-                                last: adjusted_query_end,
-                                metadata: metadata.query_id,
-                            },
-                            if store_cigar {
-                                adjusted_cigar
-                            } else {
-                                Vec::new()
-                            },
-                            Interval {
-                                first: adjusted_target_start,
-                                last: adjusted_target_end,
-                                metadata: target_id,
-                            },
-                        );
-                        results.push(adjusted_interval);
                     }
-                });
-            } else {
-                debug!("No tree found for target {} - no overlaps", target_id);
-            }
+
+                    let adjusted_interval = (
+                        Interval {
+                            first: adjusted_query_start,
+                            last: adjusted_query_end,
+                            metadata: metadata.query_id,
+                        },
+                        if store_cigar {
+                            adjusted_cigar
+                        } else {
+                            Vec::new()
+                        },
+                        Interval {
+                            first: adjusted_target_start,
+                            last: adjusted_target_end,
+                            metadata: target_id,
+                        },
+                    );
+                    results.push(adjusted_interval);
+                }
+            });
+        }
+
         results
     }
 
@@ -756,7 +784,6 @@ impl Impg {
             // We clone to avoid holding the RwLock for the duration of the query
             // Get or load the tree - if None, no overlaps exist for this target
             if let Some(tree) = self.get_or_load_tree(current_target_id) {
-
                 // Collect intervals first to process them in parallel
                 let mut intervals = Vec::new();
 
@@ -841,22 +868,22 @@ impl Impg {
 
                         // Check if the range is too close to any existing ranges
                         if min_distance_between_ranges > 0 {
-                                let (new_min, new_max) = if adjusted_query_start <= adjusted_query_end {
-                                    (adjusted_query_start, adjusted_query_end)
-                                } else {
-                                    (adjusted_query_end, adjusted_query_start)
-                                };
+                            let (new_min, new_max) = if adjusted_query_start <= adjusted_query_end {
+                                (adjusted_query_start, adjusted_query_end)
+                            } else {
+                                (adjusted_query_end, adjusted_query_start)
+                            };
 
-                                // Find insertion point in sorted ranges
-                                let idx = match ranges
-                                    .ranges
-                                    .binary_search_by_key(&new_min, |&(start, _)| start)
-                                {
-                                    Ok(i) => i,
-                                    Err(i) => i,
-                                };
+                            // Find insertion point in sorted ranges
+                            let idx = match ranges
+                                .ranges
+                                .binary_search_by_key(&new_min, |&(start, _)| start)
+                            {
+                                Ok(i) => i,
+                                Err(i) => i,
+                            };
 
-                                // Only need to check adjacent ranges due to sorting
+                            // Only need to check adjacent ranges due to sorting
                             if idx > 0 {
                                 // Check previous range
                                 let (_, prev_end) = ranges.ranges[idx - 1];
@@ -886,8 +913,6 @@ impl Impg {
                         }
                     }
                 }
-            } else {
-                debug!("No tree found for target {} - no overlaps", current_target_id);
             }
 
             debug!("Collected {} results", results.len() - prec_num_results);
@@ -1002,60 +1027,58 @@ impl Impg {
                                     *current_target_start,
                                     *current_target_end,
                                     |interval| {
-                                            let metadata = &interval.metadata;
-                                            let result = project_target_range_through_alignment(
-                                                (*current_target_start, *current_target_end),
-                                                (
-                                                    metadata.target_start,
-                                                    metadata.target_end,
-                                                    metadata.query_start,
-                                                    metadata.query_end,
-                                                    metadata.strand(),
-                                                ),
-                                                &metadata.get_cigar_ops(
-                                                    &self.paf_files,
-                                                    self.paf_gzi_indices.as_ref(),
-                                                ),
-                                            );
+                                        let metadata = &interval.metadata;
+                                        let result = project_target_range_through_alignment(
+                                            (*current_target_start, *current_target_end),
+                                            (
+                                                metadata.target_start,
+                                                metadata.target_end,
+                                                metadata.query_start,
+                                                metadata.query_end,
+                                                metadata.strand(),
+                                            ),
+                                            &metadata.get_cigar_ops(
+                                                &self.paf_files,
+                                                self.paf_gzi_indices.as_ref(),
+                                            ),
+                                        );
 
-                                            if let Some((
+                                        if let Some((
+                                            adjusted_query_start,
+                                            adjusted_query_end,
+                                            adjusted_cigar,
+                                            adjusted_target_start,
+                                            adjusted_target_end,
+                                        )) = result
+                                        {
+                                            // Check gap-compressed identity if threshold is provided
+                                            if let Some(threshold) = min_gap_compressed_identity {
+                                                if calculate_gap_compressed_identity(
+                                                    &adjusted_cigar,
+                                                ) < threshold
+                                                {
+                                                    return; // Skip this result
+                                                }
+                                            }
+
+                                            local_results.push((
+                                                metadata.query_id,
                                                 adjusted_query_start,
                                                 adjusted_query_end,
-                                                adjusted_cigar,
+                                                if store_cigar {
+                                                    adjusted_cigar
+                                                } else {
+                                                    Vec::new()
+                                                },
                                                 adjusted_target_start,
                                                 adjusted_target_end,
-                                            )) = result
-                                            {
-                                                // Check gap-compressed identity if threshold is provided
-                                                if let Some(threshold) = min_gap_compressed_identity {
-                                                    if calculate_gap_compressed_identity(
-                                                        &adjusted_cigar,
-                                                    ) < threshold
-                                                    {
-                                                        return; // Skip this result
-                                                    }
-                                                }
-
-                                                local_results.push((
-                                                    metadata.query_id,
-                                                    adjusted_query_start,
-                                                    adjusted_query_end,
-                                                    if store_cigar {
-                                                        adjusted_cigar
-                                                    } else {
-                                                        Vec::new()
-                                                    },
-                                                    adjusted_target_start,
-                                                    adjusted_target_end,
-                                                    *current_target_id,
-                                                ));
-                                            }
-                                        },
-                                    );
-                            } else {
-                                debug!("No tree found for target {} - no overlaps", current_target_id);
+                                                *current_target_id,
+                                            ));
+                                        }
+                                    },
+                                );
                             }
-                            
+
                             local_results
                         },
                     )

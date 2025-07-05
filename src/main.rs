@@ -1076,10 +1076,9 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
     // Load from embedded format
     let file = File::open(&index_file)?;
     let reader = BufReader::new(file);
-    
+
     Impg::load_from_file(reader, paf_files, index_file)
 }
-
 
 fn generate_multi_index(
     paf_files: &[String],
@@ -2071,11 +2070,14 @@ fn trim_cigar_prefix(cigar: &[CigarOp], query_len: i32, target_len: i32) -> Vec<
 
 fn compute_stats_memory_efficient(impg: &Impg) -> io::Result<(usize, FxHashMap<u32, usize>)> {
     if let Some(forest_map) = &impg.forest_map {
-        info!("Computing statistics for {} trees...", forest_map.entries.len());
-        
+        info!(
+            "Computing statistics for {} trees...",
+            forest_map.entries.len()
+        );
+
         // Collect target IDs to process
         let target_ids: Vec<u32> = forest_map.entries.keys().copied().collect();
-        
+
         // Process trees in parallel, computing stats without keeping them in memory
         let results: Vec<Result<(u32, usize), io::Error>> = target_ids
             .par_iter()
@@ -2084,7 +2086,7 @@ fn compute_stats_memory_efficient(impg: &Impg) -> io::Result<(usize, FxHashMap<u
                 if let Err(e) = impg.ensure_tree_loaded(target_id) {
                     return Err(e);
                 }
-                
+
                 // Get the tree count and then remove it from memory
                 let count = {
                     let mut trees = impg.trees.write().unwrap();
@@ -2094,28 +2096,33 @@ fn compute_stats_memory_efficient(impg: &Impg) -> io::Result<(usize, FxHashMap<u
                         0
                     }
                 };
-                
+
                 Ok((target_id, count))
             })
             .collect();
-        
+
         // Collect results
         let mut total_overlaps = 0;
         let mut overlaps_per_seq = FxHashMap::default();
-        
+
         for result in results {
             let (target_id, count) = result?;
             total_overlaps += count;
             overlaps_per_seq.insert(target_id, count);
         }
-        
-        info!("Processed {} trees, total overlaps: {}", target_ids.len(), total_overlaps);
+
+        info!(
+            "Processed {} trees, total overlaps: {}",
+            target_ids.len(),
+            total_overlaps
+        );
         Ok((total_overlaps, overlaps_per_seq))
     } else {
         // No forest map - use already loaded trees
         let trees = impg.trees.read().unwrap();
         let total_overlaps = trees.values().map(|tree| tree.len()).sum::<usize>();
-        let overlaps_per_seq: FxHashMap<u32, usize> = trees.iter().map(|(&id, tree)| (id, tree.len())).collect();
+        let overlaps_per_seq: FxHashMap<u32, usize> =
+            trees.iter().map(|(&id, tree)| (id, tree.len())).collect();
         Ok((total_overlaps, overlaps_per_seq))
     }
 }
@@ -2127,20 +2134,24 @@ fn print_stats(impg: &Impg) {
         .into_par_iter()
         .filter_map(|id| impg.seq_index.get_len_from_id(id))
         .sum();
-    
+
     // Compute overlap stats efficiently
     let (num_overlaps, overlaps_per_seq) = match compute_stats_memory_efficient(impg) {
         Ok((overlaps, per_seq)) => (overlaps, per_seq),
         Err(e) => {
-            warn!("Failed to compute stats efficiently: {}. Using fallback method.", e);
+            warn!(
+                "Failed to compute stats efficiently: {}. Using fallback method.",
+                e
+            );
             // Fallback: use any currently loaded trees
             let trees = impg.trees.read().unwrap();
             let overlaps = trees.values().map(|tree| tree.len()).sum::<usize>();
-            let per_seq: FxHashMap<u32, usize> = trees.iter().map(|(&id, tree)| (id, tree.len())).collect();
+            let per_seq: FxHashMap<u32, usize> =
+                trees.iter().map(|(&id, tree)| (id, tree.len())).collect();
             (overlaps, per_seq)
         }
     };
-    
+
     println!("Number of sequences: {}", num_sequences);
     println!("Total sequence length: {} bp", total_sequence_length);
     println!("Number of overlaps: {}", num_overlaps);
