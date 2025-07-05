@@ -460,9 +460,7 @@ impl Impg {
             let mut reader = BufReader::new(file);
             let (loaded_target_id, intervals): (u32, Vec<SerializableInterval>) =
                 bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
-                    .expect(
-                        format!("Failed to deserialize tree for target {}", target_id).as_str(),
-                    );
+                    .unwrap_or_else(|_| panic!("Failed to deserialize tree for target {}", target_id));
 
             // Verify we loaded the correct tree
             if loaded_target_id != target_id {
