@@ -1,7 +1,5 @@
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use std::fs::File;
-use std::io::{BufReader, BufWriter};
 
 /// Forest map entry: target_id -> tree_offset in the serialized IMPG index
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,34 +47,6 @@ impl ForestMap {
         self.entries.is_empty()
     }
 
-    /// Save the forest map to a file
-    pub fn save_to_file(&self, file_path: &str) -> std::io::Result<()> {
-        let file = File::create(file_path)?;
-        let mut writer = BufWriter::new(file);
-        bincode::serde::encode_into_std_write(self, &mut writer, bincode::config::standard())
-            .map_err(|e| std::io::Error::other(format!("Failed to serialize forest map: {:?}", e)))?;
-        Ok(())
-    }
-
-    /// Load the forest map from a file
-    pub fn load_from_file(file_path: &str) -> std::io::Result<Self> {
-        let file = File::open(file_path)?;
-        let mut reader = BufReader::new(file);
-        let forest_map: ForestMap =
-            bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
-                .map_err(|e| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("Failed to deserialize forest map: {:?}", e),
-                    )
-                })?;
-        Ok(forest_map)
-    }
-
-    /// Generate forest map filename based on the index filename
-    pub fn get_forest_map_filename(index_filename: &str) -> String {
-        format!("{}.map", index_filename)
-    }
 }
 
 impl Default for ForestMap {

@@ -375,63 +375,31 @@ impl Impg {
         })
     }
 
-
-    /// Create an IMPG instance with lazy loading using a forest map
-    pub fn with_forest_map(
-        paf_files: &[String],
-        seq_index: SequenceIndex,
-        forest_map: ForestMap,
-        index_file_path: String,
-    ) -> Self {
-        let paf_gzi_indices: Vec<_> = paf_files
-            .par_iter()
-            .map(|paf_file| {
-                if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-                    let paf_gzi_file = paf_file.to_owned() + ".gzi";
-                    Some(
-                        bgzf::gzi::fs::read(paf_gzi_file.clone())
-                            .unwrap_or_else(|_| panic!("Could not open {}", paf_gzi_file)),
-                    )
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        Self {
-            trees: RwLock::new(FxHashMap::default()), // Start with empty trees - load on demand
-            seq_index,
-            paf_files: paf_files.to_vec(),
-            paf_gzi_indices,
-            forest_map: Some(forest_map),
-            index_file_path: Some(index_file_path),
-        }
-    }
-
-    /// Serialize the IMPG index to a writer and create a forest map
-    pub fn serialize_with_forest_map<W: std::io::Write>(
+    /// Serialize the IMPG index to a writer with embedded forest map
+    pub fn serialize_with_forest_map<W: std::io::Write + std::io::Seek>(
         &self,
         mut writer: W,
-    ) -> std::io::Result<ForestMap> {
+    ) -> std::io::Result<()> {
+        const MAGIC: &[u8] = b"IMPGIDX1";
         let mut forest_map = ForestMap::new();
         
-        // Start with the sequence index
+        // Write magic bytes
+        writer.write_all(MAGIC)?;
+        
+        // Write placeholder for forest map offset (will be updated later)
+        writer.write_all(&[0u8; 8])?;
+        
+        let mut current_offset = 16u64; // Header size
+        
+        // Serialize sequence index
         let seq_index_data = bincode::serde::encode_to_vec(&self.seq_index, bincode::config::standard())
             .map_err(|e| std::io::Error::other(format!("Failed to encode sequence index: {:?}", e)))?;
         
         writer.write_all(&seq_index_data)?;
-        let mut current_offset = seq_index_data.len() as u64;
-        
-        // Serialize the tree count
-        let trees = self.trees.read().unwrap();
-        let tree_count = trees.len() as u32;
-        let tree_count_data = bincode::serde::encode_to_vec(&tree_count, bincode::config::standard())
-            .map_err(|e| std::io::Error::other(format!("Failed to encode tree count: {:?}", e)))?;
-        
-        writer.write_all(&tree_count_data)?;
-        current_offset += tree_count_data.len() as u64;
+        current_offset += seq_index_data.len() as u64;
         
         // Serialize each tree and track its offset
+        let trees = self.trees.read().unwrap();
         for (&target_id, tree) in trees.iter() {
             // Record the offset before serializing this tree
             forest_map.add_entry(target_id, current_offset);
@@ -454,7 +422,18 @@ impl Impg {
             current_offset += tree_data.len() as u64;
         }
         
-        Ok(forest_map)
+        // Now write the forest map at the end
+        let forest_map_offset = current_offset;
+        let forest_map_data = bincode::serde::encode_to_vec(&forest_map, bincode::config::standard())
+            .map_err(|e| std::io::Error::other(format!("Failed to encode forest map: {:?}", e)))?;
+        
+        writer.write_all(&forest_map_data)?;
+        
+        // Go back and update the forest map offset in the header
+        writer.seek(SeekFrom::Start(8))?;
+        writer.write_all(&forest_map_offset.to_le_bytes())?;
+        
+        Ok(())
     }
 
     /// Load a specific tree from disk using the forest map
@@ -512,6 +491,70 @@ impl Impg {
         } else {
             self.load_tree_from_disk(target_id)
         }
+    }
+
+    /// Load IMPG index from the format with embedded forest map at the end
+    pub fn load_from_file<R: std::io::Read + std::io::Seek>(
+        mut reader: R,
+        paf_files: &[String],
+        index_file_path: String,
+    ) -> std::io::Result<Self> {
+        const MAGIC: &[u8] = b"IMPGIDX1";
+        
+        // Read and verify magic bytes
+        let mut magic_buf = [0u8; 8];
+        reader.read_exact(&mut magic_buf)?;
+        if magic_buf != MAGIC {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid magic bytes - not a valid IMPG index file",
+            ));
+        }
+        
+        // Read forest map offset
+        let mut offset_buf = [0u8; 8];
+        reader.read_exact(&mut offset_buf)?;
+        let forest_map_offset = u64::from_le_bytes(offset_buf);
+        
+        // Read sequence index
+        let seq_index: SequenceIndex = bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
+            .map_err(|e| std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Failed to load sequence index: {:?}", e),
+            ))?;
+        
+        // Seek to forest map and read it
+        reader.seek(SeekFrom::Start(forest_map_offset))?;
+        let forest_map: ForestMap = bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
+            .map_err(|e| std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Failed to load forest map: {:?}", e),
+            ))?;
+        
+        // Determine PAF GZI indices
+        let paf_gzi_indices = paf_files
+            .iter()
+            .map(|paf_file| {
+                if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
+                    let paf_gzi_file = format!("{}.gzi", paf_file);
+                    Some(
+                        bgzf::gzi::fs::read(paf_gzi_file.clone())
+                            .unwrap_or_else(|_| panic!("Could not open {}", paf_gzi_file)),
+                    )
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        
+        Ok(Self {
+            trees: RwLock::new(FxHashMap::default()), // Start with empty trees - load on demand
+            seq_index,
+            paf_files: paf_files.to_vec(),
+            paf_gzi_indices,
+            forest_map: Some(forest_map),
+            index_file_path: Some(index_file_path),
+        })
     }
 
     pub fn query(
