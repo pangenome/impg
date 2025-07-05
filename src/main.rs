@@ -1,7 +1,7 @@
 use clap::Parser;
 use coitrees::{Interval, IntervalTree};
 use impg::faidx::FastaIndex;
-use impg::impg::{AdjustedInterval, CigarOp, Impg, SerializableImpg};
+use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::paf::{PartialPafRecord, Strand};
 use impg::partition::partition_alignments;
 use impg::seqidx::SequenceIndex;
@@ -1073,22 +1073,11 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
         });
     }
 
-    let file = File::open(index_file)?;
-    let mut reader = BufReader::new(file);
-    let serializable: SerializableImpg =
-        bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard()).map_err(
-            |e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Failed to deserialize index: {:?}", e),
-                )
-            },
-        )?;
+    // Load from embedded format
+    let file = File::open(&index_file)?;
+    let reader = BufReader::new(file);
 
-    Ok(Impg::from_multi_paf_and_serializable(
-        paf_files,
-        serializable,
-    ))
+    Impg::load_from_file(reader, paf_files, index_file)
 }
 
 fn generate_multi_index(
@@ -1185,11 +1174,11 @@ fn generate_multi_index(
         )
     })?;
 
-    let serializable = impg.to_serializable();
-    let file = File::create(index_file)?;
+    // Serialize the index with embedded forest map
+    let index_file_path = index_file.clone();
+    let file = File::create(&index_file_path)?;
     let mut writer = BufWriter::new(file);
-    bincode::serde::encode_into_std_write(&serializable, &mut writer, bincode::config::standard())
-        .map_err(|e| io::Error::other(format!("Failed to serialize index: {:?}", e)))?;
+    impg.serialize_with_forest_map(&mut writer)?;
 
     Ok(impg)
 }
@@ -2086,21 +2075,58 @@ fn print_stats(impg: &Impg) {
         .into_par_iter()
         .filter_map(|id| impg.seq_index.get_len_from_id(id))
         .sum();
-    let num_overlaps = impg.trees.values().map(|tree| tree.len()).sum::<usize>();
+
+    // Compute overlap stats - forest map is mandatory in IMPG index
+    let forest_map = &impg.forest_map;
+
+    info!(
+        "Computing statistics for {} trees...",
+        forest_map.entries.len()
+    );
+
+    // Collect target IDs to process
+    let target_ids: Vec<u32> = forest_map.entries.keys().copied().collect();
+
+    // Process trees in parallel, computing stats without keeping them in memory
+    let results: Vec<(u32, usize)> = target_ids
+        .par_iter()
+        .map(|&target_id| {
+            // Get tree and count, removing it from memory for efficiency
+            let count = if let Some(tree) = impg.get_or_load_tree(target_id) {
+                let len = tree.len();
+                impg.trees.write().unwrap().remove(&target_id);
+                len
+            } else {
+                0
+            };
+
+            (target_id, count)
+        })
+        .collect();
+
+    // Collect results
+    let mut num_overlaps = 0;
+    let mut overlaps_per_seq = FxHashMap::default();
+
+    for (target_id, count) in results {
+        num_overlaps += count;
+        overlaps_per_seq.insert(target_id, count);
+    }
+
+    info!(
+        "Processed {} trees, total overlaps: {}",
+        target_ids.len(),
+        num_overlaps
+    );
+
     println!("Number of sequences: {}", num_sequences);
     println!("Total sequence length: {} bp", total_sequence_length);
     println!("Number of overlaps: {}", num_overlaps);
 
-    // Overlap distribution stats
-    let mut overlaps_per_seq: FxHashMap<u32, usize> = FxHashMap::default();
-    for (&target_id, tree) in &impg.trees {
-        overlaps_per_seq.insert(target_id, tree.len());
-    }
-
     let mut entries: Vec<(u32, usize)> = overlaps_per_seq.into_iter().collect();
-    entries.sort_by(|a, b| b.1.cmp(&a.1));
-
     if !entries.is_empty() {
+        entries.par_sort_by(|a, b| b.1.cmp(&a.1));
+
         // Calculate mean and median overlaps
         let sum: usize = entries.par_iter().map(|(_, count)| count).sum();
         let mean = sum as f64 / entries.len() as f64;
