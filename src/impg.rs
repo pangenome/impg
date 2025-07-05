@@ -494,26 +494,24 @@ impl Impg {
         }
     }
 
-    /// Get a tree, loading it from disk if not already in memory
-    fn get_or_load_tree(&self, target_id: u32) -> std::io::Result<Arc<BasicCOITree<QueryMetadata, u32>>> {
+    /// Get a tree from memory or load it from disk if necessary
+    /// Returns None if the tree doesn't exist (which is valid - not all sequences have overlaps)
+    // Get a clone of the Arc<tree> (incrementing the reference count, so cheap) to use in the query
+    // We clone to avoid holding the RwLock for the duration of the query
+    fn get_or_load_tree(&self, target_id: u32) -> Option<Arc<BasicCOITree<QueryMetadata, u32>>> {
         // First check if tree is already in memory
         if let Some(tree) = self.trees.read().unwrap().get(&target_id) {
-            return Ok(Arc::clone(tree));
+            return Some(Arc::clone(tree));
         }
         
         // Not in memory - try to load from disk
-        self.load_tree_from_disk(target_id)?;
-        
-        // Now it should be in memory - get it
-        self.trees
-            .read()
-            .unwrap()
-            .get(&target_id)
-            .cloned()
-            .ok_or_else(|| std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Failed to load tree for target {}", target_id),
-            ))
+        if let Ok(true) = self.load_tree_from_disk(target_id) {
+            // Successfully loaded - now get it from memory
+            self.trees.read().unwrap().get(&target_id).cloned()
+        } else {
+            // Tree doesn't exist (no overlaps for this target)
+            None
+        }
     }
 
     /// Load IMPG index from the format with embedded forest map at the end
@@ -616,63 +614,59 @@ impl Impg {
             range_end - range_start
         );
 
-        // Get a clone of the Arc<tree> (incrementing the reference count, so cheap) to use in the query
-        // We clone to avoid holding the RwLock for the duration of the query
-        let tree = match self.get_or_load_tree(target_id) {
-            Ok(tree) => tree,
-            Err(e) => {
-                panic!("Failed to get tree for target {}: {}", target_id, e);
-            }
-        };
-        tree.query(range_start, range_end, |interval| {
-                let metadata = &interval.metadata;
-                let result = project_target_range_through_alignment(
-                    (range_start, range_end),
-                    (
-                        metadata.target_start,
-                        metadata.target_end,
-                        metadata.query_start,
-                        metadata.query_end,
-                        metadata.strand(),
-                    ),
-                    &metadata.get_cigar_ops(&self.paf_files, self.paf_gzi_indices.as_ref()),
-                );
-                if let Some((
-                    adjusted_query_start,
-                    adjusted_query_end,
-                    adjusted_cigar,
-                    adjusted_target_start,
-                    adjusted_target_end,
-                )) = result
-                {
-                    // Check gap-compressed identity if threshold is provided
-                    if let Some(threshold) = min_gap_compressed_identity {
-                        if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
-                            return; // Skip this result
-                        }
-                    }
-
-                    let adjusted_interval = (
-                        Interval {
-                            first: adjusted_query_start,
-                            last: adjusted_query_end,
-                            metadata: metadata.query_id,
-                        },
-                        if store_cigar {
-                            adjusted_cigar
-                        } else {
-                            Vec::new()
-                        },
-                        Interval {
-                            first: adjusted_target_start,
-                            last: adjusted_target_end,
-                            metadata: target_id,
-                        },
+        // Get or load the tree - if None, no overlaps exist for this target
+        if let Some(tree) = self.get_or_load_tree(target_id) {           
+            tree.query(range_start, range_end, |interval| {
+                    let metadata = &interval.metadata;
+                    let result = project_target_range_through_alignment(
+                        (range_start, range_end),
+                        (
+                            metadata.target_start,
+                            metadata.target_end,
+                            metadata.query_start,
+                            metadata.query_end,
+                            metadata.strand(),
+                        ),
+                        &metadata.get_cigar_ops(&self.paf_files, self.paf_gzi_indices.as_ref()),
                     );
-                    results.push(adjusted_interval);
-                }
-            });
+                    if let Some((
+                        adjusted_query_start,
+                        adjusted_query_end,
+                        adjusted_cigar,
+                        adjusted_target_start,
+                        adjusted_target_end,
+                    )) = result
+                    {
+                        // Check gap-compressed identity if threshold is provided
+                        if let Some(threshold) = min_gap_compressed_identity {
+                            if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
+                                return; // Skip this result
+                            }
+                        }
 
+                        let adjusted_interval = (
+                            Interval {
+                                first: adjusted_query_start,
+                                last: adjusted_query_end,
+                                metadata: metadata.query_id,
+                            },
+                            if store_cigar {
+                                adjusted_cigar
+                            } else {
+                                Vec::new()
+                            },
+                            Interval {
+                                first: adjusted_target_start,
+                                last: adjusted_target_end,
+                                metadata: target_id,
+                            },
+                        );
+                        results.push(adjusted_interval);
+                    }
+                });
+            } else {
+                debug!("No tree found for target {} - no overlaps", target_id);
+            }
         results
     }
 
@@ -760,141 +754,140 @@ impl Impg {
 
             // Get a clone of the Arc<tree> (incrementing the reference count, so cheap) to use in the query
             // We clone to avoid holding the RwLock for the duration of the query
-            let tree = match self.get_or_load_tree(current_target_id) {
-                Ok(tree) => tree,
-                Err(e) => {
-                    panic!("Failed to get tree for target {}: {}", current_target_id, e);
-                }
-            };
+            // Get or load the tree - if None, no overlaps exist for this target
+            if let Some(tree) = self.get_or_load_tree(current_target_id) {
 
-            // Collect intervals first to process them in parallel
-            let mut intervals = Vec::new();
+                // Collect intervals first to process them in parallel
+                let mut intervals = Vec::new();
 
-            tree.query(current_target_start, current_target_end, |interval| {
-                intervals.push(interval.metadata.clone());
-            });
+                tree.query(current_target_start, current_target_end, |interval| {
+                    intervals.push(interval.metadata.clone());
+                });
 
-            // Process the intervals in parallel
-            let processed_results: Vec<_> = intervals
-                .into_par_iter()
-                .filter_map(|metadata| {
-                    let result = project_target_range_through_alignment(
-                        (current_target_start, current_target_end),
-                        (
-                            metadata.target_start,
-                            metadata.target_end,
-                            metadata.query_start,
-                            metadata.query_end,
-                            metadata.strand(),
-                        ),
-                        &metadata.get_cigar_ops(&self.paf_files, self.paf_gzi_indices.as_ref()),
-                    );
+                // Process the intervals in parallel
+                let processed_results: Vec<_> = intervals
+                    .into_par_iter()
+                    .filter_map(|metadata| {
+                        let result = project_target_range_through_alignment(
+                            (current_target_start, current_target_end),
+                            (
+                                metadata.target_start,
+                                metadata.target_end,
+                                metadata.query_start,
+                                metadata.query_end,
+                                metadata.strand(),
+                            ),
+                            &metadata.get_cigar_ops(&self.paf_files, self.paf_gzi_indices.as_ref()),
+                        );
 
-                    if let Some((
-                        adjusted_query_start,
-                        adjusted_query_end,
-                        adjusted_cigar,
-                        adjusted_target_start,
-                        adjusted_target_end,
-                    )) = result
-                    {
-                        // Check gap-compressed identity if threshold is provided
-                        if let Some(threshold) = min_gap_compressed_identity {
-                            if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
-                                return None; // Skip this result
-                            }
-                        }
-
-                        Some((
-                            Interval {
-                                first: adjusted_query_start,
-                                last: adjusted_query_end,
-                                metadata: metadata.query_id,
-                            },
-                            if store_cigar {
-                                adjusted_cigar
-                            } else {
-                                Vec::new()
-                            },
-                            Interval {
-                                first: adjusted_target_start,
-                                last: adjusted_target_end,
-                                metadata: current_target_id,
-                            },
-                            metadata.query_id,
+                        if let Some((
                             adjusted_query_start,
                             adjusted_query_end,
-                        ))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+                            adjusted_cigar,
+                            adjusted_target_start,
+                            adjusted_target_end,
+                        )) = result
+                        {
+                            // Check gap-compressed identity if threshold is provided
+                            if let Some(threshold) = min_gap_compressed_identity {
+                                if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
+                                    return None; // Skip this result
+                                }
+                            }
 
-            // Process results sequentially to maintain deterministic behavior
-            for (
-                query_interval,
-                cigar,
-                target_interval,
-                query_id,
-                adjusted_query_start,
-                adjusted_query_end,
-            ) in processed_results
-            {
-                results.push((query_interval, cigar, target_interval));
+                            Some((
+                                Interval {
+                                    first: adjusted_query_start,
+                                    last: adjusted_query_end,
+                                    metadata: metadata.query_id,
+                                },
+                                if store_cigar {
+                                    adjusted_cigar
+                                } else {
+                                    Vec::new()
+                                },
+                                Interval {
+                                    first: adjusted_target_start,
+                                    last: adjusted_target_end,
+                                    metadata: current_target_id,
+                                },
+                                metadata.query_id,
+                                adjusted_query_start,
+                                adjusted_query_end,
+                            ))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
 
-                // Only add non-overlapping portions to the stack for further exploration
-                if query_id != current_target_id {
-                    let ranges = visited_ranges.entry(query_id).or_default();
+                // Process results sequentially to maintain deterministic behavior
+                for (
+                    query_interval,
+                    cigar,
+                    target_interval,
+                    query_id,
+                    adjusted_query_start,
+                    adjusted_query_end,
+                ) in processed_results
+                {
+                    results.push((query_interval, cigar, target_interval));
 
-                    let mut should_add = true;
+                    // Only add non-overlapping portions to the stack for further exploration
+                    if query_id != current_target_id {
+                        let ranges = visited_ranges.entry(query_id).or_default();
 
-                    // Check if the range is too close to any existing ranges
-                    if min_distance_between_ranges > 0 {
-                            let (new_min, new_max) = if adjusted_query_start <= adjusted_query_end {
-                                (adjusted_query_start, adjusted_query_end)
-                            } else {
-                                (adjusted_query_end, adjusted_query_start)
-                            };
+                        let mut should_add = true;
 
-                            // Find insertion point in sorted ranges
-                            let idx = match ranges
-                                .ranges
-                                .binary_search_by_key(&new_min, |&(start, _)| start)
-                            {
-                                Ok(i) => i,
-                                Err(i) => i,
-                            };
+                        // Check if the range is too close to any existing ranges
+                        if min_distance_between_ranges > 0 {
+                                let (new_min, new_max) = if adjusted_query_start <= adjusted_query_end {
+                                    (adjusted_query_start, adjusted_query_end)
+                                } else {
+                                    (adjusted_query_end, adjusted_query_start)
+                                };
 
-                            // Only need to check adjacent ranges due to sorting
-                        if idx > 0 {
-                            // Check previous range
-                            let (_, prev_end) = ranges.ranges[idx - 1];
-                            if (new_min - prev_end).abs() < min_distance_between_ranges {
-                                should_add = false;
+                                // Find insertion point in sorted ranges
+                                let idx = match ranges
+                                    .ranges
+                                    .binary_search_by_key(&new_min, |&(start, _)| start)
+                                {
+                                    Ok(i) => i,
+                                    Err(i) => i,
+                                };
+
+                                // Only need to check adjacent ranges due to sorting
+                            if idx > 0 {
+                                // Check previous range
+                                let (_, prev_end) = ranges.ranges[idx - 1];
+                                if (new_min - prev_end).abs() < min_distance_between_ranges {
+                                    should_add = false;
+                                }
+                            }
+                            if idx < ranges.ranges.len() {
+                                // Check next range
+                                let (next_start, _) = ranges.ranges[idx];
+                                if (next_start - new_max).abs() < min_distance_between_ranges {
+                                    should_add = false;
+                                }
                             }
                         }
-                        if idx < ranges.ranges.len() {
-                            // Check next range
-                            let (next_start, _) = ranges.ranges[idx];
-                            if (next_start - new_max).abs() < min_distance_between_ranges {
-                                should_add = false;
-                            }
-                        }
-                    }
 
-                    if should_add {
-                        let new_ranges =
-                            ranges.insert((adjusted_query_start, adjusted_query_end));
+                        if should_add {
+                            let new_ranges =
+                                ranges.insert((adjusted_query_start, adjusted_query_end));
 
-                        // Add non-overlapping portions to stack
-                        for (new_start, new_end) in new_ranges {
-                            if (new_end - new_start).abs() >= min_transitive_len {
-                                stack.push((query_id, new_start, new_end, current_depth + 1));
+                            // Add non-overlapping portions to stack
+                            for (new_start, new_end) in new_ranges {
+                                if (new_end - new_start).abs() >= min_transitive_len {
+                                    stack.push((query_id, new_start, new_end, current_depth + 1));
+                                }
                             }
                         }
                     }
                 }
+            } else {
+                debug!("No tree found for target {} - no overlaps", current_target_id);
             }
 
             debug!("Collected {} results", results.len() - prec_num_results);
@@ -1003,69 +996,66 @@ impl Impg {
                         |(current_target_id, current_target_start, current_target_end)| {
                             let mut local_results = Vec::new();
 
-                            // Get a clone of the Arc<tree> (incrementing the reference count, so cheap) to use in the query
-                            // We clone to avoid holding the RwLock for the duration of the query
-                            let tree = match self.get_or_load_tree(*current_target_id) {
-                                Ok(tree) => tree,
-                                Err(e) => {
-                                    panic!("Failed to get tree for target {}: {}", current_target_id, e);
-                                }
-                            };
-                            tree.query(
-                                *current_target_start,
-                                *current_target_end,
-                                |interval| {
-                                        let metadata = &interval.metadata;
-                                        let result = project_target_range_through_alignment(
-                                            (*current_target_start, *current_target_end),
-                                            (
-                                                metadata.target_start,
-                                                metadata.target_end,
-                                                metadata.query_start,
-                                                metadata.query_end,
-                                                metadata.strand(),
-                                            ),
-                                            &metadata.get_cigar_ops(
-                                                &self.paf_files,
-                                                self.paf_gzi_indices.as_ref(),
-                                            ),
-                                        );
+                            // Get or load the tree - if None, no overlaps exist for this target
+                            if let Some(tree) = self.get_or_load_tree(*current_target_id) {
+                                tree.query(
+                                    *current_target_start,
+                                    *current_target_end,
+                                    |interval| {
+                                            let metadata = &interval.metadata;
+                                            let result = project_target_range_through_alignment(
+                                                (*current_target_start, *current_target_end),
+                                                (
+                                                    metadata.target_start,
+                                                    metadata.target_end,
+                                                    metadata.query_start,
+                                                    metadata.query_end,
+                                                    metadata.strand(),
+                                                ),
+                                                &metadata.get_cigar_ops(
+                                                    &self.paf_files,
+                                                    self.paf_gzi_indices.as_ref(),
+                                                ),
+                                            );
 
-                                        if let Some((
-                                            adjusted_query_start,
-                                            adjusted_query_end,
-                                            adjusted_cigar,
-                                            adjusted_target_start,
-                                            adjusted_target_end,
-                                        )) = result
-                                        {
-                                            // Check gap-compressed identity if threshold is provided
-                                            if let Some(threshold) = min_gap_compressed_identity {
-                                                if calculate_gap_compressed_identity(
-                                                    &adjusted_cigar,
-                                                ) < threshold
-                                                {
-                                                    return; // Skip this result
-                                                }
-                                            }
-
-                                            local_results.push((
-                                                metadata.query_id,
+                                            if let Some((
                                                 adjusted_query_start,
                                                 adjusted_query_end,
-                                                if store_cigar {
-                                                    adjusted_cigar
-                                                } else {
-                                                    Vec::new()
-                                                },
+                                                adjusted_cigar,
                                                 adjusted_target_start,
                                                 adjusted_target_end,
-                                                *current_target_id,
-                                            ));
-                                        }
-                                    },
-                                );
+                                            )) = result
+                                            {
+                                                // Check gap-compressed identity if threshold is provided
+                                                if let Some(threshold) = min_gap_compressed_identity {
+                                                    if calculate_gap_compressed_identity(
+                                                        &adjusted_cigar,
+                                                    ) < threshold
+                                                    {
+                                                        return; // Skip this result
+                                                    }
+                                                }
 
+                                                local_results.push((
+                                                    metadata.query_id,
+                                                    adjusted_query_start,
+                                                    adjusted_query_end,
+                                                    if store_cigar {
+                                                        adjusted_cigar
+                                                    } else {
+                                                        Vec::new()
+                                                    },
+                                                    adjusted_target_start,
+                                                    adjusted_target_end,
+                                                    *current_target_id,
+                                                ));
+                                            }
+                                        },
+                                    );
+                            } else {
+                                debug!("No tree found for target {} - no overlaps", current_target_id);
+                            }
+                            
                             local_results
                         },
                     )
