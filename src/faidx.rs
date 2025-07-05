@@ -3,6 +3,7 @@ use rustc_hash::FxHashMap;
 use std::io::{self};
 
 // Structure to manage multiple FASTA files
+#[derive(Debug)]
 pub struct FastaIndex {
     pub fasta_paths: Vec<String>,
     pub path_key_to_fasta: FxHashMap<String, usize>,

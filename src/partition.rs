@@ -1,7 +1,7 @@
-use crate::faidx::FastaIndex;
 use crate::impg::CigarOp;
 use crate::impg::Impg;
 use crate::impg::SortedRanges;
+use crate::sequence_index::{SequenceIndex, UnifiedSequenceIndex};
 use coitrees::Interval;
 use log::{debug, info};
 use rayon::prelude::*;
@@ -41,7 +41,7 @@ pub fn partition_alignments(
     min_distance_between_ranges: i32,
     output_format: &str,
     output_folder: Option<&str>,
-    fasta_index: Option<&FastaIndex>,
+    sequence_index: Option<&UnifiedSequenceIndex>,
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
     reverse_complement: bool,
     debug: bool,
@@ -359,7 +359,7 @@ pub fn partition_alignments(
                             &query_intervals,
                             impg,
                             output_folder,
-                            fasta_index.expect("FASTA index not found"),
+                            sequence_index.expect("Sequence index not found"),
                             reverse_complement,
                         )?;
                     }
@@ -450,7 +450,7 @@ pub fn partition_alignments(
                     impg,
                     output_format,
                     output_folder,
-                    fasta_index,
+                    sequence_index,
                     scoring_params,
                     reverse_complement,
                 )?;
@@ -1120,14 +1120,14 @@ fn write_partition(
     impg: &Impg,
     output_format: &str,
     output_folder: Option<&str>,
-    fasta_index: Option<&FastaIndex>,
+    sequence_index: Option<&UnifiedSequenceIndex>,
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
     reverse_complement: bool,
 ) -> io::Result<()> {
     match output_format {
         "bed" => write_partition_bed(partition_num, query_intervals, impg, output_folder, None),
         "gfa" => {
-            let fasta_index = fasta_index.ok_or_else(|| {
+            let sequence_index = sequence_index.ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "FASTA index required for GFA output",
@@ -1144,12 +1144,12 @@ fn write_partition(
                 query_intervals,
                 impg,
                 output_folder,
-                fasta_index,
+                sequence_index,
                 scoring_params,
             )
         }
         "maf" => {
-            let fasta_index = fasta_index.ok_or_else(|| {
+            let sequence_index = sequence_index.ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "FASTA index required for MAF output",
@@ -1166,12 +1166,12 @@ fn write_partition(
                 query_intervals,
                 impg,
                 output_folder,
-                fasta_index,
+                sequence_index,
                 scoring_params,
             )
         }
         "fasta" => {
-            let fasta_index = fasta_index.ok_or_else(|| {
+            let sequence_index = sequence_index.ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "FASTA index required for FASTA output",
@@ -1182,7 +1182,7 @@ fn write_partition(
                 query_intervals,
                 impg,
                 output_folder,
-                fasta_index,
+                sequence_index,
                 reverse_complement,
             )
         }
@@ -1233,14 +1233,14 @@ fn write_partition_gfa(
     query_intervals: &[Interval<u32>],
     impg: &Impg,
     output_folder: Option<&str>,
-    fasta_index: &FastaIndex,
+    sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<()> {
     // Generate a GFA-formatted string from the list of intervals
     let gfa_output = crate::graph::generate_gfa_from_intervals(
         impg,
         query_intervals,
-        fasta_index,
+        sequence_index,
         scoring_params,
     );
 
@@ -1261,14 +1261,14 @@ fn write_partition_maf(
     query_intervals: &[Interval<u32>],
     impg: &Impg,
     output_folder: Option<&str>,
-    fasta_index: &FastaIndex,
+    sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<()> {
     // Generate a MAF-formatted string from the list of intervals
     let maf_output = crate::graph::generate_maf_from_intervals(
         impg,
         query_intervals,
-        fasta_index,
+        sequence_index,
         scoring_params,
     );
 
@@ -1289,7 +1289,7 @@ fn write_partition_fasta(
     query_intervals: &[Interval<u32>],
     impg: &Impg,
     output_folder: Option<&str>,
-    fasta_index: &FastaIndex,
+    sequence_index: &UnifiedSequenceIndex,
     reverse_complement: bool,
 ) -> io::Result<()> {
     // Create output file
@@ -1309,7 +1309,7 @@ fn write_partition_fasta(
         };
 
         // Fetch the sequence
-        let sequence = fasta_index.fetch_sequence(query_name, start, end)?;
+        let sequence = sequence_index.fetch_sequence(query_name, start, end)?;
 
         // If reverse strand and reverse_complement strand, reverse complement the sequence
         let sequence = if strand == '-' && reverse_complement {
