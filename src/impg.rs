@@ -287,8 +287,8 @@ pub struct Impg {
     pub seq_index: SequenceIndex,
     pub paf_files: Vec<String>, // List of all PAF files
     pub paf_gzi_indices: Vec<Option<bgzf::gzi::Index>>, // Corresponding GZI indices
-    pub forest_map: Option<ForestMap>, // Forest map for lazy loading
-    pub index_file_path: Option<String>, // Path to the index file for lazy loading
+    pub forest_map: ForestMap, // Forest map for lazy loading
+    pub index_file_path: String, // Path to the index file for lazy loading
 }
 
 impl Impg {
@@ -374,8 +374,8 @@ impl Impg {
             seq_index,
             paf_files,
             paf_gzi_indices,
-            forest_map: None,
-            index_file_path: None,
+            forest_map: ForestMap::new(), // All trees are in memory, no need for forest map
+            index_file_path: String::new(), // All trees are in memory, no need for index file path
         })
     }
 
@@ -452,59 +452,54 @@ impl Impg {
 
     /// Load a specific tree from disk using the forest map
     fn load_tree_from_disk(&self, target_id: u32) -> std::io::Result<bool> {
-        if let (Some(forest_map), Some(index_file_path)) = (&self.forest_map, &self.index_file_path)
-        {
-            if let Some(tree_offset) = forest_map.get_tree_offset(target_id) {
-                let mut file = File::open(index_file_path)?;
-                file.seek(std::io::SeekFrom::Start(tree_offset))?;
+        if let Some(tree_offset) = self.forest_map.get_tree_offset(target_id) {
+            let mut file = File::open(&self.index_file_path)?;
+            file.seek(std::io::SeekFrom::Start(tree_offset))?;
 
-                let mut reader = BufReader::new(file);
-                let (loaded_target_id, intervals): (u32, Vec<SerializableInterval>) =
-                    bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
-                        .map_err(|e| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                format!(
-                                    "Failed to deserialize tree for target {}: {:?}",
-                                    target_id, e
-                                ),
-                            )
-                        })?;
+            let mut reader = BufReader::new(file);
+            let (loaded_target_id, intervals): (u32, Vec<SerializableInterval>) =
+                bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
+                    .map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!(
+                                "Failed to deserialize tree for target {}: {:?}",
+                                target_id, e
+                            ),
+                        )
+                    })?;
 
-                // Verify we loaded the correct tree
-                if loaded_target_id != target_id {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!(
-                            "Tree mismatch: expected {}, got {}",
-                            target_id, loaded_target_id
-                        ),
-                    ));
-                }
-
-                // Reconstruct the tree
-                let tree = BasicCOITree::new(
-                    intervals
-                        .iter()
-                        .map(|interval| Interval {
-                            first: interval.first,
-                            last: interval.last,
-                            metadata: interval.metadata.clone(),
-                        })
-                        .collect::<Vec<_>>()
-                        .as_slice(),
-                );
-
-                self.trees
-                    .write()
-                    .unwrap()
-                    .insert(target_id, Arc::new(tree));
-                Ok(true)
-            } else {
-                Ok(false) // Tree not found in forest map
+            // Verify we loaded the correct tree
+            if loaded_target_id != target_id {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "Tree mismatch: expected {}, got {}",
+                        target_id, loaded_target_id
+                    ),
+                ));
             }
+
+            // Reconstruct the tree
+            let tree = BasicCOITree::new(
+                intervals
+                    .iter()
+                    .map(|interval| Interval {
+                        first: interval.first,
+                        last: interval.last,
+                        metadata: interval.metadata.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            );
+
+            self.trees
+                .write()
+                .unwrap()
+                .insert(target_id, Arc::new(tree));
+            Ok(true)
         } else {
-            Ok(false) // No forest map available
+            Ok(false) // Tree not found in forest map
         }
     }
 
@@ -596,8 +591,8 @@ impl Impg {
             seq_index,
             paf_files: paf_files.to_vec(),
             paf_gzi_indices,
-            forest_map: Some(forest_map),
-            index_file_path: Some(index_file_path),
+            forest_map,
+            index_file_path,
         })
     }
 

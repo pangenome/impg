@@ -2077,7 +2077,7 @@ fn print_stats(impg: &Impg) {
         .sum();
 
     // Compute overlap stats - forest map is mandatory in IMPG index
-    let forest_map = impg.forest_map.as_ref().expect("Error loading forest map");
+    let forest_map = &impg.forest_map;
 
     info!(
         "Computing statistics for {} trees...",
