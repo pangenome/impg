@@ -494,6 +494,18 @@ impl Impg {
         }
     }
 
+    /// Get a tree, loading it from disk if not already in memory
+    fn get_tree(&self, target_id: u32) -> Arc<BasicCOITree<QueryMetadata, u32>> {
+        if let Some(tree) = self.trees.read().unwrap().get(&target_id).cloned() {
+            tree
+        } else {
+            self.load_tree_from_disk(target_id)
+                .unwrap_or_else(|e| panic!("Failed to load tree for target {}: {}", target_id, e));
+            self.trees.read().unwrap().get(&target_id).cloned()
+                .unwrap_or_else(|| panic!("Tree not found in memory after loading for target {}", target_id))
+        }
+    }
+
     /// Load IMPG index from the format with embedded forest map at the end
     pub fn load_from_file<R: std::io::Read + std::io::Seek>(
         mut reader: R,
@@ -594,16 +606,10 @@ impl Impg {
             range_end - range_start
         );
 
-        // Ensure the tree is loaded
-        if let Err(e) = self.ensure_tree_loaded(target_id) {
-            debug!("Failed to load tree for target {}: {}", target_id, e);
-            return results;
-        }
-        
         // Get a clone of the Arc<tree> (incrementing the reference count, so cheap) to use in the query
         // We clone to avoid holding the RwLock for the duration of the query
-        if let Some(tree) = self.trees.read().unwrap().get(&target_id).cloned() {
-            tree.query(range_start, range_end, |interval| {
+        let tree = self.get_tree(target_id);
+        tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
                 let result = project_target_range_through_alignment(
                     (range_start, range_end),
@@ -651,7 +657,6 @@ impl Impg {
                     results.push(adjusted_interval);
                 }
             });
-        }
 
         results
     }
@@ -738,99 +743,93 @@ impl Impg {
 
             let prec_num_results = results.len();
 
-            // Ensure the tree is loaded
-            if let Err(e) = self.ensure_tree_loaded(current_target_id) {
-                debug!("Failed to load tree for target {}: {}", current_target_id, e);
-                continue;
-            }
-            
             // Get a clone of the Arc<tree> (incrementing the reference count, so cheap) to use in the query
             // We clone to avoid holding the RwLock for the duration of the query
-            if let Some(tree) = self.trees.read().unwrap().get(&current_target_id).cloned() {
-                // Collect intervals first to process them in parallel
-                let mut intervals = Vec::new();
+            let tree = self.get_tree(current_target_id);
+            // Collect intervals first to process them in parallel
+            let mut intervals = Vec::new();
 
-                tree.query(current_target_start, current_target_end, |interval| {
-                    intervals.push(interval.metadata.clone());
-                });
+            tree.query(current_target_start, current_target_end, |interval| {
+                intervals.push(interval.metadata.clone());
+            });
 
-                // Process the intervals in parallel
-                let processed_results: Vec<_> = intervals
-                    .into_par_iter()
-                    .filter_map(|metadata| {
-                        let result = project_target_range_through_alignment(
-                            (current_target_start, current_target_end),
-                            (
-                                metadata.target_start,
-                                metadata.target_end,
-                                metadata.query_start,
-                                metadata.query_end,
-                                metadata.strand(),
-                            ),
-                            &metadata.get_cigar_ops(&self.paf_files, self.paf_gzi_indices.as_ref()),
-                        );
+            // Process the intervals in parallel
+            let processed_results: Vec<_> = intervals
+                .into_par_iter()
+                .filter_map(|metadata| {
+                    let result = project_target_range_through_alignment(
+                        (current_target_start, current_target_end),
+                        (
+                            metadata.target_start,
+                            metadata.target_end,
+                            metadata.query_start,
+                            metadata.query_end,
+                            metadata.strand(),
+                        ),
+                        &metadata.get_cigar_ops(&self.paf_files, self.paf_gzi_indices.as_ref()),
+                    );
 
-                        if let Some((
+                    if let Some((
+                        adjusted_query_start,
+                        adjusted_query_end,
+                        adjusted_cigar,
+                        adjusted_target_start,
+                        adjusted_target_end,
+                    )) = result
+                    {
+                        // Check gap-compressed identity if threshold is provided
+                        if let Some(threshold) = min_gap_compressed_identity {
+                            if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
+                                return None; // Skip this result
+                            }
+                        }
+
+                        Some((
+                            Interval {
+                                first: adjusted_query_start,
+                                last: adjusted_query_end,
+                                metadata: metadata.query_id,
+                            },
+                            if store_cigar {
+                                adjusted_cigar
+                            } else {
+                                Vec::new()
+                            },
+                            Interval {
+                                first: adjusted_target_start,
+                                last: adjusted_target_end,
+                                metadata: current_target_id,
+                            },
+                            metadata.query_id,
                             adjusted_query_start,
                             adjusted_query_end,
-                            adjusted_cigar,
-                            adjusted_target_start,
-                            adjusted_target_end,
-                        )) = result
-                        {
-                            // Check gap-compressed identity if threshold is provided
-                            if let Some(threshold) = min_gap_compressed_identity {
-                                if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
-                                    return None; // Skip this result
-                                }
-                            }
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
-                            Some((
-                                Interval {
-                                    first: adjusted_query_start,
-                                    last: adjusted_query_end,
-                                    metadata: metadata.query_id,
-                                },
-                                if store_cigar {
-                                    adjusted_cigar
-                                } else {
-                                    Vec::new()
-                                },
-                                Interval {
-                                    first: adjusted_target_start,
-                                    last: adjusted_target_end,
-                                    metadata: current_target_id,
-                                },
-                                metadata.query_id,
-                                adjusted_query_start,
-                                adjusted_query_end,
-                            ))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
+            // Process results sequentially to maintain deterministic behavior
+            for (
+                query_interval,
+                cigar,
+                target_interval,
+                query_id,
+                adjusted_query_start,
+                adjusted_query_end,
+            ) in processed_results
+            {
+                results.push((query_interval, cigar, target_interval));
 
-                // Process results sequentially to maintain deterministic behavior
-                for (
-                    query_interval,
-                    cigar,
-                    target_interval,
-                    query_id,
-                    adjusted_query_start,
-                    adjusted_query_end,
-                ) in processed_results
-                {
-                    results.push((query_interval, cigar, target_interval));
+                // Only add non-overlapping portions to the stack for further exploration
+                if query_id != current_target_id {
+                    let ranges = visited_ranges.entry(query_id).or_default();
 
-                    // Only add non-overlapping portions to the stack for further exploration
-                    if query_id != current_target_id {
-                        let ranges = visited_ranges.entry(query_id).or_default();
+                    let mut should_add = true;
 
-                        let mut should_add = true;
-
-                        // Check if the range is too close to any existing ranges
-                        if min_distance_between_ranges > 0 {
+                    // Check if the range is too close to any existing ranges
+                    if min_distance_between_ranges > 0 {
                             let (new_min, new_max) = if adjusted_query_start <= adjusted_query_end {
                                 (adjusted_query_start, adjusted_query_end)
                             } else {
@@ -847,31 +846,30 @@ impl Impg {
                             };
 
                             // Only need to check adjacent ranges due to sorting
-                            if idx > 0 {
-                                // Check previous range
-                                let (_, prev_end) = ranges.ranges[idx - 1];
-                                if (new_min - prev_end).abs() < min_distance_between_ranges {
-                                    should_add = false;
-                                }
-                            }
-                            if should_add && idx < ranges.ranges.len() {
-                                // Check next range
-                                let (next_start, _) = ranges.ranges[idx];
-                                if (next_start - new_max).abs() < min_distance_between_ranges {
-                                    should_add = false;
-                                }
+                        if idx > 0 {
+                            // Check previous range
+                            let (_, prev_end) = ranges.ranges[idx - 1];
+                            if (new_min - prev_end).abs() < min_distance_between_ranges {
+                                should_add = false;
                             }
                         }
+                        if idx < ranges.ranges.len() {
+                            // Check next range
+                            let (next_start, _) = ranges.ranges[idx];
+                            if (next_start - new_max).abs() < min_distance_between_ranges {
+                                should_add = false;
+                            }
+                        }
+                    }
 
-                        if should_add {
-                            let new_ranges =
-                                ranges.insert((adjusted_query_start, adjusted_query_end));
+                    if should_add {
+                        let new_ranges =
+                            ranges.insert((adjusted_query_start, adjusted_query_end));
 
-                            // Add non-overlapping portions to stack
-                            for (new_start, new_end) in new_ranges {
-                                if (new_end - new_start).abs() >= min_transitive_len {
-                                    stack.push((query_id, new_start, new_end, current_depth + 1));
-                                }
+                        // Add non-overlapping portions to stack
+                        for (new_start, new_end) in new_ranges {
+                            if (new_end - new_start).abs() >= min_transitive_len {
+                                stack.push((query_id, new_start, new_end, current_depth + 1));
                             }
                         }
                     }
@@ -984,18 +982,13 @@ impl Impg {
                         |(current_target_id, current_target_start, current_target_end)| {
                             let mut local_results = Vec::new();
 
-                            // Ensure the tree is loaded
-                            if self.ensure_tree_loaded(*current_target_id).is_err() {
-                                return local_results;
-                            }
-                            
                             // Get a clone of the Arc<tree> (incrementing the reference count, so cheap) to use in the query
                             // We clone to avoid holding the RwLock for the duration of the query
-                            if let Some(tree) = self.trees.read().unwrap().get(current_target_id).cloned() {
-                                tree.query(
-                                    *current_target_start,
-                                    *current_target_end,
-                                    |interval| {
+                            let tree = self.get_tree(*current_target_id);
+                            tree.query(
+                                *current_target_start,
+                                *current_target_end,
+                                |interval| {
                                         let metadata = &interval.metadata;
                                         let result = project_target_range_through_alignment(
                                             (*current_target_start, *current_target_end),
@@ -1046,7 +1039,6 @@ impl Impg {
                                         }
                                     },
                                 );
-                            }
 
                             local_results
                         },
