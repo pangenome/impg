@@ -285,10 +285,10 @@ impl SortedRanges {
 pub struct Impg {
     pub trees: RwLock<TreeMap>,
     pub seq_index: SequenceIndex,
-    paf_files: Vec<String>, // List of all PAF files
+    paf_files: Vec<String>,                         // List of all PAF files
     paf_gzi_indices: Vec<Option<bgzf::gzi::Index>>, // Corresponding GZI indices
-    pub forest_map: ForestMap,  // Forest map for lazy loading
-    index_file_path: String, // Path to the index file for lazy loading
+    pub forest_map: ForestMap,                      // Forest map for lazy loading
+    index_file_path: String,                        // Path to the index file for lazy loading
 }
 
 impl Impg {
@@ -460,7 +460,9 @@ impl Impg {
             let mut reader = BufReader::new(file);
             let (loaded_target_id, intervals): (u32, Vec<SerializableInterval>) =
                 bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
-                    .unwrap_or_else(|_| panic!("Failed to deserialize tree for target {}", target_id));
+                    .unwrap_or_else(|_| {
+                        panic!("Failed to deserialize tree for target {}", target_id)
+                    });
 
             // Verify we loaded the correct tree
             if loaded_target_id != target_id {
