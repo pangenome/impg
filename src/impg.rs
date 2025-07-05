@@ -495,15 +495,25 @@ impl Impg {
     }
 
     /// Get a tree, loading it from disk if not already in memory
-    fn get_tree(&self, target_id: u32) -> Arc<BasicCOITree<QueryMetadata, u32>> {
-        if let Some(tree) = self.trees.read().unwrap().get(&target_id).cloned() {
-            tree
-        } else {
-            self.load_tree_from_disk(target_id)
-                .unwrap_or_else(|e| panic!("Failed to load tree for target {}: {}", target_id, e));
-            self.trees.read().unwrap().get(&target_id).cloned()
-                .unwrap_or_else(|| panic!("Tree not found in memory after loading for target {}", target_id))
+    fn get_or_load_tree(&self, target_id: u32) -> std::io::Result<Arc<BasicCOITree<QueryMetadata, u32>>> {
+        // First check if tree is already in memory
+        if let Some(tree) = self.trees.read().unwrap().get(&target_id) {
+            return Ok(Arc::clone(tree));
         }
+        
+        // Not in memory - try to load from disk
+        self.load_tree_from_disk(target_id)?;
+        
+        // Now it should be in memory - get it
+        self.trees
+            .read()
+            .unwrap()
+            .get(&target_id)
+            .cloned()
+            .ok_or_else(|| std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Failed to load tree for target {}", target_id),
+            ))
     }
 
     /// Load IMPG index from the format with embedded forest map at the end
@@ -608,7 +618,12 @@ impl Impg {
 
         // Get a clone of the Arc<tree> (incrementing the reference count, so cheap) to use in the query
         // We clone to avoid holding the RwLock for the duration of the query
-        let tree = self.get_tree(target_id);
+        let tree = match self.get_or_load_tree(target_id) {
+            Ok(tree) => tree,
+            Err(e) => {
+                panic!("Failed to get tree for target {}: {}", target_id, e);
+            }
+        };
         tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
                 let result = project_target_range_through_alignment(
@@ -745,7 +760,13 @@ impl Impg {
 
             // Get a clone of the Arc<tree> (incrementing the reference count, so cheap) to use in the query
             // We clone to avoid holding the RwLock for the duration of the query
-            let tree = self.get_tree(current_target_id);
+            let tree = match self.get_or_load_tree(current_target_id) {
+                Ok(tree) => tree,
+                Err(e) => {
+                    panic!("Failed to get tree for target {}: {}", current_target_id, e);
+                }
+            };
+
             // Collect intervals first to process them in parallel
             let mut intervals = Vec::new();
 
@@ -984,7 +1005,12 @@ impl Impg {
 
                             // Get a clone of the Arc<tree> (incrementing the reference count, so cheap) to use in the query
                             // We clone to avoid holding the RwLock for the duration of the query
-                            let tree = self.get_tree(*current_target_id);
+                            let tree = match self.get_or_load_tree(*current_target_id) {
+                                Ok(tree) => tree,
+                                Err(e) => {
+                                    panic!("Failed to get tree for target {}: {}", current_target_id, e);
+                                }
+                            };
                             tree.query(
                                 *current_target_start,
                                 *current_target_end,
