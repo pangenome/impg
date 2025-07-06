@@ -3,7 +3,7 @@ use coitrees::{Interval, IntervalTree};
 use impg::faidx::FastaIndex;
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::paf::{PartialPafRecord, Strand};
-use impg::partition::partition_alignments;
+use impg::partition::{partition_alignments, parse_target_range};
 use impg::seqidx::SequenceIndex;
 use log::{debug, error, info, warn};
 use noodles::bgzf;
@@ -65,6 +65,10 @@ struct GfaMafFastaOpts {
     /// Reverse complement reverse strand sequences (for 'fasta' output)
     #[clap(long, action)]
     reverse_complement: bool,
+
+    /// Force processing of large regions (>10kbp) with maf/gfa output formats
+    #[clap(long, action)]
+    force_large_region: bool,
 }
 
 impl GfaMafFastaOpts {
@@ -288,10 +292,6 @@ enum Args {
         /// Minimum distance from sequence start/end - closer regions will be extended to the boundaries
         #[clap(long, value_parser, default_value_t = 3000)]
         min_boundary_distance: i32,
-
-        /// Force processing of large regions (>10kbp) with maf/gfa output formats
-        #[clap(long, action)]
-        force_large_region: bool,
     },
     /// Query overlaps in the alignment
     Query {
@@ -307,10 +307,6 @@ enum Args {
 
         #[clap(flatten)]
         gfa_maf_fasta: GfaMafFastaOpts,
-
-        /// Force processing of large regions (>10kbp) with maf/gfa output formats
-        #[clap(long, action)]
-        force_large_region: bool,
     },
     /// Compute pairwise similarity between sequences in a region
     Similarity {
@@ -369,10 +365,6 @@ enum Args {
         /// Similarity measure to use for PCA distance matrix ("jaccard", "cosine", or "dice")
         #[clap(long, value_parser, requires = "pca", default_value = "jaccard")]
         pca_measure: String,
-
-        /// Force processing of large regions (>10kbp)
-        #[clap(long, action)]
-        force_large_region: bool,
     },
     /// Print alignment statistics
     Stats {
@@ -406,12 +398,11 @@ fn main() -> io::Result<()> {
             selection_mode,
             min_missing_size,
             min_boundary_distance,
-            force_large_region,
         } => {
             validate_selection_mode(&selection_mode)?;
             validate_output_format(&output_format, &["bed", "gfa", "maf", "fasta"])?;
 
-            validate_region_size((0, window_size as i32), &output_format, force_large_region)?;
+            validate_region_size((0, window_size as i32), &output_format, gfa_maf_fasta.force_large_region)?;
 
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
@@ -468,7 +459,6 @@ fn main() -> io::Result<()> {
             query,
             output_format,
             gfa_maf_fasta,
-            force_large_region,
         } => {
             validate_output_format(
                 &output_format,
@@ -477,15 +467,15 @@ fn main() -> io::Result<()> {
 
             // Early validation for target_range before ANY expensive operations
             if let Some(target_range_str) = &query.target_range {
-                let (_, target_range) = parse_target_range(target_range_str)?;
-                validate_region_size(target_range, &output_format, force_large_region)?;
+                let (_, target_range, _) = parse_target_range(target_range_str)?;
+                validate_region_size(target_range, &output_format, gfa_maf_fasta.force_large_region)?;
             }
 
             // Early validation for target_bed and cache parsed data to avoid re-parsing
-            let cached_targets = if let Some(target_bed) = &query.target_bed {
+            let target_ranges = if let Some(target_bed) = &query.target_bed {
                 let targets = impg::partition::parse_bed_file(target_bed)?;
                 for (_, target_range, _) in &targets {
-                    validate_region_size(*target_range, &output_format, force_large_region)?;
+                    validate_region_size(*target_range, &output_format, gfa_maf_fasta.force_large_region)?;
                 }
                 Some(targets)
             } else {
@@ -522,8 +512,7 @@ fn main() -> io::Result<()> {
             let impg = initialize_impg(&common)?;
 
             if let Some(target_range) = &query.target_range {
-                let (target_name, target_range) = parse_target_range(target_range)?;
-                let name = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
+                let (target_name, target_range, name) = parse_target_range(target_range)?;
 
                 let mut results = perform_query(
                     &impg,
@@ -601,7 +590,7 @@ fn main() -> io::Result<()> {
                         );
                     }
                 }
-            } else if let Some(targets) = cached_targets {
+            } else if let Some(targets) = target_ranges {
                 info!("Parsed {} target ranges from BED file", targets.len());
                 for (target_name, target_range, name) in targets {
                     let mut results = perform_query(
@@ -701,7 +690,6 @@ fn main() -> io::Result<()> {
             pca_measure,
             polarize_n_prev,
             polarize_guide_samples,
-            force_large_region,
         } => {
             // Validate delim_pos
             if delim_pos < 1 {
@@ -732,23 +720,33 @@ fn main() -> io::Result<()> {
                 }
             }
 
-            // Early validation for target_range before expensive operations
-            if let Some(target_range_str) = &query.target_range {
-                let (_, target_range) = parse_target_range(target_range_str)?;
-                validate_region_size(target_range, "gfa", force_large_region)?; // Similarity always uses SPOA
-            }
-
-            // Early validation for target_bed and cache parsed data to avoid re-parsing
-            let cached_targets = if let Some(target_bed) = &query.target_bed {
-                let targets = impg::partition::parse_bed_file(target_bed)?;
-                for (_, target_range, _) in &targets {
-                    // Similarity always uses SPOA
-                    validate_region_size(*target_range, "gfa", force_large_region)?;
+            // Early validation for target_range and target_bed before ANY expensive operations,
+            // so we can cache parsed data and avoid re-parsing
+            let target_ranges = {
+                let mut targets = Vec::new();
+                
+                if let Some(target_range_str) = &query.target_range {
+                    let (target_name, target_range, name) = parse_target_range(target_range_str)?;
+                    validate_region_size(target_range, "gfa", gfa_maf_fasta.force_large_region)?;
+                    targets.push((target_name, target_range, name));
                 }
-                Some(targets)
-            } else {
-                None
+                
+                if let Some(target_bed) = &query.target_bed {
+                    let bed_targets = impg::partition::parse_bed_file(target_bed)?;
+                    for (target_name, target_range, name) in bed_targets {
+                        validate_region_size(target_range, "gfa", gfa_maf_fasta.force_large_region)?;
+                        targets.push((target_name, target_range, name));
+                    }
+                }
+                
+                targets
             };
+            if target_ranges.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Either --target-range or --target-bed must be provided for similarity subcommand",
+                ));
+            }
 
             // Parse POA scoring parameters
             let scoring_params = gfa_maf_fasta.parse_poa_scoring()?;
@@ -763,9 +761,11 @@ fn main() -> io::Result<()> {
 
             let impg = initialize_impg(&common)?;
 
-            if let Some(target_range) = &query.target_range {
-                let (target_name, target_range) = parse_target_range(target_range)?;
+            info!("Parsed {} target ranges from BED file", target_ranges.len());
 
+            // Query all regions serially (already parallelized internally)
+            let mut all_query_data = Vec::new();
+            for (target_name, target_range, _name) in target_ranges.into_iter() {
                 let mut results = perform_query(
                     &impg,
                     &target_name,
@@ -791,83 +791,27 @@ fn main() -> io::Result<()> {
                     .iter()
                     .map(|(query_interval, _, _)| *query_interval)
                     .collect();
+
                 let region = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
-                let query_data = vec![(query_intervals, region)];
-
-                // Compute and output similarities
-                impg::similarity::compute_and_output_similarities(
-                    &impg,
-                    query_data,
-                    &fasta_index,
-                    scoring_params,
-                    distances,
-                    all,
-                    delim,
-                    delim_pos,
-                    pca,
-                    pca_components,
-                    &pca_measure,
-                    0,    // No polarization for single query
-                    None, // No polarization for single query
-                )?;
-            } else if let Some(targets) = cached_targets {
-                info!("Parsed {} target ranges from BED file", targets.len());
-
-                // Query all regions serially (already parallelized internally)
-                let mut all_query_data = Vec::new();
-                for (target_name, target_range, _name) in targets {
-                    let mut results = perform_query(
-                        &impg,
-                        &target_name,
-                        target_range,
-                        false, // Don't need CIGAR for similarity
-                        query.min_identity,
-                        query.transitive,
-                        query.transitive_dfs,
-                        query.max_depth,
-                        query.min_transitive_len,
-                        query.min_distance_between_ranges,
-                    )?;
-
-                    // Merge intervals if needed
-                    merge_query_adjusted_intervals(
-                        &mut results,
-                        query.effective_merge_distance(),
-                        true,
-                    );
-
-                    // Extract query intervals
-                    let query_intervals: Vec<Interval<u32>> = results
-                        .iter()
-                        .map(|(query_interval, _, _)| *query_interval)
-                        .collect();
-
-                    let region = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
-                    all_query_data.push((query_intervals, region));
-                }
-
-                // Process all regions in parallel
-                impg::similarity::compute_and_output_similarities(
-                    &impg,
-                    all_query_data,
-                    &fasta_index,
-                    scoring_params,
-                    distances,
-                    all,
-                    delim,
-                    delim_pos,
-                    pca,
-                    pca_components,
-                    &pca_measure,
-                    polarize_n_prev,
-                    polarize_guide_samples.as_deref(),
-                )?;
-            } else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Either --target-range or --target-bed must be provided for query subcommand",
-                ));
+                all_query_data.push((query_intervals, region));
             }
+
+            // Process all regions in parallel
+            impg::similarity::compute_and_output_similarities(
+                &impg,
+                all_query_data,
+                &fasta_index,
+                scoring_params,
+                distances,
+                all,
+                delim,
+                delim_pos,
+                pca,
+                pca_components,
+                &pca_measure,
+                polarize_n_prev,
+                polarize_guide_samples.as_deref(),
+            )?;
         }
         Args::Stats { common } => {
             let impg = initialize_impg(&common)?;
@@ -1183,19 +1127,6 @@ fn generate_multi_index(
     Ok(impg)
 }
 
-fn parse_target_range(target_range: &str) -> io::Result<(String, (i32, i32))> {
-    let parts: Vec<&str> = target_range.rsplitn(2, ':').collect();
-    if parts.len() != 2 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Target range format should be `seq_name:start-end`",
-        ));
-    }
-
-    let (start, end) = impg::partition::parse_range(&parts[0].split('-').collect::<Vec<_>>())?;
-    Ok((parts[1].to_string(), (start, end)))
-}
-
 fn get_combined_index_filename(paf_files: &[String], custom_index: Option<&str>) -> String {
     if let Some(index) = custom_index {
         return index.to_string();
@@ -1426,7 +1357,7 @@ fn output_results_paf(
     }
 }
 
-pub fn output_results_gfa(
+fn output_results_gfa(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
     fasta_index: &FastaIndex,
@@ -1453,7 +1384,7 @@ pub fn output_results_gfa(
     Ok(())
 }
 
-pub fn output_results_fasta(
+fn output_results_fasta(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
     fasta_index: &FastaIndex,
@@ -1503,7 +1434,7 @@ pub fn output_results_fasta(
     Ok(())
 }
 
-pub fn output_results_maf(
+fn output_results_maf(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
     fasta_index: &FastaIndex,
