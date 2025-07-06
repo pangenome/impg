@@ -158,11 +158,11 @@ impl GfaMafFastaOpts {
 #[derive(Parser, Debug, Clone)]
 struct QueryOpts {
     /// Target range in the format `seq_name:start-end`
-    #[clap(short = 'r', long, value_parser)]
+    #[clap(short = 'r', long, value_parser, conflicts_with = "target_bed")]
     target_range: Option<String>,
 
     /// Path to the BED file containing target regions
-    #[clap(short = 'b', long, value_parser)]
+    #[clap(short = 'b', long, value_parser, conflicts_with = "target_range")]
     target_bed: Option<String>,
 
     /// Maximum distance between regions to merge
@@ -673,7 +673,7 @@ fn main() -> io::Result<()> {
             } else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "Either --target-range or --target-bed must be provided for query subcommand",
+                    "Either --target-range or --target-bed must be provided",
                 ));
             }
         }
@@ -744,7 +744,7 @@ fn main() -> io::Result<()> {
             if target_ranges.is_empty() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "Either --target-range or --target-bed must be provided for similarity subcommand",
+                    "Either --target-range or --target-bed must be provided",
                 ));
             }
 
