@@ -2,7 +2,7 @@ use clap::Parser;
 use coitrees::{Interval, IntervalTree};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::paf::{PartialPafRecord, Strand};
-use impg::partition::partition_alignments;
+use impg::partition::{parse_target_range, partition_alignments};
 use impg::seqidx::SequenceIndex;
 use impg::sequence_index::{SequenceIndex as SeqFetchIndex, UnifiedSequenceIndex};
 use log::{debug, error, info, warn};
@@ -65,6 +65,10 @@ struct GfaMafFastaOpts {
     /// Reverse complement reverse strand sequences (for 'fasta' output)
     #[clap(long, action)]
     reverse_complement: bool,
+
+    /// Force processing of large regions (>10kbp) with maf/gfa output formats
+    #[clap(long, action)]
+    force_large_region: bool,
 }
 
 impl GfaMafFastaOpts {
@@ -153,17 +157,47 @@ impl GfaMafFastaOpts {
             }
         }
     }
+
+    /// Helper to validate and setup POA/sequence resources for a given output format
+    fn setup_poa_sequence_resources(
+        self,
+        output_format: &str,
+    ) -> io::Result<(Option<UnifiedSequenceIndex>, Option<(u8, u8, u8, u8, u8, u8)>)> {
+        let needs_sequence = matches!(output_format, "gfa" | "maf" | "fasta");
+        let needs_poa = matches!(output_format, "gfa" | "maf");
+
+        let scoring_params = if needs_poa {
+            Some(self.parse_poa_scoring()?)
+        } else {
+            None
+        };
+
+        let sequence_index = if needs_sequence {
+            let index = self.build_sequence_index()?;
+            if index.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("FASTA/AGC files are required for '{}' output format. Use --fasta-files or --fasta-list", output_format),
+                ));
+            }
+            index
+        } else {
+            None
+        };
+
+        Ok((sequence_index, scoring_params))
+    }
 }
 
 /// Common query and filtering options
 #[derive(Parser, Debug, Clone)]
 struct QueryOpts {
     /// Target range in the format `seq_name:start-end`
-    #[clap(short = 'r', long, value_parser)]
+    #[clap(short = 'r', long, value_parser, conflicts_with = "target_bed")]
     target_range: Option<String>,
 
     /// Path to the BED file containing target regions
-    #[clap(short = 'b', long, value_parser)]
+    #[clap(short = 'b', long, value_parser, conflicts_with = "target_range")]
     target_bed: Option<String>,
 
     /// Maximum distance between regions to merge
@@ -293,10 +327,6 @@ enum Args {
         /// Minimum distance from sequence start/end - closer regions will be extended to the boundaries
         #[clap(long, value_parser, default_value_t = 3000)]
         min_boundary_distance: i32,
-
-        /// Force processing of large regions (>10kbp) with maf/gfa output formats
-        #[clap(long, action)]
-        force_large_region: bool,
     },
     /// Query overlaps in the alignment
     Query {
@@ -312,10 +342,6 @@ enum Args {
 
         #[clap(flatten)]
         gfa_maf_fasta: GfaMafFastaOpts,
-
-        /// Force processing of large regions (>10kbp) with maf/gfa output formats
-        #[clap(long, action)]
-        force_large_region: bool,
     },
     /// Compute pairwise similarity between sequences in a region
     Similarity {
@@ -374,10 +400,6 @@ enum Args {
         /// Similarity measure to use for PCA distance matrix ("jaccard", "cosine", or "dice")
         #[clap(long, value_parser, requires = "pca", default_value = "jaccard")]
         pca_measure: String,
-
-        /// Force processing of large regions (>10kbp)
-        #[clap(long, action)]
-        force_large_region: bool,
     },
     /// Print alignment statistics
     Stats {
@@ -411,39 +433,23 @@ fn main() -> io::Result<()> {
             selection_mode,
             min_missing_size,
             min_boundary_distance,
-            force_large_region,
         } => {
             validate_selection_mode(&selection_mode)?;
             validate_output_format(&output_format, &["bed", "gfa", "maf", "fasta"])?;
 
-            validate_region_size((0, window_size as i32), &output_format, force_large_region)?;
+            validate_region_size(
+                0,
+                window_size as i32,
+                &output_format,
+                gfa_maf_fasta.force_large_region,
+            )?;
 
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
 
-            // Parse POA scoring parameters if GFA/MAF output is requested
-            let scoring_params = if output_format == "gfa" || output_format == "maf" {
-                Some(gfa_maf_fasta.parse_poa_scoring()?)
-            } else {
-                None
-            };
-
-            // Build FASTA index if GFA/MAF/FASTA output is requested
-            let sequence_index = if output_format == "gfa"
-                || output_format == "maf"
-                || output_format == "fasta"
-            {
-                let index = gfa_maf_fasta.build_sequence_index()?;
-                if index.is_none() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("FASTA files are required for '{}' output format. Use --fasta-files or --fasta-list", output_format),
-                    ));
-                }
-                index
-            } else {
-                None
-            };
+            // Setup POA/sequence resources
+            let (sequence_index, scoring_params) =
+                gfa_maf_fasta.setup_poa_sequence_resources(&output_format)?;
 
             let impg = initialize_impg(&common)?;
 
@@ -473,68 +479,77 @@ fn main() -> io::Result<()> {
             query,
             output_format,
             gfa_maf_fasta,
-            force_large_region,
         } => {
             validate_output_format(
                 &output_format,
                 &["auto", "bed", "bedpe", "paf", "gfa", "maf", "fasta"],
             )?;
 
-            // Early validation for target_range before ANY expensive operations
-            if let Some(target_range_str) = &query.target_range {
-                let (_, target_range) = parse_target_range(target_range_str)?;
-                validate_region_size(target_range, &output_format, force_large_region)?;
-            }
+            let impg = initialize_impg(&common)?;
 
-            // Early validation for target_bed and cache parsed data to avoid re-parsing
-            let cached_targets = if let Some(target_bed) = &query.target_bed {
-                let targets = impg::partition::parse_bed_file(target_bed)?;
-                for (_, target_range, _) in &targets {
-                    validate_region_size(*target_range, &output_format, force_large_region)?;
+            // Parse and validate all target ranges, tracking which parameter was used
+            let (target_ranges, from_range_param) =
+                if let Some(target_range_str) = &query.target_range {
+                    let (target_name, target_range, name) = parse_target_range(target_range_str)?;
+                    // Validate sequence exists and range is within bounds
+                    validate_sequence_range(
+                        &target_name,
+                        target_range.0,
+                        target_range.1,
+                        &impg.seq_index,
+                    )?;
+                    validate_region_size(
+                        target_range.0,
+                        target_range.1,
+                        &output_format,
+                        gfa_maf_fasta.force_large_region,
+                    )?;
+                    (vec![(target_name, target_range, name)], true)
+                } else if let Some(target_bed) = &query.target_bed {
+                    let targets = impg::partition::parse_bed_file(target_bed)?;
+                    // Validate all entries in the BED file
+                    for (seq_name, (start, end), _) in &targets {
+                        validate_sequence_range(seq_name, *start, *end, &impg.seq_index)?;
+                        validate_region_size(
+                            *start,
+                            *end,
+                            &output_format,
+                            gfa_maf_fasta.force_large_region,
+                        )?;
+                    }
+                    (targets, false)
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Either --target-range or --target-bed must be provided",
+                    ));
+                };
+
+            // Resolve output format based on 'auto' and parameter used
+            let resolved_output_format = if output_format == "auto" {
+                if from_range_param {
+                    "bed"
+                } else {
+                    "bedpe"
                 }
-                Some(targets)
             } else {
-                None
+                output_format.as_str()
             };
 
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
 
-            // Parse POA scoring parameters if GFA/MAF output is requested
-            let scoring_params = if output_format == "gfa" || output_format == "maf" {
-                Some(gfa_maf_fasta.parse_poa_scoring()?)
-            } else {
-                None
-            };
+            // Setup POA/sequence resources
+            let (sequence_index, scoring_params) =
+                gfa_maf_fasta.setup_poa_sequence_resources(resolved_output_format)?;
 
-            // Build FASTA index if GFA/MAF/FASTA output is requested
-            let sequence_index = if output_format == "gfa"
-                || output_format == "maf"
-                || output_format == "fasta"
-            {
-                let index = gfa_maf_fasta.build_sequence_index()?;
-                if index.is_none() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("FASTA files are required for '{}' output format. Use --fasta-files or --fasta-list", output_format),
-                    ));
-                }
-                index
-            } else {
-                None
-            };
-
-            let impg = initialize_impg(&common)?;
-
-            if let Some(target_range) = &query.target_range {
-                let (target_name, target_range) = parse_target_range(target_range)?;
-                let name = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
-
+            // Process all target ranges in a unified loop
+            for (target_name, target_range, name) in target_ranges {
                 let mut results = perform_query(
                     &impg,
                     &target_name,
                     target_range,
-                    output_format == "paf" || output_format == "bedpe", // Store CIGAR for PAF/BEDPE output
+                    resolved_output_format == "paf" || resolved_output_format == "bedpe", // Store CIGAR for PAF/BEDPE output
                     query.min_identity,
                     query.transitive,
                     query.transitive_dfs,
@@ -543,8 +558,17 @@ fn main() -> io::Result<()> {
                     query.min_distance_between_ranges,
                 )?;
 
-                // Output results based on the format
-                match output_format.as_str() {
+                // Output results based on the resolved format
+                match resolved_output_format {
+                    "bed" => {
+                        // BED format - include the first element
+                        output_results_bed(
+                            &impg,
+                            &mut results,
+                            Some(name),
+                            query.effective_merge_distance(),
+                        );
+                    }
                     "bedpe" => {
                         // Skip the first element (the input range) for BEDPE output
                         results.remove(0);
@@ -569,7 +593,7 @@ fn main() -> io::Result<()> {
                         output_results_gfa(
                             &impg,
                             &mut results,
-                            &sequence_index.unwrap(),
+                            sequence_index.as_ref().unwrap(),
                             Some(name),
                             query.effective_merge_distance(),
                             scoring_params.unwrap(),
@@ -579,7 +603,7 @@ fn main() -> io::Result<()> {
                         output_results_maf(
                             &impg,
                             &mut results,
-                            &sequence_index.unwrap(),
+                            sequence_index.as_ref().unwrap(),
                             Some(name),
                             query.effective_merge_distance(),
                             scoring_params.unwrap(),
@@ -589,108 +613,19 @@ fn main() -> io::Result<()> {
                         output_results_fasta(
                             &impg,
                             &mut results,
-                            &sequence_index.unwrap(),
+                            sequence_index.as_ref().unwrap(),
                             Some(name),
                             query.effective_merge_distance(),
                             reverse_complement,
                         )?;
                     }
                     _ => {
-                        // 'auto' or 'bed'
-                        // BED format - include the first element
-                        output_results_bed(
-                            &impg,
-                            &mut results,
-                            Some(name),
-                            query.effective_merge_distance(),
-                        );
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Invalid output format: {}", resolved_output_format),
+                        ));
                     }
                 }
-            } else if let Some(targets) = cached_targets {
-                info!("Parsed {} target ranges from BED file", targets.len());
-                for (target_name, target_range, name) in targets {
-                    let mut results = perform_query(
-                        &impg,
-                        &target_name,
-                        target_range,
-                        output_format == "paf" || output_format == "bedpe", // Store CIGAR for PAF/BEDPE output
-                        query.min_identity,
-                        query.transitive,
-                        query.transitive_dfs,
-                        query.max_depth,
-                        query.min_transitive_len,
-                        query.min_distance_between_ranges,
-                    )?;
-
-                    // Output results based on the format
-                    match output_format.as_str() {
-                        "bed" => {
-                            // BED format - include the first element
-                            output_results_bed(
-                                &impg,
-                                &mut results,
-                                Some(name),
-                                query.effective_merge_distance(),
-                            );
-                        }
-                        "paf" => {
-                            // Skip the first element (the input range) for PAF output
-                            results.remove(0);
-                            output_results_paf(
-                                &impg,
-                                &mut results,
-                                Some(name),
-                                query.effective_merge_distance(),
-                            );
-                        }
-                        "gfa" => {
-                            output_results_gfa(
-                                &impg,
-                                &mut results,
-                                sequence_index.as_ref().unwrap(),
-                                Some(name),
-                                query.effective_merge_distance(),
-                                scoring_params.unwrap(),
-                            )?;
-                        }
-                        "maf" => {
-                            output_results_maf(
-                                &impg,
-                                &mut results,
-                                sequence_index.as_ref().unwrap(),
-                                Some(name),
-                                query.effective_merge_distance(),
-                                scoring_params.unwrap(),
-                            )?;
-                        }
-                        "fasta" => {
-                            output_results_fasta(
-                                &impg,
-                                &mut results,
-                                sequence_index.as_ref().unwrap(),
-                                Some(name),
-                                query.effective_merge_distance(),
-                                reverse_complement,
-                            )?;
-                        }
-                        _ => {
-                            // 'auto' or 'bedpe'
-                            // Skip the first element (the input range) for BEDPE output
-                            results.remove(0);
-                            output_results_bedpe(
-                                &impg,
-                                &mut results,
-                                Some(name),
-                                query.effective_merge_distance(),
-                            );
-                        }
-                    }
-                }
-            } else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Either --target-range or --target-bed must be provided for query subcommand",
-                ));
             }
         }
         Args::Similarity {
@@ -706,13 +641,12 @@ fn main() -> io::Result<()> {
             pca_measure,
             polarize_n_prev,
             polarize_guide_samples,
-            force_large_region,
         } => {
             // Validate delim_pos
             if delim_pos < 1 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "delim-pos must be greater than 0",
+                    "--delim-pos must be greater than 0",
                 ));
             }
 
@@ -737,40 +671,69 @@ fn main() -> io::Result<()> {
                 }
             }
 
-            // Early validation for target_range before expensive operations
-            if let Some(target_range_str) = &query.target_range {
-                let (_, target_range) = parse_target_range(target_range_str)?;
-                validate_region_size(target_range, "gfa", force_large_region)?; // Similarity always uses SPOA
-            }
+            // Extract force_large_region before moving gfa_maf_fasta
+            let force_large_region = gfa_maf_fasta.force_large_region;
 
-            // Early validation for target_bed and cache parsed data to avoid re-parsing
-            let cached_targets = if let Some(target_bed) = &query.target_bed {
-                let targets = impg::partition::parse_bed_file(target_bed)?;
-                for (_, target_range, _) in &targets {
-                    // Similarity always uses SPOA
-                    validate_region_size(*target_range, "gfa", force_large_region)?;
-                }
-                Some(targets)
-            } else {
-                None
-            };
-
-            // Parse POA scoring parameters
-            let scoring_params = gfa_maf_fasta.parse_poa_scoring()?;
-
-            // Build FASTA index (always required for similarity)
-            let sequence_index = gfa_maf_fasta.build_sequence_index()?.ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "FASTA files are required for similarity computation",
-                )
-            })?;
-
+            // Setup POA/sequence resources (always required for similarity)
+            let (sequence_index, scoring_params) = gfa_maf_fasta.setup_poa_sequence_resources("gfa")?;
+            let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
+            let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA
             let impg = initialize_impg(&common)?;
 
-            if let Some(target_range) = &query.target_range {
-                let (target_name, target_range) = parse_target_range(target_range)?;
+            // Validate target_range and target_bed before ANY expensive operations,
+            let target_ranges = {
+                let mut targets = Vec::new();
 
+                if let Some(target_range_str) = &query.target_range {
+                    let (target_name, target_range, name) = parse_target_range(target_range_str)?;
+                    validate_sequence_range(
+                        &target_name,
+                        target_range.0,
+                        target_range.1,
+                        &impg.seq_index,
+                    )?;
+                    validate_region_size(
+                        target_range.0,
+                        target_range.1,
+                        "gfa",
+                        force_large_region,
+                    )?;
+                    targets.push((target_name, target_range, name));
+                }
+
+                if let Some(target_bed) = &query.target_bed {
+                    let bed_targets = impg::partition::parse_bed_file(target_bed)?;
+                    for (target_name, target_range, name) in bed_targets {
+                        validate_sequence_range(
+                            &target_name,
+                            target_range.0,
+                            target_range.1,
+                            &impg.seq_index,
+                        )?;
+                        validate_region_size(
+                            target_range.0,
+                            target_range.1,
+                            "gfa",
+                            force_large_region,
+                        )?;
+                        targets.push((target_name, target_range, name));
+                    }
+                }
+
+                targets
+            };
+            if target_ranges.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Either --target-range or --target-bed must be provided",
+                ));
+            }
+
+            info!("Parsed {} target ranges from BED file", target_ranges.len());
+
+            // Query all regions serially (already parallelized internally)
+            let mut all_query_data = Vec::new();
+            for (target_name, target_range, _name) in target_ranges.into_iter() {
                 let mut results = perform_query(
                     &impg,
                     &target_name,
@@ -796,83 +759,27 @@ fn main() -> io::Result<()> {
                     .iter()
                     .map(|(query_interval, _, _)| *query_interval)
                     .collect();
+
                 let region = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
-                let query_data = vec![(query_intervals, region)];
-
-                // Compute and output similarities
-                impg::similarity::compute_and_output_similarities(
-                    &impg,
-                    query_data,
-                    &sequence_index,
-                    scoring_params,
-                    distances,
-                    all,
-                    delim,
-                    delim_pos,
-                    pca,
-                    pca_components,
-                    &pca_measure,
-                    0,    // No polarization for single query
-                    None, // No polarization for single query
-                )?;
-            } else if let Some(targets) = cached_targets {
-                info!("Parsed {} target ranges from BED file", targets.len());
-
-                // Query all regions serially (already parallelized internally)
-                let mut all_query_data = Vec::new();
-                for (target_name, target_range, _name) in targets {
-                    let mut results = perform_query(
-                        &impg,
-                        &target_name,
-                        target_range,
-                        false, // Don't need CIGAR for similarity
-                        query.min_identity,
-                        query.transitive,
-                        query.transitive_dfs,
-                        query.max_depth,
-                        query.min_transitive_len,
-                        query.min_distance_between_ranges,
-                    )?;
-
-                    // Merge intervals if needed
-                    merge_query_adjusted_intervals(
-                        &mut results,
-                        query.effective_merge_distance(),
-                        true,
-                    );
-
-                    // Extract query intervals
-                    let query_intervals: Vec<Interval<u32>> = results
-                        .iter()
-                        .map(|(query_interval, _, _)| *query_interval)
-                        .collect();
-
-                    let region = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
-                    all_query_data.push((query_intervals, region));
-                }
-
-                // Process all regions in parallel
-                impg::similarity::compute_and_output_similarities(
-                    &impg,
-                    all_query_data,
-                    &sequence_index,
-                    scoring_params,
-                    distances,
-                    all,
-                    delim,
-                    delim_pos,
-                    pca,
-                    pca_components,
-                    &pca_measure,
-                    polarize_n_prev,
-                    polarize_guide_samples.as_deref(),
-                )?;
-            } else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Either --target-range or --target-bed must be provided for query subcommand",
-                ));
+                all_query_data.push((query_intervals, region));
             }
+
+            // Process all regions in parallel
+            impg::similarity::compute_and_output_similarities(
+                &impg,
+                all_query_data,
+                &sequence_index,
+                scoring_params,
+                distances,
+                all,
+                delim,
+                delim_pos,
+                pca,
+                pca_components,
+                &pca_measure,
+                polarize_n_prev,
+                polarize_guide_samples.as_deref(),
+            )?;
         }
         Args::Stats { common } => {
             let impg = initialize_impg(&common)?;
@@ -911,41 +818,75 @@ fn validate_output_format(format: &str, valid_formats: &[&str]) -> io::Result<()
     }
 }
 
-/// Validate region size
-fn validate_region_size(
-    target_range: (i32, i32),
-    output_format: &str,
-    force_large_region: bool,
+/// Validates that a sequence name exists in the index and the range is within bounds
+fn validate_sequence_range(
+    seq_name: &str,
+    start: i32,
+    end: i32,
+    seq_index: &SequenceIndex,
 ) -> io::Result<()> {
-    let (start, end) = target_range;
+    // Check if sequence exists in index
+    let seq_id = seq_index.get_id(seq_name).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Sequence '{}' not found in index", seq_name),
+        )
+    })?;
 
-    // Check that start and end are non-negative
+    // Get sequence length
+    let seq_len = seq_index.get_len_from_id(seq_id).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Could not get length for sequence '{}'", seq_name),
+        )
+    })? as i32;
+
+    // Validate range bounds
     if start < 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("Target range start ({}) cannot be negative", start),
+            format!("Start position {} cannot be negative", start),
         ));
     }
 
     if end < 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("Target range end ({}) cannot be negative", end),
+            format!("End position {} cannot be negative", end),
         ));
     }
 
-    // Check that start <= end
-    if start > end {
+    if start >= end {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "Target range start ({}) cannot be greater than end ({})",
+                "Start position {} must be less than end position {}",
                 start, end
             ),
         ));
     }
 
-    let region_size = (target_range.1 - target_range.0).unsigned_abs() as u64;
+    if end > seq_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "End position {} exceeds sequence length {} for sequence '{}'",
+                end, seq_len, seq_name
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate region size
+fn validate_region_size(
+    start: i32,
+    end: i32,
+    output_format: &str,
+    force_large_region: bool,
+) -> io::Result<()> {
+    let region_size = (end - start).unsigned_abs() as u64;
     const SIZE_LIMIT: u64 = 10_000; // 10kbp limit
 
     // Check if this is a maf/gfa output format that uses SPOA
@@ -1188,19 +1129,6 @@ fn generate_multi_index(
     Ok(impg)
 }
 
-fn parse_target_range(target_range: &str) -> io::Result<(String, (i32, i32))> {
-    let parts: Vec<&str> = target_range.rsplitn(2, ':').collect();
-    if parts.len() != 2 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Target range format should be `seq_name:start-end`",
-        ));
-    }
-
-    let (start, end) = impg::partition::parse_range(&parts[0].split('-').collect::<Vec<_>>())?;
-    Ok((parts[1].to_string(), (start, end)))
-}
-
 fn get_combined_index_filename(paf_files: &[String], custom_index: Option<&str>) -> String {
     if let Some(index) = custom_index {
         return index.to_string();
@@ -1431,7 +1359,7 @@ fn output_results_paf(
     }
 }
 
-pub fn output_results_gfa(
+fn output_results_gfa(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
     sequence_index: &UnifiedSequenceIndex,
@@ -1458,7 +1386,7 @@ pub fn output_results_gfa(
     Ok(())
 }
 
-pub fn output_results_fasta(
+fn output_results_fasta(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
     sequence_index: &UnifiedSequenceIndex,
@@ -1508,7 +1436,7 @@ pub fn output_results_fasta(
     Ok(())
 }
 
-pub fn output_results_maf(
+fn output_results_maf(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
     sequence_index: &UnifiedSequenceIndex,
