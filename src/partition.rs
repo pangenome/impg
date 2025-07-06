@@ -1373,7 +1373,7 @@ pub fn parse_target_range(target_range: &str) -> io::Result<(String, (i32, i32),
     }
 
     let (start, end) = parse_range(&parts[0].split('-').collect::<Vec<_>>())?;
-    let name = format!("{}:{}-{}", parts[0], start, end);
+    let name = format!("{}:{}-{}", parts[1], start, end);
     Ok((parts[1].to_string(), (start, end), name))
 }
 
