@@ -402,7 +402,7 @@ fn main() -> io::Result<()> {
             validate_selection_mode(&selection_mode)?;
             validate_output_format(&output_format, &["bed", "gfa", "maf", "fasta"])?;
 
-            validate_region_size((0, window_size as i32), &output_format, gfa_maf_fasta.force_large_region)?;
+            validate_region_size(0, window_size as i32, &output_format, gfa_maf_fasta.force_large_region)?;
 
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
@@ -465,15 +465,21 @@ fn main() -> io::Result<()> {
                 &["auto", "bed", "bedpe", "paf", "gfa", "maf", "fasta"],
             )?;
 
+            let impg = initialize_impg(&common)?;
+
             // Parse and validate all target ranges, tracking which parameter was used
             let (target_ranges, from_range_param) = if let Some(target_range_str) = &query.target_range {
                 let (target_name, target_range, name) = parse_target_range(target_range_str)?;
-                validate_region_size(target_range, &output_format, gfa_maf_fasta.force_large_region)?;
+                // Validate sequence exists and range is within bounds
+                validate_sequence_range(&target_name, target_range.0, target_range.1, &impg.seq_index)?;
+                validate_region_size(target_range.0, target_range.1, &output_format, gfa_maf_fasta.force_large_region)?;
                 (vec![(target_name, target_range, name)], true)
             } else if let Some(target_bed) = &query.target_bed {
                 let targets = impg::partition::parse_bed_file(target_bed)?;
-                for (_, target_range, _) in &targets {
-                    validate_region_size(*target_range, &output_format, gfa_maf_fasta.force_large_region)?;
+                // Validate all entries in the BED file
+                for (seq_name, (start, end), _) in &targets {
+                    validate_sequence_range(seq_name, *start, *end, &impg.seq_index)?;
+                    validate_region_size(*start, *end, &output_format, gfa_maf_fasta.force_large_region)?;
                 }
                 (targets, false)
             } else {
@@ -520,8 +526,6 @@ fn main() -> io::Result<()> {
             } else {
                 None
             };
-
-            let impg = initialize_impg(&common)?;
 
             // Process all target ranges in a unified loop
             for (target_name, target_range, name) in target_ranges {
@@ -651,21 +655,25 @@ fn main() -> io::Result<()> {
                 }
             }
 
-            // Early validation for target_range and target_bed before ANY expensive operations,
-            // so we can cache parsed data and avoid re-parsing
+            let impg = initialize_impg(&common)?;
+
+            // Validate target_range and target_bed before ANY expensive operations,
+            // and can cache parsed data to avoid re-parsing
             let target_ranges = {
                 let mut targets = Vec::new();
                 
                 if let Some(target_range_str) = &query.target_range {
                     let (target_name, target_range, name) = parse_target_range(target_range_str)?;
-                    validate_region_size(target_range, "gfa", gfa_maf_fasta.force_large_region)?;
+                    validate_sequence_range(&target_name, target_range.0, target_range.1, &impg.seq_index)?;
+                    validate_region_size(target_range.0, target_range.1, "gfa", gfa_maf_fasta.force_large_region)?;
                     targets.push((target_name, target_range, name));
                 }
                 
                 if let Some(target_bed) = &query.target_bed {
                     let bed_targets = impg::partition::parse_bed_file(target_bed)?;
                     for (target_name, target_range, name) in bed_targets {
-                        validate_region_size(target_range, "gfa", gfa_maf_fasta.force_large_region)?;
+                        validate_sequence_range(&target_name, target_range.0, target_range.1, &impg.seq_index)?;
+                        validate_region_size(target_range.0, target_range.1, "gfa", gfa_maf_fasta.force_large_region)?;
                         targets.push((target_name, target_range, name));
                     }
                 }
@@ -689,8 +697,6 @@ fn main() -> io::Result<()> {
                     "FASTA files are required for similarity computation",
                 )
             })?;
-
-            let impg = initialize_impg(&common)?;
 
             info!("Parsed {} target ranges from BED file", target_ranges.len());
 
@@ -781,41 +787,72 @@ fn validate_output_format(format: &str, valid_formats: &[&str]) -> io::Result<()
     }
 }
 
-/// Validate region size
-fn validate_region_size(
-    target_range: (i32, i32),
-    output_format: &str,
-    force_large_region: bool,
+/// Validates that a sequence name exists in the index and the range is within bounds
+fn validate_sequence_range(
+    seq_name: &str,
+    start: i32,
+    end: i32,
+    seq_index: &SequenceIndex,
 ) -> io::Result<()> {
-    let (start, end) = target_range;
+    // Check if sequence exists in index
+    let seq_id = seq_index.get_id(seq_name).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Sequence '{}' not found in index", seq_name),
+        )
+    })?;
 
-    // Check that start and end are non-negative
+    // Get sequence length
+    let seq_len = seq_index.get_len_from_id(seq_id).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Could not get length for sequence '{}'", seq_name),
+        )
+    })? as i32;
+
+    // Validate range bounds
     if start < 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("Target range start ({}) cannot be negative", start),
+            format!("Start position {} cannot be negative", start),
         ));
     }
 
     if end < 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("Target range end ({}) cannot be negative", end),
+            format!("End position {} cannot be negative", end),
         ));
     }
 
-    // Check that start <= end
-    if start > end {
+    if start >= end {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Start position {} must be less than end position {}", start, end),
+        ));
+    }
+
+    if end > seq_len {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "Target range start ({}) cannot be greater than end ({})",
-                start, end
+                "End position {} exceeds sequence length {} for sequence '{}'",
+                end, seq_len, seq_name
             ),
         ));
     }
 
-    let region_size = (target_range.1 - target_range.0).unsigned_abs() as u64;
+    Ok(())
+}
+
+/// Validate region size
+fn validate_region_size(
+    start: i32,
+    end: i32,
+    output_format: &str,
+    force_large_region: bool,
+) -> io::Result<()> {
+    let region_size = (end - start).unsigned_abs() as u64;
     const SIZE_LIMIT: u64 = 10_000; // 10kbp limit
 
     // Check if this is a maf/gfa output format that uses SPOA

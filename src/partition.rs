@@ -1363,6 +1363,21 @@ pub fn parse_bed_file(bed_file: &str) -> io::Result<Vec<(String, (i32, i32), Str
     Ok(ranges)
 }
 
+pub fn parse_target_range(target_range: &str) -> io::Result<(String, (i32, i32), String)> {
+    let parts: Vec<&str> = target_range.rsplitn(2, ':').collect();
+    if parts.len() != 2 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Target range format should be `seq_name:start-end`",
+        ));
+    }
+
+    let (start, end) = parse_range(&parts[0].split('-').collect::<Vec<_>>())?;
+    let name = format!("{}:{}-{}", parts[0], start, end);
+    Ok((parts[1].to_string(), (start, end), name))
+}
+
+
 fn parse_range(range_parts: &[&str]) -> io::Result<(i32, i32)> {
     if range_parts.len() != 2 {
         return Err(io::Error::new(
@@ -1386,18 +1401,4 @@ fn parse_range(range_parts: &[&str]) -> io::Result<(i32, i32)> {
     }
 
     Ok((start, end))
-}
-
-pub fn parse_target_range(target_range: &str) -> io::Result<(String, (i32, i32), String)> {
-    let parts: Vec<&str> = target_range.rsplitn(2, ':').collect();
-    if parts.len() != 2 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Target range format should be `seq_name:start-end`",
-        ));
-    }
-
-    let (start, end) = parse_range(&parts[0].split('-').collect::<Vec<_>>())?;
-    let name = format!("{}:{}-{}", parts[0], start, end);
-    Ok((parts[1].to_string(), (start, end), name))
 }
