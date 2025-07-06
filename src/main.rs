@@ -152,6 +152,33 @@ impl GfaMafFastaOpts {
             }
         }
     }
+
+    /// Helper to validate and setup POA/FASTA resources for a given output format
+    fn setup_poa_fasta_resources(self, output_format: &str) -> io::Result<(Option<FastaIndex>, Option<(u8, u8, u8, u8, u8, u8)>)> {
+        let needs_fasta = matches!(output_format, "gfa" | "maf" | "fasta");
+        let needs_poa = matches!(output_format, "gfa" | "maf");
+
+        let scoring_params = if needs_poa {
+            Some(self.parse_poa_scoring()?)
+        } else {
+            None
+        };
+
+        let fasta_index = if needs_fasta {
+            let index = self.build_fasta_index()?;
+            if index.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("FASTA files are required for '{}' output format. Use --fasta-files or --fasta-list", output_format),
+                ));
+            }
+            index
+        } else {
+            None
+        };
+
+        Ok((fasta_index, scoring_params))
+    }
 }
 
 /// Common query and filtering options
@@ -412,29 +439,8 @@ fn main() -> io::Result<()> {
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
 
-            // Parse POA scoring parameters if GFA/MAF output is requested
-            let scoring_params = if output_format == "gfa" || output_format == "maf" {
-                Some(gfa_maf_fasta.parse_poa_scoring()?)
-            } else {
-                None
-            };
-
-            // Build FASTA index if GFA/MAF/FASTA output is requested
-            let fasta_index = if output_format == "gfa"
-                || output_format == "maf"
-                || output_format == "fasta"
-            {
-                let index = gfa_maf_fasta.build_fasta_index()?;
-                if index.is_none() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("FASTA files are required for '{}' output format. Use --fasta-files or --fasta-list", output_format),
-                    ));
-                }
-                index
-            } else {
-                None
-            };
+            // Setup POA/FASTA resources
+            let (fasta_index, scoring_params) = gfa_maf_fasta.setup_poa_fasta_resources(&output_format)?;
 
             let impg = initialize_impg(&common)?;
 
@@ -524,30 +530,8 @@ fn main() -> io::Result<()> {
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
 
-            // Parse POA scoring parameters if GFA/MAF output is requested
-            let scoring_params =
-                if resolved_output_format == "gfa" || resolved_output_format == "maf" {
-                    Some(gfa_maf_fasta.parse_poa_scoring()?)
-                } else {
-                    None
-                };
-
-            // Build FASTA index if GFA/MAF/FASTA output is requested
-            let fasta_index = if resolved_output_format == "gfa"
-                || resolved_output_format == "maf"
-                || resolved_output_format == "fasta"
-            {
-                let index = gfa_maf_fasta.build_fasta_index()?;
-                if index.is_none() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("FASTA files are required for '{}' output format. Use --fasta-files or --fasta-list", resolved_output_format),
-                    ));
-                }
-                index
-            } else {
-                None
-            };
+            // Setup POA/FASTA resources
+            let (fasta_index, scoring_params) = gfa_maf_fasta.setup_poa_fasta_resources(resolved_output_format)?;
 
             // Process all target ranges in a unified loop
             for (target_name, target_range, name) in target_ranges {
@@ -652,7 +636,7 @@ fn main() -> io::Result<()> {
             if delim_pos < 1 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "delim-pos must be greater than 0",
+                    "--delim-pos must be greater than 0",
                 ));
             }
 
@@ -728,16 +712,10 @@ fn main() -> io::Result<()> {
                 ));
             }
 
-            // Parse POA scoring parameters
-            let scoring_params = gfa_maf_fasta.parse_poa_scoring()?;
-
-            // Build FASTA index (always required for similarity)
-            let fasta_index = gfa_maf_fasta.build_fasta_index()?.ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "FASTA files are required for similarity computation",
-                )
-            })?;
+            // Setup POA/FASTA resources (always required for similarity)
+            let (fasta_index, scoring_params) = gfa_maf_fasta.setup_poa_fasta_resources("gfa")?;
+            let fasta_index = fasta_index.unwrap(); // Safe since "gfa" always requires FASTA
+            let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA
 
             info!("Parsed {} target ranges from BED file", target_ranges.len());
 
