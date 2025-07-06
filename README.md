@@ -40,6 +40,7 @@ cd impg
 cargo install --force --path .
 ```
 
+
 Alternatively, install from Bioconda:
 
 ```bash
@@ -72,10 +73,13 @@ impg query -p alignments.paf -r chr1:1000-2000 --min-identity 0.9
 impg query -p alignments.paf -r chr1:1000-2000 -o bedpe
 impg query -p alignments.paf -b regions.bed -o paf
 
-# GFA/MAF/FASTA output requires FASTA files (--fasta-files or --fasta-list)
+# GFA/MAF/FASTA output requires FASTA or AGC files (--fasta-files or --fasta-list)
 impg query -p alignments.paf -r chr1:1000-2000 -o gfa --fasta-files ref.fa genomes.fa
 impg query -p alignments.paf -r chr1:1000-2000 -o maf --fasta-list fastas.txt
 impg query -p alignments.paf -r chr1:1000-2000 -o fasta --fasta-files *.fa
+
+# Works with AGC archives too
+impg query -p alignments.paf -r chr1:1000-2000 -o gfa --fasta-files genomes.agc
 
 # FASTA output with reverse complement for reverse strand sequences
 impg query -p alignments.paf -r chr1:1000-2000 -o fasta --fasta-files *.fa --reverse-complement
@@ -113,10 +117,13 @@ impg partition -p alignments.paf -w 1000000 --selection-mode haplotype      # by
 # Control transitive search depth and minimum sizes
 impg partition -p alignments.paf -w 1000000 -m 2 -l 10000
 
-# Output as GFA, MAF or FASTA requires FASTA files (--fasta-files or --fasta-list)
+# Output as GFA, MAF or FASTA requires FASTA or AGC files (--fasta-files or --fasta-list)
 impg partition -p alignments.paf -w 1000000 -o gfa --fasta-files *.fa --output-folder gfa_partitions
 impg partition -p alignments.paf -w 1000000 -o maf --fasta-list fastas.txt --output-folder maf_partitions
 impg partition -p alignments.paf -w 1000000 -o fasta --fasta-files *.fa --output-folder fasta_partitions
+
+# Works with AGC archives too
+impg partition -p alignments.paf -w 1000000 -o gfa --fasta-files genomes.agc --output-folder gfa_partitions
 ```
 
 ### Similarity
@@ -195,12 +202,12 @@ All commands support these options:
 - `-t, --threads`: Number of threads (default: 4)
 - `-v, --verbose`: Verbosity level (0=error, 1=info, 2=debug)
 
-### FASTA options
+### FASTA/AGC options
 
 For GFA/MAF/FASTA output and similarity computation:
 
-- `--fasta-files`: List of FASTA files
-- `--fasta-list`: Text file listing FASTA files (one per line)
+- `--fasta-files`: List of FASTA or AGC files
+- `--fasta-list`: Text file listing FASTA or AGC files (one per line)
 - `--poa-scoring`: POA scoring parameters as `match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2` (default: `1,4,6,2,26,1`)
 - `--reverse-complement`: Reverse complement sequences on the reverse strand (for FASTA output)
 

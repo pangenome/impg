@@ -11,7 +11,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 [[package]]
 name = "agc-rs"
 version = "0.1.0"
-source = "git+https://github.com/pangenome/agc-rs.git#ae57b5a38565f90f14f76447c41069a45c4fe9a4"
+source = "git+https://github.com/pangenome/agc-rs.git#ad57eaf069ad6665c7c94386691ae704a14536bd"
 dependencies = [
  "cmake",
  "cxx",

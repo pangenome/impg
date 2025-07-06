@@ -1,6 +1,7 @@
 use std::io;
 use std::path::Path;
 
+#[cfg(feature = "agc")]
 use crate::agc_index::AgcIndex;
 use crate::faidx::FastaIndex;
 
@@ -13,6 +14,7 @@ pub trait SequenceIndex {
 #[derive(Debug)]
 pub enum UnifiedSequenceIndex {
     Fasta(FastaIndex),
+    #[cfg(feature = "agc")]
     Agc(AgcIndex),
 }
 
@@ -51,6 +53,7 @@ impl UnifiedSequenceIndex {
                 let index = FastaIndex::build_from_files(files)?;
                 Ok(UnifiedSequenceIndex::Fasta(index))
             }
+            #[cfg(feature = "agc")]
             "agc" => {
                 let index = AgcIndex::build_from_files(files)?;
                 Ok(UnifiedSequenceIndex::Agc(index))
@@ -67,6 +70,7 @@ impl SequenceIndex for UnifiedSequenceIndex {
     fn fetch_sequence(&self, seq_name: &str, start: i32, end: i32) -> io::Result<Vec<u8>> {
         match self {
             UnifiedSequenceIndex::Fasta(index) => index.fetch_sequence(seq_name, start, end),
+            #[cfg(feature = "agc")]
             UnifiedSequenceIndex::Agc(index) => index.fetch_sequence(seq_name, start, end),
         }
     }
@@ -80,6 +84,7 @@ impl SequenceIndex for FastaIndex {
 }
 
 // Implement for AgcIndex
+#[cfg(feature = "agc")]
 impl SequenceIndex for AgcIndex {
     fn fetch_sequence(&self, seq_name: &str, start: i32, end: i32) -> io::Result<Vec<u8>> {
         AgcIndex::fetch_sequence(self, seq_name, start, end)

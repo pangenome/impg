@@ -1,4 +1,5 @@
 // lib.rs
+#[cfg(feature = "agc")]
 pub mod agc_index;
 pub mod faidx;
 pub mod forest_map;

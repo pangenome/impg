@@ -26,4 +26,8 @@ spoa_rs = { git = "https://github.com/AndreaGuarracino/spoa-rs.git" }
 
 nalgebra = "0.33.2"
 
-agc-rs = { git = "https://github.com/pangenome/agc-rs.git" }
+agc-rs = { git = "https://github.com/pangenome/agc-rs.git", optional = true }
+
+[features]
+default = ["agc"]
+agc = ["agc-rs"]

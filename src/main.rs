@@ -138,6 +138,7 @@ impl GfaMafFastaOpts {
                         UnifiedSequenceIndex::Fasta(fasta_index) => {
                             ("FASTA", fasta_index.fasta_paths.len())
                         }
+                        #[cfg(feature = "agc")]
                         UnifiedSequenceIndex::Agc(agc_index) => {
                             ("AGC", agc_index.agc_paths.len())
                         }
