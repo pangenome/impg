@@ -1377,7 +1377,6 @@ pub fn parse_target_range(target_range: &str) -> io::Result<(String, (i32, i32),
     Ok((parts[1].to_string(), (start, end), name))
 }
 
-
 fn parse_range(range_parts: &[&str]) -> io::Result<(i32, i32)> {
     if range_parts.len() != 2 {
         return Err(io::Error::new(

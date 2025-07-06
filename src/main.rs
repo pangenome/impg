@@ -3,7 +3,7 @@ use coitrees::{Interval, IntervalTree};
 use impg::faidx::FastaIndex;
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::paf::{PartialPafRecord, Strand};
-use impg::partition::{partition_alignments, parse_target_range};
+use impg::partition::{parse_target_range, partition_alignments};
 use impg::seqidx::SequenceIndex;
 use log::{debug, error, info, warn};
 use noodles::bgzf;
@@ -402,7 +402,12 @@ fn main() -> io::Result<()> {
             validate_selection_mode(&selection_mode)?;
             validate_output_format(&output_format, &["bed", "gfa", "maf", "fasta"])?;
 
-            validate_region_size(0, window_size as i32, &output_format, gfa_maf_fasta.force_large_region)?;
+            validate_region_size(
+                0,
+                window_size as i32,
+                &output_format,
+                gfa_maf_fasta.force_large_region,
+            )?;
 
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
@@ -468,26 +473,42 @@ fn main() -> io::Result<()> {
             let impg = initialize_impg(&common)?;
 
             // Parse and validate all target ranges, tracking which parameter was used
-            let (target_ranges, from_range_param) = if let Some(target_range_str) = &query.target_range {
-                let (target_name, target_range, name) = parse_target_range(target_range_str)?;
-                // Validate sequence exists and range is within bounds
-                validate_sequence_range(&target_name, target_range.0, target_range.1, &impg.seq_index)?;
-                validate_region_size(target_range.0, target_range.1, &output_format, gfa_maf_fasta.force_large_region)?;
-                (vec![(target_name, target_range, name)], true)
-            } else if let Some(target_bed) = &query.target_bed {
-                let targets = impg::partition::parse_bed_file(target_bed)?;
-                // Validate all entries in the BED file
-                for (seq_name, (start, end), _) in &targets {
-                    validate_sequence_range(seq_name, *start, *end, &impg.seq_index)?;
-                    validate_region_size(*start, *end, &output_format, gfa_maf_fasta.force_large_region)?;
-                }
-                (targets, false)
-            } else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Either --target-range or --target-bed must be provided",
-                ));
-            };
+            let (target_ranges, from_range_param) =
+                if let Some(target_range_str) = &query.target_range {
+                    let (target_name, target_range, name) = parse_target_range(target_range_str)?;
+                    // Validate sequence exists and range is within bounds
+                    validate_sequence_range(
+                        &target_name,
+                        target_range.0,
+                        target_range.1,
+                        &impg.seq_index,
+                    )?;
+                    validate_region_size(
+                        target_range.0,
+                        target_range.1,
+                        &output_format,
+                        gfa_maf_fasta.force_large_region,
+                    )?;
+                    (vec![(target_name, target_range, name)], true)
+                } else if let Some(target_bed) = &query.target_bed {
+                    let targets = impg::partition::parse_bed_file(target_bed)?;
+                    // Validate all entries in the BED file
+                    for (seq_name, (start, end), _) in &targets {
+                        validate_sequence_range(seq_name, *start, *end, &impg.seq_index)?;
+                        validate_region_size(
+                            *start,
+                            *end,
+                            &output_format,
+                            gfa_maf_fasta.force_large_region,
+                        )?;
+                    }
+                    (targets, false)
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Either --target-range or --target-bed must be provided",
+                    ));
+                };
 
             // Resolve output format based on 'auto' and parameter used
             let resolved_output_format = if output_format == "auto" {
@@ -504,11 +525,12 @@ fn main() -> io::Result<()> {
             let reverse_complement = gfa_maf_fasta.reverse_complement;
 
             // Parse POA scoring parameters if GFA/MAF output is requested
-            let scoring_params = if resolved_output_format == "gfa" || resolved_output_format == "maf" {
-                Some(gfa_maf_fasta.parse_poa_scoring()?)
-            } else {
-                None
-            };
+            let scoring_params =
+                if resolved_output_format == "gfa" || resolved_output_format == "maf" {
+                    Some(gfa_maf_fasta.parse_poa_scoring()?)
+                } else {
+                    None
+                };
 
             // Build FASTA index if GFA/MAF/FASTA output is requested
             let fasta_index = if resolved_output_format == "gfa"
@@ -658,26 +680,45 @@ fn main() -> io::Result<()> {
             let impg = initialize_impg(&common)?;
 
             // Validate target_range and target_bed before ANY expensive operations,
-            // and can cache parsed data to avoid re-parsing
             let target_ranges = {
                 let mut targets = Vec::new();
-                
+
                 if let Some(target_range_str) = &query.target_range {
                     let (target_name, target_range, name) = parse_target_range(target_range_str)?;
-                    validate_sequence_range(&target_name, target_range.0, target_range.1, &impg.seq_index)?;
-                    validate_region_size(target_range.0, target_range.1, "gfa", gfa_maf_fasta.force_large_region)?;
+                    validate_sequence_range(
+                        &target_name,
+                        target_range.0,
+                        target_range.1,
+                        &impg.seq_index,
+                    )?;
+                    validate_region_size(
+                        target_range.0,
+                        target_range.1,
+                        "gfa",
+                        gfa_maf_fasta.force_large_region,
+                    )?;
                     targets.push((target_name, target_range, name));
                 }
-                
+
                 if let Some(target_bed) = &query.target_bed {
                     let bed_targets = impg::partition::parse_bed_file(target_bed)?;
                     for (target_name, target_range, name) in bed_targets {
-                        validate_sequence_range(&target_name, target_range.0, target_range.1, &impg.seq_index)?;
-                        validate_region_size(target_range.0, target_range.1, "gfa", gfa_maf_fasta.force_large_region)?;
+                        validate_sequence_range(
+                            &target_name,
+                            target_range.0,
+                            target_range.1,
+                            &impg.seq_index,
+                        )?;
+                        validate_region_size(
+                            target_range.0,
+                            target_range.1,
+                            "gfa",
+                            gfa_maf_fasta.force_large_region,
+                        )?;
                         targets.push((target_name, target_range, name));
                     }
                 }
-                
+
                 targets
             };
             if target_ranges.is_empty() {
@@ -828,7 +869,10 @@ fn validate_sequence_range(
     if start >= end {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("Start position {} must be less than end position {}", start, end),
+            format!(
+                "Start position {} must be less than end position {}",
+                start, end
+            ),
         ));
     }
 
