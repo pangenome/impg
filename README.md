@@ -40,7 +40,6 @@ cd impg
 cargo install --force --path .
 ```
 
-
 Alternatively, install from Bioconda:
 
 ```bash
@@ -73,16 +72,16 @@ impg query -p alignments.paf -r chr1:1000-2000 --min-identity 0.9
 impg query -p alignments.paf -r chr1:1000-2000 -o bedpe
 impg query -p alignments.paf -b regions.bed -o paf
 
-# GFA/MAF/FASTA output requires FASTA or AGC files (--fasta-files or --fasta-list)
-impg query -p alignments.paf -r chr1:1000-2000 -o gfa --fasta-files ref.fa genomes.fa
-impg query -p alignments.paf -r chr1:1000-2000 -o maf --fasta-list fastas.txt
-impg query -p alignments.paf -r chr1:1000-2000 -o fasta --fasta-files *.fa
+# GFA/MAF/FASTA output requires sequence files (--sequence-files or --sequence-list)
+impg query -p alignments.paf -r chr1:1000-2000 -o gfa --sequence-files ref.fa genomes.fa
+impg query -p alignments.paf -r chr1:1000-2000 -o maf --sequence-list fastas.txt
+impg query -p alignments.paf -r chr1:1000-2000 -o fasta --sequence-files *.fa
 
 # Works with AGC archives too
-impg query -p alignments.paf -r chr1:1000-2000 -o gfa --fasta-files genomes.agc
+impg query -p alignments.paf -r chr1:1000-2000 -o gfa --sequence-files genomes.agc
 
 # FASTA output with reverse complement for reverse strand sequences
-impg query -p alignments.paf -r chr1:1000-2000 -o fasta --fasta-files *.fa --reverse-complement
+impg query -p alignments.paf -r chr1:1000-2000 -o fasta --sequence-files *.fa --reverse-complement
 
 # Merge nearby regions (default: 0)
 impg query -p alignments.paf -r chr1:1000-2000 -d 1000
@@ -117,13 +116,13 @@ impg partition -p alignments.paf -w 1000000 --selection-mode haplotype      # by
 # Control transitive search depth and minimum sizes
 impg partition -p alignments.paf -w 1000000 -m 2 -l 10000
 
-# Output as GFA, MAF or FASTA requires FASTA or AGC files (--fasta-files or --fasta-list)
-impg partition -p alignments.paf -w 1000000 -o gfa --fasta-files *.fa --output-folder gfa_partitions
-impg partition -p alignments.paf -w 1000000 -o maf --fasta-list fastas.txt --output-folder maf_partitions
-impg partition -p alignments.paf -w 1000000 -o fasta --fasta-files *.fa --output-folder fasta_partitions
+# Output as GFA, MAF or FASTA requires sequence files (--sequence-files or --sequence-list)
+impg partition -p alignments.paf -w 1000000 -o gfa --sequence-files *.fa --output-folder gfa_partitions
+impg partition -p alignments.paf -w 1000000 -o maf --sequence-list fastas.txt --output-folder maf_partitions
+impg partition -p alignments.paf -w 1000000 -o fasta --sequence-files *.fa --output-folder fasta_partitions
 
 # Works with AGC archives too
-impg partition -p alignments.paf -w 1000000 -o gfa --fasta-files genomes.agc --output-folder gfa_partitions
+impg partition -p alignments.paf -w 1000000 -o gfa --sequence-files genomes.agc --output-folder gfa_partitions
 ```
 
 ### Similarity
@@ -132,37 +131,37 @@ Compute pairwise similarity between sequences in a region:
 
 ```bash
 # Basic similarity computation
-impg similarity -p alignments.paf -r chr1:1000-2000 --fasta-files ref.fa genomes.fa
+impg similarity -p alignments.paf -r chr1:1000-2000 --sequence-files ref.fa genomes.fa
 
 # Query multiple regions from a BED file (it produces multiple similarity matrices)
-impg similarity -p alignments.paf -b regions.bed --fasta-files *.fa
+impg similarity -p alignments.paf -b regions.bed --sequence-files *.fa
 
 # Output distances instead of similarities
-impg similarity -p alignments.paf -r chr1:1000-2000 --fasta-files *.fa --distances
+impg similarity -p alignments.paf -r chr1:1000-2000 --sequence-files *.fa --distances
 
 # Include all pairs (even those with zero similarity)
-impg similarity -p alignments.paf -r chr1:1000-2000 --fasta-files *.fa -a
+impg similarity -p alignments.paf -r chr1:1000-2000 --sequence-files *.fa -a
 
 # Group sequences by delimiter (e.g., for PanSN naming, "sample#haplotype#chr" -> "sample")
-impg similarity -p alignments.paf -r chr1:1000-2000 --fasta-files *.fa --delim '#'
+impg similarity -p alignments.paf -r chr1:1000-2000 --sequence-files *.fa --delim '#'
 
 # Use 2nd occurrence of delimiter for grouping (e.g., for PanSN naming, "sample#haplotype#chr" -> "sample#haplotype")
-impg similarity -p alignments.paf -r chr1:1000-2000 --fasta-files *.fa --delim '#' --delim-pos 2
+impg similarity -p alignments.paf -r chr1:1000-2000 --sequence-files *.fa --delim '#' --delim-pos 2
 
 # Perform PCA/MDS dimensionality reduction
-impg similarity -p alignments.paf -r chr1:1000-2000 --fasta-files *.fa --pca
+impg similarity -p alignments.paf -r chr1:1000-2000 --sequence-files *.fa --pca
 
 # Specify number of PCA components (default: 2)
-impg similarity -p alignments.paf -r chr1:1000-2000 --fasta-files *.fa --pca --pca-components 3
+impg similarity -p alignments.paf -r chr1:1000-2000 --sequence-files *.fa --pca --pca-components 3
 
 # Choose similarity measure for PCA distance matrix (jaccard/cosine/dice, default: jaccard)
-impg similarity -p alignments.paf -r chr1:1000-2000 --fasta-files *.fa --pca --pca-measure cosine
+impg similarity -p alignments.paf -r chr1:1000-2000 --sequence-files *.fa --pca --pca-measure cosine
 
 # PCA with adaptive polarization using previous regions
-impg similarity -p alignments.paf -b regions.bed --fasta-files *.fa --pca --polarize-n-prev 3
+impg similarity -p alignments.paf -b regions.bed --sequence-files *.fa --pca --polarize-n-prev 3
 
 # PCA with sample-guided polarization
-impg similarity -p alignments.paf -b regions.bed --fasta-files *.fa --pca --polarize-guide-samples sample1,sample2
+impg similarity -p alignments.paf -b regions.bed --sequence-files *.fa --pca --polarize-guide-samples sample1,sample2
 ```
 
 ### Stats
@@ -202,12 +201,12 @@ All commands support these options:
 - `-t, --threads`: Number of threads (default: 4)
 - `-v, --verbose`: Verbosity level (0=error, 1=info, 2=debug)
 
-### FASTA/AGC options
+### Sequence file options
 
 For GFA/MAF/FASTA output and similarity computation:
 
-- `--fasta-files`: List of FASTA or AGC files
-- `--fasta-list`: Text file listing FASTA or AGC files (one per line)
+- `--sequence-files`: List of sequence files (FASTA or AGC)
+- `--sequence-list`: Text file listing sequence files (FASTA or AGC) (one per line)
 - `--poa-scoring`: POA scoring parameters as `match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2` (default: `1,4,6,2,26,1`)
 - `--reverse-complement`: Reverse complement sequences on the reverse strand (for FASTA output)
 

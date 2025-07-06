@@ -47,16 +47,16 @@ struct CommonOpts {
     verbose: u8,
 }
 
-/// Common FASTA and POA scoring options
+/// Common sequence and POA scoring options
 #[derive(Parser, Debug)]
 struct GfaMafFastaOpts {
-    /// List of FASTA or AGC file paths (required for 'gfa', 'maf', and 'fasta')
-    #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["fasta_list"])]
-    fasta_files: Option<Vec<String>>,
+    /// List of sequence file paths (FASTA or AGC) (required for 'gfa', 'maf', and 'fasta')
+    #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["sequence_list"])]
+    sequence_files: Option<Vec<String>>,
 
-    /// Path to a text file containing paths to FASTA or AGC files (required for 'gfa', 'maf', and 'fasta')
-    #[clap(long, value_parser, conflicts_with_all = &["fasta_files"])]
-    fasta_list: Option<String>,
+    /// Path to a text file containing paths to sequence files (FASTA or AGC) (required for 'gfa', 'maf', and 'fasta')
+    #[clap(long, value_parser, conflicts_with_all = &["sequence_files"])]
+    sequence_list: Option<String>,
 
     /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for 'gfa' and 'maf')
     #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
@@ -72,17 +72,17 @@ struct GfaMafFastaOpts {
 }
 
 impl GfaMafFastaOpts {
-    /// Resolve FASTA files from either --fasta-files or --fasta-list
-    fn resolve_fasta_files(self) -> io::Result<Vec<String>> {
-        match (self.fasta_files, self.fasta_list) {
-            // Handle --fasta-files option - no clone needed!
+    /// Resolve sequence files from either --sequence-files or --sequence-list
+    fn resolve_sequence_files(self) -> io::Result<Vec<String>> {
+        match (self.sequence_files, self.sequence_list) {
+            // Handle --sequence-files option - no clone needed!
             (Some(files), None) => Ok(files),
-            // Handle --fasta-list option
+            // Handle --sequence-list option
             (None, Some(list_file)) => {
                 let content = std::fs::read_to_string(&list_file).map_err(|e| {
                     io::Error::new(
                         io::ErrorKind::NotFound,
-                        format!("Failed to read FASTA list file '{}': {}", list_file, e),
+                        format!("Failed to read sequence list file '{}': {}", list_file, e),
                     )
                 })?;
 
@@ -95,7 +95,7 @@ impl GfaMafFastaOpts {
             (None, None) => Ok(Vec::new()),
             (Some(_), Some(_)) => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "Cannot specify both --fasta-files and --fasta-list",
+                "Cannot specify both --sequence-files and --sequence-list",
             )),
         }
     }
@@ -131,7 +131,7 @@ impl GfaMafFastaOpts {
 
     /// Build sequence index if files are provided
     fn build_sequence_index(self) -> io::Result<Option<UnifiedSequenceIndex>> {
-        let seq_files = self.resolve_fasta_files()?;
+        let seq_files = self.resolve_sequence_files()?;
 
         if seq_files.is_empty() {
             Ok(None)
@@ -151,7 +151,7 @@ impl GfaMafFastaOpts {
                     Ok(Some(index))
                 }
                 Err(e) => {
-                    error!("Failed to build FASTA index: {}", e);
+                    error!("Failed to build sequence index: {}", e);
                     Err(e)
                 }
             }
@@ -177,7 +177,7 @@ impl GfaMafFastaOpts {
             if index.is_none() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("FASTA/AGC files are required for '{}' output format. Use --fasta-files or --fasta-list", output_format),
+                    format!("Sequence files (FASTA/AGC) are required for '{}' output format. Use --sequence-files or --sequence-list", output_format),
                 ));
             }
             index
@@ -268,7 +268,7 @@ enum Args {
         #[clap(short = 'w', long, value_parser)]
         window_size: usize,
 
-        /// Output format: 'bed', 'gfa' (v1.0), 'maf', or 'fasta' ('gfa', 'maf', and 'fasta' require --fasta-files or --fasta-list)
+        /// Output format: 'bed', 'gfa' (v1.0), 'maf', or 'fasta' ('gfa', 'maf', and 'fasta' require --sequence-files or --sequence-list)
         #[clap(short = 'o', long, value_parser, default_value = "bed")]
         output_format: String,
 
@@ -336,7 +336,7 @@ enum Args {
         #[clap(flatten)]
         query: QueryOpts,
 
-        /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', 'gfa' (v1.0), 'maf', or 'fasta' ('gfa', 'maf', and 'fasta' require --fasta-files or --fasta-list)
+        /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', 'gfa' (v1.0), 'maf', or 'fasta' ('gfa', 'maf', and 'fasta' require --sequence-files or --sequence-list)
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
 
