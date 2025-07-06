@@ -465,43 +465,55 @@ fn main() -> io::Result<()> {
                 &["auto", "bed", "bedpe", "paf", "gfa", "maf", "fasta"],
             )?;
 
-            // Early validation for target_range before ANY expensive operations
-            if let Some(target_range_str) = &query.target_range {
-                let (_, target_range, _) = parse_target_range(target_range_str)?;
+            // Parse and validate all target ranges, tracking which parameter was used
+            let (target_ranges, from_range_param) = if let Some(target_range_str) = &query.target_range {
+                let (target_name, target_range, name) = parse_target_range(target_range_str)?;
                 validate_region_size(target_range, &output_format, gfa_maf_fasta.force_large_region)?;
-            }
-
-            // Early validation for target_bed and cache parsed data to avoid re-parsing
-            let target_ranges = if let Some(target_bed) = &query.target_bed {
+                (vec![(target_name, target_range, name)], true)
+            } else if let Some(target_bed) = &query.target_bed {
                 let targets = impg::partition::parse_bed_file(target_bed)?;
                 for (_, target_range, _) in &targets {
                     validate_region_size(*target_range, &output_format, gfa_maf_fasta.force_large_region)?;
                 }
-                Some(targets)
+                (targets, false)
             } else {
-                None
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Either --target-range or --target-bed must be provided",
+                ));
+            };
+
+            // Resolve output format based on 'auto' and parameter used
+            let resolved_output_format = if output_format == "auto" {
+                if from_range_param {
+                    "bed"
+                } else {
+                    "bedpe"
+                }
+            } else {
+                output_format.as_str()
             };
 
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
 
             // Parse POA scoring parameters if GFA/MAF output is requested
-            let scoring_params = if output_format == "gfa" || output_format == "maf" {
+            let scoring_params = if resolved_output_format == "gfa" || resolved_output_format == "maf" {
                 Some(gfa_maf_fasta.parse_poa_scoring()?)
             } else {
                 None
             };
 
             // Build FASTA index if GFA/MAF/FASTA output is requested
-            let fasta_index = if output_format == "gfa"
-                || output_format == "maf"
-                || output_format == "fasta"
+            let fasta_index = if resolved_output_format == "gfa"
+                || resolved_output_format == "maf"
+                || resolved_output_format == "fasta"
             {
                 let index = gfa_maf_fasta.build_fasta_index()?;
                 if index.is_none() {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        format!("FASTA files are required for '{}' output format. Use --fasta-files or --fasta-list", output_format),
+                        format!("FASTA files are required for '{}' output format. Use --fasta-files or --fasta-list", resolved_output_format),
                     ));
                 }
                 index
@@ -511,14 +523,13 @@ fn main() -> io::Result<()> {
 
             let impg = initialize_impg(&common)?;
 
-            if let Some(target_range) = &query.target_range {
-                let (target_name, target_range, name) = parse_target_range(target_range)?;
-
+            // Process all target ranges in a unified loop
+            for (target_name, target_range, name) in target_ranges {
                 let mut results = perform_query(
                     &impg,
                     &target_name,
                     target_range,
-                    output_format == "paf" || output_format == "bedpe", // Store CIGAR for PAF/BEDPE output
+                    resolved_output_format == "paf" || resolved_output_format == "bedpe", // Store CIGAR for PAF/BEDPE output
                     query.min_identity,
                     query.transitive,
                     query.transitive_dfs,
@@ -527,8 +538,17 @@ fn main() -> io::Result<()> {
                     query.min_distance_between_ranges,
                 )?;
 
-                // Output results based on the format
-                match output_format.as_str() {
+                // Output results based on the resolved format
+                match resolved_output_format {
+                    "bed" => {
+                        // BED format - include the first element
+                        output_results_bed(
+                            &impg,
+                            &mut results,
+                            Some(name),
+                            query.effective_merge_distance(),
+                        );
+                    }
                     "bedpe" => {
                         // Skip the first element (the input range) for BEDPE output
                         results.remove(0);
@@ -553,7 +573,7 @@ fn main() -> io::Result<()> {
                         output_results_gfa(
                             &impg,
                             &mut results,
-                            &fasta_index.unwrap(),
+                            fasta_index.as_ref().unwrap(),
                             Some(name),
                             query.effective_merge_distance(),
                             scoring_params.unwrap(),
@@ -563,7 +583,7 @@ fn main() -> io::Result<()> {
                         output_results_maf(
                             &impg,
                             &mut results,
-                            &fasta_index.unwrap(),
+                            fasta_index.as_ref().unwrap(),
                             Some(name),
                             query.effective_merge_distance(),
                             scoring_params.unwrap(),
@@ -573,108 +593,19 @@ fn main() -> io::Result<()> {
                         output_results_fasta(
                             &impg,
                             &mut results,
-                            &fasta_index.unwrap(),
+                            fasta_index.as_ref().unwrap(),
                             Some(name),
                             query.effective_merge_distance(),
                             reverse_complement,
                         )?;
                     }
                     _ => {
-                        // 'auto' or 'bed'
-                        // BED format - include the first element
-                        output_results_bed(
-                            &impg,
-                            &mut results,
-                            Some(name),
-                            query.effective_merge_distance(),
-                        );
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Invalid output format: {}", resolved_output_format),
+                        ));
                     }
                 }
-            } else if let Some(targets) = target_ranges {
-                info!("Parsed {} target ranges from BED file", targets.len());
-                for (target_name, target_range, name) in targets {
-                    let mut results = perform_query(
-                        &impg,
-                        &target_name,
-                        target_range,
-                        output_format == "paf" || output_format == "bedpe", // Store CIGAR for PAF/BEDPE output
-                        query.min_identity,
-                        query.transitive,
-                        query.transitive_dfs,
-                        query.max_depth,
-                        query.min_transitive_len,
-                        query.min_distance_between_ranges,
-                    )?;
-
-                    // Output results based on the format
-                    match output_format.as_str() {
-                        "bed" => {
-                            // BED format - include the first element
-                            output_results_bed(
-                                &impg,
-                                &mut results,
-                                Some(name),
-                                query.effective_merge_distance(),
-                            );
-                        }
-                        "paf" => {
-                            // Skip the first element (the input range) for PAF output
-                            results.remove(0);
-                            output_results_paf(
-                                &impg,
-                                &mut results,
-                                Some(name),
-                                query.effective_merge_distance(),
-                            );
-                        }
-                        "gfa" => {
-                            output_results_gfa(
-                                &impg,
-                                &mut results,
-                                fasta_index.as_ref().unwrap(),
-                                Some(name),
-                                query.effective_merge_distance(),
-                                scoring_params.unwrap(),
-                            )?;
-                        }
-                        "maf" => {
-                            output_results_maf(
-                                &impg,
-                                &mut results,
-                                fasta_index.as_ref().unwrap(),
-                                Some(name),
-                                query.effective_merge_distance(),
-                                scoring_params.unwrap(),
-                            )?;
-                        }
-                        "fasta" => {
-                            output_results_fasta(
-                                &impg,
-                                &mut results,
-                                fasta_index.as_ref().unwrap(),
-                                Some(name),
-                                query.effective_merge_distance(),
-                                reverse_complement,
-                            )?;
-                        }
-                        _ => {
-                            // 'auto' or 'bedpe'
-                            // Skip the first element (the input range) for BEDPE output
-                            results.remove(0);
-                            output_results_bedpe(
-                                &impg,
-                                &mut results,
-                                Some(name),
-                                query.effective_merge_distance(),
-                            );
-                        }
-                    }
-                }
-            } else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Either --target-range or --target-bed must be provided",
-                ));
             }
         }
         Args::Similarity {
