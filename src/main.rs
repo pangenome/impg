@@ -154,7 +154,10 @@ impl GfaMafFastaOpts {
     }
 
     /// Helper to validate and setup POA/FASTA resources for a given output format
-    fn setup_poa_fasta_resources(self, output_format: &str) -> io::Result<(Option<FastaIndex>, Option<(u8, u8, u8, u8, u8, u8)>)> {
+    fn setup_poa_fasta_resources(
+        self,
+        output_format: &str,
+    ) -> io::Result<(Option<FastaIndex>, Option<(u8, u8, u8, u8, u8, u8)>)> {
         let needs_fasta = matches!(output_format, "gfa" | "maf" | "fasta");
         let needs_poa = matches!(output_format, "gfa" | "maf");
 
@@ -440,7 +443,8 @@ fn main() -> io::Result<()> {
             let reverse_complement = gfa_maf_fasta.reverse_complement;
 
             // Setup POA/FASTA resources
-            let (fasta_index, scoring_params) = gfa_maf_fasta.setup_poa_fasta_resources(&output_format)?;
+            let (fasta_index, scoring_params) =
+                gfa_maf_fasta.setup_poa_fasta_resources(&output_format)?;
 
             let impg = initialize_impg(&common)?;
 
@@ -531,7 +535,8 @@ fn main() -> io::Result<()> {
             let reverse_complement = gfa_maf_fasta.reverse_complement;
 
             // Setup POA/FASTA resources
-            let (fasta_index, scoring_params) = gfa_maf_fasta.setup_poa_fasta_resources(resolved_output_format)?;
+            let (fasta_index, scoring_params) =
+                gfa_maf_fasta.setup_poa_fasta_resources(resolved_output_format)?;
 
             // Process all target ranges in a unified loop
             for (target_name, target_range, name) in target_ranges {
