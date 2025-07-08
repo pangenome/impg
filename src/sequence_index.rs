@@ -28,17 +28,29 @@ impl UnifiedSequenceIndex {
         }
 
         // Check if all files have the same extension
-        let first_ext = Path::new(&files[0])
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
+        let get_full_extension = |path: &str| -> String {
+            let p = Path::new(path);
+            let file_name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            
+            // Handle compound extensions like .fa.gz, .fasta.gz, .fna.gz
+            if file_name.ends_with(".fa.gz") {
+                "fa.gz".to_string()
+            } else if file_name.ends_with(".fasta.gz") {
+                "fasta.gz".to_string()
+            } else if file_name.ends_with(".fna.gz") {
+                "fna.gz".to_string()
+            } else {
+                p.extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string()
+            }
+        };
+
+        let first_ext = get_full_extension(&files[0]);
 
         let all_same_type = files.iter().all(|f| {
-            Path::new(f)
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                == first_ext
+            get_full_extension(f) == first_ext
         });
 
         if !all_same_type {
@@ -48,7 +60,7 @@ impl UnifiedSequenceIndex {
             ));
         }
 
-        match first_ext {
+        match first_ext.as_str() {
             "fa" | "fasta" | "fna" | "fa.gz" | "fasta.gz" | "fna.gz" => {
                 let index = FastaIndex::build_from_files(files)?;
                 Ok(UnifiedSequenceIndex::Fasta(index))
