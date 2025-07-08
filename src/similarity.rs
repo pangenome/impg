@@ -196,8 +196,14 @@ fn compute_similarities_for_region(
 ) -> io::Result<String> {
     debug!("Computing similarities for region {:?}", region);
 
-    let (groups, msa_chars) =
-        prepare_groups_and_msa(impg, results, sequence_index, scoring_params, delim, delim_pos)?;
+    let (groups, msa_chars) = prepare_groups_and_msa(
+        impg,
+        results,
+        sequence_index,
+        scoring_params,
+        delim,
+        delim_pos,
+    )?;
 
     // Parse region once
     let (chrom, start, end) = parse_region_string(region);
@@ -271,8 +277,14 @@ fn compute_pca_for_region(
 ) -> io::Result<PcaResult> {
     debug!("Computing PCA for region with {} intervals", results.len());
 
-    let (groups, msa_chars) =
-        prepare_groups_and_msa(impg, results, sequence_index, scoring_params, delim, delim_pos)?;
+    let (groups, msa_chars) = prepare_groups_and_msa(
+        impg,
+        results,
+        sequence_index,
+        scoring_params,
+        delim,
+        delim_pos,
+    )?;
 
     // Collect all similarities for PCA
     let mut similarities = Vec::new();

@@ -23,16 +23,16 @@ fn test_agc_vs_fasta_same_content() -> io::Result<()> {
 
     // Test sequences to check
     let test_cases = vec![
-        ("chr1", 0, 10),      // First 10 bp of chr1
-        ("chr1", 5, 15),      // Middle section  
-        ("chr1a", 0, 5),      // chr1a from sample a
-        ("1", 0, 10),         // sequence "1" from sample c
+        ("chr1", 0, 10), // First 10 bp of chr1
+        ("chr1", 5, 15), // Middle section
+        ("chr1a", 0, 5), // chr1a from sample a
+        ("1", 0, 10),    // sequence "1" from sample c
     ];
 
     for (seq_name, start, end) in test_cases {
         // Fetch from FASTA
         let fasta_seq = fasta_index.fetch_sequence(seq_name, start, end)?;
-        
+
         // Fetch from AGC - try with just contig name first
         let agc_seq = match agc_index.fetch_sequence(seq_name, start, end) {
             Ok(seq) => seq,
@@ -42,7 +42,7 @@ fn test_agc_vs_fasta_same_content() -> io::Result<()> {
                 let samples = ["ref", "a", "b", "c"];
                 let mut found = false;
                 let mut result = Vec::new();
-                
+
                 for sample in &samples {
                     let query = format!("{}@{}", seq_name, sample);
                     if let Ok(seq) = agc_index.fetch_sequence(&query, start, end) {
@@ -51,7 +51,7 @@ fn test_agc_vs_fasta_same_content() -> io::Result<()> {
                         break;
                     }
                 }
-                
+
                 if !found {
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
@@ -65,11 +65,14 @@ fn test_agc_vs_fasta_same_content() -> io::Result<()> {
         // Compare sequences
         assert_eq!(
             fasta_seq, agc_seq,
-            "Sequences differ for {}:{}-{}", seq_name, start, end
+            "Sequences differ for {}:{}-{}",
+            seq_name, start, end
         );
-        
+
         // Also check that content is uppercase ASCII
-        assert!(fasta_seq.iter().all(|&b| b.is_ascii_uppercase() || b == b'N'));
+        assert!(fasta_seq
+            .iter()
+            .all(|&b| b.is_ascii_uppercase() || b == b'N'));
         assert!(agc_seq.iter().all(|&b| b.is_ascii_uppercase() || b == b'N'));
     }
 
@@ -85,7 +88,7 @@ fn test_unified_sequence_index_fasta() -> io::Result<()> {
     ];
 
     let index = UnifiedSequenceIndex::from_files(&fasta_files)?;
-    
+
     // Test fetching
     let seq = index.fetch_sequence("chr1", 0, 10)?;
     assert_eq!(seq.len(), 10);
@@ -100,7 +103,7 @@ fn test_unified_sequence_index_agc() -> io::Result<()> {
     let agc_files = vec![format!("{}/test.agc", test_data_dir)];
 
     let index = UnifiedSequenceIndex::from_files(&agc_files)?;
-    
+
     // Test fetching with sample@contig format
     let seq = index.fetch_sequence("chr1@ref", 0, 10)?;
     assert_eq!(seq.len(), 10);

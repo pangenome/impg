@@ -143,9 +143,7 @@ impl GfaMafFastaOpts {
                             ("FASTA", fasta_index.fasta_paths.len())
                         }
                         #[cfg(feature = "agc")]
-                        UnifiedSequenceIndex::Agc(agc_index) => {
-                            ("AGC", agc_index.agc_paths.len())
-                        }
+                        UnifiedSequenceIndex::Agc(agc_index) => ("AGC", agc_index.agc_paths.len()),
                     };
                     info!("Built {} index for {} files", file_type, num_files);
                     Ok(Some(index))
@@ -162,7 +160,10 @@ impl GfaMafFastaOpts {
     fn setup_poa_sequence_resources(
         self,
         output_format: &str,
-    ) -> io::Result<(Option<UnifiedSequenceIndex>, Option<(u8, u8, u8, u8, u8, u8)>)> {
+    ) -> io::Result<(
+        Option<UnifiedSequenceIndex>,
+        Option<(u8, u8, u8, u8, u8, u8)>,
+    )> {
         let needs_sequence = matches!(output_format, "gfa" | "maf" | "fasta");
         let needs_poa = matches!(output_format, "gfa" | "maf");
 
@@ -675,7 +676,8 @@ fn main() -> io::Result<()> {
             let force_large_region = gfa_maf_fasta.force_large_region;
 
             // Setup POA/sequence resources (always required for similarity)
-            let (sequence_index, scoring_params) = gfa_maf_fasta.setup_poa_sequence_resources("gfa")?;
+            let (sequence_index, scoring_params) =
+                gfa_maf_fasta.setup_poa_sequence_resources("gfa")?;
             let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
             let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA
             let impg = initialize_impg(&common)?;

@@ -9,7 +9,7 @@ struct ThreadSafeAgc {
     agc_files: Arc<Mutex<Vec<AGCFile>>>,
 }
 
-// Structure to manage AGC archives 
+// Structure to manage AGC archives
 #[derive(Debug)]
 pub struct AgcIndex {
     agc_wrapper: ThreadSafeAgc,
@@ -33,7 +33,7 @@ impl AgcIndex {
 
         for (agc_idx, agc_path) in agc_files.iter().enumerate() {
             index.agc_paths.push(agc_path.clone());
-            
+
             let mut agc = AGCFile::new();
             if !agc.open(agc_path, true) {
                 return Err(io::Error::new(
@@ -44,16 +44,16 @@ impl AgcIndex {
 
             // Get all samples in this AGC file
             let samples = agc.list_samples();
-            
+
             for sample in samples {
                 // Get all contigs for this sample
                 let contigs = agc.list_contigs(&sample);
-                
+
                 for contig in contigs {
                     // Create a key that combines sample and contig name
                     let key = format!("{}@{}", contig, sample);
                     index.sample_contig_to_agc.insert(key.clone(), agc_idx);
-                    
+
                     // Also insert just the contig name if it's unique
                     // This allows queries by contig name alone
                     if !index.sample_contig_to_agc.contains_key(&contig) {
@@ -61,7 +61,7 @@ impl AgcIndex {
                     }
                 }
             }
-            
+
             index.agc_wrapper.agc_files.lock().unwrap().push(agc);
         }
 
@@ -72,7 +72,7 @@ impl AgcIndex {
         // Parse queries in the format:
         // - "contig@sample" -> (sample, contig, agc_idx)
         // - "contig" -> (sample, contig, agc_idx) if contig is unique
-        
+
         if let Some((contig, sample)) = seq_name.split_once('@') {
             // Format: contig@sample
             let key = seq_name;
@@ -99,7 +99,7 @@ impl AgcIndex {
 
     pub fn fetch_sequence(&self, seq_name: &str, start: i32, end: i32) -> io::Result<Vec<u8>> {
         let (sample, contig, agc_idx) = self.parse_query(seq_name);
-        
+
         let agc_idx = agc_idx.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
@@ -123,10 +123,10 @@ impl AgcIndex {
 
         Ok(sequence.into_bytes())
     }
-    
+
     pub fn fetch_full_sequence(&self, seq_name: &str) -> io::Result<Vec<u8>> {
         let (sample, contig, agc_idx) = self.parse_query(seq_name);
-        
+
         let agc_idx = agc_idx.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
@@ -158,12 +158,12 @@ mod tests {
     #[test]
     fn test_parse_query() {
         let index = AgcIndex::new();
-        
+
         // Test contig@sample format
         let (sample, contig, _) = index.parse_query("chr1@sample1");
         assert_eq!(sample, "sample1");
         assert_eq!(contig, "chr1");
-        
+
         // Test contig-only format
         let (sample, contig, _) = index.parse_query("chr1");
         assert_eq!(sample, "");

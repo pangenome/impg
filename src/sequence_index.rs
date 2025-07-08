@@ -31,7 +31,7 @@ impl UnifiedSequenceIndex {
         let get_full_extension = |path: &str| -> String {
             let p = Path::new(path);
             let file_name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            
+
             // Handle compound extensions like .fa.gz, .fasta.gz, .fna.gz
             if file_name.ends_with(".fa.gz") {
                 "fa.gz".to_string()
@@ -49,9 +49,7 @@ impl UnifiedSequenceIndex {
 
         let first_ext = get_full_extension(&files[0]);
 
-        let all_same_type = files.iter().all(|f| {
-            get_full_extension(f) == first_ext
-        });
+        let all_same_type = files.iter().all(|f| get_full_extension(f) == first_ext);
 
         if !all_same_type {
             return Err(io::Error::new(
