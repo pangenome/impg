@@ -28,6 +28,15 @@ impl AgcIndex {
         }
     }
 
+    // Helper function to extract the short contig name (before first whitespace)
+    fn extract_short_contig_name(full_name: &str) -> &str {
+        // Split on any whitespace character and take the first part
+        full_name
+            .split(|c: char| c == ' ' || c == '\n' || c == '\r' || c == '\t')
+            .next()
+            .unwrap_or(full_name)
+    }
+
     pub fn build_from_files(agc_files: &[String]) -> io::Result<Self> {
         let mut index = AgcIndex::new();
 
@@ -50,13 +59,25 @@ impl AgcIndex {
                 let contigs = agc.list_contigs(&sample);
 
                 for contig in contigs {
-                    // Create a key that combines sample and contig name
+                    // Create a key that combines full contig name and sample name
                     let key = format!("{}@{}", contig, sample);
                     index.sample_contig_to_agc.insert(key.clone(), agc_idx);
 
-                    // Also insert just the contig name if it's unique
-                    // This allows queries by contig name alone
-                    index.sample_contig_to_agc.entry(contig).or_insert(agc_idx);
+                    // Also insert just the full contig name if it's unique
+                    index.sample_contig_to_agc.entry(contig.clone()).or_insert(agc_idx);
+                    
+                    // Extract short contig name and create mappings
+                    let short_contig = Self::extract_short_contig_name(&contig);
+                    
+                    // If short name differs from full name, also create mappings for short name
+                    if short_contig != contig {
+                        // Create key with short contig name and sample
+                        let short_key = format!("{}@{}", short_contig, sample);
+                        index.sample_contig_to_agc.entry(short_key).or_insert(agc_idx);
+                        
+                        // Also insert just the short contig name if it's unique
+                        index.sample_contig_to_agc.entry(short_contig.to_string()).or_insert(agc_idx);
+                    }
                 }
             }
 
@@ -85,8 +106,11 @@ impl AgcIndex {
                     let samples = agc.list_samples();
                     for sample in samples {
                         let contigs = agc.list_contigs(&sample);
-                        if contigs.contains(&seq_name.to_string()) {
-                            return (sample, seq_name.to_string(), Some(agc_idx));
+                        // Check both full names and short names
+                        for contig in &contigs {
+                            if contig == seq_name || Self::extract_short_contig_name(contig) == seq_name {
+                                return (sample, contig.clone(), Some(agc_idx));
+                            }
                         }
                     }
                 }
