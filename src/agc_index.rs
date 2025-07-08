@@ -56,9 +56,7 @@ impl AgcIndex {
 
                     // Also insert just the contig name if it's unique
                     // This allows queries by contig name alone
-                    if !index.sample_contig_to_agc.contains_key(&contig) {
-                        index.sample_contig_to_agc.insert(contig, agc_idx);
-                    }
+                    index.sample_contig_to_agc.entry(contig).or_insert(agc_idx);
                 }
             }
 
@@ -112,8 +110,7 @@ impl AgcIndex {
         let sequence = agc_files[agc_idx]
             .get_contig_sequence(&sample, &contig, start, end - 1)
             .map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::Other,
+                io::Error::other(
                     format!(
                         "Failed to fetch sequence '{}@{}:{}:{}': {}",
                         contig, sample, start, end, e
@@ -138,8 +135,7 @@ impl AgcIndex {
         let sequence = agc_files[agc_idx]
             .get_full_contig(&sample, &contig)
             .map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::Other,
+                io::Error::other(
                     format!(
                         "Failed to fetch full sequence '{}@{}': {}",
                         contig, sample, e
