@@ -44,12 +44,12 @@ impl UnifiedSequenceIndex {
         if !all_same_type {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "Mixed file types not supported. All files must be either .fa/.fasta or .agc",
+                "Mixed file types not supported. All files must be either .fa/.fasta/.fna/.fa.gz/.fasta.gz/.fna.gz or .agc",
             ));
         }
 
         match first_ext {
-            "fa" | "fasta" | "fna" => {
+            "fa" | "fasta" | "fna" | "fa.gz" | "fasta.gz" | "fna.gz" => {
                 let index = FastaIndex::build_from_files(files)?;
                 Ok(UnifiedSequenceIndex::Fasta(index))
             }
