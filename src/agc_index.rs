@@ -3,7 +3,6 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::io::{self};
 use std::sync::{Arc, Mutex};
-use log::debug;
 
 // Wrapper to make AGC operations thread-safe
 #[derive(Clone, Debug)]
@@ -172,37 +171,6 @@ impl AgcIndex {
 
         Ok(sequence.into_bytes())
     }
-
-    /// Fetch multiple sequence subranges in a single batch operation.
-    ///
-    /// This method groups requests by sequence/contig and fetches the min-max range once
-    /// per group, then extracts individual subranges from the cached sequence.
-    /// This reduces decompression overhead compared to individual fetches.
-    ///
-    /// # Arguments
-    /// * `requests` - A slice of (sequence_name, start, end) tuples
-    ///
-    /// # Returns
-    /// A vector of sequences in the same order as the input requests
-    ///
-    /// # Performance Benefits
-    /// - Reduces decompression from N operations to K operations (where K is unique sequences)
-    /// - Fetches min-max range once per sequence/contig group
-    /// - Extracts subranges from cached decompressed sequence
-pub fn fetch_sequences_batch(
-    &self,
-    requests: &[(String, i32, i32)],
-) -> io::Result<Vec<Vec<u8>>> {
-    debug!("Starting batch sequence fetch for {} requests", requests.len());
-
-    // Simply use parallel iteration to fetch each sequence individually
-    requests
-        .par_iter()
-        .map(|(seq_name, start, end)| {
-            self.fetch_sequence(seq_name, *start, *end)
-        })
-        .collect::<io::Result<Vec<_>>>()
-}
 }
 
 #[cfg(test)]
@@ -222,15 +190,6 @@ mod tests {
         let (sample, contig, _) = index.parse_query("chr1");
         assert_eq!(sample, "");
         assert_eq!(contig, "chr1");
-    }
-
-    #[test]
-    fn test_fetch_sequences_batch_empty() {
-        let index = AgcIndex::new();
-        let requests = vec![];
-        let result = index.fetch_sequences_batch(&requests);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().len(), 0);
     }
 
     #[test]

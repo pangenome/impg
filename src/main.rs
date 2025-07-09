@@ -4,7 +4,7 @@ use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::paf::{PartialPafRecord, Strand};
 use impg::partition::{parse_target_range, partition_alignments};
 use impg::seqidx::SequenceIndex;
-use impg::sequence_index::{SequenceIndex as SeqFetchIndex, UnifiedSequenceIndex};
+use impg::sequence_index::{SequenceIndex as SeqIndexTrait, UnifiedSequenceIndex};
 use log::{debug, error, info, warn};
 use noodles::bgzf;
 use rayon::prelude::*;
@@ -1399,41 +1399,26 @@ fn output_results_fasta(
     // Merge intervals if needed
     merge_query_adjusted_intervals(results, merge_distance, false);
 
-    // Prepare batch requests for sequence fetching
-    let mut batch_requests = Vec::new();
-
-    for (query_interval, _, _) in results.iter() {
+    // Output each sequence as FASTA
+    for (query_interval, _, _) in results {
         let query_name = impg.seq_index.get_name(query_interval.metadata).unwrap();
 
         // Determine actual start and end based on orientation
-        let (start, end, _) = if query_interval.first <= query_interval.last {
-            (query_interval.first, query_interval.last, '+')
-        } else {
-            (query_interval.last, query_interval.first, '-')
-        };
-
-        // Add to batch request
-        batch_requests.push((query_name.to_string(), start, end));
-    }
-
-    // Fetch all sequences in batch
-    let mut sequences = sequence_index.fetch_sequences_batch(&batch_requests)?;
-
-    // Output each sequence as FASTA
-    for ((query_interval, _, _), sequence) in results.iter().zip(sequences.iter_mut()) {
-        let query_name = impg.seq_index.get_name(query_interval.metadata).unwrap();
-
-        // Re-determine strand from original interval
         let (start, end, strand) = if query_interval.first <= query_interval.last {
             (query_interval.first, query_interval.last, '+')
         } else {
             (query_interval.last, query_interval.first, '-')
         };
 
+        // Fetch the sequence
+        let sequence = sequence_index.fetch_sequence(query_name, start, end)?;
+
         // If reverse strand and reverse complementing, reverse complement the sequence
-        if strand == '-' && reverse_complement {
-            *sequence = impg::graph::reverse_complement(sequence);
-        }
+        let sequence = if strand == '-' && reverse_complement {
+            impg::graph::reverse_complement(&sequence)
+        } else {
+            sequence
+        };
 
         // Output FASTA format
         let header_suffix = if strand == '-' && reverse_complement {
@@ -1444,12 +1429,11 @@ fn output_results_fasta(
         println!(">{}:{}-{}{}", query_name, start, end, header_suffix);
 
         // Print sequence in lines of 80 characters
-        let sequence_str = String::from_utf8_lossy(sequence);
+        let sequence_str = String::from_utf8_lossy(&sequence);
         for line in sequence_str.as_bytes().chunks(80) {
             println!("{}", String::from_utf8_lossy(line));
         }
     }
-
     Ok(())
 }
 

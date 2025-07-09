@@ -1,5 +1,5 @@
 use crate::impg::Impg;
-use crate::sequence_index::{SequenceIndex as SeqFetchIndex, UnifiedSequenceIndex};
+use crate::sequence_index::{SequenceIndex, UnifiedSequenceIndex};
 use coitrees::Interval;
 use spoa_rs::{AlignmentEngine, AlignmentType as SpoaAlignmentType, Graph as SpoaGraph};
 use std::io::{self, Write};
@@ -148,10 +148,8 @@ pub fn prepare_poa_graph_and_sequences(
 ) -> io::Result<(SpoaGraph, Vec<SequenceMetadata>)> {
     // Create a SPOA graph
     let mut graph = SpoaGraph::new();
-
     // Create scoring parameters for alignment
     let (match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2) = scoring_params;
-
     // Create an alignment engine with affine gap penalties
     let mut engine = AlignmentEngine::new_convex(
         SpoaAlignmentType::kSW, // Local alignment (Smith-Waterman)
@@ -162,37 +160,10 @@ pub fn prepare_poa_graph_and_sequences(
         -(gap_open2 as i8),     // gap open penalty (negative)
         -(gap_extend2 as i8),   // gap extend penalty (negative)
     );
-
     // Collect sequences and metadata for each interval
     let mut sequence_metadata = Vec::new();
 
-    // Prepare batch requests for sequence fetching
-    let mut batch_requests = Vec::new();
-
     for interval in results.iter() {
-        let seq_name = impg.seq_index.get_name(interval.metadata).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("Sequence name not found for ID {}", interval.metadata),
-            )
-        })?;
-
-        // Determine actual start and end based on orientation
-        let (start, end, _) = if interval.first <= interval.last {
-            (interval.first, interval.last, '+')
-        } else {
-            (interval.last, interval.first, '-')
-        };
-
-        // Add to batch request
-        batch_requests.push((seq_name.to_string(), start, end));
-    }
-
-    // Fetch all sequences in batch
-    let mut sequences = sequence_index.fetch_sequences_batch(&batch_requests)?;
-
-    // Process each sequence
-    for (interval, sequence) in results.iter().zip(sequences.iter_mut()) {
         let seq_name = impg.seq_index.get_name(interval.metadata).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
@@ -211,19 +182,24 @@ pub fn prepare_poa_graph_and_sequences(
                 )
             })?;
 
-        // Re-determine strand from original interval
+        // Determine actual start and end based on orientation
         let (start, end, strand) = if interval.first <= interval.last {
             (interval.first, interval.last, '+')
         } else {
             (interval.last, interval.first, '-')
         };
 
-        // If reverse strand, reverse complement the sequence
-        if strand == '-' {
-            *sequence = reverse_complement(sequence);
-        }
+        // Fetch the sequence
+        let sequence = sequence_index.fetch_sequence(seq_name, start, end)?;
 
-        let sequence_str = String::from_utf8_lossy(sequence).to_string();
+        // If reverse strand, reverse complement the sequence
+        let sequence = if strand == '-' {
+            reverse_complement(&sequence)
+        } else {
+            sequence
+        };
+
+        let sequence_str = String::from_utf8_lossy(&sequence).to_string();
         let seq_size = end - start;
 
         // For MAF format, if strand is "-", start is relative to reverse-complemented sequence
@@ -232,7 +208,6 @@ pub fn prepare_poa_graph_and_sequences(
         } else {
             start
         };
-
         sequence_metadata.push(SequenceMetadata {
             name: seq_name.to_string(),
             start: maf_start,
@@ -240,13 +215,11 @@ pub fn prepare_poa_graph_and_sequences(
             strand,
             total_length,
         });
-
         // Add to SPOA graph
         let weights = vec![1u32; sequence_str.len()];
         let (_, alignment) = engine.align(&sequence_str, &graph);
         graph.add_alignment_with_weights(alignment, &sequence_str, &weights);
     }
-
     Ok((graph, sequence_metadata))
 }
 
