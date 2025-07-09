@@ -1,5 +1,5 @@
-use rust_htslib::faidx;
 use rayon::prelude::*;
+use rust_htslib::faidx;
 use rustc_hash::FxHashMap;
 use std::io::{self};
 
