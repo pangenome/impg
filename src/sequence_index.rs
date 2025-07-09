@@ -102,11 +102,7 @@ impl SequenceIndex for FastaIndex {
     }
 
     fn fetch_sequences_batch(&self, requests: &[(String, i32, i32)]) -> io::Result<Vec<Vec<u8>>> {
-        // For FASTA, just iterate through individual requests
-        // Could be optimized later if needed
-        requests.iter()
-            .map(|(seq_name, start, end)| self.fetch_sequence(seq_name, *start, *end))
-            .collect()
+        FastaIndex::fetch_sequences_batch(self, requests)
     }
 }
 
