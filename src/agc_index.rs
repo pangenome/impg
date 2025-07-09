@@ -173,29 +173,6 @@ impl AgcIndex {
         Ok(sequence.into_bytes())
     }
 
-    pub fn fetch_full_sequence(&self, seq_name: &str) -> io::Result<Vec<u8>> {
-        let (sample, contig, agc_idx) = self.parse_query(seq_name);
-
-        let agc_idx = agc_idx.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("Sequence '{}' not found in any AGC file", seq_name),
-            )
-        })?;
-
-        let mut agc_files = self.agc_wrapper.agc_files.lock().unwrap();
-        let sequence = agc_files[agc_idx]
-            .get_full_contig(&sample, &contig)
-            .map_err(|e| {
-                io::Error::other(format!(
-                    "Failed to fetch full sequence '{}@{}': {}",
-                    contig, sample, e
-                ))
-            })?;
-
-        Ok(sequence.into_bytes())
-    }
-
     /// Fetch multiple sequence subranges in a single batch operation.
     ///
     /// This method groups requests by sequence/contig and fetches the min-max range once
@@ -212,91 +189,20 @@ impl AgcIndex {
     /// - Reduces decompression from N operations to K operations (where K is unique sequences)
     /// - Fetches min-max range once per sequence/contig group
     /// - Extracts subranges from cached decompressed sequence
-    pub fn fetch_sequences_batch(
-        &self,
-        requests: &[(String, i32, i32)],
-    ) -> io::Result<Vec<Vec<u8>>> {
-        debug!("Starting batch sequence fetch for {} requests", requests.len());
+pub fn fetch_sequences_batch(
+    &self,
+    requests: &[(String, i32, i32)],
+) -> io::Result<Vec<Vec<u8>>> {
+    debug!("Starting batch sequence fetch for {} requests", requests.len());
 
-        // Parse and group requests by sample@contig
-        let parsed_requests: Vec<_> = requests
-            .par_iter()
-            .enumerate()
-            .map(|(idx, (seq_name, start, end))| {
-                let (sample, contig, agc_idx) = self.parse_query(seq_name);
-                if agc_idx.is_some() {
-                    let key = format!("{}@{}", contig, sample);
-                    Ok((key, idx, *start, *end))
-                } else {
-                    Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("Sequence '{}' not found", seq_name),
-                    ))
-                }
-            })
-            .collect::<io::Result<Vec<_>>>()?;
-
-        debug!("Parsed {} requests into {} unique groups", requests.len(), parsed_requests.len());
-
-        // Group the parsed requests by contig key
-        let mut grouped_requests: FxHashMap<String, Vec<(usize, i32, i32)>> = FxHashMap::default();
-        for (key, idx, start, end) in parsed_requests {
-            grouped_requests
-                .entry(key)
-                .or_default()
-                .push((idx, start, end));
-        }
-
-        debug!("Grouped requests into {} unique contig groups", grouped_requests.len());
-
-        // Pre-allocate result vector with shared access
-        let results = Arc::new(Mutex::new(vec![Vec::new(); requests.len()]));
-
-        // Process each group in parallel using Rayon
-        grouped_requests
-            .into_par_iter()
-            .try_for_each(|(key, group)| -> io::Result<()> {
-                // Find the overall range for this contig
-                let min_start = group.iter().map(|(_, s, _)| *s).min().unwrap();
-                let max_end = group.iter().map(|(_, _, e)| *e).max().unwrap();
-
-                // Parse key back to get sample and contig
-                let (contig, sample) = key.split_once('@').unwrap();
-
-                // Find which AGC file contains this contig
-                let agc_idx = self.sample_contig_to_agc.get(&key).copied().unwrap();
-
-                // Fetch with minimal lock duration
-                let full_sequence_bytes = {
-                    let mut agc_files = self.agc_wrapper.agc_files.lock().unwrap();
-                    agc_files[agc_idx]
-                        .get_contig_sequence(sample, contig, min_start, max_end - 1)
-                        .map_err(|e| {
-                            io::Error::other(format!(
-                                "Failed to fetch sequence '{}@{}:{}:{}': {}",
-                                contig, sample, min_start, max_end, e
-                            ))
-                        })?
-                        .into_bytes()
-                }; // Lock released here!
-
-                // Extract subranges and assign directly to result vector
-                {
-                    let mut results_guard = results.lock().unwrap();
-                    for (idx, start, end) in group {
-                        let offset_start = (start - min_start) as usize;
-                        let offset_end = (end - min_start) as usize;
-                        results_guard[idx] = full_sequence_bytes[offset_start..offset_end].to_vec();
-                    }
-                }
-
-                Ok(())
-            })?;
-
-        // Extract final results
-        let final_results = Arc::try_unwrap(results).unwrap().into_inner().unwrap();
-        Ok(final_results)
-    }
+    // Simply use parallel iteration to fetch each sequence individually
+    requests
+        .par_iter()
+        .map(|(seq_name, start, end)| {
+            self.fetch_sequence(seq_name, *start, *end)
+        })
+        .collect::<io::Result<Vec<_>>>()
+}
 }
 
 #[cfg(test)]
