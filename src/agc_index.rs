@@ -199,30 +199,43 @@ impl AgcIndex {
         &self,
         requests: &[(String, i32, i32)],
     ) -> io::Result<Vec<Vec<u8>>> {
-        // Group requests by contig to minimize AGC calls
-        let mut grouped_requests: FxHashMap<String, Vec<(usize, i32, i32)>> = FxHashMap::default();
-
         debug!(
             "fetch_sequences_batch: received {} requests",
             requests.len()
         );
 
         // Parse and group requests by sample@contig
-        for (idx, (seq_name, start, end)) in requests.iter().enumerate() {
-            let (sample, contig, agc_idx) = self.parse_query(seq_name);
-            if agc_idx.is_some() {
-                let key = format!("{}@{}", contig, sample);
-                grouped_requests
-                    .entry(key)
-                    .or_default()
-                    .push((idx, *start, *end));
-            } else {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("Sequence '{}' not found", seq_name),
-                ));
-            }
+        let parsed_requests: Vec<_> = requests
+            .par_iter()
+            .enumerate()
+            .map(|(idx, (seq_name, start, end))| {
+                let (sample, contig, agc_idx) = self.parse_query(seq_name);
+                if agc_idx.is_some() {
+                    let key = format!("{}@{}", contig, sample);
+                    Ok((key, idx, *start, *end))
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("Sequence '{}' not found", seq_name),
+                    ))
+                }
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+
+        // Group the parsed requests by contig key
+        let grouping_start = std::time::Instant::now();
+        let mut grouped_requests: FxHashMap<String, Vec<(usize, i32, i32)>> = FxHashMap::default();
+        for (key, idx, start, end) in parsed_requests {
+            grouped_requests
+                .entry(key)
+                .or_default()
+                .push((idx, start, end));
         }
+
+        debug!(
+            "fetch_sequences_batch: grouped requests in {:?}",
+            grouping_start.elapsed()
+        );
 
         // Pre-allocate result vector
         let mut results = vec![Vec::new(); requests.len()];
