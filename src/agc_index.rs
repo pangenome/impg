@@ -1,4 +1,5 @@
 use agc_rs::AGCFile;
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::io::{self};
 use std::sync::{Arc, Mutex};
@@ -220,40 +221,52 @@ impl AgcIndex {
         // Pre-allocate result vector
         let mut results = vec![Vec::new(); requests.len()];
 
-        // Lock AGC files once
-        let mut agc_files = self.agc_wrapper.agc_files.lock().unwrap();
+        // Process each group in parallel using Rayon
+        grouped_requests
+            .into_par_iter()
+            .map(|(key, group)| -> io::Result<Vec<(usize, Vec<u8>)>> {
+                // Find the overall range for this contig
+                let min_start = group.iter().map(|(_, s, _)| *s).min().unwrap();
+                let max_end = group.iter().map(|(_, _, e)| *e).max().unwrap();
 
-        // Fetch each group
-        for (key, group) in grouped_requests {
-            // Find the overall range for this contig
-            let min_start = group.iter().map(|(_, s, _)| *s).min().unwrap();
-            let max_end = group.iter().map(|(_, _, e)| *e).max().unwrap();
+                // Parse key back to get sample and contig
+                let (contig, sample) = key.split_once('@').unwrap();
 
-            // Parse key back to get sample and contig
-            let (contig, sample) = key.split_once('@').unwrap();
+                // Find which AGC file contains this contig
+                let agc_idx = self.sample_contig_to_agc.get(&key).copied().unwrap();
 
-            // Find which AGC file contains this contig
-            let agc_idx = self.sample_contig_to_agc.get(&key).copied().unwrap();
+                // Fetch with minimal lock duration
+                let full_sequence_bytes = {
+                    let mut agc_files = self.agc_wrapper.agc_files.lock().unwrap();
+                    agc_files[agc_idx]
+                        .get_contig_sequence(sample, contig, min_start, max_end - 1)
+                        .map_err(|e| {
+                            io::Error::other(format!(
+                                "Failed to fetch sequence '{}@{}:{}:{}': {}",
+                                contig, sample, min_start, max_end, e
+                            ))
+                        })?
+                        .into_bytes()
+                }; // Lock released here!
 
-            // Fetch the entire range once (AGC uses 0-based inclusive end)
-            let full_sequence = agc_files[agc_idx]
-                .get_contig_sequence(sample, contig, min_start, max_end - 1)
-                .map_err(|e| {
-                    io::Error::other(format!(
-                        "Failed to fetch sequence '{}@{}:{}:{}': {}",
-                        contig, sample, min_start, max_end, e
-                    ))
-                })?;
+                // Extract subranges for each request
+                let local_results: Vec<(usize, Vec<u8>)> = group
+                    .into_iter()
+                    .map(|(idx, start, end)| {
+                        let offset_start = (start - min_start) as usize;
+                        let offset_end = (end - min_start) as usize;
+                        (idx, full_sequence_bytes[offset_start..offset_end].to_vec())
+                    })
+                    .collect();
 
-            let full_sequence_bytes = full_sequence.into_bytes();
-
-            // Extract subranges for each request
-            for (idx, start, end) in group {
-                let offset_start = (start - min_start) as usize;
-                let offset_end = (end - min_start) as usize;
-                results[idx] = full_sequence_bytes[offset_start..offset_end].to_vec();
-            }
-        }
+                Ok(local_results)
+            })
+            .collect::<io::Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .for_each(|(idx, sequence)| {
+                results[idx] = sequence;
+            });
 
         Ok(results)
     }
