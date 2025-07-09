@@ -51,10 +51,22 @@ struct CommonOpts {
 #[derive(Parser, Debug)]
 struct GfaMafFastaOpts {
     /// List of sequence file paths (FASTA or AGC) (required for 'gfa', 'maf', and 'fasta')
+    #[cfg(feature = "agc")]
+    #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["sequence_list"])]
+    sequence_files: Option<Vec<String>>,
+
+    /// List of sequence file paths (FASTA) (required for 'gfa', 'maf', and 'fasta')
+    #[cfg(not(feature = "agc"))]
     #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["sequence_list"])]
     sequence_files: Option<Vec<String>>,
 
     /// Path to a text file containing paths to sequence files (FASTA or AGC) (required for 'gfa', 'maf', and 'fasta')
+    #[cfg(feature = "agc")]
+    #[clap(long, value_parser, conflicts_with_all = &["sequence_files"])]
+    sequence_list: Option<String>,
+
+    /// Path to a text file containing paths to sequence files (FASTA) (required for 'gfa', 'maf', and 'fasta')
+    #[cfg(not(feature = "agc"))]
     #[clap(long, value_parser, conflicts_with_all = &["sequence_files"])]
     sequence_list: Option<String>,
 
@@ -176,9 +188,14 @@ impl GfaMafFastaOpts {
         let sequence_index = if needs_sequence {
             let index = self.build_sequence_index()?;
             if index.is_none() {
+                #[cfg(feature = "agc")]
+                let msg = format!("Sequence files (FASTA/AGC) are required for '{}' output format. Use --sequence-files or --sequence-list", output_format);
+                #[cfg(not(feature = "agc"))]
+                let msg = format!("Sequence files (FASTA) are required for '{}' output format. Use --sequence-files or --sequence-list", output_format);
+                
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("Sequence files (FASTA/AGC) are required for '{}' output format. Use --sequence-files or --sequence-list", output_format),
+                    msg,
                 ));
             }
             index
