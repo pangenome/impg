@@ -1,4 +1,5 @@
 use rust_htslib::faidx;
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::io::{self};
 
@@ -106,26 +107,34 @@ impl FastaIndex {
         &self,
         requests: &[(String, i32, i32)],
     ) -> io::Result<Vec<Vec<u8>>> {
+        // Parse requests in parallel
+        let parsed_requests: Vec<_> = requests
+            .par_iter()
+            .enumerate()
+            .map(|(idx, (seq_name, start, end))| {
+                let fasta_idx = self
+                    .path_key_to_fasta
+                    .get(seq_name)
+                    .copied()
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::NotFound,
+                            format!("Sequence '{}' not found in any FASTA file", seq_name),
+                        )
+                    })?;
+                Ok((fasta_idx, idx, seq_name.as_str(), *start, *end))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+
         // Group requests by FASTA file to minimize reader creation
         let mut grouped_requests: FxHashMap<usize, Vec<(usize, &str, i32, i32)>> =
             FxHashMap::default();
 
-        for (idx, (seq_name, start, end)) in requests.iter().enumerate() {
-            let fasta_idx = self
-                .path_key_to_fasta
-                .get(seq_name)
-                .copied()
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("Sequence '{}' not found in any FASTA file", seq_name),
-                    )
-                })?;
-
+        for (fasta_idx, idx, seq_name, start, end) in parsed_requests {
             grouped_requests
                 .entry(fasta_idx)
                 .or_default()
-                .push((idx, seq_name, *start, *end));
+                .push((idx, seq_name, start, end));
         }
 
         // Pre-allocate result vector
