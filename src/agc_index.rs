@@ -3,6 +3,7 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::io::{self};
 use std::sync::{Arc, Mutex};
+use log::debug;
 
 // Wrapper to make AGC operations thread-safe
 #[derive(Clone, Debug)]
@@ -215,6 +216,8 @@ impl AgcIndex {
         &self,
         requests: &[(String, i32, i32)],
     ) -> io::Result<Vec<Vec<u8>>> {
+        debug!("Starting batch sequence fetch for {} requests", requests.len());
+
         // Parse and group requests by sample@contig
         let parsed_requests: Vec<_> = requests
             .par_iter()
@@ -233,6 +236,8 @@ impl AgcIndex {
             })
             .collect::<io::Result<Vec<_>>>()?;
 
+        debug!("Parsed {} requests into {} unique groups", requests.len(), parsed_requests.len());
+
         // Group the parsed requests by contig key
         let mut grouped_requests: FxHashMap<String, Vec<(usize, i32, i32)>> = FxHashMap::default();
         for (key, idx, start, end) in parsed_requests {
@@ -242,13 +247,15 @@ impl AgcIndex {
                 .push((idx, start, end));
         }
 
-        // Pre-allocate result vector
-        let mut results = vec![Vec::new(); requests.len()];
+        debug!("Grouped requests into {} unique contig groups", grouped_requests.len());
+
+        // Pre-allocate result vector with shared access
+        let results = Arc::new(Mutex::new(vec![Vec::new(); requests.len()]));
 
         // Process each group in parallel using Rayon
         grouped_requests
             .into_par_iter()
-            .map(|(key, group)| -> io::Result<Vec<(usize, Vec<u8>)>> {
+            .try_for_each(|(key, group)| -> io::Result<()> {
                 // Find the overall range for this contig
                 let min_start = group.iter().map(|(_, s, _)| *s).min().unwrap();
                 let max_end = group.iter().map(|(_, _, e)| *e).max().unwrap();
@@ -273,26 +280,22 @@ impl AgcIndex {
                         .into_bytes()
                 }; // Lock released here!
 
-                // Extract subranges for each request
-                let local_results: Vec<(usize, Vec<u8>)> = group
-                    .into_iter()
-                    .map(|(idx, start, end)| {
+                // Extract subranges and assign directly to result vector
+                {
+                    let mut results_guard = results.lock().unwrap();
+                    for (idx, start, end) in group {
                         let offset_start = (start - min_start) as usize;
                         let offset_end = (end - min_start) as usize;
+                        results_guard[idx] = full_sequence_bytes[offset_start..offset_end].to_vec();
+                    }
+                }
 
-                        (idx, full_sequence_bytes[offset_start..offset_end].to_vec())
-                    })
-                    .collect();
+                Ok(())
+            })?;
 
-                Ok(local_results)
-            })
-            .collect::<io::Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .for_each(|(idx, sequence)| {
-                results[idx] = sequence;
-            });
-        Ok(results)
+        // Extract final results
+        let final_results = Arc::try_unwrap(results).unwrap().into_inner().unwrap();
+        Ok(final_results)
     }
 }
 
