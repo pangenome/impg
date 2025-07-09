@@ -1,4 +1,5 @@
 use agc_rs::AGCFile;
+use log::debug;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::io::{self};
@@ -221,10 +222,16 @@ impl AgcIndex {
         // Pre-allocate result vector
         let mut results = vec![Vec::new(); requests.len()];
 
+        debug!("fetch_sequences_batch: processing {} requests grouped into {} contigs", 
+               requests.len(), grouped_requests.len());
+
         // Process each group in parallel using Rayon
         grouped_requests
             .into_par_iter()
             .map(|(key, group)| -> io::Result<Vec<(usize, Vec<u8>)>> {
+                let thread_id = rayon::current_thread_index().unwrap_or(0);
+                debug!("Thread {}: processing group {} with {} requests", thread_id, key, group.len());
+                
                 // Find the overall range for this contig
                 let min_start = group.iter().map(|(_, s, _)| *s).min().unwrap();
                 let max_end = group.iter().map(|(_, _, e)| *e).max().unwrap();
@@ -235,7 +242,11 @@ impl AgcIndex {
                 // Find which AGC file contains this contig
                 let agc_idx = self.sample_contig_to_agc.get(&key).copied().unwrap();
 
+                debug!("Thread {}: fetching {}@{} range {}:{} from AGC file {}", 
+                       thread_id, contig, sample, min_start, max_end, agc_idx);
+
                 // Fetch with minimal lock duration
+                let fetch_start = std::time::Instant::now();
                 let full_sequence_bytes = {
                     let mut agc_files = self.agc_wrapper.agc_files.lock().unwrap();
                     agc_files[agc_idx]
@@ -248,6 +259,10 @@ impl AgcIndex {
                         })?
                         .into_bytes()
                 }; // Lock released here!
+                
+                let fetch_duration = fetch_start.elapsed();
+                debug!("Thread {}: AGC fetch completed in {:?}, got {} bytes", 
+                       thread_id, fetch_duration, full_sequence_bytes.len());
 
                 // Extract subranges for each request
                 let local_results: Vec<(usize, Vec<u8>)> = group
@@ -255,10 +270,14 @@ impl AgcIndex {
                     .map(|(idx, start, end)| {
                         let offset_start = (start - min_start) as usize;
                         let offset_end = (end - min_start) as usize;
+                        debug!("Thread {}: extracting subrange {}:{} (relative {}:{}) for request {}", 
+                               thread_id, start, end, offset_start, offset_end, idx);
                         (idx, full_sequence_bytes[offset_start..offset_end].to_vec())
                     })
                     .collect();
 
+                debug!("Thread {}: completed processing group {} with {} subranges", 
+                       thread_id, key, local_results.len());
                 Ok(local_results)
             })
             .collect::<io::Result<Vec<_>>>()?
@@ -268,6 +287,7 @@ impl AgcIndex {
                 results[idx] = sequence;
             });
 
+        debug!("fetch_sequences_batch: completed all {} requests", requests.len());
         Ok(results)
     }
 }
