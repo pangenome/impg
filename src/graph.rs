@@ -146,10 +146,73 @@ pub fn prepare_poa_graph_and_sequences(
     sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<(SpoaGraph, Vec<SequenceMetadata>)> {
-    // Create a SPOA graph
-    let mut graph = SpoaGraph::new();
+    use rayon::prelude::*;
+    
     // Create scoring parameters for alignment
     let (match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2) = scoring_params;
+    
+    // Parallelize sequence fetching and processing
+    let processed_sequences: Vec<(String, SequenceMetadata)> = results
+        .par_iter()
+        .map(|interval| -> io::Result<(String, SequenceMetadata)> {
+            let seq_name = impg.seq_index.get_name(interval.metadata).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Sequence name not found for ID {}", interval.metadata),
+                )
+            })?;
+
+            // Get total sequence length
+            let total_length = impg
+                .seq_index
+                .get_len_from_id(interval.metadata)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("Sequence length not found for ID {}", interval.metadata),
+                    )
+                })?;
+
+            // Determine actual start and end based on orientation
+            let (start, end, strand) = if interval.first <= interval.last {
+                (interval.first, interval.last, '+')
+            } else {
+                (interval.last, interval.first, '-')
+            };
+
+            // Fetch the sequence
+            let sequence = sequence_index.fetch_sequence(seq_name, start, end)?;
+
+            // If reverse strand, reverse complement the sequence
+            let sequence = if strand == '-' {
+                reverse_complement(&sequence)
+            } else {
+                sequence
+            };
+
+            let sequence_str = String::from_utf8_lossy(&sequence).to_string();
+            let seq_size = end - start;
+
+            // For MAF format, if strand is "-", start is relative to reverse-complemented sequence
+            let maf_start = if strand == '-' {
+                (total_length as i32) - end
+            } else {
+                start
+            };
+            let metadata = SequenceMetadata {
+                name: seq_name.to_string(),
+                start: maf_start,
+                size: seq_size,
+                strand,
+                total_length,
+            };
+
+            Ok((sequence_str, metadata))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Create a SPOA graph
+    let mut graph = SpoaGraph::new();
     // Create an alignment engine with affine gap penalties
     let mut engine = AlignmentEngine::new_convex(
         SpoaAlignmentType::kSW, // Local alignment (Smith-Waterman)
@@ -160,66 +223,18 @@ pub fn prepare_poa_graph_and_sequences(
         -(gap_open2 as i8),     // gap open penalty (negative)
         -(gap_extend2 as i8),   // gap extend penalty (negative)
     );
-    // Collect sequences and metadata for each interval
-    let mut sequence_metadata = Vec::new();
 
-    for interval in results.iter() {
-        let seq_name = impg.seq_index.get_name(interval.metadata).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("Sequence name not found for ID {}", interval.metadata),
-            )
-        })?;
-
-        // Get total sequence length
-        let total_length = impg
-            .seq_index
-            .get_len_from_id(interval.metadata)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("Sequence length not found for ID {}", interval.metadata),
-                )
-            })?;
-
-        // Determine actual start and end based on orientation
-        let (start, end, strand) = if interval.first <= interval.last {
-            (interval.first, interval.last, '+')
-        } else {
-            (interval.last, interval.first, '-')
-        };
-
-        // Fetch the sequence
-        let sequence = sequence_index.fetch_sequence(seq_name, start, end)?;
-
-        // If reverse strand, reverse complement the sequence
-        let sequence = if strand == '-' {
-            reverse_complement(&sequence)
-        } else {
-            sequence
-        };
-
-        let sequence_str = String::from_utf8_lossy(&sequence).to_string();
-        let seq_size = end - start;
-
-        // For MAF format, if strand is "-", start is relative to reverse-complemented sequence
-        let maf_start = if strand == '-' {
-            (total_length as i32) - end
-        } else {
-            start
-        };
-        sequence_metadata.push(SequenceMetadata {
-            name: seq_name.to_string(),
-            start: maf_start,
-            size: seq_size,
-            strand,
-            total_length,
-        });
+    // Sequentially add sequences to SPOA graph (SPOA is not thread-safe)
+    let mut sequence_metadata = Vec::with_capacity(processed_sequences.len());
+    for (sequence_str, metadata) in processed_sequences {
+        sequence_metadata.push(metadata);
+        
         // Add to SPOA graph
         let weights = vec![1u32; sequence_str.len()];
         let (_, alignment) = engine.align(&sequence_str, &graph);
         graph.add_alignment_with_weights(alignment, &sequence_str, &weights);
     }
+    
     Ok((graph, sequence_metadata))
 }
 

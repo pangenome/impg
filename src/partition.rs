@@ -1284,6 +1284,7 @@ fn write_partition_maf(
     Ok(())
 }
 
+// Do not parallelize
 fn write_partition_fasta(
     partition_num: usize,
     query_intervals: &[Interval<u32>],

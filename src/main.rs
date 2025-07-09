@@ -1399,41 +1399,56 @@ fn output_results_fasta(
     // Merge intervals if needed
     merge_query_adjusted_intervals(results, merge_distance, false);
 
-    // Output each sequence as FASTA
-    for (query_interval, _, _) in results {
-        let query_name = impg.seq_index.get_name(query_interval.metadata).unwrap();
+    // Parallelize sequence fetching and processing
+    let sequence_data: Vec<(String, String)> = results
+        .par_iter()
+        .map(|(query_interval, _, _)| -> io::Result<(String, String)> {
+            let query_name = impg.seq_index.get_name(query_interval.metadata).unwrap();
 
-        // Determine actual start and end based on orientation
-        let (start, end, strand) = if query_interval.first <= query_interval.last {
-            (query_interval.first, query_interval.last, '+')
-        } else {
-            (query_interval.last, query_interval.first, '-')
-        };
+            // Determine actual start and end based on orientation
+            let (start, end, strand) = if query_interval.first <= query_interval.last {
+                (query_interval.first, query_interval.last, '+')
+            } else {
+                (query_interval.last, query_interval.first, '-')
+            };
 
-        // Fetch the sequence
-        let sequence = sequence_index.fetch_sequence(query_name, start, end)?;
+            // Fetch the sequence
+            let sequence = sequence_index.fetch_sequence(query_name, start, end)?;
 
-        // If reverse strand and reverse complementing, reverse complement the sequence
-        let sequence = if strand == '-' && reverse_complement {
-            impg::graph::reverse_complement(&sequence)
-        } else {
-            sequence
-        };
+            // If reverse strand and reverse complementing, reverse complement the sequence
+            let sequence = if strand == '-' && reverse_complement {
+                impg::graph::reverse_complement(&sequence)
+            } else {
+                sequence
+            };
 
-        // Output FASTA format
-        let header_suffix = if strand == '-' && reverse_complement {
-            "/rc"
-        } else {
-            ""
-        };
-        println!(">{}:{}-{}{}", query_name, start, end, header_suffix);
+            // Create header
+            let header_suffix = if strand == '-' && reverse_complement {
+                "/rc"
+            } else {
+                ""
+            };
+            let header = format!(">{}:{}-{}{}", query_name, start, end, header_suffix);
 
-        // Print sequence in lines of 80 characters
-        let sequence_str = String::from_utf8_lossy(&sequence);
-        for line in sequence_str.as_bytes().chunks(80) {
-            println!("{}", String::from_utf8_lossy(line));
-        }
+            // Convert sequence to string with line breaks every 80 characters
+            let sequence_str = String::from_utf8_lossy(&sequence);
+            let formatted_sequence = sequence_str
+                .as_bytes()
+                .chunks(80)
+                .map(|chunk| String::from_utf8_lossy(chunk).to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            Ok((header, formatted_sequence))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Output sequences sequentially to maintain order
+    for (header, sequence) in sequence_data {
+        println!("{}", header);
+        println!("{}", sequence);
     }
+    
     Ok(())
 }
 
