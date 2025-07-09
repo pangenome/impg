@@ -1448,7 +1448,7 @@ fn output_results_fasta(
         println!("{}", header);
         println!("{}", sequence);
     }
-    
+
     Ok(())
 }
 

@@ -147,10 +147,10 @@ pub fn prepare_poa_graph_and_sequences(
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<(SpoaGraph, Vec<SequenceMetadata>)> {
     use rayon::prelude::*;
-    
+
     // Create scoring parameters for alignment
     let (match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2) = scoring_params;
-    
+
     // Parallelize sequence fetching and processing
     let processed_sequences: Vec<(String, SequenceMetadata)> = results
         .par_iter()
@@ -228,13 +228,13 @@ pub fn prepare_poa_graph_and_sequences(
     let mut sequence_metadata = Vec::with_capacity(processed_sequences.len());
     for (sequence_str, metadata) in processed_sequences {
         sequence_metadata.push(metadata);
-        
+
         // Add to SPOA graph
         let weights = vec![1u32; sequence_str.len()];
         let (_, alignment) = engine.align(&sequence_str, &graph);
         graph.add_alignment_with_weights(alignment, &sequence_str, &weights);
     }
-    
+
     Ok((graph, sequence_metadata))
 }
 
