@@ -8,6 +8,7 @@ use crate::faidx::FastaIndex;
 // Trait for sequence fetching from different sources
 pub trait SequenceIndex {
     fn fetch_sequence(&self, seq_name: &str, start: i32, end: i32) -> io::Result<Vec<u8>>;
+    fn fetch_sequences_batch(&self, requests: &[(String, i32, i32)]) -> io::Result<Vec<Vec<u8>>>;
 }
 
 // Enum to hold either FASTA or AGC index
@@ -84,12 +85,28 @@ impl SequenceIndex for UnifiedSequenceIndex {
             UnifiedSequenceIndex::Agc(index) => index.fetch_sequence(seq_name, start, end),
         }
     }
+
+    fn fetch_sequences_batch(&self, requests: &[(String, i32, i32)]) -> io::Result<Vec<Vec<u8>>> {
+        match self {
+            UnifiedSequenceIndex::Fasta(index) => index.fetch_sequences_batch(requests),
+            #[cfg(feature = "agc")]
+            UnifiedSequenceIndex::Agc(index) => index.fetch_sequences_batch(requests),
+        }
+    }
 }
 
 // Implement for FastaIndex
 impl SequenceIndex for FastaIndex {
     fn fetch_sequence(&self, seq_name: &str, start: i32, end: i32) -> io::Result<Vec<u8>> {
         FastaIndex::fetch_sequence(self, seq_name, start, end)
+    }
+
+    fn fetch_sequences_batch(&self, requests: &[(String, i32, i32)]) -> io::Result<Vec<Vec<u8>>> {
+        // For FASTA, just iterate through individual requests
+        // Could be optimized later if needed
+        requests.iter()
+            .map(|(seq_name, start, end)| self.fetch_sequence(seq_name, *start, *end))
+            .collect()
     }
 }
 
@@ -98,5 +115,9 @@ impl SequenceIndex for FastaIndex {
 impl SequenceIndex for AgcIndex {
     fn fetch_sequence(&self, seq_name: &str, start: i32, end: i32) -> io::Result<Vec<u8>> {
         AgcIndex::fetch_sequence(self, seq_name, start, end)
+    }
+
+    fn fetch_sequences_batch(&self, requests: &[(String, i32, i32)]) -> io::Result<Vec<Vec<u8>>> {
+        AgcIndex::fetch_sequences_batch(self, requests)
     }
 }

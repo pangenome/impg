@@ -166,7 +166,33 @@ pub fn prepare_poa_graph_and_sequences(
     // Collect sequences and metadata for each interval
     let mut sequence_metadata = Vec::new();
 
+    // Prepare batch requests for sequence fetching
+    let mut batch_requests = Vec::new();
+
     for interval in results.iter() {
+        let seq_name = impg.seq_index.get_name(interval.metadata).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Sequence name not found for ID {}", interval.metadata),
+            )
+        })?;
+
+        // Determine actual start and end based on orientation
+        let (start, end, _) = if interval.first <= interval.last {
+            (interval.first, interval.last, '+')
+        } else {
+            (interval.last, interval.first, '-')
+        };
+
+        // Add to batch request
+        batch_requests.push((seq_name.to_string(), start, end));
+    }
+
+    // Fetch all sequences in batch
+    let mut sequences = sequence_index.fetch_sequences_batch(&batch_requests)?;
+
+    // Process each sequence
+    for (interval, sequence) in results.iter().zip(sequences.iter_mut()) {
         let seq_name = impg.seq_index.get_name(interval.metadata).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
@@ -185,24 +211,19 @@ pub fn prepare_poa_graph_and_sequences(
                 )
             })?;
 
-        // Determine actual start and end based on orientation
+        // Re-determine strand from original interval
         let (start, end, strand) = if interval.first <= interval.last {
             (interval.first, interval.last, '+')
         } else {
             (interval.last, interval.first, '-')
         };
 
-        // Fetch the sequence
-        let sequence = sequence_index.fetch_sequence(seq_name, start, end)?;
-
         // If reverse strand, reverse complement the sequence
-        let sequence = if strand == '-' {
-            reverse_complement(&sequence)
-        } else {
-            sequence
-        };
+        if strand == '-' {
+            *sequence = reverse_complement(sequence);
+        }
 
-        let sequence_str = String::from_utf8_lossy(&sequence).to_string();
+        let sequence_str = String::from_utf8_lossy(sequence).to_string();
         let seq_size = end - start;
 
         // For MAF format, if strand is "-", start is relative to reverse-complemented sequence

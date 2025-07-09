@@ -1298,25 +1298,41 @@ fn write_partition_fasta(
     let file = File::create(full_path)?;
     let mut writer = BufWriter::new(file);
 
+    // Prepare batch requests for sequence fetching
+    let mut batch_requests = Vec::new();
+
     for query_interval in query_intervals {
         let query_name = impg.seq_index.get_name(query_interval.metadata).unwrap();
 
         // Determine actual start and end based on orientation
+        let (start, end, _) = if query_interval.first <= query_interval.last {
+            (query_interval.first, query_interval.last, '+')
+        } else {
+            (query_interval.last, query_interval.first, '-')
+        };
+
+        // Add to batch request
+        batch_requests.push((query_name.to_string(), start, end));
+    }
+
+    // Fetch all sequences in batch
+    let mut sequences = sequence_index.fetch_sequences_batch(&batch_requests)?;
+
+    // Process and write each sequence
+    for (query_interval, sequence) in query_intervals.iter().zip(sequences.iter_mut()) {
+        let query_name = impg.seq_index.get_name(query_interval.metadata).unwrap();
+
+        // Re-determine strand from original interval
         let (start, end, strand) = if query_interval.first <= query_interval.last {
             (query_interval.first, query_interval.last, '+')
         } else {
             (query_interval.last, query_interval.first, '-')
         };
 
-        // Fetch the sequence
-        let sequence = sequence_index.fetch_sequence(query_name, start, end)?;
-
         // If reverse strand and reverse_complement strand, reverse complement the sequence
-        let sequence = if strand == '-' && reverse_complement {
-            crate::graph::reverse_complement(&sequence)
-        } else {
-            sequence
-        };
+        if strand == '-' && reverse_complement {
+            *sequence = crate::graph::reverse_complement(sequence);
+        }
 
         // Write FASTA format
         let header_suffix = if strand == '-' && reverse_complement {
@@ -1327,7 +1343,7 @@ fn write_partition_fasta(
         writeln!(writer, ">{}:{}-{}{}", query_name, start, end, header_suffix)?;
 
         // Write sequence in lines of 80 characters
-        let sequence_str = String::from_utf8_lossy(&sequence);
+        let sequence_str = String::from_utf8_lossy(sequence);
         for line in sequence_str.as_bytes().chunks(80) {
             writeln!(writer, "{}", String::from_utf8_lossy(line))?;
         }
