@@ -79,24 +79,20 @@ impl FastaIndex {
             io::Error::other(format!("Failed to open FASTA file '{}': {}", fasta_path, e))
         })?;
 
+        // Fetch sequence and properly handle memory
         // rust-htslib uses 0-based half-open coordinates internally
         // but fetch_seq expects 0-based inclusive end coordinate
-        let sequence = reader
-            .fetch_seq(seq_name, start as usize, (end - 1) as usize)
-            .map_err(|e| {
-                io::Error::other(format!(
-                    "Failed to fetch sequence '{}:{}:{}': {}",
-                    seq_name, start, end, e
-                ))
-            })?;
-
-        // Apply the fix for the rust_htslib memory leak bug
-        // https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171
-        let seq_vec = sequence.to_vec();
-        // Free the memory allocated by htslib to prevent memory leak
-        unsafe {
-            libc::free(sequence.as_ptr() as *mut std::ffi::c_void);
-        }
+        let seq_vec = match reader.fetch_seq(seq_name, start as usize, (end - 1) as usize) {
+            Ok(seq) => {
+                let mut seq_vec = seq.to_vec();
+                unsafe { libc::free(seq.as_ptr() as *mut std::ffi::c_void) }; // Free up memory to avoid memory leak (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
+                seq_vec
+                    .iter_mut()
+                    .for_each(|byte| *byte = byte.to_ascii_uppercase());
+                seq_vec
+            }
+            Err(e) => return Err(io::Error::other(format!("Failed to fetch sequence for {}: {}", seq_name, e))),
+        };
 
         Ok(seq_vec)
     }
@@ -130,24 +126,20 @@ impl FastaIndex {
             
             // Fetch all sequences from this FASTA file
             for (original_idx, seq_name, start, end) in group {
+                // Fetch sequence and properly handle memory
                 // rust-htslib uses 0-based half-open coordinates internally
                 // but fetch_seq expects 0-based inclusive end coordinate
-                let sequence = reader
-                    .fetch_seq(seq_name, start as usize, (end - 1) as usize)
-                    .map_err(|e| {
-                        io::Error::other(format!(
-                            "Failed to fetch sequence '{}:{}:{}': {}",
-                            seq_name, start, end, e
-                        ))
-                    })?;
-
-                // Apply the fix for the rust_htslib memory leak bug
-                // https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171
-                let seq_vec = sequence.to_vec();
-                // Free the memory allocated by htslib to prevent memory leak
-                unsafe {
-                    libc::free(sequence.as_ptr() as *mut std::ffi::c_void);
-                }
+                let seq_vec = match reader.fetch_seq(seq_name, start as usize, (end - 1) as usize) {
+                    Ok(seq) => {
+                        let mut seq_vec = seq.to_vec();
+                        unsafe { libc::free(seq.as_ptr() as *mut std::ffi::c_void) }; // Free up memory to avoid memory leak (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
+                        seq_vec
+                            .iter_mut()
+                            .for_each(|byte| *byte = byte.to_ascii_uppercase());
+                        seq_vec
+                    }
+                    Err(e) => return Err(io::Error::other(format!("Failed to fetch sequence for {}: {}", seq_name, e))),
+                };
                 
                 results[original_idx] = seq_vec;
             }
