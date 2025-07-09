@@ -1402,6 +1402,8 @@ fn output_results_fasta(
     // Prepare batch requests for sequence fetching
     let mut batch_requests = Vec::new();
 
+    debug!("Preparing batch requests for {} intervals", results.len());
+
     for (query_interval, _, _) in results.iter() {
         let query_name = impg.seq_index.get_name(query_interval.metadata).unwrap();
 
