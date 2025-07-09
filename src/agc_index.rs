@@ -17,6 +17,8 @@ pub struct AgcIndex {
     agc_wrapper: ThreadSafeAgc,
     pub agc_paths: Vec<String>,
     sample_contig_to_agc: FxHashMap<String, usize>,
+    // Precomputed mapping from contig name to (sample, full_contig_name, agc_idx)
+    contig_to_sample_info: FxHashMap<String, (String, String, usize)>,
 }
 
 impl AgcIndex {
@@ -27,6 +29,7 @@ impl AgcIndex {
             },
             agc_paths: Vec::new(),
             sample_contig_to_agc: FxHashMap::default(),
+            contig_to_sample_info: FxHashMap::default(),
         }
     }
 
@@ -42,24 +45,38 @@ impl AgcIndex {
     pub fn build_from_files(agc_files: &[String]) -> io::Result<Self> {
         let mut index = AgcIndex::new();
 
-        for (agc_idx, agc_path) in agc_files.iter().enumerate() {
-            index.agc_paths.push(agc_path.clone());
+        // Parallel metadata extraction phase
+        let metadata_results: Vec<_> = agc_files
+            .par_iter()
+            .enumerate()
+            .map(|(agc_idx, agc_path)| -> io::Result<(usize, String, AGCFile, Vec<(String, Vec<String>)>)> {
+                let mut agc = AGCFile::new();
+                if !agc.open(agc_path, true) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Failed to open AGC file: {}", agc_path),
+                    ));
+                }
 
-            let mut agc = AGCFile::new();
-            if !agc.open(agc_path, true) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Failed to open AGC file: {}", agc_path),
-                ));
-            }
+                // Get all samples and their contigs
+                let samples = agc.list_samples();
+                let sample_contigs: Vec<_> = samples
+                    .into_iter()
+                    .map(|sample| {
+                        let contigs = agc.list_contigs(&sample);
+                        (sample, contigs)
+                    })
+                    .collect();
 
-            // Get all samples in this AGC file
-            let samples = agc.list_samples();
+                Ok((agc_idx, agc_path.clone(), agc, sample_contigs))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
 
-            for sample in samples {
-                // Get all contigs for this sample
-                let contigs = agc.list_contigs(&sample);
+        // Sequential assembly phase to maintain order and avoid shared mutable state issues
+        for (agc_idx, agc_path, agc, sample_contigs) in metadata_results {
+            index.agc_paths.push(agc_path);
 
+            for (sample, contigs) in sample_contigs {
                 for contig in contigs {
                     // Create a key that combines full contig name and sample name
                     let key = format!("{}@{}", contig, sample);
@@ -71,6 +88,12 @@ impl AgcIndex {
                         .entry(contig.clone())
                         .or_insert(agc_idx);
 
+                    // Precompute contig-to-sample mappings for fast lookup
+                    let sample_info = (sample.clone(), contig.clone(), agc_idx);
+                    
+                    // Map full contig name to sample info
+                    index.contig_to_sample_info.entry(contig.clone()).or_insert(sample_info.clone());
+                    
                     // Extract short contig name and create mappings
                     let short_contig = Self::extract_short_contig_name(&contig);
 
@@ -88,6 +111,9 @@ impl AgcIndex {
                             .sample_contig_to_agc
                             .entry(short_contig.to_string())
                             .or_insert(agc_idx);
+                            
+                        // Map short contig name to sample info
+                        index.contig_to_sample_info.entry(short_contig.to_string()).or_insert(sample_info);
                     }
                 }
             }
@@ -110,23 +136,8 @@ impl AgcIndex {
             (sample.to_string(), contig.to_string(), agc_idx)
         } else {
             // Format: just contig name
-            if let Some(&agc_idx) = self.sample_contig_to_agc.get(seq_name) {
-                // Find which sample contains this contig
-                let agc_files = self.agc_wrapper.agc_files.lock().unwrap();
-                if let Some(agc) = agc_files.get(agc_idx) {
-                    let samples = agc.list_samples();
-                    for sample in samples {
-                        let contigs = agc.list_contigs(&sample);
-                        // Check both full names and short names
-                        for contig in &contigs {
-                            if contig == seq_name
-                                || Self::extract_short_contig_name(contig) == seq_name
-                            {
-                                return (sample, contig.clone(), Some(agc_idx));
-                            }
-                        }
-                    }
-                }
+            if let Some((sample, full_contig, agc_idx)) = self.contig_to_sample_info.get(seq_name) {
+                return (sample.clone(), full_contig.clone(), Some(*agc_idx));
             }
             ("".to_string(), seq_name.to_string(), None)
         }
