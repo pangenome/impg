@@ -14,6 +14,12 @@ pub struct ForestMap {
     pub entries: FxHashMap<u32, u64>,
 }
 
+impl Default for ForestMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ForestMap {
     /// Create a new empty forest map
     pub fn new() -> Self {

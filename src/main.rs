@@ -1,10 +1,10 @@
 use clap::Parser;
 use coitrees::{Interval, IntervalTree};
-use impg::faidx::FastaIndex;
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::paf::{PartialPafRecord, Strand};
 use impg::partition::{parse_target_range, partition_alignments};
 use impg::seqidx::SequenceIndex;
+use impg::sequence_index::{SequenceIndex as SeqIndexTrait, UnifiedSequenceIndex};
 use log::{debug, error, info, warn};
 use noodles::bgzf;
 use rayon::prelude::*;
@@ -47,16 +47,28 @@ struct CommonOpts {
     verbose: u8,
 }
 
-/// Common FASTA and POA scoring options
+/// Common sequence and POA scoring options
 #[derive(Parser, Debug)]
 struct GfaMafFastaOpts {
-    /// List of FASTA file paths (required for 'gfa', 'maf', and 'fasta')
-    #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["fasta_list"])]
-    fasta_files: Option<Vec<String>>,
+    /// List of sequence file paths (FASTA or AGC) (required for 'gfa', 'maf', and 'fasta')
+    #[cfg(feature = "agc")]
+    #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["sequence_list"])]
+    sequence_files: Option<Vec<String>>,
 
-    /// Path to a text file containing paths to FASTA files (required for 'gfa', 'maf', and 'fasta')
-    #[clap(long, value_parser, conflicts_with_all = &["fasta_files"])]
-    fasta_list: Option<String>,
+    /// List of sequence file paths (FASTA) (required for 'gfa', 'maf', and 'fasta')
+    #[cfg(not(feature = "agc"))]
+    #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["sequence_list"])]
+    sequence_files: Option<Vec<String>>,
+
+    /// Path to a text file containing paths to sequence files (FASTA or AGC) (required for 'gfa', 'maf', and 'fasta')
+    #[cfg(feature = "agc")]
+    #[clap(long, value_parser, conflicts_with_all = &["sequence_files"])]
+    sequence_list: Option<String>,
+
+    /// Path to a text file containing paths to sequence files (FASTA) (required for 'gfa', 'maf', and 'fasta')
+    #[cfg(not(feature = "agc"))]
+    #[clap(long, value_parser, conflicts_with_all = &["sequence_files"])]
+    sequence_list: Option<String>,
 
     /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for 'gfa' and 'maf')
     #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
@@ -72,17 +84,17 @@ struct GfaMafFastaOpts {
 }
 
 impl GfaMafFastaOpts {
-    /// Resolve FASTA files from either --fasta-files or --fasta-list
-    fn resolve_fasta_files(self) -> io::Result<Vec<String>> {
-        match (self.fasta_files, self.fasta_list) {
-            // Handle --fasta-files option - no clone needed!
+    /// Resolve sequence files from either --sequence-files or --sequence-list
+    fn resolve_sequence_files(self) -> io::Result<Vec<String>> {
+        match (self.sequence_files, self.sequence_list) {
+            // Handle --sequence-files option - no clone needed!
             (Some(files), None) => Ok(files),
-            // Handle --fasta-list option
+            // Handle --sequence-list option
             (None, Some(list_file)) => {
                 let content = std::fs::read_to_string(&list_file).map_err(|e| {
                     io::Error::new(
                         io::ErrorKind::NotFound,
-                        format!("Failed to read FASTA list file '{}': {}", list_file, e),
+                        format!("Failed to read sequence list file '{}': {}", list_file, e),
                     )
                 })?;
 
@@ -95,7 +107,7 @@ impl GfaMafFastaOpts {
             (None, None) => Ok(Vec::new()),
             (Some(_), Some(_)) => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "Cannot specify both --fasta-files and --fasta-list",
+                "Cannot specify both --sequence-files and --sequence-list",
             )),
         }
     }
@@ -129,36 +141,42 @@ impl GfaMafFastaOpts {
         ))
     }
 
-    /// Build FASTA index if files are provided
-    fn build_fasta_index(self) -> io::Result<Option<FastaIndex>> {
-        let fasta_files = self.resolve_fasta_files()?;
+    /// Build sequence index if files are provided
+    fn build_sequence_index(self) -> io::Result<Option<UnifiedSequenceIndex>> {
+        let seq_files = self.resolve_sequence_files()?;
 
-        if fasta_files.is_empty() {
+        if seq_files.is_empty() {
             Ok(None)
         } else {
-            match FastaIndex::build_from_files(&fasta_files) {
+            match UnifiedSequenceIndex::from_files(&seq_files) {
                 Ok(index) => {
-                    info!(
-                        "Built FASTA index for {} files with {} sequences",
-                        index.fasta_paths.len(),
-                        index.path_key_to_fasta.len()
-                    );
+                    let (file_type, num_files) = match &index {
+                        UnifiedSequenceIndex::Fasta(fasta_index) => {
+                            ("FASTA", fasta_index.fasta_paths.len())
+                        }
+                        #[cfg(feature = "agc")]
+                        UnifiedSequenceIndex::Agc(agc_index) => ("AGC", agc_index.agc_paths.len()),
+                    };
+                    info!("Built {} index for {} files", file_type, num_files);
                     Ok(Some(index))
                 }
                 Err(e) => {
-                    error!("Failed to build FASTA index: {}", e);
+                    error!("Failed to build sequence index: {}", e);
                     Err(e)
                 }
             }
         }
     }
 
-    /// Helper to validate and setup POA/FASTA resources for a given output format
-    fn setup_poa_fasta_resources(
+    /// Helper to validate and setup POA/sequence resources for a given output format
+    fn setup_poa_sequence_resources(
         self,
         output_format: &str,
-    ) -> io::Result<(Option<FastaIndex>, Option<(u8, u8, u8, u8, u8, u8)>)> {
-        let needs_fasta = matches!(output_format, "gfa" | "maf" | "fasta");
+    ) -> io::Result<(
+        Option<UnifiedSequenceIndex>,
+        Option<(u8, u8, u8, u8, u8, u8)>,
+    )> {
+        let needs_sequence = matches!(output_format, "gfa" | "maf" | "fasta");
         let needs_poa = matches!(output_format, "gfa" | "maf");
 
         let scoring_params = if needs_poa {
@@ -167,12 +185,17 @@ impl GfaMafFastaOpts {
             None
         };
 
-        let fasta_index = if needs_fasta {
-            let index = self.build_fasta_index()?;
+        let sequence_index = if needs_sequence {
+            let index = self.build_sequence_index()?;
             if index.is_none() {
+                #[cfg(feature = "agc")]
+                let msg = format!("Sequence files (FASTA/AGC) are required for '{}' output format. Use --sequence-files or --sequence-list", output_format);
+                #[cfg(not(feature = "agc"))]
+                let msg = format!("Sequence files (FASTA) are required for '{}' output format. Use --sequence-files or --sequence-list", output_format);
+                
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("FASTA files are required for '{}' output format. Use --fasta-files or --fasta-list", output_format),
+                    msg,
                 ));
             }
             index
@@ -180,7 +203,7 @@ impl GfaMafFastaOpts {
             None
         };
 
-        Ok((fasta_index, scoring_params))
+        Ok((sequence_index, scoring_params))
     }
 }
 
@@ -263,7 +286,7 @@ enum Args {
         #[clap(short = 'w', long, value_parser)]
         window_size: usize,
 
-        /// Output format: 'bed', 'gfa' (v1.0), 'maf', or 'fasta' ('gfa', 'maf', and 'fasta' require --fasta-files or --fasta-list)
+        /// Output format: 'bed', 'gfa' (v1.0), 'maf', or 'fasta' ('gfa', 'maf', and 'fasta' require --sequence-files or --sequence-list)
         #[clap(short = 'o', long, value_parser, default_value = "bed")]
         output_format: String,
 
@@ -331,7 +354,7 @@ enum Args {
         #[clap(flatten)]
         query: QueryOpts,
 
-        /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', 'gfa' (v1.0), 'maf', or 'fasta' ('gfa', 'maf', and 'fasta' require --fasta-files or --fasta-list)
+        /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', 'gfa' (v1.0), 'maf', or 'fasta' ('gfa', 'maf', and 'fasta' require --sequence-files or --sequence-list)
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
 
@@ -442,9 +465,9 @@ fn main() -> io::Result<()> {
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
 
-            // Setup POA/FASTA resources
-            let (fasta_index, scoring_params) =
-                gfa_maf_fasta.setup_poa_fasta_resources(&output_format)?;
+            // Setup POA/sequence resources
+            let (sequence_index, scoring_params) =
+                gfa_maf_fasta.setup_poa_sequence_resources(&output_format)?;
 
             let impg = initialize_impg(&common)?;
 
@@ -463,7 +486,7 @@ fn main() -> io::Result<()> {
                 min_distance_between_ranges,
                 &output_format,
                 output_folder.as_deref(),
-                fasta_index.as_ref(),
+                sequence_index.as_ref(),
                 scoring_params,
                 reverse_complement,
                 common.verbose > 1,
@@ -534,9 +557,9 @@ fn main() -> io::Result<()> {
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
 
-            // Setup POA/FASTA resources
-            let (fasta_index, scoring_params) =
-                gfa_maf_fasta.setup_poa_fasta_resources(resolved_output_format)?;
+            // Setup POA/sequence resources
+            let (sequence_index, scoring_params) =
+                gfa_maf_fasta.setup_poa_sequence_resources(resolved_output_format)?;
 
             // Process all target ranges in a unified loop
             for (target_name, target_range, name) in target_ranges {
@@ -588,7 +611,7 @@ fn main() -> io::Result<()> {
                         output_results_gfa(
                             &impg,
                             &mut results,
-                            fasta_index.as_ref().unwrap(),
+                            sequence_index.as_ref().unwrap(),
                             Some(name),
                             query.effective_merge_distance(),
                             scoring_params.unwrap(),
@@ -598,7 +621,7 @@ fn main() -> io::Result<()> {
                         output_results_maf(
                             &impg,
                             &mut results,
-                            fasta_index.as_ref().unwrap(),
+                            sequence_index.as_ref().unwrap(),
                             Some(name),
                             query.effective_merge_distance(),
                             scoring_params.unwrap(),
@@ -608,7 +631,7 @@ fn main() -> io::Result<()> {
                         output_results_fasta(
                             &impg,
                             &mut results,
-                            fasta_index.as_ref().unwrap(),
+                            sequence_index.as_ref().unwrap(),
                             Some(name),
                             query.effective_merge_distance(),
                             reverse_complement,
@@ -666,6 +689,14 @@ fn main() -> io::Result<()> {
                 }
             }
 
+            // Extract force_large_region before moving gfa_maf_fasta
+            let force_large_region = gfa_maf_fasta.force_large_region;
+
+            // Setup POA/sequence resources (always required for similarity)
+            let (sequence_index, scoring_params) =
+                gfa_maf_fasta.setup_poa_sequence_resources("gfa")?;
+            let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
+            let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA
             let impg = initialize_impg(&common)?;
 
             // Validate target_range and target_bed before ANY expensive operations,
@@ -684,7 +715,7 @@ fn main() -> io::Result<()> {
                         target_range.0,
                         target_range.1,
                         "gfa",
-                        gfa_maf_fasta.force_large_region,
+                        force_large_region,
                     )?;
                     targets.push((target_name, target_range, name));
                 }
@@ -702,7 +733,7 @@ fn main() -> io::Result<()> {
                             target_range.0,
                             target_range.1,
                             "gfa",
-                            gfa_maf_fasta.force_large_region,
+                            force_large_region,
                         )?;
                         targets.push((target_name, target_range, name));
                     }
@@ -716,11 +747,6 @@ fn main() -> io::Result<()> {
                     "Either --target-range or --target-bed must be provided",
                 ));
             }
-
-            // Setup POA/FASTA resources (always required for similarity)
-            let (fasta_index, scoring_params) = gfa_maf_fasta.setup_poa_fasta_resources("gfa")?;
-            let fasta_index = fasta_index.unwrap(); // Safe since "gfa" always requires FASTA
-            let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA
 
             info!("Parsed {} target ranges from BED file", target_ranges.len());
 
@@ -761,7 +787,7 @@ fn main() -> io::Result<()> {
             impg::similarity::compute_and_output_similarities(
                 &impg,
                 all_query_data,
-                &fasta_index,
+                &sequence_index,
                 scoring_params,
                 distances,
                 all,
@@ -1355,7 +1381,7 @@ fn output_results_paf(
 fn output_results_gfa(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
-    fasta_index: &FastaIndex,
+    sequence_index: &UnifiedSequenceIndex,
     _name: Option<String>,
     merge_distance: i32,
     scoring_params: (u8, u8, u8, u8, u8, u8),
@@ -1371,7 +1397,7 @@ fn output_results_gfa(
     let gfa_output = impg::graph::generate_gfa_from_intervals(
         impg,
         &query_intervals,
-        fasta_index,
+        sequence_index,
         scoring_params,
     );
     print!("{}", gfa_output);
@@ -1382,7 +1408,7 @@ fn output_results_gfa(
 fn output_results_fasta(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
-    fasta_index: &FastaIndex,
+    sequence_index: &UnifiedSequenceIndex,
     _name: Option<String>,
     merge_distance: i32,
     reverse_complement: bool,
@@ -1390,40 +1416,54 @@ fn output_results_fasta(
     // Merge intervals if needed
     merge_query_adjusted_intervals(results, merge_distance, false);
 
-    // Output each sequence as FASTA
-    for (query_interval, _, _) in results {
-        let query_name = impg.seq_index.get_name(query_interval.metadata).unwrap();
+    // Parallelize sequence fetching and processing
+    let sequence_data: Vec<(String, String)> = results
+        .par_iter()
+        .map(|(query_interval, _, _)| -> io::Result<(String, String)> {
+            let query_name = impg.seq_index.get_name(query_interval.metadata).unwrap();
 
-        // Determine actual start and end based on orientation
-        let (start, end, strand) = if query_interval.first <= query_interval.last {
-            (query_interval.first, query_interval.last, '+')
-        } else {
-            (query_interval.last, query_interval.first, '-')
-        };
+            // Determine actual start and end based on orientation
+            let (start, end, strand) = if query_interval.first <= query_interval.last {
+                (query_interval.first, query_interval.last, '+')
+            } else {
+                (query_interval.last, query_interval.first, '-')
+            };
 
-        // Fetch the sequence
-        let sequence = fasta_index.fetch_sequence(query_name, start, end)?;
+            // Fetch the sequence
+            let sequence = sequence_index.fetch_sequence(query_name, start, end)?;
 
-        // If reverse strand and reverse complementing, reverse complement the sequence
-        let sequence = if strand == '-' && reverse_complement {
-            impg::graph::reverse_complement(&sequence)
-        } else {
-            sequence
-        };
+            // If reverse strand and reverse complementing, reverse complement the sequence
+            let sequence = if strand == '-' && reverse_complement {
+                impg::graph::reverse_complement(&sequence)
+            } else {
+                sequence
+            };
 
-        // Output FASTA format
-        let header_suffix = if strand == '-' && reverse_complement {
-            "/rc"
-        } else {
-            ""
-        };
-        println!(">{}:{}-{}{}", query_name, start, end, header_suffix);
+            // Create header
+            let header_suffix = if strand == '-' && reverse_complement {
+                "/rc"
+            } else {
+                ""
+            };
+            let header = format!(">{}:{}-{}{}", query_name, start, end, header_suffix);
 
-        // Print sequence in lines of 80 characters
-        let sequence_str = String::from_utf8_lossy(&sequence);
-        for line in sequence_str.as_bytes().chunks(80) {
-            println!("{}", String::from_utf8_lossy(line));
-        }
+            // Convert sequence to string with line breaks every 80 characters
+            let sequence_str = String::from_utf8_lossy(&sequence);
+            let formatted_sequence = sequence_str
+                .as_bytes()
+                .chunks(80)
+                .map(|chunk| String::from_utf8_lossy(chunk).to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            Ok((header, formatted_sequence))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Output sequences sequentially to maintain order
+    for (header, sequence) in sequence_data {
+        println!("{}", header);
+        println!("{}", sequence);
     }
 
     Ok(())
@@ -1432,7 +1472,7 @@ fn output_results_fasta(
 fn output_results_maf(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
-    fasta_index: &FastaIndex,
+    sequence_index: &UnifiedSequenceIndex,
     _name: Option<String>,
     merge_distance: i32,
     scoring_params: (u8, u8, u8, u8, u8, u8),
@@ -1448,7 +1488,7 @@ fn output_results_maf(
     let maf_output = impg::graph::generate_maf_from_intervals(
         impg,
         &query_intervals,
-        fasta_index,
+        sequence_index,
         scoring_params,
     );
     print!("{}", maf_output);
