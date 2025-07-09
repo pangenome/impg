@@ -40,6 +40,14 @@ cd impg
 cargo install --force --path .
 ```
 
+To install without AGC support (using only FASTA files):
+
+```bash
+git clone https://github.com/pangenome/impg.git
+cd impg
+cargo install --force --path . --no-default-features
+```
+
 Alternatively, install from Bioconda:
 
 ```bash
@@ -205,10 +213,12 @@ All commands support these options:
 
 For GFA/MAF/FASTA output and similarity computation:
 
-- `--sequence-files`: List of sequence files (FASTA or AGC)
-- `--sequence-list`: Text file listing sequence files (FASTA or AGC) (one per line)
+- `--sequence-files`: List of sequence files (FASTA or AGC*)
+- `--sequence-list`: Text file listing sequence files (FASTA or AGC*) (one per line)
 - `--poa-scoring`: POA scoring parameters as `match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2` (default: `1,4,6,2,26,1`)
 - `--reverse-complement`: Reverse complement sequences on the reverse strand (for FASTA output)
+
+*AGC files are only supported in the full installation (default features). For FASTA-only support, install with `--no-default-features`.
 
 ## What does `impg` do?
 
