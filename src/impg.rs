@@ -1210,7 +1210,7 @@ impl Impg {
                                         ) = if QueryMetadata::is_tracepoints_data(&data_buffer) {
                                             self.process_tracepoints_data(
                                                 data_buffer,
-                                                &metadata,
+                                                metadata,
                                                 *current_target_id,
                                                 sequence_index,
                                                 (
