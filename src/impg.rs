@@ -167,7 +167,7 @@ impl QueryMetadata {
         while i < data_bytes.len() && data_bytes[i].is_ascii_digit() {
             i += 1;
         }
-        
+
         // Check the first non-digit character
         if i < data_bytes.len() {
             let c = data_bytes[i];
@@ -338,7 +338,7 @@ impl Impg {
         target_id: u32,
         sequence_index: Option<&UnifiedSequenceIndex>,
         penalties: (u8, u8, u8, u8, u8, u8),
-    ) -> Vec<CigarOp> {
+    ) -> (i32, i32, i32, i32, Vec<CigarOp>) {
         if let Some(sequence_index) = sequence_index {
             // Get the tracepoints
             let tracepoints = metadata.get_tracepoints_from_bytes(data_buffer);
@@ -349,7 +349,11 @@ impl Impg {
                 sequence_index.fetch_sequence(query_name, metadata.query_start, metadata.query_end)
             } else {
                 // For reverse strand, fetch and reverse complement
-                match sequence_index.fetch_sequence(query_name, metadata.query_start, metadata.query_end) {
+                match sequence_index.fetch_sequence(
+                    query_name,
+                    metadata.query_start,
+                    metadata.query_end,
+                ) {
                     Ok(seq) => Ok(reverse_complement(&seq)),
                     Err(e) => Err(e),
                 }
@@ -357,7 +361,11 @@ impl Impg {
 
             // Fetch target sequence
             let target_name = self.seq_index.get_name(target_id).unwrap();
-            let target_seq_result = sequence_index.fetch_sequence(target_name, metadata.target_start, metadata.target_end);
+            let target_seq_result = sequence_index.fetch_sequence(
+                target_name,
+                metadata.target_start,
+                metadata.target_end,
+            );
 
             // Convert tracepoints to CIGAR if we successfully fetched both sequences
             match (query_seq_result, target_seq_result) {
@@ -370,11 +378,23 @@ impl Impg {
                         &target_seq,
                         0,
                         0,
-                        (mismatch.into(), gap_open1.into(), gap_ext1.into(), gap_open2.into(), gap_ext2.into()),
+                        (
+                            mismatch.into(),
+                            gap_open1.into(),
+                            gap_ext1.into(),
+                            gap_open2.into(),
+                            gap_ext2.into(),
+                        ),
                     );
 
-                    // Parse the CIGAR string to CigarOp vector
-                    parse_cigar_to_delta(&cigar_str).ok().unwrap_or_default()
+                    (
+                        metadata.target_start,
+                        metadata.target_end,
+                        metadata.query_start,
+                        metadata.query_end,
+                        // Parse the CIGAR string to CigarOp vector
+                        parse_cigar_to_delta(&cigar_str).ok().unwrap_or_default(),
+                    )
                 }
                 (Err(e), _) => {
                     panic!("Failed to fetch query sequence: {}", e);
@@ -737,21 +757,34 @@ impl Impg {
                 let metadata = &interval.metadata;
                 let data_buffer = metadata.get_data_bytes(&self.paf_files, &self.paf_gzi_indices);
 
-                let cigar_ops = if QueryMetadata::is_tracepoints_data(&data_buffer) {
-                    self.process_tracepoints_data(data_buffer, metadata, target_id, sequence_index, (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2))
-                } else {
-                    // Handle regular CIGAR
-                    metadata.get_cigar_ops_from_bytes(data_buffer)
-                };
+                let (adj_target_start, adj_target_end, adj_query_start, adj_query_end, cigar_ops) =
+                    if QueryMetadata::is_tracepoints_data(&data_buffer) {
+                        self.process_tracepoints_data(
+                            data_buffer,
+                            metadata,
+                            target_id,
+                            sequence_index,
+                            (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
+                        )
+                    } else {
+                        // Handle regular CIGAR
+                        (
+                            metadata.target_start,
+                            metadata.target_end,
+                            metadata.query_start,
+                            metadata.query_end,
+                            metadata.get_cigar_ops_from_bytes(data_buffer),
+                        )
+                    };
 
                 // Project through alignment
                 let result = project_target_range_through_alignment(
                     (range_start, range_end),
                     (
-                        metadata.target_start,
-                        metadata.target_end,
-                        metadata.query_start,
-                        metadata.query_end,
+                        adj_target_start,
+                        adj_target_end,
+                        adj_query_start,
+                        adj_query_end,
                         metadata.strand(),
                     ),
                     &cigar_ops,
@@ -898,22 +931,41 @@ impl Impg {
                 let processed_results: Vec<_> = intervals
                     .into_par_iter()
                     .filter_map(|metadata| {
-                        let data_buffer = metadata.get_data_bytes(&self.paf_files, &self.paf_gzi_indices);
+                        let data_buffer =
+                            metadata.get_data_bytes(&self.paf_files, &self.paf_gzi_indices);
 
-                        let cigar_ops = if QueryMetadata::is_tracepoints_data(&data_buffer) {
-                            self.process_tracepoints_data(data_buffer, &metadata, current_target_id, sequence_index, (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2))
+                        let (
+                            adj_target_start,
+                            adj_target_end,
+                            adj_query_start,
+                            adj_query_end,
+                            cigar_ops,
+                        ) = if QueryMetadata::is_tracepoints_data(&data_buffer) {
+                            self.process_tracepoints_data(
+                                data_buffer,
+                                &metadata,
+                                current_target_id,
+                                sequence_index,
+                                (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
+                            )
                         } else {
                             // Handle regular CIGAR
-                            metadata.get_cigar_ops_from_bytes(data_buffer)
-                        };
-
-                        let result = project_target_range_through_alignment(
-                            (current_target_start, current_target_end),
                             (
                                 metadata.target_start,
                                 metadata.target_end,
                                 metadata.query_start,
                                 metadata.query_end,
+                                metadata.get_cigar_ops_from_bytes(data_buffer),
+                            )
+                        };
+
+                        let result = project_target_range_through_alignment(
+                            (current_target_start, current_target_end),
+                            (
+                                adj_target_start,
+                                adj_target_end,
+                                adj_query_start,
+                                adj_query_end,
                                 metadata.strand(),
                             ),
                             &cigar_ops,
@@ -1146,22 +1198,44 @@ impl Impg {
                                     *current_target_end,
                                     |interval| {
                                         let metadata = &interval.metadata;
-                                        let data_buffer = metadata.get_data_bytes(&self.paf_files, &self.paf_gzi_indices);
+                                        let data_buffer = metadata
+                                            .get_data_bytes(&self.paf_files, &self.paf_gzi_indices);
 
-                                        let cigar_ops = if QueryMetadata::is_tracepoints_data(&data_buffer) {
-                                            self.process_tracepoints_data(data_buffer, metadata, *current_target_id, sequence_index, (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2))
+                                        let (
+                                            adj_target_start,
+                                            adj_target_end,
+                                            adj_query_start,
+                                            adj_query_end,
+                                            cigar_ops,
+                                        ) = if QueryMetadata::is_tracepoints_data(&data_buffer) {
+                                            self.process_tracepoints_data(
+                                                data_buffer,
+                                                &metadata,
+                                                *current_target_id,
+                                                sequence_index,
+                                                (
+                                                    _match, mismatch, gap_open1, gap_ext1,
+                                                    gap_open2, gap_ext2,
+                                                ),
+                                            )
                                         } else {
                                             // Handle regular CIGAR
-                                            metadata.get_cigar_ops_from_bytes(data_buffer)
-                                        };
-
-                                        let result = project_target_range_through_alignment(
-                                            (*current_target_start, *current_target_end),
                                             (
                                                 metadata.target_start,
                                                 metadata.target_end,
                                                 metadata.query_start,
                                                 metadata.query_end,
+                                                metadata.get_cigar_ops_from_bytes(data_buffer),
+                                            )
+                                        };
+
+                                        let result = project_target_range_through_alignment(
+                                            (*current_target_start, *current_target_end),
+                                            (
+                                                adj_target_start,
+                                                adj_target_end,
+                                                adj_query_start,
+                                                adj_query_end,
                                                 metadata.strand(),
                                             ),
                                             &cigar_ops,
@@ -1756,25 +1830,25 @@ mod tests {
         assert!(!QueryMetadata::is_tracepoints_data(b"50I"));
         assert!(!QueryMetadata::is_tracepoints_data(b"25D"));
         assert!(!QueryMetadata::is_tracepoints_data(b"10X"));
-        
+
         // Test tracepoints with comma (should return true)
         assert!(QueryMetadata::is_tracepoints_data(b"123,456"));
         assert!(QueryMetadata::is_tracepoints_data(b"123,456;789,012"));
         assert!(QueryMetadata::is_tracepoints_data(b"0,10;20,30;40,50"));
-        
+
         // Test tracepoints with semicolon only (should return true)
         assert!(QueryMetadata::is_tracepoints_data(b"123;456"));
         assert!(QueryMetadata::is_tracepoints_data(b"123;456;789"));
         assert!(QueryMetadata::is_tracepoints_data(b"0;10;20;30"));
-        
+
         // Test mixed tracepoints (with some having only first coordinate)
         assert!(QueryMetadata::is_tracepoints_data(b"123,456;789;012,345"));
-        
+
         // Test single number tracepoints (should return true)
         assert!(QueryMetadata::is_tracepoints_data(b"123"));
         assert!(QueryMetadata::is_tracepoints_data(b"0"));
         assert!(QueryMetadata::is_tracepoints_data(b"999"));
-        
+
         // Edge cases (should return false)
         assert!(!QueryMetadata::is_tracepoints_data(b"abc"));
         assert!(!QueryMetadata::is_tracepoints_data(b"M123"));
