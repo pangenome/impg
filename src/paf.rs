@@ -10,8 +10,8 @@ pub struct PartialPafRecord {
     pub target_id: u32,
     pub target_start: usize,
     pub target_end: usize,
-    pub strand_and_cigar_offset: u64, // Track strand and cigar offset
-    pub cigar_bytes: usize,
+    pub strand_and_data_offset: u64, // Track strand and cigar/tracepoints offset
+    pub data_bytes: usize,
 }
 
 #[derive(Default, PartialEq, Clone, Copy)]
@@ -26,7 +26,7 @@ impl PartialPafRecord {
     const STRAND_BIT: u64 = 0x8000000000000000; // Most significant bit for u64
 
     pub fn strand(&self) -> Strand {
-        if (self.strand_and_cigar_offset & Self::STRAND_BIT) != 0 {
+        if (self.strand_and_data_offset & Self::STRAND_BIT) != 0 {
             Strand::Reverse
         } else {
             Strand::Forward
@@ -34,8 +34,8 @@ impl PartialPafRecord {
     }
     pub fn set_strand(&mut self, strand: Strand) {
         match strand {
-            Strand::Forward => self.strand_and_cigar_offset &= !Self::STRAND_BIT,
-            Strand::Reverse => self.strand_and_cigar_offset |= Self::STRAND_BIT,
+            Strand::Forward => self.strand_and_data_offset &= !Self::STRAND_BIT,
+            Strand::Reverse => self.strand_and_data_offset |= Self::STRAND_BIT,
         }
     }
 
@@ -71,16 +71,16 @@ impl PartialPafRecord {
         let query_id = seq_index.get_or_insert_id(&query_name, Some(query_length));
         let target_id = seq_index.get_or_insert_id(&target_name, Some(target_length));
 
-        let mut cigar_offset: u64 = file_pos;
-        let mut cigar_bytes: usize = 0;
+        let mut data_offset: u64 = file_pos;
+        let mut data_bytes: usize = 0;
 
         for tag_str in fields.iter() {
-            if tag_str.starts_with("cg:Z:") {
-                cigar_offset += 5;
-                cigar_bytes = tag_str.len() - 5;
+            if tag_str.starts_with("cg:Z:") || tag_str.starts_with("tp:Z:"){
+                data_offset += 5;
+                data_bytes = tag_str.len() - 5;
                 break;
             } else {
-                cigar_offset += (tag_str.len() + 1) as u64;
+                data_offset += (tag_str.len() + 1) as u64;
             }
         }
 
@@ -92,8 +92,8 @@ impl PartialPafRecord {
             target_id,
             target_start,
             target_end,
-            strand_and_cigar_offset: cigar_offset,
-            cigar_bytes,
+            strand_and_data_offset: data_offset,
+            data_bytes,
         };
         record.set_strand(strand);
 
@@ -152,10 +152,10 @@ mod tests {
                 target_id,
                 target_start: 0,
                 target_end: 100,
-                // If no cigar, then the offset is just the length of the line and cigar_bytes=0
+                // If no cigar, then the offset is just the length of the line and data_bytes=0
                 // Should we use Option<> instead?
-                strand_and_cigar_offset: (line.len() + 1) as u64,
-                cigar_bytes: 0,
+                strand_and_data_offset: (line.len() + 1) as u64,
+                data_bytes: 0,
             }
         );
     }

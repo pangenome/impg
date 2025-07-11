@@ -28,6 +28,8 @@ nalgebra = "0.33.2"
 
 agc-rs = { git = "https://github.com/pangenome/agc-rs.git", optional = true }
 
+lib_tracepoints = { git = "https://github.com/AndreaGuarracino/lib_tracepoints"}
+
 [features]
 default = ["agc"]
 agc = ["agc-rs"]

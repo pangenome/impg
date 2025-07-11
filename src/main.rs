@@ -169,7 +169,7 @@ impl GfaMafFastaOpts {
     }
 
     /// Helper to validate and setup POA/sequence resources for a given output format
-    fn setup_poa_sequence_resources(
+    fn setup_poa_and_tracepoints_sequence_resources(
         self,
         output_format: &str,
     ) -> io::Result<(
@@ -467,7 +467,7 @@ fn main() -> io::Result<()> {
 
             // Setup POA/sequence resources
             let (sequence_index, scoring_params) =
-                gfa_maf_fasta.setup_poa_sequence_resources(&output_format)?;
+                gfa_maf_fasta.setup_poa_and_tracepoints_sequence_resources(&output_format)?;
 
             let impg = initialize_impg(&common)?;
 
@@ -559,7 +559,7 @@ fn main() -> io::Result<()> {
 
             // Setup POA/sequence resources
             let (sequence_index, scoring_params) =
-                gfa_maf_fasta.setup_poa_sequence_resources(resolved_output_format)?;
+                gfa_maf_fasta.setup_poa_and_tracepoints_sequence_resources(resolved_output_format)?;
 
             // Process all target ranges in a unified loop
             for (target_name, target_range, name) in target_ranges {
@@ -574,6 +574,8 @@ fn main() -> io::Result<()> {
                     query.max_depth,
                     query.min_transitive_len,
                     query.min_distance_between_ranges,
+                    sequence_index.as_ref(),
+                    scoring_params,
                 )?;
 
                 // Output results based on the resolved format
@@ -694,7 +696,7 @@ fn main() -> io::Result<()> {
 
             // Setup POA/sequence resources (always required for similarity)
             let (sequence_index, scoring_params) =
-                gfa_maf_fasta.setup_poa_sequence_resources("gfa")?;
+                gfa_maf_fasta.setup_poa_and_tracepoints_sequence_resources("gfa")?;
             let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
             let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA
             let impg = initialize_impg(&common)?;
@@ -764,6 +766,8 @@ fn main() -> io::Result<()> {
                     query.max_depth,
                     query.min_transitive_len,
                     query.min_distance_between_ranges,
+                    Some(&sequence_index),
+                    Some(scoring_params),
                 )?;
 
                 // Merge intervals if needed
@@ -1181,6 +1185,8 @@ fn perform_query(
     max_depth: u16,
     min_transitive_len: i32,
     min_distance_between_ranges: i32,
+    sequence_index: Option<&UnifiedSequenceIndex>,
+    penalties: Option<(u8, u8, u8, u8, u8, u8)>,
 ) -> io::Result<Vec<AdjustedInterval>> {
     let (target_start, target_end) = target_range;
     let target_id = impg.seq_index.get_id(target_name).ok_or_else(|| {
@@ -1239,6 +1245,8 @@ fn perform_query(
             target_end,
             store_cigar,
             min_identity,
+            sequence_index,
+            penalties,
         )
     };
 
