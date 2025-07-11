@@ -156,6 +156,30 @@ impl QueryMetadata {
             .ok()
             .unwrap_or_default()
     }
+
+    /// Fast check to determine if data contains tracepoints or CIGAR
+    /// Tracepoints: "123,456;789,012" or "123;456;789" or "123" or "123,456"
+    /// CIGAR: "123M45I67D"
+    fn is_tracepoints_data(data_bytes: &[u8]) -> bool {
+        // Find the first non-digit character after skipping initial digits
+        let mut i = 0;
+        // Skip leading digits
+        while i < data_bytes.len() && data_bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        
+        // Check the first non-digit character
+        if i < data_bytes.len() {
+            let c = data_bytes[i];
+            // Tracepoints use comma or semicolon as separators
+            // CIGAR uses operation characters (M, I, D, =, X)
+            c == b',' || c == b';'
+        } else {
+            // If it's all digits, it's a tracepoint (single number)
+            // CIGAR strings always have operation characters
+            true
+        }
+    }
 }
 
 pub type AdjustedInterval = (Interval<u32>, Vec<CigarOp>, Interval<u32>);
@@ -649,8 +673,7 @@ impl Impg {
                 let metadata = &interval.metadata;
                 let data_buffer = metadata.get_data_bytes(&self.paf_files, &self.paf_gzi_indices);
 
-                // Check if in data there is the comma (,) character
-                let cigar_ops = if data_buffer.contains(&b',') {
+                let cigar_ops = if QueryMetadata::is_tracepoints_data(&data_buffer) {
                     // Handle tracepoints conversion
                     if let Some(sequence_index) = sequence_index {
                         // Get the tracepoints
@@ -866,8 +889,7 @@ impl Impg {
                     .filter_map(|metadata| {
                         let data_buffer = metadata.get_data_bytes(&self.paf_files, &self.paf_gzi_indices);
 
-                        // Check if in data there is the comma (,) character
-                        let cigar_ops = if data_buffer.contains(&b',') {
+                        let cigar_ops = if QueryMetadata::is_tracepoints_data(&data_buffer) {
                             // Handle tracepoints conversion
                             if let Some(sequence_index) = sequence_index {
                                 // Get the tracepoints
@@ -1168,8 +1190,7 @@ impl Impg {
                                         let metadata = &interval.metadata;
                                         let data_buffer = metadata.get_data_bytes(&self.paf_files, &self.paf_gzi_indices);
 
-                                        // Check if in data there is the comma (,) character
-                                        let cigar_ops = if data_buffer.contains(&b',') {
+                                        let cigar_ops = if QueryMetadata::is_tracepoints_data(&data_buffer) {
                                             // Handle tracepoints conversion
                                             if let Some(sequence_index) = sequence_index {
                                                 // Get the tracepoints
@@ -1818,5 +1839,40 @@ mod tests {
         ];
         let records = parse_paf(reader, &mut seq_index).unwrap();
         assert_eq!(records, expected_records);
+    }
+
+    #[test]
+    fn test_is_tracepoints_data() {
+        // Test CIGAR strings (should return false)
+        assert!(!QueryMetadata::is_tracepoints_data(b"10M"));
+        assert!(!QueryMetadata::is_tracepoints_data(b"123M45I67D"));
+        assert!(!QueryMetadata::is_tracepoints_data(b"5=3X2I"));
+        assert!(!QueryMetadata::is_tracepoints_data(b"100="));
+        assert!(!QueryMetadata::is_tracepoints_data(b"50I"));
+        assert!(!QueryMetadata::is_tracepoints_data(b"25D"));
+        assert!(!QueryMetadata::is_tracepoints_data(b"10X"));
+        
+        // Test tracepoints with comma (should return true)
+        assert!(QueryMetadata::is_tracepoints_data(b"123,456"));
+        assert!(QueryMetadata::is_tracepoints_data(b"123,456;789,012"));
+        assert!(QueryMetadata::is_tracepoints_data(b"0,10;20,30;40,50"));
+        
+        // Test tracepoints with semicolon only (should return true)
+        assert!(QueryMetadata::is_tracepoints_data(b"123;456"));
+        assert!(QueryMetadata::is_tracepoints_data(b"123;456;789"));
+        assert!(QueryMetadata::is_tracepoints_data(b"0;10;20;30"));
+        
+        // Test mixed tracepoints (with some having only first coordinate)
+        assert!(QueryMetadata::is_tracepoints_data(b"123,456;789;012,345"));
+        
+        // Test single number tracepoints (should return true)
+        assert!(QueryMetadata::is_tracepoints_data(b"123"));
+        assert!(QueryMetadata::is_tracepoints_data(b"0"));
+        assert!(QueryMetadata::is_tracepoints_data(b"999"));
+        
+        // Edge cases (should return false)
+        assert!(!QueryMetadata::is_tracepoints_data(b"abc"));
+        assert!(!QueryMetadata::is_tracepoints_data(b"M123"));
+        assert!(!QueryMetadata::is_tracepoints_data(b"=50"));
     }
 }
