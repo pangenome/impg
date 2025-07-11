@@ -156,16 +156,6 @@ impl QueryMetadata {
             .ok()
             .unwrap_or_default()
     }
-
-    fn get_cigar_ops(
-        &self,
-        paf_files: &[String],
-        paf_gzi_indices: &[Option<bgzf::gzi::Index>],
-    ) -> Vec<CigarOp> {
-        let data_bytes = self.get_data_bytes(paf_files, paf_gzi_indices);
-        let cigar_str = std::str::from_utf8(&data_bytes).unwrap();
-        parse_cigar_to_delta(cigar_str).ok().unwrap_or_default()
-    }
 }
 
 pub type AdjustedInterval = (Interval<u32>, Vec<CigarOp>, Interval<u32>);
@@ -660,7 +650,7 @@ impl Impg {
                 let data_buffer = metadata.get_data_bytes(&self.paf_files, &self.paf_gzi_indices);
 
                 // Check if in data there is the comma (,) character
-                let result = if data_buffer.contains(&b',') {
+                let cigar_ops = if data_buffer.contains(&b',') {
                     // Handle tracepoints conversion
                     if let Some(sequence_index) = sequence_index {
                         // Get the tracepoints
@@ -696,20 +686,7 @@ impl Impg {
                                 );
 
                                 // Parse the CIGAR string to CigarOp vector
-                                let cigar_ops = parse_cigar_to_delta(&cigar_str).ok().unwrap_or_default();
-
-                                // Project through alignment
-                                project_target_range_through_alignment(
-                                    (range_start, range_end),
-                                    (
-                                        metadata.target_start,
-                                        metadata.target_end,
-                                        metadata.query_start,
-                                        metadata.query_end,
-                                        metadata.strand(),
-                                    ),
-                                    &cigar_ops,
-                                )
+                                parse_cigar_to_delta(&cigar_str).ok().unwrap_or_default()
                             }
                             (Err(e), _) => {
                                 panic!("Failed to fetch query sequence: {}", e);
@@ -730,20 +707,21 @@ impl Impg {
                     }
                 } else {
                     // Handle regular CIGAR
-                    let cigar_ops = metadata.get_cigar_ops_from_bytes(data_buffer);
-
-                    project_target_range_through_alignment(
-                        (range_start, range_end),
-                        (
-                            metadata.target_start,
-                            metadata.target_end,
-                            metadata.query_start,
-                            metadata.query_end,
-                            metadata.strand(),
-                        ),
-                        &cigar_ops,
-                    )
+                    metadata.get_cigar_ops_from_bytes(data_buffer)
                 };
+
+                // Project through alignment
+                let result = project_target_range_through_alignment(
+                    (range_start, range_end),
+                    (
+                        metadata.target_start,
+                        metadata.target_end,
+                        metadata.query_start,
+                        metadata.query_end,
+                        metadata.strand(),
+                    ),
+                    &cigar_ops,
+                );
 
                 if let Some((
                     adjusted_query_start,
@@ -796,6 +774,8 @@ impl Impg {
         min_distance_between_ranges: i32,
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
+        sequence_index: Option<&UnifiedSequenceIndex>,
+        penalties: Option<(u8, u8, u8, u8, u8, u8)>,
     ) -> Vec<AdjustedInterval> {
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
@@ -867,6 +847,10 @@ impl Impg {
 
             let prec_num_results = results.len();
 
+            // Use default penalties if not provided
+            let (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) =
+                penalties.unwrap_or((0, 4, 6, 2, 26, 1));
+
             // Get or load the tree - if None, no overlaps exist for this target
             if let Some(tree) = self.get_or_load_tree(current_target_id) {
                 // Collect intervals first to process them in parallel
@@ -880,6 +864,69 @@ impl Impg {
                 let processed_results: Vec<_> = intervals
                     .into_par_iter()
                     .filter_map(|metadata| {
+                        let data_buffer = metadata.get_data_bytes(&self.paf_files, &self.paf_gzi_indices);
+
+                        // Check if in data there is the comma (,) character
+                        let cigar_ops = if data_buffer.contains(&b',') {
+                            // Handle tracepoints conversion
+                            if let Some(sequence_index) = sequence_index {
+                                // Get the tracepoints
+                                let tracepoints = metadata.get_tracepoints_from_bytes(data_buffer);
+
+                                // Fetch query sequence
+                                let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
+                                let query_seq_result = if metadata.strand() == Strand::Forward {
+                                    sequence_index.fetch_sequence(query_name, metadata.query_start, metadata.query_end)
+                                } else {
+                                    // For reverse strand, fetch and reverse complement
+                                    match sequence_index.fetch_sequence(query_name, metadata.query_start, metadata.query_end) {
+                                        Ok(seq) => Ok(reverse_complement(&seq)),
+                                        Err(e) => Err(e),
+                                    }
+                                };
+
+                                // Fetch target sequence
+                                let target_name = self.seq_index.get_name(current_target_id).unwrap();
+                                let target_seq_result = sequence_index.fetch_sequence(target_name, metadata.target_start, metadata.target_end);
+
+                                // Convert tracepoints to CIGAR if we successfully fetched both sequences
+                                match (query_seq_result, target_seq_result) {
+                                    (Ok(query_seq), Ok(target_seq)) => {
+                                        // Convert tracepoints to CIGAR operations
+                                        let cigar_str = variable_tracepoints_to_cigar(
+                                            &tracepoints,
+                                            &query_seq,
+                                            &target_seq,
+                                            0,
+                                            0,
+                                            (mismatch.into(), gap_open1.into(), gap_ext1.into(), gap_open2.into(), gap_ext2.into()),
+                                        );
+
+                                        // Parse the CIGAR string to CigarOp vector
+                                        parse_cigar_to_delta(&cigar_str).ok().unwrap_or_default()
+                                    }
+                                    (Err(e), _) => {
+                                        panic!("Failed to fetch query sequence: {}", e);
+                                    }
+                                    (_, Err(e)) => {
+                                        panic!("Failed to fetch target sequence: {}", e);
+                                    }
+                                }
+                            } else {
+                                #[cfg(feature = "agc")]
+                                let file_types = "FASTA/AGC";
+                                #[cfg(not(feature = "agc"))]
+                                let file_types = "FASTA";
+                                panic!(
+                                    "Sequence data ({}) is required for tracepoints conversion. Use --sequence-files or --sequence-list",
+                                    file_types
+                                )
+                            }
+                        } else {
+                            // Handle regular CIGAR
+                            metadata.get_cigar_ops_from_bytes(data_buffer)
+                        };
+
                         let result = project_target_range_through_alignment(
                             (current_target_start, current_target_end),
                             (
@@ -889,7 +936,7 @@ impl Impg {
                                 metadata.query_end,
                                 metadata.strand(),
                             ),
-                            &metadata.get_cigar_ops(&self.paf_files, self.paf_gzi_indices.as_ref()),
+                            &cigar_ops,
                         );
 
                         if let Some((
@@ -1037,6 +1084,8 @@ impl Impg {
         min_distance_between_ranges: i32,
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
+        sequence_index: Option<&UnifiedSequenceIndex>,
+        penalties: Option<(u8, u8, u8, u8, u8, u8)>,
     ) -> Vec<AdjustedInterval> {
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
@@ -1090,6 +1139,10 @@ impl Impg {
             }
         }
 
+        // Use default penalties if not provided
+        let (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) =
+            penalties.unwrap_or((0, 4, 6, 2, 26, 1));
+
         // Process by depth until max_depth or no more ranges
         while !current_ranges.is_empty() && (max_depth == 0 || current_depth < max_depth) {
             debug!(
@@ -1113,6 +1166,69 @@ impl Impg {
                                     *current_target_end,
                                     |interval| {
                                         let metadata = &interval.metadata;
+                                        let data_buffer = metadata.get_data_bytes(&self.paf_files, &self.paf_gzi_indices);
+
+                                        // Check if in data there is the comma (,) character
+                                        let cigar_ops = if data_buffer.contains(&b',') {
+                                            // Handle tracepoints conversion
+                                            if let Some(sequence_index) = sequence_index {
+                                                // Get the tracepoints
+                                                let tracepoints = metadata.get_tracepoints_from_bytes(data_buffer);
+
+                                                // Fetch query sequence
+                                                let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
+                                                let query_seq_result = if metadata.strand() == Strand::Forward {
+                                                    sequence_index.fetch_sequence(query_name, metadata.query_start, metadata.query_end)
+                                                } else {
+                                                    // For reverse strand, fetch and reverse complement
+                                                    match sequence_index.fetch_sequence(query_name, metadata.query_start, metadata.query_end) {
+                                                        Ok(seq) => Ok(reverse_complement(&seq)),
+                                                        Err(e) => Err(e),
+                                                    }
+                                                };
+
+                                                // Fetch target sequence
+                                                let target_name = self.seq_index.get_name(*current_target_id).unwrap();
+                                                let target_seq_result = sequence_index.fetch_sequence(target_name, metadata.target_start, metadata.target_end);
+
+                                                // Convert tracepoints to CIGAR if we successfully fetched both sequences
+                                                match (query_seq_result, target_seq_result) {
+                                                    (Ok(query_seq), Ok(target_seq)) => {
+                                                        // Convert tracepoints to CIGAR operations
+                                                        let cigar_str = variable_tracepoints_to_cigar(
+                                                            &tracepoints,
+                                                            &query_seq,
+                                                            &target_seq,
+                                                            0,
+                                                            0,
+                                                            (mismatch.into(), gap_open1.into(), gap_ext1.into(), gap_open2.into(), gap_ext2.into()),
+                                                        );
+
+                                                        // Parse the CIGAR string to CigarOp vector
+                                                        parse_cigar_to_delta(&cigar_str).ok().unwrap_or_default()
+                                                    }
+                                                    (Err(e), _) => {
+                                                        panic!("Failed to fetch query sequence: {}", e);
+                                                    }
+                                                    (_, Err(e)) => {
+                                                        panic!("Failed to fetch target sequence: {}", e);
+                                                    }
+                                                }
+                                            } else {
+                                                #[cfg(feature = "agc")]
+                                                let file_types = "FASTA/AGC";
+                                                #[cfg(not(feature = "agc"))]
+                                                let file_types = "FASTA";
+                                                panic!(
+                                                    "Sequence data ({}) is required for tracepoints conversion. Use --sequence-files or --sequence-list",
+                                                    file_types
+                                                )
+                                            }
+                                        } else {
+                                            // Handle regular CIGAR
+                                            metadata.get_cigar_ops_from_bytes(data_buffer)
+                                        };
+
                                         let result = project_target_range_through_alignment(
                                             (*current_target_start, *current_target_end),
                                             (
@@ -1122,10 +1238,7 @@ impl Impg {
                                                 metadata.query_end,
                                                 metadata.strand(),
                                             ),
-                                            &metadata.get_cigar_ops(
-                                                &self.paf_files,
-                                                self.paf_gzi_indices.as_ref(),
-                                            ),
+                                            &cigar_ops,
                                         );
 
                                         if let Some((
