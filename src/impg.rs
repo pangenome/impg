@@ -1,9 +1,11 @@
 use crate::forest_map::ForestMap;
+use crate::graph::reverse_complement;
 use crate::paf::{ParseErr, PartialPafRecord, Strand};
 use crate::seqidx::SequenceIndex;
+use crate::sequence_index::SequenceIndex as _; // The as _ syntax imports the trait so its methods are available, but doesn't bring the name into scope (avoiding the naming conflict)
 use crate::sequence_index::UnifiedSequenceIndex;
-use crate::sequence_index::SequenceIndex as _;  // The as _ syntax imports the trait so its methods are available, but doesn't bring the name into scope (avoiding the naming conflict)
 use coitrees::{BasicCOITree, Interval, IntervalTree};
+use lib_tracepoints::variable_tracepoints_to_cigar;
 use log::debug;
 use noodles::bgzf;
 use rayon::prelude::*;
@@ -14,8 +16,6 @@ use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::sync::Arc;
 use std::sync::RwLock;
-use crate::graph::reverse_complement;
-use lib_tracepoints::variable_tracepoints_to_cigar;
 
 /// Parse a CIGAR string into a vector of CigarOp
 // Note that the query_delta is negative for reverse strand alignments
@@ -145,20 +145,16 @@ impl QueryMetadata {
         data_buffer
     }
 
-    fn get_cigar_ops_from_bytes(
-        &self,
-        data_bytes: Vec<u8>,
-    ) -> Vec<CigarOp> {
+    fn get_cigar_ops_from_bytes(&self, data_bytes: Vec<u8>) -> Vec<CigarOp> {
         let cigar_str = std::str::from_utf8(&data_bytes).unwrap();
         parse_cigar_to_delta(cigar_str).ok().unwrap_or_default()
     }
 
-    fn get_tracepoints_from_bytes(
-        &self,
-        data_bytes: Vec<u8>,
-    ) -> Vec<(usize, Option<usize>)>  {
+    fn get_tracepoints_from_bytes(&self, data_bytes: Vec<u8>) -> Vec<(usize, Option<usize>)> {
         let tracepoints_str = std::str::from_utf8(&data_bytes).unwrap();
-        parse_variable_tracepoints(tracepoints_str).ok().unwrap_or_default()
+        parse_variable_tracepoints(tracepoints_str)
+            .ok()
+            .unwrap_or_default()
     }
 
     fn get_cigar_ops(
@@ -654,7 +650,8 @@ impl Impg {
         );
 
         // Use default penalties if not provided
-        let (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) = penalties.unwrap_or((0, 4, 6, 2, 26, 1));
+        let (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) =
+            penalties.unwrap_or((0, 4, 6, 2, 26, 1));
 
         // Get or load the tree - if None, no overlaps exist for this target
         if let Some(tree) = self.get_or_load_tree(target_id) {
@@ -666,7 +663,6 @@ impl Impg {
                 let result = if data_buffer.contains(&b',') {
                     // Handle tracepoints conversion
                     if let Some(sequence_index) = sequence_index {
-                        eprintln!("Found tracepoints in data buffer for target {}", target_id);
                         // Get the tracepoints
                         let tracepoints = metadata.get_tracepoints_from_bytes(data_buffer);
 
@@ -723,11 +719,17 @@ impl Impg {
                             }
                         }
                     } else {
-                        panic!("Sequence data is required for tracepoints conversion");
+                        #[cfg(feature = "agc")]
+                        let file_types = "FASTA/AGC";
+                        #[cfg(not(feature = "agc"))]
+                        let file_types = "FASTA";
+                        panic!(
+                            "Sequence data ({}) is required for tracepoints conversion. Use --sequence-files or --sequence-list",
+                            file_types
+                        )
                     }
                 } else {
                     // Handle regular CIGAR
-                    eprintln!("Found CIGAR in data buffer for target {}", target_id);
                     let cigar_ops = metadata.get_cigar_ops_from_bytes(data_buffer);
 
                     project_target_range_through_alignment(

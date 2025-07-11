@@ -75,7 +75,7 @@ impl PartialPafRecord {
         let mut data_bytes: usize = 0;
 
         for tag_str in fields.iter() {
-            if tag_str.starts_with("cg:Z:") || tag_str.starts_with("tp:Z:"){
+            if tag_str.starts_with("cg:Z:") || tag_str.starts_with("tp:Z:") {
                 data_offset += 5;
                 data_bytes = tag_str.len() - 5;
                 break;

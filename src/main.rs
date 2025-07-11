@@ -172,12 +172,23 @@ impl GfaMafFastaOpts {
     fn setup_poa_and_tracepoints_sequence_resources(
         self,
         output_format: &str,
+        paf_files: &[String],
     ) -> io::Result<(
         Option<UnifiedSequenceIndex>,
         Option<(u8, u8, u8, u8, u8, u8)>,
     )> {
         let needs_sequence = matches!(output_format, "gfa" | "maf" | "fasta");
         let needs_poa = matches!(output_format, "gfa" | "maf");
+
+        // Check for tp:Z: field in PAF files
+        let has_tracepoints = self.check_for_tracepoints(paf_files)?;
+
+        // If tp:Z: field is present, sequence_index and poa_scorings are required
+        let (needs_sequence, needs_poa) = if has_tracepoints {
+            (true, true)
+        } else {
+            (needs_sequence, needs_poa)
+        };
 
         let scoring_params = if needs_poa {
             Some(self.parse_poa_scoring()?)
@@ -189,14 +200,25 @@ impl GfaMafFastaOpts {
             let index = self.build_sequence_index()?;
             if index.is_none() {
                 #[cfg(feature = "agc")]
-                let msg = format!("Sequence files (FASTA/AGC) are required for '{}' output format. Use --sequence-files or --sequence-list", output_format);
+                let file_types = "FASTA/AGC";
                 #[cfg(not(feature = "agc"))]
-                let msg = format!("Sequence files (FASTA) are required for '{}' output format. Use --sequence-files or --sequence-list", output_format);
-                
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    msg,
-                ));
+                let file_types = "FASTA";
+
+                let msg = if has_tracepoints {
+                    // tp:Z: detected
+                    format!(
+                        "Sequence data ({}) is required for tracepoints conversion. Use --sequence-files or --sequence-list",
+                        file_types
+                    )
+                } else {
+                    // Only output format requires sequence files
+                    format!(
+                        "Sequence data ({}) is required for '{}' output format. Use --sequence-files or --sequence-list", 
+                        file_types, output_format
+                    )
+                };
+
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, msg));
             }
             index
         } else {
@@ -204,6 +226,48 @@ impl GfaMafFastaOpts {
         };
 
         Ok((sequence_index, scoring_params))
+    }
+
+    /// Check if any PAF files contain tp:Z: field by reading first few rows
+    fn check_for_tracepoints(&self, paf_files: &[String]) -> io::Result<bool> {
+        use noodles::bgzf;
+        use std::fs::File;
+        use std::io::{BufRead, BufReader};
+
+        const MAX_ROWS_TO_CHECK: usize = 10;
+
+        for paf_file in paf_files {
+            let file = File::open(paf_file)?;
+            let reader: Box<dyn io::Read> = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e))
+            {
+                Box::new(bgzf::io::Reader::new(file))
+            } else {
+                Box::new(file)
+            };
+            let reader = BufReader::new(reader);
+
+            let mut rows_checked = 0;
+            for line in reader.lines() {
+                let line = line?;
+
+                // Skip empty lines and comments
+                if line.trim().is_empty() || line.trim().starts_with('#') {
+                    continue;
+                }
+
+                // Check if this line contains tp:Z: field
+                if line.contains("tp:Z:") {
+                    return Ok(true);
+                }
+
+                rows_checked += 1;
+                if rows_checked >= MAX_ROWS_TO_CHECK {
+                    break;
+                }
+            }
+        }
+
+        Ok(false)
     }
 }
 
@@ -465,9 +529,12 @@ fn main() -> io::Result<()> {
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
 
+            // Resolve PAF files for tracepoints check
+            let paf_files = resolve_paf_files(&common)?;
+
             // Setup POA/sequence resources
-            let (sequence_index, scoring_params) =
-                gfa_maf_fasta.setup_poa_and_tracepoints_sequence_resources(&output_format)?;
+            let (sequence_index, scoring_params) = gfa_maf_fasta
+                .setup_poa_and_tracepoints_sequence_resources(&output_format, &paf_files)?;
 
             let impg = initialize_impg(&common)?;
 
@@ -557,9 +624,12 @@ fn main() -> io::Result<()> {
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
 
+            // Resolve PAF files for tracepoints check
+            let paf_files = resolve_paf_files(&common)?;
+
             // Setup POA/sequence resources
-            let (sequence_index, scoring_params) =
-                gfa_maf_fasta.setup_poa_and_tracepoints_sequence_resources(resolved_output_format)?;
+            let (sequence_index, scoring_params) = gfa_maf_fasta
+                .setup_poa_and_tracepoints_sequence_resources(resolved_output_format, &paf_files)?;
 
             // Process all target ranges in a unified loop
             for (target_name, target_range, name) in target_ranges {
@@ -694,9 +764,12 @@ fn main() -> io::Result<()> {
             // Extract force_large_region before moving gfa_maf_fasta
             let force_large_region = gfa_maf_fasta.force_large_region;
 
+            // Resolve PAF files for tracepoints check
+            let paf_files = resolve_paf_files(&common)?;
+
             // Setup POA/sequence resources (always required for similarity)
             let (sequence_index, scoring_params) =
-                gfa_maf_fasta.setup_poa_and_tracepoints_sequence_resources("gfa")?;
+                gfa_maf_fasta.setup_poa_and_tracepoints_sequence_resources("gfa", &paf_files)?;
             let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
             let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA
             let impg = initialize_impg(&common)?;
