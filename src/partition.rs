@@ -1124,6 +1124,8 @@ fn write_partition(
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
     reverse_complement: bool,
 ) -> io::Result<()> {
+    info!("Writing partition {} with {} intervals in {} format", partition_num, query_intervals.len(), output_format);
+
     match output_format {
         "bed" => write_partition_bed(partition_num, query_intervals, impg, output_folder, None),
         "gfa" => {
