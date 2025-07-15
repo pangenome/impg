@@ -192,11 +192,8 @@ impl GfaMafFastaOpts {
                 let msg = format!("Sequence files (FASTA/AGC) are required for '{}' output format. Use --sequence-files or --sequence-list", output_format);
                 #[cfg(not(feature = "agc"))]
                 let msg = format!("Sequence files (FASTA) are required for '{}' output format. Use --sequence-files or --sequence-list", output_format);
-                
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    msg,
-                ));
+
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, msg));
             }
             index
         } else {
@@ -928,7 +925,7 @@ fn validate_region_size(
                 ),
             ));
         }
-        
+
         if merge_distance > MERGE_DISTANCE_LIMIT {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
