@@ -459,6 +459,7 @@ fn main() -> io::Result<()> {
                 0,
                 window_size as i32,
                 &output_format,
+                merge_distance,
                 gfa_maf_fasta.force_large_region,
             )?;
 
@@ -520,6 +521,7 @@ fn main() -> io::Result<()> {
                         target_range.0,
                         target_range.1,
                         &output_format,
+                        query.effective_merge_distance(),
                         gfa_maf_fasta.force_large_region,
                     )?;
                     (vec![(target_name, target_range, name)], true)
@@ -532,6 +534,7 @@ fn main() -> io::Result<()> {
                             *start,
                             *end,
                             &output_format,
+                            query.effective_merge_distance(),
                             gfa_maf_fasta.force_large_region,
                         )?;
                     }
@@ -715,6 +718,7 @@ fn main() -> io::Result<()> {
                         target_range.0,
                         target_range.1,
                         "gfa",
+                        query.effective_merge_distance(),
                         force_large_region,
                     )?;
                     targets.push((target_name, target_range, name));
@@ -733,6 +737,7 @@ fn main() -> io::Result<()> {
                             target_range.0,
                             target_range.1,
                             "gfa",
+                            query.effective_merge_distance(),
                             force_large_region,
                         )?;
                         targets.push((target_name, target_range, name));
@@ -903,22 +908,36 @@ fn validate_region_size(
     start: i32,
     end: i32,
     output_format: &str,
+    merge_distance: i32,
     force_large_region: bool,
 ) -> io::Result<()> {
     let region_size = (end - start).unsigned_abs() as u64;
     const SIZE_LIMIT: u64 = 10_000; // 10kbp limit
+    const MERGE_DISTANCE_LIMIT: i32 = 1000; // 1k limit
 
     // Check if this is a maf/gfa output format that uses SPOA
     let uses_spoa = matches!(output_format, "maf" | "gfa");
 
-    if uses_spoa && region_size > SIZE_LIMIT && !force_large_region {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "Region size ({} bp) exceeds 10kbp for '{}' output format, which may require large time and memory. Use --force-large-region to proceed anyway.",
-                region_size, output_format
-            ),
-        ));
+    if uses_spoa && !force_large_region {
+        if region_size > SIZE_LIMIT {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Region size ({} bp) exceeds 10kbp for '{}' output format, which may require large time and memory. Use --force-large-region to proceed anyway.",
+                    region_size, output_format
+                ),
+            ));
+        }
+        
+        if merge_distance > MERGE_DISTANCE_LIMIT {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Merge distance ({} bp) exceeds 1kbp for '{}' output format, which may require large time and memory. Use --force-large-region to proceed anyway.",
+                    merge_distance, output_format
+                ),
+            ));
+        }
     }
 
     Ok(())
