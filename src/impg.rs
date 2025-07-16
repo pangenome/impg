@@ -5,7 +5,8 @@ use crate::seqidx::SequenceIndex;
 use crate::sequence_index::SequenceIndex as _; // The as _ syntax imports the trait so its methods are available, but doesn't bring the name into scope (avoiding the naming conflict)
 use crate::sequence_index::UnifiedSequenceIndex;
 use coitrees::{BasicCOITree, Interval, IntervalTree};
-use lib_tracepoints::variable_tracepoints_to_cigar;
+use lib_tracepoints::variable_tracepoints_to_cigar_with_aligner;
+use lib_wfa2::affine_wavefront::AffineWavefronts;
 use log::debug;
 use noodles::bgzf;
 use rayon::prelude::*;
@@ -16,6 +17,11 @@ use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::cell::RefCell;
+
+thread_local! {
+    static ALIGNERS: RefCell<Vec<AffineWavefronts>> = RefCell::new(Vec::new());
+}
 
 /// Parse a CIGAR string into a vector of CigarOp
 // Note that the query_delta is negative for reverse strand alignments
@@ -321,6 +327,28 @@ impl SortedRanges {
     }
 }
 
+/// Execute a closure with a thread-local aligner
+fn with_thread_aligner<F, R>(penalties: (u8, u8, u8, u8, u8, u8), f: F) -> R
+where
+    F: FnOnce(&mut AffineWavefronts) -> R,
+{
+    ALIGNERS.with(|aligners| {
+        let mut aligners = aligners.borrow_mut();
+        if aligners.is_empty() {
+            let (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) = penalties;
+            aligners.push(AffineWavefronts::with_penalties_affine2p(
+                0, // match score
+                mismatch.into(),
+                gap_open1.into(),
+                gap_ext1.into(),
+                gap_open2.into(),
+                gap_ext2.into(),
+            ));
+        }
+        f(&mut aligners[0])
+    })
+}
+
 pub struct Impg {
     pub trees: RwLock<TreeMap>,
     pub seq_index: SequenceIndex,
@@ -338,6 +366,7 @@ impl Impg {
         target_id: u32,
         sequence_index: Option<&UnifiedSequenceIndex>,
         penalties: (u8, u8, u8, u8, u8, u8),
+        _requested_range: (i32, i32),
     ) -> (i32, i32, i32, i32, Vec<CigarOp>) {
         if let Some(sequence_index) = sequence_index {
             // Get the tracepoints
@@ -370,22 +399,17 @@ impl Impg {
             // Convert tracepoints to CIGAR if we successfully fetched both sequences
             match (query_seq_result, target_seq_result) {
                 (Ok(query_seq), Ok(target_seq)) => {
-                    let (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) = penalties;
-                    // Convert tracepoints to CIGAR operations
-                    let cigar_str = variable_tracepoints_to_cigar(
-                        &tracepoints,
-                        &query_seq,
-                        &target_seq,
-                        0,
-                        0,
-                        (
-                            mismatch.into(),
-                            gap_open1.into(),
-                            gap_ext1.into(),
-                            gap_open2.into(),
-                            gap_ext2.into(),
-                        ),
-                    );
+                    // Convert tracepoints to CIGAR operations using thread-local aligner
+                    let cigar_str = with_thread_aligner(penalties, |aligner| {
+                        variable_tracepoints_to_cigar_with_aligner(
+                            &tracepoints,
+                            &query_seq,
+                            &target_seq,
+                            0,
+                            0,
+                            aligner,
+                        )
+                    });
 
                     (
                         metadata.target_start,
@@ -765,6 +789,7 @@ impl Impg {
                             target_id,
                             sequence_index,
                             (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
+                            (range_start, range_end),
                         )
                     } else {
                         // Handle regular CIGAR
@@ -947,6 +972,7 @@ impl Impg {
                                 current_target_id,
                                 sequence_index,
                                 (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
+                                (current_target_start, current_target_end),
                             )
                         } else {
                             // Handle regular CIGAR
@@ -1217,6 +1243,7 @@ impl Impg {
                                                     _match, mismatch, gap_open1, gap_ext1,
                                                     gap_open2, gap_ext2,
                                                 ),
+                                                (*current_target_start, *current_target_end),
                                             )
                                         } else {
                                             // Handle regular CIGAR

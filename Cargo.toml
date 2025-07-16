@@ -8,11 +8,11 @@ edition = "2021"
 [dependencies]
 bincode = { version = "2.0.1", features = ["serde"] }
 serde = { version = "1.0.219", features = ["derive"] }
-clap = { version = "4.5.40", features = ["derive"] }
+clap = { version = "4.5.41", features = ["derive"] }
 coitrees = "0.4.0"
 num_cpus = "1.17.0"
 rayon = "1.10.0"
-noodles = { version = "0.99.0", features = ["bgzf"] }
+noodles = { version = "0.100.0", features = ["bgzf"] }
 regex = "1.11.1"
 log = "0.4.27"
 env_logger = "0.11.8"
@@ -22,12 +22,12 @@ rustc-hash = "2.1.1"
 rust-htslib = { version = "0.46.0", default-features = false } # Don't update it, see https://github.com/rust-bio/rust-htslib/issues/434
 libc = "0.2.174"
 
-spoa_rs = { git = "https://github.com/AndreaGuarracino/spoa-rs.git" }
-
 nalgebra = "0.33.2"
 
+spoa_rs = { git = "https://github.com/AndreaGuarracino/spoa-rs.git" }
 agc-rs = { git = "https://github.com/pangenome/agc-rs.git", optional = true }
 
+lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2"}
 lib_tracepoints = { git = "https://github.com/AndreaGuarracino/lib_tracepoints"}
 
 [features]
