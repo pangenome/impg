@@ -426,14 +426,17 @@ impl Impg {
                     found_start = true;
                 }
                 
-                if found_start && next_target_pos >= requested_range.1 {
-                    debug!("-------------->Found end of relevant tracepoint region: {:?}", tracepoints[i]);
-
-                    // Found the end of the relevant region
+                if found_start {
+                    // Update the end of the relevant region as we go
                     end_idx = i + 1;
                     subset_query_end = next_query_pos;
                     subset_target_end = next_target_pos;
-                    break;
+                    
+                    // Only break if the current tracepoint no longer overlaps
+                    if target_pos >= requested_range.1 {
+                        debug!("-------------->Found end of relevant tracepoint region: {:?}", tracepoints[i]);
+                        break;
+                    }
                 }
                 
                 query_pos = next_query_pos;
