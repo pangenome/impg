@@ -366,23 +366,116 @@ impl Impg {
         target_id: u32,
         sequence_index: Option<&UnifiedSequenceIndex>,
         penalties: (u8, u8, u8, u8, u8, u8),
-        _requested_range: (i32, i32),
+        requested_range: (i32, i32),
     ) -> (i32, i32, i32, i32, Vec<CigarOp>) {
         if let Some(sequence_index) = sequence_index {
             // Get the tracepoints
             let tracepoints = metadata.get_tracepoints_from_bytes(data_buffer);
 
-            // Fetch query sequence
+            // Scan tracepoints to find the relevant subset for the requested range
+            let mut query_pos = if metadata.strand() == Strand::Forward {
+                metadata.query_start
+            } else {
+                metadata.query_end
+            };
+            let mut target_pos = metadata.target_start;
+            let mut start_idx = 0;
+            let mut end_idx = tracepoints.len();
+            let mut found_start = false;
+            let mut subset_query_start = if metadata.strand() == Strand::Forward {
+                metadata.query_start
+            } else {
+                metadata.query_end
+            };
+            let mut subset_target_start = metadata.target_start;
+            let mut subset_query_end = if metadata.strand() == Strand::Forward {
+                metadata.query_end
+            } else {
+                metadata.query_start
+            };
+            let mut subset_target_end = metadata.target_end;
+
+            // Find the relevant subset of tracepoints
+            for (i, &(a_len, b_len_opt)) in tracepoints.iter().enumerate() {
+                debug!("Tracepoint {}: {:?}, {:?}", i, a_len, b_len_opt);
+                debug!(
+                    "Current query_pos: {}, target_pos: {}",
+                    query_pos, target_pos
+                );
+
+                let query_delta = if metadata.strand() == Strand::Forward {
+                    a_len as i32
+                } else {
+                    -(a_len as i32)
+                };
+                let target_delta = b_len_opt.unwrap_or(a_len) as i32;
+                
+                let next_query_pos = query_pos + query_delta;
+                let next_target_pos = target_pos + target_delta;
+                
+                // Check if this tracepoint overlaps with the requested range
+                let overlaps = target_pos < requested_range.1 && next_target_pos > requested_range.0;
+                
+                if overlaps && !found_start {
+                    debug!("-------------->Found overlapping tracepoint: {:?}", tracepoints[i]);
+                    
+                    // Found the start of the relevant region
+                    start_idx = i;
+                    subset_query_start = query_pos;
+                    subset_target_start = target_pos;
+                    found_start = true;
+                }
+                
+                if found_start && next_target_pos >= requested_range.1 {
+                    debug!("-------------->Found end of relevant tracepoint region: {:?}", tracepoints[i]);
+
+                    // Found the end of the relevant region
+                    end_idx = i + 1;
+                    subset_query_end = next_query_pos;
+                    subset_target_end = next_target_pos;
+                    break;
+                }
+                
+                query_pos = next_query_pos;
+                target_pos = next_target_pos;
+            }
+
+            debug!("Subsets query: {}-{}, target: {}-{}",
+                subset_query_start, subset_query_end,
+                subset_target_start, subset_target_end
+            );
+
+            // Extract the relevant subset of tracepoints
+            let subset_tracepoints = &tracepoints[start_idx..end_idx];
+
+            debug!("Tracepoints from {} to {} ({:?})",
+                tracepoints.len(), subset_tracepoints.len(), subset_tracepoints
+            );
+            debug!(
+                "From {}/{} -> {}/{} to {}/{} -> {}/{}",
+                metadata.query_start,
+                metadata.target_start,
+                metadata.query_end,
+                metadata.target_end,
+                subset_query_start,
+                subset_target_start,
+                subset_query_end,
+                subset_target_end
+            );
+
+            // Fetch only the relevant portions of the sequences
             let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
             let query_seq_result = if metadata.strand() == Strand::Forward {
-                sequence_index.fetch_sequence(query_name, metadata.query_start, metadata.query_end)
+                sequence_index.fetch_sequence(query_name, subset_query_start, subset_query_end)
             } else {
-                // For reverse strand, fetch and reverse complement
-                match sequence_index.fetch_sequence(
-                    query_name,
-                    metadata.query_start,
-                    metadata.query_end,
-                ) {
+                // For reverse strand, coordinates are inverted, so we need min/max
+                let (fetch_start, fetch_end) = if subset_query_start < subset_query_end {
+                    (subset_query_start, subset_query_end)
+                } else {
+                    (subset_query_end, subset_query_start)
+                };
+                // Fetch and reverse complement
+                match sequence_index.fetch_sequence(query_name, fetch_start, fetch_end) {
                     Ok(seq) => Ok(reverse_complement(&seq)),
                     Err(e) => Err(e),
                 }
@@ -390,11 +483,7 @@ impl Impg {
 
             // Fetch target sequence
             let target_name = self.seq_index.get_name(target_id).unwrap();
-            let target_seq_result = sequence_index.fetch_sequence(
-                target_name,
-                metadata.target_start,
-                metadata.target_end,
-            );
+            let target_seq_result = sequence_index.fetch_sequence(target_name, subset_target_start, subset_target_end);
 
             // Convert tracepoints to CIGAR if we successfully fetched both sequences
             match (query_seq_result, target_seq_result) {
@@ -402,7 +491,7 @@ impl Impg {
                     // Convert tracepoints to CIGAR operations using thread-local aligner
                     let cigar_str = with_thread_aligner(penalties, |aligner| {
                         variable_tracepoints_to_cigar_with_aligner(
-                            &tracepoints,
+                            subset_tracepoints,
                             &query_seq,
                             &target_seq,
                             0,
@@ -412,10 +501,19 @@ impl Impg {
                     });
 
                     (
-                        metadata.target_start,
-                        metadata.target_end,
-                        metadata.query_start,
-                        metadata.query_end,
+                        subset_target_start,
+                        subset_target_end,
+                        // For reverse strand, coordinates should be in forward orientation (start < end)
+                        if metadata.strand() == Strand::Forward {
+                            subset_query_start
+                        } else {
+                            subset_query_end
+                        },
+                        if metadata.strand() == Strand::Forward {
+                            subset_query_end
+                        } else {
+                            subset_query_start
+                        },
                         // Parse the CIGAR string to CigarOp vector
                         parse_cigar_to_delta(&cigar_str).ok().unwrap_or_default(),
                     )
