@@ -15,7 +15,7 @@ fn test_agc_vs_fasta_same_content() -> io::Result<()> {
         format!("{}/b.fa", test_data_dir),
         format!("{}/c.fa", test_data_dir),
     ];
-    let agc_file = format!("{}/test.agc", test_data_dir);
+    let agc_file = format!("{test_data_dir}/test.agc");
 
     // Build both indices
     let fasta_index = FastaIndex::build_from_files(&fasta_files)?;
@@ -44,7 +44,7 @@ fn test_agc_vs_fasta_same_content() -> io::Result<()> {
                 let mut result = Vec::new();
 
                 for sample in &samples {
-                    let query = format!("{}@{}", seq_name, sample);
+                    let query = format!("{seq_name}@{sample}");
                     if let Ok(seq) = agc_index.fetch_sequence(&query, start, end) {
                         result = seq;
                         found = true;
@@ -55,7 +55,7 @@ fn test_agc_vs_fasta_same_content() -> io::Result<()> {
                 if !found {
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
-                        format!("Sequence {} not found in AGC", seq_name),
+                        format!("Sequence {seq_name} not found in AGC"),
                     ));
                 }
                 result
@@ -65,8 +65,7 @@ fn test_agc_vs_fasta_same_content() -> io::Result<()> {
         // Compare sequences
         assert_eq!(
             fasta_seq, agc_seq,
-            "Sequences differ for {}:{}-{}",
-            seq_name, start, end
+            "Sequences differ for {seq_name}:{start}-{end}"
         );
 
         // Also check that content is uppercase ASCII

@@ -131,7 +131,7 @@ pub fn compute_and_output_similarities(
                 // Lock stdout and write both header and results
                 let stdout = stdout_mutex.lock().unwrap();
                 let mut handle = stdout.lock();
-                write!(handle, "{}", similarity_output)?;
+                write!(handle, "{similarity_output}")?;
 
                 Ok(())
             })?;
@@ -194,7 +194,7 @@ fn compute_similarities_for_region(
     delim_pos: u16,
     region: &str,
 ) -> io::Result<String> {
-    debug!("Computing similarities for region {:?}", region);
+    debug!("Computing similarities for region {region:?}");
 
     let (groups, msa_chars) = prepare_groups_and_msa(
         impg,
@@ -330,7 +330,7 @@ fn compute_pca_for_region(
                     n_components: 0,
                 })
             } else {
-                Err(io::Error::other(format!("PCA/MDS failed: {}", e)))
+                Err(io::Error::other(format!("PCA/MDS failed: {e}")))
             }
         }
     }
@@ -393,8 +393,7 @@ fn format_similarity_line(
     emit_distances: bool,
 ) {
     output.push_str(&format!(
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t",
-        chrom, start, end, name_a, name_b, len_a, len_b, intersection
+        "{chrom}\t{start}\t{end}\t{name_a}\t{name_b}\t{len_a}\t{len_b}\t{intersection}\t"
     ));
 
     if emit_distances {
@@ -417,7 +416,7 @@ fn format_similarity_line(
 }
 
 fn format_value(value: f32) -> String {
-    let formatted = format!("{:.7}", value);
+    let formatted = format!("{value:.7}");
     let trimmed = formatted.trim_end_matches('0');
     if trimmed.ends_with('.') {
         trimmed.trim_end_matches('.').to_string()
@@ -583,8 +582,7 @@ impl PcaResult {
                 let pc_value = self.coordinates[group_idx][pc_idx];
 
                 output.push_str(&format!(
-                    "{}\t{}\t{}\t{}\t{}\t{:.7}\n",
-                    chrom, start, end, group_name, pc_rank, pc_value
+                    "{chrom}\t{start}\t{end}\t{group_name}\t{pc_rank}\t{pc_value:.7}\n"
                 ));
             }
         }
@@ -733,7 +731,7 @@ fn polarize_pca_result_with_guides(
         if guide_indices[i].iter().all(|idx| idx.is_none()) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("Guide sample '{}' not found in any window", guide_name),
+                format!("Guide sample '{guide_name}' not found in any window"),
             ));
         }
     }
@@ -973,7 +971,7 @@ pub fn build_distance_matrix(
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("Unknown similarity type: {}", similarity_type),
+                    format!("Unknown similarity type: {similarity_type}"),
                 ))
             }
         };

@@ -53,7 +53,7 @@ impl AgcIndex {
                 if !agc.open(agc_path, true) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("Failed to open AGC file: {}", agc_path),
+                        format!("Failed to open AGC file: {agc_path}"),
                     ));
                 }
 
@@ -78,7 +78,7 @@ impl AgcIndex {
             for (sample, contigs) in sample_contigs {
                 for contig in contigs {
                     // Create a key that combines full contig name and sample name
-                    let key = format!("{}@{}", contig, sample);
+                    let key = format!("{contig}@{sample}");
                     index.sample_contig_to_agc.insert(key.clone(), agc_idx);
 
                     // Also insert just the full contig name if it's unique
@@ -102,7 +102,7 @@ impl AgcIndex {
                     // If short name differs from full name, also create mappings for short name
                     if short_contig != contig {
                         // Create key with short contig name and sample
-                        let short_key = format!("{}@{}", short_contig, sample);
+                        let short_key = format!("{short_contig}@{sample}");
                         index
                             .sample_contig_to_agc
                             .entry(short_key)
@@ -154,7 +154,7 @@ impl AgcIndex {
         let agc_idx = agc_idx.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("Sequence '{}' not found in any AGC file", seq_name),
+                format!("Sequence '{seq_name}' not found in any AGC file"),
             )
         })?;
 
@@ -164,8 +164,7 @@ impl AgcIndex {
             .get_contig_sequence(&sample, &contig, start, end - 1)
             .map_err(|e| {
                 io::Error::other(format!(
-                    "Failed to fetch sequence '{}@{}:{}:{}': {}",
-                    contig, sample, start, end, e
+                    "Failed to fetch sequence '{contig}@{sample}:{start}:{end}': {e}"
                 ))
             })?;
 
