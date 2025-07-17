@@ -12,12 +12,12 @@ use noodles::bgzf;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::cmp::{max, min};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::sync::Arc;
 use std::sync::RwLock;
-use std::cell::RefCell;
 
 thread_local! {
     static ALIGNERS: RefCell<Vec<AffineWavefronts>> = RefCell::new(Vec::new());
@@ -397,74 +397,46 @@ impl Impg {
 
             // Find the relevant subset of tracepoints
             for (i, &(a_len, b_len_opt)) in tracepoints.iter().enumerate() {
-                debug!("Tracepoint {}: {:?}, {:?}", i, a_len, b_len_opt);
-                debug!(
-                    "Current query_pos: {}, target_pos: {}",
-                    query_pos, target_pos
-                );
-
                 let query_delta = if metadata.strand() == Strand::Forward {
                     a_len as i32
                 } else {
                     -(a_len as i32)
                 };
                 let target_delta = b_len_opt.unwrap_or(a_len) as i32;
-                
+
                 let next_query_pos = query_pos + query_delta;
                 let next_target_pos = target_pos + target_delta;
-                
+
                 // Check if this tracepoint overlaps with the requested range
-                let overlaps = target_pos < requested_range.1 && next_target_pos >= requested_range.0;
-                
+                let overlaps =
+                    target_pos < requested_range.1 && next_target_pos >= requested_range.0;
+
                 if overlaps && !found_start {
-                    debug!("-------------->Found overlapping tracepoint: {:?}", tracepoints[i]);
-                    
                     // Found the start of the relevant region
                     start_idx = i;
                     subset_query_start = query_pos;
                     subset_target_start = target_pos;
                     found_start = true;
                 }
-                
+
                 if found_start {
                     // Update the end of the relevant region as we go
                     end_idx = i + 1;
                     subset_query_end = next_query_pos;
                     subset_target_end = next_target_pos;
-                    
+
                     // Only break if the current tracepoint no longer overlaps
                     if target_pos >= requested_range.1 {
-                        debug!("-------------->Found end of relevant tracepoint region: {:?}", tracepoints[i]);
                         break;
                     }
                 }
-                
+
                 query_pos = next_query_pos;
                 target_pos = next_target_pos;
             }
 
-            debug!("Subsets query: {}-{}, target: {}-{}",
-                subset_query_start, subset_query_end,
-                subset_target_start, subset_target_end
-            );
-
             // Extract the relevant subset of tracepoints
             let subset_tracepoints = &tracepoints[start_idx..end_idx];
-
-            debug!("Tracepoints from {} to {} ({:?})",
-                tracepoints.len(), subset_tracepoints.len(), subset_tracepoints
-            );
-            debug!(
-                "From {}/{} -> {}/{} to {}/{} -> {}/{}",
-                metadata.query_start,
-                metadata.target_start,
-                metadata.query_end,
-                metadata.target_end,
-                subset_query_start,
-                subset_target_start,
-                subset_query_end,
-                subset_target_end
-            );
 
             // Fetch only the relevant portions of the sequences
             let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
@@ -486,7 +458,8 @@ impl Impg {
 
             // Fetch target sequence
             let target_name = self.seq_index.get_name(target_id).unwrap();
-            let target_seq_result = sequence_index.fetch_sequence(target_name, subset_target_start, subset_target_end);
+            let target_seq_result =
+                sequence_index.fetch_sequence(target_name, subset_target_start, subset_target_end);
 
             // Convert tracepoints to CIGAR if we successfully fetched both sequences
             match (query_seq_result, target_seq_result) {
