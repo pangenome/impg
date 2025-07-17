@@ -414,7 +414,7 @@ impl Impg {
                 let next_target_pos = target_pos + target_delta;
                 
                 // Check if this tracepoint overlaps with the requested range
-                let overlaps = target_pos < requested_range.1 && next_target_pos > requested_range.0;
+                let overlaps = target_pos < requested_range.1 && next_target_pos >= requested_range.0;
                 
                 if overlaps && !found_start {
                     debug!("-------------->Found overlapping tracepoint: {:?}", tracepoints[i]);
