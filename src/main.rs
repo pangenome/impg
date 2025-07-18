@@ -253,7 +253,7 @@ struct QueryOpts {
     #[clap(long, value_parser, default_value_t = 0)]
     min_distance_between_ranges: i32,
 
-    /// Update coordinates to original sequences when input sequences are subsequences
+    /// Update coordinates to original sequences when input sequences are subsequences (seq_name:start-end) for 'bed', 'bedpe', and 'paf'
     #[clap(long, action)]
     original_sequence_coordinates: bool,
 }
