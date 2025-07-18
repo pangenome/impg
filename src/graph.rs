@@ -152,7 +152,7 @@ pub fn prepare_poa_graph_and_sequences(
     let (match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2) = scoring_params;
 
     // Parallelize sequence fetching and processing
-    let processed_sequences: Vec<(String, SequenceMetadata)> = results
+    let mut processed_sequences: Vec<(String, SequenceMetadata)> = results
         .par_iter()
         .map(|interval| -> io::Result<(String, SequenceMetadata)> {
             let seq_name = impg.seq_index.get_name(interval.metadata).ok_or_else(|| {
@@ -210,6 +210,9 @@ pub fn prepare_poa_graph_and_sequences(
             Ok((sequence_str, metadata))
         })
         .collect::<Result<Vec<_>, _>>()?;
+
+    // Sort sequences by length in descending order (longest first)
+    processed_sequences.par_sort_by(|a, b| b.0.len().cmp(&a.0.len()));
 
     // Create a SPOA graph
     let mut graph = SpoaGraph::new();
