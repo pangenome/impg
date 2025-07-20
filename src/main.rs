@@ -177,8 +177,8 @@ impl GfaMafFastaOpts {
         Option<UnifiedSequenceIndex>,
         Option<(u8, u8, u8, u8, u8, u8)>,
     )> {
-        let needs_sequence = matches!(output_format, "gfa" | "maf" | "fasta") 
-            || (output_format == "paf" && original_sequence_coordinates);
+        let needs_sequence_mandatory = matches!(output_format, "gfa" | "maf" | "fasta");
+        let needs_sequence_optional = output_format == "paf" && original_sequence_coordinates;
         let needs_poa = matches!(output_format, "gfa" | "maf");
 
         let scoring_params = if needs_poa {
@@ -187,9 +187,9 @@ impl GfaMafFastaOpts {
             None
         };
 
-        let sequence_index = if needs_sequence {
+        let sequence_index = if needs_sequence_mandatory || needs_sequence_optional {
             let index = self.build_sequence_index()?;
-            if index.is_none() {
+            if index.is_none() && needs_sequence_mandatory {
                 #[cfg(feature = "agc")]
                 let msg = format!("Sequence files (FASTA/AGC) are required for '{}' output format. Use --sequence-files or --sequence-list", output_format);
                 #[cfg(not(feature = "agc"))]
