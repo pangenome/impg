@@ -8,6 +8,7 @@ use crate::faidx::FastaIndex;
 // Trait for sequence fetching from different sources
 pub trait SequenceIndex {
     fn fetch_sequence(&self, seq_name: &str, start: i32, end: i32) -> io::Result<Vec<u8>>;
+    fn get_sequence_length(&self, seq_name: &str) -> io::Result<usize>;
 }
 
 // Enum to hold either FASTA or AGC index
@@ -84,12 +85,24 @@ impl SequenceIndex for UnifiedSequenceIndex {
             UnifiedSequenceIndex::Agc(index) => index.fetch_sequence(seq_name, start, end),
         }
     }
+
+    fn get_sequence_length(&self, seq_name: &str) -> io::Result<usize> {
+        match self {
+            UnifiedSequenceIndex::Fasta(index) => index.get_sequence_length(seq_name),
+            #[cfg(feature = "agc")]
+            UnifiedSequenceIndex::Agc(index) => index.get_sequence_length(seq_name),
+        }
+    }
 }
 
 // Implement for FastaIndex
 impl SequenceIndex for FastaIndex {
     fn fetch_sequence(&self, seq_name: &str, start: i32, end: i32) -> io::Result<Vec<u8>> {
         FastaIndex::fetch_sequence(self, seq_name, start, end)
+    }
+
+    fn get_sequence_length(&self, seq_name: &str) -> io::Result<usize> {
+        FastaIndex::get_sequence_length(self, seq_name)
     }
 }
 
@@ -98,5 +111,9 @@ impl SequenceIndex for FastaIndex {
 impl SequenceIndex for AgcIndex {
     fn fetch_sequence(&self, seq_name: &str, start: i32, end: i32) -> io::Result<Vec<u8>> {
         AgcIndex::fetch_sequence(self, seq_name, start, end)
+    }
+
+    fn get_sequence_length(&self, seq_name: &str) -> io::Result<usize> {
+        AgcIndex::get_sequence_length(self, seq_name)
     }
 }

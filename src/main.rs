@@ -168,15 +168,17 @@ impl GfaMafFastaOpts {
         }
     }
 
-    /// Helper to validate and setup POA/sequence resources for a given output format
-    fn setup_poa_sequence_resources(
+    /// Helper to validate and setup POA/sequence resources for a given output format, including sequence index for PAF with original coordinates
+    fn setup_output_resources(
         self,
         output_format: &str,
+        original_sequence_coordinates: bool,
     ) -> io::Result<(
         Option<UnifiedSequenceIndex>,
         Option<(u8, u8, u8, u8, u8, u8)>,
     )> {
-        let needs_sequence = matches!(output_format, "gfa" | "maf" | "fasta");
+        let needs_sequence_mandatory = matches!(output_format, "gfa" | "maf" | "fasta");
+        let needs_sequence_optional = output_format == "paf" && original_sequence_coordinates;
         let needs_poa = matches!(output_format, "gfa" | "maf");
 
         let scoring_params = if needs_poa {
@@ -185,9 +187,9 @@ impl GfaMafFastaOpts {
             None
         };
 
-        let sequence_index = if needs_sequence {
+        let sequence_index = if needs_sequence_mandatory || needs_sequence_optional {
             let index = self.build_sequence_index()?;
-            if index.is_none() {
+            if index.is_none() && needs_sequence_mandatory {
                 #[cfg(feature = "agc")]
                 let msg = format!("Sequence files (FASTA/AGC) are required for '{}' output format. Use --sequence-files or --sequence-list", output_format);
                 #[cfg(not(feature = "agc"))]
@@ -307,6 +309,34 @@ fn transform_coordinates_to_original(
     } else {
         (seq_name.to_string(), start, end)
     }
+}
+
+/// Get the original sequence length when using original_sequence_coordinates
+fn get_original_sequence_length(
+    original_seq_name: &str,
+    external_seq_index: Option<&UnifiedSequenceIndex>,
+) -> usize {
+    // If we have an external sequence index, try to get the length from it
+    if let Some(ext_index) = external_seq_index {
+        match ext_index.get_sequence_length(original_seq_name) {
+            Ok(length) => return length,
+            Err(_) => {
+                // Emit warning when sequence not found in index
+                warn!(
+                    "Sequence '{}' not found in sequence index, using 0 as length for PAF output",
+                    original_seq_name
+                );
+            }
+        }
+    } else {
+        // Emit warning when no index is provided
+        warn!(
+            "No sequence index provided, using 0 as length for PAF output of sequence '{}'",
+            original_seq_name
+        );
+    }
+
+    0 // Return 0 if the sequence is not found or no index is provided
 }
 
 /// Command-line tool for querying overlaps in PAF files.
@@ -509,7 +539,7 @@ fn main() -> io::Result<()> {
 
             // Setup POA/sequence resources
             let (sequence_index, scoring_params) =
-                gfa_maf_fasta.setup_poa_sequence_resources(&output_format)?;
+                gfa_maf_fasta.setup_output_resources(&output_format, false)?;
 
             let impg = initialize_impg(&common)?;
 
@@ -603,7 +633,7 @@ fn main() -> io::Result<()> {
 
             // Setup POA/sequence resources
             let (sequence_index, scoring_params) =
-                gfa_maf_fasta.setup_poa_sequence_resources(resolved_output_format)?;
+                gfa_maf_fasta.setup_output_resources(resolved_output_format, query.original_sequence_coordinates)?;
 
             // Process all target ranges in a unified loop
             for (target_name, target_range, name) in target_ranges {
@@ -652,6 +682,7 @@ fn main() -> io::Result<()> {
                             Some(name),
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
+                            sequence_index.as_ref(),
                         );
                     }
                     "gfa" => {
@@ -741,7 +772,7 @@ fn main() -> io::Result<()> {
 
             // Setup POA/sequence resources (always required for similarity)
             let (sequence_index, scoring_params) =
-                gfa_maf_fasta.setup_poa_sequence_resources("gfa")?;
+                gfa_maf_fasta.setup_output_resources("gfa", false)?;
             let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
             let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA
             let impg = initialize_impg(&common)?;
@@ -1386,6 +1417,7 @@ fn output_results_paf(
     name: Option<String>,
     merge_distance: i32,
     original_coordinates: bool,
+    sequence_index: Option<&UnifiedSequenceIndex>,
 ) {
     merge_adjusted_intervals(results, merge_distance);
 
@@ -1404,14 +1436,28 @@ fn output_results_paf(
         let (transformed_target_name, transformed_target_first, transformed_target_last) = 
             transform_coordinates_to_original(target_name, overlap_target.first as u32, overlap_target.last as u32, original_coordinates);
 
-        let query_length = impg
-            .seq_index
-            .get_len_from_id(overlap_query.metadata)
-            .unwrap();
-        let target_length = impg
-            .seq_index
-            .get_len_from_id(overlap_target.metadata)
-            .unwrap();
+        // Get original sequence lengths when original_sequence_coordinates is enabled
+        let query_length = if original_coordinates {
+            get_original_sequence_length(
+                &transformed_query_name,
+                sequence_index,
+            )
+        } else {
+            impg.seq_index
+                .get_len_from_id(overlap_query.metadata)
+                .unwrap()
+        };
+        
+        let target_length = if original_coordinates {
+            get_original_sequence_length(
+                &transformed_target_name,
+                sequence_index,
+            )
+        } else {
+            impg.seq_index
+                .get_len_from_id(overlap_target.metadata)
+                .unwrap()
+        };
 
         let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, block_len) =
             cigar.iter().fold(

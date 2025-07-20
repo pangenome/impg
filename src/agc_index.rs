@@ -171,6 +171,23 @@ impl AgcIndex {
 
         Ok(sequence.into_bytes())
     }
+
+    pub fn get_sequence_length(&self, seq_name: &str) -> io::Result<usize> {
+        let (sample, contig, agc_idx) = self.parse_query(seq_name);
+        
+        let agc_idx = agc_idx.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Sequence '{}' not found in any AGC file", seq_name),
+            )
+        })?;
+
+        // Get the full sequence to determine its length
+        // This is not the most efficient approach, but AGC doesn't provide a direct length query
+        let agc_files = self.agc_wrapper.agc_files.lock().unwrap();
+
+        Ok(agc_files[agc_idx].get_contig_length(&sample, &contig) as usize)
+    }
 }
 
 #[cfg(test)]
