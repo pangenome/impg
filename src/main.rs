@@ -323,7 +323,7 @@ fn get_original_sequence_length(
             Err(_) => {
                 // Emit warning when sequence not found in index
                 warn!(
-                    "Sequence '{}' not found in sequence index, using subsequence length for PAF output",
+                    "Sequence '{}' not found in sequence index, using 0 as length for PAF output",
                     original_seq_name
                 );
             }
