@@ -168,15 +168,17 @@ impl GfaMafFastaOpts {
         }
     }
 
-    /// Helper to validate and setup POA/sequence resources for a given output format
-    fn setup_poa_sequence_resources(
+    /// Helper to validate and setup POA/sequence resources for a given output format, including sequence index for PAF with original coordinates
+    fn setup_output_resources(
         self,
         output_format: &str,
+        original_sequence_coordinates: bool,
     ) -> io::Result<(
         Option<UnifiedSequenceIndex>,
         Option<(u8, u8, u8, u8, u8, u8)>,
     )> {
-        let needs_sequence = matches!(output_format, "gfa" | "maf" | "fasta");
+        let needs_sequence = matches!(output_format, "gfa" | "maf" | "fasta") 
+            || (output_format == "paf" && original_sequence_coordinates);
         let needs_poa = matches!(output_format, "gfa" | "maf");
 
         let scoring_params = if needs_poa {
@@ -329,7 +331,7 @@ fn get_original_sequence_length(
     } else {
         // Emit warning when no index is provided
         warn!(
-            "No sequence index provided, using subsequence length for PAF output of sequence '{}'",
+            "No sequence index provided, using 0 as length for PAF output of sequence '{}'",
             original_seq_name
         );
     }
@@ -537,7 +539,7 @@ fn main() -> io::Result<()> {
 
             // Setup POA/sequence resources
             let (sequence_index, scoring_params) =
-                gfa_maf_fasta.setup_poa_sequence_resources(&output_format)?;
+                gfa_maf_fasta.setup_output_resources(&output_format, false)?;
 
             let impg = initialize_impg(&common)?;
 
@@ -631,7 +633,7 @@ fn main() -> io::Result<()> {
 
             // Setup POA/sequence resources
             let (sequence_index, scoring_params) =
-                gfa_maf_fasta.setup_poa_sequence_resources(resolved_output_format)?;
+                gfa_maf_fasta.setup_output_resources(resolved_output_format, query.original_sequence_coordinates)?;
 
             // Process all target ranges in a unified loop
             for (target_name, target_range, name) in target_ranges {
@@ -770,7 +772,7 @@ fn main() -> io::Result<()> {
 
             // Setup POA/sequence resources (always required for similarity)
             let (sequence_index, scoring_params) =
-                gfa_maf_fasta.setup_poa_sequence_resources("gfa")?;
+                gfa_maf_fasta.setup_output_resources("gfa", false)?;
             let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
             let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA
             let impg = initialize_impg(&common)?;
