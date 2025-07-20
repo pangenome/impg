@@ -309,6 +309,34 @@ fn transform_coordinates_to_original(
     }
 }
 
+/// Get the original sequence length when using original_sequence_coordinates
+fn get_original_sequence_length(
+    original_seq_name: &str,
+    external_seq_index: Option<&UnifiedSequenceIndex>,
+) -> usize {
+    // If we have an external sequence index, try to get the length from it
+    if let Some(ext_index) = external_seq_index {
+        match ext_index.get_sequence_length(original_seq_name) {
+            Ok(length) => return length,
+            Err(_) => {
+                // Emit warning when sequence not found in index
+                warn!(
+                    "Sequence '{}' not found in sequence index, using subsequence length for PAF output",
+                    original_seq_name
+                );
+            }
+        }
+    } else {
+        // Emit warning when no index is provided
+        warn!(
+            "No sequence index provided, using subsequence length for PAF output of sequence '{}'",
+            original_seq_name
+        );
+    }
+
+    0 // Return 0 if the sequence is not found or no index is provided
+}
+
 /// Command-line tool for querying overlaps in PAF files.
 #[derive(Parser, Debug)]
 #[command(author, version, about, disable_help_subcommand = true)]
@@ -652,6 +680,7 @@ fn main() -> io::Result<()> {
                             Some(name),
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
+                            sequence_index.as_ref(),
                         );
                     }
                     "gfa" => {
@@ -1386,6 +1415,7 @@ fn output_results_paf(
     name: Option<String>,
     merge_distance: i32,
     original_coordinates: bool,
+    sequence_index: Option<&UnifiedSequenceIndex>,
 ) {
     merge_adjusted_intervals(results, merge_distance);
 
@@ -1404,14 +1434,28 @@ fn output_results_paf(
         let (transformed_target_name, transformed_target_first, transformed_target_last) = 
             transform_coordinates_to_original(target_name, overlap_target.first as u32, overlap_target.last as u32, original_coordinates);
 
-        let query_length = impg
-            .seq_index
-            .get_len_from_id(overlap_query.metadata)
-            .unwrap();
-        let target_length = impg
-            .seq_index
-            .get_len_from_id(overlap_target.metadata)
-            .unwrap();
+        // Get original sequence lengths when original_sequence_coordinates is enabled
+        let query_length = if original_coordinates {
+            get_original_sequence_length(
+                &transformed_query_name,
+                sequence_index,
+            )
+        } else {
+            impg.seq_index
+                .get_len_from_id(overlap_query.metadata)
+                .unwrap()
+        };
+        
+        let target_length = if original_coordinates {
+            get_original_sequence_length(
+                &transformed_target_name,
+                sequence_index,
+            )
+        } else {
+            impg.seq_index
+                .get_len_from_id(overlap_target.metadata)
+                .unwrap()
+        };
 
         let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, block_len) =
             cigar.iter().fold(

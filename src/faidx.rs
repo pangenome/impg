@@ -7,6 +7,7 @@ use std::io::{self};
 pub struct FastaIndex {
     pub fasta_paths: Vec<String>,
     pub path_key_to_fasta: FxHashMap<String, usize>,
+    pub sequence_lengths: FxHashMap<String, usize>,
 }
 
 impl FastaIndex {
@@ -14,6 +15,7 @@ impl FastaIndex {
         FastaIndex {
             fasta_paths: Vec::new(),
             path_key_to_fasta: FxHashMap::default(),
+            sequence_lengths: FxHashMap::default(),
         }
     }
 
@@ -46,13 +48,22 @@ impl FastaIndex {
                 }
             };
 
-            // Parse the .fai file to get sequence names
+            // Parse the .fai file to get sequence names and lengths
             for line in fai_content.lines() {
-                if let Some(seq_name) = line.split('\t').next() {
+                let fields: Vec<&str> = line.split('\t').collect();
+                if fields.len() >= 2 {
+                    let seq_name = fields[0];
                     if !seq_name.is_empty() {
                         index
                             .path_key_to_fasta
                             .insert(seq_name.to_string(), fasta_idx);
+                        
+                        // Parse sequence length (second field in .fai file)
+                        if let Ok(length) = fields[1].parse::<usize>() {
+                            index
+                                .sequence_lengths
+                                .insert(seq_name.to_string(), length);
+                        }
                     }
                 }
             }
@@ -100,5 +111,14 @@ impl FastaIndex {
         };
 
         Ok(seq_vec)
+    }
+
+    pub fn get_sequence_length(&self, seq_name: &str) -> io::Result<usize> {
+        self.sequence_lengths.get(seq_name).copied().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Sequence '{}' not found", seq_name),
+            )
+        })
     }
 }
