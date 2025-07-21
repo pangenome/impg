@@ -416,6 +416,10 @@ enum Args {
         /// Minimum distance from sequence start/end - closer regions will be extended to the boundaries
         #[clap(long, value_parser, default_value_t = 3000)]
         min_boundary_distance: i32,
+
+        /// Output separate files for each partition when 'bed'
+        #[clap(long, action)]
+        separate_files: bool,
     },
     /// Query overlaps in the alignment
     Query {
@@ -522,6 +526,7 @@ fn main() -> io::Result<()> {
             selection_mode,
             min_missing_size,
             min_boundary_distance,
+            separate_files,
         } => {
             validate_selection_mode(&selection_mode)?;
             validate_output_format(&output_format, &["bed", "gfa", "maf", "fasta"])?;
@@ -562,6 +567,7 @@ fn main() -> io::Result<()> {
                 scoring_params,
                 reverse_complement,
                 common.verbose > 1,
+                separate_files,
             )?;
         }
         Args::Query {
