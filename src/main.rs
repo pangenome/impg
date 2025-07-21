@@ -539,6 +539,17 @@ fn main() -> io::Result<()> {
                 gfa_maf_fasta.force_large_region,
             )?;
 
+            // Validate single-file output compatibility
+            if !separate_files && output_format != "bed" {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Single-file output is only supported for BED format. Use --separate-files for {} format.",
+                        output_format.to_uppercase()
+                    ),
+                ));
+            }
+
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
 
