@@ -416,6 +416,10 @@ enum Args {
         /// Minimum distance from sequence start/end - closer regions will be extended to the boundaries
         #[clap(long, value_parser, default_value_t = 3000)]
         min_boundary_distance: i32,
+
+        /// Output separate files for each partition when 'bed'
+        #[clap(long, action)]
+        separate_files: bool,
     },
     /// Query overlaps in the alignment
     Query {
@@ -522,6 +526,7 @@ fn main() -> io::Result<()> {
             selection_mode,
             min_missing_size,
             min_boundary_distance,
+            separate_files,
         } => {
             validate_selection_mode(&selection_mode)?;
             validate_output_format(&output_format, &["bed", "gfa", "maf", "fasta"])?;
@@ -533,6 +538,17 @@ fn main() -> io::Result<()> {
                 merge_distance,
                 gfa_maf_fasta.force_large_region,
             )?;
+
+            // Validate single-file output compatibility
+            if !separate_files && output_format != "bed" {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Single-file output is only supported for BED format. Use --separate-files for {} format.",
+                        output_format.to_uppercase()
+                    ),
+                ));
+            }
 
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
@@ -562,6 +578,7 @@ fn main() -> io::Result<()> {
                 scoring_params,
                 reverse_complement,
                 common.verbose > 1,
+                separate_files,
             )?;
         }
         Args::Query {

@@ -45,6 +45,7 @@ pub fn partition_alignments(
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
     reverse_complement: bool,
     debug: bool,
+    separate_files: bool,
 ) -> io::Result<()> {
     // Initialize windows from starting sequences if provided
     let mut windows = Vec::<(u32, i32, i32)>::new();
@@ -158,6 +159,9 @@ pub fn partition_alignments(
 
     // Track temporary BED files for GFA/MAF conversion
     let mut temp_bed_files = Vec::new();
+    
+    // Collect partitions for single-file output
+    let mut collected_partitions: Vec<(usize, Vec<Interval<u32>>)> = Vec::new();
 
     while !windows.is_empty() {
         if debug {
@@ -329,45 +333,68 @@ pub fn partition_alignments(
                     .map(|(query_interval, _, _)| query_interval)
                     .collect();
 
-                // Write partition
-                match output_format {
-                    "bed" => {
-                        // Write BED file directly
-                        write_partition_bed(
-                            partition_num,
-                            &query_intervals,
-                            impg,
-                            output_folder,
-                            None,
-                        )?;
+                // Write partition or collect for single-file output
+                if separate_files {
+                    // Legacy behavior: write separate files
+                    match output_format {
+                        "bed" => {
+                            // Write BED file directly
+                            write_partition_bed(
+                                partition_num,
+                                &query_intervals,
+                                impg,
+                                output_folder,
+                                None,
+                            )?;
+                        }
+                        "gfa" | "maf" => {
+                            // Write temporary BED file with .tmp suffix
+                            write_partition_bed(
+                                partition_num,
+                                &query_intervals,
+                                impg,
+                                output_folder,
+                                Some(".tmp"),
+                            )?;
+                            temp_bed_files.push(partition_num);
+                        }
+                        "fasta" => {
+                            // Write FASTA file directly
+                            write_partition_fasta(
+                                partition_num,
+                                &query_intervals,
+                                impg,
+                                output_folder,
+                                sequence_index.expect("Sequence index not found"),
+                                reverse_complement,
+                            )?;
+                        }
+                        _ => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!("Unsupported output format: {}", output_format),
+                            ));
+                        }
                     }
-                    "gfa" | "maf" => {
-                        // Write temporary BED file with .tmp suffix
-                        write_partition_bed(
-                            partition_num,
-                            &query_intervals,
-                            impg,
-                            output_folder,
-                            Some(".tmp"),
-                        )?;
-                        temp_bed_files.push(partition_num);
-                    }
-                    "fasta" => {
-                        // Write FASTA file directly
-                        write_partition_fasta(
-                            partition_num,
-                            &query_intervals,
-                            impg,
-                            output_folder,
-                            sequence_index.expect("Sequence index not found"),
-                            reverse_complement,
-                        )?;
-                    }
-                    _ => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("Unsupported output format: {}", output_format),
-                        ));
+                } else {
+                    // New behavior: collect partitions for single-file output
+                    match output_format {
+                        "bed" => {
+                            // Collect BED partitions
+                            collected_partitions.push((partition_num, query_intervals.clone()));
+                        }
+                        "gfa" | "maf" | "fasta" => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "Single-file output is only supported for BED format. Use --separate-files for GFA, MAF, or FASTA formats.".to_string(),
+                            ));
+                        }
+                        _ => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!("Unsupported output format: {}", output_format),
+                            ));
+                        }
                     }
                 }
 
@@ -460,6 +487,21 @@ pub fn partition_alignments(
 
                 Ok(())
             })?;
+    }
+
+    // Write collected partitions as single file if not using separate files
+    if !separate_files && !collected_partitions.is_empty() {
+        info!(
+            "Writing {} partitions to single {} file",
+            collected_partitions.len(),
+            output_format
+        );
+        write_single_partition_file(
+            &collected_partitions,
+            impg,
+            output_format,
+            output_folder,
+        )?;
     }
 
     // Calculate final percentage
@@ -1342,6 +1384,45 @@ fn write_partition_fasta(
     }
     writer.flush()?;
     Ok(())
+}
+
+fn write_single_partition_file(
+    collected_partitions: &[(usize, Vec<Interval<u32>>)],
+    impg: &Impg,
+    output_format: &str,
+    output_folder: Option<&str>,
+) -> io::Result<()> {
+    match output_format {
+        "bed" => {
+            // Create single BED file with partition column
+            let filename = "partitions.bed";
+            let full_path = create_output_path(output_folder, filename)?;
+            let file = File::create(full_path)?;
+            let mut writer = BufWriter::new(file);
+
+            for (partition_num, query_intervals) in collected_partitions {
+                for query_interval in query_intervals {
+                    let name = impg.seq_index.get_name(query_interval.metadata).unwrap();
+                    let (start, end) = if query_interval.first <= query_interval.last {
+                        (query_interval.first, query_interval.last)
+                    } else {
+                        (query_interval.last, query_interval.first)
+                    };
+
+                    writeln!(writer, "{}	{}	{}	{}", name, start, end, partition_num)?;
+                }
+            }
+
+            writer.flush()?;
+            Ok(())
+        }
+        _ => {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Single-file output not supported for format: {}", output_format),
+            ))
+        }
+    }
 }
 
 pub fn parse_bed_file(bed_file: &str) -> io::Result<Vec<(String, (i32, i32), String)>> {

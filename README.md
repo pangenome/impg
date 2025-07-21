@@ -103,8 +103,11 @@ impg query -p alignments.paf -r chr1:1000-2000 --transitive-dfs
 Partition the alignment into smaller pieces:
 
 ```bash
-# Basic partitioning with 1Mb windows
+# Basic partitioning with 1Mb windows (outputs single partitions.bed file with partition number in 4th column)
 impg partition -p alignments.paf -w 1000000
+
+# Output separate files for each partition
+impg partition -p alignments.paf -w 1000000 --separate-files
 
 # Specify output folder for partition files (directory will be created if it doesn't exist)
 impg partition -p alignments.paf -w 1000000 --output-folder results
@@ -124,13 +127,13 @@ impg partition -p alignments.paf -w 1000000 --selection-mode haplotype      # by
 # Control transitive search depth and minimum sizes
 impg partition -p alignments.paf -w 1000000 -m 2 -l 10000
 
-# Output as GFA, MAF or FASTA requires sequence files (--sequence-files or --sequence-list)
-impg partition -p alignments.paf -w 1000000 -o gfa --sequence-files *.fa --output-folder gfa_partitions
-impg partition -p alignments.paf -w 1000000 -o maf --sequence-list fastas.txt --output-folder maf_partitions
-impg partition -p alignments.paf -w 1000000 -o fasta --sequence-files *.fa --output-folder fasta_partitions
+# Output as GFA, MAF or FASTA requires sequence files and --separate-files flag
+impg partition -p alignments.paf -w 1000000 -o gfa --sequence-files *.fa --separate-files --output-folder gfa_partitions
+impg partition -p alignments.paf -w 1000000 -o maf --sequence-list fastas.txt --separate-files --output-folder maf_partitions
+impg partition -p alignments.paf -w 1000000 -o fasta --sequence-files *.fa --separate-files --output-folder fasta_partitions
 
 # Works with AGC archives too
-impg partition -p alignments.paf -w 1000000 -o gfa --sequence-files genomes.agc --output-folder gfa_partitions
+impg partition -p alignments.paf -w 1000000 -o gfa --sequence-files genomes.agc --separate-files --output-folder gfa_partitions
 ```
 
 ### Similarity
