@@ -103,7 +103,7 @@ impg query -p alignments.paf -r chr1:1000-2000 --transitive-dfs
 Partition the alignment into smaller pieces:
 
 ```bash
-# Basic partitioning with 1Mb windows (outputs single partitions.bed file)
+# Basic partitioning with 1Mb windows (outputs single partitions.bed file with partition number in 4th column)
 impg partition -p alignments.paf -w 1000000
 
 # Output separate files for each partition
