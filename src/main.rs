@@ -5,7 +5,7 @@ use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::paf::{PartialPafRecord, Strand};
 use impg::seqidx::SequenceIndex;
 use impg::sequence_index::{SequenceIndex as SeqIndexTrait, UnifiedSequenceIndex};
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use noodles::bgzf;
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
@@ -51,9 +51,9 @@ struct PafOpts {
     force_reindex: bool,
 }
 
-/// Common sequence and POA scoring options
+/// Sequence file options for commands that need FASTA/AGC files
 #[derive(Parser, Debug)]
-struct GfaMafFastaOpts {
+struct SequenceOpts {
     /// List of sequence file paths (FASTA or AGC) (required for 'gfa', 'maf', and 'fasta')
     #[cfg(feature = "agc")]
     #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["sequence_list"])]
@@ -73,21 +73,9 @@ struct GfaMafFastaOpts {
     #[cfg(not(feature = "agc"))]
     #[clap(long, value_parser, conflicts_with_all = &["sequence_files"])]
     sequence_list: Option<String>,
-
-    /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for 'gfa' and 'maf')
-    #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
-    poa_scoring: String,
-
-    /// Reverse complement reverse strand sequences (for 'fasta' output)
-    #[clap(long, action)]
-    reverse_complement: bool,
-
-    /// Force processing of large regions (>10kbp) with maf/gfa output formats
-    #[clap(long, action)]
-    force_large_region: bool,
 }
 
-impl GfaMafFastaOpts {
+impl SequenceOpts {
     /// Resolve sequence files from either --sequence-files or --sequence-list
     fn resolve_sequence_files(self) -> io::Result<Vec<String>> {
         match (self.sequence_files, self.sequence_list) {
@@ -116,6 +104,57 @@ impl GfaMafFastaOpts {
         }
     }
 
+    /// Build sequence index if files are provided
+    fn build_sequence_index(self) -> io::Result<Option<UnifiedSequenceIndex>> {
+        let seq_files = self.resolve_sequence_files()?;
+
+        if seq_files.is_empty() {
+            Ok(None)
+        } else {
+            match UnifiedSequenceIndex::from_files(&seq_files) {
+                Ok(index) => {
+                    let (file_type, num_files) = match &index {
+                        UnifiedSequenceIndex::Fasta(fasta_index) => {
+                            ("FASTA", fasta_index.fasta_paths.len())
+                        }
+                        #[cfg(feature = "agc")]
+                        UnifiedSequenceIndex::Agc(agc_index) => ("AGC", agc_index.agc_paths.len()),
+                    };
+                    info!("Built {} index for {} files", file_type, num_files);
+                    Ok(Some(index))
+                }
+                Err(e) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Failed to build sequence index: {}", e),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// Common sequence and POA scoring options
+#[derive(Parser, Debug)]
+struct GfaMafFastaOpts {
+    #[clap(flatten)]
+    sequence: SequenceOpts,
+
+    /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for 'gfa' and 'maf')
+    #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
+    poa_scoring: String,
+
+    /// Reverse complement reverse strand sequences (for 'fasta' output)
+    #[clap(long, action)]
+    reverse_complement: bool,
+
+    /// Force processing of large regions (>10kbp) with maf/gfa output formats
+    #[clap(long, action)]
+    force_large_region: bool,
+}
+
+
+impl GfaMafFastaOpts {
     /// Parse POA scoring parameters
     fn parse_poa_scoring(&self) -> io::Result<(u8, u8, u8, u8, u8, u8)> {
         let parts: Vec<&str> = self.poa_scoring.split(',').collect();
@@ -145,33 +184,6 @@ impl GfaMafFastaOpts {
         ))
     }
 
-    /// Build sequence index if files are provided
-    fn build_sequence_index(self) -> io::Result<Option<UnifiedSequenceIndex>> {
-        let seq_files = self.resolve_sequence_files()?;
-
-        if seq_files.is_empty() {
-            Ok(None)
-        } else {
-            match UnifiedSequenceIndex::from_files(&seq_files) {
-                Ok(index) => {
-                    let (file_type, num_files) = match &index {
-                        UnifiedSequenceIndex::Fasta(fasta_index) => {
-                            ("FASTA", fasta_index.fasta_paths.len())
-                        }
-                        #[cfg(feature = "agc")]
-                        UnifiedSequenceIndex::Agc(agc_index) => ("AGC", agc_index.agc_paths.len()),
-                    };
-                    info!("Built {} index for {} files", file_type, num_files);
-                    Ok(Some(index))
-                }
-                Err(e) => {
-                    error!("Failed to build sequence index: {}", e);
-                    Err(e)
-                }
-            }
-        }
-    }
-
     /// Helper to validate and setup POA/sequence resources for a given output format, including sequence index for PAF with original coordinates
     fn setup_output_resources(
         self,
@@ -192,7 +204,7 @@ impl GfaMafFastaOpts {
         };
 
         let sequence_index = if needs_sequence_mandatory || needs_sequence_optional {
-            let index = self.build_sequence_index()?;
+            let index = self.sequence.build_sequence_index()?;
             if index.is_none() && needs_sequence_mandatory {
                 #[cfg(feature = "agc")]
                 let msg = format!("Sequence files (FASTA/AGC) are required for '{}' output format. Use --sequence-files or --sequence-list", output_format);
@@ -350,16 +362,13 @@ enum Args {
     /// Create an IMPG index
     Index {
         #[clap(flatten)]
-        common: CommonOpts,
+        paf: PafOpts,
 
         #[clap(flatten)]
-        paf: PafOpts,
+        common: CommonOpts,
     },
     /// Partition the alignment
     Partition {
-        #[clap(flatten)]
-        common: CommonOpts,
-
         #[clap(flatten)]
         paf: PafOpts,
 
@@ -430,12 +439,12 @@ enum Args {
         /// Output separate files for each partition when 'bed'
         #[clap(long, action)]
         separate_files: bool,
+
+        #[clap(flatten)]
+        common: CommonOpts,
     },
     /// Query overlaps in the alignment
     Query {
-        #[clap(flatten)]
-        common: CommonOpts,
-
         #[clap(flatten)]
         paf: PafOpts,
 
@@ -448,12 +457,12 @@ enum Args {
 
         #[clap(flatten)]
         gfa_maf_fasta: GfaMafFastaOpts,
+
+        #[clap(flatten)]
+        common: CommonOpts,
     },
     /// Compute pairwise similarity between sequences in a region
     Similarity {
-        #[clap(flatten)]
-        common: CommonOpts,
-
         #[clap(flatten)]
         paf: PafOpts,
 
@@ -509,20 +518,20 @@ enum Args {
         /// Similarity measure to use for PCA distance matrix ("jaccard", "cosine", or "dice")
         #[clap(long, value_parser, requires = "pca", default_value = "jaccard")]
         pca_measure: String,
+
+        #[clap(flatten)]
+        common: CommonOpts,
     },
     /// Print alignment statistics
     Stats {
         #[clap(flatten)]
-        common: CommonOpts,
+        paf: PafOpts,
 
         #[clap(flatten)]
-        paf: PafOpts,
+        common: CommonOpts,
     },
     /// Lace pangenome graphs together
     Lace {
-        #[clap(flatten)]
-        common: CommonOpts,
-
         /// List of input GFA files (space-separated)
         #[clap(short = 'g', long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with = "gfa_list")]
         gfa_files: Option<Vec<String>>,
@@ -543,17 +552,15 @@ enum Args {
         #[clap(long, default_value = "0")]
         fill_gaps: u8,
 
-        /// FASTA files for gap filling (space-separated)
-        #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["fasta_list"])]
-        fasta_files: Option<Vec<String>>,
-
-        /// Text file containing FASTA paths (one per line)
-        #[clap(long, value_parser, conflicts_with_all = &["fasta_files"])]
-        fasta_list: Option<String>,
+        #[clap(flatten)]
+        sequence: SequenceOpts,
 
         /// Directory for temporary files
         #[clap(long, value_parser)]
         temp_dir: Option<String>,
+
+        #[clap(flatten)]
+        common: CommonOpts,
     },
 }
 
@@ -963,13 +970,12 @@ fn main() -> io::Result<()> {
         }
         Args::Lace { 
             common,
+            sequence,
             gfa_files,
             gfa_list,
             output,
             compress,
             fill_gaps,
-            fasta_files,
-            fasta_list,
             temp_dir,
         } => {
             // Validate that either gfa_files or gfa_list is provided
@@ -998,15 +1004,17 @@ fn main() -> io::Result<()> {
                 ));
             }
 
+            // Build sequence index for sequence fetching (always build if sequence files provided)
+            let sequence_index = sequence.build_sequence_index()?;
+
             lace::run_lace(
                 gfa_files,
                 gfa_list,
                 &output,
                 &compress,
                 fill_gaps,
-                fasta_files,
-                fasta_list,
                 temp_dir,
+                sequence_index.as_ref(),
                 common.threads,
                 common.verbose,
             )?;
