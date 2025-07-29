@@ -499,13 +499,42 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
     },
-    /// Lace sequences together
+    /// Lace pangenome graphs together
     Lace {
         #[clap(flatten)]
         common: CommonOpts,
 
-        #[clap(flatten)]
-        gfa_maf_fasta: GfaMafFastaOpts,
+        /// List of input GFA files (space-separated)
+        #[clap(short = 'g', long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with = "gfa_list")]
+        gfa_files: Option<Vec<String>>,
+
+        /// Text file containing GFA paths (one per line)
+        #[clap(short = 'l', long, value_parser, conflicts_with = "gfa_files")]
+        gfa_list: Option<String>,
+
+        /// Output GFA file path
+        #[clap(short, long, value_parser)]
+        output: String,
+
+        /// Output compression format (none, gzip, bgzip, zstd, auto)
+        #[clap(long, value_parser, default_value = "auto")]
+        compress: String,
+
+        /// Gap filling mode (0 = none [default], 1 = middle gaps, 2 = all gaps)
+        #[clap(long, default_value = "0")]
+        fill_gaps: u8,
+
+        /// FASTA files for gap filling (space-separated)
+        #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["fasta_list"])]
+        fasta_files: Option<Vec<String>>,
+
+        /// Text file containing FASTA paths (one per line)
+        #[clap(long, value_parser, conflicts_with_all = &["fasta_files"])]
+        fasta_list: Option<String>,
+
+        /// Directory for temporary files
+        #[clap(long, value_parser)]
+        temp_dir: Option<String>,
     },
 }
 
@@ -910,14 +939,55 @@ fn main() -> io::Result<()> {
 
             print_stats(&impg);
         }
-        Args::Lace { common, gfa_maf_fasta } => {
-            // Setup sequence resources (required for lace)
-            let (sequence_index, _scoring_params) =
-                gfa_maf_fasta.setup_output_resources("fasta", false)?;
+        Args::Lace { 
+            common,
+            gfa_files,
+            gfa_list,
+            output,
+            compress,
+            fill_gaps,
+            fasta_files,
+            fasta_list,
+            temp_dir,
+        } => {
+            // Validate that either gfa_files or gfa_list is provided
+            if gfa_files.is_none() && gfa_list.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Either --gfa-files or --gfa-list must be provided",
+                ));
+            }
 
-            let impg = initialize_impg(&common)?;
+            // Validate gap filling mode
+            if fill_gaps > 2 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "fill_gaps must be 0, 1, or 2",
+                ));
+            }
 
-            lace::run_lace(&impg, sequence_index.as_ref(), common.verbose > 1)?;
+            // Validate compression format
+            let valid_compress = ["none", "gzip", "bgzip", "zstd", "auto"];
+            if !valid_compress.contains(&compress.as_str()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Invalid compression format '{}'. Must be one of: {}", 
+                           compress, valid_compress.join(", ")),
+                ));
+            }
+
+            lace::run_lace(
+                gfa_files,
+                gfa_list,
+                &output,
+                &compress,
+                fill_gaps,
+                fasta_files,
+                fasta_list,
+                temp_dir,
+                common.threads,
+                common.verbose,
+            )?;
         }
     }
 
