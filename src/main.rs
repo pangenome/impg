@@ -1,8 +1,8 @@
 use clap::Parser;
 use coitrees::{Interval, IntervalTree};
+use impg::commands::{lace, partition, similarity};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::paf::{PartialPafRecord, Strand};
-use impg::partition::{parse_target_range, partition_alignments};
 use impg::seqidx::SequenceIndex;
 use impg::sequence_index::{SequenceIndex as SeqIndexTrait, UnifiedSequenceIndex};
 use log::{debug, error, info, warn};
@@ -499,6 +499,14 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
     },
+    /// Lace sequences together
+    Lace {
+        #[clap(flatten)]
+        common: CommonOpts,
+
+        #[clap(flatten)]
+        gfa_maf_fasta: GfaMafFastaOpts,
+    },
 }
 
 fn main() -> io::Result<()> {
@@ -559,7 +567,7 @@ fn main() -> io::Result<()> {
 
             let impg = initialize_impg(&common)?;
 
-            partition_alignments(
+            partition::partition_alignments(
                 &impg,
                 window_size,
                 starting_sequences_file.as_deref(),
@@ -597,7 +605,7 @@ fn main() -> io::Result<()> {
             // Parse and validate all target ranges, tracking which parameter was used
             let (target_ranges, from_range_param) =
                 if let Some(target_range_str) = &query.target_range {
-                    let (target_name, target_range, name) = parse_target_range(target_range_str)?;
+                    let (target_name, target_range, name) = partition::parse_target_range(target_range_str)?;
                     // Validate sequence exists and range is within bounds
                     validate_sequence_range(
                         &target_name,
@@ -614,7 +622,7 @@ fn main() -> io::Result<()> {
                     )?;
                     (vec![(target_name, target_range, name)], true)
                 } else if let Some(target_bed) = &query.target_bed {
-                    let targets = impg::partition::parse_bed_file(target_bed)?;
+                    let targets = partition::parse_bed_file(target_bed)?;
                     // Validate all entries in the BED file
                     for (seq_name, (start, end), _) in &targets {
                         validate_sequence_range(seq_name, *start, *end, &impg.seq_index)?;
@@ -799,7 +807,7 @@ fn main() -> io::Result<()> {
                 let mut targets = Vec::new();
 
                 if let Some(target_range_str) = &query.target_range {
-                    let (target_name, target_range, name) = parse_target_range(target_range_str)?;
+                    let (target_name, target_range, name) = partition::parse_target_range(target_range_str)?;
                     validate_sequence_range(
                         &target_name,
                         target_range.0,
@@ -817,7 +825,7 @@ fn main() -> io::Result<()> {
                 }
 
                 if let Some(target_bed) = &query.target_bed {
-                    let bed_targets = impg::partition::parse_bed_file(target_bed)?;
+                    let bed_targets = partition::parse_bed_file(target_bed)?;
                     for (target_name, target_range, name) in bed_targets {
                         validate_sequence_range(
                             &target_name,
@@ -881,7 +889,7 @@ fn main() -> io::Result<()> {
             }
 
             // Process all regions in parallel
-            impg::similarity::compute_and_output_similarities(
+            similarity::compute_and_output_similarities(
                 &impg,
                 all_query_data,
                 &sequence_index,
@@ -901,6 +909,15 @@ fn main() -> io::Result<()> {
             let impg = initialize_impg(&common)?;
 
             print_stats(&impg);
+        }
+        Args::Lace { common, gfa_maf_fasta } => {
+            // Setup sequence resources (required for lace)
+            let (sequence_index, _scoring_params) =
+                gfa_maf_fasta.setup_output_resources("fasta", false)?;
+
+            let impg = initialize_impg(&common)?;
+
+            lace::run_lace(&impg, sequence_index.as_ref(), common.verbose > 1)?;
         }
     }
 
