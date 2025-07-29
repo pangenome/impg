@@ -19,9 +19,21 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Common options shared between all commands
+/// Basic common options shared between all commands
 #[derive(Parser, Debug)]
 struct CommonOpts {
+    /// Number of threads for parallel processing.
+    #[clap(short = 't', long, value_parser, default_value_t = NonZeroUsize::new(4).unwrap())]
+    threads: NonZeroUsize,
+
+    /// Verbosity level (0 = error, 1 = info, 2 = debug)
+    #[clap(short, long, default_value = "0")]
+    verbose: u8,
+}
+
+/// PAF file and index options for commands that work with alignments
+#[derive(Parser, Debug)]
+struct PafOpts {
     /// Path to the PAF files.
     #[clap(short = 'p', long, value_parser, required = false, num_args = 1.., conflicts_with = "paf_list")]
     paf_files: Vec<String>,
@@ -37,14 +49,6 @@ struct CommonOpts {
     /// Force the regeneration of the index, even if it already exists.
     #[clap(short = 'f', long, action)]
     force_reindex: bool,
-
-    /// Number of threads for parallel processing.
-    #[clap(short = 't', long, value_parser, default_value_t = NonZeroUsize::new(4).unwrap())]
-    threads: NonZeroUsize,
-
-    /// Verbosity level (0 = error, 1 = info, 2 = debug)
-    #[clap(short, long, default_value = "0")]
-    verbose: u8,
 }
 
 /// Common sequence and POA scoring options
@@ -347,11 +351,17 @@ enum Args {
     Index {
         #[clap(flatten)]
         common: CommonOpts,
+
+        #[clap(flatten)]
+        paf: PafOpts,
     },
     /// Partition the alignment
     Partition {
         #[clap(flatten)]
         common: CommonOpts,
+
+        #[clap(flatten)]
+        paf: PafOpts,
 
         /// Window size for partitioning
         #[clap(short = 'w', long, value_parser)]
@@ -427,6 +437,9 @@ enum Args {
         common: CommonOpts,
 
         #[clap(flatten)]
+        paf: PafOpts,
+
+        #[clap(flatten)]
         query: QueryOpts,
 
         /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', 'gfa' (v1.0), 'maf', or 'fasta' ('gfa', 'maf', and 'fasta' require --sequence-files or --sequence-list)
@@ -440,6 +453,9 @@ enum Args {
     Similarity {
         #[clap(flatten)]
         common: CommonOpts,
+
+        #[clap(flatten)]
+        paf: PafOpts,
 
         #[clap(flatten)]
         query: QueryOpts,
@@ -498,6 +514,9 @@ enum Args {
     Stats {
         #[clap(flatten)]
         common: CommonOpts,
+
+        #[clap(flatten)]
+        paf: PafOpts,
     },
     /// Lace pangenome graphs together
     Lace {
@@ -542,13 +561,14 @@ fn main() -> io::Result<()> {
     let args = Args::parse();
 
     match args {
-        Args::Index { common } => {
-            let _ = initialize_impg(&common)?;
+        Args::Index { common, paf } => {
+            let _ = initialize_impg(&common, &paf)?;
 
             info!("Index created successfully");
         }
         Args::Partition {
             common,
+            paf,
             window_size,
             output_format,
             output_folder,
@@ -594,7 +614,7 @@ fn main() -> io::Result<()> {
             let (sequence_index, scoring_params) =
                 gfa_maf_fasta.setup_output_resources(&output_format, false)?;
 
-            let impg = initialize_impg(&common)?;
+            let impg = initialize_impg(&common, &paf)?;
 
             partition::partition_alignments(
                 &impg,
@@ -620,6 +640,7 @@ fn main() -> io::Result<()> {
         }
         Args::Query {
             common,
+            paf,
             query,
             output_format,
             gfa_maf_fasta,
@@ -629,7 +650,7 @@ fn main() -> io::Result<()> {
                 &["auto", "bed", "bedpe", "paf", "gfa", "maf", "fasta"],
             )?;
 
-            let impg = initialize_impg(&common)?;
+            let impg = initialize_impg(&common, &paf)?;
 
             // Parse and validate all target ranges, tracking which parameter was used
             let (target_ranges, from_range_param) =
@@ -780,6 +801,7 @@ fn main() -> io::Result<()> {
         }
         Args::Similarity {
             common,
+            paf,
             query,
             gfa_maf_fasta,
             distances,
@@ -829,7 +851,7 @@ fn main() -> io::Result<()> {
                 gfa_maf_fasta.setup_output_resources("gfa", false)?;
             let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
             let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA
-            let impg = initialize_impg(&common)?;
+            let impg = initialize_impg(&common, &paf)?;
 
             // Validate target_range and target_bed before ANY expensive operations,
             let target_ranges = {
@@ -934,8 +956,8 @@ fn main() -> io::Result<()> {
                 polarize_guide_samples.as_deref(),
             )?;
         }
-        Args::Stats { common } => {
-            let impg = initialize_impg(&common)?;
+        Args::Stats { common, paf } => {
+            let impg = initialize_impg(&common, &paf)?;
 
             print_stats(&impg);
         }
@@ -1122,8 +1144,8 @@ fn validate_region_size(
     Ok(())
 }
 
-/// Initialize thread pool and load/generate index based on common options
-fn initialize_impg(common: &CommonOpts) -> io::Result<Impg> {
+/// Initialize thread pool and load/generate index based on common and PAF options
+fn initialize_impg(common: &CommonOpts, paf: &PafOpts) -> io::Result<Impg> {
     // Initialize logger based on verbosity
     env_logger::Builder::new()
         .filter_level(match common.verbose {
@@ -1140,22 +1162,22 @@ fn initialize_impg(common: &CommonOpts) -> io::Result<Impg> {
         .unwrap();
 
     // Resolve the list of PAF files
-    let paf_files = resolve_paf_files(common)?;
+    let paf_files = resolve_paf_files(paf)?;
     info!("Found {} PAF files", paf_files.len());
 
     // Load or generate index
-    if common.force_reindex {
-        generate_multi_index(&paf_files, common.threads, common.index.as_deref())
+    if paf.force_reindex {
+        generate_multi_index(&paf_files, common.threads, paf.index.as_deref())
     } else {
-        load_or_generate_multi_index(&paf_files, common.threads, common.index.as_deref())
+        load_or_generate_multi_index(&paf_files, common.threads, paf.index.as_deref())
     }
 }
 
 /// Resolve the list of PAF files from either --paf-files or --paf-list
-fn resolve_paf_files(common: &CommonOpts) -> io::Result<Vec<String>> {
-    let paf_files = if !common.paf_files.is_empty() {
-        common.paf_files.clone()
-    } else if let Some(paf_list_file) = &common.paf_list {
+fn resolve_paf_files(paf: &PafOpts) -> io::Result<Vec<String>> {
+    let paf_files = if !paf.paf_files.is_empty() {
+        paf.paf_files.clone()
+    } else if let Some(paf_list_file) = &paf.paf_list {
         // Read PAF files from the list file
         let file = File::open(paf_list_file)?;
         let reader = BufReader::new(file);
