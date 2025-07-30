@@ -559,6 +559,59 @@ fn read_gfa_files(
         .into_inner()
         .unwrap();
 
+    // Validate all path ranges in parallel using the still-wrapped graph
+    info!("Validating path range lengths");
+    let validation_errors: Vec<String> = path_map
+        .par_iter()
+        .flat_map(|(path_key, ranges)| {
+            ranges
+                .par_iter()
+                .filter_map(|range| {
+                    let expected_length = range.end - range.start;
+                    let mut actual_length = 0;
+
+                    // Compute actual length by summing step lengths
+                    for &step_handle in &range.steps {
+                        let seq_result = {
+                            let mut graph = combined_graph.lock().unwrap();
+                            graph.get_sequence(step_handle)
+                        };
+
+                        match seq_result {
+                            Ok(seq) => actual_length += seq.len(),
+                            Err(e) => {
+                                return Some(format!(
+                                    "Failed to get sequence for node {} in path {}: {}",
+                                    step_handle.id(),
+                                    path_key,
+                                    e
+                                ));
+                            }
+                        }
+                    }
+
+                    if expected_length != actual_length {
+                        Some(format!(
+                            "Path range length mismatch for '{}:{}-{}': \
+                             expected length {} but sum of step lengths is {}",
+                            path_key, range.start, range.end, expected_length, actual_length
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<String>>()
+        })
+        .collect();
+
+    // Check if there were any validation errors
+    if !validation_errors.is_empty() {
+        for error in validation_errors {
+            error!("{}", error);
+        }
+        std::process::exit(1);
+    }
+
     let graph = Arc::try_unwrap(combined_graph)
         .ok()
         .expect("More than one Arc pointer to graph")
