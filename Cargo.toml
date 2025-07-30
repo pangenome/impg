@@ -12,7 +12,7 @@ clap = { version = "4.5.42", features = ["derive"] }
 coitrees = "0.4.0"
 num_cpus = "1.17.0"
 rayon = "1.10.0"
-noodles = { version = "0.99.0", features = ["bgzf"] }
+noodles = { version = "0.100.0", features = ["bgzf"] }
 regex = "1.11.1"
 log = "0.4.27"
 env_logger = "0.11.8"
@@ -27,6 +27,14 @@ spoa_rs = { git = "https://github.com/AndreaGuarracino/spoa-rs.git" }
 nalgebra = "0.33.2"
 
 agc-rs = { git = "https://github.com/pangenome/agc-rs.git", optional = true }
+
+# Additional dependencies for lace functionality
+handlegraph = { git = "https://github.com/chfi/rs-handlegraph", rev = "3ac575e4216ce16a16667503a8875e469a40a97a" }
+bitvec = "1.0.1"
+niffler = "2.7.0"
+tempfile = "3.20.0"
+zstd = { version = "0.13.3", features = ["zstdmt"] }
+gzp = "1.0.1"
 
 [features]
 default = ["agc"]

@@ -8,14 +8,14 @@ use std::io;
 #[test]
 fn test_agc_vs_fasta_same_content() -> io::Result<()> {
     // Test data paths
-    let test_data_dir = "test_data";
+    let test_data_dir = "tests/test_data";
     let fasta_files = vec![
         format!("{}/ref.fa", test_data_dir),
         format!("{}/a.fa", test_data_dir),
         format!("{}/b.fa", test_data_dir),
         format!("{}/c.fa", test_data_dir),
     ];
-    let agc_file = format!("{}/test.agc", test_data_dir);
+    let agc_file = format!("{test_data_dir}/test.agc");
 
     // Build both indices
     let fasta_index = FastaIndex::build_from_files(&fasta_files)?;
@@ -44,7 +44,7 @@ fn test_agc_vs_fasta_same_content() -> io::Result<()> {
                 let mut result = Vec::new();
 
                 for sample in &samples {
-                    let query = format!("{}@{}", seq_name, sample);
+                    let query = format!("{seq_name}@{sample}");
                     if let Ok(seq) = agc_index.fetch_sequence(&query, start, end) {
                         result = seq;
                         found = true;
@@ -55,7 +55,7 @@ fn test_agc_vs_fasta_same_content() -> io::Result<()> {
                 if !found {
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
-                        format!("Sequence {} not found in AGC", seq_name),
+                        format!("Sequence {seq_name} not found in AGC"),
                     ));
                 }
                 result
@@ -65,8 +65,7 @@ fn test_agc_vs_fasta_same_content() -> io::Result<()> {
         // Compare sequences
         assert_eq!(
             fasta_seq, agc_seq,
-            "Sequences differ for {}:{}-{}",
-            seq_name, start, end
+            "Sequences differ for {seq_name}:{start}-{end}"
         );
 
         // Also check that content is uppercase ASCII
@@ -81,7 +80,7 @@ fn test_agc_vs_fasta_same_content() -> io::Result<()> {
 
 #[test]
 fn test_unified_sequence_index_fasta() -> io::Result<()> {
-    let test_data_dir = "test_data";
+    let test_data_dir = "tests/test_data";
     let fasta_files = vec![
         format!("{}/ref.fa", test_data_dir),
         format!("{}/a.fa", test_data_dir),
@@ -99,7 +98,7 @@ fn test_unified_sequence_index_fasta() -> io::Result<()> {
 
 #[test]
 fn test_unified_sequence_index_agc() -> io::Result<()> {
-    let test_data_dir = "test_data";
+    let test_data_dir = "tests/test_data";
     let agc_files = vec![format!("{}/test.agc", test_data_dir)];
 
     let index = UnifiedSequenceIndex::from_files(&agc_files)?;
@@ -118,7 +117,7 @@ fn test_unified_sequence_index_agc() -> io::Result<()> {
 
 #[test]
 fn test_mixed_file_types_error() {
-    let test_data_dir = "test_data";
+    let test_data_dir = "tests/test_data";
     let mixed_files = vec![
         format!("{}/ref.fa", test_data_dir),
         format!("{}/test.agc", test_data_dir),

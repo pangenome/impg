@@ -1,11 +1,11 @@
 use clap::Parser;
 use coitrees::{Interval, IntervalTree};
+use impg::commands::{lace, partition, similarity};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::paf::{PartialPafRecord, Strand};
-use impg::partition::{parse_target_range, partition_alignments};
 use impg::seqidx::SequenceIndex;
 use impg::sequence_index::{SequenceIndex as SeqIndexTrait, UnifiedSequenceIndex};
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use noodles::bgzf;
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
@@ -19,9 +19,21 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Common options shared between all commands
+/// Basic common options shared between all commands
 #[derive(Parser, Debug)]
 struct CommonOpts {
+    /// Number of threads for parallel processing.
+    #[clap(short = 't', long, value_parser, default_value_t = NonZeroUsize::new(4).unwrap())]
+    threads: NonZeroUsize,
+
+    /// Verbosity level (0 = error, 1 = info, 2 = debug)
+    #[clap(short, long, default_value = "0")]
+    verbose: u8,
+}
+
+/// PAF file and index options for commands that work with alignments
+#[derive(Parser, Debug)]
+struct PafOpts {
     /// Path to the PAF files.
     #[clap(short = 'p', long, value_parser, required = false, num_args = 1.., conflicts_with = "paf_list")]
     paf_files: Vec<String>,
@@ -37,19 +49,11 @@ struct CommonOpts {
     /// Force the regeneration of the index, even if it already exists.
     #[clap(short = 'f', long, action)]
     force_reindex: bool,
-
-    /// Number of threads for parallel processing.
-    #[clap(short = 't', long, value_parser, default_value_t = NonZeroUsize::new(4).unwrap())]
-    threads: NonZeroUsize,
-
-    /// Verbosity level (0 = error, 1 = info, 2 = debug)
-    #[clap(short, long, default_value = "0")]
-    verbose: u8,
 }
 
-/// Common sequence and POA scoring options
+/// Sequence file options for commands that need FASTA/AGC files
 #[derive(Parser, Debug)]
-struct GfaMafFastaOpts {
+struct SequenceOpts {
     /// List of sequence file paths (FASTA or AGC) (required for 'gfa', 'maf', and 'fasta')
     #[cfg(feature = "agc")]
     #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["sequence_list"])]
@@ -69,21 +73,9 @@ struct GfaMafFastaOpts {
     #[cfg(not(feature = "agc"))]
     #[clap(long, value_parser, conflicts_with_all = &["sequence_files"])]
     sequence_list: Option<String>,
-
-    /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for 'gfa' and 'maf')
-    #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
-    poa_scoring: String,
-
-    /// Reverse complement reverse strand sequences (for 'fasta' output)
-    #[clap(long, action)]
-    reverse_complement: bool,
-
-    /// Force processing of large regions (>10kbp) with maf/gfa output formats
-    #[clap(long, action)]
-    force_large_region: bool,
 }
 
-impl GfaMafFastaOpts {
+impl SequenceOpts {
     /// Resolve sequence files from either --sequence-files or --sequence-list
     fn resolve_sequence_files(self) -> io::Result<Vec<String>> {
         match (self.sequence_files, self.sequence_list) {
@@ -94,7 +86,7 @@ impl GfaMafFastaOpts {
                 let content = std::fs::read_to_string(&list_file).map_err(|e| {
                     io::Error::new(
                         io::ErrorKind::NotFound,
-                        format!("Failed to read sequence list file '{}': {}", list_file, e),
+                        format!("Failed to read sequence list file '{list_file}': {e}"),
                     )
                 })?;
 
@@ -110,35 +102,6 @@ impl GfaMafFastaOpts {
                 "Cannot specify both --sequence-files and --sequence-list",
             )),
         }
-    }
-
-    /// Parse POA scoring parameters
-    fn parse_poa_scoring(&self) -> io::Result<(u8, u8, u8, u8, u8, u8)> {
-        let parts: Vec<&str> = self.poa_scoring.split(',').collect();
-        if parts.len() != 6 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "POA scoring format should be 'match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2'",
-            ));
-        }
-
-        let parse_u8 = |s: &str, name: &str| {
-            s.parse::<u8>().map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("Invalid {} value", name),
-                )
-            })
-        };
-
-        Ok((
-            parse_u8(parts[0], "match score")?,
-            parse_u8(parts[1], "mismatch cost")?,
-            parse_u8(parts[2], "gap opening 1 cost")?,
-            parse_u8(parts[3], "gap extension 1 cost")?,
-            parse_u8(parts[4], "gap opening 2 cost")?,
-            parse_u8(parts[5], "gap extension 2 cost")?,
-        ))
     }
 
     /// Build sequence index if files are provided
@@ -157,15 +120,67 @@ impl GfaMafFastaOpts {
                         #[cfg(feature = "agc")]
                         UnifiedSequenceIndex::Agc(agc_index) => ("AGC", agc_index.agc_paths.len()),
                     };
-                    info!("Built {} index for {} files", file_type, num_files);
+                    info!("Built {file_type} index for {num_files} files");
                     Ok(Some(index))
                 }
                 Err(e) => {
-                    error!("Failed to build sequence index: {}", e);
-                    Err(e)
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Failed to build sequence index: {e}"),
+                    ))
                 }
             }
         }
+    }
+}
+
+/// Common sequence and POA scoring options
+#[derive(Parser, Debug)]
+struct GfaMafFastaOpts {
+    #[clap(flatten)]
+    sequence: SequenceOpts,
+
+    /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for 'gfa' and 'maf')
+    #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
+    poa_scoring: String,
+
+    /// Reverse complement reverse strand sequences (for 'fasta' output)
+    #[clap(long, action)]
+    reverse_complement: bool,
+
+    /// Force processing of large regions (>10kbp) with maf/gfa output formats
+    #[clap(long, action)]
+    force_large_region: bool,
+}
+
+impl GfaMafFastaOpts {
+    /// Parse POA scoring parameters
+    fn parse_poa_scoring(&self) -> io::Result<(u8, u8, u8, u8, u8, u8)> {
+        let parts: Vec<&str> = self.poa_scoring.split(',').collect();
+        if parts.len() != 6 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "POA scoring format should be 'match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2'",
+            ));
+        }
+
+        let parse_u8 = |s: &str, name: &str| {
+            s.parse::<u8>().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Invalid {name} value"),
+                )
+            })
+        };
+
+        Ok((
+            parse_u8(parts[0], "match score")?,
+            parse_u8(parts[1], "mismatch cost")?,
+            parse_u8(parts[2], "gap opening 1 cost")?,
+            parse_u8(parts[3], "gap extension 1 cost")?,
+            parse_u8(parts[4], "gap opening 2 cost")?,
+            parse_u8(parts[5], "gap extension 2 cost")?,
+        ))
     }
 
     /// Helper to validate and setup POA/sequence resources for a given output format, including sequence index for PAF with original coordinates
@@ -188,10 +203,10 @@ impl GfaMafFastaOpts {
         };
 
         let sequence_index = if needs_sequence_mandatory || needs_sequence_optional {
-            let index = self.build_sequence_index()?;
+            let index = self.sequence.build_sequence_index()?;
             if index.is_none() && needs_sequence_mandatory {
                 #[cfg(feature = "agc")]
-                let msg = format!("Sequence files (FASTA/AGC) are required for '{}' output format. Use --sequence-files or --sequence-list", output_format);
+                let msg = format!("Sequence files (FASTA/AGC) are required for '{output_format}' output format. Use --sequence-files or --sequence-list");
                 #[cfg(not(feature = "agc"))]
                 let msg = format!("Sequence files (FASTA) are required for '{}' output format. Use --sequence-files or --sequence-list", output_format);
 
@@ -278,11 +293,11 @@ fn parse_subsequence_coordinates(seq_name: &str) -> Option<(String, i32)> {
     if let Some(colon_pos) = seq_name.rfind(':') {
         let (base_name, range_part) = seq_name.split_at(colon_pos);
         let range_part = &range_part[1..]; // Remove the colon
-        
+
         // Check if the range part contains a dash
         if let Some(dash_pos) = range_part.find('-') {
             let (start_str, _end_str) = range_part.split_at(dash_pos);
-            
+
             // Parse the start coordinate
             if let Ok(start_offset) = start_str.parse::<i32>() {
                 return Some((base_name.to_string(), start_offset));
@@ -302,7 +317,7 @@ fn transform_coordinates_to_original(
     if !original_coordinates {
         return (seq_name.to_string(), start, end);
     }
-    
+
     if let Some((original_name, offset)) = parse_subsequence_coordinates(seq_name) {
         let offset = offset as u32;
         (original_name, start + offset, end + offset)
@@ -323,16 +338,14 @@ fn get_original_sequence_length(
             Err(_) => {
                 // Emit warning when sequence not found in index
                 warn!(
-                    "Sequence '{}' not found in sequence index, using 0 as length for PAF output",
-                    original_seq_name
+                    "Sequence '{original_seq_name}' not found in sequence index, using 0 as length for PAF output"
                 );
             }
         }
     } else {
         // Emit warning when no index is provided
         warn!(
-            "No sequence index provided, using 0 as length for PAF output of sequence '{}'",
-            original_seq_name
+            "No sequence index provided, using 0 as length for PAF output of sequence '{original_seq_name}'"
         );
     }
 
@@ -346,12 +359,47 @@ enum Args {
     /// Create an IMPG index
     Index {
         #[clap(flatten)]
+        paf: PafOpts,
+
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+    /// Lace pangenome graphs together
+    Lace {
+        /// List of input GFA files (space-separated)
+        #[clap(short = 'g', long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with = "gfa_list")]
+        gfa_files: Option<Vec<String>>,
+
+        /// Text file containing GFA paths (one per line)
+        #[clap(short = 'l', long, value_parser, conflicts_with = "gfa_files")]
+        gfa_list: Option<String>,
+
+        /// Output GFA file path
+        #[clap(short, long, value_parser)]
+        output: String,
+
+        /// Output compression format (none, gzip, bgzip, zstd, auto)
+        #[clap(long, value_parser, default_value = "auto")]
+        compress: String,
+
+        /// Gap filling mode: 0=none, 1=middle gaps only, 2=all gaps (requires --sequence-files or --sequence-list for end gaps)
+        #[clap(long, default_value = "0")]
+        fill_gaps: u8,
+
+        #[clap(flatten)]
+        sequence: SequenceOpts,
+
+        /// Directory for temporary files
+        #[clap(long, value_parser)]
+        temp_dir: Option<String>,
+
+        #[clap(flatten)]
         common: CommonOpts,
     },
     /// Partition the alignment
     Partition {
         #[clap(flatten)]
-        common: CommonOpts,
+        paf: PafOpts,
 
         /// Window size for partitioning
         #[clap(short = 'w', long, value_parser)]
@@ -420,11 +468,14 @@ enum Args {
         /// Output separate files for each partition when 'bed'
         #[clap(long, action)]
         separate_files: bool,
+
+        #[clap(flatten)]
+        common: CommonOpts,
     },
     /// Query overlaps in the alignment
     Query {
         #[clap(flatten)]
-        common: CommonOpts,
+        paf: PafOpts,
 
         #[clap(flatten)]
         query: QueryOpts,
@@ -435,11 +486,14 @@ enum Args {
 
         #[clap(flatten)]
         gfa_maf_fasta: GfaMafFastaOpts,
+
+        #[clap(flatten)]
+        common: CommonOpts,
     },
     /// Compute pairwise similarity between sequences in a region
     Similarity {
         #[clap(flatten)]
-        common: CommonOpts,
+        paf: PafOpts,
 
         #[clap(flatten)]
         query: QueryOpts,
@@ -493,9 +547,15 @@ enum Args {
         /// Similarity measure to use for PCA distance matrix ("jaccard", "cosine", or "dice")
         #[clap(long, value_parser, requires = "pca", default_value = "jaccard")]
         pca_measure: String,
+
+        #[clap(flatten)]
+        common: CommonOpts,
     },
     /// Print alignment statistics
     Stats {
+        #[clap(flatten)]
+        paf: PafOpts,
+
         #[clap(flatten)]
         common: CommonOpts,
     },
@@ -505,13 +565,63 @@ fn main() -> io::Result<()> {
     let args = Args::parse();
 
     match args {
-        Args::Index { common } => {
-            let _ = initialize_impg(&common)?;
+        Args::Index { common, paf } => {
+            initialize_threads_and_log(&common);
+            let _ = initialize_impg(&common, &paf)?;
 
             info!("Index created successfully");
         }
+        Args::Lace {
+            common,
+            sequence,
+            gfa_files,
+            gfa_list,
+            output,
+            compress,
+            fill_gaps,
+            temp_dir,
+        } => {
+            // Validate gap filling mode
+            if fill_gaps > 2 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "fill_gaps must be 0, 1, or 2",
+                ));
+            }
+
+            // Validate compression format
+            let valid_compress = ["none", "gzip", "bgzip", "zstd", "auto"];
+            if !valid_compress.contains(&compress.as_str()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Invalid compression format '{}'. Must be one of: {}",
+                        compress,
+                        valid_compress.join(", ")
+                    ),
+                ));
+            }
+
+            // Initialize threads and logger for lace processing
+            initialize_threads_and_log(&common);
+
+            // Build sequence index for sequence fetching (always build if sequence files provided)
+            let sequence_index = sequence.build_sequence_index()?;
+
+            lace::run_lace(
+                gfa_files,
+                gfa_list,
+                &output,
+                &compress,
+                fill_gaps,
+                temp_dir,
+                sequence_index.as_ref(),
+                common.verbose,
+            )?;
+        }
         Args::Partition {
             common,
+            paf,
             window_size,
             output_format,
             output_folder,
@@ -557,9 +667,10 @@ fn main() -> io::Result<()> {
             let (sequence_index, scoring_params) =
                 gfa_maf_fasta.setup_output_resources(&output_format, false)?;
 
-            let impg = initialize_impg(&common)?;
+            initialize_threads_and_log(&common);
+            let impg = initialize_impg(&common, &paf)?;
 
-            partition_alignments(
+            partition::partition_alignments(
                 &impg,
                 window_size,
                 starting_sequences_file.as_deref(),
@@ -583,6 +694,7 @@ fn main() -> io::Result<()> {
         }
         Args::Query {
             common,
+            paf,
             query,
             output_format,
             gfa_maf_fasta,
@@ -592,12 +704,14 @@ fn main() -> io::Result<()> {
                 &["auto", "bed", "bedpe", "paf", "gfa", "maf", "fasta"],
             )?;
 
-            let impg = initialize_impg(&common)?;
+            initialize_threads_and_log(&common);
+            let impg = initialize_impg(&common, &paf)?;
 
             // Parse and validate all target ranges, tracking which parameter was used
             let (target_ranges, from_range_param) =
                 if let Some(target_range_str) = &query.target_range {
-                    let (target_name, target_range, name) = parse_target_range(target_range_str)?;
+                    let (target_name, target_range, name) =
+                        partition::parse_target_range(target_range_str)?;
                     // Validate sequence exists and range is within bounds
                     validate_sequence_range(
                         &target_name,
@@ -614,7 +728,7 @@ fn main() -> io::Result<()> {
                     )?;
                     (vec![(target_name, target_range, name)], true)
                 } else if let Some(target_bed) = &query.target_bed {
-                    let targets = impg::partition::parse_bed_file(target_bed)?;
+                    let targets = partition::parse_bed_file(target_bed)?;
                     // Validate all entries in the BED file
                     for (seq_name, (start, end), _) in &targets {
                         validate_sequence_range(seq_name, *start, *end, &impg.seq_index)?;
@@ -649,8 +763,10 @@ fn main() -> io::Result<()> {
             let reverse_complement = gfa_maf_fasta.reverse_complement;
 
             // Setup POA/sequence resources
-            let (sequence_index, scoring_params) =
-                gfa_maf_fasta.setup_output_resources(resolved_output_format, query.original_sequence_coordinates)?;
+            let (sequence_index, scoring_params) = gfa_maf_fasta.setup_output_resources(
+                resolved_output_format,
+                query.original_sequence_coordinates,
+            )?;
 
             // Process all target ranges in a unified loop
             for (target_name, target_range, name) in target_ranges {
@@ -735,7 +851,7 @@ fn main() -> io::Result<()> {
                     _ => {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
-                            format!("Invalid output format: {}", resolved_output_format),
+                            format!("Invalid output format: {resolved_output_format}"),
                         ));
                     }
                 }
@@ -743,6 +859,7 @@ fn main() -> io::Result<()> {
         }
         Args::Similarity {
             common,
+            paf,
             query,
             gfa_maf_fasta,
             distances,
@@ -777,8 +894,7 @@ fn main() -> io::Result<()> {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "Invalid PCA similarity measure '{}'. Must be one of: jaccard, cosine, dice",
-                            pca_measure
+                            "Invalid PCA similarity measure '{pca_measure}'. Must be one of: jaccard, cosine, dice"
                         ),
                     ));
                 }
@@ -792,14 +908,17 @@ fn main() -> io::Result<()> {
                 gfa_maf_fasta.setup_output_resources("gfa", false)?;
             let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
             let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA
-            let impg = initialize_impg(&common)?;
+
+            initialize_threads_and_log(&common);
+            let impg = initialize_impg(&common, &paf)?;
 
             // Validate target_range and target_bed before ANY expensive operations,
             let target_ranges = {
                 let mut targets = Vec::new();
 
                 if let Some(target_range_str) = &query.target_range {
-                    let (target_name, target_range, name) = parse_target_range(target_range_str)?;
+                    let (target_name, target_range, name) =
+                        partition::parse_target_range(target_range_str)?;
                     validate_sequence_range(
                         &target_name,
                         target_range.0,
@@ -817,7 +936,7 @@ fn main() -> io::Result<()> {
                 }
 
                 if let Some(target_bed) = &query.target_bed {
-                    let bed_targets = impg::partition::parse_bed_file(target_bed)?;
+                    let bed_targets = partition::parse_bed_file(target_bed)?;
                     for (target_name, target_range, name) in bed_targets {
                         validate_sequence_range(
                             &target_name,
@@ -881,7 +1000,7 @@ fn main() -> io::Result<()> {
             }
 
             // Process all regions in parallel
-            impg::similarity::compute_and_output_similarities(
+            similarity::compute_and_output_similarities(
                 &impg,
                 all_query_data,
                 &sequence_index,
@@ -897,8 +1016,9 @@ fn main() -> io::Result<()> {
                 polarize_guide_samples.as_deref(),
             )?;
         }
-        Args::Stats { common } => {
-            let impg = initialize_impg(&common)?;
+        Args::Stats { common, paf } => {
+            initialize_threads_and_log(&common);
+            let impg = initialize_impg(&common, &paf)?;
 
             print_stats(&impg);
         }
@@ -945,7 +1065,7 @@ fn validate_sequence_range(
     let seq_id = seq_index.get_id(seq_name).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            format!("Sequence '{}' not found in index", seq_name),
+            format!("Sequence '{seq_name}' not found in index"),
         )
     })?;
 
@@ -953,7 +1073,7 @@ fn validate_sequence_range(
     let seq_len = seq_index.get_len_from_id(seq_id).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Could not get length for sequence '{}'", seq_name),
+            format!("Could not get length for sequence '{seq_name}'"),
         )
     })? as i32;
 
@@ -961,14 +1081,14 @@ fn validate_sequence_range(
     if start < 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("Start position {} cannot be negative", start),
+            format!("Start position {start} cannot be negative"),
         ));
     }
 
     if end < 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("End position {} cannot be negative", end),
+            format!("End position {end} cannot be negative"),
         ));
     }
 
@@ -976,8 +1096,7 @@ fn validate_sequence_range(
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "Start position {} must be less than end position {}",
-                start, end
+                "Start position {start} must be less than end position {end}"
             ),
         ));
     }
@@ -986,8 +1105,7 @@ fn validate_sequence_range(
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "End position {} exceeds sequence length {} for sequence '{}'",
-                end, seq_len, seq_name
+                "End position {end} exceeds sequence length {seq_len} for sequence '{seq_name}'"
             ),
         ));
     }
@@ -1015,8 +1133,7 @@ fn validate_region_size(
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "Region size ({} bp) exceeds 10kbp for '{}' output format, which may require large time and memory. Use --force-large-region to proceed anyway.",
-                    region_size, output_format
+                    "Region size ({region_size} bp) exceeds 10kbp for '{output_format}' output format, which may require large time and memory. Use --force-large-region to proceed anyway."
                 ),
             ));
         }
@@ -1025,8 +1142,7 @@ fn validate_region_size(
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "Merge distance ({} bp) exceeds 1kbp for '{}' output format, which may require large time and memory. Use --force-large-region to proceed anyway.",
-                    merge_distance, output_format
+                    "Merge distance ({merge_distance} bp) exceeds 1kbp for '{output_format}' output format, which may require large time and memory. Use --force-large-region to proceed anyway."
                 ),
             ));
         }
@@ -1035,8 +1151,8 @@ fn validate_region_size(
     Ok(())
 }
 
-/// Initialize thread pool and load/generate index based on common options
-fn initialize_impg(common: &CommonOpts) -> io::Result<Impg> {
+/// Initialize thread pool and logger with the specified number of threads and verbosity
+fn initialize_threads_and_log(common: &CommonOpts) {
     // Initialize logger based on verbosity
     env_logger::Builder::new()
         .filter_level(match common.verbose {
@@ -1051,24 +1167,27 @@ fn initialize_impg(common: &CommonOpts) -> io::Result<Impg> {
         .num_threads(common.threads.into())
         .build_global()
         .unwrap();
+}
 
+/// Load/generate index based on common and PAF options
+fn initialize_impg(common: &CommonOpts, paf: &PafOpts) -> io::Result<Impg> {
     // Resolve the list of PAF files
-    let paf_files = resolve_paf_files(common)?;
+    let paf_files = resolve_paf_files(paf)?;
     info!("Found {} PAF files", paf_files.len());
 
     // Load or generate index
-    if common.force_reindex {
-        generate_multi_index(&paf_files, common.threads, common.index.as_deref())
+    if paf.force_reindex {
+        generate_multi_index(&paf_files, common.threads, paf.index.as_deref())
     } else {
-        load_or_generate_multi_index(&paf_files, common.threads, common.index.as_deref())
+        load_or_generate_multi_index(&paf_files, common.threads, paf.index.as_deref())
     }
 }
 
 /// Resolve the list of PAF files from either --paf-files or --paf-list
-fn resolve_paf_files(common: &CommonOpts) -> io::Result<Vec<String>> {
-    let paf_files = if !common.paf_files.is_empty() {
-        common.paf_files.clone()
-    } else if let Some(paf_list_file) = &common.paf_list {
+fn resolve_paf_files(paf: &PafOpts) -> io::Result<Vec<String>> {
+    let paf_files = if !paf.paf_files.is_empty() {
+        paf.paf_files.clone()
+    } else if let Some(paf_list_file) = &paf.paf_list {
         // Read PAF files from the list file
         let file = File::open(paf_list_file)?;
         let reader = BufReader::new(file);
@@ -1085,7 +1204,7 @@ fn resolve_paf_files(common: &CommonOpts) -> io::Result<Vec<String>> {
         if files.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("No valid PAF files found in list file: {}", paf_list_file),
+                format!("No valid PAF files found in list file: {paf_list_file}"),
             ));
         }
 
@@ -1128,7 +1247,7 @@ fn load_or_generate_multi_index(
 
 fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Result<Impg> {
     let index_file = get_combined_index_filename(paf_files, custom_index);
-    info!("Reading IMPG index from {}", index_file);
+    info!("Reading IMPG index from {index_file}");
 
     // Check if all PAF files are newer than the index
     let index_file_metadata = std::fs::metadata(&index_file)?;
@@ -1140,8 +1259,7 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
                 if let Ok(paf_file_ts) = paf_file_metadata.modified() {
                     if paf_file_ts > index_ts {
                         warn!(
-                            "WARNING:\tPAF file {} has been modified since impg index creation.",
-                            paf_file
+                            "WARNING:\tPAF file {paf_file} has been modified since impg index creation."
                         );
                     }
                 }
@@ -1162,7 +1280,7 @@ fn generate_multi_index(
     custom_index: Option<&str>,
 ) -> io::Result<Impg> {
     let index_file = get_combined_index_filename(paf_files, custom_index);
-    info!("No index found at {}. Creating it now.", index_file);
+    info!("No index found at {index_file}. Creating it now.");
 
     let num_paf_files = paf_files.len();
     // Thread-safe counter for tracking progress
@@ -1182,8 +1300,7 @@ fn generate_multi_index(
                 let current_count = files_processed.fetch_add(1, Ordering::SeqCst) + 1;
                 // Print progress with sequential counter
                 debug!(
-                    "Processing PAF file ({}/{}): {}",
-                    current_count, num_paf_files, paf_file
+                    "Processing PAF file ({current_count}/{num_paf_files}): {paf_file}"
                 );
 
                 let file = File::open(paf_file)?;
@@ -1202,7 +1319,7 @@ fn generate_multi_index(
                 let records = impg::paf::parse_paf(reader, &mut seq_index_guard).map_err(|e| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("Failed to parse PAF records from {}: {:?}", paf_file, e),
+                        format!("Failed to parse PAF records from {paf_file}: {e:?}"),
                     )
                 })?;
 
@@ -1246,7 +1363,7 @@ fn generate_multi_index(
     let impg = Impg::from_multi_paf_records(&records_by_file, seq_index).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Failed to create index: {:?}", e),
+            format!("Failed to create index: {e:?}"),
         )
     })?;
 
@@ -1297,15 +1414,14 @@ fn perform_query(
     let target_id = impg.seq_index.get_id(target_name).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("Target sequence '{}' not found in index", target_name),
+            format!("Target sequence '{target_name}' not found in index"),
         )
     })?;
     let target_length = impg.seq_index.get_len_from_id(target_id).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "Target sequence '{}' length not found in index",
-                target_name
+                "Target sequence '{target_name}' length not found in index"
             ),
         )
     })?;
@@ -1313,8 +1429,7 @@ fn perform_query(
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "Target range end ({}) exceeds the target sequence length ({})",
-                target_end, target_length
+                "Target range end ({target_end}) exceeds the target sequence length ({target_length})"
             ),
         ));
     }
@@ -1374,11 +1489,16 @@ fn output_results_bed(
         } else {
             (query_interval.last, query_interval.first, '-')
         };
-        
+
         // Transform coordinates to original sequence space if requested
-        let (transformed_name, transformed_first, transformed_last) = 
-            transform_coordinates_to_original(query_name, first as u32, last as u32, original_coordinates);
-        
+        let (transformed_name, transformed_first, transformed_last) =
+            transform_coordinates_to_original(
+                query_name,
+                first as u32,
+                last as u32,
+                original_coordinates,
+            );
+
         println!(
             "{}\t{}\t{}\t{}\t.\t{}",
             transformed_name,
@@ -1407,13 +1527,23 @@ fn output_results_bedpe(
         } else {
             (overlap_query.last, overlap_query.first, '-')
         };
-        
+
         // Transform coordinates to original sequence space if requested
-        let (transformed_query_name, transformed_first, transformed_last) = 
-            transform_coordinates_to_original(query_name, first as u32, last as u32, original_coordinates);
-        let (transformed_target_name, transformed_target_first, transformed_target_last) = 
-            transform_coordinates_to_original(target_name, overlap_target.first as u32, overlap_target.last as u32, original_coordinates);
-        
+        let (transformed_query_name, transformed_first, transformed_last) =
+            transform_coordinates_to_original(
+                query_name,
+                first as u32,
+                last as u32,
+                original_coordinates,
+            );
+        let (transformed_target_name, transformed_target_first, transformed_target_last) =
+            transform_coordinates_to_original(
+                target_name,
+                overlap_target.first as u32,
+                overlap_target.last as u32,
+                original_coordinates,
+            );
+
         println!(
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t0\t{}\t+",
             transformed_query_name,
@@ -1448,28 +1578,32 @@ fn output_results_paf(
         };
 
         // Transform coordinates to original sequence space if requested
-        let (transformed_query_name, transformed_first, transformed_last) = 
-            transform_coordinates_to_original(query_name, first as u32, last as u32, original_coordinates);
-        let (transformed_target_name, transformed_target_first, transformed_target_last) = 
-            transform_coordinates_to_original(target_name, overlap_target.first as u32, overlap_target.last as u32, original_coordinates);
+        let (transformed_query_name, transformed_first, transformed_last) =
+            transform_coordinates_to_original(
+                query_name,
+                first as u32,
+                last as u32,
+                original_coordinates,
+            );
+        let (transformed_target_name, transformed_target_first, transformed_target_last) =
+            transform_coordinates_to_original(
+                target_name,
+                overlap_target.first as u32,
+                overlap_target.last as u32,
+                original_coordinates,
+            );
 
         // Get original sequence lengths when original_sequence_coordinates is enabled
         let query_length = if original_coordinates {
-            get_original_sequence_length(
-                &transformed_query_name,
-                sequence_index,
-            )
+            get_original_sequence_length(&transformed_query_name, sequence_index)
         } else {
             impg.seq_index
                 .get_len_from_id(overlap_query.metadata)
                 .unwrap()
         };
-        
+
         let target_length = if original_coordinates {
-            get_original_sequence_length(
-                &transformed_target_name,
-                sequence_index,
-            )
+            get_original_sequence_length(&transformed_target_name, sequence_index)
         } else {
             impg.seq_index
                 .get_len_from_id(overlap_target.metadata)
@@ -1498,11 +1632,11 @@ fn output_results_paf(
         let block_identity = (matches as f64) / (matches + edit_distance) as f64;
 
         // Format bi and gi fields without trailing zeros
-        let gi_str = format!("{:.6}", gap_compressed_identity)
+        let gi_str = format!("{gap_compressed_identity:.6}")
             .trim_end_matches('0')
             .trim_end_matches('.')
             .to_string();
-        let bi_str = format!("{:.6}", block_identity)
+        let bi_str = format!("{block_identity:.6}")
             .trim_end_matches('0')
             .trim_end_matches('.')
             .to_string();
@@ -1547,7 +1681,7 @@ fn output_results_gfa(
         sequence_index,
         scoring_params,
     );
-    print!("{}", gfa_output);
+    print!("{gfa_output}");
 
     Ok(())
 }
@@ -1592,7 +1726,7 @@ fn output_results_fasta(
             } else {
                 ""
             };
-            let header = format!(">{}:{}-{}{}", query_name, start, end, header_suffix);
+            let header = format!(">{query_name}:{start}-{end}{header_suffix}");
 
             // Convert sequence to string with line breaks every 80 characters
             let sequence_str = String::from_utf8_lossy(&sequence);
@@ -1609,8 +1743,8 @@ fn output_results_fasta(
 
     // Output sequences sequentially to maintain order
     for (header, sequence) in sequence_data {
-        println!("{}", header);
-        println!("{}", sequence);
+        println!("{header}");
+        println!("{sequence}");
     }
 
     Ok(())
@@ -1638,7 +1772,7 @@ fn output_results_maf(
         sequence_index,
         scoring_params,
     );
-    print!("{}", maf_output);
+    print!("{maf_output}");
 
     Ok(())
 }
@@ -2232,9 +2366,9 @@ fn print_stats(impg: &Impg) {
         num_overlaps
     );
 
-    println!("Number of sequences: {}", num_sequences);
-    println!("Total sequence length: {} bp", total_sequence_length);
-    println!("Number of overlaps: {}", num_overlaps);
+    println!("Number of sequences: {num_sequences}");
+    println!("Total sequence length: {total_sequence_length} bp");
+    println!("Number of overlaps: {num_overlaps}");
 
     let mut entries: Vec<(u32, usize)> = overlaps_per_seq.into_iter().collect();
     if !entries.is_empty() {
@@ -2252,8 +2386,8 @@ fn print_stats(impg: &Impg) {
         } else {
             entries[entries.len() / 2].1 as f64
         };
-        println!("\nMean overlaps per sequence: {:.2}", mean);
-        println!("Median overlaps per sequence: {:.2}", median);
+        println!("\nMean overlaps per sequence: {mean:.2}");
+        println!("Median overlaps per sequence: {median:.2}");
 
         println!("\nTop sequences by number of overlaps:");
         for (idx, (seq_id, count)) in entries.iter().take(5).enumerate() {
@@ -2273,14 +2407,14 @@ mod tests {
         // Test parsing subsequence coordinates
         let result = parse_subsequence_coordinates("HG002#1#chr1:5116130-6116563");
         assert_eq!(result, Some(("HG002#1#chr1".to_string(), 5116130)));
-        
+
         let result = parse_subsequence_coordinates("GRCh38#0#chr1:5477602-6474357");
         assert_eq!(result, Some(("GRCh38#0#chr1".to_string(), 5477602)));
-        
+
         // Test with no subsequence coordinates
         let result = parse_subsequence_coordinates("chr1");
         assert_eq!(result, None);
-        
+
         // Test with invalid format
         let result = parse_subsequence_coordinates("chr1:invalid");
         assert_eq!(result, None);
@@ -2289,34 +2423,21 @@ mod tests {
     #[test]
     fn test_transform_coordinates_to_original() {
         // Test with original coordinates enabled
-        let (name, start, end) = transform_coordinates_to_original(
-            "HG002#1#chr1:5116130-6116563",
-            45803,
-            45861,
-            true
-        );
+        let (name, start, end) =
+            transform_coordinates_to_original("HG002#1#chr1:5116130-6116563", 45803, 45861, true);
         assert_eq!(name, "HG002#1#chr1");
         assert_eq!(start, 5116130 + 45803);
         assert_eq!(end, 5116130 + 45861);
-        
+
         // Test with original coordinates disabled
-        let (name, start, end) = transform_coordinates_to_original(
-            "HG002#1#chr1:5116130-6116563",
-            45803,
-            45861,
-            false
-        );
+        let (name, start, end) =
+            transform_coordinates_to_original("HG002#1#chr1:5116130-6116563", 45803, 45861, false);
         assert_eq!(name, "HG002#1#chr1:5116130-6116563");
         assert_eq!(start, 45803);
         assert_eq!(end, 45861);
-        
+
         // Test with sequence name that doesn't contain subsequence coordinates
-        let (name, start, end) = transform_coordinates_to_original(
-            "chr1",
-            45803,
-            45861,
-            true
-        );
+        let (name, start, end) = transform_coordinates_to_original("chr1", 45803, 45861, true);
         assert_eq!(name, "chr1");
         assert_eq!(start, 45803);
         assert_eq!(end, 45861);

@@ -28,7 +28,7 @@ impl CigarOp {
             'I' => 2,
             'D' => 3,
             'M' => 4,
-            _ => panic!("Invalid CIGAR operation: {}", op),
+            _ => panic!("Invalid CIGAR operation: {op}"),
         };
         Self {
             val: (val << 29) | (len as u32),
@@ -305,7 +305,7 @@ impl Impg {
                         let paf_gzi_file = paf_file.to_owned() + ".gzi";
                         Some(
                             bgzf::gzi::fs::read(paf_gzi_file.clone())
-                                .unwrap_or_else(|_| panic!("Could not open {}", paf_gzi_file)),
+                                .unwrap_or_else(|_| panic!("Could not open {paf_gzi_file}")),
                         )
                     } else {
                         None
@@ -398,7 +398,7 @@ impl Impg {
         // Serialize sequence index
         let seq_index_data =
             bincode::serde::encode_to_vec(&self.seq_index, bincode::config::standard()).map_err(
-                |e| std::io::Error::other(format!("Failed to encode sequence index: {:?}", e)),
+                |e| std::io::Error::other(format!("Failed to encode sequence index: {e:?}")),
             )?;
 
         writer.write_all(&seq_index_data)?;
@@ -425,8 +425,7 @@ impl Impg {
                 bincode::serde::encode_to_vec(&(target_id, intervals), bincode::config::standard())
                     .map_err(|e| {
                         std::io::Error::other(format!(
-                            "Failed to encode tree for target {}: {:?}",
-                            target_id, e
+                            "Failed to encode tree for target {target_id}: {e:?}"
                         ))
                     })?;
 
@@ -438,7 +437,7 @@ impl Impg {
         let forest_map_offset = current_offset;
         let forest_map_data =
             bincode::serde::encode_to_vec(&forest_map, bincode::config::standard()).map_err(
-                |e| std::io::Error::other(format!("Failed to encode forest map: {:?}", e)),
+                |e| std::io::Error::other(format!("Failed to encode forest map: {e:?}")),
             )?;
 
         writer.write_all(&forest_map_data)?;
@@ -461,14 +460,13 @@ impl Impg {
             let (loaded_target_id, intervals): (u32, Vec<SerializableInterval>) =
                 bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
                     .unwrap_or_else(|_| {
-                        panic!("Failed to deserialize tree for target {}", target_id)
+                        panic!("Failed to deserialize tree for target {target_id}")
                     });
 
             // Verify we loaded the correct tree
             if loaded_target_id != target_id {
                 panic!(
-                    "Tree mismatch: expected {}, got {}",
-                    target_id, loaded_target_id
+                    "Tree mismatch: expected {target_id}, got {loaded_target_id}"
                 );
             }
 
@@ -545,7 +543,7 @@ impl Impg {
                 .map_err(|e| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        format!("Failed to load sequence index: {:?}", e),
+                        format!("Failed to load sequence index: {e:?}"),
                     )
                 })?;
 
@@ -556,7 +554,7 @@ impl Impg {
                 .map_err(|e| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        format!("Failed to load forest map: {:?}", e),
+                        format!("Failed to load forest map: {e:?}"),
                     )
                 })?;
 
@@ -565,10 +563,10 @@ impl Impg {
             .iter()
             .map(|paf_file| {
                 if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-                    let paf_gzi_file = format!("{}.gzi", paf_file);
+                    let paf_gzi_file = format!("{paf_file}.gzi");
                     Some(
                         bgzf::gzi::fs::read(paf_gzi_file.clone())
-                            .unwrap_or_else(|_| panic!("Could not open {}", paf_gzi_file)),
+                            .unwrap_or_else(|_| panic!("Could not open {paf_gzi_file}")),
                     )
                 } else {
                     None
