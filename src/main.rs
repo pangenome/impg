@@ -86,7 +86,7 @@ impl SequenceOpts {
                 let content = std::fs::read_to_string(&list_file).map_err(|e| {
                     io::Error::new(
                         io::ErrorKind::NotFound,
-                        format!("Failed to read sequence list file '{}': {}", list_file, e),
+                        format!("Failed to read sequence list file '{list_file}': {e}"),
                     )
                 })?;
 
@@ -120,14 +120,14 @@ impl SequenceOpts {
                         #[cfg(feature = "agc")]
                         UnifiedSequenceIndex::Agc(agc_index) => ("AGC", agc_index.agc_paths.len()),
                     };
-                    info!("Built {} index for {} files", file_type, num_files);
+                    info!("Built {file_type} index for {num_files} files");
                     Ok(Some(index))
                 }
                 Err(e) => {
-                    return Err(io::Error::new(
+                    Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("Failed to build sequence index: {}", e),
-                    ));
+                        format!("Failed to build sequence index: {e}"),
+                    ))
                 }
             }
         }
@@ -168,7 +168,7 @@ impl GfaMafFastaOpts {
             s.parse::<u8>().map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("Invalid {} value", name),
+                    format!("Invalid {name} value"),
                 )
             })
         };
@@ -206,7 +206,7 @@ impl GfaMafFastaOpts {
             let index = self.sequence.build_sequence_index()?;
             if index.is_none() && needs_sequence_mandatory {
                 #[cfg(feature = "agc")]
-                let msg = format!("Sequence files (FASTA/AGC) are required for '{}' output format. Use --sequence-files or --sequence-list", output_format);
+                let msg = format!("Sequence files (FASTA/AGC) are required for '{output_format}' output format. Use --sequence-files or --sequence-list");
                 #[cfg(not(feature = "agc"))]
                 let msg = format!("Sequence files (FASTA) are required for '{}' output format. Use --sequence-files or --sequence-list", output_format);
 
@@ -338,16 +338,14 @@ fn get_original_sequence_length(
             Err(_) => {
                 // Emit warning when sequence not found in index
                 warn!(
-                    "Sequence '{}' not found in sequence index, using 0 as length for PAF output",
-                    original_seq_name
+                    "Sequence '{original_seq_name}' not found in sequence index, using 0 as length for PAF output"
                 );
             }
         }
     } else {
         // Emit warning when no index is provided
         warn!(
-            "No sequence index provided, using 0 as length for PAF output of sequence '{}'",
-            original_seq_name
+            "No sequence index provided, using 0 as length for PAF output of sequence '{original_seq_name}'"
         );
     }
 
@@ -853,7 +851,7 @@ fn main() -> io::Result<()> {
                     _ => {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
-                            format!("Invalid output format: {}", resolved_output_format),
+                            format!("Invalid output format: {resolved_output_format}"),
                         ));
                     }
                 }
@@ -896,8 +894,7 @@ fn main() -> io::Result<()> {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "Invalid PCA similarity measure '{}'. Must be one of: jaccard, cosine, dice",
-                            pca_measure
+                            "Invalid PCA similarity measure '{pca_measure}'. Must be one of: jaccard, cosine, dice"
                         ),
                     ));
                 }
@@ -1068,7 +1065,7 @@ fn validate_sequence_range(
     let seq_id = seq_index.get_id(seq_name).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            format!("Sequence '{}' not found in index", seq_name),
+            format!("Sequence '{seq_name}' not found in index"),
         )
     })?;
 
@@ -1076,7 +1073,7 @@ fn validate_sequence_range(
     let seq_len = seq_index.get_len_from_id(seq_id).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Could not get length for sequence '{}'", seq_name),
+            format!("Could not get length for sequence '{seq_name}'"),
         )
     })? as i32;
 
@@ -1084,14 +1081,14 @@ fn validate_sequence_range(
     if start < 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("Start position {} cannot be negative", start),
+            format!("Start position {start} cannot be negative"),
         ));
     }
 
     if end < 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("End position {} cannot be negative", end),
+            format!("End position {end} cannot be negative"),
         ));
     }
 
@@ -1099,8 +1096,7 @@ fn validate_sequence_range(
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "Start position {} must be less than end position {}",
-                start, end
+                "Start position {start} must be less than end position {end}"
             ),
         ));
     }
@@ -1109,8 +1105,7 @@ fn validate_sequence_range(
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "End position {} exceeds sequence length {} for sequence '{}'",
-                end, seq_len, seq_name
+                "End position {end} exceeds sequence length {seq_len} for sequence '{seq_name}'"
             ),
         ));
     }
@@ -1138,8 +1133,7 @@ fn validate_region_size(
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "Region size ({} bp) exceeds 10kbp for '{}' output format, which may require large time and memory. Use --force-large-region to proceed anyway.",
-                    region_size, output_format
+                    "Region size ({region_size} bp) exceeds 10kbp for '{output_format}' output format, which may require large time and memory. Use --force-large-region to proceed anyway."
                 ),
             ));
         }
@@ -1148,8 +1142,7 @@ fn validate_region_size(
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "Merge distance ({} bp) exceeds 1kbp for '{}' output format, which may require large time and memory. Use --force-large-region to proceed anyway.",
-                    merge_distance, output_format
+                    "Merge distance ({merge_distance} bp) exceeds 1kbp for '{output_format}' output format, which may require large time and memory. Use --force-large-region to proceed anyway."
                 ),
             ));
         }
@@ -1211,7 +1204,7 @@ fn resolve_paf_files(paf: &PafOpts) -> io::Result<Vec<String>> {
         if files.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("No valid PAF files found in list file: {}", paf_list_file),
+                format!("No valid PAF files found in list file: {paf_list_file}"),
             ));
         }
 
@@ -1254,7 +1247,7 @@ fn load_or_generate_multi_index(
 
 fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Result<Impg> {
     let index_file = get_combined_index_filename(paf_files, custom_index);
-    info!("Reading IMPG index from {}", index_file);
+    info!("Reading IMPG index from {index_file}");
 
     // Check if all PAF files are newer than the index
     let index_file_metadata = std::fs::metadata(&index_file)?;
@@ -1266,8 +1259,7 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
                 if let Ok(paf_file_ts) = paf_file_metadata.modified() {
                     if paf_file_ts > index_ts {
                         warn!(
-                            "WARNING:\tPAF file {} has been modified since impg index creation.",
-                            paf_file
+                            "WARNING:\tPAF file {paf_file} has been modified since impg index creation."
                         );
                     }
                 }
@@ -1288,7 +1280,7 @@ fn generate_multi_index(
     custom_index: Option<&str>,
 ) -> io::Result<Impg> {
     let index_file = get_combined_index_filename(paf_files, custom_index);
-    info!("No index found at {}. Creating it now.", index_file);
+    info!("No index found at {index_file}. Creating it now.");
 
     let num_paf_files = paf_files.len();
     // Thread-safe counter for tracking progress
@@ -1308,8 +1300,7 @@ fn generate_multi_index(
                 let current_count = files_processed.fetch_add(1, Ordering::SeqCst) + 1;
                 // Print progress with sequential counter
                 debug!(
-                    "Processing PAF file ({}/{}): {}",
-                    current_count, num_paf_files, paf_file
+                    "Processing PAF file ({current_count}/{num_paf_files}): {paf_file}"
                 );
 
                 let file = File::open(paf_file)?;
@@ -1328,7 +1319,7 @@ fn generate_multi_index(
                 let records = impg::paf::parse_paf(reader, &mut seq_index_guard).map_err(|e| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("Failed to parse PAF records from {}: {:?}", paf_file, e),
+                        format!("Failed to parse PAF records from {paf_file}: {e:?}"),
                     )
                 })?;
 
@@ -1372,7 +1363,7 @@ fn generate_multi_index(
     let impg = Impg::from_multi_paf_records(&records_by_file, seq_index).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Failed to create index: {:?}", e),
+            format!("Failed to create index: {e:?}"),
         )
     })?;
 
@@ -1423,15 +1414,14 @@ fn perform_query(
     let target_id = impg.seq_index.get_id(target_name).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("Target sequence '{}' not found in index", target_name),
+            format!("Target sequence '{target_name}' not found in index"),
         )
     })?;
     let target_length = impg.seq_index.get_len_from_id(target_id).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "Target sequence '{}' length not found in index",
-                target_name
+                "Target sequence '{target_name}' length not found in index"
             ),
         )
     })?;
@@ -1439,8 +1429,7 @@ fn perform_query(
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "Target range end ({}) exceeds the target sequence length ({})",
-                target_end, target_length
+                "Target range end ({target_end}) exceeds the target sequence length ({target_length})"
             ),
         ));
     }
@@ -1643,11 +1632,11 @@ fn output_results_paf(
         let block_identity = (matches as f64) / (matches + edit_distance) as f64;
 
         // Format bi and gi fields without trailing zeros
-        let gi_str = format!("{:.6}", gap_compressed_identity)
+        let gi_str = format!("{gap_compressed_identity:.6}")
             .trim_end_matches('0')
             .trim_end_matches('.')
             .to_string();
-        let bi_str = format!("{:.6}", block_identity)
+        let bi_str = format!("{block_identity:.6}")
             .trim_end_matches('0')
             .trim_end_matches('.')
             .to_string();
@@ -1692,7 +1681,7 @@ fn output_results_gfa(
         sequence_index,
         scoring_params,
     );
-    print!("{}", gfa_output);
+    print!("{gfa_output}");
 
     Ok(())
 }
@@ -1737,7 +1726,7 @@ fn output_results_fasta(
             } else {
                 ""
             };
-            let header = format!(">{}:{}-{}{}", query_name, start, end, header_suffix);
+            let header = format!(">{query_name}:{start}-{end}{header_suffix}");
 
             // Convert sequence to string with line breaks every 80 characters
             let sequence_str = String::from_utf8_lossy(&sequence);
@@ -1754,8 +1743,8 @@ fn output_results_fasta(
 
     // Output sequences sequentially to maintain order
     for (header, sequence) in sequence_data {
-        println!("{}", header);
-        println!("{}", sequence);
+        println!("{header}");
+        println!("{sequence}");
     }
 
     Ok(())
@@ -1783,7 +1772,7 @@ fn output_results_maf(
         sequence_index,
         scoring_params,
     );
-    print!("{}", maf_output);
+    print!("{maf_output}");
 
     Ok(())
 }
@@ -2377,9 +2366,9 @@ fn print_stats(impg: &Impg) {
         num_overlaps
     );
 
-    println!("Number of sequences: {}", num_sequences);
-    println!("Total sequence length: {} bp", total_sequence_length);
-    println!("Number of overlaps: {}", num_overlaps);
+    println!("Number of sequences: {num_sequences}");
+    println!("Total sequence length: {total_sequence_length} bp");
+    println!("Number of overlaps: {num_overlaps}");
 
     let mut entries: Vec<(u32, usize)> = overlaps_per_seq.into_iter().collect();
     if !entries.is_empty() {
@@ -2397,8 +2386,8 @@ fn print_stats(impg: &Impg) {
         } else {
             entries[entries.len() / 2].1 as f64
         };
-        println!("\nMean overlaps per sequence: {:.2}", mean);
-        println!("Median overlaps per sequence: {:.2}", median);
+        println!("\nMean overlaps per sequence: {mean:.2}");
+        println!("Median overlaps per sequence: {median:.2}");
 
         println!("\nTop sequences by number of overlaps:");
         for (idx, (seq_id, count)) in entries.iter().take(5).enumerate() {

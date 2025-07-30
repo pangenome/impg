@@ -94,11 +94,11 @@ fn post_process_gfa_for_strands(gfa: String, sequence_metadata: &[SequenceMetada
                             .rev()
                             .map(|seg| {
                                 if let Some(seg_stripped) = seg.strip_suffix('+') {
-                                    format!("{}-", seg_stripped)
+                                    format!("{seg_stripped}-")
                                 } else if let Some(seg_stripped) = seg.strip_suffix('-') {
-                                    format!("{}+", seg_stripped)
+                                    format!("{seg_stripped}+")
                                 } else {
-                                    panic!("Missing segment orientation in path: {}", path_name);
+                                    panic!("Missing segment orientation in path: {path_name}");
                                 }
                             })
                             .collect();
@@ -251,7 +251,7 @@ fn format_maf_from_msa(
     // Write MAF header
     output.push_str("##maf version=1 scoring=spoa\n");
     if let Some(ref name) = block_name {
-        output.push_str(&format!("# {}\n", name));
+        output.push_str(&format!("# {name}\n"));
     }
 
     // Find trimming positions (remove all-gap columns at start and end)
@@ -319,7 +319,7 @@ fn _convert_and_write_gfa<R: AsRef<str>, W: Write>(raw_gfa: R, writer: &mut W) -
             let fields: Vec<&str> = line.splitn(4, '\t').collect();
             if fields.len() < 3 {
                 // Malformed S line: echo raw
-                writeln!(writer, "{}", line)?;
+                writeln!(writer, "{line}")?;
                 continue;
             }
 
@@ -351,7 +351,7 @@ fn _convert_and_write_gfa<R: AsRef<str>, W: Write>(raw_gfa: R, writer: &mut W) -
             let fields: Vec<&str> = line.splitn(7, '\t').collect();
             if fields.len() < 6 {
                 // Malformed L line: echo raw
-                writeln!(writer, "{}", line)?;
+                writeln!(writer, "{line}")?;
                 continue;
             }
 
@@ -402,7 +402,7 @@ fn _convert_and_write_gfa<R: AsRef<str>, W: Write>(raw_gfa: R, writer: &mut W) -
             let fields: Vec<&str> = line.splitn(8, '\t').collect();
             if fields.len() < 7 {
                 // Malformed W line: echo raw
-                writeln!(writer, "{}", line)?;
+                writeln!(writer, "{line}")?;
                 continue;
             }
 
@@ -435,18 +435,18 @@ fn _convert_and_write_gfa<R: AsRef<str>, W: Write>(raw_gfa: R, writer: &mut W) -
                     } else {
                         segname.clone()
                     };
-                    segs_oriented.push(format!("{}{}", new_seg, orient));
+                    segs_oriented.push(format!("{new_seg}{orient}"));
                 }
             }
 
             let joined = segs_oriented.join(",");
             // Emit as a `P` line, with Overlaps = “*”
-            writeln!(writer, "P\t{}\t{}\t*", path_name, joined)?;
+            writeln!(writer, "P\t{path_name}\t{joined}\t*")?;
             continue;
         }
 
         // 5) All other lines (including C/J/P/L/W tags not shown above, or comment lines): pass through:
-        writeln!(writer, "{}", line)?;
+        writeln!(writer, "{line}")?;
     }
 
     Ok(())

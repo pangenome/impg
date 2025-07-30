@@ -71,7 +71,7 @@ impl UnifiedSequenceIndex {
             }
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("Unsupported file extension: {}", first_ext),
+                format!("Unsupported file extension: {first_ext}"),
             )),
         }
     }

@@ -54,7 +54,7 @@ pub fn partition_alignments(
         let file = File::open(path).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("Could not open starting sequences file {}: {}", path, e),
+                format!("Could not open starting sequences file {path}: {e}"),
             )
         })?;
 
@@ -75,8 +75,7 @@ pub fn partition_alignments(
                     starting_sequences.push((seq_id, 0, seq_length));
                 } else if debug {
                     debug!(
-                        "Sequence {} from starting file not found in index",
-                        trimmed_name
+                        "Sequence {trimmed_name} from starting file not found in index"
                     );
                 }
             }
@@ -316,14 +315,14 @@ pub fn partition_alignments(
                     (total_partitioned_length as f64 / total_sequence_length as f64) * 100.0;
                 // Create formatted percentage strings with conditional scientific notation
                 let current_percentage_str = if current_percentage < 0.0001 {
-                    format!("{:.4e}%", current_percentage)
+                    format!("{current_percentage:.4e}%")
                 } else {
-                    format!("{:.4}%", current_percentage)
+                    format!("{current_percentage:.4}%")
                 };
                 let total_percentage_str = if total_percentage < 0.0001 {
-                    format!("{:.4e}%", total_percentage)
+                    format!("{total_percentage:.4e}%")
                 } else {
-                    format!("{:.4}%", total_percentage)
+                    format!("{total_percentage:.4}%")
                 };
                 //let calc_time = calc_start.elapsed();
 
@@ -372,7 +371,7 @@ pub fn partition_alignments(
                         _ => {
                             return Err(io::Error::new(
                                 io::ErrorKind::InvalidInput,
-                                format!("Unsupported output format: {}", output_format),
+                                format!("Unsupported output format: {output_format}"),
                             ));
                         }
                     }
@@ -392,7 +391,7 @@ pub fn partition_alignments(
                         _ => {
                             return Err(io::Error::new(
                                 io::ErrorKind::InvalidInput,
-                                format!("Unsupported output format: {}", output_format),
+                                format!("Unsupported output format: {output_format}"),
                             ));
                         }
                     }
@@ -452,7 +451,7 @@ pub fn partition_alignments(
             .try_for_each(|partition_idx| -> io::Result<()> {
                 let temp_bed_file = create_output_path(
                     output_folder,
-                    &format!("partition{}.bed.tmp", partition_idx),
+                    &format!("partition{partition_idx}.bed.tmp"),
                 )?;
 
                 // Read intervals from temporary BED file using parse_bed_file
@@ -503,14 +502,13 @@ pub fn partition_alignments(
     let final_percentage = (total_partitioned_length as f64 / total_sequence_length as f64) * 100.0;
     // Create formatted percentage string with conditional scientific notation
     let final_percentage_str = if final_percentage < 0.0001 {
-        format!("{:.4e}%", final_percentage)
+        format!("{final_percentage:.4e}%")
     } else {
-        format!("{:.4}%", final_percentage)
+        format!("{final_percentage:.4}%")
     };
 
     info!(
-        "Partitioned into {} regions: {} bp total written / {} bp total sequence ({})",
-        partition_num, total_partitioned_length, total_sequence_length, final_percentage_str
+        "Partitioned into {partition_num} regions: {total_partitioned_length} bp total written / {total_sequence_length} bp total sequence ({final_percentage_str})"
     );
 
     Ok(())
@@ -588,8 +586,7 @@ fn select_and_window_sequences(
                 let seq_name = impg.seq_index.get_name(seq_id).unwrap();
 
                 debug!(
-                    "Selected sequence {} with most missing sequence ({}bp)",
-                    seq_name, max_total_missing
+                    "Selected sequence {seq_name} with most missing sequence ({max_total_missing}bp)"
                 );
 
                 ranges_to_window.push((seq_id, 0, seq_length));
@@ -1232,7 +1229,7 @@ fn write_partition(
         }
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("Unsupported output format: {}", output_format),
+            format!("Unsupported output format: {output_format}"),
         )),
     }
 }
@@ -1246,8 +1243,8 @@ fn write_partition_bed(
 ) -> io::Result<()> {
     // Create filename with optional suffix
     let filename = match suffix {
-        Some(s) => format!("partition{}.bed{}", partition_num, s),
-        None => format!("partition{}.bed", partition_num),
+        Some(s) => format!("partition{partition_num}.bed{s}"),
+        None => format!("partition{partition_num}.bed"),
     };
 
     // Create full path with output folder
@@ -1265,7 +1262,7 @@ fn write_partition_bed(
             (query_interval.last, query_interval.first)
         };
 
-        writeln!(writer, "{}\t{}\t{}", name, start, end)?;
+        writeln!(writer, "{name}\t{start}\t{end}")?;
     }
 
     writer.flush()?;
@@ -1289,13 +1286,13 @@ fn write_partition_gfa(
     );
 
     // Create output file
-    let filename = format!("partition{}.gfa", partition_num);
+    let filename = format!("partition{partition_num}.gfa");
     let full_path = create_output_path(output_folder, &filename)?;
     let file = File::create(full_path)?;
     let mut writer = BufWriter::new(file);
 
     // Write the GFA output to the file
-    writeln!(writer, "{}", gfa_output)?;
+    writeln!(writer, "{gfa_output}")?;
     writer.flush()?;
     Ok(())
 }
@@ -1317,13 +1314,13 @@ fn write_partition_maf(
     );
 
     // Create output file
-    let filename = format!("partition{}.maf", partition_num);
+    let filename = format!("partition{partition_num}.maf");
     let full_path = create_output_path(output_folder, &filename)?;
     let file = File::create(full_path)?;
     let mut writer = BufWriter::new(file);
 
     // Write the MAF output to the file
-    write!(writer, "{}", maf_output)?;
+    write!(writer, "{maf_output}")?;
     writer.flush()?;
     Ok(())
 }
@@ -1338,7 +1335,7 @@ fn write_partition_fasta(
     reverse_complement: bool,
 ) -> io::Result<()> {
     // Create output file
-    let filename = format!("partition{}.fasta", partition_num);
+    let filename = format!("partition{partition_num}.fasta");
     let full_path = create_output_path(output_folder, &filename)?;
     let file = File::create(full_path)?;
     let mut writer = BufWriter::new(file);
@@ -1369,7 +1366,7 @@ fn write_partition_fasta(
         } else {
             ""
         };
-        writeln!(writer, ">{}:{}-{}{}", query_name, start, end, header_suffix)?;
+        writeln!(writer, ">{query_name}:{start}-{end}{header_suffix}")?;
 
         // Write sequence in lines of 80 characters
         let sequence_str = String::from_utf8_lossy(&sequence);
@@ -1404,7 +1401,7 @@ fn write_single_partition_file(
                         (query_interval.last, query_interval.first)
                     };
 
-                    writeln!(writer, "{}	{}	{}	{}", name, start, end, partition_num)?;
+                    writeln!(writer, "{name}	{start}	{end}	{partition_num}")?;
                 }
             }
 
@@ -1414,8 +1411,7 @@ fn write_single_partition_file(
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "Single-file output not supported for format: {}",
-                output_format
+                "Single-file output not supported for format: {output_format}"
             ),
         )),
     }

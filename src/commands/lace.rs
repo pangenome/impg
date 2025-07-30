@@ -53,8 +53,7 @@ fn get_compression_format(compress_arg: &str, output_path: &str) -> Format {
         }
         _ => {
             warn!(
-                "Unsupported compression format '{}', using none",
-                compress_arg
+                "Unsupported compression format '{compress_arg}', using none"
             );
             Format::No
         }
@@ -245,7 +244,7 @@ pub fn run_lace(
         if !Path::new(temp_path).exists() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("Temporary directory '{}' does not exist", temp_path),
+                format!("Temporary directory '{temp_path}' does not exist"),
             ));
         }
     }
@@ -316,10 +315,9 @@ pub fn run_lace(
         verbose > 1,
     ) {
         Ok(_) => info!(
-            "Successfully wrote the combined graph to {} ({:?} format)",
-            output, compression_format
+            "Successfully wrote the combined graph to {output} ({compression_format:?} format)"
         ),
-        Err(e) => error!("Error writing the GFA file: {}", e),
+        Err(e) => error!("Error writing the GFA file: {e}"),
     }
 
     // log_memory_usage("end");
@@ -339,7 +337,7 @@ fn resolve_gfa_files(
                 if !Path::new(file).exists() {
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
-                        format!("GFA file '{}' not found", file),
+                        format!("GFA file '{file}' not found"),
                     ));
                 }
             }
@@ -357,7 +355,7 @@ fn resolve_gfa_files(
                     if !Path::new(trimmed).exists() {
                         return Err(io::Error::new(
                             io::ErrorKind::NotFound,
-                            format!("GFA file '{}' not found", trimmed),
+                            format!("GFA file '{trimmed}' not found"),
                         ));
                     }
                     files.push(trimmed.to_string());
@@ -367,7 +365,7 @@ fn resolve_gfa_files(
             if files.is_empty() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("No valid GFA files found in list file: {}", list_file),
+                    format!("No valid GFA files found in list file: {list_file}"),
                 ));
             }
 
@@ -416,7 +414,7 @@ fn read_gfa_files(
                     match fields[0] {
                         "S" => {
                             if fields.len() < 3 {
-                                error!("Invalid S line: {}", line);
+                                error!("Invalid S line: {line}");
                                 continue;
                             }
                             let node_id: u64 = match fields[1].parse() {
@@ -437,7 +435,7 @@ fn read_gfa_files(
                         }
                         "L" => {
                             if fields.len() < 6 {
-                                error!("Invalid L line: {}", line);
+                                error!("Invalid L line: {line}");
                                 continue;
                             }
 
@@ -462,7 +460,7 @@ fn read_gfa_files(
                         }
                         "P" => {
                             if fields.len() < 3 {
-                                error!("Invalid P line: {}", line);
+                                error!("Invalid P line: {line}");
                                 continue;
                             }
                             let path_name = fields[1];
@@ -473,7 +471,7 @@ fn read_gfa_files(
                                 let mut translated_steps = Vec::new();
                                 for step_str in nodes_str.split(',') {
                                     if step_str.is_empty() {
-                                        error!("Empty step in path {} in line {}", path_name, line);
+                                        error!("Empty step in path {path_name} in line {line}");
                                         continue;
                                     }
                                     let (node_str, orient) = if let Some(stripped) =
@@ -483,7 +481,7 @@ fn read_gfa_files(
                                     } else if let Some(stripped) = step_str.strip_suffix('-') {
                                         (stripped, true)
                                     } else {
-                                        error!("Invalid step format {} in line {}", step_str, line);
+                                        error!("Invalid step format {step_str} in line {line}");
                                         continue;
                                     };
 
@@ -491,8 +489,7 @@ fn read_gfa_files(
                                         Ok(id) => id,
                                         Err(_) => {
                                             error!(
-                                                "Invalid node ID in path {} in line {}",
-                                                path_name, line
+                                                "Invalid node ID in path {path_name} in line {line}"
                                             );
                                             continue;
                                         }
@@ -504,8 +501,7 @@ fn read_gfa_files(
                                         translated_steps.push(Handle::pack(translated_id, orient));
                                     } else {
                                         error!(
-                                            "Node {} in path {} not found in translation map",
-                                            node_id, path_name
+                                            "Node {node_id} in path {path_name} not found in translation map"
                                         );
                                         continue;
                                     }
@@ -546,11 +542,10 @@ fn read_gfa_files(
                 }
 
                 debug!(
-                    "GFA file {} ({}) processed: {} nodes, {} edges",
-                    gfa_id, gfa_path, node_count, edge_count
+                    "GFA file {gfa_id} ({gfa_path}) processed: {node_count} nodes, {edge_count} edges"
                 );
             } else {
-                error!("Failed to open GFA file '{}'", gfa_path);
+                error!("Failed to open GFA file '{gfa_path}'");
             }
         });
 
@@ -607,7 +602,7 @@ fn read_gfa_files(
     // Check if there were any validation errors
     if !validation_errors.is_empty() {
         for error in validation_errors {
-            error!("{}", error);
+            error!("{error}");
         }
         std::process::exit(1);
     }
@@ -634,12 +629,12 @@ fn get_gfa_reader(gfa_path: &str) -> io::Result<Box<dyn BufRead>> {
     let file = std::fs::File::open(gfa_path).map_err(|e| {
         io::Error::new(
             e.kind(),
-            format!("Failed to open file '{}': {}", gfa_path, e),
+            format!("Failed to open file '{gfa_path}': {e}"),
         )
     })?;
 
     let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
-        io::Error::other(format!("Failed to open reader for '{}': {}", gfa_path, e))
+        io::Error::other(format!("Failed to open reader for '{gfa_path}': {e}"))
     })?;
 
     Ok(Box::new(BufReader::new(reader)))
@@ -678,24 +673,21 @@ fn sort_and_filter_ranges(ranges: &mut Vec<RangeInfo>) {
             // Skip duplicate range
             // Current range is a duplicate of the previous range, skip it
             debug!(
-                "    Duplicate range detected: Range [start={}, end={}] is identical to previous range and will be removed.",
-                curr_start, curr_end
+                "    Duplicate range detected: Range [start={curr_start}, end={curr_end}] is identical to previous range and will be removed."
             );
 
             continue;
         } else if curr_start >= prev_start && curr_end <= prev_end {
             // Skip range that is fully contained within previous range
             debug!(
-                "    Contained range detected: Range [start={}, end={}] is fully contained within previous range [start={}, end={}] and will be removed.",
-                curr_start, curr_end, prev_start, prev_end
+                "    Contained range detected: Range [start={curr_start}, end={curr_end}] is fully contained within previous range [start={prev_start}, end={prev_end}] and will be removed."
             );
 
             continue;
         } else if prev_start >= curr_start && prev_end <= curr_end {
             // Previous range is fully contained within current range
             debug!(
-                "    Containing range detected: Previous range [start={}, end={}] is fully contained within current range [start={}, end={}] and will be removed.",
-                prev_start, prev_end, curr_start, curr_end
+                "    Containing range detected: Previous range [start={prev_start}, end={prev_end}] is fully contained within current range [start={curr_start}, end={curr_end}] and will be removed."
             );
 
             ranges.swap(write_idx, read_idx);
@@ -721,8 +713,7 @@ fn sort_and_filter_ranges(ranges: &mut Vec<RangeInfo>) {
 
             if !should_skip {
                 debug!(
-                    "    Overlapping range detected: Range [start={}, end={}] overlaps with previous range [start={}, end={}] and will be kept.",
-                    curr_start, curr_end, prev_start, prev_end
+                    "    Overlapping range detected: Range [start={curr_start}, end={curr_end}] overlaps with previous range [start={prev_start}, end={prev_end}] and will be kept."
                 );
                 write_idx += 1;
                 if write_idx != read_idx {
@@ -838,8 +829,7 @@ fn trim_range_overlaps(ranges: &mut [RangeInfo], graph_mutex: &Arc<Mutex<Compact
 
                     if step_start < overlap_start {
                         debug!(
-                            "      Adding left part of step [start={}, end={}]",
-                            step_start, overlap_within_step_start
+                            "      Adding left part of step [start={step_start}, end={overlap_within_step_start}]"
                         );
                         assert!(overlap_start_offset > 0);
 
@@ -861,8 +851,7 @@ fn trim_range_overlaps(ranges: &mut [RangeInfo], graph_mutex: &Arc<Mutex<Compact
                         }
                     } else if step_end > overlap_end {
                         debug!(
-                            "      Adding right part of step [start={}, end={}]",
-                            overlap_within_step_end, step_end
+                            "      Adding right part of step [start={overlap_within_step_end}, end={step_end}]"
                         );
                         assert!(overlap_end_offset < node_len);
 
@@ -1025,7 +1014,7 @@ fn write_graph_to_gfa(
             // Use parallel gzip compression
             let parz: ParCompress<Gzip> = ParCompressBuilder::new()
                 .num_threads(rayon::current_num_threads())
-                .map_err(|e| std::io::Error::other(format!("Failed to set threads: {:?}", e)))?
+                .map_err(|e| std::io::Error::other(format!("Failed to set threads: {e:?}")))?
                 .compression_level(Compression::new(6))
                 .from_writer(output_file);
             Box::new(parz)
@@ -1034,7 +1023,7 @@ fn write_graph_to_gfa(
             // Use parallel BGZF compression
             let parz: ParCompress<Bgzf> = ParCompressBuilder::new()
                 .num_threads(rayon::current_num_threads())
-                .map_err(|e| std::io::Error::other(format!("Failed to set threads: {:?}", e)))?
+                .map_err(|e| std::io::Error::other(format!("Failed to set threads: {e:?}")))?
                 .compression_level(Compression::new(6))
                 .from_writer(output_file);
             Box::new(parz)
@@ -1079,7 +1068,7 @@ fn write_graph_to_gfa(
                 combined_graph.get_sequence(Handle::pack(NodeId::from(node_id), false))?;
             let sequence_str =
                 String::from_utf8(sequence).expect("Node sequence contains invalid UTF-8");
-            writeln!(file, "S\t{}\t{}", new_id, sequence_str)?;
+            writeln!(file, "S\t{new_id}\t{sequence_str}")?;
 
             new_id += 1;
         }
@@ -1097,8 +1086,7 @@ fn write_graph_to_gfa(
             let to_orient = if edge.to_rev() { "-" } else { "+" };
             writeln!(
                 file,
-                "L\t{}\t{}\t{}\t{}\t0M",
-                from_mapped, from_orient, to_mapped, to_orient
+                "L\t{from_mapped}\t{from_orient}\t{to_mapped}\t{to_orient}\t0M"
             )?;
         }
     }
@@ -1122,7 +1110,7 @@ fn write_graph_to_gfa(
         //if ranges.is_empty() { continue }
 
         if debug {
-            debug!("Processing Path key '{}'", path_key);
+            debug!("Processing Path key '{path_key}'");
 
             let mut current_start = ranges[0].start;
             let mut current_end = ranges[0].end;
@@ -1134,18 +1122,17 @@ fn write_graph_to_gfa(
                 } else {
                     // Print current merged range
                     debug!(
-                        "  Merged range: start={}, end={}",
-                        current_start, current_end
+                        "  Merged range: start={current_start}, end={current_end}"
                     );
 
                     if !ranges[i - 1].overlaps_with(&ranges[i]) {
                         // Calculate and print gap
                         let gap = ranges[i].start - current_end;
-                        debug!("    Gap to next range: {} positions", gap);
+                        debug!("    Gap to next range: {gap} positions");
                     } else {
                         // Calculate and print overlap (IT SHOULD NOT HAPPEN)
                         let overlap = current_end - ranges[i].start;
-                        debug!("    Overlap with next range: {} positions", overlap);
+                        debug!("    Overlap with next range: {overlap} positions");
                     }
 
                     // Start new merged range
@@ -1156,8 +1143,7 @@ fn write_graph_to_gfa(
 
             // Print final merged range
             debug!(
-                "  Final merged range: start={}, end={}",
-                current_start, current_end
+                "  Final merged range: start={current_start}, end={current_end}"
             );
         }
 
@@ -1218,7 +1204,7 @@ fn write_graph_to_gfa(
                 } else {
                     // Finish current partial path and start a new one
                     if !path_elements.is_empty() {
-                        let path_name = format!("{}:{}-{}", path_key, path_start, path_end);
+                        let path_name = format!("{path_key}:{path_start}-{path_end}");
                         writeln!(file, "P\t{}\t{}\t*", path_name, path_elements.join(","))?;
                         path_elements.clear();
                     }
@@ -1248,15 +1234,13 @@ fn write_graph_to_gfa(
                         path_end = total_len;
                     } else if path_end > total_len {
                         warn!(
-                            "Path '{}' extends beyond sequence length ({} > {})",
-                            path_key, path_end, total_len
+                            "Path '{path_key}' extends beyond sequence length ({path_end} > {total_len})"
                         );
                     }
                 }
                 Err(e) => {
                     warn!(
-                        "Failed to get sequence length for path '{}': {}",
-                        path_key, e
+                        "Failed to get sequence length for path '{path_key}': {e}"
                     );
                 }
             }
@@ -1276,7 +1260,7 @@ fn write_graph_to_gfa(
             let path_name = if is_full_path {
                 path_key.to_string()
             } else {
-                format!("{}:{}-{}", path_key, path_start, path_end)
+                format!("{path_key}:{path_start}-{path_end}")
             };
             writeln!(file, "P\t{}\t{}\t*", path_name, path_elements.join(","))?;
         }
@@ -1291,7 +1275,7 @@ fn write_graph_to_gfa(
             end_gaps
         );
     } else if fill_gaps == 1 {
-        info!("Filled {} middle gaps", middle_gaps);
+        info!("Filled {middle_gaps} middle gaps");
     }
 
     file.flush()?;
@@ -1315,11 +1299,11 @@ fn create_gap_node<W: Write>(
     let gap_sequence = if let Some(index) = sequence_index {
         match index.fetch_sequence(path_key, gap_start as i32, gap_end as i32) {
             Ok(seq) => String::from_utf8(seq).unwrap_or_else(|e| {
-                error!("Failed to convert sequence to UTF-8: {}", e);
+                error!("Failed to convert sequence to UTF-8: {e}");
                 "N".repeat(gap_size)
             }),
             Err(e) => {
-                error!("Failed to fetch sequence for '{}': {}", path_key, e);
+                error!("Failed to fetch sequence for '{path_key}': {e}");
                 "N".repeat(gap_size)
             }
         }
@@ -1328,7 +1312,7 @@ fn create_gap_node<W: Write>(
     };
 
     // Write gap node
-    writeln!(file, "S\t{}\t{}", new_id, gap_sequence)?;
+    writeln!(file, "S\t{new_id}\t{gap_sequence}")?;
 
     // Add edge from previous node if it exists
     if let Some(last_element) = last_element {
@@ -1336,7 +1320,7 @@ fn create_gap_node<W: Write>(
             .parse::<usize>()
             .unwrap();
         let last_orient = &last_element[last_element.len() - 1..];
-        writeln!(file, "L\t{}\t{}\t{}\t+\t0M", last_id, last_orient, new_id)?;
+        writeln!(file, "L\t{last_id}\t{last_orient}\t{new_id}\t+\t0M")?;
     }
 
     // Add edge to next node if it exists
@@ -1346,7 +1330,7 @@ fn create_gap_node<W: Write>(
         writeln!(file, "L\t{}\t+\t{}\t{}\t0M", *new_id, next_id, next_orient)?;
     }
 
-    let path_element = format!("{}+", new_id);
+    let path_element = format!("{new_id}+");
     *new_id += 1;
 
     Ok(path_element)
@@ -1360,7 +1344,7 @@ fn add_range_steps_to_path(
     for handle in &range.steps {
         let node_id = id_mapping[u64::from(handle.id()) as usize];
         let orient = if handle.is_reverse() { "-" } else { "+" };
-        path_elements.push(format!("{}{}", node_id, orient));
+        path_elements.push(format!("{node_id}{orient}"));
     }
 }
 
@@ -1521,17 +1505,14 @@ mod tests {
             assert_eq!(
                 ranges.len(),
                 expected.len(),
-                "Test case '{}': Wrong number of ranges after containment removal",
-                case_name
+                "Test case '{case_name}': Wrong number of ranges after containment removal"
             );
 
             for (i, (result, expected)) in ranges.iter().zip(expected.iter()).enumerate() {
                 assert_eq!(
                     (result.start, result.end),
                     (expected.start, expected.end),
-                    "Test case '{}': Mismatch at position {}",
-                    case_name,
-                    i
+                    "Test case '{case_name}': Mismatch at position {i}"
                 );
             }
 

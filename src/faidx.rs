@@ -26,7 +26,7 @@ impl FastaIndex {
             index.fasta_paths.push(fasta_path.clone());
 
             // Read the .fai file to get sequence names
-            let fai_path = format!("{}.fai", fasta_path);
+            let fai_path = format!("{fasta_path}.fai");
 
             // Try to open the .fai file, if it doesn't exist, try to create it
             let fai_content = match std::fs::read_to_string(&fai_path) {
@@ -40,8 +40,7 @@ impl FastaIndex {
                         }
                         Err(e) => {
                             return Err(io::Error::other(format!(
-                                "Failed to create FASTA index for '{}': {}",
-                                fasta_path, e
+                                "Failed to create FASTA index for '{fasta_path}': {e}"
                             )));
                         }
                     }
@@ -80,12 +79,12 @@ impl FastaIndex {
         let fasta_path = self.get_fasta_path(seq_name).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("Sequence '{}' not found in any FASTA file", seq_name),
+                format!("Sequence '{seq_name}' not found in any FASTA file"),
             )
         })?;
 
         let reader = faidx::Reader::from_path(fasta_path).map_err(|e| {
-            io::Error::other(format!("Failed to open FASTA file '{}': {}", fasta_path, e))
+            io::Error::other(format!("Failed to open FASTA file '{fasta_path}': {e}"))
         })?;
 
         // Fetch sequence and properly handle memory
@@ -102,8 +101,7 @@ impl FastaIndex {
             }
             Err(e) => {
                 return Err(io::Error::other(format!(
-                    "Failed to fetch sequence for {}: {}",
-                    seq_name, e
+                    "Failed to fetch sequence for {seq_name}: {e}"
                 )))
             }
         };
@@ -115,7 +113,7 @@ impl FastaIndex {
         self.sequence_lengths.get(seq_name).copied().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("Sequence '{}' not found", seq_name),
+                format!("Sequence '{seq_name}' not found"),
             )
         })
     }
