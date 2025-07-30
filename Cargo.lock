@@ -11,7 +11,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 [[package]]
 name = "agc-rs"
 version = "0.1.0"
-source = "git+https://github.com/pangenome/agc-rs.git#e86eb00266fe3fca7c922ca02e58b9f3b682bace"
+source = "git+https://github.com/pangenome/agc-rs.git#d52ccc082a02b7164a137d5e71bfd7843e3ab497"
 dependencies = [
  "cmake",
  "cxx",
@@ -1184,20 +1184,19 @@ dependencies = [
 
 [[package]]
 name = "noodles"
-version = "0.99.0"
+version = "0.100.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "110e4a86fc1551a6480a47c7ff52176dc314b3f20355550bd542f05bce65ead2"
+checksum = "8a5d9c17e7b3fd97eee958bfba83522d3da540c395f7ae071a8fa4bb7e85969e"
 dependencies = [
  "noodles-bgzf",
 ]
 
 [[package]]
 name = "noodles-bgzf"
-version = "0.41.0"
+version = "0.42.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f07e5d75eb7e00c1fe140acef39dea0aea2f48a05ab698a16c6797dd0c0db7e4"
+checksum = "7c1c3e3f19c4afd0c540104e596a9312074de9d0c01bedd5370ffba62ba3b439"
 dependencies = [
- "byteorder",
  "bytes",
  "crossbeam-channel",
  "flate2",

@@ -12,7 +12,7 @@ clap = { version = "4.5.42", features = ["derive"] }
 coitrees = "0.4.0"
 num_cpus = "1.17.0"
 rayon = "1.10.0"
-noodles = { version = "0.99.0", features = ["bgzf"] }
+noodles = { version = "0.100.0", features = ["bgzf"] }
 regex = "1.11.1"
 log = "0.4.27"
 env_logger = "0.11.8"
