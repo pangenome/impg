@@ -195,8 +195,12 @@ impg lace -g file1.gfa file2.gfa file3.gfa -o combined.gfa
 impg lace -l gfa_files.txt -o combined.gfa
 
 # Fill gaps between contiguous path segments
-impg lace -g *.gfa -o combined.gfa --fill-gaps 1  # Fill with N's
-impg lace -g *.gfa -o combined.gfa --fill-gaps 2  --sequence-files sequence.fa # Fill with sequences
+impg lace -g *.gfa -o combined.gfa --fill-gaps 1 # Fill with N's
+impg lace -g *.gfa -o combined.gfa --fill-gaps 1 --sequence-files sequence.fa # Fill with sequences
+
+# Fill all gaps, including start and end gaps (end gap filling requires sequence files)
+impg lace -g *.gfa -o combined.gfa --fill-gaps 2 # Fill with N's
+impg lace -g *.gfa -o combined.gfa --fill-gaps 2 --sequence-files sequence.fa # Fill with sequences
 
 # Control output compression
 impg lace -g *.gfa -o combined.gfa.gz --compress gzip
