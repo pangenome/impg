@@ -183,6 +183,67 @@ Print alignment statistics:
 impg stats -p alignments.paf
 ```
 
+### Lace
+
+Combine multiple GFA files into a unified pangenome graph:
+
+```bash
+# Combine multiple GFA files (you can mix compressed and uncompressed files)
+impg lace -g file1.gfa file2.gfa file3.gfa -o combined.gfa
+
+# Use a list file containing GFA paths
+impg lace -l gfa_files.txt -o combined.gfa
+
+# Fill gaps between contiguous path segments
+impg lace -g *.gfa -o combined.gfa --fill-gaps 1  # Fill with N's
+impg lace -g *.gfa -o combined.gfa --fill-gaps 2  --sequence-files sequence.fa # Fill with sequences
+
+# Control output compression
+impg lace -g *.gfa -o combined.gfa.gz --compress gzip
+impg lace -g *.gfa -o combined.gfa.bgz --compress bgzip
+impg lace -g *.gfa -o combined.gfa.zst --compress zstd
+
+# Use custom temporary directory
+impg lace -g *.gfa -o combined.gfa --temp-dir /tmp/lace_work
+```
+
+#### Path Name Format
+
+The command expects path names in the format:
+
+```
+NAME:START-END
+```
+
+Example: `HG002#1#chr20:1000-2000`
+
+The command uses these coordinates to:
+1. Identify which sequences belong together
+2. Order the sequences correctly
+3. Detect and handle overlaps or gaps
+
+Note: `NAME` can contain ':' characters. When parsing coordinates, the command uses the last occurrence of ':' to separate the name from the coordinate range.
+
+#### Post-processing recommendations
+
+After combining the GFA files, the resulting graph will already have compacted node IDs ranging from `1` to the total number of nodes. However, it is strongly recommended to perform post-processing steps using **[ODGI](https://github.com/pangenome/odgi)** to unchop and sort the graph.
+
+```bash
+odgi unchop -i combined.gfa -o - -t 16 | \
+    odgi sort -i - -o - -p gYs -t 16 | \
+    odgi view -i - -g > combined.final.gfa
+```
+
+If overlaps were present, and then trimmed during the merging process, it's advisable to run **[GFAffix](https://github.com/marschall-lab/GFAffix)** before the ODGI pipeline to remove redundant nodes introduced by the overlap trimming.
+
+```bash
+gfaffix combined.gfa -o combined.fix.gfa &> /dev/null
+
+odgi unchop -i combined.fix.gfa -o - -t 16 | \
+    odgi sort -i - -o - -p gYs -t 16 | \
+    odgi view -i - -g > combined.final.gfa
+```
+
 ### Index
 
 Create an IMPG index from PAF files:
