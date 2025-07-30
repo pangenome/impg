@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 bincode = { version = "2.0.1", features = ["serde"] }
 serde = { version = "1.0.219", features = ["derive"] }
-clap = { version = "4.5.41", features = ["derive"] }
+clap = { version = "4.5.42", features = ["derive"] }
 coitrees = "0.4.0"
 num_cpus = "1.17.0"
 rayon = "1.10.0"
@@ -27,6 +27,13 @@ spoa_rs = { git = "https://github.com/AndreaGuarracino/spoa-rs.git" }
 nalgebra = "0.33.2"
 
 agc-rs = { git = "https://github.com/pangenome/agc-rs.git", optional = true }
+
+# Additional dependencies for lace functionality
+handlegraph = "0.7.0-alpha.9"
+niffler = "2.7.0"
+tempfile = "3.20.0"
+flate2 = "1.1.2"
+zstd = "0.13.3"
 
 [features]
 default = ["agc"]

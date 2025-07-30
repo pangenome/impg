@@ -153,7 +153,6 @@ struct GfaMafFastaOpts {
     force_large_region: bool,
 }
 
-
 impl GfaMafFastaOpts {
     /// Parse POA scoring parameters
     fn parse_poa_scoring(&self) -> io::Result<(u8, u8, u8, u8, u8, u8)> {
@@ -294,11 +293,11 @@ fn parse_subsequence_coordinates(seq_name: &str) -> Option<(String, i32)> {
     if let Some(colon_pos) = seq_name.rfind(':') {
         let (base_name, range_part) = seq_name.split_at(colon_pos);
         let range_part = &range_part[1..]; // Remove the colon
-        
+
         // Check if the range part contains a dash
         if let Some(dash_pos) = range_part.find('-') {
             let (start_str, _end_str) = range_part.split_at(dash_pos);
-            
+
             // Parse the start coordinate
             if let Ok(start_offset) = start_str.parse::<i32>() {
                 return Some((base_name.to_string(), start_offset));
@@ -318,7 +317,7 @@ fn transform_coordinates_to_original(
     if !original_coordinates {
         return (seq_name.to_string(), start, end);
     }
-    
+
     if let Some((original_name, offset)) = parse_subsequence_coordinates(seq_name) {
         let offset = offset as u32;
         (original_name, start + offset, end + offset)
@@ -363,6 +362,38 @@ enum Args {
     Index {
         #[clap(flatten)]
         paf: PafOpts,
+
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+    /// Lace pangenome graphs together
+    Lace {
+        /// List of input GFA files (space-separated)
+        #[clap(short = 'g', long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with = "gfa_list")]
+        gfa_files: Option<Vec<String>>,
+
+        /// Text file containing GFA paths (one per line)
+        #[clap(short = 'l', long, value_parser, conflicts_with = "gfa_files")]
+        gfa_list: Option<String>,
+
+        /// Output GFA file path
+        #[clap(short, long, value_parser)]
+        output: String,
+
+        /// Output compression format (none, gzip, bgzip, zstd, auto)
+        #[clap(long, value_parser, default_value = "auto")]
+        compress: String,
+
+        /// Gap filling mode: 0=none, 1=middle gaps only, 2=all gaps (requires --sequence-files or --sequence-list for end gaps)
+        #[clap(long, default_value = "0")]
+        fill_gaps: u8,
+
+        #[clap(flatten)]
+        sequence: SequenceOpts,
+
+        /// Directory for temporary files
+        #[clap(long, value_parser)]
+        temp_dir: Option<String>,
 
         #[clap(flatten)]
         common: CommonOpts,
@@ -530,38 +561,6 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
     },
-    /// Lace pangenome graphs together
-    Lace {
-        /// List of input GFA files (space-separated)
-        #[clap(short = 'g', long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with = "gfa_list")]
-        gfa_files: Option<Vec<String>>,
-
-        /// Text file containing GFA paths (one per line)
-        #[clap(short = 'l', long, value_parser, conflicts_with = "gfa_files")]
-        gfa_list: Option<String>,
-
-        /// Output GFA file path
-        #[clap(short, long, value_parser)]
-        output: String,
-
-        /// Output compression format (none, gzip, bgzip, zstd, auto)
-        #[clap(long, value_parser, default_value = "auto")]
-        compress: String,
-
-        /// Gap filling mode (0 = none [default], 1 = middle gaps, 2 = all gaps)
-        #[clap(long, default_value = "0")]
-        fill_gaps: u8,
-
-        #[clap(flatten)]
-        sequence: SequenceOpts,
-
-        /// Directory for temporary files
-        #[clap(long, value_parser)]
-        temp_dir: Option<String>,
-
-        #[clap(flatten)]
-        common: CommonOpts,
-    },
 }
 
 fn main() -> io::Result<()> {
@@ -569,9 +568,59 @@ fn main() -> io::Result<()> {
 
     match args {
         Args::Index { common, paf } => {
+            initialize_threads_and_log(&common);
             let _ = initialize_impg(&common, &paf)?;
 
             info!("Index created successfully");
+        }
+        Args::Lace {
+            common,
+            sequence,
+            gfa_files,
+            gfa_list,
+            output,
+            compress,
+            fill_gaps,
+            temp_dir,
+        } => {
+            // Validate gap filling mode
+            if fill_gaps > 2 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "fill_gaps must be 0, 1, or 2",
+                ));
+            }
+
+            // Validate compression format
+            let valid_compress = ["none", "gzip", "bgzip", "zstd", "auto"];
+            if !valid_compress.contains(&compress.as_str()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Invalid compression format '{}'. Must be one of: {}",
+                        compress,
+                        valid_compress.join(", ")
+                    ),
+                ));
+            }
+
+            // Initialize threads and logger for lace processing
+            initialize_threads_and_log(&common);
+
+            // Build sequence index for sequence fetching (always build if sequence files provided)
+            let sequence_index = sequence.build_sequence_index()?;
+
+            lace::run_lace(
+                gfa_files,
+                gfa_list,
+                &output,
+                &compress,
+                fill_gaps,
+                temp_dir,
+                sequence_index.as_ref(),
+                common.threads,
+                common.verbose,
+            )?;
         }
         Args::Partition {
             common,
@@ -621,6 +670,7 @@ fn main() -> io::Result<()> {
             let (sequence_index, scoring_params) =
                 gfa_maf_fasta.setup_output_resources(&output_format, false)?;
 
+            initialize_threads_and_log(&common);
             let impg = initialize_impg(&common, &paf)?;
 
             partition::partition_alignments(
@@ -657,12 +707,14 @@ fn main() -> io::Result<()> {
                 &["auto", "bed", "bedpe", "paf", "gfa", "maf", "fasta"],
             )?;
 
+            initialize_threads_and_log(&common);
             let impg = initialize_impg(&common, &paf)?;
 
             // Parse and validate all target ranges, tracking which parameter was used
             let (target_ranges, from_range_param) =
                 if let Some(target_range_str) = &query.target_range {
-                    let (target_name, target_range, name) = partition::parse_target_range(target_range_str)?;
+                    let (target_name, target_range, name) =
+                        partition::parse_target_range(target_range_str)?;
                     // Validate sequence exists and range is within bounds
                     validate_sequence_range(
                         &target_name,
@@ -714,8 +766,10 @@ fn main() -> io::Result<()> {
             let reverse_complement = gfa_maf_fasta.reverse_complement;
 
             // Setup POA/sequence resources
-            let (sequence_index, scoring_params) =
-                gfa_maf_fasta.setup_output_resources(resolved_output_format, query.original_sequence_coordinates)?;
+            let (sequence_index, scoring_params) = gfa_maf_fasta.setup_output_resources(
+                resolved_output_format,
+                query.original_sequence_coordinates,
+            )?;
 
             // Process all target ranges in a unified loop
             for (target_name, target_range, name) in target_ranges {
@@ -858,6 +912,8 @@ fn main() -> io::Result<()> {
                 gfa_maf_fasta.setup_output_resources("gfa", false)?;
             let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
             let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA
+            
+            initialize_threads_and_log(&common);
             let impg = initialize_impg(&common, &paf)?;
 
             // Validate target_range and target_bed before ANY expensive operations,
@@ -865,7 +921,8 @@ fn main() -> io::Result<()> {
                 let mut targets = Vec::new();
 
                 if let Some(target_range_str) = &query.target_range {
-                    let (target_name, target_range, name) = partition::parse_target_range(target_range_str)?;
+                    let (target_name, target_range, name) =
+                        partition::parse_target_range(target_range_str)?;
                     validate_sequence_range(
                         &target_name,
                         target_range.0,
@@ -964,60 +1021,10 @@ fn main() -> io::Result<()> {
             )?;
         }
         Args::Stats { common, paf } => {
+            initialize_threads_and_log(&common);
             let impg = initialize_impg(&common, &paf)?;
 
             print_stats(&impg);
-        }
-        Args::Lace { 
-            common,
-            sequence,
-            gfa_files,
-            gfa_list,
-            output,
-            compress,
-            fill_gaps,
-            temp_dir,
-        } => {
-            // Validate that either gfa_files or gfa_list is provided
-            if gfa_files.is_none() && gfa_list.is_none() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Either --gfa-files or --gfa-list must be provided",
-                ));
-            }
-
-            // Validate gap filling mode
-            if fill_gaps > 2 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "fill_gaps must be 0, 1, or 2",
-                ));
-            }
-
-            // Validate compression format
-            let valid_compress = ["none", "gzip", "bgzip", "zstd", "auto"];
-            if !valid_compress.contains(&compress.as_str()) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("Invalid compression format '{}'. Must be one of: {}", 
-                           compress, valid_compress.join(", ")),
-                ));
-            }
-
-            // Build sequence index for sequence fetching (always build if sequence files provided)
-            let sequence_index = sequence.build_sequence_index()?;
-
-            lace::run_lace(
-                gfa_files,
-                gfa_list,
-                &output,
-                &compress,
-                fill_gaps,
-                temp_dir,
-                sequence_index.as_ref(),
-                common.threads,
-                common.verbose,
-            )?;
         }
     }
 
@@ -1152,8 +1159,8 @@ fn validate_region_size(
     Ok(())
 }
 
-/// Initialize thread pool and load/generate index based on common and PAF options
-fn initialize_impg(common: &CommonOpts, paf: &PafOpts) -> io::Result<Impg> {
+/// Initialize thread pool and logger with the specified number of threads and verbosity
+fn initialize_threads_and_log(common: &CommonOpts) {
     // Initialize logger based on verbosity
     env_logger::Builder::new()
         .filter_level(match common.verbose {
@@ -1168,7 +1175,10 @@ fn initialize_impg(common: &CommonOpts, paf: &PafOpts) -> io::Result<Impg> {
         .num_threads(common.threads.into())
         .build_global()
         .unwrap();
+}
 
+/// Load/generate index based on common and PAF options
+fn initialize_impg(common: &CommonOpts, paf: &PafOpts) -> io::Result<Impg> {
     // Resolve the list of PAF files
     let paf_files = resolve_paf_files(paf)?;
     info!("Found {} PAF files", paf_files.len());
@@ -1491,11 +1501,16 @@ fn output_results_bed(
         } else {
             (query_interval.last, query_interval.first, '-')
         };
-        
+
         // Transform coordinates to original sequence space if requested
-        let (transformed_name, transformed_first, transformed_last) = 
-            transform_coordinates_to_original(query_name, first as u32, last as u32, original_coordinates);
-        
+        let (transformed_name, transformed_first, transformed_last) =
+            transform_coordinates_to_original(
+                query_name,
+                first as u32,
+                last as u32,
+                original_coordinates,
+            );
+
         println!(
             "{}\t{}\t{}\t{}\t.\t{}",
             transformed_name,
@@ -1524,13 +1539,23 @@ fn output_results_bedpe(
         } else {
             (overlap_query.last, overlap_query.first, '-')
         };
-        
+
         // Transform coordinates to original sequence space if requested
-        let (transformed_query_name, transformed_first, transformed_last) = 
-            transform_coordinates_to_original(query_name, first as u32, last as u32, original_coordinates);
-        let (transformed_target_name, transformed_target_first, transformed_target_last) = 
-            transform_coordinates_to_original(target_name, overlap_target.first as u32, overlap_target.last as u32, original_coordinates);
-        
+        let (transformed_query_name, transformed_first, transformed_last) =
+            transform_coordinates_to_original(
+                query_name,
+                first as u32,
+                last as u32,
+                original_coordinates,
+            );
+        let (transformed_target_name, transformed_target_first, transformed_target_last) =
+            transform_coordinates_to_original(
+                target_name,
+                overlap_target.first as u32,
+                overlap_target.last as u32,
+                original_coordinates,
+            );
+
         println!(
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t0\t{}\t+",
             transformed_query_name,
@@ -1565,28 +1590,32 @@ fn output_results_paf(
         };
 
         // Transform coordinates to original sequence space if requested
-        let (transformed_query_name, transformed_first, transformed_last) = 
-            transform_coordinates_to_original(query_name, first as u32, last as u32, original_coordinates);
-        let (transformed_target_name, transformed_target_first, transformed_target_last) = 
-            transform_coordinates_to_original(target_name, overlap_target.first as u32, overlap_target.last as u32, original_coordinates);
+        let (transformed_query_name, transformed_first, transformed_last) =
+            transform_coordinates_to_original(
+                query_name,
+                first as u32,
+                last as u32,
+                original_coordinates,
+            );
+        let (transformed_target_name, transformed_target_first, transformed_target_last) =
+            transform_coordinates_to_original(
+                target_name,
+                overlap_target.first as u32,
+                overlap_target.last as u32,
+                original_coordinates,
+            );
 
         // Get original sequence lengths when original_sequence_coordinates is enabled
         let query_length = if original_coordinates {
-            get_original_sequence_length(
-                &transformed_query_name,
-                sequence_index,
-            )
+            get_original_sequence_length(&transformed_query_name, sequence_index)
         } else {
             impg.seq_index
                 .get_len_from_id(overlap_query.metadata)
                 .unwrap()
         };
-        
+
         let target_length = if original_coordinates {
-            get_original_sequence_length(
-                &transformed_target_name,
-                sequence_index,
-            )
+            get_original_sequence_length(&transformed_target_name, sequence_index)
         } else {
             impg.seq_index
                 .get_len_from_id(overlap_target.metadata)
@@ -2390,14 +2419,14 @@ mod tests {
         // Test parsing subsequence coordinates
         let result = parse_subsequence_coordinates("HG002#1#chr1:5116130-6116563");
         assert_eq!(result, Some(("HG002#1#chr1".to_string(), 5116130)));
-        
+
         let result = parse_subsequence_coordinates("GRCh38#0#chr1:5477602-6474357");
         assert_eq!(result, Some(("GRCh38#0#chr1".to_string(), 5477602)));
-        
+
         // Test with no subsequence coordinates
         let result = parse_subsequence_coordinates("chr1");
         assert_eq!(result, None);
-        
+
         // Test with invalid format
         let result = parse_subsequence_coordinates("chr1:invalid");
         assert_eq!(result, None);
@@ -2406,34 +2435,21 @@ mod tests {
     #[test]
     fn test_transform_coordinates_to_original() {
         // Test with original coordinates enabled
-        let (name, start, end) = transform_coordinates_to_original(
-            "HG002#1#chr1:5116130-6116563",
-            45803,
-            45861,
-            true
-        );
+        let (name, start, end) =
+            transform_coordinates_to_original("HG002#1#chr1:5116130-6116563", 45803, 45861, true);
         assert_eq!(name, "HG002#1#chr1");
         assert_eq!(start, 5116130 + 45803);
         assert_eq!(end, 5116130 + 45861);
-        
+
         // Test with original coordinates disabled
-        let (name, start, end) = transform_coordinates_to_original(
-            "HG002#1#chr1:5116130-6116563",
-            45803,
-            45861,
-            false
-        );
+        let (name, start, end) =
+            transform_coordinates_to_original("HG002#1#chr1:5116130-6116563", 45803, 45861, false);
         assert_eq!(name, "HG002#1#chr1:5116130-6116563");
         assert_eq!(start, 45803);
         assert_eq!(end, 45861);
-        
+
         // Test with sequence name that doesn't contain subsequence coordinates
-        let (name, start, end) = transform_coordinates_to_original(
-            "chr1",
-            45803,
-            45861,
-            true
-        );
+        let (name, start, end) = transform_coordinates_to_original("chr1", 45803, 45861, true);
         assert_eq!(name, "chr1");
         assert_eq!(start, 45803);
         assert_eq!(end, 45861);
