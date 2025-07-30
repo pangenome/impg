@@ -159,7 +159,7 @@ pub fn partition_alignments(
 
     // Track temporary BED files for GFA/MAF conversion
     let mut temp_bed_files = Vec::new();
-    
+
     // Collect partitions for single-file output
     let mut collected_partitions: Vec<(usize, Vec<Interval<u32>>)> = Vec::new();
 
@@ -496,12 +496,7 @@ pub fn partition_alignments(
             collected_partitions.len(),
             output_format
         );
-        write_single_partition_file(
-            &collected_partitions,
-            impg,
-            output_format,
-            output_folder,
-        )?;
+        write_single_partition_file(&collected_partitions, impg, output_format, output_folder)?;
     }
 
     // Calculate final percentage
@@ -1416,12 +1411,13 @@ fn write_single_partition_file(
             writer.flush()?;
             Ok(())
         }
-        _ => {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("Single-file output not supported for format: {}", output_format),
-            ))
-        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Single-file output not supported for format: {}",
+                output_format
+            ),
+        )),
     }
 }
 

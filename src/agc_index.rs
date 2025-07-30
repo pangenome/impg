@@ -174,7 +174,7 @@ impl AgcIndex {
 
     pub fn get_sequence_length(&self, seq_name: &str) -> io::Result<usize> {
         let (sample, contig, agc_idx) = self.parse_query(seq_name);
-        
+
         let agc_idx = agc_idx.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,

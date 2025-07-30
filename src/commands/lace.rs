@@ -1,5 +1,10 @@
-use bitvec::{bitvec, prelude::BitVec};
 use crate::sequence_index::{SequenceIndex, UnifiedSequenceIndex};
+use bitvec::{bitvec, prelude::BitVec};
+use gzp::{
+    deflate::{Bgzf, Gzip}, // Both Gzip and Bgzf are in deflate module
+    par::compress::{ParCompress, ParCompressBuilder},
+    Compression,
+};
 use handlegraph::handle::{Handle, NodeId};
 use log::{debug, error, info, warn};
 use niffler::compression::Format;
@@ -11,11 +16,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tempfile::NamedTempFile;
-use gzp::{
-    deflate::{Bgzf, Gzip}, // Both Gzip and Bgzf are in deflate module
-    par::compress::{ParCompress, ParCompressBuilder},
-    Compression,
-};
 use zstd::stream::Encoder as ZstdEncoder;
 
 // use std::process::Command;
@@ -254,8 +254,7 @@ pub fn run_lace(
 
     // Create a single combined graph without paths and a map of path key to ranges
     info!("Collecting metadata from {} GFA files", gfa_files.len());
-    let (combined_graph, mut path_key_ranges) =
-        read_gfa_files(&gfa_files, temp_dir.as_deref())?;
+    let (combined_graph, mut path_key_ranges) = read_gfa_files(&gfa_files, temp_dir.as_deref())?;
 
     // log_memory_usage("after_reading_files");
 
@@ -1267,7 +1266,11 @@ fn write_graph_to_gfa(
         if !path_elements.is_empty() {
             let is_full_path = path_start == 0
                 && sequence_index
-                    .map(|idx| idx.get_sequence_length(path_key).map(|len| len == path_end).unwrap_or(false))
+                    .map(|idx| {
+                        idx.get_sequence_length(path_key)
+                            .map(|len| len == path_end)
+                            .unwrap_or(false)
+                    })
                     .unwrap_or(true); // Assume path_end matches full length if no sequence index is available
 
             let path_name = if is_full_path {
@@ -1311,12 +1314,10 @@ fn create_gap_node<W: Write>(
     // Get gap sequence either from sequence index or create string of N's
     let gap_sequence = if let Some(index) = sequence_index {
         match index.fetch_sequence(path_key, gap_start as i32, gap_end as i32) {
-            Ok(seq) => {
-                String::from_utf8(seq).unwrap_or_else(|e| {
-                    error!("Failed to convert sequence to UTF-8: {}", e);
-                    "N".repeat(gap_size)
-                })
-            }
+            Ok(seq) => String::from_utf8(seq).unwrap_or_else(|e| {
+                error!("Failed to convert sequence to UTF-8: {}", e);
+                "N".repeat(gap_size)
+            }),
             Err(e) => {
                 error!("Failed to fetch sequence for '{}': {}", path_key, e);
                 "N".repeat(gap_size)

@@ -57,12 +57,10 @@ impl FastaIndex {
                         index
                             .path_key_to_fasta
                             .insert(seq_name.to_string(), fasta_idx);
-                        
+
                         // Parse sequence length (second field in .fai file)
                         if let Ok(length) = fields[1].parse::<usize>() {
-                            index
-                                .sequence_lengths
-                                .insert(seq_name.to_string(), length);
+                            index.sequence_lengths.insert(seq_name.to_string(), length);
                         }
                     }
                 }

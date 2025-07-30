@@ -911,7 +911,7 @@ fn main() -> io::Result<()> {
                 gfa_maf_fasta.setup_output_resources("gfa", false)?;
             let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
             let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA
-            
+
             initialize_threads_and_log(&common);
             let impg = initialize_impg(&common, &paf)?;
 
