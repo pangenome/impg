@@ -14,6 +14,7 @@ use tempfile::NamedTempFile;
 use gzp::{
     deflate::{Bgzf, Gzip}, // Both Gzip and Bgzf are in deflate module
     par::compress::{ParCompress, ParCompressBuilder},
+    Compression,
 };
 use zstd::stream::Encoder as ZstdEncoder;
 
@@ -1026,7 +1027,7 @@ fn write_graph_to_gfa(
             let parz: ParCompress<Gzip> = ParCompressBuilder::new()
                 .num_threads(rayon::current_num_threads())
                 .map_err(|e| std::io::Error::other(format!("Failed to set threads: {:?}", e)))?
-                .compression_level(flate2::Compression::new(6))
+                .compression_level(Compression::new(6))
                 .from_writer(output_file);
             Box::new(parz)
         }
@@ -1035,7 +1036,7 @@ fn write_graph_to_gfa(
             let parz: ParCompress<Bgzf> = ParCompressBuilder::new()
                 .num_threads(rayon::current_num_threads())
                 .map_err(|e| std::io::Error::other(format!("Failed to set threads: {:?}", e)))?
-                .compression_level(flate2::Compression::new(6))
+                .compression_level(Compression::new(6))
                 .from_writer(output_file);
             Box::new(parz)
         }
