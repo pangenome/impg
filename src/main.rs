@@ -618,7 +618,6 @@ fn main() -> io::Result<()> {
                 fill_gaps,
                 temp_dir,
                 sequence_index.as_ref(),
-                common.threads,
                 common.verbose,
             )?;
         }
