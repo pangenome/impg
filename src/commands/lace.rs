@@ -1611,14 +1611,13 @@ fn process_vcf_file(
             let chrom = parts[0];
             let pos_str = parts[1];
             
-            if let Some((base_contig, start, _end)) = parse_vcf_chrom(chrom) {
-                if let Ok(pos) = pos_str.parse::<u64>() {
-                    let abs_pos = start + pos;
-                    
-                    // Update contig max position
+            if let Some((base_contig, start, end)) = parse_vcf_chrom(chrom) {
+                // Parse position to ensure it's valid, but we don't use the value
+                if let Ok(_pos) = pos_str.parse::<u64>() {
+                    // Update contig max position using the end value from CHROM field
                     let current_max = local_contigs.entry(base_contig.clone()).or_insert(0);
-                    if abs_pos > *current_max {
-                        *current_max = abs_pos;
+                    if end > *current_max {
+                        *current_max = end;
                     }
                     
                     // Update file ordering
