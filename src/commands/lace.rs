@@ -1748,6 +1748,9 @@ fn merge_vcf_file_records<W: Write>(
     let mut this_samples = Vec::new();
     let mut in_header = true;
     
+    // Cache for missing genotype strings per FORMAT field
+    let mut format_cache: FxHashMap<String, String> = FxHashMap::default();
+    
     for line in reader.lines() {
         let line = line?;
         let line = line.trim();
@@ -1791,13 +1794,15 @@ fn merge_vcf_file_records<W: Write>(
             if let Ok(old_pos) = pos_str.parse::<u64>() {
                 let new_pos = start + old_pos;
                 
-                // Create missing genotype string
-                let format_keys: Vec<&str> = format.split(':').collect();
-                let missing_fields: Vec<&str> = format_keys
-                    .iter()
-                    .map(|&key| if key == "GT" { "./." } else { "." })
-                    .collect();
-                let missing_str = missing_fields.join(":");
+                // Get cached missing genotype string or compute it
+                let missing_str = format_cache.entry(format.to_string()).or_insert_with(|| {
+                    let format_keys: Vec<&str> = format.split(':').collect();
+                    let missing_fields: Vec<&str> = format_keys
+                        .iter()
+                        .map(|&key| if key == "GT" { "./." } else { "." })
+                        .collect();
+                    missing_fields.join(":")
+                });
                 
                 // Map this file's samples to their genotype strings
                 let sample_to_gt: FxHashMap<String, String> = this_samples
