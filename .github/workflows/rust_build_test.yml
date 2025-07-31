@@ -39,16 +39,20 @@ jobs:
       if: matrix.os == 'macos-latest'
       run: |
         brew install cmake zlib gcc make zstd
-        # Force GNU make to be used instead of BSD make
-        echo "/opt/homebrew/opt/make/libexec/gnubin" >> $GITHUB_PATH
-        # Set MAKE environment variable as backup
-        echo "MAKE=gmake" >> $GITHUB_ENV
-        # Verify we're using GNU make
-        echo "Checking make version:"
-        which make || true
-        make --version || true
-        which gmake || true
-        gmake --version || true
+
+          # Set up environment for GCC
+          echo "CC=/opt/homebrew/opt/gcc@13/bin/gcc-13" >> $GITHUB_ENV
+          echo "CXX=/opt/homebrew/opt/gcc@13/bin/g++-13" >> $GITHUB_ENV
+          
+          # Add GCC libraries to linker path
+          echo "LIBRARY_PATH=/opt/homebrew/opt/gcc@13/lib/gcc/13:/opt/homebrew/opt/gcc@13/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/opt/homebrew/opt/gcc@13/lib/gcc/13:/opt/homebrew/opt/gcc@13/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          
+          # Set RUSTFLAGS to include GCC runtime libraries
+          echo "RUSTFLAGS=-C link-arg=-L/opt/homebrew/opt/gcc@13/lib/gcc/13 -C link-arg=-lgcc_s.1 -C link-arg=-lgcc" >> $GITHUB_ENV
+          
+          # Use GNU make
+          echo "/opt/homebrew/opt/make/libexec/gnubin" >> $GITHUB_PATH
 
     - name: Build
       run: cargo build --verbose
