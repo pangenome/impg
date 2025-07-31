@@ -415,13 +415,13 @@ fn read_gfa_files(
                         "S" => {
                             if fields.len() < 3 {
                                 error!("Invalid S line: {line}");
-                                continue;
+                                std::process::exit(1);
                             }
                             let node_id: u64 = match fields[1].parse() {
                                 Ok(id) => id,
                                 Err(_) => {
                                     error!("Invalid node ID {} in line {}", fields[1], line);
-                                    continue;
+                                    std::process::exit(1);
                                 }
                             };
                             let sequence = fields[2].as_bytes();
@@ -436,14 +436,14 @@ fn read_gfa_files(
                         "L" => {
                             if fields.len() < 6 {
                                 error!("Invalid L line: {line}");
-                                continue;
+                                std::process::exit(1);
                             }
 
                             let from_id: u64 = match fields[1].parse() {
                                 Ok(id) => id,
                                 Err(_) => {
                                     error!("Invalid from node ID {} in line {}", fields[1], line);
-                                    continue;
+                                    std::process::exit(1);
                                 }
                             };
                             let from_rev = fields[2] == "-";
@@ -451,7 +451,7 @@ fn read_gfa_files(
                                 Ok(id) => id,
                                 Err(_) => {
                                     error!("Invalid to node ID {} in line {}", fields[3], line);
-                                    continue;
+                                    std::process::exit(1);
                                 }
                             };
                             let to_rev = fields[4] == "-";
@@ -461,7 +461,7 @@ fn read_gfa_files(
                         "P" => {
                             if fields.len() < 3 {
                                 error!("Invalid P line: {line}");
-                                continue;
+                                std::process::exit(1);
                             }
                             let path_name = fields[1];
                             let nodes_str = fields[2];
@@ -472,7 +472,7 @@ fn read_gfa_files(
                                 for step_str in nodes_str.split(',') {
                                     if step_str.is_empty() {
                                         error!("Empty step in path {path_name} in line {line}");
-                                        continue;
+                                        std::process::exit(1);
                                     }
                                     let (node_str, orient) = if let Some(stripped) =
                                         step_str.strip_suffix('+')
@@ -482,7 +482,7 @@ fn read_gfa_files(
                                         (stripped, true)
                                     } else {
                                         error!("Invalid step format {step_str} in line {line}");
-                                        continue;
+                                        std::process::exit(1);
                                     };
 
                                     let node_id: u64 = match node_str.parse() {
@@ -491,7 +491,7 @@ fn read_gfa_files(
                                             error!(
                                                 "Invalid node ID in path {path_name} in line {line}"
                                             );
-                                            continue;
+                                            std::process::exit(1);
                                         }
                                     };
 
@@ -503,7 +503,7 @@ fn read_gfa_files(
                                         error!(
                                             "Node {node_id} in path {path_name} not found in translation map"
                                         );
-                                        continue;
+                                        std::process::exit(1);
                                     }
                                 }
                                 if !translated_steps.is_empty() {
@@ -546,6 +546,7 @@ fn read_gfa_files(
                 );
             } else {
                 error!("Failed to open GFA file '{gfa_path}'");
+                std::process::exit(1);
             }
         });
 
@@ -1771,7 +1772,7 @@ fn merge_vcf_file_records<W: Write>(
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() < 9 {
             error!("Malformed VCF record in {}: {}", path, line);
-            continue;
+            std::process::exit(1);
         }
         
         let chrom = parts[0];
@@ -1834,9 +1835,11 @@ fn merge_vcf_file_records<W: Write>(
                 writeln!(output_file, "{}", out_fields.join("\t"))?;
             } else {
                 error!("Cannot parse POS in {}: {}", path, pos_str);
+                std::process::exit(1);
             }
         } else {
             error!("Unexpected CHROM format in {}: {}", path, chrom);
+            std::process::exit(1);
         }
     }
     
