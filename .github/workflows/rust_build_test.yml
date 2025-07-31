@@ -5,11 +5,15 @@ on: [push, pull_request]
 jobs:
   build_and_test:
     name: Run cargo build and test
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        rust: [stable]
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
         with:
-          toolchain: stable
+          toolchain: ${{ matrix.rust }}
       - run: cargo build --verbose
       - run: cargo test --verbose
