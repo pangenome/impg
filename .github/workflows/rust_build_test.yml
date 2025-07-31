@@ -15,7 +15,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
         rust: [stable]
     
     steps:
@@ -35,24 +35,24 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y build-essential cmake zlib1g-dev
     
-    - name: Install dependencies (macOS)
-      if: matrix.os == 'macos-latest'
-      run: |
-        brew install cmake zlib gcc make zstd
+    # - name: Install dependencies (macOS)
+    #   if: matrix.os == 'macos-latest'
+    #   run: |
+    #     brew install cmake zlib gcc make zstd
 
-          # Set up environment for GCC
-          echo "CC=/opt/homebrew/opt/gcc@13/bin/gcc-13" >> $GITHUB_ENV
-          echo "CXX=/opt/homebrew/opt/gcc@13/bin/g++-13" >> $GITHUB_ENV
+    #       # Set up environment for GCC
+    #       echo "CC=/opt/homebrew/opt/gcc@13/bin/gcc-13" >> $GITHUB_ENV
+    #       echo "CXX=/opt/homebrew/opt/gcc@13/bin/g++-13" >> $GITHUB_ENV
           
-          # Add GCC libraries to linker path
-          echo "LIBRARY_PATH=/opt/homebrew/opt/gcc@13/lib/gcc/13:/opt/homebrew/opt/gcc@13/lib:$LIBRARY_PATH" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=/opt/homebrew/opt/gcc@13/lib/gcc/13:/opt/homebrew/opt/gcc@13/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+    #       # Add GCC libraries to linker path
+    #       echo "LIBRARY_PATH=/opt/homebrew/opt/gcc@13/lib/gcc/13:/opt/homebrew/opt/gcc@13/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+    #       echo "LD_LIBRARY_PATH=/opt/homebrew/opt/gcc@13/lib/gcc/13:/opt/homebrew/opt/gcc@13/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
           
-          # Set RUSTFLAGS to include GCC runtime libraries
-          echo "RUSTFLAGS=-C link-arg=-L/opt/homebrew/opt/gcc@13/lib/gcc/13 -C link-arg=-lgcc_s.1 -C link-arg=-lgcc" >> $GITHUB_ENV
+    #       # Set RUSTFLAGS to include GCC runtime libraries
+    #       echo "RUSTFLAGS=-C link-arg=-L/opt/homebrew/opt/gcc@13/lib/gcc/13 -C link-arg=-lgcc_s.1 -C link-arg=-lgcc" >> $GITHUB_ENV
           
-          # Use GNU make
-          echo "/opt/homebrew/opt/make/libexec/gnubin" >> $GITHUB_PATH
+    #       # Use GNU make
+    #       echo "/opt/homebrew/opt/make/libexec/gnubin" >> $GITHUB_PATH
 
     - name: Build
       run: cargo build --verbose
