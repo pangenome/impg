@@ -191,7 +191,7 @@ impl CompactGraph {
 struct RangeInfo {
     start: usize,
     end: usize,
-    //gfa_id: usize,          // GFA file ID this range belongs to
+    //gfa_id: usize,      // GFA file ID this range belongs to
     steps: Vec<Handle>, // Path steps for this range
 }
 
@@ -212,7 +212,7 @@ impl RangeInfo {
 }
 
 /// Lace pangenome graphs together
-pub fn run_lace(
+pub fn run_gfa_lace(
     gfa_files: Option<Vec<String>>,
     gfa_list: Option<String>,
     output: &str,

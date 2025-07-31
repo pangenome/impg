@@ -586,6 +586,14 @@ fn main() -> io::Result<()> {
             fill_gaps,
             temp_dir,
         } => {
+            // Check that at least one input is provided
+            if files.is_none() && file_list.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Either --files or --file-list must be provided",
+                ));
+            }
+
             // Validate gap filling mode
             if fill_gaps > 2 {
                 return Err(io::Error::new(
@@ -620,14 +628,6 @@ fn main() -> io::Result<()> {
                 ));
             }
 
-            // Check that at least one input is provided
-            if files.is_none() && file_list.is_none() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Either --files or --file-list must be provided",
-                ));
-            }
-
             // Initialize threads and logger for lace processing
             initialize_threads_and_log(&common);
 
@@ -649,7 +649,7 @@ fn main() -> io::Result<()> {
                 // Build sequence index for sequence fetching (always build if sequence files provided)
                 let sequence_index = sequence.build_sequence_index()?;
 
-                lace::run_lace(
+                lace::run_gfa_lace(
                     files,
                     file_list,
                     &output,
