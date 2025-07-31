@@ -1695,8 +1695,9 @@ fn write_merged_vcf(
         for line in reader.lines() {
             let line = line?;
             if line.starts_with("##") {
-                if line.starts_with("##contig") {
-                    continue; // Skip original contig lines
+                // Skip fileformat line (already written) and contig lines (will be regenerated)
+                if line.starts_with("##fileformat") || line.starts_with("##contig") {
+                    continue;
                 }
                 writeln!(file, "{}", line)?;
             } else {
