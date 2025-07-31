@@ -1425,38 +1425,69 @@ pub fn run_vcf_lace(
     
     info!("[1/2] Found {} VCF files to merge", vcf_files.len());
     
-    // First pass: collect sample names and contig information
+    // Process files in parallel and collect results as they complete
     let mut all_samples = FxHashSet::default();
     let mut contig_max_end = FxHashMap::default();
     let mut file_order_info = Vec::new();
     
     info!("[1/2] Scanning files with {} threads...", threads);
     
-    let results: Vec<_> = vcf_files
-        .par_iter()
-        .enumerate()
-        .map(|(idx, path)| process_vcf_file(path, idx))
-        .collect();
+    // Use channels to process results as they become available
+    use std::sync::mpsc;
+    let (tx, rx) = mpsc::channel();
     
-    for (idx, result) in results.into_iter().enumerate() {
-        let (path, local_samples, local_contigs, local_order) = result?;
-        info!("[1/2] Processed {}/{}: {}", idx + 1, vcf_files.len(), 
-              Path::new(&path).file_name().unwrap().to_string_lossy());
+    // Process files in parallel using rayon::scope
+    let result = rayon::scope(|s| -> io::Result<()> {
+        s.spawn(|_| {
+            vcf_files
+                .par_iter()
+                .enumerate()
+                .for_each_with(tx, |tx, (_idx, path)| {
+                    let result = process_vcf_file(path, _idx);
+                    let _ = tx.send(result);
+                });
+        });
         
-        // Update global sample set
-        all_samples.extend(local_samples);
-        
-        // Update global contig extents
-        for (base_contig, end_pos) in local_contigs {
-            let current_max = contig_max_end.entry(base_contig).or_insert(0);
-            if end_pos > *current_max {
-                *current_max = end_pos;
+        // Process results as they become available
+        let mut processed_count = 0;
+        for result in rx {
+            match result {
+                Ok((path, local_samples, local_contigs, local_order)) => {
+                    processed_count += 1;
+                    
+                    info!("[1/2] Processed {}/{}: {}", 
+                          processed_count, vcf_files.len(), 
+                          Path::new(&path).file_name().unwrap().to_string_lossy());
+                    
+                    // Update global sample set
+                    all_samples.extend(local_samples);
+                    
+                    // Update global contig extents
+                    for (base_contig, end_pos) in local_contigs {
+                        let current_max = contig_max_end.entry(base_contig).or_insert(0);
+                        if end_pos > *current_max {
+                            *current_max = end_pos;
+                        }
+                    }
+                    
+                    // Record ordering info
+                    file_order_info.push((path, local_order));
+                    
+                    // Break when all files are processed
+                    if processed_count == vcf_files.len() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    return Err(e);
+                }
             }
         }
-        
-        // Record ordering info
-        file_order_info.push((path, local_order));
-    }
+        Ok(())
+    });
+    
+    // Handle any errors from the scope
+    result?;
     
     let merged_samples: Vec<String> = {
         let mut samples = all_samples.into_iter().collect::<Vec<_>>();
