@@ -1610,16 +1610,15 @@ fn process_vcf_file(
     Ok((path.to_string(), local_samples, local_contigs, order))
 }
 
-/// Get VCF reader that handles .gz compression
+/// Get VCF reader that handles compression transparently
 fn get_vcf_reader(path: &str) -> io::Result<Box<dyn BufRead>> {
     let file = File::open(path)?;
     
-    if path.ends_with(".gz") {
-        let decoder = flate2::read::GzDecoder::new(file);
-        Ok(Box::new(BufReader::new(decoder)))
-    } else {
-        Ok(Box::new(BufReader::new(file)))
-    }
+    // Use niffler to automatically detect and handle compression
+    let (reader, _format) = niffler::get_reader(Box::new(file))
+        .map_err(|e| io::Error::other(format!("Failed to open reader for '{}': {}", path, e)))?;
+    
+    Ok(Box::new(BufReader::new(reader)))
 }
 
 /// Write merged VCF file

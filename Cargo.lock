@@ -853,7 +853,6 @@ dependencies = [
  "clap",
  "coitrees",
  "env_logger",
- "flate2",
  "gzp",
  "handlegraph",
  "libc",
