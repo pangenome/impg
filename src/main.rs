@@ -364,17 +364,21 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
     },
-    /// Lace pangenome graphs together
+    /// Lace files together (graphs or VCFs)
     Lace {
-        /// List of input GFA files (space-separated)
-        #[clap(short = 'g', long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with = "gfa_list")]
-        gfa_files: Option<Vec<String>>,
+        /// List of input files (space-separated)
+        #[clap(short = 'f', long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with = "file_list")]
+        files: Option<Vec<String>>,
 
-        /// Text file containing GFA paths (one per line)
-        #[clap(short = 'l', long, value_parser, conflicts_with = "gfa_files")]
-        gfa_list: Option<String>,
+        /// Text file containing input file paths (one per line)
+        #[clap(short = 'l', long, value_parser, conflicts_with = "files")]
+        file_list: Option<String>,
 
-        /// Output GFA file path
+        /// Input file format (gfa, vcf, auto)
+        #[clap(long, value_parser, default_value = "auto")]
+        format: String,
+
+        /// Output file path
         #[clap(short, long, value_parser)]
         output: String,
 
@@ -382,7 +386,7 @@ enum Args {
         #[clap(long, value_parser, default_value = "auto")]
         compress: String,
 
-        /// Gap filling mode: 0=none, 1=middle gaps only, 2=all gaps (requires --sequence-files or --sequence-list for end gaps)
+        /// Gap filling mode: 0=none, 1=middle gaps only, 2=all gaps (requires --sequence-files or --sequence-list for end gaps, GFA mode only)
         #[clap(long, default_value = "0")]
         fill_gaps: u8,
 
@@ -392,6 +396,16 @@ enum Args {
         /// Directory for temporary files
         #[clap(long, value_parser)]
         temp_dir: Option<String>,
+
+        /// Reference (FASTA or AGC) file for validating contig lengths in VCF files
+        #[cfg(feature = "agc")]
+        #[clap(long, value_parser)]
+        reference: Option<String>,
+
+        /// Reference FASTA file for validating contig lengths in VCF files
+        #[cfg(not(feature = "agc"))]
+        #[clap(long, value_parser)]
+        reference: Option<String>,
 
         #[clap(flatten)]
         common: CommonOpts,
@@ -574,18 +588,41 @@ fn main() -> io::Result<()> {
         Args::Lace {
             common,
             sequence,
-            gfa_files,
-            gfa_list,
+            files,
+            file_list,
+            format,
             output,
             compress,
             fill_gaps,
             temp_dir,
+            reference,
         } => {
+            // Check that at least one input is provided
+            if files.is_none() && file_list.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Either --files or --file-list must be provided",
+                ));
+            }
+
             // Validate gap filling mode
             if fill_gaps > 2 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "fill_gaps must be 0, 1, or 2",
+                ));
+            }
+
+            // Validate format
+            let valid_formats = ["gfa", "vcf", "auto"];
+            if !valid_formats.contains(&format.as_str()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Invalid format '{}'. Must be one of: {}",
+                        format,
+                        valid_formats.join(", ")
+                    ),
                 ));
             }
 
@@ -605,19 +642,43 @@ fn main() -> io::Result<()> {
             // Initialize threads and logger for lace processing
             initialize_threads_and_log(&common);
 
-            // Build sequence index for sequence fetching (always build if sequence files provided)
-            let sequence_index = sequence.build_sequence_index()?;
+            // Determine the actual format (auto-detect if needed)
+            let actual_format = determine_file_format(&format, &files, &file_list)?;
 
-            lace::run_lace(
-                gfa_files,
-                gfa_list,
-                &output,
-                &compress,
-                fill_gaps,
-                temp_dir,
-                sequence_index.as_ref(),
-                common.verbose,
-            )?;
+            if actual_format == "vcf" {
+                // Build reference sequence index if provided
+                let reference_index = if let Some(ref_file) = reference {
+                    Some(UnifiedSequenceIndex::from_files(&[ref_file])?)
+                } else {
+                    None
+                };
+
+                // VCF lacing mode
+                lace::run_vcf_lace(
+                    files,
+                    file_list,
+                    &output,
+                    &compress,
+                    common.threads.get(),
+                    common.verbose,
+                    reference_index.as_ref(),
+                )?;
+            } else {
+                // GFA lacing mode (existing functionality)
+                // Build sequence index for sequence fetching (always build if sequence files provided)
+                let sequence_index = sequence.build_sequence_index()?;
+
+                lace::run_gfa_lace(
+                    files,
+                    file_list,
+                    &output,
+                    &compress,
+                    fill_gaps,
+                    temp_dir,
+                    sequence_index.as_ref(),
+                    common.verbose,
+                )?;
+            }
         }
         Args::Partition {
             common,
@@ -1167,6 +1228,71 @@ fn initialize_threads_and_log(common: &CommonOpts) {
         .num_threads(common.threads.into())
         .build_global()
         .unwrap();
+}
+
+/// Determine file format from explicit format or auto-detection
+fn determine_file_format(
+    format: &str, 
+    files: &Option<Vec<String>>, 
+    file_list: &Option<String>
+) -> io::Result<String> {
+    if format != "auto" {
+        return Ok(format.to_string());
+    }
+
+    // Auto-detect from first file
+    let first_file = match (files, file_list) {
+        (Some(files), _) if !files.is_empty() => files[0].clone(),
+        (_, Some(list_file)) => {
+            // Read first line from list file
+            let content = std::fs::read_to_string(list_file)?;
+            let first_line = content
+                .lines()
+                .find(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
+                .ok_or_else(|| io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "No valid files found in list file"
+                ))?;
+            first_line.trim().to_string()
+        }
+        _ => return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "No input files provided"
+        )),
+    };
+
+    // Auto-detect based on file extension
+    if first_file.ends_with(".vcf") || first_file.ends_with(".vcf.gz") {
+        Ok("vcf".to_string())
+    } else if first_file.ends_with(".gfa") || first_file.ends_with(".gfa.gz") {
+        Ok("gfa".to_string())
+    } else {
+        // Try to detect by reading first few lines
+        let file = std::fs::File::open(&first_file)?;
+        let reader = std::io::BufReader::new(file);
+        
+        for line in reader.lines().take(10) {
+            let line = line?;
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            
+            // Check for VCF header
+            if line.starts_with("#CHROM") {
+                return Ok("vcf".to_string());
+            }
+            
+            // Check for GFA segments, links, or paths
+            if line.starts_with('S') || line.starts_with('L') || line.starts_with('P') {
+                return Ok("gfa".to_string());
+            }
+        }
+        
+        // Default to GFA if we can't determine
+        warn!("Could not auto-detect file format for '{}', defaulting to GFA", first_file);
+        Ok("gfa".to_string())
+    }
 }
 
 /// Load/generate index based on common and PAF options
