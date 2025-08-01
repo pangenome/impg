@@ -397,6 +397,16 @@ enum Args {
         #[clap(long, value_parser)]
         temp_dir: Option<String>,
 
+        /// Reference (FASTA or AGC) file for validating contig lengths in VCF files
+        #[cfg(feature = "agc")]
+        #[clap(long, value_parser)]
+        reference: Option<String>,
+
+        /// Reference FASTA file for validating contig lengths in VCF files
+        #[cfg(not(feature = "agc"))]
+        #[clap(long, value_parser)]
+        reference: Option<String>,
+
         #[clap(flatten)]
         common: CommonOpts,
     },
@@ -585,6 +595,7 @@ fn main() -> io::Result<()> {
             compress,
             fill_gaps,
             temp_dir,
+            reference,
         } => {
             // Check that at least one input is provided
             if files.is_none() && file_list.is_none() {
@@ -635,6 +646,13 @@ fn main() -> io::Result<()> {
             let actual_format = determine_file_format(&format, &files, &file_list)?;
 
             if actual_format == "vcf" {
+                // Build reference sequence index if provided
+                let reference_index = if let Some(ref_file) = reference {
+                    Some(UnifiedSequenceIndex::from_files(&[ref_file])?)
+                } else {
+                    None
+                };
+
                 // VCF lacing mode
                 lace::run_vcf_lace(
                     files,
@@ -643,6 +661,7 @@ fn main() -> io::Result<()> {
                     &compress,
                     common.threads.get(),
                     common.verbose,
+                    reference_index.as_ref(),
                 )?;
             } else {
                 // GFA lacing mode (existing functionality)

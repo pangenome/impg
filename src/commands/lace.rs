@@ -1411,6 +1411,7 @@ pub fn run_vcf_lace(
     compress: &str,
     threads: usize,
     verbose: u8,
+    reference_index: Option<&UnifiedSequenceIndex>,
 ) -> io::Result<()> {
     // Determine compression format
     let compression_format = get_compression_format(compress, output);
@@ -1511,6 +1512,7 @@ pub fn run_vcf_lace(
         output,
         compression_format,
         verbose,
+        reference_index,
     )?;
     
     info!("[2/2] Done: merged {} files to {}", vcf_files.len(), output);
@@ -1660,6 +1662,7 @@ fn write_merged_vcf(
     output_path: &str,
     compression_format: Format,
     verbose: u8,
+    reference_index: Option<&UnifiedSequenceIndex>,
 ) -> io::Result<()> {
     // Create output writer with compression
     let output_file = File::create(output_path)?;
@@ -1706,12 +1709,43 @@ fn write_merged_vcf(
         }
     }
     
-    // Write new contig lines sorted by chromosome order
+    // Write new contig lines sorted by chromosome order with validation
     let mut sorted_contigs: Vec<_> = contig_max_end.iter().collect();
     sorted_contigs.sort_by(|a, b| chr_sort_key(a.0).cmp(&chr_sort_key(b.0)));
     
-    for (base_contig, &length) in sorted_contigs {
-        writeln!(file, "##contig=<ID={},length={}>", base_contig, length)?;
+    for (base_contig, &estimated_length) in sorted_contigs {
+        let final_length = if let Some(ref_index) = reference_index {
+            match ref_index.get_sequence_length(base_contig) {
+                Ok(ref_length) => {
+                    if estimated_length > ref_length as u64 {
+                        warn!(
+                            "Contig '{}': Estimated length {} exceeds reference length {}, using reference length",
+                            base_contig, estimated_length, ref_length
+                        );
+                        ref_length as u64
+                    } else if estimated_length < ref_length as u64 {
+                        warn!(
+                            "Contig '{}': Estimated length {} is shorter than reference length {}, using reference length",
+                            base_contig, estimated_length, ref_length
+                        );
+                        ref_length as u64
+                    } else {
+                        estimated_length
+                    }
+                }
+                Err(_) => {
+                    warn!(
+                        "Contig '{}' not found in reference, using estimated length {}",
+                        base_contig, estimated_length
+                    );
+                    estimated_length
+                }
+            }
+        } else {
+            estimated_length
+        };
+        
+        writeln!(file, "##contig=<ID={},length={}>", base_contig, final_length)?;
     }
     
     // Write header line
