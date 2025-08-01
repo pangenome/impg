@@ -185,30 +185,38 @@ impg stats -p alignments.paf
 
 ### Lace
 
-Combine multiple GFA files into a unified pangenome graph:
+Combine multiple GFA or VCF files:
 
 ```bash
-# Combine multiple GFA files (you can mix compressed and uncompressed files)
-impg lace -g file1.gfa file2.gfa file3.gfa -o combined.gfa
+# Combine multiple GFA files (auto-detects format)
+impg lace -f file1.gfa file2.gfa file3.gfa -o combined.gfa
 
-# Use a list file containing GFA paths
-impg lace -l gfa_files.txt -o combined.gfa
+# Combine multiple VCF files
+impg lace -f file1.vcf file2.vcf file3.vcf -o combined.vcf
 
-# Fill gaps between contiguous path segments
-impg lace -g *.gfa -o combined.gfa --fill-gaps 1 # Fill with N's
-impg lace -g *.gfa -o combined.gfa --fill-gaps 1 --sequence-files sequence.fa # Fill with sequences
+# Use a list file containing file paths
+impg lace -l files.txt -o combined.gfa
 
-# Fill all gaps, including start and end gaps (end gap filling requires sequence files)
-impg lace -g *.gfa -o combined.gfa --fill-gaps 2 # Fill with N's
-impg lace -g *.gfa -o combined.gfa --fill-gaps 2 --sequence-files sequence.fa # Fill with sequences
+# Explicitly specify input format (gfa, vcf, auto)
+impg lace -f *.gfa -o combined.gfa --format gfa
+
+# Fill gaps between contiguous path segments (GFA only)
+impg lace -f *.gfa -o combined.gfa --fill-gaps 1 # Fill with N's
+impg lace -f *.gfa -o combined.gfa --fill-gaps 1 --sequence-files sequence.fa # Fill with sequences
+
+# Fill all gaps, including start and end gaps (GFA only, requires sequence files)
+impg lace -f *.gfa -o combined.gfa --fill-gaps 2 --sequence-files sequence.fa
 
 # Control output compression
-impg lace -g *.gfa -o combined.gfa.gz --compress gzip
-impg lace -g *.gfa -o combined.gfa.bgz --compress bgzip
-impg lace -g *.gfa -o combined.gfa.zst --compress zstd
+impg lace -f *.gfa -o combined.gfa.gz --compress gzip
+impg lace -f *.gfa -o combined.gfa.bgz --compress bgzip
+impg lace -f *.gfa -o combined.gfa.zst --compress zstd
+
+# Use reference for VCF contig validation
+impg lace -f *.vcf -o combined.vcf --reference reference.fa
 
 # Use custom temporary directory
-impg lace -g *.gfa -o combined.gfa --temp-dir /tmp/lace_work
+impg lace -f *.gfa -o combined.gfa --temp-dir /tmp/lace_work
 ```
 
 #### Path Name Format
