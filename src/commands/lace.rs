@@ -579,27 +579,7 @@ fn read_gfa_files(
         .unwrap();
 
     if !skip_validation {
-        // Pre-compute all unique node sequence lengths in parallel
-        info!("Caching sequence lengths for validation");
-        let unique_node_ids: FxHashSet<u64> = path_map
-            .par_iter()
-            .flat_map(|(_, ranges)| ranges.par_iter())
-            .flat_map(|range| range.steps.par_iter())
-            .map(|handle| u64::from(handle.id()))
-            .collect();
-        
-        let node_length_cache: FxHashMap<u64, usize> = unique_node_ids
-            .par_iter()
-            .map(|&node_id| {
-                let index = (node_id - 1) as usize; // Convert to 0-based index
-                match graph.sequence_store.get_sequence_length(index) {
-                    Ok(length) => (node_id, length),
-                    Err(_) => (node_id, 0), // Handle error case
-                }
-            })
-            .collect();
-        
-        // Validate all path ranges in parallel using cached lengths
+        // Validate all path ranges in parallel
         info!("Validating path range lengths");
         let validation_errors: Vec<String> = path_map
             .par_iter()
@@ -609,9 +589,12 @@ fn read_gfa_files(
                     .filter_map(|range| {
                         let expected_length = range.end - range.start;
                         
-                        // Calculate actual length using cached sequence lengths
+                        // Calculate actual length by querying sequence store directly
                         let actual_length: usize = range.steps.iter()
-                            .map(|handle| node_length_cache.get(&u64::from(handle.id())).copied().unwrap_or(0))
+                            .map(|handle| {
+                                let index = (u64::from(handle.id()) - 1) as usize;
+                                graph.sequence_store.get_sequence_length(index).unwrap_or(0)
+                            })
                             .sum();
                         
                         if expected_length != actual_length {
