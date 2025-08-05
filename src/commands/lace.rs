@@ -582,9 +582,9 @@ fn read_gfa_files(
         // Pre-compute all unique node sequence lengths in parallel
         info!("Caching sequence lengths for validation");
         let unique_node_ids: FxHashSet<u64> = path_map
-            .values()
-            .flat_map(|ranges| ranges.iter())
-            .flat_map(|range| range.steps.iter())
+            .par_iter()
+            .flat_map(|(_, ranges)| ranges.par_iter())
+            .flat_map(|range| range.steps.par_iter())
             .map(|handle| u64::from(handle.id()))
             .collect();
         
