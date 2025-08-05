@@ -390,6 +390,10 @@ enum Args {
         #[clap(long, default_value = "0")]
         fill_gaps: u8,
 
+        /// Skip path range length validation (faster but may miss data integrity issues)
+        #[clap(long, default_value = "false")]
+        skip_validation: bool,
+
         #[clap(flatten)]
         sequence: SequenceOpts,
 
@@ -594,6 +598,7 @@ fn main() -> io::Result<()> {
             output,
             compress,
             fill_gaps,
+            skip_validation,
             temp_dir,
             reference,
         } => {
@@ -674,6 +679,7 @@ fn main() -> io::Result<()> {
                     &output,
                     &compress,
                     fill_gaps,
+                    skip_validation,
                     temp_dir,
                     sequence_index.as_ref(),
                     common.verbose,
