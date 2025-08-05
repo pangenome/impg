@@ -140,6 +140,41 @@ impl SequenceStore {
 
         Ok(buffer)
     }
+
+    // Batch read multiple sequences to reduce I/O overhead
+    fn get_sequences_batch(&self, indices: &[usize]) -> io::Result<Vec<Vec<u8>>> {
+        if indices.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Collect (offset, length, original_index) and sort by offset for sequential reads
+        let mut reads: Vec<(u64, u32, usize)> = indices
+            .iter()
+            .enumerate()
+            .filter_map(|(pos, &idx)| {
+                if idx < self.offsets.len() {
+                    let (offset, length) = self.offsets[idx];
+                    Some((offset, length, pos))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        
+        reads.sort_by_key(|&(offset, _, _)| offset);
+
+        // Read sequences in order and store results
+        let mut results = vec![Vec::new(); indices.len()];
+        
+        use std::os::unix::fs::FileExt;
+        for (offset, length, original_pos) in reads {
+            let mut buffer = vec![0u8; length as usize];
+            self.sequences_file.read_exact_at(&mut buffer, offset)?;
+            results[original_pos] = buffer;
+        }
+
+        Ok(results)
+    }
 }
 
 // Simplified graph structure
@@ -185,6 +220,28 @@ impl CompactGraph {
         } else {
             seq
         })
+    }
+
+    // Batch get sequences for multiple handles
+    fn get_sequences_batch(&self, handles: &[Handle]) -> io::Result<Vec<Vec<u8>>> {
+        let indices: Vec<usize> = handles
+            .iter()
+            .map(|handle| (u64::from(handle.id()) - 1) as usize)
+            .collect();
+        
+        let sequences = self.sequence_store.get_sequences_batch(&indices)?;
+        
+        Ok(sequences
+            .into_iter()
+            .zip(handles.iter())
+            .map(|(seq, handle)| {
+                if handle.is_reverse() {
+                    crate::graph::reverse_complement(&seq)
+                } else {
+                    seq
+                }
+            })
+            .collect())
     }
 }
 
@@ -575,31 +632,29 @@ fn read_gfa_files(
                     .par_iter()
                     .filter_map(|range| {
                         let expected_length = range.end - range.start;
-                        let mut actual_length = 0;
-
-                        // Compute actual length by summing step lengths
-                        for &step_handle in &range.steps {
-                            match graph.get_sequence(step_handle) {
-                                Ok(seq) => actual_length += seq.len(),
-                                Err(e) => {
-                                    return Some(format!(
-                                        "Failed to get sequence for node {} in path {}: {}",
-                                        step_handle.id(),
-                                        path_key,
-                                        e
-                                    ));
+                        
+                        // Batch read all sequences for this range
+                        match graph.get_sequences_batch(&range.steps) {
+                            Ok(sequences) => {
+                                let actual_length: usize = sequences.iter().map(|seq| seq.len()).sum();
+                                
+                                if expected_length != actual_length {
+                                    Some(format!(
+                                        "Path range length mismatch for '{}:{}-{}': \
+                                        expected length {} but sum of step lengths is {}",
+                                        path_key, range.start, range.end, expected_length, actual_length
+                                    ))
+                                } else {
+                                    None
                                 }
                             }
-                        }
-
-                        if expected_length != actual_length {
-                            Some(format!(
-                                "Path range length mismatch for '{}:{}-{}': \
-                                expected length {} but sum of step lengths is {}",
-                                path_key, range.start, range.end, expected_length, actual_length
-                            ))
-                        } else {
-                            None
+                            Err(e) => {
+                                Some(format!(
+                                    "Failed to get sequences for path {}: {}",
+                                    path_key,
+                                    e
+                                ))
+                            }
                         }
                     })
                     .collect::<Vec<String>>()
