@@ -557,30 +557,53 @@ fn read_gfa_files(
 
     // Validate all path ranges in parallel using the still-wrapped graph
     info!("Validating path range lengths");
+    
+    // Pre-cache all unique node sequences to avoid repeated file I/O
+    let mut unique_nodes = FxHashSet::default();
+    for ranges in path_map.values() {
+        for range in ranges {
+            for &handle in &range.steps {
+                unique_nodes.insert(handle);
+            }
+        }
+    }
+    
+    info!("Pre-caching {} unique node sequences", unique_nodes.len());
+    let node_length_cache: FxHashMap<Handle, usize> = {
+        let mut graph = combined_graph.lock().unwrap();
+        unique_nodes
+            .into_iter()
+            .filter_map(|handle| {
+                match graph.get_sequence(handle) {
+                    Ok(seq) => Some((handle, seq.len())),
+                    Err(e) => {
+                        error!("Failed to cache sequence for node {}: {}", handle.id(), e);
+                        None
+                    }
+                }
+            })
+            .collect()
+    };
+    
+    // Now validate using cached lengths
     let validation_errors: Vec<String> = path_map
         .par_iter()
         .flat_map(|(path_key, ranges)| {
             ranges
-                .par_iter()
+                .iter()  // Use regular iterator to avoid excessive parallelism
                 .filter_map(|range| {
                     let expected_length = range.end - range.start;
                     let mut actual_length = 0;
 
-                    // Compute actual length by summing step lengths
+                    // Compute actual length by summing cached step lengths
                     for &step_handle in &range.steps {
-                        let seq_result = {
-                            let mut graph = combined_graph.lock().unwrap();
-                            graph.get_sequence(step_handle)
-                        };
-
-                        match seq_result {
-                            Ok(seq) => actual_length += seq.len(),
-                            Err(e) => {
+                        match node_length_cache.get(&step_handle) {
+                            Some(&len) => actual_length += len,
+                            None => {
                                 return Some(format!(
-                                    "Failed to get sequence for node {} in path {}: {}",
+                                    "Failed to get cached sequence length for node {} in path {}",
                                     step_handle.id(),
-                                    path_key,
-                                    e
+                                    path_key
                                 ));
                             }
                         }
