@@ -11,7 +11,7 @@ use niffler::compression::Format;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -123,7 +123,7 @@ impl SequenceStore {
         Ok(idx)
     }
 
-    fn get_sequence(&mut self, idx: usize) -> io::Result<Vec<u8>> {
+    fn get_sequence(&self, idx: usize) -> io::Result<Vec<u8>> {
         if idx >= self.offsets.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -134,10 +134,24 @@ impl SequenceStore {
         let (offset, length) = self.offsets[idx];
         let mut buffer = vec![0u8; length as usize];
 
-        self.sequences_file.seek(SeekFrom::Start(offset))?;
-        self.sequences_file.read_exact(&mut buffer)?;
+        // Use pread for thread-safe reading without modifying file cursor
+        use std::os::unix::fs::FileExt;
+        self.sequences_file.read_exact_at(&mut buffer, offset)?;
 
         Ok(buffer)
+    }
+
+    // Get sequence length without reading the actual sequence data
+    fn get_sequence_length(&self, idx: usize) -> io::Result<usize> {
+        if idx < self.offsets.len() {
+            let (_, length) = self.offsets[idx];
+            Ok(length as usize)
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Sequence index {} out of bounds", idx),
+            ))
+        }
     }
 }
 
@@ -175,7 +189,7 @@ impl CompactGraph {
         self.edges.contains(&edge1) || self.edges.contains(&edge2)
     }
 
-    fn get_sequence(&mut self, handle: Handle) -> io::Result<Vec<u8>> {
+    fn get_sequence(&self, handle: Handle) -> io::Result<Vec<u8>> {
         let seq = self
             .sequence_store
             .get_sequence((u64::from(handle.id()) - 1) as usize)?;
@@ -218,6 +232,7 @@ pub fn run_gfa_lace(
     output: &str,
     compress: &str,
     fill_gaps: u8,
+    skip_validation: bool,
     temp_dir: Option<String>,
     sequence_index: Option<&UnifiedSequenceIndex>,
     verbose: u8,
@@ -253,7 +268,7 @@ pub fn run_gfa_lace(
 
     // Create a single combined graph without paths and a map of path key to ranges
     info!("Collecting metadata from {} GFA files", gfa_files.len());
-    let (combined_graph, mut path_key_ranges) = read_gfa_files(&gfa_files, temp_dir.as_deref())?;
+    let (combined_graph, mut path_key_ranges) = read_gfa_files(&gfa_files, temp_dir.as_deref(), skip_validation)?;
 
     // log_memory_usage("after_reading_files");
 
@@ -385,6 +400,7 @@ fn resolve_gfa_files(
 fn read_gfa_files(
     gfa_list: &[String],
     temp_dir: Option<&str>,
+    skip_validation: bool,
 ) -> io::Result<(CompactGraph, FxHashMap<String, Vec<RangeInfo>>)> {
     let combined_graph = Arc::new(Mutex::new(CompactGraph::new(temp_dir)?));
     let path_key_ranges: Arc<Mutex<FxHashMap<String, Vec<RangeInfo>>>> =
@@ -555,64 +571,56 @@ fn read_gfa_files(
         .into_inner()
         .unwrap();
 
-    // Validate all path ranges in parallel using the still-wrapped graph
-    info!("Validating path range lengths");
-    let validation_errors: Vec<String> = path_map
-        .par_iter()
-        .flat_map(|(path_key, ranges)| {
-            ranges
-                .par_iter()
-                .filter_map(|range| {
-                    let expected_length = range.end - range.start;
-                    let mut actual_length = 0;
-
-                    // Compute actual length by summing step lengths
-                    for &step_handle in &range.steps {
-                        let seq_result = {
-                            let mut graph = combined_graph.lock().unwrap();
-                            graph.get_sequence(step_handle)
-                        };
-
-                        match seq_result {
-                            Ok(seq) => actual_length += seq.len(),
-                            Err(e) => {
-                                return Some(format!(
-                                    "Failed to get sequence for node {} in path {}: {}",
-                                    step_handle.id(),
-                                    path_key,
-                                    e
-                                ));
-                            }
-                        }
-                    }
-
-                    if expected_length != actual_length {
-                        Some(format!(
-                            "Path range length mismatch for '{}:{}-{}': \
-                             expected length {} but sum of step lengths is {}",
-                            path_key, range.start, range.end, expected_length, actual_length
-                        ))
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<String>>()
-        })
-        .collect();
-
-    // Check if there were any validation errors
-    if !validation_errors.is_empty() {
-        for error in validation_errors {
-            error!("{error}");
-        }
-        std::process::exit(1);
-    }
-
+    // Unwrap the graph for lock-free validation
     let graph = Arc::try_unwrap(combined_graph)
         .ok()
         .expect("More than one Arc pointer to graph")
         .into_inner()
         .unwrap();
+
+    if !skip_validation {
+        // Validate all path ranges in parallel
+        info!("Validating path range lengths");
+        let validation_errors: Vec<String> = path_map
+            .par_iter()
+            .flat_map(|(path_key, ranges)| {
+                ranges
+                    .par_iter()
+                    .filter_map(|range| {
+                        let expected_length = range.end - range.start;
+                        
+                        // Calculate actual length by querying sequence store directly
+                        let actual_length: usize = range.steps.iter()
+                            .map(|handle| {
+                                let index = (u64::from(handle.id()) - 1) as usize;
+                                graph.sequence_store.get_sequence_length(index).unwrap_or(0)
+                            })
+                            .sum();
+                        
+                        if expected_length != actual_length {
+                            Some(format!(
+                                "Path range length mismatch for '{}:{}-{}': \
+                                expected length {} but sum of step lengths is {}",
+                                path_key, range.start, range.end, expected_length, actual_length
+                            ))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<String>>()
+            })
+            .collect();
+
+        // Check if there were any validation errors
+        if !validation_errors.is_empty() {
+            for error in validation_errors {
+                error!("{error}");
+            }
+            std::process::exit(1);
+        }
+    } else {
+        info!("Skipping path range length validation (--skip-validation flag set)");
+    }
 
     info!(
         "Collected {} nodes, {} edges, {} path keys, {} path ranges and {} path steps",
@@ -765,7 +773,7 @@ fn trim_range_overlaps(ranges: &mut [RangeInfo], graph_mutex: &Arc<Mutex<Compact
 
             // First pass: identify steps to remove/split (read-only, brief lock)
             {
-                let mut graph = graph_mutex.lock().unwrap();
+                let graph = graph_mutex.lock().unwrap();
                 for (idx, &step_handle) in r2.steps.iter().enumerate() {
                     let step_start = cumulative_pos;
                     let node_seq = graph.get_sequence(step_handle).unwrap();
@@ -803,7 +811,7 @@ fn trim_range_overlaps(ranges: &mut [RangeInfo], graph_mutex: &Arc<Mutex<Compact
 
                 // Get node sequence with lock
                 let node_seq = {
-                    let mut graph = graph_mutex.lock().unwrap();
+                    let graph = graph_mutex.lock().unwrap();
                     graph.get_sequence(step_handle).unwrap()
                 }; // Lock released here
 
