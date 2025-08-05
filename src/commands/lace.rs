@@ -141,39 +141,17 @@ impl SequenceStore {
         Ok(buffer)
     }
 
-    // Batch read multiple sequences to reduce I/O overhead
-    fn get_sequences_batch(&self, indices: &[usize]) -> io::Result<Vec<Vec<u8>>> {
-        if indices.is_empty() {
-            return Ok(Vec::new());
+    // Get sequence length without reading the actual sequence data
+    fn get_sequence_length(&self, idx: usize) -> io::Result<usize> {
+        if idx < self.offsets.len() {
+            let (_, length) = self.offsets[idx];
+            Ok(length as usize)
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Sequence index {} out of bounds", idx),
+            ))
         }
-
-        // Collect (offset, length, original_index) and sort by offset for sequential reads
-        let mut reads: Vec<(u64, u32, usize)> = indices
-            .iter()
-            .enumerate()
-            .filter_map(|(pos, &idx)| {
-                if idx < self.offsets.len() {
-                    let (offset, length) = self.offsets[idx];
-                    Some((offset, length, pos))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        
-        reads.sort_by_key(|&(offset, _, _)| offset);
-
-        // Read sequences in order and store results
-        let mut results = vec![Vec::new(); indices.len()];
-        
-        use std::os::unix::fs::FileExt;
-        for (offset, length, original_pos) in reads {
-            let mut buffer = vec![0u8; length as usize];
-            self.sequences_file.read_exact_at(&mut buffer, offset)?;
-            results[original_pos] = buffer;
-        }
-
-        Ok(results)
     }
 }
 
@@ -220,28 +198,6 @@ impl CompactGraph {
         } else {
             seq
         })
-    }
-
-    // Batch get sequences for multiple handles
-    fn get_sequences_batch(&self, handles: &[Handle]) -> io::Result<Vec<Vec<u8>>> {
-        let indices: Vec<usize> = handles
-            .iter()
-            .map(|handle| (u64::from(handle.id()) - 1) as usize)
-            .collect();
-        
-        let sequences = self.sequence_store.get_sequences_batch(&indices)?;
-        
-        Ok(sequences
-            .into_iter()
-            .zip(handles.iter())
-            .map(|(seq, handle)| {
-                if handle.is_reverse() {
-                    crate::graph::reverse_complement(&seq)
-                } else {
-                    seq
-                }
-            })
-            .collect())
     }
 }
 
@@ -623,7 +579,27 @@ fn read_gfa_files(
         .unwrap();
 
     if !skip_validation {
-        // Validate all path ranges in parallel using direct graph reference (no locks!)
+        // Pre-compute all unique node sequence lengths in parallel
+        info!("Caching sequence lengths for validation");
+        let unique_node_ids: FxHashSet<u64> = path_map
+            .values()
+            .flat_map(|ranges| ranges.iter())
+            .flat_map(|range| range.steps.iter())
+            .map(|handle| u64::from(handle.id()))
+            .collect();
+        
+        let node_length_cache: FxHashMap<u64, usize> = unique_node_ids
+            .par_iter()
+            .map(|&node_id| {
+                let index = (node_id - 1) as usize; // Convert to 0-based index
+                match graph.sequence_store.get_sequence_length(index) {
+                    Ok(length) => (node_id, length),
+                    Err(_) => (node_id, 0), // Handle error case
+                }
+            })
+            .collect();
+        
+        // Validate all path ranges in parallel using cached lengths
         info!("Validating path range lengths");
         let validation_errors: Vec<String> = path_map
             .par_iter()
@@ -633,28 +609,19 @@ fn read_gfa_files(
                     .filter_map(|range| {
                         let expected_length = range.end - range.start;
                         
-                        // Batch read all sequences for this range
-                        match graph.get_sequences_batch(&range.steps) {
-                            Ok(sequences) => {
-                                let actual_length: usize = sequences.iter().map(|seq| seq.len()).sum();
-                                
-                                if expected_length != actual_length {
-                                    Some(format!(
-                                        "Path range length mismatch for '{}:{}-{}': \
-                                        expected length {} but sum of step lengths is {}",
-                                        path_key, range.start, range.end, expected_length, actual_length
-                                    ))
-                                } else {
-                                    None
-                                }
-                            }
-                            Err(e) => {
-                                Some(format!(
-                                    "Failed to get sequences for path {}: {}",
-                                    path_key,
-                                    e
-                                ))
-                            }
+                        // Calculate actual length using cached sequence lengths
+                        let actual_length: usize = range.steps.iter()
+                            .map(|handle| node_length_cache.get(&u64::from(handle.id())).copied().unwrap_or(0))
+                            .sum();
+                        
+                        if expected_length != actual_length {
+                            Some(format!(
+                                "Path range length mismatch for '{}:{}-{}': \
+                                expected length {} but sum of step lengths is {}",
+                                path_key, range.start, range.end, expected_length, actual_length
+                            ))
+                        } else {
+                            None
                         }
                     })
                     .collect::<Vec<String>>()
