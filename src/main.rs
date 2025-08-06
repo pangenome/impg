@@ -1,6 +1,6 @@
 use clap::Parser;
 use coitrees::{Interval, IntervalTree};
-use impg::commands::{lace, partition, similarity};
+use impg::commands::{lace, partition, scan, similarity};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::paf::{PartialPafRecord, Strand};
 use impg::seqidx::SequenceIndex;
@@ -577,6 +577,40 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
     },
+    /// Compute selection scans (FST, XP-CLR, π-ratio) for genomic regions
+    Scan {
+        #[clap(flatten)]
+        paf: PafOpts,
+
+        #[clap(flatten)]
+        query: QueryOpts,
+
+        #[clap(flatten)]
+        gfa_maf_fasta: GfaMafFastaOpts,
+
+        /// Path to TSV file with sequence prefix to group mapping (columns: sequenceprefix, group)
+        #[clap(long, value_parser, required = true)]
+        groups_file: String,
+
+        /// Window size for sliding window analysis (in alignment positions)
+        #[clap(long, value_parser, default_value_t = 1000)]
+        window_size: usize,
+
+        /// Step size for sliding window (in alignment positions)
+        #[clap(long, value_parser, default_value_t = 500)]
+        step_size: usize,
+
+        /// Minimum allele frequency to consider a site as variant (0.0-1.0)
+        #[clap(long, value_parser, default_value_t = 0.01)]
+        min_allele_freq: f64,
+
+        /// Output format: 'tsv' (default) or 'vcf' (for variant output)
+        #[clap(long, value_parser, default_value = "tsv")]
+        output_format: String,
+
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
 }
 
 fn main() -> io::Result<()> {
@@ -1088,6 +1122,133 @@ fn main() -> io::Result<()> {
             let impg = initialize_impg(&common, &paf)?;
 
             print_stats(&impg);
+        }
+        Args::Scan {
+            common,
+            paf,
+            query,
+            gfa_maf_fasta,
+            groups_file,
+            window_size,
+            step_size,
+            min_allele_freq,
+            output_format,
+        } => {
+            initialize_threads_and_log(&common);
+            let impg = initialize_impg(&common, &paf)?;
+
+            // Validate min_allele_freq
+            if !(0.0..=0.5).contains(&min_allele_freq) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "min_allele_freq must be between 0.0 and 0.5",
+                ));
+            }
+
+            // Setup sequence index and POA scoring
+            let (sequence_index, scoring_params) = gfa_maf_fasta
+                .setup_output_resources("gfa", query.original_sequence_coordinates)?;
+
+            let sequence_index = sequence_index.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Sequence files are required for selection scan analysis",
+                )
+            })?;
+
+            let scoring_params = scoring_params.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "POA scoring parameters are required",
+                )
+            })?;
+
+            // Parse target ranges
+            let target_ranges = {
+                let mut targets = Vec::new();
+                
+                for target_range_str in &query.target_range {
+                    let (target_name, target_range, name) =
+                        partition::parse_target_range(target_range_str)?;
+                    validate_sequence_range(
+                        &target_name,
+                        target_range.0,
+                        target_range.1,
+                        &impg.seq_index,
+                    )?;
+                    targets.push((target_name, target_range, name));
+                }
+
+                if let Some(target_bed) = &query.target_bed {
+                    let bed_targets = partition::parse_bed_file(target_bed)?;
+                    for (target_name, target_range, name) in bed_targets {
+                        validate_sequence_range(
+                            &target_name,
+                            target_range.0,
+                            target_range.1,
+                            &impg.seq_index,
+                        )?;
+                        targets.push((target_name, target_range, name));
+                    }
+                }
+
+                targets
+            };
+
+            if target_ranges.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Either --target-range or --target-bed must be provided",
+                ));
+            }
+
+            info!("Processing {} target ranges for selection scan", target_ranges.len());
+
+            // Query all regions
+            let mut all_query_data = Vec::new();
+            for (target_name, target_range, name) in target_ranges {
+                let mut results = perform_query(
+                    &impg,
+                    &target_name,
+                    target_range,
+                    false,
+                    query.min_identity,
+                    query.transitive,
+                    query.transitive_dfs,
+                    query.max_depth,
+                    query.min_transitive_len,
+                    query.min_distance_between_ranges,
+                )?;
+
+                if results.is_empty() {
+                    warn!("No overlaps found for region {}", name);
+                    continue;
+                }
+
+                if query.effective_merge_distance() >= 0 {
+                    merge_query_adjusted_intervals(&mut results, query.effective_merge_distance(), false);
+                }
+
+                let query_intervals: Vec<Interval<u32>> = results
+                    .into_iter()
+                    .map(|(query_interval, _, _)| query_interval)
+                    .collect();
+
+                all_query_data.push((query_intervals, name));
+            }
+
+            // Compute selection scans
+            scan::compute_selection_scan(
+                &impg,
+                all_query_data,
+                &sequence_index,
+                scoring_params,
+                &groups_file,
+                window_size,
+                step_size,
+                min_allele_freq,
+                &output_format,
+            )?;
         }
     }
 
