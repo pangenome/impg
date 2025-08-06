@@ -1167,7 +1167,7 @@ fn main() -> io::Result<()> {
             let target_ranges = {
                 let mut targets = Vec::new();
                 
-                for target_range_str in &query.target_range {
+                if let Some(target_range_str) = &query.target_range {
                     let (target_name, target_range, name) =
                         partition::parse_target_range(target_range_str)?;
                     validate_sequence_range(
@@ -1691,7 +1691,7 @@ fn get_combined_index_filename(paf_files: &[String], custom_index: Option<&str>)
     }
 }
 
-fn perform_query(
+pub fn perform_query(
     impg: &Impg,
     target_name: &str,
     target_range: (i32, i32),

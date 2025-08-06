@@ -430,61 +430,6 @@ fn calculate_xp_clr(
     xp_clr
 }
 
-fn calculate_window_metrics(
-    msa_chars: &[Vec<char>],
-    variants: &[Variant],
-    group1: &GroupInfo,
-    group2: &GroupInfo,
-    window_start: usize,
-    window_end: usize,
-) -> SelectionMetrics {
-    let window_variants: Vec<Variant> = variants
-        .iter()
-        .filter(|v| v.position >= window_start && v.position < window_end)
-        .cloned()
-        .collect();
-    
-    if window_variants.is_empty() {
-        return SelectionMetrics {
-            fst: 0.0,
-            pi_ratio: 0.0,
-            xp_clr: 0.0,
-            pi_group1: 0.0,
-            pi_group2: 0.0,
-        };
-    }
-    
-    if window_start == 0 {
-        debug!("Window {}-{}: calculating metrics for {} variants",
-               window_start, window_end, window_variants.len());
-    }
-    
-    let freq1 = calculate_allele_frequencies(msa_chars, &window_variants, group1);
-    let freq2 = calculate_allele_frequencies(msa_chars, &window_variants, group2);
-    
-    let pi1 = calculate_nucleotide_diversity(&freq1);
-    let pi2 = calculate_nucleotide_diversity(&freq2);
-    
-    let pi_ratio = if pi2 > 0.0 { pi1 / pi2 } else { 0.0 };
-    
-    let fst = calculate_fst_hudson(
-        &freq1,
-        &freq2,
-        group1.total_sequences,
-        group2.total_sequences,
-    );
-    
-    let xp_clr = calculate_xp_clr(&freq1, &freq2, window_variants.len());
-    
-    SelectionMetrics {
-        fst,
-        pi_ratio,
-        xp_clr,
-        pi_group1: pi1,
-        pi_group2: pi2,
-    }
-}
-
 fn calculate_window_metrics_for_all_variants(
     msa_chars: &[Vec<char>],
     variants: &[Variant],
@@ -554,16 +499,29 @@ pub fn compute_selection_scan(
         "region\twindow_start\twindow_end\tvariant_count\tFST\tpi_ratio\tXP-CLR\tpi_group1\tpi_group2"
     )?;
     
-    for (intervals, name) in &query_data {
+    for (_intervals, name) in &query_data {
         debug!("Processing region: {}", name);
         
-        // Determine the range of the region to calculate windows
-        let (region_start, region_end) = if let Some(first_interval) = intervals.first() {
-            let start = intervals.iter().map(|i| i.first).min().unwrap_or(first_interval.first);
-            let end = intervals.iter().map(|i| i.last).max().unwrap_or(first_interval.last);
-            (start as usize, end as usize + 1)
+        // Parse the original target range from the region name
+        let (region_start, region_end) = if let Some(range_part) = name.split(':').nth(1) {
+            if let Some((start_str, end_str)) = range_part.split_once('-') {
+                let start = start_str.parse::<usize>().unwrap_or(0);
+                let end = end_str.parse::<usize>().unwrap_or(start + 1000);
+                (start, end)
+            } else {
+                warn!("Failed to parse range from name: {}", name);
+                continue;
+            }
         } else {
-            warn!("No intervals found for region {}", name);
+            warn!("No range found in name: {}", name);
+            continue;
+        };
+        
+        // Extract sequence name from region name
+        let sequence_name = if let Some(seq_name) = name.split(':').next() {
+            seq_name.to_string()
+        } else {
+            warn!("Failed to parse sequence name from: {}", name);
             continue;
         };
         
@@ -571,36 +529,56 @@ pub fn compute_selection_scan(
         
         // Generate sliding windows over the region
         let region_length = region_end - region_start;
-        let windows: Vec<WindowMetrics> = (0..region_length)
+        let windows: Vec<(usize, usize)> = (0..region_length)
             .step_by(step_size)
-            .par_bridge()
             .filter_map(|relative_start| {
                 let start = region_start + relative_start;
                 let end = (start + window_size).min(region_end);
                 
                 if end - start < window_size / 2 {
-                    return None; // Skip too-small windows at the end
+                    None // Skip too-small windows at the end
+                } else {
+                    Some((start, end))
                 }
-                
+            })
+            .collect();
+        
+        debug!("Processing {} windows for region {}", windows.len(), name);
+        
+        // Process windows in parallel - each thread handles one complete window
+        let window_results: Vec<WindowMetrics> = windows
+            .par_iter()
+            .filter_map(|&(start, end)| {
                 debug!("Processing window {}-{} for region {}", start, end, name);
                 
-                // Filter intervals that overlap with this window
-                let window_intervals: Vec<Interval<u32>> = intervals
-                    .iter()
-                    .filter(|interval| {
-                        let interval_start = interval.first as usize;
-                        let interval_end = (interval.last + 1) as usize;
-                        
-                        // Check if interval overlaps with window
-                        interval_start < end && interval_end > start
-                    })
-                    .cloned()
-                    .collect();
+                // Get target_id for the sequence
+                let target_id = match impg.seq_index.get_id(&sequence_name) {
+                    Some(id) => id,
+                    None => {
+                        debug!("Sequence '{}' not found in index", sequence_name);
+                        return None;
+                    }
+                };
                 
-                if window_intervals.is_empty() {
-                    debug!("No overlapping intervals for window {}-{}", start, end);
+                // Query PAF for this specific window
+                let window_results = impg.query(
+                    target_id,
+                    start as i32,
+                    end as i32,
+                    false, // store_cigar
+                    None,  // min_gap_compressed_identity
+                );
+                
+                if window_results.is_empty() {
+                    debug!("No alignments found for window {}-{}", start, end);
                     return None;
                 }
+                
+                // Convert results to intervals
+                let window_intervals: Vec<Interval<u32>> = window_results
+                    .into_iter()
+                    .map(|(query_interval, _, _)| query_interval)
+                    .collect();
                 
                 // Prepare MSA for this window
                 let window_result = prepare_poa_graph_and_sequences(
@@ -613,7 +591,7 @@ pub fn compute_selection_scan(
                 let (graph, sequence_metadata) = match window_result {
                     Ok(result) => result,
                     Err(e) => {
-                        debug!("Failed to prepare window {}-{}: {}", start, end, e);
+                        debug!("Failed to prepare MSA for window {}-{}: {}", start, end, e);
                         return None;
                     }
                 };
@@ -670,15 +648,19 @@ pub fn compute_selection_scan(
                 );
                 
                 Some(WindowMetrics {
-                    start: relative_start,
-                    end: relative_start + (end - start),
+                    start: start - region_start, // relative start
+                    end: end - region_start, // relative end
                     metrics,
                     variant_count: variants.len(),
                 })
             })
             .collect();
         
-        for window in windows {
+        // Write results in order (sorted by window start position)
+        let mut sorted_results = window_results;
+        sorted_results.sort_by_key(|w| w.start);
+        
+        for window in sorted_results {
             if window.variant_count > 0 {
                 writeln!(
                     handle,

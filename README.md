@@ -175,6 +175,33 @@ impg similarity -p alignments.paf -b regions.bed --sequence-files *.fa --pca --p
 impg similarity -p alignments.paf -b regions.bed --sequence-files *.fa --pca --polarize-guide-samples sample1,sample2
 ```
 
+### Scan
+
+Compute selection scans (FST Hudson, FST Weir & Cockerham, XP-CLR, π-ratio) for genomic regions:
+
+```bash
+# Basic selection scan with groups file
+impg scan -p alignments.paf -r chr1:1000000-2000000 --sequence-files *.fa --groups-file groups.tsv
+
+# Query multiple regions from BED file
+impg scan -p alignments.paf -b regions.bed --sequence-files *.fa --groups-file groups.tsv
+
+# Configure sliding windows (default: 1000bp windows, 500bp step)
+impg scan -p alignments.paf -r chr1:1000000-2000000 --sequence-files *.fa --groups-file groups.tsv --window-size 2000 --step-size 1000
+
+# Adjust minimum allele frequency threshold (default: 0.01)
+impg scan -p alignments.paf -r chr1:1000000-2000000 --sequence-files *.fa --groups-file groups.tsv --min-allele-freq 0.05
+```
+
+Groups file format (TSV with columns: sequenceprefix, group):
+```
+# Comments supported
+DBVPG6044	wild_strain
+DBVPG6765	wild_strain
+S288C	lab_strain
+SGDref	lab_strain
+```
+
 ### Stats
 
 Print alignment statistics:
