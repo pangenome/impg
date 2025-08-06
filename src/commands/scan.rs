@@ -485,6 +485,50 @@ fn calculate_window_metrics(
     }
 }
 
+fn calculate_window_metrics_for_all_variants(
+    msa_chars: &[Vec<char>],
+    variants: &[Variant],
+    group1: &GroupInfo,
+    group2: &GroupInfo,
+) -> SelectionMetrics {
+    if variants.is_empty() {
+        return SelectionMetrics {
+            fst: 0.0,
+            pi_ratio: 0.0,
+            xp_clr: 0.0,
+            pi_group1: 0.0,
+            pi_group2: 0.0,
+        };
+    }
+    
+    debug!("Calculating metrics for {} variants", variants.len());
+    
+    let freq1 = calculate_allele_frequencies(msa_chars, variants, group1);
+    let freq2 = calculate_allele_frequencies(msa_chars, variants, group2);
+    
+    let pi1 = calculate_nucleotide_diversity(&freq1);
+    let pi2 = calculate_nucleotide_diversity(&freq2);
+    
+    let pi_ratio = if pi2 > 0.0 { pi1 / pi2 } else { 0.0 };
+    
+    let fst = calculate_fst_hudson(
+        &freq1,
+        &freq2,
+        group1.total_sequences,
+        group2.total_sequences,
+    );
+    
+    let xp_clr = calculate_xp_clr(&freq1, &freq2, variants.len());
+    
+    SelectionMetrics {
+        fst,
+        pi_ratio,
+        xp_clr,
+        pi_group1: pi1,
+        pi_group2: pi2,
+    }
+}
+
 pub fn compute_selection_scan(
     impg: &Impg,
     query_data: Vec<(Vec<Interval<u32>>, String)>,
@@ -513,91 +557,124 @@ pub fn compute_selection_scan(
     for (intervals, name) in &query_data {
         debug!("Processing region: {}", name);
         
-        let (graph, sequence_metadata) =
-            prepare_poa_graph_and_sequences(impg, intervals, sequence_index, scoring_params)?;
-        
-        if sequence_metadata.is_empty() {
-            warn!("No sequences found for region {}", name);
+        // Determine the range of the region to calculate windows
+        let (region_start, region_end) = if let Some(first_interval) = intervals.first() {
+            let start = intervals.iter().map(|i| i.first).min().unwrap_or(first_interval.first);
+            let end = intervals.iter().map(|i| i.last).max().unwrap_or(first_interval.last);
+            (start as usize, end as usize + 1)
+        } else {
+            warn!("No intervals found for region {}", name);
             continue;
-        }
+        };
         
-        let msa = graph.generate_msa();
-        let msa_chars: Vec<Vec<char>> = msa
-            .iter()
-            .map(|s| s.chars().collect())
-            .collect();
+        debug!("Region {} spans positions {}-{}", name, region_start, region_end);
         
-        let sequence_names: Vec<String> = sequence_metadata
-            .iter()
-            .map(|m| m.name.clone())
-            .collect();
-        
-        debug!("Sequence names extracted: {:?}", 
-               if sequence_names.len() <= 10 { &sequence_names[..] } else { &sequence_names[..10] });
-        
-        let groups = create_groups(&sequence_names, &groups_map)?;
-        
-        debug!("Created {} groups for region {}", groups.len(), name);
-        for (i, group) in groups.iter().enumerate() {
-            debug!("  Group {}: {} sequences", i, group.total_sequences);
-        }
-        
-        if groups.len() < 2 {
-            warn!("Insufficient groups for region {} (found {}), skipping", name, groups.len());
-            continue;
-        }
-        
-        debug!("MSA dimensions: {} sequences x {} positions", msa_chars.len(), 
-               if !msa_chars.is_empty() { msa_chars[0].len() } else { 0 });
-        
-        let variants = detect_variants_from_msa(&msa_chars, min_allele_freq);
-        info!("Found {} biallelic variants in region {} (min_allele_freq={:.3})", 
-              variants.len(), name, min_allele_freq);
-        
-        if variants.is_empty() {
-            warn!("No variants found in region {}, skipping", name);
-            continue;
-        }
-        
-        let msa_length = msa_chars[0].len();
-        let group1 = &groups[0];
-        let group2 = &groups[1];
-        
-        let windows: Vec<WindowMetrics> = (0..msa_length)
+        // Generate sliding windows over the region
+        let region_length = region_end - region_start;
+        let windows: Vec<WindowMetrics> = (0..region_length)
             .step_by(step_size)
             .par_bridge()
-            .map(|start| {
-                let end = (start + window_size).min(msa_length);
-                let window_variants: Vec<Variant> = variants
+            .filter_map(|relative_start| {
+                let start = region_start + relative_start;
+                let end = (start + window_size).min(region_end);
+                
+                if end - start < window_size / 2 {
+                    return None; // Skip too-small windows at the end
+                }
+                
+                debug!("Processing window {}-{} for region {}", start, end, name);
+                
+                // Filter intervals that overlap with this window
+                let window_intervals: Vec<Interval<u32>> = intervals
                     .iter()
-                    .filter(|v| v.position >= start && v.position < end)
+                    .filter(|interval| {
+                        let interval_start = interval.first as usize;
+                        let interval_end = (interval.last + 1) as usize;
+                        
+                        // Check if interval overlaps with window
+                        interval_start < end && interval_end > start
+                    })
                     .cloned()
                     .collect();
                 
-                let window_variants_count = variants
-                    .iter()
-                    .filter(|v| v.position >= start && v.position < end)
-                    .count();
-                
-                if window_variants_count > 0 && start == 0 {
-                    debug!("Window {}-{}: {} variants", start, end, window_variants_count);
+                if window_intervals.is_empty() {
+                    debug!("No overlapping intervals for window {}-{}", start, end);
+                    return None;
                 }
                 
-                let metrics = calculate_window_metrics(
+                // Prepare MSA for this window
+                let window_result = prepare_poa_graph_and_sequences(
+                    impg, 
+                    &window_intervals, 
+                    sequence_index, 
+                    scoring_params
+                );
+                
+                let (graph, sequence_metadata) = match window_result {
+                    Ok(result) => result,
+                    Err(e) => {
+                        debug!("Failed to prepare window {}-{}: {}", start, end, e);
+                        return None;
+                    }
+                };
+                
+                if sequence_metadata.is_empty() {
+                    debug!("No sequences found for window {}-{}", start, end);
+                    return None;
+                }
+                
+                let msa = graph.generate_msa();
+                let msa_chars: Vec<Vec<char>> = msa
+                    .iter()
+                    .map(|s| s.chars().collect())
+                    .collect();
+                
+                let sequence_names: Vec<String> = sequence_metadata
+                    .iter()
+                    .map(|m| m.name.clone())
+                    .collect();
+                
+                let groups = match create_groups(&sequence_names, &groups_map) {
+                    Ok(g) => g,
+                    Err(e) => {
+                        debug!("Failed to create groups for window {}-{}: {}", start, end, e);
+                        return None;
+                    }
+                };
+                
+                if groups.len() < 2 {
+                    debug!("Insufficient groups for window {}-{}", start, end);
+                    return None;
+                }
+                
+                // Detect variants in this window's MSA
+                let variants = detect_variants_from_msa(&msa_chars, min_allele_freq);
+                
+                if variants.is_empty() {
+                    debug!("No variants found in window {}-{}", start, end);
+                    return None;
+                }
+                
+                debug!("Window {}-{}: {} sequences, {} variants", 
+                       start, end, msa_chars.len(), variants.len());
+                
+                let group1 = &groups[0];
+                let group2 = &groups[1];
+                
+                // Calculate metrics for this window using all variants (since MSA is window-specific)
+                let metrics = calculate_window_metrics_for_all_variants(
                     &msa_chars,
                     &variants,
                     group1,
                     group2,
-                    start,
-                    end,
                 );
                 
-                WindowMetrics {
-                    start,
-                    end,
+                Some(WindowMetrics {
+                    start: relative_start,
+                    end: relative_start + (end - start),
                     metrics,
-                    variant_count: window_variants.len(),
-                }
+                    variant_count: variants.len(),
+                })
             })
             .collect();
         
