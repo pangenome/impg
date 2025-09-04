@@ -224,6 +224,10 @@ impl GfaMafFastaOpts {
 /// Transitive query options
 #[derive(Parser, Debug, Clone)]
 struct TransitiveOpts {
+    /// Enable transitive queries with Depth-First Search (slower, but returns fewer overlapping results)
+    #[clap(long, action, conflicts_with = "transitive")]
+    transitive_dfs: bool,
+
     /// Maximum recursion depth for transitive overlaps (0 for no limit)
     #[clap(short = 'm', long, value_parser, default_value_t = 2)]
     max_depth: u16,
@@ -269,11 +273,7 @@ struct QueryOpts {
     /// Enable transitive queries (with Breadth-First Search)
     #[clap(short = 'x', long, action, conflicts_with = "transitive_dfs")]
     transitive: bool,
-
-    /// Enable transitive queries with Depth-First Search (slower, but returns fewer overlapping results)
-    #[clap(long, action, conflicts_with = "transitive")]
-    transitive_dfs: bool,
-
+    
     #[clap(flatten)]
     transitive_opts: TransitiveOpts,
 
@@ -448,10 +448,6 @@ enum Args {
         /// Minimum gap-compressed identity threshold (0.0-1.0)
         #[clap(long, value_parser)]
         min_identity: Option<f64>,
-
-        /// Enable transitive queries with Depth-First Search (slower, but returns fewer overlapping results)
-        #[clap(long, action)]
-        transitive_dfs: bool,
 
         #[clap(flatten)]
         transitive_opts: TransitiveOpts,
@@ -693,7 +689,6 @@ fn main() -> io::Result<()> {
             gfa_maf_fasta,
             merge_distance,
             min_identity,
-            transitive_dfs,
             transitive_opts,
             starting_sequences_file,
             selection_mode,
@@ -742,7 +737,7 @@ fn main() -> io::Result<()> {
                 min_identity,
                 min_missing_size,
                 min_boundary_distance,
-                transitive_dfs,
+                transitive_opts.transitive_dfs,
                 transitive_opts.max_depth,
                 transitive_opts.min_transitive_len,
                 transitive_opts.min_distance_between_ranges,
@@ -840,7 +835,7 @@ fn main() -> io::Result<()> {
                     resolved_output_format == "paf" || resolved_output_format == "bedpe", // Store CIGAR for PAF/BEDPE output
                     query.min_identity,
                     query.transitive,
-                    query.transitive_dfs,
+                    query.transitive_opts.transitive_dfs,
                     &query.transitive_opts,
                 )?;
 
@@ -1037,7 +1032,7 @@ fn main() -> io::Result<()> {
                     false, // Don't need CIGAR for similarity
                     query.min_identity,
                     query.transitive,
-                    query.transitive_dfs,
+                    query.transitive_opts.transitive_dfs,
                     &query.transitive_opts,
                 )?;
 
