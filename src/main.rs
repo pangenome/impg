@@ -221,6 +221,22 @@ impl GfaMafFastaOpts {
     }
 }
 
+/// Transitive query options
+#[derive(Parser, Debug, Clone)]
+struct TransitiveOpts {
+    /// Maximum recursion depth for transitive overlaps (0 for no limit)
+    #[clap(short = 'm', long, value_parser, default_value_t = 2)]
+    max_depth: u16,
+
+    /// Minimum region size to consider for transitive queries
+    #[clap(short = 'l', long, value_parser, default_value_t = 10)]
+    min_transitive_len: i32,
+
+    /// Minimum distance between transitive ranges to consider on the same sequence
+    #[clap(long, value_parser, default_value_t = 10)]
+    min_distance_between_ranges: i32,
+}
+
 /// Common query and filtering options
 #[derive(Parser, Debug, Clone)]
 struct QueryOpts {
@@ -258,17 +274,8 @@ struct QueryOpts {
     #[clap(long, action, conflicts_with = "transitive")]
     transitive_dfs: bool,
 
-    /// Maximum recursion depth for transitive overlaps (0 for no limit)
-    #[clap(short = 'm', long, value_parser, default_value_t = 0)]
-    max_depth: u16,
-
-    /// Minimum region size to consider for transitive queries
-    #[clap(short = 'l', long, value_parser, default_value_t = 0)]
-    min_transitive_len: i32,
-
-    /// Minimum distance between transitive ranges to consider on the same sequence
-    #[clap(long, value_parser, default_value_t = 0)]
-    min_distance_between_ranges: i32,
+    #[clap(flatten)]
+    transitive_opts: TransitiveOpts,
 
     /// Update coordinates to original sequences when input sequences are subsequences (seq_name:start-end) for 'bed', 'bedpe', and 'paf'
     #[clap(long, action)]
@@ -446,17 +453,8 @@ enum Args {
         #[clap(long, action)]
         transitive_dfs: bool,
 
-        /// Maximum recursion depth for transitive overlaps (0 for no limit)
-        #[clap(short = 'm', long, value_parser, default_value_t = 2)]
-        max_depth: u16,
-
-        /// Minimum region size to consider for transitive queries
-        #[clap(short = 'l', long, value_parser, default_value_t = 10)]
-        min_transitive_len: i32,
-
-        /// Minimum distance between transitive ranges to consider on the same sequence
-        #[clap(long, value_parser, default_value_t = 10)]
-        min_distance_between_ranges: i32,
+        #[clap(flatten)]
+        transitive_opts: TransitiveOpts,
 
         /// Path to the file with sequence names to start with (one per line)
         #[clap(long, value_parser)]
@@ -696,9 +694,7 @@ fn main() -> io::Result<()> {
             merge_distance,
             min_identity,
             transitive_dfs,
-            max_depth,
-            min_transitive_len,
-            min_distance_between_ranges,
+            transitive_opts,
             starting_sequences_file,
             selection_mode,
             min_missing_size,
@@ -747,9 +743,9 @@ fn main() -> io::Result<()> {
                 min_missing_size,
                 min_boundary_distance,
                 transitive_dfs,
-                max_depth,
-                min_transitive_len,
-                min_distance_between_ranges,
+                transitive_opts.max_depth,
+                transitive_opts.min_transitive_len,
+                transitive_opts.min_distance_between_ranges,
                 &output_format,
                 output_folder.as_deref(),
                 sequence_index.as_ref(),
@@ -845,9 +841,7 @@ fn main() -> io::Result<()> {
                     query.min_identity,
                     query.transitive,
                     query.transitive_dfs,
-                    query.max_depth,
-                    query.min_transitive_len,
-                    query.min_distance_between_ranges,
+                    &query.transitive_opts,
                 )?;
 
                 // Output results based on the resolved format
@@ -1044,9 +1038,7 @@ fn main() -> io::Result<()> {
                     query.min_identity,
                     query.transitive,
                     query.transitive_dfs,
-                    query.max_depth,
-                    query.min_transitive_len,
-                    query.min_distance_between_ranges,
+                    &query.transitive_opts,
                 )?;
 
                 // Merge intervals if needed
@@ -1538,9 +1530,7 @@ fn perform_query(
     min_identity: Option<f64>,
     transitive: bool,
     transitive_dfs: bool,
-    max_depth: u16,
-    min_transitive_len: i32,
-    min_distance_between_ranges: i32,
+    transitive_opts: &TransitiveOpts,
 ) -> io::Result<Vec<AdjustedInterval>> {
     let (target_start, target_end) = target_range;
     let target_id = impg.seq_index.get_id(target_name).ok_or_else(|| {
@@ -1572,9 +1562,9 @@ fn perform_query(
             target_start,
             target_end,
             None,
-            max_depth,
-            min_transitive_len,
-            min_distance_between_ranges,
+            transitive_opts.max_depth,
+            transitive_opts.min_transitive_len,
+            transitive_opts.min_distance_between_ranges,
             store_cigar,
             min_identity,
         )
@@ -1584,9 +1574,9 @@ fn perform_query(
             target_start,
             target_end,
             None,
-            max_depth,
-            min_transitive_len,
-            min_distance_between_ranges,
+            transitive_opts.max_depth,
+            transitive_opts.min_transitive_len,
+            transitive_opts.min_distance_between_ranges,
             store_cigar,
             min_identity,
         )
