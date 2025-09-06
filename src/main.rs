@@ -1602,7 +1602,7 @@ fn perform_query(
         )
     };
 
-    info!("Collected {} results", results.len() - 1); // Exclude the first element (the input range itself)
+    info!("Collected {} results (excluding input range)", results.len() - 1); // Exclude the first element (the input range itself)
 
     Ok(results)
 }
