@@ -1401,6 +1401,23 @@ fn generate_multi_index(
     let index_file = get_combined_index_filename(paf_files, custom_index);
     info!("No index found at {index_file}. Creating it now.");
 
+    // Check for missing .gzi files before processing
+    for paf_file in paf_files {
+        if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
+            let gzi_file = format!("{}.gzi", paf_file);
+            if !std::path::Path::new(&gzi_file).exists() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "Compressed PAF file '{}' requires a .gzi index file. \
+                        Please create it using 'bgzip -r {}' or decompress the file first.",
+                        paf_file, paf_file
+                    ),
+                ));
+            }
+        }
+    }
+
     let num_paf_files = paf_files.len();
     // Thread-safe counter for tracking progress
     let files_processed = AtomicUsize::new(0);
