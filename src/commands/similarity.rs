@@ -2,6 +2,7 @@ use crate::graph::prepare_poa_graph_and_sequences;
 use crate::impg::Impg;
 use crate::sequence_index::UnifiedSequenceIndex;
 use coitrees::Interval;
+use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, info, warn};
 use rayon::prelude::*;
 use std::collections::BTreeMap;
@@ -108,8 +109,18 @@ pub fn compute_and_output_similarities(
             }
         );
 
+        // Create progress bar
+        let pb = ProgressBar::new(query_data.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})")
+                .unwrap()
+                .progress_chars("#>-")
+        );
+
         // Create a mutex to protect stdout
         let stdout_mutex = Arc::new(Mutex::new(io::stdout()));
+        let pb = Arc::new(pb);
 
         // Process in parallel and write results directly
         query_data
@@ -132,17 +143,34 @@ pub fn compute_and_output_similarities(
                 let stdout = stdout_mutex.lock().unwrap();
                 let mut handle = stdout.lock();
                 write!(handle, "{similarity_output}")?;
+                drop(handle);
+                drop(stdout);
+
+                // Update progress
+                pb.inc(1);
 
                 Ok(())
             })?;
+
+        pb.finish_with_message("Completed computing similarities");
     } else {
         info!("Performing PCA for {} regions", query_data.len());
+
+        // Create progress bar for PCA
+        let pb = ProgressBar::new(query_data.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta}) PCA")
+                .unwrap()
+                .progress_chars("#>-")
+        );
+        let pb = Arc::new(pb);
 
         // Case 2 & 3: PCA with or without polarization
         let mut pca_results: Vec<_> = query_data
             .par_iter()
             .map(|(query_intervals, _)| {
-                compute_pca_for_region(
+                let result = compute_pca_for_region(
                     impg,
                     query_intervals,
                     sequence_index,
@@ -152,9 +180,13 @@ pub fn compute_and_output_similarities(
                     delim_pos,
                     n_components,
                     pca_similarity,
-                )
+                );
+                pb.inc(1);
+                result
             })
             .collect::<Result<Vec<_>, _>>()?;
+
+        pb.finish_with_message("Completed PCA computation");
 
         // Apply polarization if needed
         if let Some(guide_samples) = guide_samples {
