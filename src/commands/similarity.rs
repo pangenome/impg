@@ -109,18 +109,22 @@ pub fn compute_and_output_similarities(
             }
         );
 
-        // Create progress bar
-        let pb = ProgressBar::new(query_data.len() as u64);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})")
-                .unwrap()
-                .progress_chars("#>-")
-        );
+        // Create progress bar only if not in debug mode to avoid interfering with verbose logging
+        let pb = if log::log_enabled!(log::Level::Debug) {
+            None
+        } else {
+            let progress_bar = ProgressBar::new(query_data.len() as u64);
+            progress_bar.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})")
+                    .unwrap()
+                    .progress_chars("#>-")
+            );
+            Some(Arc::new(progress_bar))
+        };
 
         // Create a mutex to protect stdout
         let stdout_mutex = Arc::new(Mutex::new(io::stdout()));
-        let pb = Arc::new(pb);
 
         // Process in parallel and write results directly
         query_data
@@ -147,24 +151,32 @@ pub fn compute_and_output_similarities(
                 drop(stdout);
 
                 // Update progress
-                pb.inc(1);
+                if let Some(ref progress_bar) = pb {
+                    progress_bar.inc(1);
+                }
 
                 Ok(())
             })?;
 
-        pb.finish_with_message("Completed computing similarities");
+        if let Some(progress_bar) = pb {
+            progress_bar.finish_with_message("Completed computing similarities");
+        }
     } else {
         info!("Performing PCA for {} regions", query_data.len());
 
-        // Create progress bar for PCA
-        let pb = ProgressBar::new(query_data.len() as u64);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta}) PCA")
-                .unwrap()
-                .progress_chars("#>-")
-        );
-        let pb = Arc::new(pb);
+        // Create progress bar for PCA only if not in debug mode
+        let pb = if log::log_enabled!(log::Level::Debug) {
+            None
+        } else {
+            let progress_bar = ProgressBar::new(query_data.len() as u64);
+            progress_bar.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta}) PCA")
+                    .unwrap()
+                    .progress_chars("#>-")
+            );
+            Some(Arc::new(progress_bar))
+        };
 
         // Case 2 & 3: PCA with or without polarization
         let mut pca_results: Vec<_> = query_data
@@ -181,12 +193,16 @@ pub fn compute_and_output_similarities(
                     n_components,
                     pca_similarity,
                 );
-                pb.inc(1);
+                if let Some(ref progress_bar) = pb {
+                    progress_bar.inc(1);
+                }
                 result
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        pb.finish_with_message("Completed PCA computation");
+        if let Some(progress_bar) = pb {
+            progress_bar.finish_with_message("Completed PCA computation");
+        }
 
         // Apply polarization if needed
         if let Some(guide_samples) = guide_samples {
