@@ -74,9 +74,7 @@ pub fn partition_alignments(
                     let seq_length = impg.seq_index.get_len_from_id(seq_id).unwrap() as i32;
                     starting_sequences.push((seq_id, 0, seq_length));
                 } else if debug {
-                    debug!(
-                        "Sequence {trimmed_name} from starting file not found in index"
-                    );
+                    debug!("Sequence {trimmed_name} from starting file not found in index");
                 }
             }
         }
@@ -1410,9 +1408,7 @@ fn write_single_partition_file(
         }
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!(
-                "Single-file output not supported for format: {output_format}"
-            ),
+            format!("Single-file output not supported for format: {output_format}"),
         )),
     }
 }

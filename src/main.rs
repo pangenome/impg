@@ -123,12 +123,10 @@ impl SequenceOpts {
                     info!("Built {file_type} index for {num_files} files");
                     Ok(Some(index))
                 }
-                Err(e) => {
-                    Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("Failed to build sequence index: {e}"),
-                    ))
-                }
+                Err(e) => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Failed to build sequence index: {e}"),
+                )),
             }
         }
     }
@@ -166,10 +164,7 @@ impl GfaMafFastaOpts {
 
         let parse_u8 = |s: &str, name: &str| {
             s.parse::<u8>().map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("Invalid {name} value"),
-                )
+                io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid {name} value"))
             })
         };
 
@@ -273,7 +268,7 @@ struct QueryOpts {
     /// Enable transitive queries (with Breadth-First Search)
     #[clap(short = 'x', long, action, conflicts_with = "transitive_dfs")]
     transitive: bool,
-    
+
     #[clap(flatten)]
     transitive_opts: TransitiveOpts,
 
@@ -1149,9 +1144,7 @@ fn validate_sequence_range(
     if start >= end {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!(
-                "Start position {start} must be less than end position {end}"
-            ),
+            format!("Start position {start} must be less than end position {end}"),
         ));
     }
 
@@ -1225,9 +1218,9 @@ fn initialize_threads_and_log(common: &CommonOpts) {
 
 /// Determine file format from explicit format or auto-detection
 fn determine_file_format(
-    format: &str, 
-    files: &Option<Vec<String>>, 
-    file_list: &Option<String>
+    format: &str,
+    files: &Option<Vec<String>>,
+    file_list: &Option<String>,
 ) -> io::Result<String> {
     if format != "auto" {
         return Ok(format.to_string());
@@ -1242,50 +1235,73 @@ fn determine_file_format(
             let first_line = content
                 .lines()
                 .find(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
-                .ok_or_else(|| io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "No valid files found in list file"
-                ))?;
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "No valid files found in list file",
+                    )
+                })?;
             first_line.trim().to_string()
         }
-        _ => return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "No input files provided"
-        )),
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "No input files provided",
+            ))
+        }
     };
 
     // Auto-detect based on file extension
-    if first_file.ends_with(".vcf") || first_file.ends_with(".vcf.gz") {
+    if first_file.ends_with(".vcf")
+        || first_file.ends_with(".vcf.gz")
+        || first_file.ends_with(".vcf.zst")
+        || first_file.ends_with(".vcf.bgz")
+    {
         Ok("vcf".to_string())
-    } else if first_file.ends_with(".gfa") || first_file.ends_with(".gfa.gz") {
+    } else if first_file.ends_with(".gfa")
+        || first_file.ends_with(".gfa.gz")
+        || first_file.ends_with(".gfa.zst")
+        || first_file.ends_with(".gfa.bgz")
+    {
         Ok("gfa".to_string())
     } else {
-        // Try to detect by reading first few lines
-        let file = std::fs::File::open(&first_file)?;
-        let reader = std::io::BufReader::new(file);
-        
+        // Try to detect by reading first few lines through decompression
+        let reader = get_auto_reader(&first_file)?;
+
         for line in reader.lines().take(10) {
             let line = line?;
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            
+
             // Check for VCF header
             if line.starts_with("#CHROM") {
                 return Ok("vcf".to_string());
             }
-            
+
             // Check for GFA segments, links, or paths
-            if line.starts_with('S') || line.starts_with('L') || line.starts_with('P') {
+            if line.starts_with('S')
+                || line.starts_with('L')
+                || line.starts_with('P')
+                || line.starts_with('H')
+            {
                 return Ok("gfa".to_string());
             }
         }
-        
+
         // Default to GFA if we can't determine
-        warn!("Could not auto-detect file format for '{}', defaulting to GFA", first_file);
+        warn!("Could not auto-detect file format for '{first_file}', defaulting to GFA");
         Ok("gfa".to_string())
     }
+}
+
+// Helper function for auto-detection with compression support
+fn get_auto_reader(path: &str) -> io::Result<Box<dyn BufRead>> {
+    let file = std::fs::File::open(path)?;
+    let (reader, _format) = niffler::get_reader(Box::new(file))
+        .map_err(|e| io::Error::other(format!("Failed to open reader: {e}")))?;
+    Ok(Box::new(BufReader::new(reader)))
 }
 
 /// Load/generate index based on common and PAF options
@@ -1404,14 +1420,13 @@ fn generate_multi_index(
     // Check for missing .gzi files before processing
     for paf_file in paf_files {
         if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-            let gzi_file = format!("{}.gzi", paf_file);
+            let gzi_file = format!("{paf_file}.gzi");
             if !std::path::Path::new(&gzi_file).exists() {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!(
-                        "Compressed PAF file '{}' requires a .gzi index file. \
-                        Please create it using 'bgzip -r {}' or decompress the file first.",
-                        paf_file, paf_file
+                        "Compressed PAF file '{paf_file}' requires a .gzi index file. \
+                        Please create it using 'bgzip -r {paf_file}' or decompress the file first."
                     ),
                 ));
             }
@@ -1435,9 +1450,7 @@ fn generate_multi_index(
                 // Increment the counter and get the new value atomically
                 let current_count = files_processed.fetch_add(1, Ordering::SeqCst) + 1;
                 // Print progress with sequential counter
-                debug!(
-                    "Processing PAF file ({current_count}/{num_paf_files}): {paf_file}"
-                );
+                debug!("Processing PAF file ({current_count}/{num_paf_files}): {paf_file}");
 
                 let file = File::open(paf_file)?;
                 let reader: Box<dyn io::Read> =
@@ -1554,9 +1567,7 @@ fn perform_query(
     let target_length = impg.seq_index.get_len_from_id(target_id).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!(
-                "Target sequence '{target_name}' length not found in index"
-            ),
+            format!("Target sequence '{target_name}' length not found in index"),
         )
     })?;
     if target_end > target_length as i32 {
@@ -1602,7 +1613,10 @@ fn perform_query(
         )
     };
 
-    info!("Collected {} results (excluding input range)", results.len() - 1); // Exclude the first element (the input range itself)
+    info!(
+        "Collected {} results (excluding input range)",
+        results.len() - 1
+    ); // Exclude the first element (the input range itself)
 
     Ok(results)
 }

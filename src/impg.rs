@@ -465,9 +465,7 @@ impl Impg {
 
             // Verify we loaded the correct tree
             if loaded_target_id != target_id {
-                panic!(
-                    "Tree mismatch: expected {target_id}, got {loaded_target_id}"
-                );
+                panic!("Tree mismatch: expected {target_id}, got {loaded_target_id}");
             }
 
             // Reconstruct the tree
