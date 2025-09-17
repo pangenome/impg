@@ -1698,34 +1698,72 @@ fn write_merged_vcf(
     verbose: u8,
     reference_index: Option<&UnifiedSequenceIndex>,
 ) -> io::Result<()> {
-    // Create output writer with compression
+    // Create output file
     let output_file = File::create(output_path)?;
-    let writer: Box<dyn Write> = match compression_format {
-        Format::Gzip => {
-            let parz: ParCompress<Gzip> = ParCompressBuilder::new()
-                .num_threads(rayon::current_num_threads())
-                .map_err(|e| std::io::Error::other(format!("Failed to set threads: {e:?}")))?
-                .compression_level(Compression::new(6))
-                .from_writer(output_file);
-            Box::new(parz)
+    
+    // Handle zstd separately to ensure proper finalization
+    match compression_format {
+        Format::Zstd => {
+            // Use multi-threaded zstd compression with explicit finish
+            let mut encoder = ZstdEncoder::new(output_file, 6)?;
+            encoder.multithread(rayon::current_num_threads() as u32)?;
+            let mut file = BufWriter::new(encoder);
+            
+            // Write all VCF content
+            write_vcf_content(&mut file, sorted_paths, merged_samples, contig_max_end, verbose, reference_index)?;
+            
+            // Properly finish zstd encoder
+            file.flush()?;
+            let encoder = file.into_inner()?;
+            encoder.finish()?;
         }
-        Format::No => Box::new(output_file),
         _ => {
-            // Use niffler for other formats
-            niffler::get_writer(
-                Box::new(output_file),
-                compression_format,
-                niffler::compression::Level::Six,
-            )
-            .map_err(std::io::Error::other)?
+            // Handle other compression formats with Box<dyn Write>
+            let writer: Box<dyn Write> = match compression_format {
+                Format::Gzip => {
+                    let parz: ParCompress<Gzip> = ParCompressBuilder::new()
+                        .num_threads(rayon::current_num_threads())
+                        .map_err(|e| std::io::Error::other(format!("Failed to set threads: {:?}", e)))?
+                        .compression_level(Compression::new(6))
+                        .from_writer(output_file);
+                    Box::new(parz)
+                }
+                Format::No => Box::new(output_file),
+                _ => {
+                    // Use niffler for other formats
+                    niffler::get_writer(
+                        Box::new(output_file),
+                        compression_format,
+                        niffler::compression::Level::Six,
+                    )
+                    .map_err(std::io::Error::other)?
+                }
+            };
+            
+            let mut file = BufWriter::new(writer);
+            
+            // Write all VCF content
+            write_vcf_content(&mut file, sorted_paths, merged_samples, contig_max_end, verbose, reference_index)?;
+            
+            file.flush()?;
         }
-    };
+    }
+    
+    Ok(())
+}
 
-    let mut file = BufWriter::new(writer);
-
+// Helper function to write VCF content (extracted to avoid duplication)
+fn write_vcf_content<W: Write>(
+    file: &mut BufWriter<W>,
+    sorted_paths: &[String],
+    merged_samples: &[String],
+    contig_max_end: &FxHashMap<String, u64>,
+    verbose: u8,
+    reference_index: Option<&UnifiedSequenceIndex>,
+) -> io::Result<()> {
     // Write VCF header
     writeln!(file, "##fileformat=VCFv4.2")?;
-
+    
     // Read and write meta-lines from the first file
     if let Some(first_path) = sorted_paths.first() {
         let reader = get_vcf_reader(first_path)?;
@@ -1742,32 +1780,27 @@ fn write_merged_vcf(
             }
         }
     }
-
-    // Write new contig lines sorted by chromosome order with validation
+    
+    // Write new contig lines sorted by chromosome order
     let mut sorted_contigs: Vec<_> = contig_max_end.iter().collect();
     sorted_contigs.sort_by(|a, b| chr_sort_key(a.0).cmp(&chr_sort_key(b.0)));
-
+    
     for (base_contig, &estimated_length) in sorted_contigs {
         let final_length = if let Some(ref_index) = reference_index {
             match ref_index.get_sequence_length(base_contig) {
                 Ok(ref_length) => {
-                    if estimated_length > ref_length as u64 {
+                    if estimated_length != ref_length as u64 {
                         warn!(
-                            "Contig '{base_contig}': Estimated length {estimated_length} exceeds reference length {ref_length}, using reference length"
+                            "Contig '{}': Using reference length {} instead of estimated {}",
+                            base_contig, ref_length, estimated_length
                         );
-                        ref_length as u64
-                    } else if estimated_length < ref_length as u64 {
-                        warn!(
-                            "Contig '{base_contig}': Estimated length {estimated_length} is shorter than reference length {ref_length}, using reference length"
-                        );
-                        ref_length as u64
-                    } else {
-                        estimated_length
                     }
+                    ref_length as u64
                 }
                 Err(_) => {
                     warn!(
-                        "Contig '{base_contig}' not found in reference, using estimated length {estimated_length}"
+                        "Contig '{}' not found in reference, using estimated length {}",
+                        base_contig, estimated_length
                     );
                     estimated_length
                 }
@@ -1775,39 +1808,32 @@ fn write_merged_vcf(
         } else {
             estimated_length
         };
-
-        writeln!(file, "##contig=<ID={base_contig},length={final_length}>")?;
+        
+        writeln!(file, "##contig=<ID={},length={}>", base_contig, final_length)?;
     }
-
+    
     // Write header line
-    let header_cols = vec![
-        "#CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO", "FORMAT",
-    ]
-    .into_iter()
-    .chain(merged_samples.iter().map(|s| s.as_str()))
-    .collect::<Vec<_>>();
+    let header_cols = vec!["#CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO", "FORMAT"]
+        .into_iter()
+        .chain(merged_samples.iter().map(|s| s.as_str()))
+        .collect::<Vec<_>>();
     writeln!(file, "{}", header_cols.join("\t"))?;
-
+    
     info!("[2/2] Writing merged VCF records");
-
+    
     // Process each file in sorted order
     for (idx, path) in sorted_paths.iter().enumerate() {
         if verbose > 0 {
-            info!(
-                "[2/2] Merging {}/{}: {}",
-                idx + 1,
-                sorted_paths.len(),
-                Path::new(path).file_name().unwrap().to_string_lossy()
-            );
+            info!("[2/2] Merging {}/{}: {}", 
+                  idx + 1, sorted_paths.len(), 
+                  Path::new(path).file_name().unwrap().to_string_lossy());
         }
-
-        merge_vcf_file_records(&mut file, path, merged_samples)?;
+        
+        merge_vcf_file_records(file, path, merged_samples)?;
     }
-
-    file.flush()?;
+    
     Ok(())
 }
-
 /// Merge records from a single VCF file
 fn merge_vcf_file_records<W: Write>(
     output_file: &mut BufWriter<W>,
