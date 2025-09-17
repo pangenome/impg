@@ -1014,49 +1014,80 @@ fn write_graph_to_gfa(
     // Create the output file
     let output_file = File::create(output_path)?;
 
-    // Create writer based on compression format
-    let writer: Box<dyn Write> = match compression_format {
-        Format::Gzip => {
-            // Use parallel gzip compression
-            let parz: ParCompress<Gzip> = ParCompressBuilder::new()
-                .num_threads(rayon::current_num_threads())
-                .map_err(|e| std::io::Error::other(format!("Failed to set threads: {e:?}")))?
-                .compression_level(Compression::new(6))
-                .from_writer(output_file);
-            Box::new(parz)
-        }
-        Format::Bzip => {
-            // Use parallel BGZF compression
-            let parz: ParCompress<Bgzf> = ParCompressBuilder::new()
-                .num_threads(rayon::current_num_threads())
-                .map_err(|e| std::io::Error::other(format!("Failed to set threads: {e:?}")))?
-                .compression_level(Compression::new(6))
-                .from_writer(output_file);
-            Box::new(parz)
-        }
+    // Handle zstd separately to ensure proper finalization
+    match compression_format {
         Format::Zstd => {
-            // Use multi-threaded zstd compression
+            // Use multi-threaded zstd compression with explicit finish
             let mut encoder = ZstdEncoder::new(output_file, 6)?;
             encoder.multithread(rayon::current_num_threads() as u32)?;
-            Box::new(encoder)
-        }
-        Format::No => {
-            // No compression
-            Box::new(output_file)
+            let mut file = BufWriter::new(encoder);
+            
+            // Write all GFA content
+            write_gfa_content(&mut file, combined_graph, path_key_ranges, &nodes_to_remove, fill_gaps, sequence_index, debug)?;
+            
+            // Properly finish zstd encoder
+            file.flush()?;
+            let encoder = file.into_inner()?;
+            encoder.finish()?;
         }
         _ => {
-            // Fallback to niffler for other formats
-            niffler::get_writer(
-                Box::new(output_file),
-                compression_format,
-                niffler::compression::Level::Six,
-            )
-            .map_err(std::io::Error::other)?
+            // Handle other compression formats with Box<dyn Write>
+            let writer: Box<dyn Write> = match compression_format {
+                Format::Gzip => {
+                    // Use parallel gzip compression
+                    let parz: ParCompress<Gzip> = ParCompressBuilder::new()
+                        .num_threads(rayon::current_num_threads())
+                        .map_err(|e| std::io::Error::other(format!("Failed to set threads: {e:?}")))?
+                        .compression_level(Compression::new(6))
+                        .from_writer(output_file);
+                    Box::new(parz)
+                }
+                Format::Bzip => {
+                    // Use parallel BGZF compression
+                    let parz: ParCompress<Bgzf> = ParCompressBuilder::new()
+                        .num_threads(rayon::current_num_threads())
+                        .map_err(|e| std::io::Error::other(format!("Failed to set threads: {e:?}")))?
+                        .compression_level(Compression::new(6))
+                        .from_writer(output_file);
+                    Box::new(parz)
+                }
+                Format::No => {
+                    // No compression
+                    Box::new(output_file)
+                }
+                _ => {
+                    // Fallback to niffler for other formats
+                    niffler::get_writer(
+                        Box::new(output_file),
+                        compression_format,
+                        niffler::compression::Level::Six,
+                    )
+                    .map_err(std::io::Error::other)?
+                }
+            };
+
+            let mut file = BufWriter::new(writer);
+            
+            // Write all GFA content
+            write_gfa_content(&mut file, combined_graph, path_key_ranges, &nodes_to_remove, fill_gaps, sequence_index, debug)?;
+            
+            file.flush()?;
         }
-    };
+    }
+    
+    Ok(())
+}
 
-    let mut file = BufWriter::new(writer);
-
+// Helper function to write GFA content (extracted to avoid duplication)
+fn write_gfa_content<W: Write>(
+    file: &mut BufWriter<W>,
+    combined_graph: &mut CompactGraph,
+    path_key_ranges: &FxHashMap<String, Vec<RangeInfo>>,
+    nodes_to_remove: &BitVec,
+    fill_gaps: u8,
+    sequence_index: Option<&UnifiedSequenceIndex>,
+    debug: bool,
+) -> std::io::Result<()> {
     // Write GFA version
     writeln!(file, "H\tVN:Z:1.0")?;
 
@@ -1157,7 +1188,7 @@ fn write_graph_to_gfa(
         if fill_gaps == 2 && ranges[0].start > 0 {
             start_gaps += 1;
             path_elements.push(create_gap_node(
-                &mut file,
+                file,
                 (0, ranges[0].start),
                 path_key,
                 sequence_index,
@@ -1194,7 +1225,7 @@ fn write_graph_to_gfa(
                     middle_gaps += 1;
 
                     path_elements.push(create_gap_node(
-                        &mut file,
+                        file,
                         (last_range_end, next_start),
                         path_key,
                         sequence_index,
@@ -1224,7 +1255,7 @@ fn write_graph_to_gfa(
                         end_gaps += 1;
 
                         path_elements.push(create_gap_node(
-                            &mut file,
+                            file,
                             (path_end, total_len),
                             path_key,
                             sequence_index,
@@ -1278,7 +1309,6 @@ fn write_graph_to_gfa(
         info!("Filled {middle_gaps} middle gaps");
     }
 
-    file.flush()?;
     Ok(())
 }
 
