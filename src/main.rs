@@ -1255,14 +1255,19 @@ fn determine_file_format(
     };
 
     // Auto-detect based on file extension
-    if first_file.ends_with(".vcf") || first_file.ends_with(".vcf.gz") {
+    if first_file.ends_with(".vcf") 
+        || first_file.ends_with(".vcf.gz") 
+        || first_file.ends_with(".vcf.zst") 
+        || first_file.ends_with(".vcf.bgz") {
         Ok("vcf".to_string())
-    } else if first_file.ends_with(".gfa") || first_file.ends_with(".gfa.gz") {
+    } else if first_file.ends_with(".gfa") 
+        || first_file.ends_with(".gfa.gz") 
+        || first_file.ends_with(".gfa.zst")
+        || first_file.ends_with(".gfa.bgz") {
         Ok("gfa".to_string())
     } else {
-        // Try to detect by reading first few lines
-        let file = std::fs::File::open(&first_file)?;
-        let reader = std::io::BufReader::new(file);
+        // Try to detect by reading first few lines through decompression
+        let reader = get_auto_reader(&first_file)?;
         
         for line in reader.lines().take(10) {
             let line = line?;
@@ -1277,7 +1282,7 @@ fn determine_file_format(
             }
             
             // Check for GFA segments, links, or paths
-            if line.starts_with('S') || line.starts_with('L') || line.starts_with('P') {
+            if line.starts_with('S') || line.starts_with('L') || line.starts_with('P') || line.starts_with('H') {
                 return Ok("gfa".to_string());
             }
         }
@@ -1286,6 +1291,14 @@ fn determine_file_format(
         warn!("Could not auto-detect file format for '{}', defaulting to GFA", first_file);
         Ok("gfa".to_string())
     }
+}
+
+// Helper function for auto-detection with compression support
+fn get_auto_reader(path: &str) -> io::Result<Box<dyn BufRead>> {
+    let file = std::fs::File::open(path)?;
+    let (reader, _format) = niffler::get_reader(Box::new(file))
+        .map_err(|e| io::Error::other(format!("Failed to open reader: {}", e)))?;
+    Ok(Box::new(BufReader::new(reader)))
 }
 
 /// Load/generate index based on common and PAF options

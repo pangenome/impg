@@ -44,8 +44,8 @@ fn get_compression_format(compress_arg: &str, output_path: &str) -> Format {
             if output_path.ends_with(".gz") {
                 Format::Gzip
             } else if output_path.ends_with(".bgz") {
-                Format::Bzip
-            } else if output_path.ends_with(".zst") {
+                Format::Bzip  
+            } else if output_path.ends_with(".zst") || output_path.ends_with(".zstd") {
                 Format::Zstd
             } else {
                 Format::No
@@ -53,7 +53,8 @@ fn get_compression_format(compress_arg: &str, output_path: &str) -> Format {
         }
         _ => {
             warn!(
-                "Unsupported compression format '{compress_arg}', using none"
+                "Unsupported compression format '{}', using none",
+                compress_arg
             );
             Format::No
         }
@@ -638,12 +639,13 @@ fn get_gfa_reader(gfa_path: &str) -> io::Result<Box<dyn BufRead>> {
     let file = std::fs::File::open(gfa_path).map_err(|e| {
         io::Error::new(
             e.kind(),
-            format!("Failed to open file '{gfa_path}': {e}"),
+            format!("Failed to open file '{}': {}", gfa_path, e),
         )
     })?;
 
+    // niffler automatically detects compression format including zstd
     let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
-        io::Error::other(format!("Failed to open reader for '{gfa_path}': {e}"))
+        io::Error::other(format!("Failed to open reader for '{}': {}", gfa_path, e))
     })?;
 
     Ok(Box::new(BufReader::new(reader)))
