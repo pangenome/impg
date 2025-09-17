@@ -2,6 +2,7 @@ use crate::graph::prepare_poa_graph_and_sequences;
 use crate::impg::Impg;
 use crate::sequence_index::UnifiedSequenceIndex;
 use coitrees::Interval;
+use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, info, warn};
 use rayon::prelude::*;
 use std::collections::BTreeMap;
@@ -108,6 +109,20 @@ pub fn compute_and_output_similarities(
             }
         );
 
+        // Create progress bar only if not in debug mode to avoid interfering with verbose logging
+        let pb = if log::log_enabled!(log::Level::Debug) {
+            None
+        } else {
+            let progress_bar = ProgressBar::new(query_data.len() as u64);
+            progress_bar.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})")
+                    .unwrap()
+                    .progress_chars("#>-")
+            );
+            Some(Arc::new(progress_bar))
+        };
+
         // Create a mutex to protect stdout
         let stdout_mutex = Arc::new(Mutex::new(io::stdout()));
 
@@ -132,17 +147,42 @@ pub fn compute_and_output_similarities(
                 let stdout = stdout_mutex.lock().unwrap();
                 let mut handle = stdout.lock();
                 write!(handle, "{similarity_output}")?;
+                drop(handle);
+                drop(stdout);
+
+                // Update progress
+                if let Some(ref progress_bar) = pb {
+                    progress_bar.inc(1);
+                }
 
                 Ok(())
             })?;
+
+        if let Some(progress_bar) = pb {
+            progress_bar.finish_with_message("Completed computing similarities");
+        }
     } else {
         info!("Performing PCA for {} regions", query_data.len());
+
+        // Create progress bar for PCA only if not in debug mode
+        let pb = if log::log_enabled!(log::Level::Debug) {
+            None
+        } else {
+            let progress_bar = ProgressBar::new(query_data.len() as u64);
+            progress_bar.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta}) PCA")
+                    .unwrap()
+                    .progress_chars("#>-")
+            );
+            Some(Arc::new(progress_bar))
+        };
 
         // Case 2 & 3: PCA with or without polarization
         let mut pca_results: Vec<_> = query_data
             .par_iter()
             .map(|(query_intervals, _)| {
-                compute_pca_for_region(
+                let result = compute_pca_for_region(
                     impg,
                     query_intervals,
                     sequence_index,
@@ -152,9 +192,17 @@ pub fn compute_and_output_similarities(
                     delim_pos,
                     n_components,
                     pca_similarity,
-                )
+                );
+                if let Some(ref progress_bar) = pb {
+                    progress_bar.inc(1);
+                }
+                result
             })
             .collect::<Result<Vec<_>, _>>()?;
+
+        if let Some(progress_bar) = pb {
+            progress_bar.finish_with_message("Completed PCA computation");
+        }
 
         // Apply polarization if needed
         if let Some(guide_samples) = guide_samples {
