@@ -53,8 +53,7 @@ fn get_compression_format(compress_arg: &str, output_path: &str) -> Format {
         }
         _ => {
             warn!(
-                "Unsupported compression format '{}', using none",
-                compress_arg
+                "Unsupported compression format '{compress_arg}', using none"
             );
             Format::No
         }
@@ -150,7 +149,7 @@ impl SequenceStore {
         } else {
             Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("Sequence index {} out of bounds", idx),
+                format!("Sequence index {idx} out of bounds"),
             ))
         }
     }
@@ -639,13 +638,13 @@ fn get_gfa_reader(gfa_path: &str) -> io::Result<Box<dyn BufRead>> {
     let file = std::fs::File::open(gfa_path).map_err(|e| {
         io::Error::new(
             e.kind(),
-            format!("Failed to open file '{}': {}", gfa_path, e),
+            format!("Failed to open file '{gfa_path}': {e}"),
         )
     })?;
 
     // niffler automatically detects compression format including zstd
     let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
-        io::Error::other(format!("Failed to open reader for '{}': {}", gfa_path, e))
+        io::Error::other(format!("Failed to open reader for '{gfa_path}': {e}"))
     })?;
 
     Ok(Box::new(BufReader::new(reader)))
@@ -1381,11 +1380,9 @@ fn parse_vcf_chrom(chrom: &str) -> Option<(String, u64, u64)> {
 /// Get chromosome sort key for human-friendly ordering
 fn chr_sort_key(base_contig: &str) -> (u8, u64, String) {
     // Extract the last segment after '#', e.g., "chr19" from "CHM13#0#chr19"
-    let chr_label = base_contig.split('#').last().unwrap_or(base_contig);
+    let chr_label = base_contig.split('#').next_back().unwrap_or(base_contig);
     
-    if chr_label.starts_with("chr") {
-        let suffix = &chr_label[3..];
-        
+    if let Some(suffix) = chr_label.strip_prefix("chr") {
         // Numbered chromosome
         if let Ok(num) = suffix.parse::<u64>() {
             if (1..=22).contains(&num) {
@@ -1442,7 +1439,7 @@ pub fn run_vcf_lace(
     let mut contig_max_end = FxHashMap::default();
     let mut file_order_info = Vec::new();
     
-    info!("[1/2] Scanning files with {} threads...", threads);
+    info!("[1/2] Scanning files with {threads} threads...");
     
     // Use channels to process results as they become available
     use std::sync::mpsc;
@@ -1541,7 +1538,7 @@ fn resolve_vcf_files(
                 if !Path::new(file).exists() {
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
-                        format!("VCF file '{}' not found", file),
+                        format!("VCF file '{file}' not found"),
                     ));
                 }
             }
@@ -1559,7 +1556,7 @@ fn resolve_vcf_files(
                     if !Path::new(trimmed).exists() {
                         return Err(io::Error::new(
                             io::ErrorKind::NotFound,
-                            format!("VCF file '{}' not found", trimmed),
+                            format!("VCF file '{trimmed}' not found"),
                         ));
                     }
                     files.push(trimmed.to_string());
@@ -1569,7 +1566,7 @@ fn resolve_vcf_files(
             if files.is_empty() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("No valid VCF files found in list file: {}", list_file),
+                    format!("No valid VCF files found in list file: {list_file}"),
                 ));
             }
             
@@ -1643,7 +1640,7 @@ fn process_vcf_file(
             } else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("Unexpected CHROM format in {}: {}", path, chrom),
+                    format!("Unexpected CHROM format in {path}: {chrom}"),
                 ));
             }
         }
@@ -1659,7 +1656,7 @@ fn get_vcf_reader(path: &str) -> io::Result<Box<dyn BufRead>> {
     
     // Use niffler to automatically detect and handle compression
     let (reader, _format) = niffler::get_reader(Box::new(file))
-        .map_err(|e| io::Error::other(format!("Failed to open reader for '{}': {}", path, e)))?;
+        .map_err(|e| io::Error::other(format!("Failed to open reader for '{path}': {e}")))?;
     
     Ok(Box::new(BufReader::new(reader)))
 }
@@ -1680,7 +1677,7 @@ fn write_merged_vcf(
         Format::Gzip => {
             let parz: ParCompress<Gzip> = ParCompressBuilder::new()
                 .num_threads(rayon::current_num_threads())
-                .map_err(|e| std::io::Error::other(format!("Failed to set threads: {:?}", e)))?
+                .map_err(|e| std::io::Error::other(format!("Failed to set threads: {e:?}")))?
                 .compression_level(Compression::new(6))
                 .from_writer(output_file);
             Box::new(parz)
@@ -1712,7 +1709,7 @@ fn write_merged_vcf(
                 if line.starts_with("##fileformat") || line.starts_with("##contig") {
                     continue;
                 }
-                writeln!(file, "{}", line)?;
+                writeln!(file, "{line}")?;
             } else {
                 break; // Stop at header line
             }
@@ -1729,14 +1726,12 @@ fn write_merged_vcf(
                 Ok(ref_length) => {
                     if estimated_length > ref_length as u64 {
                         warn!(
-                            "Contig '{}': Estimated length {} exceeds reference length {}, using reference length",
-                            base_contig, estimated_length, ref_length
+                            "Contig '{base_contig}': Estimated length {estimated_length} exceeds reference length {ref_length}, using reference length"
                         );
                         ref_length as u64
                     } else if estimated_length < ref_length as u64 {
                         warn!(
-                            "Contig '{}': Estimated length {} is shorter than reference length {}, using reference length",
-                            base_contig, estimated_length, ref_length
+                            "Contig '{base_contig}': Estimated length {estimated_length} is shorter than reference length {ref_length}, using reference length"
                         );
                         ref_length as u64
                     } else {
@@ -1745,8 +1740,7 @@ fn write_merged_vcf(
                 }
                 Err(_) => {
                     warn!(
-                        "Contig '{}' not found in reference, using estimated length {}",
-                        base_contig, estimated_length
+                        "Contig '{base_contig}' not found in reference, using estimated length {estimated_length}"
                     );
                     estimated_length
                 }
@@ -1755,7 +1749,7 @@ fn write_merged_vcf(
             estimated_length
         };
         
-        writeln!(file, "##contig=<ID={},length={}>", base_contig, final_length)?;
+        writeln!(file, "##contig=<ID={base_contig},length={final_length}>")?;
     }
     
     // Write header line
@@ -1818,7 +1812,7 @@ fn merge_vcf_file_records<W: Write>(
         // Process data record
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() < 9 {
-            error!("Malformed VCF record in {}: {}", path, line);
+            error!("Malformed VCF record in {path}: {line}");
             std::process::exit(1);
         }
         
@@ -1883,11 +1877,11 @@ fn merge_vcf_file_records<W: Write>(
                 
                 writeln!(output_file, "{}", out_fields.join("\t"))?;
             } else {
-                error!("Cannot parse POS in {}: {}", path, pos_str);
+                error!("Cannot parse POS in {path}: {pos_str}");
                 std::process::exit(1);
             }
         } else {
-            error!("Unexpected CHROM format in {}: {}", path, chrom);
+            error!("Unexpected CHROM format in {path}: {chrom}");
             std::process::exit(1);
         }
     }

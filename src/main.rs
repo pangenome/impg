@@ -1288,7 +1288,7 @@ fn determine_file_format(
         }
         
         // Default to GFA if we can't determine
-        warn!("Could not auto-detect file format for '{}', defaulting to GFA", first_file);
+        warn!("Could not auto-detect file format for '{first_file}', defaulting to GFA");
         Ok("gfa".to_string())
     }
 }
@@ -1297,7 +1297,7 @@ fn determine_file_format(
 fn get_auto_reader(path: &str) -> io::Result<Box<dyn BufRead>> {
     let file = std::fs::File::open(path)?;
     let (reader, _format) = niffler::get_reader(Box::new(file))
-        .map_err(|e| io::Error::other(format!("Failed to open reader: {}", e)))?;
+        .map_err(|e| io::Error::other(format!("Failed to open reader: {e}")))?;
     Ok(Box::new(BufReader::new(reader)))
 }
 
@@ -1417,14 +1417,13 @@ fn generate_multi_index(
     // Check for missing .gzi files before processing
     for paf_file in paf_files {
         if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-            let gzi_file = format!("{}.gzi", paf_file);
+            let gzi_file = format!("{paf_file}.gzi");
             if !std::path::Path::new(&gzi_file).exists() {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!(
-                        "Compressed PAF file '{}' requires a .gzi index file. \
-                        Please create it using 'bgzip -r {}' or decompress the file first.",
-                        paf_file, paf_file
+                        "Compressed PAF file '{paf_file}' requires a .gzi index file. \
+                        Please create it using 'bgzip -r {paf_file}' or decompress the file first."
                     ),
                 ));
             }
