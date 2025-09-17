@@ -44,7 +44,7 @@ fn get_compression_format(compress_arg: &str, output_path: &str) -> Format {
             if output_path.ends_with(".gz") {
                 Format::Gzip
             } else if output_path.ends_with(".bgz") {
-                Format::Bzip  
+                Format::Bzip
             } else if output_path.ends_with(".zst") || output_path.ends_with(".zstd") {
                 Format::Zstd
             } else {
@@ -52,9 +52,7 @@ fn get_compression_format(compress_arg: &str, output_path: &str) -> Format {
             }
         }
         _ => {
-            warn!(
-                "Unsupported compression format '{compress_arg}', using none"
-            );
+            warn!("Unsupported compression format '{compress_arg}', using none");
             Format::No
         }
     }
@@ -268,7 +266,8 @@ pub fn run_gfa_lace(
 
     // Create a single combined graph without paths and a map of path key to ranges
     info!("Collecting metadata from {} GFA files", gfa_files.len());
-    let (combined_graph, mut path_key_ranges) = read_gfa_files(&gfa_files, temp_dir.as_deref(), skip_validation)?;
+    let (combined_graph, mut path_key_ranges) =
+        read_gfa_files(&gfa_files, temp_dir.as_deref(), skip_validation)?;
 
     // log_memory_usage("after_reading_files");
 
@@ -588,15 +587,17 @@ fn read_gfa_files(
                     .par_iter()
                     .filter_map(|range| {
                         let expected_length = range.end - range.start;
-                        
+
                         // Calculate actual length by querying sequence store directly
-                        let actual_length: usize = range.steps.iter()
+                        let actual_length: usize = range
+                            .steps
+                            .iter()
                             .map(|handle| {
                                 let index = (u64::from(handle.id()) - 1) as usize;
                                 graph.sequence_store.get_sequence_length(index).unwrap_or(0)
                             })
                             .sum();
-                        
+
                         if expected_length != actual_length {
                             Some(format!(
                                 "Path range length mismatch for '{}:{}-{}': \
@@ -635,17 +636,12 @@ fn read_gfa_files(
 }
 
 fn get_gfa_reader(gfa_path: &str) -> io::Result<Box<dyn BufRead>> {
-    let file = std::fs::File::open(gfa_path).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("Failed to open file '{gfa_path}': {e}"),
-        )
-    })?;
+    let file = std::fs::File::open(gfa_path)
+        .map_err(|e| io::Error::new(e.kind(), format!("Failed to open file '{gfa_path}': {e}")))?;
 
     // niffler automatically detects compression format including zstd
-    let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
-        io::Error::other(format!("Failed to open reader for '{gfa_path}': {e}"))
-    })?;
+    let (reader, _format) = niffler::get_reader(Box::new(file))
+        .map_err(|e| io::Error::other(format!("Failed to open reader for '{gfa_path}': {e}")))?;
 
     Ok(Box::new(BufReader::new(reader)))
 }
@@ -1131,9 +1127,7 @@ fn write_graph_to_gfa(
                     current_end = ranges[i].end;
                 } else {
                     // Print current merged range
-                    debug!(
-                        "  Merged range: start={current_start}, end={current_end}"
-                    );
+                    debug!("  Merged range: start={current_start}, end={current_end}");
 
                     if !ranges[i - 1].overlaps_with(&ranges[i]) {
                         // Calculate and print gap
@@ -1152,9 +1146,7 @@ fn write_graph_to_gfa(
             }
 
             // Print final merged range
-            debug!(
-                "  Final merged range: start={current_start}, end={current_end}"
-            );
+            debug!("  Final merged range: start={current_start}, end={current_end}");
         }
 
         let mut path_elements: Vec<String> = Vec::new();
@@ -1249,9 +1241,7 @@ fn write_graph_to_gfa(
                     }
                 }
                 Err(e) => {
-                    warn!(
-                        "Failed to get sequence length for path '{path_key}': {e}"
-                    );
+                    warn!("Failed to get sequence length for path '{path_key}': {e}");
                 }
             }
         }
@@ -1358,17 +1348,16 @@ fn add_range_steps_to_path(
     }
 }
 
-
 /// Parse VCF CHROM field to extract base contig and range
 fn parse_vcf_chrom(chrom: &str) -> Option<(String, u64, u64)> {
     if let Some(colon_pos) = chrom.rfind(':') {
         let (base_contig, range_str) = chrom.split_at(colon_pos);
         let range_str = &range_str[1..]; // Skip the ':'
-        
+
         if let Some(dash_pos) = range_str.find('-') {
             let (start_str, end_str) = range_str.split_at(dash_pos);
             let end_str = &end_str[1..]; // Skip the '-'
-            
+
             if let (Ok(start), Ok(end)) = (start_str.parse::<u64>(), end_str.parse::<u64>()) {
                 return Some((base_contig.to_string(), start, end));
             }
@@ -1381,7 +1370,7 @@ fn parse_vcf_chrom(chrom: &str) -> Option<(String, u64, u64)> {
 fn chr_sort_key(base_contig: &str) -> (u8, u64, String) {
     // Extract the last segment after '#', e.g., "chr19" from "CHM13#0#chr19"
     let chr_label = base_contig.split('#').next_back().unwrap_or(base_contig);
-    
+
     if let Some(suffix) = chr_label.strip_prefix("chr") {
         // Numbered chromosome
         if let Ok(num) = suffix.parse::<u64>() {
@@ -1389,23 +1378,23 @@ fn chr_sort_key(base_contig: &str) -> (u8, u64, String) {
                 return (0, num, String::new());
             }
         }
-        
+
         // X chromosome
         if suffix == "X" {
             return (0, 23, String::new());
         }
-        
+
         // Y chromosome
         if suffix == "Y" {
             return (0, 24, String::new());
         }
-        
+
         // Mitochondrial: accept "M" or "MT"
         if suffix == "M" || suffix == "MT" {
             return (0, 25, String::new());
         }
     }
-    
+
     // Fallback: anything not matching above goes after, sorted alphabetically
     (1, 0, chr_label.to_string())
 }
@@ -1422,7 +1411,7 @@ pub fn run_vcf_lace(
 ) -> io::Result<()> {
     // Determine compression format
     let compression_format = get_compression_format(compress, output);
-    
+
     // Resolve VCF files
     let vcf_files = resolve_vcf_files(vcf_files, vcf_list)?;
     if vcf_files.is_empty() {
@@ -1431,20 +1420,20 @@ pub fn run_vcf_lace(
             "No VCF files specified",
         ));
     }
-    
+
     info!("[1/2] Found {} VCF files to merge", vcf_files.len());
-    
+
     // Process files in parallel and collect results as they complete
     let mut all_samples = FxHashSet::default();
     let mut contig_max_end = FxHashMap::default();
     let mut file_order_info = Vec::new();
-    
+
     info!("[1/2] Scanning files with {threads} threads...");
-    
+
     // Use channels to process results as they become available
     use std::sync::mpsc;
     let (tx, rx) = mpsc::channel();
-    
+
     // Process files in parallel using rayon::scope
     let result = rayon::scope(|s| -> io::Result<()> {
         s.spawn(|_| {
@@ -1456,21 +1445,24 @@ pub fn run_vcf_lace(
                     let _ = tx.send(result);
                 });
         });
-        
+
         // Process results as they become available
         let mut processed_count = 0;
         for result in rx {
             match result {
                 Ok((path, local_samples, local_contigs, local_order)) => {
                     processed_count += 1;
-                    
-                    info!("[1/2] Processed {}/{}: {}", 
-                          processed_count, vcf_files.len(), 
-                          Path::new(&path).file_name().unwrap().to_string_lossy());
-                    
+
+                    info!(
+                        "[1/2] Processed {}/{}: {}",
+                        processed_count,
+                        vcf_files.len(),
+                        Path::new(&path).file_name().unwrap().to_string_lossy()
+                    );
+
                     // Update global sample set
                     all_samples.extend(local_samples);
-                    
+
                     // Update global contig extents
                     for (base_contig, end_pos) in local_contigs {
                         let current_max = contig_max_end.entry(base_contig).or_insert(0);
@@ -1478,10 +1470,10 @@ pub fn run_vcf_lace(
                             *current_max = end_pos;
                         }
                     }
-                    
+
                     // Record ordering info
                     file_order_info.push((path, local_order));
-                    
+
                     // Break when all files are processed
                     if processed_count == vcf_files.len() {
                         break;
@@ -1494,23 +1486,23 @@ pub fn run_vcf_lace(
         }
         Ok(())
     });
-    
+
     // Handle any errors from the scope
     result?;
-    
+
     let merged_samples: Vec<String> = {
         let mut samples = all_samples.into_iter().collect::<Vec<_>>();
         samples.sort();
         samples
     };
-    
+
     info!("[1/2] Collected {} unique samples", merged_samples.len());
     info!("[1/2] Identified {} contigs", contig_max_end.len());
-    
+
     // Sort files by ordering key
     file_order_info.sort_by(|a, b| a.1.cmp(&b.1));
     let sorted_paths: Vec<String> = file_order_info.into_iter().map(|(path, _)| path).collect();
-    
+
     // Second pass: merge and write VCF
     write_merged_vcf(
         &sorted_paths,
@@ -1521,7 +1513,7 @@ pub fn run_vcf_lace(
         verbose,
         reference_index,
     )?;
-    
+
     info!("[2/2] Done: merged {} files to {}", vcf_files.len(), output);
     Ok(())
 }
@@ -1548,7 +1540,7 @@ fn resolve_vcf_files(
             let file = File::open(&list_file)?;
             let reader = BufReader::new(file);
             let mut files = Vec::new();
-            
+
             for line in reader.lines() {
                 let line = line?;
                 let trimmed = line.trim();
@@ -1562,14 +1554,14 @@ fn resolve_vcf_files(
                     files.push(trimmed.to_string());
                 }
             }
-            
+
             if files.is_empty() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!("No valid VCF files found in list file: {list_file}"),
                 ));
             }
-            
+
             Ok(files)
         }
         (None, None) => Err(io::Error::new(
@@ -1587,21 +1579,26 @@ fn resolve_vcf_files(
 fn process_vcf_file(
     path: &str,
     _file_idx: usize,
-) -> io::Result<(String, Vec<String>, FxHashMap<String, u64>, (u8, u64, String, u64))> {
+) -> io::Result<(
+    String,
+    Vec<String>,
+    FxHashMap<String, u64>,
+    (u8, u64, String, u64),
+)> {
     let mut local_samples = Vec::new();
     let mut local_contigs = FxHashMap::default();
     let mut local_order: Option<(u8, u64, String, u64)> = None;
-    
+
     let reader = get_vcf_reader(path)?;
-    
+
     for line in reader.lines() {
         let line = line?;
         let line = line.trim();
-        
+
         if line.is_empty() {
             continue;
         }
-        
+
         if line.starts_with("##") {
             continue;
         } else if line.starts_with("#CHROM") {
@@ -1616,10 +1613,10 @@ fn process_vcf_file(
             if parts.len() < 2 {
                 continue;
             }
-            
+
             let chrom = parts[0];
             let pos_str = parts[1];
-            
+
             if let Some((base_contig, start, end)) = parse_vcf_chrom(chrom) {
                 // Parse position to ensure it's valid, but we don't use the value
                 if let Ok(_pos) = pos_str.parse::<u64>() {
@@ -1628,11 +1625,11 @@ fn process_vcf_file(
                     if end > *current_max {
                         *current_max = end;
                     }
-                    
+
                     // Update file ordering
                     let sort_key = chr_sort_key(&base_contig);
                     let file_key = (sort_key.0, sort_key.1, sort_key.2, start);
-                    
+
                     if local_order.is_none() || file_key < *local_order.as_ref().unwrap() {
                         local_order = Some(file_key);
                     }
@@ -1645,7 +1642,7 @@ fn process_vcf_file(
             }
         }
     }
-    
+
     let order = local_order.unwrap_or((2, 0, String::new(), 0));
     Ok((path.to_string(), local_samples, local_contigs, order))
 }
@@ -1653,11 +1650,11 @@ fn process_vcf_file(
 /// Get VCF reader that handles compression transparently
 fn get_vcf_reader(path: &str) -> io::Result<Box<dyn BufRead>> {
     let file = File::open(path)?;
-    
+
     // Use niffler to automatically detect and handle compression
     let (reader, _format) = niffler::get_reader(Box::new(file))
         .map_err(|e| io::Error::other(format!("Failed to open reader for '{path}': {e}")))?;
-    
+
     Ok(Box::new(BufReader::new(reader)))
 }
 
@@ -1693,12 +1690,12 @@ fn write_merged_vcf(
             .map_err(std::io::Error::other)?
         }
     };
-    
+
     let mut file = BufWriter::new(writer);
-    
+
     // Write VCF header
     writeln!(file, "##fileformat=VCFv4.2")?;
-    
+
     // Read and write meta-lines from the first file
     if let Some(first_path) = sorted_paths.first() {
         let reader = get_vcf_reader(first_path)?;
@@ -1715,11 +1712,11 @@ fn write_merged_vcf(
             }
         }
     }
-    
+
     // Write new contig lines sorted by chromosome order with validation
     let mut sorted_contigs: Vec<_> = contig_max_end.iter().collect();
     sorted_contigs.sort_by(|a, b| chr_sort_key(a.0).cmp(&chr_sort_key(b.0)));
-    
+
     for (base_contig, &estimated_length) in sorted_contigs {
         let final_length = if let Some(ref_index) = reference_index {
             match ref_index.get_sequence_length(base_contig) {
@@ -1748,30 +1745,35 @@ fn write_merged_vcf(
         } else {
             estimated_length
         };
-        
+
         writeln!(file, "##contig=<ID={base_contig},length={final_length}>")?;
     }
-    
+
     // Write header line
-    let header_cols = vec!["#CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO", "FORMAT"]
-        .into_iter()
-        .chain(merged_samples.iter().map(|s| s.as_str()))
-        .collect::<Vec<_>>();
+    let header_cols = vec![
+        "#CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO", "FORMAT",
+    ]
+    .into_iter()
+    .chain(merged_samples.iter().map(|s| s.as_str()))
+    .collect::<Vec<_>>();
     writeln!(file, "{}", header_cols.join("\t"))?;
-    
+
     info!("[2/2] Writing merged VCF records");
-    
+
     // Process each file in sorted order
     for (idx, path) in sorted_paths.iter().enumerate() {
         if verbose > 0 {
-            info!("[2/2] Merging {}/{}: {}", 
-                  idx + 1, sorted_paths.len(), 
-                  Path::new(path).file_name().unwrap().to_string_lossy());
+            info!(
+                "[2/2] Merging {}/{}: {}",
+                idx + 1,
+                sorted_paths.len(),
+                Path::new(path).file_name().unwrap().to_string_lossy()
+            );
         }
-        
+
         merge_vcf_file_records(&mut file, path, merged_samples)?;
     }
-    
+
     file.flush()?;
     Ok(())
 }
@@ -1785,18 +1787,18 @@ fn merge_vcf_file_records<W: Write>(
     let reader = get_vcf_reader(path)?;
     let mut this_samples = Vec::new();
     let mut in_header = true;
-    
+
     // Cache for missing genotype strings per FORMAT field
     let mut format_cache: FxHashMap<String, String> = FxHashMap::default();
-    
+
     for line in reader.lines() {
         let line = line?;
         let line = line.trim();
-        
+
         if line.is_empty() {
             continue;
         }
-        
+
         if in_header {
             if line.starts_with("#CHROM") {
                 // Parse sample names from this file
@@ -1808,14 +1810,14 @@ fn merge_vcf_file_records<W: Write>(
             }
             continue;
         }
-        
+
         // Process data record
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() < 9 {
             error!("Malformed VCF record in {path}: {line}");
             std::process::exit(1);
         }
-        
+
         let chrom = parts[0];
         let pos_str = parts[1];
         let id = parts[2];
@@ -1826,12 +1828,12 @@ fn merge_vcf_file_records<W: Write>(
         let info = parts[7];
         let format = parts[8];
         let sample_cols = &parts[9..];
-        
+
         // Parse and adjust coordinates
         if let Some((base_contig, start, _end)) = parse_vcf_chrom(chrom) {
             if let Ok(old_pos) = pos_str.parse::<u64>() {
                 let new_pos = start + old_pos;
-                
+
                 // Get cached missing genotype string or compute it
                 let missing_str = format_cache.entry(format.to_string()).or_insert_with(|| {
                     let format_keys: Vec<&str> = format.split(':').collect();
@@ -1841,24 +1843,25 @@ fn merge_vcf_file_records<W: Write>(
                         .collect();
                     missing_fields.join(":")
                 });
-                
+
                 // Map this file's samples to their genotype strings
                 let sample_to_gt: FxHashMap<String, String> = this_samples
                     .iter()
                     .zip(sample_cols.iter())
                     .map(|(sample, gt)| (sample.clone(), gt.to_string()))
                     .collect();
-                
+
                 // Build output genotypes in merged sample order
                 let out_genotypes: Vec<String> = merged_samples
                     .iter()
                     .map(|sample| {
-                        sample_to_gt.get(sample)
+                        sample_to_gt
+                            .get(sample)
                             .cloned()
                             .unwrap_or_else(|| missing_str.clone())
                     })
                     .collect();
-                
+
                 // Write output record
                 let out_fields = vec![
                     base_contig,
@@ -1874,7 +1877,7 @@ fn merge_vcf_file_records<W: Write>(
                 .into_iter()
                 .chain(out_genotypes.into_iter())
                 .collect::<Vec<_>>();
-                
+
                 writeln!(output_file, "{}", out_fields.join("\t"))?;
             } else {
                 error!("Cannot parse POS in {path}: {pos_str}");
@@ -1885,7 +1888,7 @@ fn merge_vcf_file_records<W: Write>(
             std::process::exit(1);
         }
     }
-    
+
     Ok(())
 }
 
