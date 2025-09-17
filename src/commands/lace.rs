@@ -1021,10 +1021,18 @@ fn write_graph_to_gfa(
             let mut encoder = ZstdEncoder::new(output_file, 6)?;
             encoder.multithread(rayon::current_num_threads() as u32)?;
             let mut file = BufWriter::new(encoder);
-            
+
             // Write all GFA content
-            write_gfa_content(&mut file, combined_graph, path_key_ranges, &nodes_to_remove, fill_gaps, sequence_index, debug)?;
-            
+            write_gfa_content(
+                &mut file,
+                combined_graph,
+                path_key_ranges,
+                &nodes_to_remove,
+                fill_gaps,
+                sequence_index,
+                debug,
+            )?;
+
             // Properly finish zstd encoder
             file.flush()?;
             let encoder = file.into_inner()?;
@@ -1037,7 +1045,9 @@ fn write_graph_to_gfa(
                     // Use parallel gzip compression
                     let parz: ParCompress<Gzip> = ParCompressBuilder::new()
                         .num_threads(rayon::current_num_threads())
-                        .map_err(|e| std::io::Error::other(format!("Failed to set threads: {e:?}")))?
+                        .map_err(|e| {
+                            std::io::Error::other(format!("Failed to set threads: {e:?}"))
+                        })?
                         .compression_level(Compression::new(6))
                         .from_writer(output_file);
                     Box::new(parz)
@@ -1046,7 +1056,9 @@ fn write_graph_to_gfa(
                     // Use parallel BGZF compression
                     let parz: ParCompress<Bgzf> = ParCompressBuilder::new()
                         .num_threads(rayon::current_num_threads())
-                        .map_err(|e| std::io::Error::other(format!("Failed to set threads: {e:?}")))?
+                        .map_err(|e| {
+                            std::io::Error::other(format!("Failed to set threads: {e:?}"))
+                        })?
                         .compression_level(Compression::new(6))
                         .from_writer(output_file);
                     Box::new(parz)
@@ -1067,14 +1079,22 @@ fn write_graph_to_gfa(
             };
 
             let mut file = BufWriter::new(writer);
-            
+
             // Write all GFA content
-            write_gfa_content(&mut file, combined_graph, path_key_ranges, &nodes_to_remove, fill_gaps, sequence_index, debug)?;
-            
+            write_gfa_content(
+                &mut file,
+                combined_graph,
+                path_key_ranges,
+                &nodes_to_remove,
+                fill_gaps,
+                sequence_index,
+                debug,
+            )?;
+
             file.flush()?;
         }
     }
-    
+
     Ok(())
 }
 
@@ -1700,7 +1720,7 @@ fn write_merged_vcf(
 ) -> io::Result<()> {
     // Create output file
     let output_file = File::create(output_path)?;
-    
+
     // Handle zstd separately to ensure proper finalization
     match compression_format {
         Format::Zstd => {
@@ -1708,10 +1728,17 @@ fn write_merged_vcf(
             let mut encoder = ZstdEncoder::new(output_file, 6)?;
             encoder.multithread(rayon::current_num_threads() as u32)?;
             let mut file = BufWriter::new(encoder);
-            
+
             // Write all VCF content
-            write_vcf_content(&mut file, sorted_paths, merged_samples, contig_max_end, verbose, reference_index)?;
-            
+            write_vcf_content(
+                &mut file,
+                sorted_paths,
+                merged_samples,
+                contig_max_end,
+                verbose,
+                reference_index,
+            )?;
+
             // Properly finish zstd encoder
             file.flush()?;
             let encoder = file.into_inner()?;
@@ -1723,7 +1750,9 @@ fn write_merged_vcf(
                 Format::Gzip => {
                     let parz: ParCompress<Gzip> = ParCompressBuilder::new()
                         .num_threads(rayon::current_num_threads())
-                        .map_err(|e| std::io::Error::other(format!("Failed to set threads: {e:?}")))?
+                        .map_err(|e| {
+                            std::io::Error::other(format!("Failed to set threads: {e:?}"))
+                        })?
                         .compression_level(Compression::new(6))
                         .from_writer(output_file);
                     Box::new(parz)
@@ -1739,16 +1768,23 @@ fn write_merged_vcf(
                     .map_err(std::io::Error::other)?
                 }
             };
-            
+
             let mut file = BufWriter::new(writer);
-            
+
             // Write all VCF content
-            write_vcf_content(&mut file, sorted_paths, merged_samples, contig_max_end, verbose, reference_index)?;
-            
+            write_vcf_content(
+                &mut file,
+                sorted_paths,
+                merged_samples,
+                contig_max_end,
+                verbose,
+                reference_index,
+            )?;
+
             file.flush()?;
         }
     }
-    
+
     Ok(())
 }
 
@@ -1763,7 +1799,7 @@ fn write_vcf_content<W: Write>(
 ) -> io::Result<()> {
     // Write VCF header
     writeln!(file, "##fileformat=VCFv4.2")?;
-    
+
     // Read and write meta-lines from the first file
     if let Some(first_path) = sorted_paths.first() {
         let reader = get_vcf_reader(first_path)?;
@@ -1780,11 +1816,11 @@ fn write_vcf_content<W: Write>(
             }
         }
     }
-    
+
     // Write new contig lines sorted by chromosome order
     let mut sorted_contigs: Vec<_> = contig_max_end.iter().collect();
     sorted_contigs.sort_by(|a, b| chr_sort_key(a.0).cmp(&chr_sort_key(b.0)));
-    
+
     for (base_contig, &estimated_length) in sorted_contigs {
         let final_length = if let Some(ref_index) = reference_index {
             match ref_index.get_sequence_length(base_contig) {
@@ -1806,30 +1842,35 @@ fn write_vcf_content<W: Write>(
         } else {
             estimated_length
         };
-        
+
         writeln!(file, "##contig=<ID={base_contig},length={final_length}>")?;
     }
-    
+
     // Write header line
-    let header_cols = vec!["#CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO", "FORMAT"]
-        .into_iter()
-        .chain(merged_samples.iter().map(|s| s.as_str()))
-        .collect::<Vec<_>>();
+    let header_cols = vec![
+        "#CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO", "FORMAT",
+    ]
+    .into_iter()
+    .chain(merged_samples.iter().map(|s| s.as_str()))
+    .collect::<Vec<_>>();
     writeln!(file, "{}", header_cols.join("\t"))?;
-    
+
     info!("[2/2] Writing merged VCF records");
-    
+
     // Process each file in sorted order
     for (idx, path) in sorted_paths.iter().enumerate() {
         if verbose > 0 {
-            info!("[2/2] Merging {}/{}: {}", 
-                  idx + 1, sorted_paths.len(), 
-                  Path::new(path).file_name().unwrap().to_string_lossy());
+            info!(
+                "[2/2] Merging {}/{}: {}",
+                idx + 1,
+                sorted_paths.len(),
+                Path::new(path).file_name().unwrap().to_string_lossy()
+            );
         }
-        
+
         merge_vcf_file_records(file, path, merged_samples)?;
     }
-    
+
     Ok(())
 }
 /// Merge records from a single VCF file
