@@ -1667,7 +1667,7 @@ fn output_results_bedpe(
 ) {
     merge_adjusted_intervals(results, merge_distance);
 
-    for (overlap_query, _, overlap_target) in results {
+    for (overlap_query, cigar, overlap_target) in results {
         let query_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
         let target_name = impg.seq_index.get_name(overlap_target.metadata).unwrap();
         let (first, last, strand) = if overlap_query.first <= overlap_query.last {
@@ -1692,8 +1692,40 @@ fn output_results_bedpe(
                 original_coordinates,
             );
 
+        // Calculate gap-compressed-identity and block-identity from CIGAR
+        let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, _block_len) =
+            cigar.iter().fold(
+                (0, 0, 0, 0, 0, 0, 0),
+                |(m, mm, i, i_bp, d, d_bp, bl), op| {
+                    let len = op.len();
+                    match op.op() {
+                        'M' => (m + len, mm, i, i_bp, d, d_bp, bl + len), // We overestimate num. of matches by assuming 'M' represents matches for simplicity
+                        '=' => (m + len, mm, i, i_bp, d, d_bp, bl + len),
+                        'X' => (m, mm + len, i, i_bp, d, d_bp, bl + len),
+                        'I' => (m, mm, i + 1, i_bp + len, d, d_bp, bl + len),
+                        'D' => (m, mm, i, i_bp, d + 1, d_bp + len, bl + len),
+                        _ => (m, mm, i, i_bp, d, d_bp, bl),
+                    }
+                },
+            );
+        let gap_compressed_identity =
+            (matches as f64) / (matches + mismatches + insertions + deletions) as f64;
+
+        let edit_distance = mismatches + inserted_bp + deleted_bp;
+        let block_identity = (matches as f64) / (matches + edit_distance) as f64;
+
+        // Format gi and bi fields without trailing zeros
+        let gi_str = format!("{gap_compressed_identity:.6}")
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string();
+        let bi_str = format!("{block_identity:.6}")
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string();
+
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t0\t{}\t+",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t0\t{}\t+\tgi:f:{}\tbi:f:{}",
             transformed_query_name,
             transformed_first,
             transformed_last,
@@ -1701,7 +1733,9 @@ fn output_results_bedpe(
             transformed_target_first,
             transformed_target_last,
             name.as_deref().unwrap_or("."),
-            strand
+            strand,
+            gi_str,
+            bi_str
         );
     }
 }
