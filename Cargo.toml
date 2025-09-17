@@ -7,20 +7,20 @@ edition = "2021"
 
 [dependencies]
 bincode = { version = "2.0.1", features = ["serde"] }
-serde = { version = "1.0.219", features = ["derive"] }
-clap = { version = "4.5.42", features = ["derive"] }
+serde = { version = "1.0.225", features = ["derive"] }
+clap = { version = "4.5.47", features = ["derive"] }
 coitrees = "0.4.0"
 num_cpus = "1.17.0"
-rayon = "1.10.0"
+rayon = "1.11.0"
 noodles = { version = "0.100.0", features = ["bgzf"] }
-regex = "1.11.1"
-log = "0.4.27"
+regex = "1.11.2"
+log = "0.4.28"
 env_logger = "0.11.8"
 natord = "1.0.9"
 rustc-hash = "2.1.1"
 
 rust-htslib = { version = "0.46.0", default-features = false } # Don't update it, see https://github.com/rust-bio/rust-htslib/issues/434
-libc = "0.2.174"
+libc = "0.2.175"
 
 spoa_rs = { git = "https://github.com/AndreaGuarracino/spoa-rs.git" }
 
@@ -32,7 +32,7 @@ agc-rs = { git = "https://github.com/pangenome/agc-rs.git", optional = true }
 # Additional dependencies for lace functionality
 handlegraph = { git = "https://github.com/chfi/rs-handlegraph", rev = "3ac575e4216ce16a16667503a8875e469a40a97a" }
 bitvec = "1.0.1"
-niffler = "2.7.0"
+niffler = "3.0.0"
 tempfile = "3.20.0"
 zstd = { version = "0.13.3", features = ["zstdmt"] }
 gzp = "1.0.1"
