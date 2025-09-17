@@ -1723,7 +1723,7 @@ fn write_merged_vcf(
                 Format::Gzip => {
                     let parz: ParCompress<Gzip> = ParCompressBuilder::new()
                         .num_threads(rayon::current_num_threads())
-                        .map_err(|e| std::io::Error::other(format!("Failed to set threads: {:?}", e)))?
+                        .map_err(|e| std::io::Error::other(format!("Failed to set threads: {e:?}")))?
                         .compression_level(Compression::new(6))
                         .from_writer(output_file);
                     Box::new(parz)
@@ -1791,16 +1791,14 @@ fn write_vcf_content<W: Write>(
                 Ok(ref_length) => {
                     if estimated_length != ref_length as u64 {
                         warn!(
-                            "Contig '{}': Using reference length {} instead of estimated {}",
-                            base_contig, ref_length, estimated_length
+                            "Contig '{base_contig}': Using reference length {ref_length} instead of estimated {estimated_length}"
                         );
                     }
                     ref_length as u64
                 }
                 Err(_) => {
                     warn!(
-                        "Contig '{}' not found in reference, using estimated length {}",
-                        base_contig, estimated_length
+                        "Contig '{base_contig}' not found in reference, using estimated length {estimated_length}"
                     );
                     estimated_length
                 }
@@ -1809,7 +1807,7 @@ fn write_vcf_content<W: Write>(
             estimated_length
         };
         
-        writeln!(file, "##contig=<ID={},length={}>", base_contig, final_length)?;
+        writeln!(file, "##contig=<ID={base_contig},length={final_length}>")?;
     }
     
     // Write header line
