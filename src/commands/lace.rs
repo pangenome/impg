@@ -6,6 +6,7 @@ use gzp::{
     Compression,
 };
 use handlegraph::handle::{Handle, NodeId};
+use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, error, info, warn};
 use niffler::compression::Format;
 use rayon::prelude::*;
@@ -1162,6 +1163,20 @@ fn write_gfa_content<W: Write>(
         warn!("Cannot fill end gaps without sequence files; trailing gaps will be skipped");
     }
 
+    // Create progress bar only if not in debug mode to avoid interfering with verbose logging
+    let pb = if log::log_enabled!(log::Level::Debug) {
+        None
+    } else {
+        let progress_bar = ProgressBar::new(path_key_vec.len() as u64);
+        progress_bar.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta}) Writing paths")
+                .unwrap()
+                .progress_chars("#>-")
+        );
+        Some(progress_bar)
+    };
+
     for path_key in path_key_vec {
         let ranges = &path_key_ranges[path_key];
         //if ranges.is_empty() { continue }
@@ -1315,6 +1330,15 @@ fn write_gfa_content<W: Write>(
             };
             writeln!(file, "P\t{}\t{}\t*", path_name, path_elements.join(","))?;
         }
+
+        // Update progress
+        if let Some(ref progress_bar) = pb {
+            progress_bar.inc(1);
+        }
+    }
+
+    if let Some(progress_bar) = pb {
+        progress_bar.finish_with_message("Completed writing paths");
     }
 
     if fill_gaps == 2 {
