@@ -17,7 +17,7 @@ use std::io::{self, BufRead, BufReader, BufWriter};
 
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Basic common options shared between all commands
 #[derive(Parser, Debug)]
@@ -1200,20 +1200,38 @@ fn validate_region_size(
 
 /// Initialize thread pool and logger with the specified number of threads and verbosity
 fn initialize_threads_and_log(common: &CommonOpts) {
-    // Initialize logger based on verbosity
-    env_logger::Builder::new()
-        .filter_level(match common.verbose {
-            0 => log::LevelFilter::Error,
-            1 => log::LevelFilter::Info,
-            _ => log::LevelFilter::Debug,
-        })
-        .init();
+    static INIT: OnceLock<usize> = OnceLock::new();
+    let requested_threads = common.threads.get();
 
-    // Configure thread pool
-    ThreadPoolBuilder::new()
-        .num_threads(common.threads.into())
-        .build_global()
-        .unwrap();
+    let configured_threads = INIT.get_or_init(|| {
+        // Initialize logger only once; ignore failure if another logger is set
+        let _ = env_logger::Builder::new()
+            .filter_level(match common.verbose {
+                0 => log::LevelFilter::Error,
+                1 => log::LevelFilter::Info,
+                _ => log::LevelFilter::Debug,
+            })
+            .try_init();
+
+        match ThreadPoolBuilder::new()
+            .num_threads(requested_threads)
+            .build_global()
+        {
+            Ok(_) => requested_threads,
+            Err(err)
+                if err.to_string() == "The global thread pool has already been initialized." =>
+            {
+                rayon::current_num_threads()
+            }
+            Err(err) => panic!("Failed to build rayon thread pool: {err}"),
+        }
+    });
+
+    if *configured_threads != requested_threads {
+        warn!(
+            "Rayon global thread pool already initialized with {configured_threads} threads; keeping existing pool instead of requested {requested_threads}"
+        );
+    }
 }
 
 /// Determine file format from explicit format or auto-detection
@@ -2583,6 +2601,23 @@ fn print_stats(impg: &Impg) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initialize_threads_and_log_is_idempotent() {
+        let opts = CommonOpts {
+            threads: NonZeroUsize::new(4).unwrap(),
+            verbose: 0,
+        };
+        initialize_threads_and_log(&opts);
+
+        let opts_second = CommonOpts {
+            threads: NonZeroUsize::new(2).unwrap(),
+            verbose: 0,
+        };
+        initialize_threads_and_log(&opts_second);
+
+        assert_eq!(rayon::current_num_threads(), 4);
+    }
 
     #[test]
     fn test_parse_subsequence_coordinates() {
