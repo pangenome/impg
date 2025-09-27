@@ -591,6 +591,8 @@ fn main() -> io::Result<()> {
             temp_dir,
             reference,
         } => {
+            initialize_threads_and_log(&common);
+            
             // Check that at least one input is provided
             if files.is_none() && file_list.is_none() {
                 return Err(io::Error::new(
@@ -632,9 +634,6 @@ fn main() -> io::Result<()> {
                     ),
                 ));
             }
-
-            // Initialize threads and logger for lace processing
-            initialize_threads_and_log(&common);
 
             // Determine the actual format (auto-detect if needed)
             let actual_format = determine_file_format(&format, &files, &file_list)?;
@@ -691,6 +690,8 @@ fn main() -> io::Result<()> {
             min_boundary_distance,
             separate_files,
         } => {
+            initialize_threads_and_log(&common);
+
             validate_selection_mode(&selection_mode)?;
             validate_output_format(&output_format, &["bed", "gfa", "maf", "fasta"])?;
 
@@ -720,7 +721,6 @@ fn main() -> io::Result<()> {
             let (sequence_index, scoring_params) =
                 gfa_maf_fasta.setup_output_resources(&output_format, false)?;
 
-            initialize_threads_and_log(&common);
             let impg = initialize_impg(&common, &paf)?;
 
             partition::partition_alignments(
@@ -752,12 +752,13 @@ fn main() -> io::Result<()> {
             output_format,
             gfa_maf_fasta,
         } => {
+            initialize_threads_and_log(&common);
+
             validate_output_format(
                 &output_format,
                 &["auto", "bed", "bedpe", "paf", "gfa", "maf", "fasta"],
             )?;
 
-            initialize_threads_and_log(&common);
             let impg = initialize_impg(&common, &paf)?;
 
             // Parse and validate all target ranges, tracking which parameter was used
@@ -923,6 +924,8 @@ fn main() -> io::Result<()> {
             polarize_n_prev,
             polarize_guide_samples,
         } => {
+            initialize_threads_and_log(&common);
+            
             // Validate delim_pos
             if delim_pos < 1 {
                 return Err(io::Error::new(
@@ -960,7 +963,6 @@ fn main() -> io::Result<()> {
             let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
             let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA
 
-            initialize_threads_and_log(&common);
             let impg = initialize_impg(&common, &paf)?;
 
             // Validate target_range and target_bed before ANY expensive operations,
