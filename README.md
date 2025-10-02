@@ -153,6 +153,13 @@ impg similarity -p alignments.paf -r chr1:1000-2000 --sequence-files *.fa --dist
 # Include all pairs (even those with zero similarity)
 impg similarity -p alignments.paf -r chr1:1000-2000 --sequence-files *.fa -a
 
+# Restrict analysis to sequences listed in a file (one name per line)
+impg similarity -p alignments.paf -r chr1:1000-2000 --sequence-files *.fa --subset-sequence-list metadata/agc.EUR
+# Entries may be full contig names or sample identifiers (e.g., HG00097 or HG00097_hap1)
+
+# Suppress the progress bar (useful for scripting)
+impg similarity -p alignments.paf -r chr1:1000-2000 --sequence-files *.fa --no-progress
+
 # Group sequences by delimiter (e.g., for PanSN naming, "sample#haplotype#chr" -> "sample")
 impg similarity -p alignments.paf -r chr1:1000-2000 --sequence-files *.fa --delim '#'
 

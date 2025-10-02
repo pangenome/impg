@@ -93,6 +93,7 @@ pub fn compute_and_output_similarities(
     pca_similarity: &str,
     polarize_n_prev: usize,
     guide_samples: Option<&[String]>,
+    show_progress: bool,
 ) -> io::Result<()> {
     if !perform_pca {
         info!("Computing similarities for {} regions", query_data.len());
@@ -110,7 +111,7 @@ pub fn compute_and_output_similarities(
         );
 
         // Create progress bar only if not in debug mode to avoid interfering with verbose logging
-        let pb = if log::log_enabled!(log::Level::Debug) {
+        let pb = if !show_progress || log::log_enabled!(log::Level::Debug) {
             None
         } else {
             let progress_bar = ProgressBar::new(query_data.len() as u64);
@@ -165,7 +166,7 @@ pub fn compute_and_output_similarities(
         info!("Performing PCA for {} regions", query_data.len());
 
         // Create progress bar for PCA only if not in debug mode
-        let pb = if log::log_enabled!(log::Level::Debug) {
+        let pb = if !show_progress || log::log_enabled!(log::Level::Debug) {
             None
         } else {
             let progress_bar = ProgressBar::new(query_data.len() as u64);

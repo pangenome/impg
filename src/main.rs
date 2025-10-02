@@ -10,7 +10,7 @@ use noodles::bgzf;
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use rustc_hash::FxHashMap;
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{hash_map::DefaultHasher, HashSet};
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, BufWriter};
@@ -508,6 +508,14 @@ enum Args {
         #[clap(flatten)]
         gfa_maf_fasta: GfaMafFastaOpts,
 
+        /// Path to a file listing sequence names to include (one per line)
+        #[clap(long, value_parser)]
+        subset_sequence_list: Option<String>,
+
+        /// Disable the similarity progress bar
+        #[clap(long, action)]
+        no_progress: bool,
+
         /// Output distances instead of similarities
         #[clap(long, action)]
         distances: bool,
@@ -592,7 +600,7 @@ fn main() -> io::Result<()> {
             reference,
         } => {
             initialize_threads_and_log(&common);
-            
+
             // Check that at least one input is provided
             if files.is_none() && file_list.is_none() {
                 return Err(io::Error::new(
@@ -914,6 +922,8 @@ fn main() -> io::Result<()> {
             paf,
             query,
             gfa_maf_fasta,
+            subset_sequence_list,
+            no_progress,
             distances,
             all,
             delim,
@@ -925,7 +935,7 @@ fn main() -> io::Result<()> {
             polarize_guide_samples,
         } => {
             initialize_threads_and_log(&common);
-            
+
             // Validate delim_pos
             if delim_pos < 1 {
                 return Err(io::Error::new(
@@ -962,6 +972,18 @@ fn main() -> io::Result<()> {
                 gfa_maf_fasta.setup_output_resources("gfa", false)?;
             let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
             let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA
+
+            let subset_sequences = if let Some(ref list_path) = subset_sequence_list {
+                let subset = load_subset_filter(list_path)?;
+                info!(
+                    "Loaded {} sequence names from subset list {}",
+                    subset.entry_count(),
+                    list_path
+                );
+                Some(subset)
+            } else {
+                None
+            };
 
             let impg = initialize_impg(&common, &paf)?;
 
@@ -1033,6 +1055,43 @@ fn main() -> io::Result<()> {
                     &query.transitive_opts,
                 )?;
 
+                let region_label = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
+
+                if let Some(subset) = subset_sequences.as_ref() {
+                    let target_id = impg.seq_index.get_id(&target_name).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Target sequence '{target_name}' not found in index"),
+                        )
+                    })?;
+
+                    let before = results.len();
+                    results.retain(|(query_interval, _, _)| {
+                        if query_interval.metadata == target_id {
+                            return true;
+                        }
+                        let Some(name) = impg.seq_index.get_name(query_interval.metadata) else {
+                            return false;
+                        };
+                        subset.matches(name)
+                    });
+
+                    let filtered_out = before.saturating_sub(results.len());
+                    if filtered_out > 0 {
+                        debug!(
+                            "Filtered {} sequences outside subset for region {}",
+                            filtered_out,
+                            region_label.as_str()
+                        );
+                    }
+                    if results.len() <= 1 {
+                        warn!(
+                            "Subset filtering left no comparison sequences for region {}",
+                            region_label.as_str()
+                        );
+                    }
+                }
+
                 // Merge intervals if needed
                 merge_query_adjusted_intervals(
                     &mut results,
@@ -1046,8 +1105,7 @@ fn main() -> io::Result<()> {
                     .map(|(query_interval, _, _)| *query_interval)
                     .collect();
 
-                let region = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
-                all_query_data.push((query_intervals, region));
+                all_query_data.push((query_intervals, region_label));
             }
 
             // Process all regions in parallel
@@ -1065,6 +1123,7 @@ fn main() -> io::Result<()> {
                 &pca_measure,
                 polarize_n_prev,
                 polarize_guide_samples.as_deref(),
+                !no_progress,
             )?;
         }
         Args::Stats { common, paf } => {
@@ -1621,6 +1680,138 @@ fn perform_query(
     ); // Exclude the first element (the input range itself)
 
     Ok(results)
+}
+
+#[derive(Default, Clone)]
+struct SubsetFilter {
+    exact: HashSet<String>,
+    normalized: HashSet<String>,
+    sample_ids: HashSet<String>,
+    sample_haps: HashSet<(String, String)>,
+}
+
+impl SubsetFilter {
+    fn entry_count(&self) -> usize {
+        self.exact.len()
+    }
+
+    fn matches(&self, seq_name: &str) -> bool {
+        if self.exact.contains(seq_name) {
+            return true;
+        }
+
+        let no_coords = seq_name.split(':').next().unwrap_or(seq_name);
+        if seq_name != no_coords && self.exact.contains(no_coords) {
+            return true;
+        }
+        if self.normalized.contains(no_coords) {
+            return true;
+        }
+
+        if self.matches_sample_keys(no_coords) {
+            return true;
+        }
+
+        // As a fallback, try again on the raw sequence in case coordinates were not present
+        self.matches_sample_keys(seq_name)
+    }
+
+    fn matches_sample_keys(&self, seq_name: &str) -> bool {
+        if let Some((sample, hap)) = extract_sample_and_hap(seq_name) {
+            if let Some(hap) = hap {
+                if self.sample_haps.contains(&(sample.clone(), hap.clone())) {
+                    return true;
+                }
+            }
+
+            if self.sample_ids.contains(&sample) {
+                return true;
+            }
+        }
+
+        false
+    }
+}
+
+fn load_subset_filter(path: &str) -> io::Result<SubsetFilter> {
+    let contents = std::fs::read_to_string(path).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Failed to read subset sequence list '{path}': {e}"),
+        )
+    })?;
+
+    let filter = parse_subset_filter(&contents);
+    if filter.entry_count() == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Subset sequence list '{path}' did not contain any sequence names"),
+        ));
+    }
+
+    Ok(filter)
+}
+
+fn parse_subset_filter(contents: &str) -> SubsetFilter {
+    let mut filter = SubsetFilter::default();
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        filter.exact.insert(trimmed.to_string());
+
+        let no_coords = trimmed.split(':').next().unwrap_or(trimmed);
+        filter.normalized.insert(no_coords.to_string());
+
+        if let Some((sample, hap)) = extract_sample_and_hap(no_coords) {
+            if let Some(hap) = hap {
+                filter.sample_haps.insert((sample, hap));
+            } else {
+                filter.sample_ids.insert(sample);
+            }
+        }
+    }
+
+    filter
+}
+
+fn extract_sample_and_hap(name: &str) -> Option<(String, Option<String>)> {
+    if let Some(idx) = name.find("_hap") {
+        let sample = name[..idx].to_string();
+        let hap_digits: String = name[idx + 4..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        let hap = if hap_digits.is_empty() {
+            None
+        } else {
+            Some(hap_digits)
+        };
+        return Some((sample, hap));
+    }
+
+    if let Some((sample, rest)) = name.split_once('#') {
+        let hap_fragment = rest.split('#').next().unwrap_or(rest);
+        let hap_digits: String = hap_fragment
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        let hap = if hap_digits.is_empty() {
+            None
+        } else {
+            Some(hap_digits)
+        };
+        return Some((sample.to_string(), hap));
+    }
+
+    if !name.contains(':') && !name.trim().is_empty() {
+        return Some((name.to_string(), None));
+    }
+
+    None
 }
 
 fn output_results_bed(
@@ -2625,5 +2816,24 @@ mod tests {
         assert_eq!(name, "chr1");
         assert_eq!(start, 45803);
         assert_eq!(end, 45861);
+    }
+
+    #[test]
+    fn test_subset_filter_matches_variants() {
+        let contents = "# comment\nchr1\nchr2\n\nchr1\t\n  chr3  \nHG00097_hap1_hprc_r2_v1.0.1\nHG00098#2#chr5\n";
+        let filter = parse_subset_filter(contents);
+
+        // Basic names and coordinate variants
+        assert!(filter.matches("chr1"));
+        assert!(filter.matches("chr1:10-20"));
+        assert!(filter.matches("chr3"));
+
+        // Sample + hap conversions
+        assert!(filter.matches("HG00097#1#chr7"));
+        assert!(filter.matches("HG00097#1"));
+
+        // Exact hashed names
+        assert!(filter.matches("HG00098#2#chr5"));
+        assert!(!filter.matches("HG00098#1#chr5"));
     }
 }
