@@ -775,17 +775,7 @@ fn main() -> io::Result<()> {
             let impg = initialize_impg(&common, &paf)?;
 
             // Load subset filter if provided
-            let subset_filter = if let Some(ref list_path) = query.subset_sequence_list {
-                let filter = load_subset_filter(list_path)?;
-                info!(
-                    "Loaded {} sequence names from subset list {}",
-                    filter.entry_count(),
-                    list_path
-                );
-                Some(filter)
-            } else {
-                None
-            };
+            let subset_filter = load_subset_filter_if_provided(&query.subset_sequence_list)?;
 
             // Parse and validate all target ranges, tracking which parameter was used
             let (target_ranges, from_range_param) =
@@ -862,16 +852,13 @@ fn main() -> io::Result<()> {
                 )?;
 
                 // Apply subset filter if provided
-                if let Some(ref filter) = subset_filter {
-                    let target_id = impg.seq_index.get_id(&target_name).ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("Target sequence '{target_name}' not found in index"),
-                        )
-                    })?;
-                    let region_label = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
-                    apply_subset_filter(&impg, &mut results, target_id, filter, &region_label);
-                }
+                apply_subset_filter_if_provided(
+                    &impg,
+                    &mut results,
+                    &target_name,
+                    target_range,
+                    subset_filter.as_ref(),
+                )?;
 
                 // Output results based on the resolved format
                 match resolved_output_format {
@@ -1003,17 +990,7 @@ fn main() -> io::Result<()> {
             let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
             let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA
 
-            let subset_sequences = if let Some(ref list_path) = subset_sequence_list {
-                let subset = load_subset_filter(list_path)?;
-                info!(
-                    "Loaded {} sequence names from subset list {}",
-                    subset.entry_count(),
-                    list_path
-                );
-                Some(subset)
-            } else {
-                None
-            };
+            let subset_filter = load_subset_filter_if_provided(&subset_sequence_list)?;
 
             let impg = initialize_impg(&common, &paf)?;
 
@@ -1087,21 +1064,14 @@ fn main() -> io::Result<()> {
 
                 let region_label = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
 
-                if let Some(subset) = subset_sequences.as_ref() {
-                    let target_id = impg.seq_index.get_id(&target_name).ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("Target sequence '{target_name}' not found in index"),
-                        )
-                    })?;
-                    apply_subset_filter(&impg, &mut results, target_id, subset, &region_label);
-                    if results.len() <= 1 {
-                        warn!(
-                            "Subset filtering left no comparison sequences for region {}",
-                            region_label.as_str()
-                        );
-                    }
-                }
+                // Apply subset filter if provided
+                apply_subset_filter_if_provided(
+                    &impg,
+                    &mut results,
+                    &target_name,
+                    target_range,
+                    subset_filter.as_ref(),
+                )?;
 
                 // Merge intervals if needed
                 merge_query_adjusted_intervals(
@@ -1693,32 +1663,67 @@ fn perform_query(
     Ok(results)
 }
 
-/// Apply subset filter to query results, keeping the target sequence
-fn apply_subset_filter(
+/// Load subset filter if path is provided
+fn load_subset_filter_if_provided(path: &Option<String>) -> io::Result<Option<SubsetFilter>> {
+    if let Some(ref list_path) = path {
+        let filter = load_subset_filter(list_path)?;
+        info!(
+            "Loaded {} sequence names from subset list {}",
+            filter.entry_count(),
+            list_path
+        );
+        Ok(Some(filter))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Apply subset filter to query results if filter is provided
+/// Keeps the target sequence, filters others, and logs/warns as appropriate
+fn apply_subset_filter_if_provided(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
-    target_id: u32,
-    subset_filter: &SubsetFilter,
-    region_label: &str,
-) {
-    let before = results.len();
-    results.retain(|(query_interval, _, _)| {
-        if query_interval.metadata == target_id {
-            return true;
-        }
-        let Some(name) = impg.seq_index.get_name(query_interval.metadata) else {
-            return false;
-        };
-        subset_filter.matches(name)
-    });
+    target_name: &str,
+    target_range: (i32, i32),
+    subset_filter: Option<&SubsetFilter>,
+) -> io::Result<()> {
+    if let Some(filter) = subset_filter {
+        let target_id = impg.seq_index.get_id(target_name).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Target sequence '{target_name}' not found in index"),
+            )
+        })?;
 
-    let filtered_out = before.saturating_sub(results.len());
-    if filtered_out > 0 {
-        debug!(
-            "Filtered out {} sequences outside subset for region {}",
-            filtered_out, region_label
-        );
+        let region_label = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
+        let before = results.len();
+
+        results.retain(|(query_interval, _, _)| {
+            if query_interval.metadata == target_id {
+                return true;
+            }
+            let Some(name) = impg.seq_index.get_name(query_interval.metadata) else {
+                return false;
+            };
+            filter.matches(name)
+        });
+
+        let filtered_out = before.saturating_sub(results.len());
+        if filtered_out > 0 {
+            debug!(
+                "Filtered out {} sequences outside subset for region {}",
+                filtered_out, region_label
+            );
+        }
+
+        if results.len() <= 1 {
+            warn!(
+                "Subset filtering left no comparison sequences for region {}",
+                region_label
+            );
+        }
     }
+    Ok(())
 }
 
 fn output_results_bed(
