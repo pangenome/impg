@@ -136,3 +136,27 @@ fn extract_sample_and_hap(name: &str) -> Option<(String, Option<String>)> {
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_subset_filter_matches_variants() {
+        let contents = "# comment\nchr1\nchr2\n\nchr1\t\n  chr3  \nHG00097_hap1_hprc_r2_v1.0.1\nHG00098#2#chr5\n";
+        let filter = parse_subset_filter(contents);
+
+        // Basic names and coordinate variants
+        assert!(filter.matches("chr1"));
+        assert!(filter.matches("chr1:10-20"));
+        assert!(filter.matches("chr3"));
+
+        // Sample + hap conversions
+        assert!(filter.matches("HG00097#1#chr7"));
+        assert!(filter.matches("HG00097#1"));
+
+        // Exact hashed names
+        assert!(filter.matches("HG00098#2#chr5"));
+        assert!(!filter.matches("HG00098#1#chr5"));
+    }
+}
