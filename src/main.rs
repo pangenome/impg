@@ -512,9 +512,9 @@ enum Args {
         #[clap(long, value_parser)]
         subset_sequence_list: Option<String>,
 
-        /// Disable the similarity progress bar
+        /// Show the progress bar
         #[clap(long, action)]
-        no_progress: bool,
+        progress_bar: bool,
 
         /// Output distances instead of similarities
         #[clap(long, action)]
@@ -923,7 +923,7 @@ fn main() -> io::Result<()> {
             query,
             gfa_maf_fasta,
             subset_sequence_list,
-            no_progress,
+            progress_bar,
             distances,
             all,
             delim,
@@ -1123,7 +1123,7 @@ fn main() -> io::Result<()> {
                 &pca_measure,
                 polarize_n_prev,
                 polarize_guide_samples.as_deref(),
-                !no_progress,
+                progress_bar,
             )?;
         }
         Args::Stats { common, paf } => {

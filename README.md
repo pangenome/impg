@@ -157,8 +157,8 @@ impg similarity -p alignments.paf -r chr1:1000-2000 --sequence-files *.fa -a
 # Entries may be full contig names or sample identifiers (e.g., HG00097 or HG00097_hap1)
 impg similarity -p alignments.paf -r chr1:1000-2000 --sequence-files *.fa --subset-sequence-list sequences.txt
 
-# Suppress the progress bar (useful for scripting)
-impg similarity -p alignments.paf -r chr1:1000-2000 --sequence-files *.fa --no-progress
+# Show the progress bar
+impg similarity -p alignments.paf -r chr1:1000-2000 --sequence-files *.fa --progress-bar
 
 # Group sequences by delimiter (e.g., for PanSN naming, "sample#haplotype#chr" -> "sample")
 impg similarity -p alignments.paf -r chr1:1000-2000 --sequence-files *.fa --delim '#'
