@@ -1,1 +1,0 @@
-/home/enza/iusatoProtocol/imscratch/data/HPRC_r2_assemblies_0.6.1.agc
