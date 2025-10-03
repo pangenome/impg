@@ -110,10 +110,8 @@ pub fn compute_and_output_similarities(
             }
         );
 
-        // Create progress bar only if not in debug mode to avoid interfering with verbose logging
-        let pb = if !show_progress || log::log_enabled!(log::Level::Debug) {
-            None
-        } else {
+        // Create progress bar only if requested and not in debug mode to avoid interfering with verbose logging
+        let pb = if show_progress && !log::log_enabled!(log::Level::Debug) {
             let progress_bar = ProgressBar::new(query_data.len() as u64);
             progress_bar.set_style(
                 ProgressStyle::default_bar()
@@ -122,6 +120,8 @@ pub fn compute_and_output_similarities(
                     .progress_chars("#>-")
             );
             Some(Arc::new(progress_bar))
+        } else {
+            None
         };
 
         // Create a mutex to protect stdout
@@ -165,10 +165,8 @@ pub fn compute_and_output_similarities(
     } else {
         info!("Performing PCA for {} regions", query_data.len());
 
-        // Create progress bar for PCA only if not in debug mode
-        let pb = if !show_progress || log::log_enabled!(log::Level::Debug) {
-            None
-        } else {
+        // Create progress bar for PCA only if requested and not in debug mode
+        let pb = if show_progress && !log::log_enabled!(log::Level::Debug) {
             let progress_bar = ProgressBar::new(query_data.len() as u64);
             progress_bar.set_style(
                 ProgressStyle::default_bar()
@@ -177,6 +175,8 @@ pub fn compute_and_output_similarities(
                     .progress_chars("#>-")
             );
             Some(Arc::new(progress_bar))
+        } else {
+            None
         };
 
         // Case 2 & 3: PCA with or without polarization
