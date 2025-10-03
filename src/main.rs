@@ -513,10 +513,6 @@ enum Args {
         #[clap(flatten)]
         gfa_maf_fasta: GfaMafFastaOpts,
 
-        /// Path to a file listing sequence names to include (one per line)
-        #[clap(long, value_parser)]
-        subset_sequence_list: Option<String>,
-
         /// Show the progress bar
         #[clap(long, action)]
         progress_bar: bool,
@@ -939,7 +935,6 @@ fn main() -> io::Result<()> {
             paf,
             query,
             gfa_maf_fasta,
-            subset_sequence_list,
             progress_bar,
             distances,
             all,
@@ -990,7 +985,7 @@ fn main() -> io::Result<()> {
             let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
             let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA
 
-            let subset_filter = load_subset_filter_if_provided(&subset_sequence_list)?;
+            let subset_filter = load_subset_filter_if_provided(&query.subset_sequence_list)?;
 
             let impg = initialize_impg(&common, &paf)?;
 
