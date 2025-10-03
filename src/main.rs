@@ -5,12 +5,13 @@ use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::paf::{PartialPafRecord, Strand};
 use impg::seqidx::SequenceIndex;
 use impg::sequence_index::{SequenceIndex as SeqIndexTrait, UnifiedSequenceIndex};
+use impg::subset_filter::{load_subset_filter, SubsetFilter};
 use log::{debug, info, warn};
 use noodles::bgzf;
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use rustc_hash::FxHashMap;
-use std::collections::{hash_map::DefaultHasher, HashSet};
+use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, BufWriter};
@@ -275,6 +276,10 @@ struct QueryOpts {
     /// Update coordinates to original sequences when input sequences are subsequences (seq_name:start-end) for 'bed', 'bedpe', and 'paf'
     #[clap(long, action)]
     original_sequence_coordinates: bool,
+
+    /// Path to a file listing sequence names to include (one per line)
+    #[clap(long, value_parser)]
+    subset_sequence_list: Option<String>,
 }
 
 impl QueryOpts {
@@ -769,6 +774,19 @@ fn main() -> io::Result<()> {
 
             let impg = initialize_impg(&common, &paf)?;
 
+            // Load subset filter if provided
+            let subset_filter = if let Some(ref list_path) = query.subset_sequence_list {
+                let filter = load_subset_filter(list_path)?;
+                info!(
+                    "Loaded {} sequence names from subset list {}",
+                    filter.entry_count(),
+                    list_path
+                );
+                Some(filter)
+            } else {
+                None
+            };
+
             // Parse and validate all target ranges, tracking which parameter was used
             let (target_ranges, from_range_param) =
                 if let Some(target_range_str) = &query.target_range {
@@ -842,6 +860,18 @@ fn main() -> io::Result<()> {
                     query.transitive_opts.transitive_dfs,
                     &query.transitive_opts,
                 )?;
+
+                // Apply subset filter if provided
+                if let Some(ref filter) = subset_filter {
+                    let target_id = impg.seq_index.get_id(&target_name).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Target sequence '{target_name}' not found in index"),
+                        )
+                    })?;
+                    let region_label = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
+                    apply_subset_filter(&impg, &mut results, target_id, filter, &region_label);
+                }
 
                 // Output results based on the resolved format
                 match resolved_output_format {
@@ -1064,26 +1094,7 @@ fn main() -> io::Result<()> {
                             format!("Target sequence '{target_name}' not found in index"),
                         )
                     })?;
-
-                    let before = results.len();
-                    results.retain(|(query_interval, _, _)| {
-                        if query_interval.metadata == target_id {
-                            return true;
-                        }
-                        let Some(name) = impg.seq_index.get_name(query_interval.metadata) else {
-                            return false;
-                        };
-                        subset.matches(name)
-                    });
-
-                    let filtered_out = before.saturating_sub(results.len());
-                    if filtered_out > 0 {
-                        debug!(
-                            "Filtered {} sequences outside subset for region {}",
-                            filtered_out,
-                            region_label.as_str()
-                        );
-                    }
+                    apply_subset_filter(&impg, &mut results, target_id, subset, &region_label);
                     if results.len() <= 1 {
                         warn!(
                             "Subset filtering left no comparison sequences for region {}",
@@ -1682,136 +1693,32 @@ fn perform_query(
     Ok(results)
 }
 
-#[derive(Default, Clone)]
-struct SubsetFilter {
-    exact: HashSet<String>,
-    normalized: HashSet<String>,
-    sample_ids: HashSet<String>,
-    sample_haps: HashSet<(String, String)>,
-}
-
-impl SubsetFilter {
-    fn entry_count(&self) -> usize {
-        self.exact.len()
-    }
-
-    fn matches(&self, seq_name: &str) -> bool {
-        if self.exact.contains(seq_name) {
+/// Apply subset filter to query results, keeping the target sequence
+fn apply_subset_filter(
+    impg: &Impg,
+    results: &mut Vec<AdjustedInterval>,
+    target_id: u32,
+    subset_filter: &SubsetFilter,
+    region_label: &str,
+) {
+    let before = results.len();
+    results.retain(|(query_interval, _, _)| {
+        if query_interval.metadata == target_id {
             return true;
         }
-
-        let no_coords = seq_name.split(':').next().unwrap_or(seq_name);
-        if seq_name != no_coords && self.exact.contains(no_coords) {
-            return true;
-        }
-        if self.normalized.contains(no_coords) {
-            return true;
-        }
-
-        if self.matches_sample_keys(no_coords) {
-            return true;
-        }
-
-        // As a fallback, try again on the raw sequence in case coordinates were not present
-        self.matches_sample_keys(seq_name)
-    }
-
-    fn matches_sample_keys(&self, seq_name: &str) -> bool {
-        if let Some((sample, hap)) = extract_sample_and_hap(seq_name) {
-            if let Some(hap) = hap {
-                if self.sample_haps.contains(&(sample.clone(), hap.clone())) {
-                    return true;
-                }
-            }
-
-            if self.sample_ids.contains(&sample) {
-                return true;
-            }
-        }
-
-        false
-    }
-}
-
-fn load_subset_filter(path: &str) -> io::Result<SubsetFilter> {
-    let contents = std::fs::read_to_string(path).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("Failed to read subset sequence list '{path}': {e}"),
-        )
-    })?;
-
-    let filter = parse_subset_filter(&contents);
-    if filter.entry_count() == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("Subset sequence list '{path}' did not contain any sequence names"),
-        ));
-    }
-
-    Ok(filter)
-}
-
-fn parse_subset_filter(contents: &str) -> SubsetFilter {
-    let mut filter = SubsetFilter::default();
-
-    for line in contents.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-
-        filter.exact.insert(trimmed.to_string());
-
-        let no_coords = trimmed.split(':').next().unwrap_or(trimmed);
-        filter.normalized.insert(no_coords.to_string());
-
-        if let Some((sample, hap)) = extract_sample_and_hap(no_coords) {
-            if let Some(hap) = hap {
-                filter.sample_haps.insert((sample, hap));
-            } else {
-                filter.sample_ids.insert(sample);
-            }
-        }
-    }
-
-    filter
-}
-
-fn extract_sample_and_hap(name: &str) -> Option<(String, Option<String>)> {
-    if let Some(idx) = name.find("_hap") {
-        let sample = name[..idx].to_string();
-        let hap_digits: String = name[idx + 4..]
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        let hap = if hap_digits.is_empty() {
-            None
-        } else {
-            Some(hap_digits)
+        let Some(name) = impg.seq_index.get_name(query_interval.metadata) else {
+            return false;
         };
-        return Some((sample, hap));
-    }
+        subset_filter.matches(name)
+    });
 
-    if let Some((sample, rest)) = name.split_once('#') {
-        let hap_fragment = rest.split('#').next().unwrap_or(rest);
-        let hap_digits: String = hap_fragment
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        let hap = if hap_digits.is_empty() {
-            None
-        } else {
-            Some(hap_digits)
-        };
-        return Some((sample.to_string(), hap));
+    let filtered_out = before.saturating_sub(results.len());
+    if filtered_out > 0 {
+        debug!(
+            "Filtered out {} sequences outside subset for region {}",
+            filtered_out, region_label
+        );
     }
-
-    if !name.contains(':') && !name.trim().is_empty() {
-        return Some((name.to_string(), None));
-    }
-
-    None
 }
 
 fn output_results_bed(

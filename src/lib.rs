@@ -9,3 +9,4 @@ pub mod impg;
 pub mod paf;
 pub mod seqidx;
 pub mod sequence_index;
+pub mod subset_filter;
