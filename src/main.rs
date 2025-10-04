@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 
 /// Basic common options shared between all commands
 #[derive(Parser, Debug)]
+#[command(next_help_heading = "General options")]
 struct CommonOpts {
     /// Number of threads for parallel processing.
     #[clap(short = 't', long, value_parser, default_value_t = NonZeroUsize::new(4).unwrap())]
@@ -36,24 +37,29 @@ struct CommonOpts {
 #[derive(Parser, Debug)]
 struct PafOpts {
     /// Path to the PAF files.
+    #[arg(help_heading = "PAF input")]
     #[clap(short = 'p', long, value_parser, required = false, num_args = 1.., conflicts_with = "paf_list")]
     paf_files: Vec<String>,
 
     /// Path to a text file containing paths to PAF files (one per line).
+    #[arg(help_heading = "PAF input")]
     #[clap(long, value_parser, required = false, conflicts_with = "paf_files")]
     paf_list: Option<String>,
 
     /// Path to the IMPG index file.
+    #[arg(help_heading = "Index options")]
     #[clap(short = 'i', long, value_parser)]
     index: Option<String>,
 
     /// Force the regeneration of the index, even if it already exists.
+    #[arg(help_heading = "Index options")]
     #[clap(short = 'f', long, action)]
     force_reindex: bool,
 }
 
 /// Sequence file options for commands that need FASTA/AGC files
 #[derive(Parser, Debug)]
+#[command(next_help_heading = "Sequence input")]
 struct SequenceOpts {
     /// List of sequence file paths (FASTA or AGC) (required for 'gfa', 'maf', and 'fasta')
     #[cfg(feature = "agc")]
@@ -140,14 +146,17 @@ struct GfaMafFastaOpts {
     sequence: SequenceOpts,
 
     /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for 'gfa' and 'maf')
+    #[arg(help_heading = "Alignment and output options")]
     #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
     poa_scoring: String,
 
     /// Reverse complement reverse strand sequences (for 'fasta' output)
+    #[arg(help_heading = "Alignment and output options")]
     #[clap(long, action)]
     reverse_complement: bool,
 
     /// Force processing of large regions (>10kbp) with maf/gfa output formats
+    #[arg(help_heading = "Alignment and output options")]
     #[clap(long, action)]
     force_large_region: bool,
 }
@@ -221,18 +230,22 @@ impl GfaMafFastaOpts {
 #[derive(Parser, Debug, Clone)]
 struct TransitiveOpts {
     /// Enable transitive queries with Depth-First Search (slower, but returns fewer overlapping results)
+    #[arg(help_heading = "Transitive query options")]
     #[clap(long, action, conflicts_with = "transitive")]
     transitive_dfs: bool,
 
     /// Maximum recursion depth for transitive overlaps (0 for no limit)
+    #[arg(help_heading = "Transitive query options")]
     #[clap(short = 'm', long, value_parser, default_value_t = 2)]
     max_depth: u16,
 
     /// Minimum region size to consider for transitive queries
+    #[arg(help_heading = "Transitive query options")]
     #[clap(short = 'l', long, value_parser, default_value_t = 10)]
     min_transitive_len: i32,
 
     /// Minimum distance between transitive ranges to consider on the same sequence
+    #[arg(help_heading = "Transitive query options")]
     #[clap(long, value_parser, default_value_t = 10)]
     min_distance_between_ranges: i32,
 }
@@ -241,14 +254,17 @@ struct TransitiveOpts {
 #[derive(Parser, Debug, Clone)]
 struct QueryOpts {
     /// Target range in the format `seq_name:start-end`
+    #[arg(help_heading = "Query region")]
     #[clap(short = 'r', long, value_parser, conflicts_with = "target_bed")]
     target_range: Option<String>,
 
     /// Path to the BED file containing target regions
+    #[arg(help_heading = "Query region")]
     #[clap(short = 'b', long, value_parser, conflicts_with = "target_range")]
     target_bed: Option<String>,
 
     /// Maximum distance between regions to merge
+    #[arg(help_heading = "Filtering and merging")]
     #[clap(
         short = 'd',
         long,
@@ -259,14 +275,22 @@ struct QueryOpts {
     merge_distance: i32,
 
     /// Disable merging for all output formats
+    #[arg(help_heading = "Filtering and merging")]
     #[clap(long, action, conflicts_with = "merge_distance")]
     no_merge: bool,
 
     /// Minimum gap-compressed identity threshold (0.0-1.0)
+    #[arg(help_heading = "Filtering and merging")]
     #[clap(long, value_parser)]
     min_identity: Option<f64>,
 
+    /// Path to a file listing sequence names to include (one per line)
+    #[arg(help_heading = "Filtering and merging")]
+    #[clap(long, value_parser)]
+    subset_sequence_list: Option<String>,
+
     /// Enable transitive queries (with Breadth-First Search)
+    #[arg(help_heading = "Transitive queries")]
     #[clap(short = 'x', long, action, conflicts_with = "transitive_dfs")]
     transitive: bool,
 
@@ -274,12 +298,9 @@ struct QueryOpts {
     transitive_opts: TransitiveOpts,
 
     /// Update coordinates to original sequences when input sequences are subsequences (seq_name:start-end) for 'bed', 'bedpe', and 'paf'
+    #[arg(help_heading = "Coordinate options")]
     #[clap(long, action)]
     original_sequence_coordinates: bool,
-
-    /// Path to a file listing sequence names to include (one per line)
-    #[clap(long, value_parser)]
-    subset_sequence_list: Option<String>,
 }
 
 impl QueryOpts {
@@ -431,10 +452,12 @@ enum Args {
         window_size: usize,
 
         /// Output format: 'bed', 'gfa' (v1.0), 'maf', or 'fasta' ('gfa', 'maf', and 'fasta' require --sequence-files or --sequence-list)
+        #[arg(help_heading = "Alignment and output options")]
         #[clap(short = 'o', long, value_parser, default_value = "bed")]
         output_format: String,
 
         /// Output folder for partition files (default: current directory)
+        #[arg(help_heading = "Alignment and output options")]
         #[clap(long, value_parser)]
         output_folder: Option<String>,
 
@@ -442,10 +465,12 @@ enum Args {
         gfa_maf_fasta: GfaMafFastaOpts,
 
         /// Maximum distance between regions to merge
+        #[arg(help_heading = "Filtering and merging")]
         #[clap(short = 'd', long, value_parser, default_value_t = 100000)]
         merge_distance: i32,
 
         /// Minimum gap-compressed identity threshold (0.0-1.0)
+        #[arg(help_heading = "Filtering and merging")]
         #[clap(long, value_parser)]
         min_identity: Option<f64>,
 
@@ -453,9 +478,11 @@ enum Args {
         transitive_opts: TransitiveOpts,
 
         /// Path to the file with sequence names to start with (one per line)
+        #[arg(help_heading = "Partition options")]
         #[clap(long, value_parser)]
         starting_sequences_file: Option<String>,
 
+        #[arg(help_heading = "Partition options")]
         #[clap(
             long,
             value_parser,
@@ -470,14 +497,17 @@ enum Args {
         selection_mode: String,
 
         /// Minimum region size for missing regions
+        #[arg(help_heading = "Partition options")]
         #[clap(long, value_parser, default_value_t = 3000)]
         min_missing_size: i32,
 
         /// Minimum distance from sequence start/end - closer regions will be extended to the boundaries
+        #[arg(help_heading = "Partition options")]
         #[clap(long, value_parser, default_value_t = 3000)]
         min_boundary_distance: i32,
 
         /// Output separate files for each partition when 'bed'
+        #[arg(help_heading = "Partition options")]
         #[clap(long, action)]
         separate_files: bool,
 
@@ -493,6 +523,7 @@ enum Args {
         query: QueryOpts,
 
         /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', 'gfa' (v1.0), 'maf', or 'fasta' ('gfa', 'maf', and 'fasta' require --sequence-files or --sequence-list)
+        #[arg(help_heading = "Alignment and output options")]
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
 
