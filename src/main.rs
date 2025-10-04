@@ -146,17 +146,17 @@ struct GfaMafFastaOpts {
     sequence: SequenceOpts,
 
     /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for 'gfa' and 'maf')
-    #[arg(help_heading = "Alignment and output options")]
+    #[arg(help_heading = "Alignment options")]
     #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
     poa_scoring: String,
 
     /// Reverse complement reverse strand sequences (for 'fasta' output)
-    #[arg(help_heading = "Alignment and output options")]
+    #[arg(help_heading = "Output options")]
     #[clap(long, action)]
     reverse_complement: bool,
 
     /// Force processing of large regions (>10kbp) with maf/gfa output formats
-    #[arg(help_heading = "Alignment and output options")]
+    #[arg(help_heading = "Output options")]
     #[clap(long, action)]
     force_large_region: bool,
 }
@@ -452,12 +452,12 @@ enum Args {
         window_size: usize,
 
         /// Output format: 'bed', 'gfa' (v1.0), 'maf', or 'fasta' ('gfa', 'maf', and 'fasta' require --sequence-files or --sequence-list)
-        #[arg(help_heading = "Alignment and output options")]
+        #[arg(help_heading = "Output options")]
         #[clap(short = 'o', long, value_parser, default_value = "bed")]
         output_format: String,
 
         /// Output folder for partition files (default: current directory)
-        #[arg(help_heading = "Alignment and output options")]
+        #[arg(help_heading = "Output options")]
         #[clap(long, value_parser)]
         output_folder: Option<String>,
 
@@ -523,7 +523,7 @@ enum Args {
         query: QueryOpts,
 
         /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', 'gfa' (v1.0), 'maf', or 'fasta' ('gfa', 'maf', and 'fasta' require --sequence-files or --sequence-list)
-        #[arg(help_heading = "Alignment and output options")]
+        #[arg(help_heading = "Output options")]
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
 
@@ -545,34 +545,42 @@ enum Args {
         gfa_maf_fasta: GfaMafFastaOpts,
 
         /// Show the progress bar
+        #[arg(help_heading = "Output options")]
         #[clap(long, action)]
         progress_bar: bool,
 
         /// Output distances instead of similarities
+        #[arg(help_heading = "Output options")]
         #[clap(long, action)]
         distances: bool,
 
         /// Emit entries for all pairs of groups, including those with zero intersection
+        #[arg(help_heading = "Output options")]
         #[clap(short = 'a', long, action, default_value_t = false)]
         all: bool,
 
         /// The part of each path name before this delimiter is a group identifier
+        #[arg(help_heading = "Output options")]
         #[clap(long, value_parser)]
         delim: Option<char>,
 
         /// Consider the N-th occurrence of the delimiter (1-indexed, default: 1)
+        #[arg(help_heading = "Output options")]
         #[clap(long, value_parser, default_value_t = 1)]
         delim_pos: u16,
 
         /// Perform PCA/MDS dimensionality reduction on the distance matrix
+        #[arg(help_heading = "PCA options")]
         #[clap(long, action)]
         pca: bool,
 
         /// Number of PCA components to output (default: 2)
+        #[arg(help_heading = "PCA options")]
         #[clap(long, value_parser, requires = "pca", default_value_t = 2)]
         pca_components: usize,
 
         /// Number of previous regions to use for adaptive polarization (0 to disable)
+        #[arg(help_heading = "PCA options")]
         #[clap(
             long,
             value_parser,
@@ -583,6 +591,7 @@ enum Args {
         polarize_n_prev: usize,
 
         /// Comma-separated names of the samples to use for adaptive polarization
+        #[arg(help_heading = "PCA options")]
         #[clap(
             long,
             value_parser,
@@ -592,6 +601,7 @@ enum Args {
         polarize_guide_samples: Option<Vec<String>>,
 
         /// Similarity measure to use for PCA distance matrix ("jaccard", "cosine", or "dice")
+        #[arg(help_heading = "PCA options")]
         #[clap(long, value_parser, requires = "pca", default_value = "jaccard")]
         pca_measure: String,
 
