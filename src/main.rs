@@ -448,6 +448,7 @@ enum Args {
         paf: PafOpts,
 
         /// Window size for partitioning
+        #[arg(help_heading = "Partition options")]
         #[clap(short = 'w', long, value_parser)]
         window_size: usize,
 
