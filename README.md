@@ -76,11 +76,12 @@ impg query -p alignments.paf -r chr1:1000-2000 -x -m 3
 # Filter by minimum gap-compressed identity
 impg query -p alignments.paf -r chr1:1000-2000 --min-identity 0.9
 
-# Output formats (auto/bed/bedpe/paf/gfa/maf)
+# Output formats (auto/bed/bedpe/paf/gfa/maf/fasta)
+impg query -p alignments.paf -r chr1:1000-2000 -o bed
 impg query -p alignments.paf -r chr1:1000-2000 -o bedpe
-impg query -p alignments.paf -b regions.bed -o paf
+impg query -p alignments.paf -b chr1:1000-2000 -o paf
 
-# GFA/MAF/FASTA output requires sequence files (--sequence-files or --sequence-list)
+# gfa/maf/fasta output requires sequence files (--sequence-files or --sequence-list)
 impg query -p alignments.paf -r chr1:1000-2000 -o gfa --sequence-files ref.fa genomes.fa
 impg query -p alignments.paf -r chr1:1000-2000 -o maf --sequence-list fastas.txt
 impg query -p alignments.paf -r chr1:1000-2000 -o fasta --sequence-files *.fa
@@ -88,7 +89,7 @@ impg query -p alignments.paf -r chr1:1000-2000 -o fasta --sequence-files *.fa
 # Works with AGC archives too
 impg query -p alignments.paf -r chr1:1000-2000 -o gfa --sequence-files genomes.agc
 
-# FASTA output with reverse complement for reverse strand sequences
+# fasta output with reverse complement for reverse strand sequences
 impg query -p alignments.paf -r chr1:1000-2000 -o fasta --sequence-files *.fa --reverse-complement
 
 # Merge nearby regions (default: 0)
