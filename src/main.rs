@@ -14,7 +14,7 @@ use rustc_hash::FxHashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::{self, BufRead, BufReader, BufWriter};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
 
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -905,6 +905,7 @@ fn main() -> io::Result<()> {
                         output_results_bed(
                             &impg,
                             &mut results,
+                            &mut io::stdout(),
                             Some(name),
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
@@ -1766,6 +1767,7 @@ fn apply_subset_filter_if_provided(
 fn output_results_bed(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
+    out: &mut dyn Write,
     name: Option<String>,
     merge_distance: i32,
     original_coordinates: bool,
@@ -1789,14 +1791,15 @@ fn output_results_bed(
                 original_coordinates,
             );
 
-        println!(
+        writeln!(
+            out,
             "{}\t{}\t{}\t{}\t.\t{}",
             transformed_name,
             transformed_first,
             transformed_last,
             name.as_deref().unwrap_or("."),
             strand
-        );
+        ).unwrap();
     }
 }
 
