@@ -14,7 +14,7 @@ use rustc_hash::FxHashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::{self, BufRead, BufReader, BufWriter};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
 
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -197,7 +197,7 @@ impl GfaMafFastaOpts {
         Option<UnifiedSequenceIndex>,
         Option<(u8, u8, u8, u8, u8, u8)>,
     )> {
-        let needs_sequence_mandatory = matches!(output_format, "gfa" | "maf" | "fasta");
+        let needs_sequence_mandatory = matches!(output_format, "gfa" | "maf" | "fasta" | "fasta+paf");
         let needs_sequence_optional = output_format == "paf" && original_sequence_coordinates;
         let needs_poa = matches!(output_format, "gfa" | "maf");
 
@@ -523,10 +523,14 @@ enum Args {
         #[clap(flatten)]
         query: QueryOpts,
 
-        /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', 'gfa' (v1.0), 'maf', or 'fasta' ('gfa', 'maf', and 'fasta' require --sequence-files or --sequence-list)
+        /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', 'gfa' (v1.0), 'maf', 'fasta', or 'fasta+paf' ('gfa', 'maf', 'fasta', and 'fasta+paf' require --sequence-files or --sequence-list)
         #[arg(help_heading = "Output options")]
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
+
+        /// Destination file basename, or nothing for standard output
+        #[clap(short = 'O', long, value_parser, default_value = None)]
+        output_basename: Option<String>,
 
         #[clap(flatten)]
         gfa_maf_fasta: GfaMafFastaOpts,
@@ -801,13 +805,14 @@ fn main() -> io::Result<()> {
             paf,
             query,
             output_format,
+            output_basename,
             gfa_maf_fasta,
         } => {
             initialize_threads_and_log(&common);
 
             validate_output_format(
                 &output_format,
-                &["auto", "bed", "bedpe", "paf", "gfa", "maf", "fasta"],
+                &["auto", "bed", "bedpe", "paf", "gfa", "maf", "fasta", "fasta+paf"],
             )?;
 
             let impg = initialize_impg(&common, &paf)?;
@@ -898,6 +903,9 @@ fn main() -> io::Result<()> {
                     subset_filter.as_ref(),
                 )?;
 
+                // TODO: Why is name an Option for all the output functions?
+                let name_opt = Some(name);
+
                 // Output results based on the resolved format
                 match resolved_output_format {
                     "bed" => {
@@ -905,10 +913,11 @@ fn main() -> io::Result<()> {
                         output_results_bed(
                             &impg,
                             &mut results,
-                            Some(name),
+                            &mut find_output_stream(&output_basename, "bed")?,
+                            &name_opt,
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
-                        );
+                        )?;
                     }
                     "bedpe" => {
                         // Skip the first element (the input range) for BEDPE output
@@ -916,10 +925,11 @@ fn main() -> io::Result<()> {
                         output_results_bedpe(
                             &impg,
                             &mut results,
-                            Some(name),
+                            &mut find_output_stream(&output_basename, "bed")?,
+                            &name_opt,
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
-                        );
+                        )?;
                     }
                     "paf" => {
                         // Skip the first element (the input range) for PAF output
@@ -927,18 +937,20 @@ fn main() -> io::Result<()> {
                         output_results_paf(
                             &impg,
                             &mut results,
-                            Some(name),
+                            &mut find_output_stream(&output_basename, "paf")?,
+                            &name_opt,
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
                             sequence_index.as_ref(),
-                        );
+                        )?;
                     }
                     "gfa" => {
                         output_results_gfa(
                             &impg,
                             &mut results,
+                            &mut find_output_stream(&output_basename, "gfa")?,
                             sequence_index.as_ref().unwrap(),
-                            Some(name),
+                            &name_opt,
                             query.effective_merge_distance(),
                             scoring_params.unwrap(),
                         )?;
@@ -947,8 +959,9 @@ fn main() -> io::Result<()> {
                         output_results_maf(
                             &impg,
                             &mut results,
+                            &mut find_output_stream(&output_basename, "maf")?,
                             sequence_index.as_ref().unwrap(),
-                            Some(name),
+                            &name_opt,
                             query.effective_merge_distance(),
                             scoring_params.unwrap(),
                         )?;
@@ -957,12 +970,35 @@ fn main() -> io::Result<()> {
                         output_results_fasta(
                             &impg,
                             &mut results,
+                            &mut find_output_stream(&output_basename, "fa")?,
                             sequence_index.as_ref().unwrap(),
-                            Some(name),
+                            &name_opt,
                             query.effective_merge_distance(),
                             reverse_complement,
                         )?;
-                    }
+                    },
+                    "fasta+paf" => {
+                        output_results_fasta(
+                            &impg,
+                            &mut results,
+                            &mut find_output_stream(&output_basename, "fa")?,
+                            sequence_index.as_ref().unwrap(),
+                            &name_opt,
+                            query.effective_merge_distance(),
+                            reverse_complement,
+                        )?;
+                        // Skip the first element (the input range) for PAF output
+                        results.remove(0);
+                        output_results_paf(
+                            &impg,
+                            &mut results,
+                            &mut find_output_stream(&output_basename, "paf")?,
+                            &name_opt,
+                            query.effective_merge_distance(),
+                            query.original_sequence_coordinates,
+                            sequence_index.as_ref(),
+                        )?;
+                    },
                     _ => {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
@@ -1158,7 +1194,7 @@ fn main() -> io::Result<()> {
 fn validate_selection_mode(mode: &str) -> io::Result<()> {
     match mode {
         "longest" | "total" => Ok(()),
-        mode if mode == "sample" || mode == "haplotype" 
+        mode if mode == "sample" || mode == "haplotype"
             || mode.starts_with("sample,") || mode.starts_with("haplotype,") => Ok(()),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -1381,6 +1417,20 @@ fn get_auto_reader(path: &str) -> io::Result<Box<dyn BufRead>> {
     let (reader, _format) = niffler::get_reader(Box::new(file))
         .map_err(|e| io::Error::other(format!("Failed to open reader: {e}")))?;
     Ok(Box::new(BufReader::new(reader)))
+}
+
+/// Helper function to return a Write implementer that is either standard output or a file with the
+/// appropriate basename and extension. When no basename is provided, uses standard output.
+fn find_output_stream(basename: &Option<String>, extension: &str) -> io::Result<Box<dyn Write>> {
+    // Anthropic's Claude came up with this.
+    match basename {
+        Some(name) => {
+            let filename = format!("{}.{}", name, extension);
+            let file = File::create(filename)?;
+            Ok(Box::new(file))
+        }
+        None => Ok(Box::new(io::stdout())),
+    }
 }
 
 /// Load/generate index based on common and PAF options
@@ -1778,10 +1828,11 @@ fn apply_subset_filter_if_provided(
 fn output_results_bed(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
-    name: Option<String>,
+    out: &mut dyn Write,
+    name: &Option<String>,
     merge_distance: i32,
     original_coordinates: bool,
-) {
+) -> io::Result<()> {
     merge_query_adjusted_intervals(results, merge_distance, false);
 
     for (query_interval, _, _) in results {
@@ -1801,24 +1852,28 @@ fn output_results_bed(
                 original_coordinates,
             );
 
-        println!(
+        writeln!(
+            out,
             "{}\t{}\t{}\t{}\t.\t{}",
             transformed_name,
             transformed_first,
             transformed_last,
             name.as_deref().unwrap_or("."),
             strand
-        );
+        )?;
     }
+
+    Ok(())
 }
 
 fn output_results_bedpe(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
-    name: Option<String>,
+    out: &mut dyn Write,
+    name: &Option<String>,
     merge_distance: i32,
     original_coordinates: bool,
-) {
+) -> io::Result<()> {
     merge_adjusted_intervals(results, merge_distance);
 
     for (overlap_query, cigar, overlap_target) in results {
@@ -1878,7 +1933,8 @@ fn output_results_bedpe(
             .trim_end_matches('.')
             .to_string();
 
-        println!(
+        writeln!(
+            out,
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t0\t{}\t+\tgi:f:{}\tbi:f:{}",
             transformed_query_name,
             transformed_first,
@@ -1890,18 +1946,21 @@ fn output_results_bedpe(
             strand,
             gi_str,
             bi_str
-        );
+        )?;
     }
+
+    Ok(())
 }
 
 fn output_results_paf(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
-    name: Option<String>,
+    out: &mut dyn Write,
+    name: &Option<String>,
     merge_distance: i32,
     original_coordinates: bool,
     sequence_index: Option<&UnifiedSequenceIndex>,
-) {
+) -> io::Result<()> {
     merge_adjusted_intervals(results, merge_distance);
 
     for (overlap_query, cigar, overlap_target) in results {
@@ -1983,23 +2042,28 @@ fn output_results_paf(
             .collect();
 
         match name {
-            Some(ref name) => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{}\tbi:f:{}\tcg:Z:{}\tan:Z:{}",
+            Some(ref name) => writeln!(out,
+                                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{}\tbi:f:{}\tcg:Z:{}\tan:Z:{}",
                                 transformed_query_name, query_length, transformed_first, transformed_last, strand,
                                 transformed_target_name, target_length, transformed_target_first, transformed_target_last,
-                                matches, block_len, 255, gi_str, bi_str, cigar_str, name),
-            None => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{}\tbi:f:{}\tcg:Z:{}",
+                                matches, block_len, 255, gi_str, bi_str, cigar_str, name)?,
+            None => writeln!(out,
+                                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{}\tbi:f:{}\tcg:Z:{}",
                                 transformed_query_name, query_length, transformed_first, transformed_last, strand,
                                 transformed_target_name, target_length, transformed_target_first, transformed_target_last,
-                                matches, block_len, 255, gi_str, bi_str, cigar_str),
+                                matches, block_len, 255, gi_str, bi_str, cigar_str)?,
         }
     }
+
+    Ok(())
 }
 
 fn output_results_gfa(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
+    out: &mut dyn Write,
     sequence_index: &UnifiedSequenceIndex,
-    _name: Option<String>,
+    _name: &Option<String>,
     merge_distance: i32,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<()> {
@@ -2017,7 +2081,7 @@ fn output_results_gfa(
         sequence_index,
         scoring_params,
     );
-    print!("{gfa_output}");
+    writeln!(out, "{gfa_output}")?;
 
     Ok(())
 }
@@ -2025,8 +2089,9 @@ fn output_results_gfa(
 fn output_results_fasta(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
+    out: &mut dyn Write,
     sequence_index: &UnifiedSequenceIndex,
-    _name: Option<String>,
+    _name: &Option<String>,
     merge_distance: i32,
     reverse_complement: bool,
 ) -> io::Result<()> {
@@ -2079,8 +2144,8 @@ fn output_results_fasta(
 
     // Output sequences sequentially to maintain order
     for (header, sequence) in sequence_data {
-        println!("{header}");
-        println!("{sequence}");
+        writeln!(out, "{header}")?;
+        writeln!(out, "{sequence}")?;
     }
 
     Ok(())
@@ -2089,8 +2154,9 @@ fn output_results_fasta(
 fn output_results_maf(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
+    out: &mut dyn Write,
     sequence_index: &UnifiedSequenceIndex,
-    _name: Option<String>,
+    _name: &Option<String>,
     merge_distance: i32,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<()> {
@@ -2108,7 +2174,7 @@ fn output_results_maf(
         sequence_index,
         scoring_params,
     );
-    print!("{maf_output}");
+    writeln!(out, "{maf_output}")?;
 
     Ok(())
 }
