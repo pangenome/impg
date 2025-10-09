@@ -197,7 +197,7 @@ impl GfaMafFastaOpts {
         Option<UnifiedSequenceIndex>,
         Option<(u8, u8, u8, u8, u8, u8)>,
     )> {
-        let needs_sequence_mandatory = matches!(output_format, "gfa" | "maf" | "fasta");
+        let needs_sequence_mandatory = matches!(output_format, "gfa" | "maf" | "fasta" | "fasta+paf");
         let needs_sequence_optional = output_format == "paf" && original_sequence_coordinates;
         let needs_poa = matches!(output_format, "gfa" | "maf");
 
