@@ -909,7 +909,7 @@ fn main() -> io::Result<()> {
                             Some(name),
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
-                        );
+                        )?;
                     }
                     "bedpe" => {
                         // Skip the first element (the input range) for BEDPE output
@@ -917,10 +917,11 @@ fn main() -> io::Result<()> {
                         output_results_bedpe(
                             &impg,
                             &mut results,
+                            &mut io::stdout(),
                             Some(name),
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
-                        );
+                        )?;
                     }
                     "paf" => {
                         // Skip the first element (the input range) for PAF output
@@ -928,16 +929,18 @@ fn main() -> io::Result<()> {
                         output_results_paf(
                             &impg,
                             &mut results,
+                            &mut io::stdout(),
                             Some(name),
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
                             sequence_index.as_ref(),
-                        );
+                        )?;
                     }
                     "gfa" => {
                         output_results_gfa(
                             &impg,
                             &mut results,
+                            &mut io::stdout(),
                             sequence_index.as_ref().unwrap(),
                             Some(name),
                             query.effective_merge_distance(),
@@ -948,6 +951,7 @@ fn main() -> io::Result<()> {
                         output_results_maf(
                             &impg,
                             &mut results,
+                            &mut io::stdout(),
                             sequence_index.as_ref().unwrap(),
                             Some(name),
                             query.effective_merge_distance(),
@@ -958,6 +962,7 @@ fn main() -> io::Result<()> {
                         output_results_fasta(
                             &impg,
                             &mut results,
+                            &mut io::stdout(),
                             sequence_index.as_ref().unwrap(),
                             Some(name),
                             query.effective_merge_distance(),
@@ -1771,7 +1776,7 @@ fn output_results_bed(
     name: Option<String>,
     merge_distance: i32,
     original_coordinates: bool,
-) {
+) -> io::Result<()> {
     merge_query_adjusted_intervals(results, merge_distance, false);
 
     for (query_interval, _, _) in results {
@@ -1799,17 +1804,20 @@ fn output_results_bed(
             transformed_last,
             name.as_deref().unwrap_or("."),
             strand
-        ).unwrap();
+        )?;
     }
+
+    Ok(())
 }
 
 fn output_results_bedpe(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
+    out: &mut dyn Write,
     name: Option<String>,
     merge_distance: i32,
     original_coordinates: bool,
-) {
+) -> io::Result<()> {
     merge_adjusted_intervals(results, merge_distance);
 
     for (overlap_query, cigar, overlap_target) in results {
@@ -1869,7 +1877,8 @@ fn output_results_bedpe(
             .trim_end_matches('.')
             .to_string();
 
-        println!(
+        writeln!(
+            out,
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t0\t{}\t+\tgi:f:{}\tbi:f:{}",
             transformed_query_name,
             transformed_first,
@@ -1881,18 +1890,21 @@ fn output_results_bedpe(
             strand,
             gi_str,
             bi_str
-        );
+        )?;
     }
+
+    Ok(())
 }
 
 fn output_results_paf(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
+    out: &mut dyn Write,
     name: Option<String>,
     merge_distance: i32,
     original_coordinates: bool,
     sequence_index: Option<&UnifiedSequenceIndex>,
-) {
+) -> io::Result<()> {
     merge_adjusted_intervals(results, merge_distance);
 
     for (overlap_query, cigar, overlap_target) in results {
@@ -1974,21 +1986,26 @@ fn output_results_paf(
             .collect();
 
         match name {
-            Some(ref name) => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{}\tbi:f:{}\tcg:Z:{}\tan:Z:{}",
+            Some(ref name) => writeln!(out,
+                                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{}\tbi:f:{}\tcg:Z:{}\tan:Z:{}",
                                 transformed_query_name, query_length, transformed_first, transformed_last, strand,
                                 transformed_target_name, target_length, transformed_target_first, transformed_target_last,
-                                matches, block_len, 255, gi_str, bi_str, cigar_str, name),
-            None => println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{}\tbi:f:{}\tcg:Z:{}",
+                                matches, block_len, 255, gi_str, bi_str, cigar_str, name)?,
+            None => writeln!(out,
+                                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{}\tbi:f:{}\tcg:Z:{}",
                                 transformed_query_name, query_length, transformed_first, transformed_last, strand,
                                 transformed_target_name, target_length, transformed_target_first, transformed_target_last,
-                                matches, block_len, 255, gi_str, bi_str, cigar_str),
+                                matches, block_len, 255, gi_str, bi_str, cigar_str)?,
         }
     }
+
+    Ok(())
 }
 
 fn output_results_gfa(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
+    out: &mut dyn Write,
     sequence_index: &UnifiedSequenceIndex,
     _name: Option<String>,
     merge_distance: i32,
@@ -2008,7 +2025,7 @@ fn output_results_gfa(
         sequence_index,
         scoring_params,
     );
-    print!("{gfa_output}");
+    writeln!(out, "{gfa_output}")?;
 
     Ok(())
 }
@@ -2016,6 +2033,7 @@ fn output_results_gfa(
 fn output_results_fasta(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
+    out: &mut dyn Write,
     sequence_index: &UnifiedSequenceIndex,
     _name: Option<String>,
     merge_distance: i32,
@@ -2070,8 +2088,8 @@ fn output_results_fasta(
 
     // Output sequences sequentially to maintain order
     for (header, sequence) in sequence_data {
-        println!("{header}");
-        println!("{sequence}");
+        writeln!(out, "{header}")?;
+        writeln!(out, "{sequence}")?;
     }
 
     Ok(())
@@ -2080,6 +2098,7 @@ fn output_results_fasta(
 fn output_results_maf(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
+    out: &mut dyn Write,
     sequence_index: &UnifiedSequenceIndex,
     _name: Option<String>,
     merge_distance: i32,
@@ -2099,7 +2118,7 @@ fn output_results_maf(
         sequence_index,
         scoring_params,
     );
-    print!("{maf_output}");
+    writeln!(out, "{maf_output}")?;
 
     Ok(())
 }
