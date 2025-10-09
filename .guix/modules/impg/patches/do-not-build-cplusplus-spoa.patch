@@ -1,0 +1,19 @@
+diff --git a/build.rs b/build.rs
+index 3f0566a..a607d9d 100644
+--- a/build.rs
++++ b/build.rs
+@@ -3,14 +3,6 @@ use std::fs::canonicalize;
+ use std::path::PathBuf;
+ 
+ fn main() {
+-    let out_dir = cmake::Config::new("spoa")
+-        //.uses_cxx11() // Deprecated
+-        .define("spoa_install", "OFF")
+-        .define("spoa_build_exe", "OFF")
+-        .define("spoa_build_tests", "OFF")
+-        .build_target("spoa")
+-        .build();
+-
+     println!(
+         "cargo:rustc-link-search=native={}/build/lib",
+         out_dir.display()
