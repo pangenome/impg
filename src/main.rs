@@ -1496,22 +1496,6 @@ fn generate_multi_index(
     let index_file = get_combined_index_filename(paf_files, custom_index);
     info!("No index found at {index_file}. Creating it now.");
 
-    // Check for missing .gzi files before processing
-    for paf_file in paf_files {
-        if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-            let gzi_file = format!("{paf_file}.gzi");
-            if !std::path::Path::new(&gzi_file).exists() {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!(
-                        "Compressed PAF file '{paf_file}' requires a .gzi index file. \
-                        Please create it using 'bgzip -r {paf_file}' or decompress the file first."
-                    ),
-                ));
-            }
-        }
-    }
-
     let num_paf_files = paf_files.len();
     // Thread-safe counter for tracking progress
     let files_processed = AtomicUsize::new(0);
@@ -1532,24 +1516,52 @@ fn generate_multi_index(
                 debug!("Processing PAF file ({current_count}/{num_paf_files}): {paf_file}");
 
                 let file = File::open(paf_file)?;
-                let reader: Box<dyn io::Read> =
-                    if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-                        Box::new(bgzf::io::MultithreadedReader::with_worker_count(
-                            threads, file,
-                        ))
-                    } else {
-                        Box::new(file)
-                    };
-                let reader = BufReader::new(reader);
 
                 // Lock, get IDs, build records
                 let mut seq_index_guard = tmp_seq_index.lock().unwrap();
-                let records = impg::paf::parse_paf(reader, &mut seq_index_guard).map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("Failed to parse PAF records from {paf_file}: {e:?}"),
-                    )
-                })?;
+
+                // Use different parsing logic for compressed vs uncompressed files
+                let records = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
+                    // For compressed files, check if GZI index exists for optimization
+                    let gzi_path = format!("{}.gzi", paf_file);
+                    if std::path::Path::new(&gzi_path).exists() {
+                        debug!("Found GZI index for {}, using multithreaded decompression", paf_file);
+                        // Use multithreaded reader with GZI for faster parsing
+                        let gzi_index = bgzf::gzi::fs::read(&gzi_path).map_err(|e| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("Failed to read GZI index {}: {}", gzi_path, e),
+                            )
+                        })?;
+                        let mt_reader = bgzf::io::MultithreadedReader::with_worker_count(threads, file);
+                        impg::paf::parse_paf_bgzf_with_gzi(mt_reader, gzi_index, &mut seq_index_guard)
+                            .map_err(|e| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!("Failed to parse PAF records from {}: {:?}", paf_file, e),
+                                )
+                            })?
+                    } else {
+                        debug!("No GZI index found for {}, using BGZF reader", paf_file);
+                        // No GZI available, use BGZF reader to capture virtual positions directly
+                        let bgzf_reader = bgzf::io::Reader::new(file);
+                        impg::paf::parse_paf_bgzf(bgzf_reader, &mut seq_index_guard).map_err(|e| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("Failed to parse PAF records from {}: {:?}", paf_file, e),
+                            )
+                        })?
+                    }
+                } else {
+                    // For uncompressed files, use regular buffered reader
+                    let reader = BufReader::new(file);
+                    impg::paf::parse_paf(reader, &mut seq_index_guard).map_err(|e| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Failed to parse PAF records from {}: {:?}", paf_file, e),
+                        )
+                    })?
+                };
 
                 Ok((records, paf_file.clone()))
             },
