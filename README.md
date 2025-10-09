@@ -281,6 +281,13 @@ impg index -p alignments.paf -i custom.impg
 impg index --paf-list paf_files.txt
 ```
 
+**Note on compressed PAF files**: `impg` works directly with bgzip-compressed PAF files (`.paf.gz`, `.paf.bgz`). For large files, creating a GZI index can speed up initial index creation:
+
+```bash
+bgzip -r alignments.paf.gz  # Creates alignments.paf.gz.gzi (optional)
+```
+
+If a `.gzi` file is present, `impg` will automatically use it for faster multithreaded decompression.
 
 ### Common options
 
