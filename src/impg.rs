@@ -113,7 +113,6 @@ impl QueryMetadata {
     fn get_cigar_ops(
         &self,
         paf_files: &[String],
-        paf_gzi_indices: &[Option<bgzf::gzi::Index>],
     ) -> Vec<CigarOp> {
         // Allocate space for cigar
         let mut cigar_buffer = vec![0; self.cigar_bytes];
@@ -124,15 +123,13 @@ impl QueryMetadata {
 
         // Get reader and seek start of cigar str
         if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-            // Get the GZI index for the PAF file
-            let paf_gzi_index = paf_gzi_indices.get(paf_file_index).and_then(Option::as_ref);
-
+            // For compressed files, use virtual position directly
             let mut reader = bgzf::io::Reader::new(File::open(paf_file).unwrap());
-            reader
-                .seek_by_uncompressed_position(paf_gzi_index.unwrap(), self.cigar_offset())
-                .unwrap();
+            let virtual_position = bgzf::VirtualPosition::from(self.cigar_offset());
+            reader.seek(virtual_position).unwrap();
             reader.read_exact(&mut cigar_buffer).unwrap();
         } else {
+            // For uncompressed files, use byte offset
             let mut reader = File::open(paf_file).unwrap();
             reader.seek(SeekFrom::Start(self.cigar_offset())).unwrap();
             reader.read_exact(&mut cigar_buffer).unwrap();
@@ -285,10 +282,9 @@ impl SortedRanges {
 pub struct Impg {
     pub trees: RwLock<TreeMap>,
     pub seq_index: SequenceIndex,
-    paf_files: Vec<String>,                         // List of all PAF files
-    paf_gzi_indices: Vec<Option<bgzf::gzi::Index>>, // Corresponding GZI indices
-    pub forest_map: ForestMap,                      // Forest map for lazy loading
-    index_file_path: String,                        // Path to the index file for lazy loading
+    paf_files: Vec<String>,        // List of all PAF files
+    pub forest_map: ForestMap,     // Forest map for lazy loading
+    index_file_path: String,       // Path to the index file for lazy loading
 }
 
 impl Impg {
@@ -296,25 +292,11 @@ impl Impg {
         records_by_file: &[(Vec<PartialPafRecord>, String)],
         seq_index: SequenceIndex,
     ) -> Result<Self, ParseErr> {
-        // Use par_iter to process the files in parallel and collect both pieces of information
-        let (paf_files, paf_gzi_indices): (Vec<String>, Vec<Option<bgzf::gzi::Index>>) =
-            records_by_file
-                .par_iter()
-                .map(|(_, paf_file)| {
-                    let paf_gzi_index = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-                        let paf_gzi_file = paf_file.to_owned() + ".gzi";
-                        Some(
-                            bgzf::gzi::fs::read(paf_gzi_file.clone())
-                                .unwrap_or_else(|_| panic!("Could not open {paf_gzi_file}")),
-                        )
-                    } else {
-                        None
-                    };
-
-                    // Return both values as a tuple
-                    (paf_file.clone(), paf_gzi_index)
-                })
-                .unzip(); // Separate the tuples into two vectors
+        // Extract just the PAF file paths
+        let paf_files: Vec<String> = records_by_file
+            .par_iter()
+            .map(|(_, paf_file)| paf_file.clone())
+            .collect();
 
         let intervals: FxHashMap<u32, Vec<Interval<QueryMetadata>>> = records_by_file
             .par_iter()
@@ -373,7 +355,6 @@ impl Impg {
             trees: RwLock::new(trees),
             seq_index,
             paf_files,
-            paf_gzi_indices,
             forest_map: ForestMap::new(), // All trees are in memory, no need for forest map
             index_file_path: String::new(), // All trees are in memory, no need for index file path
         })
@@ -556,27 +537,10 @@ impl Impg {
                     )
                 })?;
 
-        // Determine PAF GZI indices
-        let paf_gzi_indices = paf_files
-            .iter()
-            .map(|paf_file| {
-                if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-                    let paf_gzi_file = format!("{paf_file}.gzi");
-                    Some(
-                        bgzf::gzi::fs::read(paf_gzi_file.clone())
-                            .unwrap_or_else(|_| panic!("Could not open {paf_gzi_file}")),
-                    )
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-
         Ok(Self {
             trees: RwLock::new(FxHashMap::default()), // Start with empty trees - load on demand
             seq_index,
             paf_files: paf_files.to_vec(),
-            paf_gzi_indices,
             forest_map,
             index_file_path,
         })
@@ -631,7 +595,7 @@ impl Impg {
                         metadata.query_end,
                         metadata.strand(),
                     ),
-                    &metadata.get_cigar_ops(&self.paf_files, self.paf_gzi_indices.as_ref()),
+                    &metadata.get_cigar_ops(&self.paf_files),
                 );
                 if let Some((
                     adjusted_query_start,
@@ -777,7 +741,7 @@ impl Impg {
                                 metadata.query_end,
                                 metadata.strand(),
                             ),
-                            &metadata.get_cigar_ops(&self.paf_files, self.paf_gzi_indices.as_ref()),
+                            &metadata.get_cigar_ops(&self.paf_files),
                         );
 
                         if let Some((
@@ -1010,10 +974,7 @@ impl Impg {
                                                 metadata.query_end,
                                                 metadata.strand(),
                                             ),
-                                            &metadata.get_cigar_ops(
-                                                &self.paf_files,
-                                                self.paf_gzi_indices.as_ref(),
-                                            ),
+                                            &metadata.get_cigar_ops(&self.paf_files),
                                         );
 
                                         if let Some((

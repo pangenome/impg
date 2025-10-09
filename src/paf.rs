@@ -129,6 +129,73 @@ pub fn parse_paf<R: BufRead>(
     Ok(records)
 }
 
+/// Parse PAF from a BGZF-compressed file, storing virtual positions for seeking.
+/// If a GZI index is provided, uses it for faster multithreaded decompression and converts
+/// uncompressed offsets to virtual positions. Otherwise, reads with single-threaded BGZF reader.
+pub fn parse_paf_bgzf<R: std::io::Read + std::io::Seek>(
+    mut reader: noodles::bgzf::io::Reader<R>,
+    seq_index: &mut SequenceIndex,
+) -> Result<Vec<PartialPafRecord>, ParseErr> {
+    use std::io::BufRead;
+
+    let mut records = Vec::new();
+    let mut line_buf = String::new();
+
+    loop {
+        // Get virtual position BEFORE reading the line
+        let virtual_pos = reader.virtual_position();
+        line_buf.clear();
+
+        let bytes_read = reader.read_line(&mut line_buf).map_err(ParseErr::IoError)?;
+        if bytes_read == 0 {
+            break; // EOF
+        }
+
+        // Remove trailing newline
+        let line = line_buf.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+
+        // Parse the record using the virtual position
+        let record = PartialPafRecord::parse(line, virtual_pos.into(), seq_index)?;
+        records.push(record);
+    }
+
+    Ok(records)
+}
+
+/// Parse PAF from a BGZF-compressed file using a GZI index for faster multithreaded decompression.
+/// After parsing with uncompressed offsets, converts them to virtual positions for seeking.
+pub fn parse_paf_bgzf_with_gzi<R: std::io::Read>(
+    reader: R,
+    gzi_index: noodles::bgzf::gzi::Index,
+    seq_index: &mut SequenceIndex,
+) -> Result<Vec<PartialPafRecord>, ParseErr> {
+    // First pass: parse with uncompressed byte offsets
+    let reader = std::io::BufReader::new(reader);
+    let mut records = parse_paf(reader, seq_index)?;
+
+    // Second pass: convert uncompressed offsets to virtual positions using GZI
+    for record in &mut records {
+        // Extract the uncompressed offset (ignoring the strand bit)
+        let uncompressed_offset = record.strand_and_cigar_offset & !PartialPafRecord::STRAND_BIT;
+
+        // Convert to virtual position using GZI query
+        let virtual_pos = gzi_index
+            .query(uncompressed_offset)
+            .map_err(|e| ParseErr::InvalidFormat(
+                format!("Failed to find virtual position for offset {}: {:?}", uncompressed_offset, e)
+            ))?;
+
+        // Update the record with virtual position, preserving strand bit
+        let strand_bit = record.strand_and_cigar_offset & PartialPafRecord::STRAND_BIT;
+        record.strand_and_cigar_offset = u64::from(virtual_pos) | strand_bit;
+    }
+
+    Ok(records)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
