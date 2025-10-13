@@ -140,6 +140,178 @@ pub fn generate_maf_from_intervals(
     format_maf_from_msa(&msa, &sequence_metadata, None)
 }
 
+
+fn format_maf_from_msa(
+    msa: &[String],
+    sequence_metadata: &[SequenceMetadata],
+    block_name: Option<String>,
+) -> String {
+    let mut output = String::new();
+
+    // Write MAF header
+    output.push_str("##maf version=1 scoring=spoa\n");
+    if let Some(ref name) = block_name {
+        output.push_str(&format!("# {name}\n"));
+    }
+
+    // Find trimming positions (remove all-gap columns at start and end)
+    let msa_len = msa.first().map(|s| s.len()).unwrap_or(0);
+    let mut start_trim = 0;
+    let mut end_trim = msa_len;
+
+    // Find first non-gap column
+    'outer: for pos in 0..msa_len {
+        for seq in msa {
+            if seq.chars().nth(pos).unwrap_or('-') != '-' {
+                start_trim = pos;
+                break 'outer;
+            }
+        }
+    }
+
+    // Find last non-gap column
+    'outer2: for pos in (0..msa_len).rev() {
+        for seq in msa {
+            if seq.chars().nth(pos).unwrap_or('-') != '-' {
+                end_trim = pos + 1;
+                break 'outer2;
+            }
+        }
+    }
+
+    // Write alignment block
+    output.push('\n'); // blank line before block
+    output.push_str("a score=0.0\n"); // We don't have a meaningful score from SPOA
+
+    // Write sequence lines
+    for (msa_seq, meta) in msa.iter().zip(sequence_metadata.iter()) {
+        let trimmed_seq = &msa_seq[start_trim..end_trim];
+
+        // Count non-gap characters to get the actual aligned size
+        let aligned_size = trimmed_seq.chars().filter(|&c| c != '-').count() as i32;
+
+        output.push_str(&format!(
+            "s {} {} {} {} {} {}\n",
+            meta.name, meta.start, aligned_size, meta.strand, meta.total_length, trimmed_seq
+        ));
+    }
+
+    output.push('\n'); // blank line after block
+    output
+}
+
+
+
+pub fn generate_fasta_alignment_from_intervals(
+    impg: &Impg,
+    results: &[Interval<u32>],
+    sequence_index: &UnifiedSequenceIndex,
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+) -> String {
+    // Prepare POA graph and sequences (same as MAF)
+    let (graph, sequence_metadata) =
+        prepare_poa_graph_and_sequences(impg, results, sequence_index, scoring_params)
+            .expect("failed to prepare SPOA graph/sequences");
+
+    // Generate MSA from the SPOA graph
+    let msa = graph.generate_msa();
+
+    // Format as aligned FASTA
+    // - trim all-gap columns on both ends (like MAF)
+    // - wrap lines at 80 columns (standard FASTA convention)
+    format_fasta_alignment_from_msa(&msa, &sequence_metadata, 80, true)
+}
+
+
+fn format_fasta_alignment_from_msa(
+    msa: &[String],
+    sequence_metadata: &[SequenceMetadata],
+    line_width: usize,   // e.g., 80
+    trim_all_gap: bool,  // true to trim leading/trailing all-gap columns
+) -> String {
+    let mut out = String::new();
+
+    if msa.is_empty() || sequence_metadata.is_empty() {
+        return out;
+    }
+
+    // Determine trimming window (remove all-gap columns at the ends)
+    let aln_len = msa.first().map(|s| s.len()).unwrap_or(0);
+    let (mut left, mut right) = (0usize, aln_len);
+
+    if trim_all_gap && aln_len > 0 {
+        // first non-gap column
+        'left: for i in 0..aln_len {
+            for s in msa {
+                if s.as_bytes()[i] != b'-' {
+                    left = i;
+                    break 'left;
+                }
+            }
+        }
+        // last non-gap column (exclusive)
+        'right: for i in (0..aln_len).rev() {
+            for s in msa {
+                if s.as_bytes()[i] != b'-' {
+                    right = i + 1;
+                    break 'right;
+                }
+            }
+        }
+        if right < left {
+            left = 0;
+            right = aln_len;
+        }
+    }
+
+    // Emit aligned FASTA:
+    // Header encodes original label + coordinates consistent with MAF logic:
+    // meta.start is already "MAF-style" start (reverse-complemented for '-' strand),
+    // so end = start + size is consistent for both '+' and '-'.
+    for (seq, meta) in msa.iter().zip(sequence_metadata.iter()) {
+        let start = meta.start;
+        let end   = meta.start + meta.size;
+
+        // Example header: >name:start-end(strand)
+        // You can adjust to omit strand or change style if you prefer.
+        out.push('>');
+        out.push_str(&meta.name);
+        out.push(':');
+        out.push_str(&start.to_string());
+        out.push('-');
+        out.push_str(&end.to_string());
+        out.push('(');
+        out.push(meta.strand);
+        out.push(')');
+        out.push('\n');
+
+        let slice = &seq[left..right];
+        if line_width == 0 {
+            // no wrapping
+            out.push_str(slice);
+            out.push('\n');
+        } else {
+            // wrap at line_width (80 by default)
+            let bytes = slice.as_bytes();
+            let mut i = 0usize;
+            while i < bytes.len() {
+                let j = (i + line_width).min(bytes.len());
+                // safe because MSA is ASCII-only (A,C,G,T,N,'-')
+                out.push_str(&String::from_utf8_lossy(&bytes[i..j]));
+                out.push('\n');
+                i = j;
+            }
+        }
+    }
+
+    out
+}
+
+
+
+
+
+
 pub fn prepare_poa_graph_and_sequences(
     impg: &Impg,
     results: &[Interval<u32>],
@@ -241,64 +413,94 @@ pub fn prepare_poa_graph_and_sequences(
     Ok((graph, sequence_metadata))
 }
 
-fn format_maf_from_msa(
-    msa: &[String],
-    sequence_metadata: &[SequenceMetadata],
-    block_name: Option<String>,
-) -> String {
-    let mut output = String::new();
 
-    // Write MAF header
-    output.push_str("##maf version=1 scoring=spoa\n");
-    if let Some(ref name) = block_name {
-        output.push_str(&format!("# {name}\n"));
-    }
 
-    // Find trimming positions (remove all-gap columns at start and end)
-    let msa_len = msa.first().map(|s| s.len()).unwrap_or(0);
-    let mut start_trim = 0;
-    let mut end_trim = msa_len;
 
-    // Find first non-gap column
-    'outer: for pos in 0..msa_len {
-        for seq in msa {
-            if seq.chars().nth(pos).unwrap_or('-') != '-' {
-                start_trim = pos;
-                break 'outer;
+
+
+pub fn prepare_sequences(
+    impg: &Impg,
+    results: &[Interval<u32>],
+    sequence_index: &UnifiedSequenceIndex,
+) -> std::io::Result<Vec<(String, SequenceMetadata)>> {
+    use rayon::prelude::*;
+
+    // Fetch, strand-normalize, and annotate each interval
+    let mut pairs: Vec<(String, SequenceMetadata)> = results
+        .par_iter()
+        .map(|interval| -> std::io::Result<(String, SequenceMetadata)> {
+            // Resolve sequence name
+            let seq_name = impg
+                .seq_index
+                .get_name(interval.metadata)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("Sequence name not found for ID {}", interval.metadata),
+                    )
+                })?;
+
+            // Resolve total contig length
+            let total_length = impg
+                .seq_index
+                .get_len_from_id(interval.metadata)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("Sequence length not found for ID {}", interval.metadata),
+                    )
+                })?;
+
+            // Determine orientation from the interval
+            let (start, end, strand) = if interval.first <= interval.last {
+                (interval.first, interval.last, '+')
+            } else {
+                (interval.last, interval.first, '-')
+            };
+
+            // Fetch subsequence on the forward strand coordinates [start, end)
+            let mut seq_bytes = sequence_index.fetch_sequence(seq_name, start, end)?;
+
+            // Reverse-complement if the interval is on the reverse strand
+            if strand == '-' {
+                seq_bytes = reverse_complement(&seq_bytes);
             }
-        }
-    }
 
-    // Find last non-gap column
-    'outer2: for pos in (0..msa_len).rev() {
-        for seq in msa {
-            if seq.chars().nth(pos).unwrap_or('-') != '-' {
-                end_trim = pos + 1;
-                break 'outer2;
-            }
-        }
-    }
+            // Convert to UTF-8 String for downstream code that expects Strings
+            let sequence_str = String::from_utf8_lossy(&seq_bytes).to_string();
 
-    // Write alignment block
-    output.push('\n'); // blank line before block
-    output.push_str("a score=0.0\n"); // We don't have a meaningful score from SPOA
+            // Size of the fetched slice in original coordinates
+            let seq_size = end - start;
 
-    // Write sequence lines
-    for (msa_seq, meta) in msa.iter().zip(sequence_metadata.iter()) {
-        let trimmed_seq = &msa_seq[start_trim..end_trim];
+            // MAF-style start: if reverse, origin is from the RC frame
+            let maf_start = if strand == '-' {
+                (total_length as i32) - end
+            } else {
+                start
+            };
 
-        // Count non-gap characters to get the actual aligned size
-        let aligned_size = trimmed_seq.chars().filter(|&c| c != '-').count() as i32;
+            let meta = SequenceMetadata {
+                name: seq_name.to_string(),
+                start: maf_start,
+                size: seq_size,
+                strand,
+                total_length,
+            };
 
-        output.push_str(&format!(
-            "s {} {} {} {} {} {}\n",
-            meta.name, meta.start, aligned_size, meta.strand, meta.total_length, trimmed_seq
-        ));
-    }
+            Ok((sequence_str, meta))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
-    output.push('\n'); // blank line after block
-    output
+    // Keep longest-first ordering (matches SPOA feeding order)
+    pairs.par_sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+
+    Ok(pairs)
 }
+
+
+
+
+
 
 /// Given a raw GFAv1.1 string and a `Write` target, convert it to GFAv1.0:
 ///  - Rewrite `H` lines to `H\tVN:Z:1.0`
@@ -465,3 +667,9 @@ pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
         })
         .collect()
 }
+
+
+
+
+
+
