@@ -614,33 +614,6 @@ enum Args {
         common: CommonOpts,
     },
 
-    /// Compute pairwise similarity using k-mer Jaccard (no MSA/POA)
-    Simplesim {
-        #[clap(flatten)]
-        paf: PafOpts,
-        #[clap(flatten)]
-        query: QueryOpts,
-        #[clap(flatten)]
-        sequence: SequenceOpts,
-        #[arg(help_heading = "Simplesim options")]
-        #[clap(long = "k", value_parser, default_value_t = 21)]
-        k: usize,
-        #[arg(help_heading = "Output options")]
-        #[clap(long, action)]
-        distances: bool,
-        #[arg(help_heading = "Output options")]
-        #[clap(short = 'a', long, action, default_value_t = false)]
-        all: bool,
-        #[arg(help_heading = "Output options")]
-        #[clap(long, value_parser)]
-        delim: Option<char>,
-        #[arg(help_heading = "Output options")]
-        #[clap(long, value_parser, default_value_t = 1)]
-        delim_pos: u16,
-        #[clap(flatten)]
-        common: CommonOpts,
-    },
-
     /// Print alignment statistics
     Stats {
         #[clap(flatten)]
