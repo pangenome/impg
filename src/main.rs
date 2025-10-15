@@ -813,7 +813,7 @@ fn main() -> io::Result<()> {
 
             validate_output_format(
                 &output_format,
-                &["auto", "bed", "bedpe", "paf", "gfa", "maf", "fasta" | "fasta+paf" | "fasta-aln"],
+                &["auto", "bed", "bedpe", "paf", "gfa", "maf", "fasta", "fasta+paf", "fasta-aln"],
             )?;
 
             let impg = initialize_impg(&common, &paf)?;
@@ -1005,7 +1005,7 @@ fn main() -> io::Result<()> {
                             &impg,
                             &mut results,
                             sequence_index.as_ref().unwrap(),
-                            Some(name),
+                            name_opt.clone(),
                             query.effective_merge_distance(),
                             scoring_params.unwrap(),
                         )?;
