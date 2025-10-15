@@ -127,6 +127,20 @@ impg query -p alignments.paf -r chr1:1000-2000 -d 1000
 impg query -p alignments.paf -r chr1:1000-2000 --transitive-dfs
 ```
 
+#### Alignment visualizations
+
+The `scripts/faln2html.py` tool converts FASTA alignments into interactive HTML visualizations that can be viewed in any web browser. It supports [react-msa](https://github.com/GMOD/JBrowseMSA) and [ProSeqViewer](https://github.com/BioComputingUP/ProSeqViewer) as MSA viewers.
+
+```bash
+# Visualize FASTA alignments in the browser (pipe directly to visualization script)
+impg query -p alignments.paf -r chr1:1000-2000 -o fasta-aln --sequence-files *.fa | \
+  python scripts/faln2html.py -i - -o alignment.html
+
+# Choose visualization tool (reactmsa or proseqviewer)
+impg query -p alignments.paf -r chr1:1000-2000 -o fasta-aln --sequence-files *.fa | \
+  python scripts/faln2html.py -i - -o alignment.html --tool proseqviewer
+```
+
 ### Partition
 
 Partition the alignment into smaller pieces:
