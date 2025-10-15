@@ -197,9 +197,9 @@ impl GfaMafFastaOpts {
         Option<UnifiedSequenceIndex>,
         Option<(u8, u8, u8, u8, u8, u8)>,
     )> {
-        let needs_sequence_mandatory = matches!(output_format, "gfa" | "maf" | "fasta" | "fasta+paf");
+        let needs_sequence_mandatory = matches!(output_format, "gfa" | "maf" | "fasta" | "fasta-aln" | "fasta+paf");
         let needs_sequence_optional = output_format == "paf" && original_sequence_coordinates;
-        let needs_poa = matches!(output_format, "gfa" | "maf");
+        let needs_poa = matches!(output_format, "gfa" | "maf" | "fasta-aln");
 
         let scoring_params = if needs_poa {
             Some(self.parse_poa_scoring()?)
@@ -613,6 +613,7 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
     },
+
     /// Print alignment statistics
     Stats {
         #[clap(flatten)]
@@ -748,7 +749,7 @@ fn main() -> io::Result<()> {
             initialize_threads_and_log(&common);
 
             validate_selection_mode(&selection_mode)?;
-            validate_output_format(&output_format, &["bed", "gfa", "maf", "fasta"])?;
+            validate_output_format(&output_format, &["bed", "gfa", "maf", "fasta", "fasta-aln"])?;
 
             validate_region_size(
                 0,
@@ -812,7 +813,7 @@ fn main() -> io::Result<()> {
 
             validate_output_format(
                 &output_format,
-                &["auto", "bed", "bedpe", "paf", "gfa", "maf", "fasta", "fasta+paf"],
+                &["auto", "bed", "bedpe", "paf", "gfa", "maf", "fasta", "fasta+paf", "fasta-aln"],
             )?;
 
             let impg = initialize_impg(&common, &paf)?;
@@ -999,6 +1000,16 @@ fn main() -> io::Result<()> {
                             sequence_index.as_ref(),
                         )?;
                     },
+                    "fasta-aln" => {
+                        output_results_fasta_aln(
+                            &impg,
+                            &mut results,
+                            sequence_index.as_ref().unwrap(),
+                            name_opt.clone(),
+                            query.effective_merge_distance(),
+                            scoring_params.unwrap(),
+                        )?;
+                    }
                     _ => {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
@@ -1180,6 +1191,7 @@ fn main() -> io::Result<()> {
                 progress_bar,
             )?;
         }
+
         Args::Stats { common, paf } => {
             initialize_threads_and_log(&common);
             let impg = initialize_impg(&common, &paf)?;
@@ -1288,7 +1300,7 @@ fn validate_region_size(
     const MERGE_DISTANCE_LIMIT: i32 = 1000; // 1k limit
 
     // Check if this is a maf/gfa output format that uses SPOA
-    let uses_spoa = matches!(output_format, "maf" | "gfa");
+    let uses_spoa = matches!(output_format, "maf" | "gfa" | "fasta-aln");
 
     if uses_spoa && !force_large_region {
         if region_size > SIZE_LIMIT {
@@ -2178,6 +2190,33 @@ fn output_results_maf(
 
     Ok(())
 }
+
+fn output_results_fasta_aln(
+    impg: &Impg,
+    results: &mut Vec<AdjustedInterval>,
+    sequence_index: &UnifiedSequenceIndex,
+    _name: Option<String>,
+    merge_distance: i32,
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+) -> io::Result<()> {
+    // Merge intervals as for MAF/GFA (collapse per-query coords, merge strands)
+    merge_query_adjusted_intervals(results, merge_distance, true);
+
+    // Drain query intervals
+    let query_intervals: Vec<coitrees::Interval<u32>> =
+        results.drain(..).map(|(q, _, _)| q).collect();
+
+    // Ask graph layer to generate aligned FASTA from SPOA's MSA
+    let fasta_aln = impg::graph::generate_fasta_alignment_from_intervals(
+        impg,
+        &query_intervals,
+        sequence_index,
+        scoring_params,
+    );
+    print!("{fasta_aln}");
+    Ok(())
+}
+
 
 // Merge adjusted intervals by ignoring the target intervals (optimized for simple genomic interval merging in BED and GFA formats)
 fn merge_query_adjusted_intervals(

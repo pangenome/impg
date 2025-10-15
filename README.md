@@ -98,7 +98,7 @@ impg query -p alignments.paf -r chr1:1000-2000 -x -m 3
 # Filter by minimum gap-compressed identity
 impg query -p alignments.paf -r chr1:1000-2000 --min-identity 0.9
 
-# Output formats (auto/bed/bedpe/paf/gfa/maf/fasta)
+# Output formats (auto/bed/bedpe/paf/gfa/maf/fasta/fasta+paf/fasta-aln)
 impg query -p alignments.paf -r chr1:1000-2000 -o bed
 impg query -p alignments.paf -r chr1:1000-2000 -o bedpe
 impg query -p alignments.paf -b chr1:1000-2000 -o paf
@@ -107,6 +107,12 @@ impg query -p alignments.paf -b chr1:1000-2000 -o paf
 impg query -p alignments.paf -r chr1:1000-2000 -o gfa --sequence-files ref.fa genomes.fa
 impg query -p alignments.paf -r chr1:1000-2000 -o maf --sequence-list fastas.txt
 impg query -p alignments.paf -r chr1:1000-2000 -o fasta --sequence-files *.fa
+
+# fasta+paf combines FASTA and PAF output
+impg query -p alignments.paf -r chr1:1000-2000 -o fasta+paf --sequence-files *.fa
+
+# fasta-aln outputs POA-based FASTA alignment
+impg query -p alignments.paf -r chr1:1000-2000 -o fasta-aln --sequence-files *.fa
 
 # Works with AGC archives too
 impg query -p alignments.paf -r chr1:1000-2000 -o gfa --sequence-files genomes.agc
@@ -119,6 +125,20 @@ impg query -p alignments.paf -r chr1:1000-2000 -d 1000
 
 # Use DFS for transitive search (slower but fewer overlapping results)
 impg query -p alignments.paf -r chr1:1000-2000 --transitive-dfs
+```
+
+#### Alignment visualizations
+
+The `scripts/faln2html.py` tool converts FASTA alignments into interactive HTML visualizations that can be viewed in any web browser. It supports [react-msa](https://github.com/GMOD/JBrowseMSA) and [ProSeqViewer](https://github.com/BioComputingUP/ProSeqViewer) as MSA viewers.
+
+```bash
+# Visualize FASTA alignments in the browser (pipe directly to visualization script)
+impg query -p alignments.paf -r chr1:1000-2000 -o fasta-aln --sequence-files *.fa | \
+  python scripts/faln2html.py -i - -o alignment.html
+
+# Choose visualization tool (reactmsa or proseqviewer)
+impg query -p alignments.paf -r chr1:1000-2000 -o fasta-aln --sequence-files *.fa | \
+  python scripts/faln2html.py -i - -o alignment.html --tool proseqviewer
 ```
 
 ### Partition
