@@ -140,7 +140,6 @@ pub fn generate_maf_from_intervals(
     format_maf_from_msa(&msa, &sequence_metadata, None)
 }
 
-
 fn format_maf_from_msa(
     msa: &[String],
     sequence_metadata: &[SequenceMetadata],
@@ -200,8 +199,6 @@ fn format_maf_from_msa(
     output
 }
 
-
-
 pub fn generate_fasta_alignment_from_intervals(
     impg: &Impg,
     results: &[Interval<u32>],
@@ -222,12 +219,11 @@ pub fn generate_fasta_alignment_from_intervals(
     format_fasta_alignment_from_msa(&msa, &sequence_metadata, 80, true)
 }
 
-
 fn format_fasta_alignment_from_msa(
     msa: &[String],
     sequence_metadata: &[SequenceMetadata],
-    line_width: usize,   // e.g., 80
-    trim_all_gap: bool,  // true to trim leading/trailing all-gap columns
+    line_width: usize,  // e.g., 80
+    trim_all_gap: bool, // true to trim leading/trailing all-gap columns
 ) -> String {
     let mut out = String::new();
 
@@ -270,7 +266,7 @@ fn format_fasta_alignment_from_msa(
     // so end = start + size is consistent for both '+' and '-'.
     for (seq, meta) in msa.iter().zip(sequence_metadata.iter()) {
         let start = meta.start;
-        let end   = meta.start + meta.size;
+        let end = meta.start + meta.size;
 
         // Example header: >name:start-end(strand)
         // You can adjust to omit strand or change style if you prefer.
@@ -306,11 +302,6 @@ fn format_fasta_alignment_from_msa(
 
     out
 }
-
-
-
-
-
 
 pub fn prepare_poa_graph_and_sequences(
     impg: &Impg,
@@ -413,11 +404,6 @@ pub fn prepare_poa_graph_and_sequences(
     Ok((graph, sequence_metadata))
 }
 
-
-
-
-
-
 pub fn prepare_sequences(
     impg: &Impg,
     results: &[Interval<u32>],
@@ -430,15 +416,12 @@ pub fn prepare_sequences(
         .par_iter()
         .map(|interval| -> std::io::Result<(String, SequenceMetadata)> {
             // Resolve sequence name
-            let seq_name = impg
-                .seq_index
-                .get_name(interval.metadata)
-                .ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        format!("Sequence name not found for ID {}", interval.metadata),
-                    )
-                })?;
+            let seq_name = impg.seq_index.get_name(interval.metadata).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("Sequence name not found for ID {}", interval.metadata),
+                )
+            })?;
 
             // Resolve total contig length
             let total_length = impg
@@ -496,11 +479,6 @@ pub fn prepare_sequences(
 
     Ok(pairs)
 }
-
-
-
-
-
 
 /// Given a raw GFAv1.1 string and a `Write` target, convert it to GFAv1.0:
 ///  - Rewrite `H` lines to `H\tVN:Z:1.0`
@@ -667,9 +645,3 @@ pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
         })
         .collect()
 }
-
-
-
-
-
-

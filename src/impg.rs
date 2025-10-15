@@ -110,10 +110,7 @@ impl QueryMetadata {
         self.strand_and_cigar_offset & !Self::STRAND_BIT
     }
 
-    fn get_cigar_ops(
-        &self,
-        paf_files: &[String],
-    ) -> Vec<CigarOp> {
+    fn get_cigar_ops(&self, paf_files: &[String]) -> Vec<CigarOp> {
         // Allocate space for cigar
         let mut cigar_buffer = vec![0; self.cigar_bytes];
 
@@ -282,9 +279,9 @@ impl SortedRanges {
 pub struct Impg {
     pub trees: RwLock<TreeMap>,
     pub seq_index: SequenceIndex,
-    paf_files: Vec<String>,        // List of all PAF files
-    pub forest_map: ForestMap,     // Forest map for lazy loading
-    index_file_path: String,       // Path to the index file for lazy loading
+    paf_files: Vec<String>,    // List of all PAF files
+    pub forest_map: ForestMap, // Forest map for lazy loading
+    index_file_path: String,   // Path to the index file for lazy loading
 }
 
 impl Impg {

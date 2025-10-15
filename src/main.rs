@@ -197,7 +197,10 @@ impl GfaMafFastaOpts {
         Option<UnifiedSequenceIndex>,
         Option<(u8, u8, u8, u8, u8, u8)>,
     )> {
-        let needs_sequence_mandatory = matches!(output_format, "gfa" | "maf" | "fasta" | "fasta-aln" | "fasta+paf");
+        let needs_sequence_mandatory = matches!(
+            output_format,
+            "gfa" | "maf" | "fasta" | "fasta-aln" | "fasta+paf"
+        );
         let needs_sequence_optional = output_format == "paf" && original_sequence_coordinates;
         let needs_poa = matches!(output_format, "gfa" | "maf" | "fasta-aln");
 
@@ -813,7 +816,17 @@ fn main() -> io::Result<()> {
 
             validate_output_format(
                 &output_format,
-                &["auto", "bed", "bedpe", "paf", "gfa", "maf", "fasta", "fasta+paf", "fasta-aln"],
+                &[
+                    "auto",
+                    "bed",
+                    "bedpe",
+                    "paf",
+                    "gfa",
+                    "maf",
+                    "fasta",
+                    "fasta+paf",
+                    "fasta-aln",
+                ],
             )?;
 
             let impg = initialize_impg(&common, &paf)?;
@@ -977,7 +990,7 @@ fn main() -> io::Result<()> {
                             query.effective_merge_distance(),
                             reverse_complement,
                         )?;
-                    },
+                    }
                     "fasta+paf" => {
                         output_results_fasta(
                             &impg,
@@ -999,7 +1012,7 @@ fn main() -> io::Result<()> {
                             query.original_sequence_coordinates,
                             sequence_index.as_ref(),
                         )?;
-                    },
+                    }
                     "fasta-aln" => {
                         output_results_fasta_aln(
                             &impg,
@@ -1587,7 +1600,10 @@ fn generate_multi_index(
                     // For compressed files, check if GZI index exists for optimization
                     let gzi_path = format!("{}.gzi", paf_file);
                     if std::path::Path::new(&gzi_path).exists() {
-                        debug!("Found GZI index for {}, using multithreaded decompression", paf_file);
+                        debug!(
+                            "Found GZI index for {}, using multithreaded decompression",
+                            paf_file
+                        );
                         // Use multithreaded reader with GZI for faster parsing
                         let gzi_index = bgzf::gzi::fs::read(&gzi_path).map_err(|e| {
                             io::Error::new(
@@ -1595,24 +1611,34 @@ fn generate_multi_index(
                                 format!("Failed to read GZI index {}: {}", gzi_path, e),
                             )
                         })?;
-                        let mt_reader = bgzf::io::MultithreadedReader::with_worker_count(threads, file);
-                        impg::paf::parse_paf_bgzf_with_gzi(mt_reader, gzi_index, &mut seq_index_guard)
-                            .map_err(|e| {
-                                io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    format!("Failed to parse PAF records from {}: {:?}", paf_file, e),
-                                )
-                            })?
-                    } else {
-                        debug!("No GZI index found for {}, using BGZF reader", paf_file);
-                        // No GZI available, use BGZF reader to capture virtual positions directly
-                        let bgzf_reader = bgzf::io::Reader::new(file);
-                        impg::paf::parse_paf_bgzf(bgzf_reader, &mut seq_index_guard).map_err(|e| {
+                        let mt_reader =
+                            bgzf::io::MultithreadedReader::with_worker_count(threads, file);
+                        impg::paf::parse_paf_bgzf_with_gzi(
+                            mt_reader,
+                            gzi_index,
+                            &mut seq_index_guard,
+                        )
+                        .map_err(|e| {
                             io::Error::new(
                                 io::ErrorKind::InvalidData,
                                 format!("Failed to parse PAF records from {}: {:?}", paf_file, e),
                             )
                         })?
+                    } else {
+                        debug!("No GZI index found for {}, using BGZF reader", paf_file);
+                        // No GZI available, use BGZF reader to capture virtual positions directly
+                        let bgzf_reader = bgzf::io::Reader::new(file);
+                        impg::paf::parse_paf_bgzf(bgzf_reader, &mut seq_index_guard).map_err(
+                            |e| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!(
+                                        "Failed to parse PAF records from {}: {:?}",
+                                        paf_file, e
+                                    ),
+                                )
+                            },
+                        )?
                     }
                 } else {
                     // For uncompressed files, use regular buffered reader
@@ -2216,7 +2242,6 @@ fn output_results_fasta_aln(
     print!("{fasta_aln}");
     Ok(())
 }
-
 
 // Merge adjusted intervals by ignoring the target intervals (optimized for simple genomic interval merging in BED and GFA formats)
 fn merge_query_adjusted_intervals(
@@ -2883,5 +2908,4 @@ mod tests {
         assert_eq!(start, 45803);
         assert_eq!(end, 45861);
     }
-
 }

@@ -182,11 +182,12 @@ pub fn parse_paf_bgzf_with_gzi<R: std::io::Read>(
         let uncompressed_offset = record.strand_and_cigar_offset & !PartialPafRecord::STRAND_BIT;
 
         // Convert to virtual position using GZI query
-        let virtual_pos = gzi_index
-            .query(uncompressed_offset)
-            .map_err(|e| ParseErr::InvalidFormat(
-                format!("Failed to find virtual position for offset {}: {:?}", uncompressed_offset, e)
-            ))?;
+        let virtual_pos = gzi_index.query(uncompressed_offset).map_err(|e| {
+            ParseErr::InvalidFormat(format!(
+                "Failed to find virtual position for offset {}: {:?}",
+                uncompressed_offset, e
+            ))
+        })?;
 
         // Update the record with virtual position, preserving strand bit
         let strand_bit = record.strand_and_cigar_offset & PartialPafRecord::STRAND_BIT;
