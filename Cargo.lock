@@ -883,6 +883,8 @@ dependencies = [
  "gzp",
  "handlegraph",
  "indicatif",
+ "lib_tracepoints",
+ "lib_wfa2",
  "libc",
  "log",
  "nalgebra",
@@ -991,6 +993,19 @@ dependencies = [
  "ryu",
  "static_assertions",
 ]
+
+[[package]]
+name = "lib_tracepoints"
+version = "0.1.0"
+source = "git+https://github.com/AndreaGuarracino/lib_tracepoints#f78711ff3e24835d71d01cdaa9e28b824da6fc64"
+dependencies = [
+ "lib_wfa2",
+]
+
+[[package]]
+name = "lib_wfa2"
+version = "0.1.0"
+source = "git+https://github.com/AndreaGuarracino/lib_wfa2#08b376c0a864f8802738eae3ce60dc0ee709bf82"
 
 [[package]]
 name = "libc"

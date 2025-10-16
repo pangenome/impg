@@ -906,6 +906,8 @@ fn main() -> io::Result<()> {
                     query.transitive,
                     query.transitive_opts.transitive_dfs,
                     &query.transitive_opts,
+                    sequence_index.as_ref(),
+                    scoring_params,
                 )?;
 
                 // Apply subset filter if provided
@@ -1157,6 +1159,8 @@ fn main() -> io::Result<()> {
                     query.transitive,
                     query.transitive_opts.transitive_dfs,
                     &query.transitive_opts,
+                    Some(&sequence_index),
+                    Some(scoring_params),
                 )?;
 
                 let region_label = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
@@ -1735,6 +1739,8 @@ fn perform_query(
     transitive: bool,
     transitive_dfs: bool,
     transitive_opts: &TransitiveOpts,
+    sequence_index: Option<&UnifiedSequenceIndex>,
+    penalties: Option<(u8, u8, u8, u8, u8, u8)>,
 ) -> io::Result<Vec<AdjustedInterval>> {
     let (target_start, target_end) = target_range;
     let target_id = impg.seq_index.get_id(target_name).ok_or_else(|| {
@@ -1769,6 +1775,8 @@ fn perform_query(
             transitive_opts.min_distance_between_ranges,
             store_cigar,
             min_identity,
+            sequence_index,
+            penalties,
         )
     } else if transitive_dfs {
         impg.query_transitive_dfs(
@@ -1781,6 +1789,8 @@ fn perform_query(
             transitive_opts.min_distance_between_ranges,
             store_cigar,
             min_identity,
+            sequence_index,
+            penalties,
         )
     } else {
         impg.query(
@@ -1789,6 +1799,8 @@ fn perform_query(
             target_end,
             store_cigar,
             min_identity,
+            sequence_index,
+            penalties,
         )
     };
 

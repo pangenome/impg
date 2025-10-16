@@ -235,6 +235,8 @@ pub fn partition_alignments(
                     min_distance_between_ranges,
                     false, // Don't store CIGAR strings during partitioning
                     min_identity,
+                    sequence_index,
+                    scoring_params,
                 )
             } else {
                 impg.query_transitive_bfs(
@@ -247,6 +249,8 @@ pub fn partition_alignments(
                     min_distance_between_ranges,
                     false, // Don't store CIGAR strings during partitioning
                     min_identity,
+                    sequence_index,
+                    scoring_params,
                 )
             };
             //let query_time = query_start.elapsed();

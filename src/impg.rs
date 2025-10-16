@@ -1,17 +1,27 @@
 use crate::forest_map::ForestMap;
+use crate::graph::reverse_complement;
 use crate::paf::{ParseErr, PartialPafRecord, Strand};
 use crate::seqidx::SequenceIndex;
+use crate::sequence_index::SequenceIndex as _; // The as _ syntax imports the trait so its methods are available, but doesn't bring the name into scope (avoiding the naming conflict)
+use crate::sequence_index::UnifiedSequenceIndex;
 use coitrees::{BasicCOITree, Interval, IntervalTree};
+use lib_tracepoints::variable_tracepoints_to_cigar_with_aligner;
+use lib_wfa2::affine_wavefront::AffineWavefronts;
 use log::debug;
 use noodles::bgzf;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::cmp::{max, min};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::sync::Arc;
 use std::sync::RwLock;
+
+thread_local! {
+    static ALIGNERS: RefCell<Vec<AffineWavefronts>> = const { RefCell::new(Vec::new()) };
+}
 
 /// Parse a CIGAR string into a vector of CigarOp
 // Note that the query_delta is negative for reverse strand alignments
@@ -90,8 +100,8 @@ pub struct QueryMetadata {
     query_start: i32,
     query_end: i32,
     paf_file_index: u16,
-    strand_and_cigar_offset: u64, // Track strand and cigar offset
-    cigar_bytes: usize,
+    strand_and_data_offset: u64, // Track strand and cigar/tracepoints offset
+    data_bytes: usize,
 }
 
 impl QueryMetadata {
@@ -99,41 +109,75 @@ impl QueryMetadata {
     const STRAND_BIT: u64 = 0x8000000000000000; // Most significant bit for u64
 
     fn strand(&self) -> Strand {
-        if (self.strand_and_cigar_offset & Self::STRAND_BIT) != 0 {
+        if (self.strand_and_data_offset & Self::STRAND_BIT) != 0 {
             Strand::Reverse
         } else {
             Strand::Forward
         }
     }
 
-    fn cigar_offset(&self) -> u64 {
-        self.strand_and_cigar_offset & !Self::STRAND_BIT
+    fn data_offset(&self) -> u64 {
+        self.strand_and_data_offset & !Self::STRAND_BIT
     }
 
-    fn get_cigar_ops(&self, paf_files: &[String]) -> Vec<CigarOp> {
+    fn get_data_bytes(&self, paf_files: &[String]) -> Vec<u8> {
         // Allocate space for cigar
-        let mut cigar_buffer = vec![0; self.cigar_bytes];
+        let mut data_buffer = vec![0; self.data_bytes];
 
         // Get the correct PAF file
         let paf_file_index = self.paf_file_index as usize;
         let paf_file = &paf_files[paf_file_index];
-
         // Get reader and seek start of cigar str
         if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
             // For compressed files, use virtual position directly
             let mut reader = bgzf::io::Reader::new(File::open(paf_file).unwrap());
-            let virtual_position = bgzf::VirtualPosition::from(self.cigar_offset());
+            let virtual_position = bgzf::VirtualPosition::from(self.data_offset());
             reader.seek(virtual_position).unwrap();
-            reader.read_exact(&mut cigar_buffer).unwrap();
+            reader.read_exact(&mut data_buffer).unwrap();
         } else {
             // For uncompressed files, use byte offset
             let mut reader = File::open(paf_file).unwrap();
-            reader.seek(SeekFrom::Start(self.cigar_offset())).unwrap();
-            reader.read_exact(&mut cigar_buffer).unwrap();
+            reader.seek(SeekFrom::Start(self.data_offset())).unwrap();
+            reader.read_exact(&mut data_buffer).unwrap();
         };
 
-        let cigar_str: &str = std::str::from_utf8(&cigar_buffer).unwrap();
+        data_buffer
+    }
+
+    fn get_cigar_ops_from_bytes(&self, data_bytes: Vec<u8>) -> Vec<CigarOp> {
+        let cigar_str = std::str::from_utf8(&data_bytes).unwrap();
         parse_cigar_to_delta(cigar_str).ok().unwrap_or_default()
+    }
+
+    fn get_tracepoints_from_bytes(&self, data_bytes: Vec<u8>) -> Vec<(usize, Option<usize>)> {
+        let tracepoints_str = std::str::from_utf8(&data_bytes).unwrap();
+        parse_variable_tracepoints(tracepoints_str)
+            .ok()
+            .unwrap_or_default()
+    }
+
+    /// Fast check to determine if data contains tracepoints or CIGAR
+    /// Tracepoints: "123,456;789,012" or "123;456;789" or "123" or "123,456"
+    /// CIGAR: "123M45I67D"
+    fn is_tracepoints_data(data_bytes: &[u8]) -> bool {
+        // Find the first non-digit character after skipping initial digits
+        let mut i = 0;
+        // Skip leading digits
+        while i < data_bytes.len() && data_bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+
+        // Check the first non-digit character
+        if i < data_bytes.len() {
+            let c = data_bytes[i];
+            // Tracepoints use comma or semicolon as separators
+            // CIGAR uses operation characters (M, I, D, =, X)
+            c == b',' || c == b';'
+        } else {
+            // If it's all digits, it's a tracepoint (single number)
+            // CIGAR strings always have operation characters
+            true
+        }
     }
 }
 
@@ -284,7 +328,182 @@ pub struct Impg {
     index_file_path: String,   // Path to the index file for lazy loading
 }
 
+/// Execute a closure with a thread-local aligner
+fn with_thread_aligner<F, R>(penalties: (u8, u8, u8, u8, u8, u8), f: F) -> R
+where
+    F: FnOnce(&mut AffineWavefronts) -> R,
+{
+    ALIGNERS.with(|aligners| {
+        let mut aligners = aligners.borrow_mut();
+        if aligners.is_empty() {
+            let (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) = penalties;
+            aligners.push(AffineWavefronts::with_penalties_affine2p(
+                0, // match score
+                mismatch.into(),
+                gap_open1.into(),
+                gap_ext1.into(),
+                gap_open2.into(),
+                gap_ext2.into(),
+            ));
+        }
+        f(&mut aligners[0])
+    })
+}
+
 impl Impg {
+        fn process_tracepoints_data(
+        &self,
+        data_buffer: Vec<u8>,
+        metadata: &QueryMetadata,
+        target_id: u32,
+        sequence_index: Option<&UnifiedSequenceIndex>,
+        penalties: (u8, u8, u8, u8, u8, u8),
+        requested_range: (i32, i32),
+    ) -> (i32, i32, i32, i32, Vec<CigarOp>) {
+        if let Some(sequence_index) = sequence_index {
+            // Get the tracepoints
+            let tracepoints = metadata.get_tracepoints_from_bytes(data_buffer);
+
+            // Scan tracepoints to find the relevant subset for the requested range
+            let mut query_pos = if metadata.strand() == Strand::Forward {
+                metadata.query_start
+            } else {
+                metadata.query_end
+            };
+            let mut target_pos = metadata.target_start;
+            let mut start_idx = 0;
+            let mut end_idx = tracepoints.len();
+            let mut found_start = false;
+            let mut subset_query_start = if metadata.strand() == Strand::Forward {
+                metadata.query_start
+            } else {
+                metadata.query_end
+            };
+            let mut subset_target_start = metadata.target_start;
+            let mut subset_query_end = if metadata.strand() == Strand::Forward {
+                metadata.query_end
+            } else {
+                metadata.query_start
+            };
+            let mut subset_target_end = metadata.target_end;
+
+            // Find the relevant subset of tracepoints
+            for (i, &(a_len, b_len_opt)) in tracepoints.iter().enumerate() {
+                let query_delta = if metadata.strand() == Strand::Forward {
+                    a_len as i32
+                } else {
+                    -(a_len as i32)
+                };
+                let target_delta = b_len_opt.unwrap_or(a_len) as i32;
+
+                let next_query_pos = query_pos + query_delta;
+                let next_target_pos = target_pos + target_delta;
+
+                // Check if this tracepoint overlaps with the requested range
+                let overlaps =
+                    target_pos < requested_range.1 && next_target_pos >= requested_range.0;
+
+                if overlaps && !found_start {
+                    // Found the start of the relevant region
+                    start_idx = i;
+                    subset_query_start = query_pos;
+                    subset_target_start = target_pos;
+                    found_start = true;
+                }
+
+                if found_start {
+                    // Update the end of the relevant region as we go
+                    end_idx = i + 1;
+                    subset_query_end = next_query_pos;
+                    subset_target_end = next_target_pos;
+
+                    // Only break if the current tracepoint no longer overlaps
+                    if target_pos >= requested_range.1 {
+                        break;
+                    }
+                }
+
+                query_pos = next_query_pos;
+                target_pos = next_target_pos;
+            }
+
+            // Extract the relevant subset of tracepoints
+            let subset_tracepoints = &tracepoints[start_idx..end_idx];
+
+            // Fetch only the relevant portions of the sequences
+            let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
+            let query_seq_result = if metadata.strand() == Strand::Forward {
+                sequence_index.fetch_sequence(query_name, subset_query_start, subset_query_end)
+            } else {
+                // For reverse strand, coordinates are inverted, so we need min/max
+                let (fetch_start, fetch_end) = if subset_query_start < subset_query_end {
+                    (subset_query_start, subset_query_end)
+                } else {
+                    (subset_query_end, subset_query_start)
+                };
+                // Fetch and reverse complement
+                match sequence_index.fetch_sequence(query_name, fetch_start, fetch_end) {
+                    Ok(seq) => Ok(reverse_complement(&seq)),
+                    Err(e) => Err(e),
+                }
+            };
+
+            // Fetch target sequence
+            let target_name = self.seq_index.get_name(target_id).unwrap();
+            let target_seq_result =
+                sequence_index.fetch_sequence(target_name, subset_target_start, subset_target_end);
+
+            // Convert tracepoints to CIGAR if we successfully fetched both sequences
+            match (query_seq_result, target_seq_result) {
+                (Ok(query_seq), Ok(target_seq)) => {
+                    // Convert tracepoints to CIGAR operations using thread-local aligner
+                    let cigar_str = with_thread_aligner(penalties, |aligner| {
+                        variable_tracepoints_to_cigar_with_aligner(
+                            subset_tracepoints,
+                            &query_seq,
+                            &target_seq,
+                            0,
+                            0,
+                            aligner,
+                        )
+                    });
+
+                    (
+                        subset_target_start,
+                        subset_target_end,
+                        // For reverse strand, coordinates should be in forward orientation (start < end)
+                        if metadata.strand() == Strand::Forward {
+                            subset_query_start
+                        } else {
+                            subset_query_end
+                        },
+                        if metadata.strand() == Strand::Forward {
+                            subset_query_end
+                        } else {
+                            subset_query_start
+                        },
+                        // Parse the CIGAR string to CigarOp vector
+                        parse_cigar_to_delta(&cigar_str).ok().unwrap_or_default(),
+                    )
+                }
+                (Err(e), _) => {
+                    panic!("Failed to fetch query sequence: {e}");
+                }
+                (_, Err(e)) => {
+                    panic!("Failed to fetch target sequence: {e}");
+                }
+            }
+        } else {
+            #[cfg(feature = "agc")]
+            let file_types = "FASTA/AGC";
+            #[cfg(not(feature = "agc"))]
+            let file_types = "FASTA";
+            panic!(
+                "Sequence data ({file_types}) is required for tracepoints conversion. Use --sequence-files or --sequence-list"
+            )
+        }
+    }
+
     pub fn from_multi_paf_records(
         records_by_file: &[(Vec<PartialPafRecord>, String)],
         seq_index: SequenceIndex,
@@ -309,8 +528,8 @@ impl Impg {
                             query_start: record.query_start as i32,
                             query_end: record.query_end as i32,
                             paf_file_index: file_index as u16,
-                            strand_and_cigar_offset: record.strand_and_cigar_offset, // Already includes strand bit
-                            cigar_bytes: record.cigar_bytes,
+                            strand_and_data_offset: record.strand_and_cigar_offset, // Already includes strand bit
+                            data_bytes: record.cigar_bytes,
                         };
 
                         Some((
@@ -550,6 +769,8 @@ impl Impg {
         range_end: i32,
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
+        sequence_index: Option<&UnifiedSequenceIndex>,
+        penalties: Option<(u8, u8, u8, u8, u8, u8)>,
     ) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
         // Add the input range to the results
@@ -579,21 +800,50 @@ impl Impg {
             range_end - range_start
         );
 
+        // Use default penalties if not provided
+        let (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) =
+            penalties.unwrap_or((0, 4, 6, 2, 26, 1));
+
         // Get or load the tree - if None, no overlaps exist for this target
         if let Some(tree) = self.get_or_load_tree(target_id) {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
+                let data_buffer = metadata.get_data_bytes(&self.paf_files);
+
+                let (adj_target_start, adj_target_end, adj_query_start, adj_query_end, cigar_ops) =
+                    if QueryMetadata::is_tracepoints_data(&data_buffer) {
+                        self.process_tracepoints_data(
+                            data_buffer,
+                            metadata,
+                            target_id,
+                            sequence_index,
+                            (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
+                            (range_start, range_end),
+                        )
+                    } else {
+                        // Handle regular CIGAR
+                        (
+                            metadata.target_start,
+                            metadata.target_end,
+                            metadata.query_start,
+                            metadata.query_end,
+                            metadata.get_cigar_ops_from_bytes(data_buffer),
+                        )
+                    };
+
+                // Project through alignment
                 let result = project_target_range_through_alignment(
                     (range_start, range_end),
                     (
-                        metadata.target_start,
-                        metadata.target_end,
-                        metadata.query_start,
-                        metadata.query_end,
+                        adj_target_start,
+                        adj_target_end,
+                        adj_query_start,
+                        adj_query_end,
                         metadata.strand(),
                     ),
-                    &metadata.get_cigar_ops(&self.paf_files),
+                    &cigar_ops,
                 );
+
                 if let Some((
                     adjusted_query_start,
                     adjusted_query_end,
@@ -645,6 +895,8 @@ impl Impg {
         min_distance_between_ranges: i32,
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
+        sequence_index: Option<&UnifiedSequenceIndex>,
+        penalties: Option<(u8, u8, u8, u8, u8, u8)>,
     ) -> Vec<AdjustedInterval> {
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
@@ -694,6 +946,10 @@ impl Impg {
             }
         }
 
+        // Use default penalties if not provided
+        let (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) =
+            penalties.unwrap_or((0, 4, 6, 2, 26, 1));
+
         while let Some((
             current_target_id,
             current_target_start,
@@ -729,16 +985,45 @@ impl Impg {
                 let processed_results: Vec<_> = intervals
                     .into_par_iter()
                     .filter_map(|metadata| {
-                        let result = project_target_range_through_alignment(
-                            (current_target_start, current_target_end),
+                        let data_buffer =
+                            metadata.get_data_bytes(&self.paf_files);
+
+                        let (
+                            adj_target_start,
+                            adj_target_end,
+                            adj_query_start,
+                            adj_query_end,
+                            cigar_ops,
+                        ) = if QueryMetadata::is_tracepoints_data(&data_buffer) {
+                            self.process_tracepoints_data(
+                                data_buffer,
+                                &metadata,
+                                current_target_id,
+                                sequence_index,
+                                (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
+                                (current_target_start, current_target_end),
+                            )
+                        } else {
+                            // Handle regular CIGAR
                             (
                                 metadata.target_start,
                                 metadata.target_end,
                                 metadata.query_start,
                                 metadata.query_end,
+                                metadata.get_cigar_ops_from_bytes(data_buffer),
+                            )
+                        };
+
+                        let result = project_target_range_through_alignment(
+                            (current_target_start, current_target_end),
+                            (
+                                adj_target_start,
+                                adj_target_end,
+                                adj_query_start,
+                                adj_query_end,
                                 metadata.strand(),
                             ),
-                            &metadata.get_cigar_ops(&self.paf_files),
+                            &cigar_ops,
                         );
 
                         if let Some((
@@ -886,6 +1171,8 @@ impl Impg {
         min_distance_between_ranges: i32,
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
+        sequence_index: Option<&UnifiedSequenceIndex>,
+        penalties: Option<(u8, u8, u8, u8, u8, u8)>,
     ) -> Vec<AdjustedInterval> {
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
@@ -939,6 +1226,10 @@ impl Impg {
             }
         }
 
+        // Use default penalties if not provided
+        let (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) =
+            penalties.unwrap_or((0, 4, 6, 2, 26, 1));
+
         // Process by depth until max_depth or no more ranges
         while !current_ranges.is_empty() && (max_depth == 0 || current_depth < max_depth) {
             debug!(
@@ -962,16 +1253,48 @@ impl Impg {
                                     *current_target_end,
                                     |interval| {
                                         let metadata = &interval.metadata;
-                                        let result = project_target_range_through_alignment(
-                                            (*current_target_start, *current_target_end),
+                                        let data_buffer = metadata
+                                            .get_data_bytes(&self.paf_files);
+
+                                        let (
+                                            adj_target_start,
+                                            adj_target_end,
+                                            adj_query_start,
+                                            adj_query_end,
+                                            cigar_ops,
+                                        ) = if QueryMetadata::is_tracepoints_data(&data_buffer) {
+                                            self.process_tracepoints_data(
+                                                data_buffer,
+                                                metadata,
+                                                *current_target_id,
+                                                sequence_index,
+                                                (
+                                                    _match, mismatch, gap_open1, gap_ext1,
+                                                    gap_open2, gap_ext2,
+                                                ),
+                                                (*current_target_start, *current_target_end),
+                                            )
+                                        } else {
+                                            // Handle regular CIGAR
                                             (
                                                 metadata.target_start,
                                                 metadata.target_end,
                                                 metadata.query_start,
                                                 metadata.query_end,
+                                                metadata.get_cigar_ops_from_bytes(data_buffer),
+                                            )
+                                        };
+
+                                        let result = project_target_range_through_alignment(
+                                            (*current_target_start, *current_target_end),
+                                            (
+                                                adj_target_start,
+                                                adj_target_end,
+                                                adj_query_start,
+                                                adj_query_end,
                                                 metadata.strand(),
                                             ),
-                                            &metadata.get_cigar_ops(&self.paf_files),
+                                            &cigar_ops,
                                         );
 
                                         if let Some((
@@ -1286,6 +1609,25 @@ fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, ParseErr> {
     Ok(ops)
 }
 
+fn parse_variable_tracepoints(tp_str: &str) -> Result<Vec<(usize, Option<usize>)>, ParseErr> {
+    Ok(tp_str
+        .split(';')
+        .filter_map(|s| {
+            if s.contains(',') {
+                // This has both coordinates
+                let parts: Vec<&str> = s.split(',').collect();
+                Some((parts[0].parse().unwrap(), Some(parts[1].parse().unwrap())))
+            } else {
+                // This has only first coordinate
+                match s.parse() {
+                    Ok(a) => Some((a, None)),
+                    Err(_) => None,
+                }
+            }
+        })
+        .collect())
+}
+
 fn calculate_gap_compressed_identity(cigar_ops: &[CigarOp]) -> f64 {
     let (matches, mismatches, insertions, deletions) =
         cigar_ops
@@ -1525,7 +1867,7 @@ mod tests {
                 target_id,
                 target_start: 30,
                 target_end: 40,
-                strand_and_cigar_offset: 45, // Forward strand
+                strand_and_data_offset: 45, // Forward strand
                 cigar_bytes: 3,
             },
             // Add more test records as needed
