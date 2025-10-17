@@ -192,14 +192,29 @@ impl GfaMafFastaOpts {
         self,
         output_format: &str,
         original_sequence_coordinates: bool,
+        paf_opts: &PafOpts,
     ) -> io::Result<(
         Option<UnifiedSequenceIndex>,
         Option<(u8, u8, u8, u8, u8, u8)>,
     )> {
+        // Check if any of the alignment files are .1aln files (which require sequence data for tracepoint conversion)
+        let has_onealn_files = if !paf_opts.paf_files.is_empty() {
+            paf_opts.paf_files.iter().any(|f| f.ends_with(".1aln"))
+        } else if let Some(paf_list) = &paf_opts.paf_list {
+            // Read and check files from list
+            if let Ok(content) = std::fs::read_to_string(paf_list) {
+                content.lines().any(|line| line.trim().ends_with(".1aln"))
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
         let needs_sequence_mandatory = matches!(
             output_format,
             "gfa" | "maf" | "fasta" | "fasta-aln" | "fasta+paf"
-        );
+        ) || has_onealn_files; // .1aln files require sequence data for tracepoint conversion
         let needs_sequence_optional = output_format == "paf" && original_sequence_coordinates;
         let needs_poa = matches!(output_format, "gfa" | "maf" | "fasta-aln");
 
@@ -212,10 +227,17 @@ impl GfaMafFastaOpts {
         let sequence_index = if needs_sequence_mandatory || needs_sequence_optional {
             let index = self.sequence.build_sequence_index()?;
             if index.is_none() && needs_sequence_mandatory {
-                #[cfg(feature = "agc")]
-                let msg = format!("Sequence files (FASTA/AGC) are required for '{output_format}' output format. Use --sequence-files or --sequence-list");
-                #[cfg(not(feature = "agc"))]
-                let msg = format!("Sequence files (FASTA) are required for '{}' output format. Use --sequence-files or --sequence-list", output_format);
+                let file_types = if cfg!(feature = "agc") {
+                    "FASTA/AGC"
+                } else {
+                    "FASTA"
+                };
+                
+                let msg = if has_onealn_files {
+                    format!("Sequence files ({file_types}) are required for .1aln alignment files to convert tracepoints to CIGAR strings. Use --sequence-files or --sequence-list")
+                } else {
+                    format!("Sequence files ({file_types}) are required for '{output_format}' output format. Use --sequence-files or --sequence-list")
+                };
 
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, msg));
             }
@@ -777,7 +799,7 @@ fn main() -> io::Result<()> {
 
             // Setup POA/sequence resources
             let (sequence_index, scoring_params) =
-                gfa_maf_fasta.setup_output_resources(&output_format, false)?;
+                gfa_maf_fasta.setup_output_resources(&output_format, false, &paf)?;
 
             let impg = initialize_impg(&common, &paf)?;
 
@@ -892,6 +914,7 @@ fn main() -> io::Result<()> {
             let (sequence_index, scoring_params) = gfa_maf_fasta.setup_output_resources(
                 resolved_output_format,
                 query.original_sequence_coordinates,
+                &paf,
             )?;
 
             // Process all target ranges in a unified loop
@@ -1084,7 +1107,7 @@ fn main() -> io::Result<()> {
 
             // Setup POA/sequence resources (always required for similarity)
             let (sequence_index, scoring_params) =
-                gfa_maf_fasta.setup_output_resources("gfa", false)?;
+                gfa_maf_fasta.setup_output_resources("gfa", false, &paf)?;
             let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
             let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA
 
@@ -1463,9 +1486,9 @@ fn find_output_stream(basename: &Option<String>, extension: &str) -> io::Result<
 
 /// Load/generate index based on common and PAF options
 fn initialize_impg(common: &CommonOpts, paf: &PafOpts) -> io::Result<Impg> {
-    // Resolve the list of PAF files
+    // Resolve the list of alignment files (PAF or .1aln)
     let paf_files = resolve_paf_files(paf)?;
-    info!("Found {} PAF files", paf_files.len());
+    info!("Found {} alignment file(s)", paf_files.len());
 
     // Load or generate index
     if paf.force_reindex {
@@ -1475,7 +1498,7 @@ fn initialize_impg(common: &CommonOpts, paf: &PafOpts) -> io::Result<Impg> {
     }
 }
 
-/// Resolve the list of PAF files from either --paf-files or --paf-list
+/// Resolve the list of alignment files (PAF or .1aln) from either --paf-files or --paf-list
 fn resolve_paf_files(paf: &PafOpts) -> io::Result<Vec<String>> {
     let paf_files = if !paf.paf_files.is_empty() {
         paf.paf_files.clone()

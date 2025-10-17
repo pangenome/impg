@@ -1,6 +1,7 @@
 use crate::forest_map::ForestMap;
 use crate::graph::reverse_complement;
 use crate::alignment_record::{AlignmentRecord, Strand};
+use crate::onealn::OneAlnParser;
 use crate::paf::ParseErr;
 use crate::seqidx::SequenceIndex;
 use crate::sequence_index::SequenceIndex as _; // The as _ syntax imports the trait so its methods are available, but doesn't bring the name into scope (avoiding the naming conflict)
@@ -100,7 +101,7 @@ pub struct QueryMetadata {
     target_end: i32,
     query_start: i32,
     query_end: i32,
-    paf_file_index: u16,
+    alignment_file_index: u16,
     strand_and_data_offset: u64, // Track strand and cigar/tracepoints offset
     data_bytes: usize,
 }
@@ -121,28 +122,97 @@ impl QueryMetadata {
         self.strand_and_data_offset & !Self::STRAND_BIT
     }
 
-    fn get_data_bytes(&self, paf_files: &[String]) -> Vec<u8> {
-        // Allocate space for cigar
-        let mut data_buffer = vec![0; self.data_bytes];
-
-        // Get the correct PAF file
-        let paf_file_index = self.paf_file_index as usize;
-        let paf_file = &paf_files[paf_file_index];
-        // Get reader and seek start of cigar str
-        if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-            // For compressed files, use virtual position directly
-            let mut reader = bgzf::io::Reader::new(File::open(paf_file).unwrap());
-            let virtual_position = bgzf::VirtualPosition::from(self.data_offset());
-            reader.seek(virtual_position).unwrap();
-            reader.read_exact(&mut data_buffer).unwrap();
+    /// Determine file type based on extension
+    fn get_file_type(paf_file: &str) -> FileType {
+        if paf_file.ends_with(".1aln") {
+            FileType::OneAln
         } else {
-            // For uncompressed files, use byte offset
-            let mut reader = File::open(paf_file).unwrap();
-            reader.seek(SeekFrom::Start(self.data_offset())).unwrap();
-            reader.read_exact(&mut data_buffer).unwrap();
+            FileType::Paf
+        }
+    }
+
+    /// Get alignment data bytes (CIGAR or tracepoints)
+    fn get_data_bytes(&self, alignment_files: &[String]) -> Result<Vec<u8>, String> {
+        // Get the correct file and type
+        let alignment_file = &alignment_files[self.alignment_file_index as usize];
+        let file_type = Self::get_file_type(alignment_file);
+
+        // Check if data is available
+        if self.data_bytes == 0 {
+            let expected_data = match file_type {
+                FileType::Paf => "CIGAR strings ('cg:Z' tag)",
+                FileType::OneAln => "tracepoints",
+            };
+            return Err(format!(
+                "The alignment file '{}' does not contain {}.",
+                alignment_file, expected_data
+            ));
+        }
+
+        let data_buffer = match file_type {
+            FileType::OneAln => {
+                // For .1aln files, use OneAlnParser to seek to the alignment
+
+                // The strand_and_data_offset contains the alignment_index (not a file offset)
+                let alignment_index = self.data_offset(); // This is actually alignment_index for .1aln
+
+                let parser = OneAlnParser::new(alignment_file.clone()).map_err(|e| {
+                    format!("Failed to create OneAlnParser for '{}': {:?}", alignment_file, e)
+                })?;
+
+                let alignment = parser.seek_alignment(alignment_index).map_err(|e| {
+                    format!(
+                        "Failed to seek to alignment {} in '{}': {:?}",
+                        alignment_index, alignment_file, e
+                    )
+                })?;
+
+                // Convert tracepoints to string format for consistency
+                let tracepoints_str = alignment
+                    .tracepoints
+                    .iter()
+                    .map(|tp| tp.to_string())
+                    .collect::<Vec<_>>()
+                    .join(";");
+
+                tracepoints_str.into_bytes()
+            }
+            FileType::Paf => {
+                // For PAF files, use byte-level seeking to read CIGAR string
+
+                // Allocate space for cigar
+                let mut data_buffer = vec![0; self.data_bytes];
+
+                if [".gz", ".bgz"].iter().any(|e| alignment_file.ends_with(e)) {
+                    // For compressed files, use virtual position directly
+                    let mut reader = bgzf::io::Reader::new(File::open(alignment_file).map_err(|e| {
+                        format!("Failed to open compressed file '{}': {}", alignment_file, e)
+                    })?);
+                    let virtual_position = bgzf::VirtualPosition::from(self.data_offset());
+                    reader.seek(virtual_position).map_err(|e| {
+                        format!("Failed to seek in compressed file '{}': {}", alignment_file, e)
+                    })?;
+                    reader.read_exact(&mut data_buffer).map_err(|e| {
+                        format!("Failed to read data from compressed file '{}': {}", alignment_file, e)
+                    })?;
+                } else {
+                    // For uncompressed files, use byte offset
+                    let mut reader = File::open(alignment_file).map_err(|e| {
+                        format!("Failed to open file '{}': {}", alignment_file, e)
+                    })?;
+                    reader.seek(SeekFrom::Start(self.data_offset())).map_err(|e| {
+                        format!("Failed to seek in file '{}': {}", alignment_file, e)
+                    })?;
+                    reader.read_exact(&mut data_buffer).map_err(|e| {
+                        format!("Failed to read data from file '{}': {}", alignment_file, e)
+                    })?;
+                }
+
+                data_buffer
+            }
         };
 
-        data_buffer
+        Ok(data_buffer)
     }
 
     fn get_cigar_ops_from_bytes(&self, data_bytes: Vec<u8>) -> Vec<CigarOp> {
@@ -158,8 +228,17 @@ impl QueryMetadata {
     }
 
     /// Fast check to determine if data contains tracepoints or CIGAR
-    /// Tracepoints: "123,456;789,012" or "123;456;789" or "123" or "123,456"
-    /// CIGAR: "123M45I67D"
+    ///
+    /// Tracepoints format (for .1aln files):
+    ///   - Variable tracepoints: "123,456;789,012" or "123;456;789" or "123" or "123,456"
+    ///   - Separators: comma (,) for paired values, semicolon (;) between tracepoints
+    ///
+    /// CIGAR format (for .paf files):
+    ///   - Standard CIGAR: "123M45I67D" or "10=5X3I2D"
+    ///   - Operations: M, I, D, =, X
+    ///
+    /// This function checks the first non-digit character to distinguish between the two formats.
+    /// Note: For .1aln files, this should always return true. For .paf files, it should return false.
     fn is_tracepoints_data(data_bytes: &[u8]) -> bool {
         // Find the first non-digit character after skipping initial digits
         let mut i = 0;
@@ -184,6 +263,12 @@ impl QueryMetadata {
 
 pub type AdjustedInterval = (Interval<u32>, Vec<CigarOp>, Interval<u32>);
 type TreeMap = FxHashMap<u32, Arc<BasicCOITree<QueryMetadata, u32>>>;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FileType {
+    Paf,
+    OneAln,
+}
 
 #[derive(Serialize, Deserialize)]
 struct SerializableInterval {
@@ -324,9 +409,9 @@ impl SortedRanges {
 pub struct Impg {
     pub trees: RwLock<TreeMap>,
     pub seq_index: SequenceIndex,
-    paf_files: Vec<String>,    // List of all PAF files
-    pub forest_map: ForestMap, // Forest map for lazy loading
-    index_file_path: String,   // Path to the index file for lazy loading
+    alignment_files: Vec<String>, // List of all alignment files (PAF or 1aln)
+    pub forest_map: ForestMap,    // Forest map for lazy loading
+    index_file_path: String,      // Path to the index file for lazy loading
 }
 
 /// Execute a closure with a thread-local aligner
@@ -509,10 +594,10 @@ impl Impg {
         records_by_file: &[(Vec<AlignmentRecord>, String)],
         seq_index: SequenceIndex,
     ) -> Result<Self, ParseErr> {
-        // Extract just the PAF file paths
-        let paf_files: Vec<String> = records_by_file
+        // Extract just the alignment file paths
+        let alignment_files: Vec<String> = records_by_file
             .par_iter()
-            .map(|(_, paf_file)| paf_file.clone())
+            .map(|(_, alignment_file)| alignment_file.clone())
             .collect();
 
         let intervals: FxHashMap<u32, Vec<Interval<QueryMetadata>>> = records_by_file
@@ -528,7 +613,7 @@ impl Impg {
                             target_end: record.target_end as i32,
                             query_start: record.query_start as i32,
                             query_end: record.query_end as i32,
-                            paf_file_index: file_index as u16,
+                            alignment_file_index: file_index as u16,
                             strand_and_data_offset: record.strand_and_data_offset, // Already includes strand bit
                             data_bytes: record.data_bytes,
                         };
@@ -578,7 +663,7 @@ impl Impg {
         Ok(Self {
             trees: RwLock::new(trees),
             seq_index,
-            paf_files,
+            alignment_files,
             forest_map,
             index_file_path: String::new(), // All trees are in memory, no need for index file path
         })
@@ -720,7 +805,7 @@ impl Impg {
     /// Load IMPG index from the format with embedded forest map at the end
     pub fn load_from_file<R: std::io::Read + std::io::Seek>(
         mut reader: R,
-        paf_files: &[String],
+        alignment_files: &[String],
         index_file_path: String,
     ) -> std::io::Result<Self> {
         const MAGIC: &[u8] = b"IMPGIDX1";
@@ -764,7 +849,7 @@ impl Impg {
         Ok(Self {
             trees: RwLock::new(FxHashMap::default()), // Start with empty trees - load on demand
             seq_index,
-            paf_files: paf_files.to_vec(),
+            alignment_files: alignment_files.to_vec(),
             forest_map,
             index_file_path,
         })
@@ -816,17 +901,18 @@ impl Impg {
         if let Some(tree) = self.get_or_load_tree(target_id) {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
-                let data_buffer = metadata.get_data_bytes(&self.paf_files);
 
-                // Check if the file has alignment path information
-                if data_buffer.is_empty() {
-                    panic!(
-                        "The alignment file does not contain CIGAR strings or tracepoints."
-                    );
-                }
+                // Get the file path to determine file type
+                let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
+                let file_type = QueryMetadata::get_file_type(alignment_file);
+
+                // Get data bytes with all validation checks
+                let data_buffer = metadata.get_data_bytes(&self.alignment_files).unwrap_or_else(|e| {
+                    panic!("{}", e);
+                });
 
                 let (adj_target_start, adj_target_end, adj_query_start, adj_query_end, cigar_ops) =
-                    if QueryMetadata::is_tracepoints_data(&data_buffer) {
+                    if file_type == FileType::OneAln || QueryMetadata::is_tracepoints_data(&data_buffer) {
                         self.process_tracepoints_data(
                             data_buffer,
                             metadata,
@@ -1000,15 +1086,14 @@ impl Impg {
                 let processed_results: Vec<_> = intervals
                     .into_par_iter()
                     .filter_map(|metadata| {
-                        let data_buffer =
-                            metadata.get_data_bytes(&self.paf_files);
+                        // Get the file path to determine file type
+                        let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
+                        let file_type = QueryMetadata::get_file_type(alignment_file);
 
-                        // Check if the file has alignment path information
-                        if data_buffer.is_empty() {
-                            panic!(
-                                "The alignment file does not contain CIGAR strings or tracepoints."
-                            );
-                        }
+                        // Get data bytes with all validation checks
+                        let data_buffer = metadata.get_data_bytes(&self.alignment_files).unwrap_or_else(|e| {
+                            panic!("{}", e);
+                        });
 
                         let (
                             adj_target_start,
@@ -1016,7 +1101,7 @@ impl Impg {
                             adj_query_start,
                             adj_query_end,
                             cigar_ops,
-                        ) = if QueryMetadata::is_tracepoints_data(&data_buffer) {
+                        ) = if file_type == FileType::OneAln || QueryMetadata::is_tracepoints_data(&data_buffer) {
                             self.process_tracepoints_data(
                                 data_buffer,
                                 &metadata,
@@ -1275,15 +1360,15 @@ impl Impg {
                                     *current_target_end,
                                     |interval| {
                                         let metadata = &interval.metadata;
-                                        let data_buffer = metadata
-                                            .get_data_bytes(&self.paf_files);
 
-                                        // Check if the file has alignment path information
-                                        if data_buffer.is_empty() {
-                                            panic!(
-                                                "The alignment file does not contain CIGAR strings or tracepoints."
-                                            );
-                                        }
+                                        // Get the file path to determine file type
+                                        let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
+                                        let file_type = QueryMetadata::get_file_type(alignment_file);
+
+                                        // Get data bytes with all validation checks
+                                        let data_buffer = metadata.get_data_bytes(&self.alignment_files).unwrap_or_else(|e| {
+                                            panic!("{}", e);
+                                        });
 
                                         let (
                                             adj_target_start,
@@ -1291,7 +1376,7 @@ impl Impg {
                                             adj_query_start,
                                             adj_query_end,
                                             cigar_ops,
-                                        ) = if QueryMetadata::is_tracepoints_data(&data_buffer) {
+                                        ) = if file_type == FileType::OneAln || QueryMetadata::is_tracepoints_data(&data_buffer) {
                                             self.process_tracepoints_data(
                                                 data_buffer,
                                                 metadata,
