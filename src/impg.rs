@@ -859,9 +859,7 @@ impl Impg {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
 
-                // Get the file path to determine file type
                 let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
-                let file_type = QueryMetadata::get_file_type(alignment_file);
 
                 // Get data bytes with all validation checks
                 let data_buffer = metadata.get_data_bytes(&self.alignment_files).unwrap_or_else(|e| {
@@ -869,7 +867,7 @@ impl Impg {
                 });
 
                 let (adj_target_start, adj_target_end, adj_query_start, adj_query_end, cigar_ops) =
-                    if file_type == FileType::OneAln {
+                    if QueryMetadata::get_file_type(alignment_file) == FileType::OneAln {
                         self.process_tracepoints_data(
                             data_buffer,
                             metadata,
@@ -1043,20 +1041,7 @@ impl Impg {
                 let processed_results: Vec<_> = intervals
                     .into_par_iter()
                     .filter_map(|metadata| {
-                        // Get the file path to determine file type
                         let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
-                        let file_type = QueryMetadata::get_file_type(alignment_file);
-
-                        // Validate sequence_index availability for OneAln files
-                        if file_type == FileType::OneAln && sequence_index.is_none() {
-                            #[cfg(feature = "agc")]
-                            let file_types = "FASTA/AGC";
-                            #[cfg(not(feature = "agc"))]
-                            let file_types = "FASTA";
-                            panic!(
-                                "Sequence data ({file_types}) is required for tracepoints conversion. Use --sequence-files or --sequence-list"
-                            )
-                        }
 
                         // Get data bytes with all validation checks
                         let data_buffer = metadata.get_data_bytes(&self.alignment_files).unwrap_or_else(|e| {
@@ -1069,7 +1054,7 @@ impl Impg {
                             adj_query_start,
                             adj_query_end,
                             cigar_ops,
-                        ) = if file_type == FileType::OneAln {
+                        ) = if QueryMetadata::get_file_type(alignment_file) == FileType::OneAln {
                             self.process_tracepoints_data(
                                 data_buffer,
                                 &metadata,
@@ -1329,20 +1314,7 @@ impl Impg {
                                     |interval| {
                                         let metadata = &interval.metadata;
 
-                                        // Get the file path to determine file type
                                         let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
-                                        let file_type = QueryMetadata::get_file_type(alignment_file);
-
-                                        // Validate sequence_index availability for OneAln files
-                                        if file_type == FileType::OneAln && sequence_index.is_none() {
-                                            #[cfg(feature = "agc")]
-                                            let file_types = "FASTA/AGC";
-                                            #[cfg(not(feature = "agc"))]
-                                            let file_types = "FASTA";
-                                            panic!(
-                                                "Sequence data ({file_types}) is required for tracepoints conversion. Use --sequence-files or --sequence-list"
-                                            )
-                                        }
 
                                         // Get data bytes with all validation checks
                                         let data_buffer = metadata.get_data_bytes(&self.alignment_files).unwrap_or_else(|e| {
@@ -1355,7 +1327,7 @@ impl Impg {
                                             adj_query_start,
                                             adj_query_end,
                                             cigar_ops,
-                                        ) = if file_type == FileType::OneAln {
+                                        ) = if QueryMetadata::get_file_type(alignment_file) == FileType::OneAln {
                                             self.process_tracepoints_data(
                                                 data_buffer,
                                                 metadata,
