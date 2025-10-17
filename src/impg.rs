@@ -226,39 +226,6 @@ impl QueryMetadata {
             .ok()
             .unwrap_or_default()
     }
-
-    /// Fast check to determine if data contains tracepoints or CIGAR
-    ///
-    /// Tracepoints format (for .1aln files):
-    ///   - Variable tracepoints: "123,456;789,012" or "123;456;789" or "123" or "123,456"
-    ///   - Separators: comma (,) for paired values, semicolon (;) between tracepoints
-    ///
-    /// CIGAR format (for .paf files):
-    ///   - Standard CIGAR: "123M45I67D" or "10=5X3I2D"
-    ///   - Operations: M, I, D, =, X
-    ///
-    /// This function checks the first non-digit character to distinguish between the two formats.
-    /// Note: For .1aln files, this should always return true. For .paf files, it should return false.
-    fn is_tracepoints_data(data_bytes: &[u8]) -> bool {
-        // Find the first non-digit character after skipping initial digits
-        let mut i = 0;
-        // Skip leading digits
-        while i < data_bytes.len() && data_bytes[i].is_ascii_digit() {
-            i += 1;
-        }
-
-        // Check the first non-digit character
-        if i < data_bytes.len() {
-            let c = data_bytes[i];
-            // Tracepoints use comma or semicolon as separators
-            // CIGAR uses operation characters (M, I, D, =, X)
-            c == b',' || c == b';'
-        } else {
-            // If it's all digits, it's a tracepoint (single number)
-            // CIGAR strings always have operation characters
-            true
-        }
-    }
 }
 
 pub type AdjustedInterval = (Interval<u32>, Vec<CigarOp>, Interval<u32>);
@@ -442,151 +409,141 @@ impl Impg {
         data_buffer: Vec<u8>,
         metadata: &QueryMetadata,
         target_id: u32,
-        sequence_index: Option<&UnifiedSequenceIndex>,
+        sequence_index: &UnifiedSequenceIndex,
         penalties: (u8, u8, u8, u8, u8, u8),
         requested_range: (i32, i32),
     ) -> (i32, i32, i32, i32, Vec<CigarOp>) {
-        if let Some(sequence_index) = sequence_index {
-            // Get the tracepoints
-            let tracepoints = metadata.get_tracepoints_from_bytes(data_buffer);
+        // Get the tracepoints
+        let tracepoints = metadata.get_tracepoints_from_bytes(data_buffer);
 
-            // Scan tracepoints to find the relevant subset for the requested range
-            let mut query_pos = if metadata.strand() == Strand::Forward {
-                metadata.query_start
-            } else {
-                metadata.query_end
-            };
-            let mut target_pos = metadata.target_start;
-            let mut start_idx = 0;
-            let mut end_idx = tracepoints.len();
-            let mut found_start = false;
-            let mut subset_query_start = if metadata.strand() == Strand::Forward {
-                metadata.query_start
-            } else {
-                metadata.query_end
-            };
-            let mut subset_target_start = metadata.target_start;
-            let mut subset_query_end = if metadata.strand() == Strand::Forward {
-                metadata.query_end
-            } else {
-                metadata.query_start
-            };
-            let mut subset_target_end = metadata.target_end;
-
-            // Find the relevant subset of tracepoints
-            for (i, &(a_len, b_len_opt)) in tracepoints.iter().enumerate() {
-                let query_delta = if metadata.strand() == Strand::Forward {
-                    a_len as i32
-                } else {
-                    -(a_len as i32)
-                };
-                let target_delta = b_len_opt.unwrap_or(a_len) as i32;
-
-                let next_query_pos = query_pos + query_delta;
-                let next_target_pos = target_pos + target_delta;
-
-                // Check if this tracepoint overlaps with the requested range
-                let overlaps =
-                    target_pos < requested_range.1 && next_target_pos >= requested_range.0;
-
-                if overlaps && !found_start {
-                    // Found the start of the relevant region
-                    start_idx = i;
-                    subset_query_start = query_pos;
-                    subset_target_start = target_pos;
-                    found_start = true;
-                }
-
-                if found_start {
-                    // Update the end of the relevant region as we go
-                    end_idx = i + 1;
-                    subset_query_end = next_query_pos;
-                    subset_target_end = next_target_pos;
-
-                    // Only break if the current tracepoint no longer overlaps
-                    if target_pos >= requested_range.1 {
-                        break;
-                    }
-                }
-
-                query_pos = next_query_pos;
-                target_pos = next_target_pos;
-            }
-
-            // Extract the relevant subset of tracepoints
-            let subset_tracepoints = &tracepoints[start_idx..end_idx];
-
-            // Fetch only the relevant portions of the sequences
-            let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
-            let query_seq_result = if metadata.strand() == Strand::Forward {
-                sequence_index.fetch_sequence(query_name, subset_query_start, subset_query_end)
-            } else {
-                // For reverse strand, coordinates are inverted, so we need min/max
-                let (fetch_start, fetch_end) = if subset_query_start < subset_query_end {
-                    (subset_query_start, subset_query_end)
-                } else {
-                    (subset_query_end, subset_query_start)
-                };
-                // Fetch and reverse complement
-                match sequence_index.fetch_sequence(query_name, fetch_start, fetch_end) {
-                    Ok(seq) => Ok(reverse_complement(&seq)),
-                    Err(e) => Err(e),
-                }
-            };
-
-            // Fetch target sequence
-            let target_name = self.seq_index.get_name(target_id).unwrap();
-            let target_seq_result =
-                sequence_index.fetch_sequence(target_name, subset_target_start, subset_target_end);
-
-            // Convert tracepoints to CIGAR if we successfully fetched both sequences
-            match (query_seq_result, target_seq_result) {
-                (Ok(query_seq), Ok(target_seq)) => {
-                    // Convert tracepoints to CIGAR operations using thread-local aligner
-                    let cigar_str = with_thread_aligner(penalties, |aligner| {
-                        variable_tracepoints_to_cigar_with_aligner(
-                            subset_tracepoints,
-                            &query_seq,
-                            &target_seq,
-                            0,
-                            0,
-                            aligner,
-                        )
-                    });
-
-                    (
-                        subset_target_start,
-                        subset_target_end,
-                        // For reverse strand, coordinates should be in forward orientation (start < end)
-                        if metadata.strand() == Strand::Forward {
-                            subset_query_start
-                        } else {
-                            subset_query_end
-                        },
-                        if metadata.strand() == Strand::Forward {
-                            subset_query_end
-                        } else {
-                            subset_query_start
-                        },
-                        // Parse the CIGAR string to CigarOp vector
-                        parse_cigar_to_delta(&cigar_str).ok().unwrap_or_default(),
-                    )
-                }
-                (Err(e), _) => {
-                    panic!("Failed to fetch query sequence: {e}");
-                }
-                (_, Err(e)) => {
-                    panic!("Failed to fetch target sequence: {e}");
-                }
-            }
+        // Scan tracepoints to find the relevant subset for the requested range
+        let mut query_pos = if metadata.strand() == Strand::Forward {
+            metadata.query_start
         } else {
-            #[cfg(feature = "agc")]
-            let file_types = "FASTA/AGC";
-            #[cfg(not(feature = "agc"))]
-            let file_types = "FASTA";
-            panic!(
-                "Sequence data ({file_types}) is required for tracepoints conversion. Use --sequence-files or --sequence-list"
-            )
+            metadata.query_end
+        };
+        let mut target_pos = metadata.target_start;
+        let mut start_idx = 0;
+        let mut end_idx = tracepoints.len();
+        let mut found_start = false;
+        let mut subset_query_start = if metadata.strand() == Strand::Forward {
+            metadata.query_start
+        } else {
+            metadata.query_end
+        };
+        let mut subset_target_start = metadata.target_start;
+        let mut subset_query_end = if metadata.strand() == Strand::Forward {
+            metadata.query_end
+        } else {
+            metadata.query_start
+        };
+        let mut subset_target_end = metadata.target_end;
+
+        // Find the relevant subset of tracepoints
+        for (i, &(a_len, b_len_opt)) in tracepoints.iter().enumerate() {
+            let query_delta = if metadata.strand() == Strand::Forward {
+                a_len as i32
+            } else {
+                -(a_len as i32)
+            };
+            let target_delta = b_len_opt.unwrap_or(a_len) as i32;
+
+            let next_query_pos = query_pos + query_delta;
+            let next_target_pos = target_pos + target_delta;
+
+            // Check if this tracepoint overlaps with the requested range
+            let overlaps =
+                target_pos < requested_range.1 && next_target_pos >= requested_range.0;
+
+            if overlaps && !found_start {
+                // Found the start of the relevant region
+                start_idx = i;
+                subset_query_start = query_pos;
+                subset_target_start = target_pos;
+                found_start = true;
+            }
+
+            if found_start {
+                // Update the end of the relevant region as we go
+                end_idx = i + 1;
+                subset_query_end = next_query_pos;
+                subset_target_end = next_target_pos;
+
+                // Only break if the current tracepoint no longer overlaps
+                if target_pos >= requested_range.1 {
+                    break;
+                }
+            }
+
+            query_pos = next_query_pos;
+            target_pos = next_target_pos;
+        }
+
+        // Extract the relevant subset of tracepoints
+        let subset_tracepoints = &tracepoints[start_idx..end_idx];
+
+        // Fetch only the relevant portions of the sequences
+        let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
+        let query_seq_result = if metadata.strand() == Strand::Forward {
+            sequence_index.fetch_sequence(query_name, subset_query_start, subset_query_end)
+        } else {
+            // For reverse strand, coordinates are inverted, so we need min/max
+            let (fetch_start, fetch_end) = if subset_query_start < subset_query_end {
+                (subset_query_start, subset_query_end)
+            } else {
+                (subset_query_end, subset_query_start)
+            };
+            // Fetch and reverse complement
+            match sequence_index.fetch_sequence(query_name, fetch_start, fetch_end) {
+                Ok(seq) => Ok(reverse_complement(&seq)),
+                Err(e) => Err(e),
+            }
+        };
+
+        // Fetch target sequence
+        let target_name = self.seq_index.get_name(target_id).unwrap();
+        let target_seq_result =
+            sequence_index.fetch_sequence(target_name, subset_target_start, subset_target_end);
+
+        // Convert tracepoints to CIGAR if we successfully fetched both sequences
+        match (query_seq_result, target_seq_result) {
+            (Ok(query_seq), Ok(target_seq)) => {
+                // Convert tracepoints to CIGAR operations using thread-local aligner
+                let cigar_str = with_thread_aligner(penalties, |aligner| {
+                    variable_tracepoints_to_cigar_with_aligner(
+                        subset_tracepoints,
+                        &query_seq,
+                        &target_seq,
+                        0,
+                        0,
+                        aligner,
+                    )
+                });
+
+                (
+                    subset_target_start,
+                    subset_target_end,
+                    // For reverse strand, coordinates should be in forward orientation (start < end)
+                    if metadata.strand() == Strand::Forward {
+                        subset_query_start
+                    } else {
+                        subset_query_end
+                    },
+                    if metadata.strand() == Strand::Forward {
+                        subset_query_end
+                    } else {
+                        subset_query_start
+                    },
+                    // Parse the CIGAR string to CigarOp vector
+                    parse_cigar_to_delta(&cigar_str).ok().unwrap_or_default(),
+                )
+            }
+            (Err(e), _) => {
+                panic!("Failed to fetch query sequence: {e}");
+            }
+            (_, Err(e)) => {
+                panic!("Failed to fetch target sequence: {e}");
+            }
         }
     }
 
@@ -912,12 +869,12 @@ impl Impg {
                 });
 
                 let (adj_target_start, adj_target_end, adj_query_start, adj_query_end, cigar_ops) =
-                    if file_type == FileType::OneAln || QueryMetadata::is_tracepoints_data(&data_buffer) {
+                    if file_type == FileType::OneAln {
                         self.process_tracepoints_data(
                             data_buffer,
                             metadata,
                             target_id,
-                            sequence_index,
+                            sequence_index.unwrap(),
                             (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
                             (range_start, range_end),
                         )
@@ -1090,6 +1047,17 @@ impl Impg {
                         let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
                         let file_type = QueryMetadata::get_file_type(alignment_file);
 
+                        // Validate sequence_index availability for OneAln files
+                        if file_type == FileType::OneAln && sequence_index.is_none() {
+                            #[cfg(feature = "agc")]
+                            let file_types = "FASTA/AGC";
+                            #[cfg(not(feature = "agc"))]
+                            let file_types = "FASTA";
+                            panic!(
+                                "Sequence data ({file_types}) is required for tracepoints conversion. Use --sequence-files or --sequence-list"
+                            )
+                        }
+
                         // Get data bytes with all validation checks
                         let data_buffer = metadata.get_data_bytes(&self.alignment_files).unwrap_or_else(|e| {
                             panic!("{}", e);
@@ -1101,12 +1069,12 @@ impl Impg {
                             adj_query_start,
                             adj_query_end,
                             cigar_ops,
-                        ) = if file_type == FileType::OneAln || QueryMetadata::is_tracepoints_data(&data_buffer) {
+                        ) = if file_type == FileType::OneAln {
                             self.process_tracepoints_data(
                                 data_buffer,
                                 &metadata,
                                 current_target_id,
-                                sequence_index,
+                                sequence_index.unwrap(),
                                 (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
                                 (current_target_start, current_target_end),
                             )
@@ -1365,6 +1333,17 @@ impl Impg {
                                         let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
                                         let file_type = QueryMetadata::get_file_type(alignment_file);
 
+                                        // Validate sequence_index availability for OneAln files
+                                        if file_type == FileType::OneAln && sequence_index.is_none() {
+                                            #[cfg(feature = "agc")]
+                                            let file_types = "FASTA/AGC";
+                                            #[cfg(not(feature = "agc"))]
+                                            let file_types = "FASTA";
+                                            panic!(
+                                                "Sequence data ({file_types}) is required for tracepoints conversion. Use --sequence-files or --sequence-list"
+                                            )
+                                        }
+
                                         // Get data bytes with all validation checks
                                         let data_buffer = metadata.get_data_bytes(&self.alignment_files).unwrap_or_else(|e| {
                                             panic!("{}", e);
@@ -1376,12 +1355,12 @@ impl Impg {
                                             adj_query_start,
                                             adj_query_end,
                                             cigar_ops,
-                                        ) = if file_type == FileType::OneAln || QueryMetadata::is_tracepoints_data(&data_buffer) {
+                                        ) = if file_type == FileType::OneAln {
                                             self.process_tracepoints_data(
                                                 data_buffer,
                                                 metadata,
                                                 *current_target_id,
-                                                sequence_index,
+                                                sequence_index.unwrap(),
                                                 (
                                                     _match, mismatch, gap_open1, gap_ext1,
                                                     gap_open2, gap_ext2,
