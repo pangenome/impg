@@ -84,44 +84,44 @@ Query overlaps in the alignment:
 
 ```bash
 # Query a single region
-impg query -a alignments.paf -r chr1:1000-2000 
+impg query -a alignments.paf -r chr1:1000-2000
 
-# Query multiple regions from a BED file
-impg query -a alignments.paf -b regions.bed
+# Query multiple regions from a BED file (mix PAF and .1aln)
+impg query -a file1.paf file2.1aln -b regions.bed
 
 # Enable transitive overlap search
 impg query -a alignments.paf -r chr1:1000-2000 -x
 
 # Set maximum transitive depth (default: 0 = unlimited)
-impg query -a alignments.paf -r chr1:1000-2000 -x -m 3
+impg query -a alignments.1aln -r chr1:1000-2000 -x -m 3
 
 # Filter by minimum gap-compressed identity
-impg query -a alignments.paf -r chr1:1000-2000 --min-identity 0.9
+impg query -a alignments.paf alignments.1aln -r chr1:1000-2000 --min-identity 0.9
 
 # Output formats (auto/bed/bedpe/paf/gfa/maf/fasta/fasta+paf/fasta-aln)
 impg query -a alignments.paf -r chr1:1000-2000 -o bed
-impg query -a alignments.paf -r chr1:1000-2000 -o bedpe
-impg query -a alignments.paf -b chr1:1000-2000 -o paf
+impg query -a alignments.1aln -r chr1:1000-2000 -o bedpe
+impg query -a file1.paf file2.1aln -b chr1:1000-2000 -o paf
 
 # gfa/maf/fasta output requires sequence files (--sequence-files or --sequence-list)
 impg query -a alignments.paf -r chr1:1000-2000 -o gfa --sequence-files ref.fa genomes.fa
-impg query -a alignments.paf -r chr1:1000-2000 -o maf --sequence-list fastas.txt
-impg query -a alignments.paf -r chr1:1000-2000 -o fasta --sequence-files *.fa
+impg query -a alignments.1aln -r chr1:1000-2000 -o maf --sequence-list fastas.txt
+impg query -a file1.paf file2.1aln -r chr1:1000-2000 -o fasta --sequence-files *.fa
 
 # fasta+paf combines FASTA and PAF output
 impg query -a alignments.paf -r chr1:1000-2000 -o fasta+paf --sequence-files *.fa
 
 # fasta-aln outputs POA-based FASTA alignment
-impg query -a alignments.paf -r chr1:1000-2000 -o fasta-aln --sequence-files *.fa
+impg query -a alignments.1aln -r chr1:1000-2000 -o fasta-aln --sequence-files *.fa
 
 # Works with AGC archives too
 impg query -a alignments.paf -r chr1:1000-2000 -o gfa --sequence-files genomes.agc
 
 # fasta output with reverse complement for reverse strand sequences
-impg query -a alignments.paf -r chr1:1000-2000 -o fasta --sequence-files *.fa --reverse-complement
+impg query -a alignments.1aln -r chr1:1000-2000 -o fasta --sequence-files *.fa --reverse-complement
 
 # Merge nearby regions (default: 0)
-impg query -a alignments.paf -r chr1:1000-2000 -d 1000
+impg query -a file1.paf file2.1aln -r chr1:1000-2000 -d 1000
 
 # Use DFS for transitive search (slower but fewer overlapping results)
 impg query -a alignments.paf -r chr1:1000-2000 --transitive-dfs
@@ -150,29 +150,29 @@ Partition the alignment into smaller pieces:
 impg partition -a alignments.paf -w 1000000
 
 # Output separate files for each partition
-impg partition -a alignments.paf -w 1000000 --separate-files
+impg partition -a alignments.1aln -w 1000000 --separate-files
 
 # Specify output folder for partition files (directory will be created if it doesn't exist)
-impg partition -a alignments.paf -w 1000000 --output-folder results
+impg partition -a file1.paf file2.1aln -w 1000000 --output-folder results
 
 # Start from specific sequences (one per line)
 impg partition -a alignments.paf -w 1000000 --starting-sequences-file seqs.txt
 
 # Merge nearby intervals within partitions
-impg partition -a alignments.paf -w 1000000 -d 10000
+impg partition -a file1.paf file2.1aln -w 1000000 -d 10000
 
 # Selection strategies for next sequence
 impg partition -a alignments.paf -w 1000000 --selection-mode longest        # longest missing region
-impg partition -a alignments.paf -w 1000000 --selection-mode total          # most total missing
+impg partition -a alignments.1aln -w 1000000 --selection-mode total          # most total missing
 impg partition -a alignments.paf -w 1000000 --selection-mode sample         # by sample (PanSN)
-impg partition -a alignments.paf -w 1000000 --selection-mode haplotype      # by haplotype (PanSN)
+impg partition -a alignments.1aln -w 1000000 --selection-mode haplotype      # by haplotype (PanSN)
 
 # Control transitive search depth and minimum sizes
-impg partition -a alignments.paf -w 1000000 -m 2 -l 10000
+impg partition -a file1.paf file2.1aln -w 1000000 -m 2 -l 10000
 # Output as GFA, MAF or FASTA requires sequence files and --separate-files flag
 impg partition -a alignments.paf -w 1000000 -o gfa --sequence-files *.fa --separate-files --output-folder gfa_partitions
-impg partition -a alignments.paf -w 1000000 -o maf --sequence-list fastas.txt --separate-files --output-folder maf_partitions
-impg partition -a alignments.paf -w 1000000 -o fasta --sequence-files *.fa --separate-files --output-folder fasta_partitions
+impg partition -a alignments.1aln -w 1000000 -o maf --sequence-list fastas.txt --separate-files --output-folder maf_partitions
+impg partition -a file1.paf file2.1aln -w 1000000 -o fasta --sequence-files *.fa --separate-files --output-folder fasta_partitions
 # Works with AGC archives too
 impg partition -a alignments.paf -w 1000000 -o gfa --sequence-files genomes.agc --separate-files --output-folder gfa_partitions
 ```
@@ -186,37 +186,37 @@ Compute pairwise similarity between sequences in a region:
 impg similarity -a alignments.paf -r chr1:1000-2000 --sequence-files ref.fa genomes.fa
 
 # Query multiple regions from a BED file (it produces multiple similarity matrices)
-impg similarity -a alignments.paf -b regions.bed --sequence-files *.fa
+impg similarity -a alignments.1aln -b regions.bed --sequence-files *.fa
 
 # Output distances instead of similarities
-impg similarity -a alignments.paf -r chr1:1000-2000 --sequence-files *.fa --distances
+impg similarity -a file1.paf file2.1aln -r chr1:1000-2000 --sequence-files *.fa --distances
 
 # Include all pairs (even those with zero similarity)
 impg similarity -a alignments.paf -r chr1:1000-2000 --sequence-files *.fa -a
 
 # Restrict analysis to sequences listed in a file (one name per line)
 # Entries may be full contig names or sample identifiers (e.g., HG00097 or HG00097_hap1)
-impg similarity -a alignments.paf -r chr1:1000-2000 --sequence-files *.fa --subset-sequence-list sequences.txt
+impg similarity -a alignments.1aln -r chr1:1000-2000 --sequence-files *.fa --subset-sequence-list sequences.txt
 # Show the progress bar
-impg similarity -a alignments.paf -r chr1:1000-2000 --sequence-files *.fa --progress-bar
+impg similarity -a file1.paf file2.1aln -r chr1:1000-2000 --sequence-files *.fa --progress-bar
 
 # Group sequences by delimiter (e.g., for PanSN naming, "sample#haplotype#chr" -> "sample")
 impg similarity -a alignments.paf -r chr1:1000-2000 --sequence-files *.fa --delim '#'
 
 # Use 2nd occurrence of delimiter for grouping (e.g., for PanSN naming, "sample#haplotype#chr" -> "sample#haplotype")
-impg similarity -a alignments.paf -r chr1:1000-2000 --sequence-files *.fa --delim '#' --delim-pos 2
+impg similarity -a alignments.1aln -r chr1:1000-2000 --sequence-files *.fa --delim '#' --delim-pos 2
 
 # Perform PCA/MDS dimensionality reduction
-impg similarity -a alignments.paf -r chr1:1000-2000 --sequence-files *.fa --pca
+impg similarity -a file1.paf file2.1aln -r chr1:1000-2000 --sequence-files *.fa --pca
 
 # Specify number of PCA components (default: 2)
 impg similarity -a alignments.paf -r chr1:1000-2000 --sequence-files *.fa --pca --pca-components 3
 
 # Choose similarity measure for PCA distance matrix (jaccard/cosine/dice, default: jaccard)
-impg similarity -a alignments.paf -r chr1:1000-2000 --sequence-files *.fa --pca --pca-measure cosine
+impg similarity -a alignments.1aln -r chr1:1000-2000 --sequence-files *.fa --pca --pca-measure cosine
 
 # PCA with adaptive polarization using previous regions
-impg similarity -a alignments.paf -b regions.bed --sequence-files *.fa --pca --polarize-n-prev 3
+impg similarity -a file1.paf file2.1aln -b regions.bed --sequence-files *.fa --pca --polarize-n-prev 3
 
 # PCA with sample-guided polarization
 impg similarity -a alignments.paf -b regions.bed --sequence-files *.fa --pca --polarize-guide-samples sample1,sample2
@@ -227,7 +227,14 @@ impg similarity -a alignments.paf -b regions.bed --sequence-files *.fa --pca --p
 Print alignment statistics:
 
 ```bash
+# Get statistics for PAF file
 impg stats -a alignments.paf
+
+# Get statistics for .1aln file
+impg stats -a alignments.1aln
+
+# Get statistics for combined PAF and .1aln files
+impg stats -a file1.paf file2.1aln
 ```
 
 ### Lace
@@ -308,16 +315,19 @@ odgi unchop -i combined.fix.gfa -o - -t 16 | \
 Create an IMPG index from alignment files:
 
 ```bash
-# Index a single alignment file
+# Index a single PAF file
 impg index -a alignments.paf
 
-# Index multiple alignment files
+# Index a single .1aln file
+impg index -a alignments.1aln
+
+# Index multiple alignment files (PAF and .1aln mixed)
 impg index -a file1.paf file2.1aln file3.paf
 
 # Create index with custom name
 impg index -a alignments.paf -i custom.impg
 
-# Index from a list of alignment files
+# Index from a list of alignment files (can mix formats)
 impg index --alignment-list alignment_files.txt
 ```
 
@@ -332,8 +342,8 @@ If a `.gzi` file is present, `impg` will automatically use it for faster multith
 ### Common options
 
 All commands support these options:
-- `-a, --alignment-files`: One or more paths to alignment files in PAF (gzipped or uncompressed) or .1aln format.
-- `--alignment-list`: Path to a plain-text file listing one alignment path per line (PAF or .1aln).
+- `-a, --alignment-files`: One or more paths to alignment files in PAF or .1aln format (can be mixed). Files can be gzipped or uncompressed.
+- `--alignment-list`: Path to a plain-text file listing one alignment path per line (PAF or .1aln files can be mixed).
 - `-i, --index`: Path to an existing IMPG index file.
 - `-f, --force-reindex`: Always regenerate the IMPG index even if it already exists.
 - `-t, --threads`: Number of threads (default: 4)
