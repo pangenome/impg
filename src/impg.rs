@@ -818,6 +818,13 @@ impl Impg {
                 let metadata = &interval.metadata;
                 let data_buffer = metadata.get_data_bytes(&self.paf_files);
 
+                // Check if the file has alignment path information
+                if data_buffer.is_empty() {
+                    panic!(
+                        "The alignment file does not contain CIGAR strings or tracepoints."
+                    );
+                }
+
                 let (adj_target_start, adj_target_end, adj_query_start, adj_query_end, cigar_ops) =
                     if QueryMetadata::is_tracepoints_data(&data_buffer) {
                         self.process_tracepoints_data(
@@ -995,6 +1002,13 @@ impl Impg {
                     .filter_map(|metadata| {
                         let data_buffer =
                             metadata.get_data_bytes(&self.paf_files);
+
+                        // Check if the file has alignment path information
+                        if data_buffer.is_empty() {
+                            panic!(
+                                "The alignment file does not contain CIGAR strings or tracepoints."
+                            );
+                        }
 
                         let (
                             adj_target_start,
@@ -1263,6 +1277,13 @@ impl Impg {
                                         let metadata = &interval.metadata;
                                         let data_buffer = metadata
                                             .get_data_bytes(&self.paf_files);
+
+                                        // Check if the file has alignment path information
+                                        if data_buffer.is_empty() {
+                                            panic!(
+                                                "The alignment file does not contain CIGAR strings or tracepoints."
+                                            );
+                                        }
 
                                         let (
                                             adj_target_start,
