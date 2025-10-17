@@ -123,8 +123,8 @@ impl QueryMetadata {
     }
 
     /// Determine file type based on extension
-    fn get_file_type(paf_file: &str) -> FileType {
-        if paf_file.ends_with(".1aln") {
+    fn get_file_type(alignment_file: &str) -> FileType {
+        if alignment_file.ends_with(".1aln") {
             FileType::OneAln
         } else {
             FileType::Paf
@@ -590,7 +590,7 @@ impl Impg {
         }
     }
 
-    pub fn from_multi_paf_records(
+    pub fn from_multi_alignment_records(
         records_by_file: &[(Vec<AlignmentRecord>, String)],
         seq_index: SequenceIndex,
     ) -> Result<Self, ParseErr> {

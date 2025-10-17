@@ -293,19 +293,3 @@ pub struct OneAlnAlignment {
     pub trace_diffs: Vec<i64>,
     pub trace_spacing: i64,
 }
-
-impl OneAlnAlignment {
-    /// Placeholder: Reconstruct CIGAR from tracepoints
-    /// TODO: Implement actual CIGAR reconstruction algorithm
-    pub fn reconstruct_cigar(&self) -> Result<String, ParseErr> {
-        // PLACEHOLDER: This is where we'll implement CIGAR reconstruction from tracepoints
-        // The tracepoints represent positions along the alignment where differences occur
-        // trace_spacing tells us the spacing between trace points
-        // trace_diffs tells us the differences at each trace point
-
-        // For now, return a placeholder
-        Err(ParseErr::InvalidFormat(
-            "CIGAR reconstruction from tracepoints not yet implemented".to_string(),
-        ))
-    }
-}
