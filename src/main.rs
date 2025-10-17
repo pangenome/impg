@@ -941,9 +941,6 @@ fn main() -> io::Result<()> {
                     subset_filter.as_ref(),
                 )?;
 
-                // TODO: Why is name an Option for all the output functions?
-                let name_opt = Some(name);
-
                 // Output results based on the resolved format
                 match resolved_output_format {
                     "bed" => {
@@ -952,7 +949,7 @@ fn main() -> io::Result<()> {
                             &impg,
                             &mut results,
                             &mut find_output_stream(&output_basename, "bed")?,
-                            &name_opt,
+                            &name,
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
                         )?;
@@ -964,7 +961,7 @@ fn main() -> io::Result<()> {
                             &impg,
                             &mut results,
                             &mut find_output_stream(&output_basename, "bed")?,
-                            &name_opt,
+                            &name,
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
                         )?;
@@ -976,7 +973,7 @@ fn main() -> io::Result<()> {
                             &impg,
                             &mut results,
                             &mut find_output_stream(&output_basename, "paf")?,
-                            &name_opt,
+                            &name,
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
                             sequence_index.as_ref(),
@@ -988,7 +985,7 @@ fn main() -> io::Result<()> {
                             &mut results,
                             &mut find_output_stream(&output_basename, "gfa")?,
                             sequence_index.as_ref().unwrap(),
-                            &name_opt,
+                            &name,
                             query.effective_merge_distance(),
                             scoring_params.unwrap(),
                         )?;
@@ -999,7 +996,7 @@ fn main() -> io::Result<()> {
                             &mut results,
                             &mut find_output_stream(&output_basename, "maf")?,
                             sequence_index.as_ref().unwrap(),
-                            &name_opt,
+                            &name,
                             query.effective_merge_distance(),
                             scoring_params.unwrap(),
                         )?;
@@ -1010,7 +1007,7 @@ fn main() -> io::Result<()> {
                             &mut results,
                             &mut find_output_stream(&output_basename, "fa")?,
                             sequence_index.as_ref().unwrap(),
-                            &name_opt,
+                            &name,
                             query.effective_merge_distance(),
                             reverse_complement,
                         )?;
@@ -1021,7 +1018,7 @@ fn main() -> io::Result<()> {
                             &mut results,
                             &mut find_output_stream(&output_basename, "fa")?,
                             sequence_index.as_ref().unwrap(),
-                            &name_opt,
+                            &name,
                             query.effective_merge_distance(),
                             reverse_complement,
                         )?;
@@ -1031,7 +1028,7 @@ fn main() -> io::Result<()> {
                             &impg,
                             &mut results,
                             &mut find_output_stream(&output_basename, "paf")?,
-                            &name_opt,
+                            &name,
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
                             sequence_index.as_ref(),
@@ -1042,7 +1039,7 @@ fn main() -> io::Result<()> {
                             &impg,
                             &mut results,
                             sequence_index.as_ref().unwrap(),
-                            name_opt.clone(),
+                            name.clone(),
                             query.effective_merge_distance(),
                             scoring_params.unwrap(),
                         )?;
@@ -1874,7 +1871,7 @@ fn output_results_bed(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
     out: &mut dyn Write,
-    name: &Option<String>,
+    name: &str,
     merge_distance: i32,
     original_coordinates: bool,
 ) -> io::Result<()> {
@@ -1903,7 +1900,7 @@ fn output_results_bed(
             transformed_name,
             transformed_first,
             transformed_last,
-            name.as_deref().unwrap_or("."),
+            name,
             strand
         )?;
     }
@@ -1915,7 +1912,7 @@ fn output_results_bedpe(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
     out: &mut dyn Write,
-    name: &Option<String>,
+    name: &str,
     merge_distance: i32,
     original_coordinates: bool,
 ) -> io::Result<()> {
@@ -1987,7 +1984,7 @@ fn output_results_bedpe(
             transformed_target_name,
             transformed_target_first,
             transformed_target_last,
-            name.as_deref().unwrap_or("."),
+            name,
             strand,
             gi_str,
             bi_str
@@ -2001,7 +1998,7 @@ fn output_results_paf(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
     out: &mut dyn Write,
-    name: &Option<String>,
+    name: &str,
     merge_distance: i32,
     original_coordinates: bool,
     sequence_index: Option<&UnifiedSequenceIndex>,
@@ -2086,18 +2083,11 @@ fn output_results_paf(
             .map(|op| format!("{}{}", op.len(), op.op()))
             .collect();
 
-        match name {
-            Some(ref name) => writeln!(out,
-                                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{}\tbi:f:{}\tcg:Z:{}\tan:Z:{}",
-                                transformed_query_name, query_length, transformed_first, transformed_last, strand,
-                                transformed_target_name, target_length, transformed_target_first, transformed_target_last,
-                                matches, block_len, 255, gi_str, bi_str, cigar_str, name)?,
-            None => writeln!(out,
-                                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{}\tbi:f:{}\tcg:Z:{}",
-                                transformed_query_name, query_length, transformed_first, transformed_last, strand,
-                                transformed_target_name, target_length, transformed_target_first, transformed_target_last,
-                                matches, block_len, 255, gi_str, bi_str, cigar_str)?,
-        }
+        writeln!(out,
+                            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{}\tbi:f:{}\tcg:Z:{}\tan:Z:{}",
+                            transformed_query_name, query_length, transformed_first, transformed_last, strand,
+                            transformed_target_name, target_length, transformed_target_first, transformed_target_last,
+                            matches, block_len, 255, gi_str, bi_str, cigar_str, name)?;
     }
 
     Ok(())
@@ -2108,7 +2098,7 @@ fn output_results_gfa(
     results: &mut Vec<AdjustedInterval>,
     out: &mut dyn Write,
     sequence_index: &UnifiedSequenceIndex,
-    _name: &Option<String>,
+    _name: &str,
     merge_distance: i32,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<()> {
@@ -2136,7 +2126,7 @@ fn output_results_fasta(
     results: &mut Vec<AdjustedInterval>,
     out: &mut dyn Write,
     sequence_index: &UnifiedSequenceIndex,
-    _name: &Option<String>,
+    _name: &str,
     merge_distance: i32,
     reverse_complement: bool,
 ) -> io::Result<()> {
@@ -2201,7 +2191,7 @@ fn output_results_maf(
     results: &mut Vec<AdjustedInterval>,
     out: &mut dyn Write,
     sequence_index: &UnifiedSequenceIndex,
-    _name: &Option<String>,
+    _name: &str,
     merge_distance: i32,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<()> {
@@ -2228,7 +2218,7 @@ fn output_results_fasta_aln(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
     sequence_index: &UnifiedSequenceIndex,
-    _name: Option<String>,
+    _name: String,
     merge_distance: i32,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<()> {
