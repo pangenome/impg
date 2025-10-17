@@ -2,12 +2,11 @@ use clap::Parser;
 use coitrees::{Interval, IntervalTree};
 use impg::commands::{lace, partition, similarity};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
-use impg::paf::{PartialPafRecord, Strand};
+use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
 use impg::seqidx::SequenceIndex;
 use impg::sequence_index::{SequenceIndex as SeqIndexTrait, UnifiedSequenceIndex};
 use impg::subset_filter::{load_subset_filter, SubsetFilter};
 use log::{debug, info, warn};
-use noodles::bgzf;
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use rustc_hash::FxHashMap;
@@ -33,18 +32,18 @@ struct CommonOpts {
     verbose: u8,
 }
 
-/// PAF file and index options for commands that work with alignments
+/// Alignment file and index options for commands that work with alignments
 #[derive(Parser, Debug)]
-struct PafOpts {
-    /// Path to the PAF files.
-    #[arg(help_heading = "PAF input")]
-    #[clap(short = 'p', long, value_parser, required = false, num_args = 1.., conflicts_with = "paf_list")]
-    paf_files: Vec<String>,
+struct AlignmentOpts {
+    /// Path to the alignment files (PAF or .1aln format).
+    #[arg(help_heading = "Alignment input")]
+    #[clap(short = 'a', long, value_parser, required = false, num_args = 1.., conflicts_with = "alignment_list")]
+    alignment_files: Vec<String>,
 
-    /// Path to a text file containing paths to PAF files (one per line).
-    #[arg(help_heading = "PAF input")]
-    #[clap(long, value_parser, required = false, conflicts_with = "paf_files")]
-    paf_list: Option<String>,
+    /// Path to a text file containing paths to alignment files (one per line, PAF or .1aln format).
+    #[arg(help_heading = "Alignment input")]
+    #[clap(long, value_parser, required = false, conflicts_with = "alignment_files")]
+    alignment_list: Option<String>,
 
     /// Path to the IMPG index file.
     #[arg(help_heading = "Index options")]
@@ -188,19 +187,34 @@ impl GfaMafFastaOpts {
         ))
     }
 
-    /// Helper to validate and setup POA/sequence resources for a given output format, including sequence index for PAF with original coordinates
+    /// Helper to validate and setup POA/sequence resources for a given output format, including sequence index for PAF with original coordinates or for 1aln files
     fn setup_output_resources(
         self,
         output_format: &str,
         original_sequence_coordinates: bool,
+        alignment_opts: &AlignmentOpts,
     ) -> io::Result<(
         Option<UnifiedSequenceIndex>,
         Option<(u8, u8, u8, u8, u8, u8)>,
     )> {
+        // Check if any of the alignment files are .1aln files (which require sequence data for tracepoint conversion)
+        let has_onealn_files = if !alignment_opts.alignment_files.is_empty() {
+            alignment_opts.alignment_files.iter().any(|f| f.ends_with(".1aln"))
+        } else if let Some(alignment_list) = &alignment_opts.alignment_list {
+            // Read and check files from list
+            if let Ok(content) = std::fs::read_to_string(alignment_list) {
+                content.lines().any(|line| line.trim().ends_with(".1aln"))
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
         let needs_sequence_mandatory = matches!(
             output_format,
             "gfa" | "maf" | "fasta" | "fasta-aln" | "fasta+paf"
-        );
+        ) || has_onealn_files; // .1aln files require sequence data for tracepoint conversion
         let needs_sequence_optional = output_format == "paf" && original_sequence_coordinates;
         let needs_poa = matches!(output_format, "gfa" | "maf" | "fasta-aln");
 
@@ -213,10 +227,17 @@ impl GfaMafFastaOpts {
         let sequence_index = if needs_sequence_mandatory || needs_sequence_optional {
             let index = self.sequence.build_sequence_index()?;
             if index.is_none() && needs_sequence_mandatory {
-                #[cfg(feature = "agc")]
-                let msg = format!("Sequence files (FASTA/AGC) are required for '{output_format}' output format. Use --sequence-files or --sequence-list");
-                #[cfg(not(feature = "agc"))]
-                let msg = format!("Sequence files (FASTA) are required for '{}' output format. Use --sequence-files or --sequence-list", output_format);
+                let file_types = if cfg!(feature = "agc") {
+                    "FASTA/AGC"
+                } else {
+                    "FASTA"
+                };
+                
+                let msg = if has_onealn_files {
+                    format!("Sequence files ({file_types}) are required for .1aln alignment files to convert tracepoints to CIGAR strings. Use --sequence-files or --sequence-list")
+                } else {
+                    format!("Sequence files ({file_types}) are required for '{output_format}' output format. Use --sequence-files or --sequence-list")
+                };
 
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, msg));
             }
@@ -369,33 +390,33 @@ fn get_original_sequence_length(
             Err(_) => {
                 // Emit warning when sequence not found in index
                 warn!(
-                    "Sequence '{original_seq_name}' not found in sequence index, using 0 as length for PAF output"
+                    "Sequence '{original_seq_name}' not found in sequence index, using 0 as length"
                 );
             }
         }
     } else {
         // Emit warning when no index is provided
         warn!(
-            "No sequence index provided, using 0 as length for PAF output of sequence '{original_seq_name}'"
+            "No sequence index provided, using 0 as length for sequence '{original_seq_name}'"
         );
     }
 
     0 // Return 0 if the sequence is not found or no index is provided
 }
 
-/// Command-line tool for querying overlaps in PAF files.
+/// Command-line tool for querying pangenome alignment
 #[derive(Parser, Debug)]
 #[command(author, version, about, disable_help_subcommand = true)]
 enum Args {
     /// Create an IMPG index
     Index {
         #[clap(flatten)]
-        paf: PafOpts,
+        alignment: AlignmentOpts,
 
         #[clap(flatten)]
         common: CommonOpts,
     },
-    /// Lace files together (graphs or VCFs)
+    /// Lace files together
     Lace {
         /// List of input files (space-separated)
         #[clap(short = 'f', long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with = "file_list")]
@@ -448,7 +469,7 @@ enum Args {
     /// Partition the alignment
     Partition {
         #[clap(flatten)]
-        paf: PafOpts,
+        alignment: AlignmentOpts,
 
         /// Window size for partitioning
         #[arg(help_heading = "Partition options")]
@@ -521,7 +542,7 @@ enum Args {
     /// Query overlaps in the alignment
     Query {
         #[clap(flatten)]
-        paf: PafOpts,
+        alignment: AlignmentOpts,
 
         #[clap(flatten)]
         query: QueryOpts,
@@ -541,10 +562,10 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
     },
-    /// Compute pairwise similarity between sequences in a region
+    /// Compute pairwise similarity
     Similarity {
         #[clap(flatten)]
-        paf: PafOpts,
+        alignment: AlignmentOpts,
 
         #[clap(flatten)]
         query: QueryOpts,
@@ -564,7 +585,7 @@ enum Args {
 
         /// Emit entries for all pairs of groups, including those with zero intersection
         #[arg(help_heading = "Output options")]
-        #[clap(short = 'a', long, action, default_value_t = false)]
+        #[clap(long, action, default_value_t = false)]
         all: bool,
 
         /// The part of each path name before this delimiter is a group identifier
@@ -620,7 +641,7 @@ enum Args {
     /// Print alignment statistics
     Stats {
         #[clap(flatten)]
-        paf: PafOpts,
+        alignment: AlignmentOpts,
 
         #[clap(flatten)]
         common: CommonOpts,
@@ -631,9 +652,9 @@ fn main() -> io::Result<()> {
     let args = Args::parse();
 
     match args {
-        Args::Index { common, paf } => {
+        Args::Index { common, alignment } => {
             initialize_threads_and_log(&common);
-            let _ = initialize_impg(&common, &paf)?;
+            let _ = initialize_impg(&common, &alignment)?;
 
             info!("Index created successfully");
         }
@@ -735,7 +756,7 @@ fn main() -> io::Result<()> {
         }
         Args::Partition {
             common,
-            paf,
+            alignment,
             window_size,
             output_format,
             output_folder,
@@ -778,9 +799,9 @@ fn main() -> io::Result<()> {
 
             // Setup POA/sequence resources
             let (sequence_index, scoring_params) =
-                gfa_maf_fasta.setup_output_resources(&output_format, false)?;
+                gfa_maf_fasta.setup_output_resources(&output_format, false, &alignment)?;
 
-            let impg = initialize_impg(&common, &paf)?;
+            let impg = initialize_impg(&common, &alignment)?;
 
             partition::partition_alignments(
                 &impg,
@@ -806,7 +827,7 @@ fn main() -> io::Result<()> {
         }
         Args::Query {
             common,
-            paf,
+            alignment,
             query,
             output_format,
             output_basename,
@@ -829,7 +850,7 @@ fn main() -> io::Result<()> {
                 ],
             )?;
 
-            let impg = initialize_impg(&common, &paf)?;
+            let impg = initialize_impg(&common, &alignment)?;
 
             // Load subset filter if provided
             let subset_filter = load_subset_filter_if_provided(&query.subset_sequence_list)?;
@@ -893,6 +914,7 @@ fn main() -> io::Result<()> {
             let (sequence_index, scoring_params) = gfa_maf_fasta.setup_output_resources(
                 resolved_output_format,
                 query.original_sequence_coordinates,
+                &alignment,
             )?;
 
             // Process all target ranges in a unified loop
@@ -906,6 +928,8 @@ fn main() -> io::Result<()> {
                     query.transitive,
                     query.transitive_opts.transitive_dfs,
                     &query.transitive_opts,
+                    sequence_index.as_ref(),
+                    scoring_params,
                 )?;
 
                 // Apply subset filter if provided
@@ -917,9 +941,6 @@ fn main() -> io::Result<()> {
                     subset_filter.as_ref(),
                 )?;
 
-                // TODO: Why is name an Option for all the output functions?
-                let name_opt = Some(name);
-
                 // Output results based on the resolved format
                 match resolved_output_format {
                     "bed" => {
@@ -928,7 +949,7 @@ fn main() -> io::Result<()> {
                             &impg,
                             &mut results,
                             &mut find_output_stream(&output_basename, "bed")?,
-                            &name_opt,
+                            &name,
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
                         )?;
@@ -940,7 +961,7 @@ fn main() -> io::Result<()> {
                             &impg,
                             &mut results,
                             &mut find_output_stream(&output_basename, "bed")?,
-                            &name_opt,
+                            &name,
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
                         )?;
@@ -952,7 +973,7 @@ fn main() -> io::Result<()> {
                             &impg,
                             &mut results,
                             &mut find_output_stream(&output_basename, "paf")?,
-                            &name_opt,
+                            &name,
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
                             sequence_index.as_ref(),
@@ -964,7 +985,7 @@ fn main() -> io::Result<()> {
                             &mut results,
                             &mut find_output_stream(&output_basename, "gfa")?,
                             sequence_index.as_ref().unwrap(),
-                            &name_opt,
+                            &name,
                             query.effective_merge_distance(),
                             scoring_params.unwrap(),
                         )?;
@@ -975,7 +996,7 @@ fn main() -> io::Result<()> {
                             &mut results,
                             &mut find_output_stream(&output_basename, "maf")?,
                             sequence_index.as_ref().unwrap(),
-                            &name_opt,
+                            &name,
                             query.effective_merge_distance(),
                             scoring_params.unwrap(),
                         )?;
@@ -986,7 +1007,7 @@ fn main() -> io::Result<()> {
                             &mut results,
                             &mut find_output_stream(&output_basename, "fa")?,
                             sequence_index.as_ref().unwrap(),
-                            &name_opt,
+                            &name,
                             query.effective_merge_distance(),
                             reverse_complement,
                         )?;
@@ -997,7 +1018,7 @@ fn main() -> io::Result<()> {
                             &mut results,
                             &mut find_output_stream(&output_basename, "fa")?,
                             sequence_index.as_ref().unwrap(),
-                            &name_opt,
+                            &name,
                             query.effective_merge_distance(),
                             reverse_complement,
                         )?;
@@ -1007,7 +1028,7 @@ fn main() -> io::Result<()> {
                             &impg,
                             &mut results,
                             &mut find_output_stream(&output_basename, "paf")?,
-                            &name_opt,
+                            &name,
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
                             sequence_index.as_ref(),
@@ -1018,7 +1039,7 @@ fn main() -> io::Result<()> {
                             &impg,
                             &mut results,
                             sequence_index.as_ref().unwrap(),
-                            name_opt.clone(),
+                            name.clone(),
                             query.effective_merge_distance(),
                             scoring_params.unwrap(),
                         )?;
@@ -1034,7 +1055,7 @@ fn main() -> io::Result<()> {
         }
         Args::Similarity {
             common,
-            paf,
+            alignment,
             query,
             gfa_maf_fasta,
             progress_bar,
@@ -1083,13 +1104,13 @@ fn main() -> io::Result<()> {
 
             // Setup POA/sequence resources (always required for similarity)
             let (sequence_index, scoring_params) =
-                gfa_maf_fasta.setup_output_resources("gfa", false)?;
+                gfa_maf_fasta.setup_output_resources("gfa", false, &alignment)?;
             let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
             let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA
 
             let subset_filter = load_subset_filter_if_provided(&query.subset_sequence_list)?;
 
-            let impg = initialize_impg(&common, &paf)?;
+            let impg = initialize_impg(&common, &alignment)?;
 
             // Validate target_range and target_bed before ANY expensive operations,
             let target_ranges = {
@@ -1157,6 +1178,8 @@ fn main() -> io::Result<()> {
                     query.transitive,
                     query.transitive_opts.transitive_dfs,
                     &query.transitive_opts,
+                    Some(&sequence_index),
+                    Some(scoring_params),
                 )?;
 
                 let region_label = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
@@ -1205,9 +1228,9 @@ fn main() -> io::Result<()> {
             )?;
         }
 
-        Args::Stats { common, paf } => {
+        Args::Stats { common, alignment } => {
             initialize_threads_and_log(&common);
-            let impg = initialize_impg(&common, &paf)?;
+            let impg = initialize_impg(&common, &alignment)?;
 
             print_stats(&impg);
         }
@@ -1458,27 +1481,27 @@ fn find_output_stream(basename: &Option<String>, extension: &str) -> io::Result<
     }
 }
 
-/// Load/generate index based on common and PAF options
-fn initialize_impg(common: &CommonOpts, paf: &PafOpts) -> io::Result<Impg> {
-    // Resolve the list of PAF files
-    let paf_files = resolve_paf_files(paf)?;
-    info!("Found {} PAF files", paf_files.len());
+/// Load/generate index based on common and alignment options
+fn initialize_impg(common: &CommonOpts, alignment: &AlignmentOpts) -> io::Result<Impg> {
+    // Resolve the list of alignment files (PAF or .1aln)
+    let alignment_files = resolve_alignment_files(alignment)?;
+    info!("Found {} alignment file(s)", alignment_files.len());
 
     // Load or generate index
-    if paf.force_reindex {
-        generate_multi_index(&paf_files, common.threads, paf.index.as_deref())
+    if alignment.force_reindex {
+        generate_multi_index(&alignment_files, common.threads, alignment.index.as_deref())
     } else {
-        load_or_generate_multi_index(&paf_files, common.threads, paf.index.as_deref())
+        load_or_generate_multi_index(&alignment_files, common.threads, alignment.index.as_deref())
     }
 }
 
-/// Resolve the list of PAF files from either --paf-files or --paf-list
-fn resolve_paf_files(paf: &PafOpts) -> io::Result<Vec<String>> {
-    let paf_files = if !paf.paf_files.is_empty() {
-        paf.paf_files.clone()
-    } else if let Some(paf_list_file) = &paf.paf_list {
-        // Read PAF files from the list file
-        let file = File::open(paf_list_file)?;
+/// Resolve the list of alignment files (PAF or .1aln) from either --alignment-files or --alignment-list
+fn resolve_alignment_files(alignment: &AlignmentOpts) -> io::Result<Vec<String>> {
+    let alignment_files = if !alignment.alignment_files.is_empty() {
+        alignment.alignment_files.clone()
+    } else if let Some(alignment_list_file) = &alignment.alignment_list {
+        // Read alignment files from the list file
+        let file = File::open(alignment_list_file)?;
         let reader = BufReader::new(file);
         let mut files = Vec::new();
 
@@ -1493,62 +1516,62 @@ fn resolve_paf_files(paf: &PafOpts) -> io::Result<Vec<String>> {
         if files.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("No valid PAF files found in list file: {paf_list_file}"),
+                format!("No valid alignment files found in list file: {alignment_list_file}"),
             ));
         }
 
         files
     } else {
-        // Neither paf_files nor paf_list provided
+        // Neither alignment_files nor alignment_list provided
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "Either --paf-files or --paf-list must be provided",
+            "Either --alignment-files or --alignment-list must be provided",
         ));
     };
 
-    // Check if the number of PAF files exceeds u16::MAX
-    if paf_files.len() > u16::MAX as usize {
+    // Check if the number of alignment files exceeds u16::MAX
+    if alignment_files.len() > u16::MAX as usize {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "Too many PAF files specified: {} (maximum allowed: {})",
-                paf_files.len(),
+                "Too many alignment files specified: {} (maximum allowed: {})",
+                alignment_files.len(),
                 u16::MAX
             ),
         ));
     }
 
-    Ok(paf_files)
+    Ok(alignment_files)
 }
 
 fn load_or_generate_multi_index(
-    paf_files: &[String],
+    alignment_files: &[String],
     threads: NonZeroUsize,
     custom_index: Option<&str>,
 ) -> io::Result<Impg> {
-    let index_file = get_combined_index_filename(paf_files, custom_index);
+    let index_file = get_combined_index_filename(alignment_files, custom_index);
     if std::path::Path::new(&index_file).exists() {
-        load_multi_index(paf_files, custom_index)
+        load_multi_index(alignment_files, custom_index)
     } else {
-        generate_multi_index(paf_files, threads, custom_index)
+        generate_multi_index(alignment_files, threads, custom_index)
     }
 }
 
-fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Result<Impg> {
-    let index_file = get_combined_index_filename(paf_files, custom_index);
+fn load_multi_index(alignment_files: &[String], custom_index: Option<&str>) -> io::Result<Impg> {
+    let index_file = get_combined_index_filename(alignment_files, custom_index);
     info!("Reading IMPG index from {index_file}");
 
-    // Check if all PAF files are newer than the index
+    // Check if all alignment files are newer than the index
     let index_file_metadata = std::fs::metadata(&index_file)?;
     let index_file_ts = index_file_metadata.modified().ok();
 
     if let Some(index_ts) = index_file_ts {
-        paf_files.par_iter().for_each(|paf_file| {
-            if let Ok(paf_file_metadata) = std::fs::metadata(paf_file) {
-                if let Ok(paf_file_ts) = paf_file_metadata.modified() {
-                    if paf_file_ts > index_ts {
+        alignment_files.par_iter().for_each(|alignment_file| {
+            if let Ok(alignment_file_metadata) = std::fs::metadata(alignment_file) {
+                if let Ok(alignment_file_ts) = alignment_file_metadata.modified() {
+                    if alignment_file_ts > index_ts {
                         warn!(
-                            "WARNING:\tPAF file {paf_file} has been modified since impg index creation."
+                            "WARNING:\tAlignment file {alignment_file} has been modified since impg index creation."
                         );
                     }
                 }
@@ -1560,98 +1583,71 @@ fn load_multi_index(paf_files: &[String], custom_index: Option<&str>) -> io::Res
     let file = File::open(&index_file)?;
     let reader = BufReader::new(file);
 
-    Impg::load_from_file(reader, paf_files, index_file)
+    Impg::load_from_file(reader, alignment_files, index_file)
 }
 
 fn generate_multi_index(
-    paf_files: &[String],
+    alignment_files: &[String],
     threads: NonZeroUsize,
     custom_index: Option<&str>,
 ) -> io::Result<Impg> {
-    let index_file = get_combined_index_filename(paf_files, custom_index);
+    let index_file = get_combined_index_filename(alignment_files, custom_index);
     info!("No index found at {index_file}. Creating it now.");
 
-    let num_paf_files = paf_files.len();
+    let num_alignment_files = alignment_files.len();
     // Thread-safe counter for tracking progress
     let files_processed = AtomicUsize::new(0);
 
     // Create a shared, thread-safe index
     let tmp_seq_index = Arc::new(Mutex::new(SequenceIndex::new()));
 
-    // Process PAF files in parallel using Rayon
-    let mut records_by_file: Vec<(Vec<PartialPafRecord>, String)> = (0..paf_files.len())
+    // Process alignment files in parallel
+    let mut records_by_file: Vec<(Vec<AlignmentRecord>, String)> = (0..alignment_files.len())
         .into_par_iter()
         .map(
-            |file_index| -> io::Result<(Vec<PartialPafRecord>, String)> {
-                let paf_file = &paf_files[file_index];
+            |file_index| -> io::Result<(Vec<AlignmentRecord>, String)> {
+                let aln_file = &alignment_files[file_index];
 
                 // Increment the counter and get the new value atomically
                 let current_count = files_processed.fetch_add(1, Ordering::SeqCst) + 1;
-                // Print progress with sequential counter
-                debug!("Processing PAF file ({current_count}/{num_paf_files}): {paf_file}");
-
-                let file = File::open(paf_file)?;
+                debug!("Processing alignment file ({current_count}/{num_alignment_files}): {aln_file}");
 
                 // Lock, get IDs, build records
                 let mut seq_index_guard = tmp_seq_index.lock().unwrap();
 
-                // Use different parsing logic for compressed vs uncompressed files
-                let records = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-                    // For compressed files, check if GZI index exists for optimization
-                    let gzi_path = format!("{}.gzi", paf_file);
-                    if std::path::Path::new(&gzi_path).exists() {
-                        debug!(
-                            "Found GZI index for {}, using multithreaded decompression",
-                            paf_file
-                        );
-                        // Use multithreaded reader with GZI for faster parsing
-                        let gzi_index = bgzf::gzi::fs::read(&gzi_path).map_err(|e| {
+                // Detect file format and parse accordingly
+                use impg::onealn::OneAlnParser;
+                let format = AlignmentFormat::from_path(aln_file).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("Unsupported alignment format: {aln_file}"),
+                    )
+                })?;
+
+                let records = match format {
+                    AlignmentFormat::Paf => {
+                        let file = File::open(aln_file)?;
+                        impg::paf::parse_paf_file(aln_file, file, threads, &mut seq_index_guard)?
+                    }
+                    AlignmentFormat::OneAln => {
+                        debug!("Parsing 1aln file: {aln_file}");
+                        let parser = OneAlnParser::new(aln_file.clone()).map_err(|e| {
                             io::Error::new(
                                 io::ErrorKind::InvalidData,
-                                format!("Failed to read GZI index {}: {}", gzi_path, e),
+                                format!("Failed to create 1aln parser: {:?}", e),
                             )
                         })?;
-                        let mt_reader =
-                            bgzf::io::MultithreadedReader::with_worker_count(threads, file);
-                        impg::paf::parse_paf_bgzf_with_gzi(
-                            mt_reader,
-                            gzi_index,
-                            &mut seq_index_guard,
-                        )
-                        .map_err(|e| {
+
+                        parser.parse_alignments(&mut seq_index_guard).map_err(|e| {
                             io::Error::new(
                                 io::ErrorKind::InvalidData,
-                                format!("Failed to parse PAF records from {}: {:?}", paf_file, e),
+                                format!("Failed to parse 1aln records: {:?}", e),
                             )
                         })?
-                    } else {
-                        debug!("No GZI index found for {}, using BGZF reader", paf_file);
-                        // No GZI available, use BGZF reader to capture virtual positions directly
-                        let bgzf_reader = bgzf::io::Reader::new(file);
-                        impg::paf::parse_paf_bgzf(bgzf_reader, &mut seq_index_guard).map_err(
-                            |e| {
-                                io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    format!(
-                                        "Failed to parse PAF records from {}: {:?}",
-                                        paf_file, e
-                                    ),
-                                )
-                            },
-                        )?
                     }
-                } else {
-                    // For uncompressed files, use regular buffered reader
-                    let reader = BufReader::new(file);
-                    impg::paf::parse_paf(reader, &mut seq_index_guard).map_err(|e| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("Failed to parse PAF records from {}: {:?}", paf_file, e),
-                        )
-                    })?
                 };
 
-                Ok((records, paf_file.clone()))
+                Ok((records, aln_file.clone()))
             },
         )
         .collect::<Result<Vec<_>, _>>()?; // Propagate any errors
@@ -1688,7 +1684,7 @@ fn generate_multi_index(
         }
     });
 
-    let impg = Impg::from_multi_paf_records(&records_by_file, seq_index).map_err(|e| {
+    let impg = Impg::from_multi_alignment_records(&records_by_file, seq_index).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("Failed to create index: {e:?}"),
@@ -1704,17 +1700,17 @@ fn generate_multi_index(
     Ok(impg)
 }
 
-fn get_combined_index_filename(paf_files: &[String], custom_index: Option<&str>) -> String {
+fn get_combined_index_filename(alignment_files: &[String], custom_index: Option<&str>) -> String {
     if let Some(index) = custom_index {
         return index.to_string();
     }
 
-    if paf_files.len() == 1 {
-        format!("{}.impg", paf_files[0])
+    if alignment_files.len() == 1 {
+        format!("{}.impg", alignment_files[0])
     } else {
         // For multiple files, create a hash of the sorted filenames
 
-        let mut file_refs: Vec<&str> = paf_files.iter().map(|s| s.as_str()).collect();
+        let mut file_refs: Vec<&str> = alignment_files.iter().map(|s| s.as_str()).collect();
         file_refs.sort();
 
         let mut hasher = DefaultHasher::new();
@@ -1735,6 +1731,8 @@ fn perform_query(
     transitive: bool,
     transitive_dfs: bool,
     transitive_opts: &TransitiveOpts,
+    sequence_index: Option<&UnifiedSequenceIndex>,
+    penalties: Option<(u8, u8, u8, u8, u8, u8)>,
 ) -> io::Result<Vec<AdjustedInterval>> {
     let (target_start, target_end) = target_range;
     let target_id = impg.seq_index.get_id(target_name).ok_or_else(|| {
@@ -1769,6 +1767,8 @@ fn perform_query(
             transitive_opts.min_distance_between_ranges,
             store_cigar,
             min_identity,
+            sequence_index,
+            penalties,
         )
     } else if transitive_dfs {
         impg.query_transitive_dfs(
@@ -1781,6 +1781,8 @@ fn perform_query(
             transitive_opts.min_distance_between_ranges,
             store_cigar,
             min_identity,
+            sequence_index,
+            penalties,
         )
     } else {
         impg.query(
@@ -1789,6 +1791,8 @@ fn perform_query(
             target_end,
             store_cigar,
             min_identity,
+            sequence_index,
+            penalties,
         )
     };
 
@@ -1867,7 +1871,7 @@ fn output_results_bed(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
     out: &mut dyn Write,
-    name: &Option<String>,
+    name: &str,
     merge_distance: i32,
     original_coordinates: bool,
 ) -> io::Result<()> {
@@ -1896,7 +1900,7 @@ fn output_results_bed(
             transformed_name,
             transformed_first,
             transformed_last,
-            name.as_deref().unwrap_or("."),
+            name,
             strand
         )?;
     }
@@ -1908,7 +1912,7 @@ fn output_results_bedpe(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
     out: &mut dyn Write,
-    name: &Option<String>,
+    name: &str,
     merge_distance: i32,
     original_coordinates: bool,
 ) -> io::Result<()> {
@@ -1980,7 +1984,7 @@ fn output_results_bedpe(
             transformed_target_name,
             transformed_target_first,
             transformed_target_last,
-            name.as_deref().unwrap_or("."),
+            name,
             strand,
             gi_str,
             bi_str
@@ -1994,7 +1998,7 @@ fn output_results_paf(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
     out: &mut dyn Write,
-    name: &Option<String>,
+    name: &str,
     merge_distance: i32,
     original_coordinates: bool,
     sequence_index: Option<&UnifiedSequenceIndex>,
@@ -2079,18 +2083,11 @@ fn output_results_paf(
             .map(|op| format!("{}{}", op.len(), op.op()))
             .collect();
 
-        match name {
-            Some(ref name) => writeln!(out,
-                                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{}\tbi:f:{}\tcg:Z:{}\tan:Z:{}",
-                                transformed_query_name, query_length, transformed_first, transformed_last, strand,
-                                transformed_target_name, target_length, transformed_target_first, transformed_target_last,
-                                matches, block_len, 255, gi_str, bi_str, cigar_str, name)?,
-            None => writeln!(out,
-                                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{}\tbi:f:{}\tcg:Z:{}",
-                                transformed_query_name, query_length, transformed_first, transformed_last, strand,
-                                transformed_target_name, target_length, transformed_target_first, transformed_target_last,
-                                matches, block_len, 255, gi_str, bi_str, cigar_str)?,
-        }
+        writeln!(out,
+                            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{}\tbi:f:{}\tcg:Z:{}\tan:Z:{}",
+                            transformed_query_name, query_length, transformed_first, transformed_last, strand,
+                            transformed_target_name, target_length, transformed_target_first, transformed_target_last,
+                            matches, block_len, 255, gi_str, bi_str, cigar_str, name)?;
     }
 
     Ok(())
@@ -2101,7 +2098,7 @@ fn output_results_gfa(
     results: &mut Vec<AdjustedInterval>,
     out: &mut dyn Write,
     sequence_index: &UnifiedSequenceIndex,
-    _name: &Option<String>,
+    _name: &str,
     merge_distance: i32,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<()> {
@@ -2129,7 +2126,7 @@ fn output_results_fasta(
     results: &mut Vec<AdjustedInterval>,
     out: &mut dyn Write,
     sequence_index: &UnifiedSequenceIndex,
-    _name: &Option<String>,
+    _name: &str,
     merge_distance: i32,
     reverse_complement: bool,
 ) -> io::Result<()> {
@@ -2194,7 +2191,7 @@ fn output_results_maf(
     results: &mut Vec<AdjustedInterval>,
     out: &mut dyn Write,
     sequence_index: &UnifiedSequenceIndex,
-    _name: &Option<String>,
+    _name: &str,
     merge_distance: i32,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<()> {
@@ -2221,7 +2218,7 @@ fn output_results_fasta_aln(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
     sequence_index: &UnifiedSequenceIndex,
-    _name: Option<String>,
+    _name: String,
     merge_distance: i32,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<()> {
@@ -2832,8 +2829,8 @@ fn print_stats(impg: &Impg) {
         num_overlaps
     );
 
-    println!("Number of sequences: {num_sequences}");
-    println!("Total sequence length: {total_sequence_length} bp");
+    println!("Number of query+target sequences: {num_sequences}");
+    println!("Total query+target sequence length: {total_sequence_length} bp");
     println!("Number of overlaps: {num_overlaps}");
 
     let mut entries: Vec<(u32, usize)> = overlaps_per_seq.into_iter().collect();
@@ -2855,7 +2852,7 @@ fn print_stats(impg: &Impg) {
         println!("\nMean overlaps per sequence: {mean:.2}");
         println!("Median overlaps per sequence: {median:.2}");
 
-        println!("\nTop sequences by number of overlaps:");
+        println!("\nTop target sequences by number of overlaps:");
         for (idx, (seq_id, count)) in entries.iter().take(5).enumerate() {
             if let Some(name) = impg.seq_index.get_name(*seq_id) {
                 println!("{}. {}: {} overlaps", idx + 1, name, count);
