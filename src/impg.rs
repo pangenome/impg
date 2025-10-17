@@ -389,14 +389,11 @@ where
     ALIGNERS.with(|aligners| {
         let mut aligners = aligners.borrow_mut();
         if aligners.is_empty() {
-            let (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) = penalties;
-            aligners.push(AffineWavefronts::with_penalties_affine2p(
+            let (_match, mismatch, gap_open1, _, _, _) = penalties;
+            aligners.push(AffineWavefronts::with_penalties_edit(
                 0, // match score
                 mismatch.into(),
                 gap_open1.into(),
-                gap_ext1.into(),
-                gap_open2.into(),
-                gap_ext2.into(),
             ));
         }
         f(&mut aligners[0])
