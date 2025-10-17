@@ -1407,7 +1407,7 @@ checksum = "a4895175b425cb1f87721b59f0f286c2092bd4af812243672510e1ac53e2e0ad"
 [[package]]
 name = "onecode"
 version = "0.1.0"
-source = "git+https://github.com/pangenome/onecode-rs#c6c5be1dfc4b2edcc2a63ac3fa5d13f0f92e6212"
+source = "git+https://github.com/pangenome/onecode-rs#ceb255c24afa7115d08efde458d7aee57b220100"
 dependencies = [
  "bindgen",
  "cc",

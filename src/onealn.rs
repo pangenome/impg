@@ -66,14 +66,23 @@ impl OneAlnParser {
 
         let mut records = Vec::new();
         let mut alignment_index: u64 = 0;
+        let mut next_line_is_a = false; // Track if we already read an 'A' in parse_single_alignment
 
         loop {
-            match file.read_line() {
+            let line_type = if next_line_is_a {
+                next_line_is_a = false;
+                'A'
+            } else {
+                file.read_line()
+            };
+
+            match line_type {
                 '\0' => break,
                 'A' => {
-                    let record = self.parse_single_alignment(&mut file, seq_index, alignment_index)?;
+                    let (record, found_next_a) = self.parse_single_alignment(&mut file, seq_index, alignment_index)?;
                     records.push(record);
                     alignment_index += 1;
+                    next_line_is_a = found_next_a; // If inner loop found next 'A', don't read again
                 }
                 _ => {}
             }
@@ -83,12 +92,13 @@ impl OneAlnParser {
     }
 
     /// Parse a single alignment from current file position (after reading 'A' line)
+    /// Returns (AlignmentRecord, found_next_A)
     fn parse_single_alignment(
         &self,
         file: &mut OneFile,
         seq_index: &mut SequenceIndex,
         alignment_index: u64,
-    ) -> Result<AlignmentRecord, ParseErr> {
+    ) -> Result<(AlignmentRecord, bool), ParseErr> {
         // Read alignment coordinates from current 'A' line
         let query_id_in_file = file.int(0);
         let target_id_in_file = file.int(3);
@@ -99,26 +109,26 @@ impl OneAlnParser {
             .seq_names
             .get(&query_id_in_file)
             .cloned()
-            .unwrap_or_else(|| "unknown".to_string());
+            .ok_or_else(|| ParseErr::InvalidFormat(format!("Query sequence with ID {} not found in metadata", query_id_in_file)))?;
         let query_length = self
             .metadata
             .seq_lengths
             .get(&query_id_in_file)
             .copied()
-            .unwrap_or(0) as usize;
+            .ok_or_else(|| ParseErr::InvalidFormat(format!("Query sequence length for ID {} not found in metadata", query_id_in_file)))? as usize;
 
         let target_name = self
             .metadata
             .seq_names
             .get(&target_id_in_file)
             .cloned()
-            .unwrap_or_else(|| "unknown".to_string());
+            .ok_or_else(|| ParseErr::InvalidFormat(format!("Target sequence with ID {} not found in metadata", target_id_in_file)))?;
         let target_length = self
             .metadata
             .seq_lengths
             .get(&target_id_in_file)
             .copied()
-            .unwrap_or(0) as usize;
+            .ok_or_else(|| ParseErr::InvalidFormat(format!("Target sequence length for ID {} not found in metadata", target_id_in_file)))? as usize;
 
         // Register sequences in the SequenceIndex
         let query_id = seq_index.get_or_insert_id(&query_name, Some(query_length));
@@ -131,19 +141,34 @@ impl OneAlnParser {
 
         let mut strand = Strand::Forward;
         let mut num_tracepoints = 0;
+        let mut found_next_a = false;
 
         // Read associated lines
         loop {
-            match file.read_line() {
+            let line_type = file.read_line();
+            match line_type {
                 'R' => strand = Strand::Reverse,
+                'D' => {
+                    // Differences (ignore for now)
+                }
                 'T' => {
                     // Tracepoints
                     if let Some(tp_vec) = file.int_list() {
                         num_tracepoints = tp_vec.len();
                     }
                 }
-                'A' | 'a' | 'g' | '\0' => break,
-                _ => {}
+                'X' => {
+                    // Trace diffs (ignore for now)
+                }
+                'A' => {
+                    // Found next alignment, signal to main loop
+                    found_next_a = true;
+                    break;
+                }
+                'a' | 'g' | 'S' | '\0' => break,
+                _ => {
+                    // Skip other line types (D, X, etc.)
+                }
             }
         }
 
@@ -159,7 +184,7 @@ impl OneAlnParser {
         };
         record.set_strand(strand);
 
-        Ok(record)
+        Ok((record, found_next_a))
     }
 
     /// Seek to a specific alignment using O(1) access
