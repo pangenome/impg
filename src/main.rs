@@ -2816,8 +2816,8 @@ fn print_stats(impg: &Impg) {
         num_overlaps
     );
 
-    println!("Number of sequences: {num_sequences}");
-    println!("Total sequence length: {total_sequence_length} bp");
+    println!("Number of query+target sequences: {num_sequences}");
+    println!("Total query+target sequence length: {total_sequence_length} bp");
     println!("Number of overlaps: {num_overlaps}");
 
     let mut entries: Vec<(u32, usize)> = overlaps_per_seq.into_iter().collect();
@@ -2839,7 +2839,7 @@ fn print_stats(impg: &Impg) {
         println!("\nMean overlaps per sequence: {mean:.2}");
         println!("Median overlaps per sequence: {median:.2}");
 
-        println!("\nTop sequences by number of overlaps:");
+        println!("\nTop target sequences by number of overlaps:");
         for (idx, (seq_id, count)) in entries.iter().take(5).enumerate() {
             if let Some(name) = impg.seq_index.get_name(*seq_id) {
                 println!("{}. {}: {} overlaps", idx + 1, name, count);
