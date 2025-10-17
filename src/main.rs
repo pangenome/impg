@@ -2,12 +2,11 @@ use clap::Parser;
 use coitrees::{Interval, IntervalTree};
 use impg::commands::{lace, partition, similarity};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
-use impg::paf::{PartialPafRecord, Strand};
+use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
 use impg::seqidx::SequenceIndex;
 use impg::sequence_index::{SequenceIndex as SeqIndexTrait, UnifiedSequenceIndex};
 use impg::subset_filter::{load_subset_filter, SubsetFilter};
 use log::{debug, info, warn};
-use noodles::bgzf;
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use rustc_hash::FxHashMap;
@@ -1575,87 +1574,60 @@ fn generate_multi_index(
     let index_file = get_combined_index_filename(paf_files, custom_index);
     info!("No index found at {index_file}. Creating it now.");
 
-    let num_paf_files = paf_files.len();
+    let num_alignment_files = paf_files.len();
     // Thread-safe counter for tracking progress
     let files_processed = AtomicUsize::new(0);
 
     // Create a shared, thread-safe index
     let tmp_seq_index = Arc::new(Mutex::new(SequenceIndex::new()));
 
-    // Process PAF files in parallel using Rayon
-    let mut records_by_file: Vec<(Vec<PartialPafRecord>, String)> = (0..paf_files.len())
+    // Process alignment files in parallel (supports both PAF and 1aln)
+    let mut records_by_file: Vec<(Vec<AlignmentRecord>, String)> = (0..paf_files.len())
         .into_par_iter()
         .map(
-            |file_index| -> io::Result<(Vec<PartialPafRecord>, String)> {
-                let paf_file = &paf_files[file_index];
+            |file_index| -> io::Result<(Vec<AlignmentRecord>, String)> {
+                let aln_file = &paf_files[file_index];
 
                 // Increment the counter and get the new value atomically
                 let current_count = files_processed.fetch_add(1, Ordering::SeqCst) + 1;
-                // Print progress with sequential counter
-                debug!("Processing PAF file ({current_count}/{num_paf_files}): {paf_file}");
-
-                let file = File::open(paf_file)?;
+                debug!("Processing alignment file ({current_count}/{num_alignment_files}): {aln_file}");
 
                 // Lock, get IDs, build records
                 let mut seq_index_guard = tmp_seq_index.lock().unwrap();
 
-                // Use different parsing logic for compressed vs uncompressed files
-                let records = if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-                    // For compressed files, check if GZI index exists for optimization
-                    let gzi_path = format!("{}.gzi", paf_file);
-                    if std::path::Path::new(&gzi_path).exists() {
-                        debug!(
-                            "Found GZI index for {}, using multithreaded decompression",
-                            paf_file
-                        );
-                        // Use multithreaded reader with GZI for faster parsing
-                        let gzi_index = bgzf::gzi::fs::read(&gzi_path).map_err(|e| {
+                // Detect file format and parse accordingly
+                use impg::onealn::OneAlnParser;
+                let format = AlignmentFormat::from_path(aln_file).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("Unsupported alignment format: {aln_file}"),
+                    )
+                })?;
+
+                let records = match format {
+                    AlignmentFormat::Paf => {
+                        let file = File::open(aln_file)?;
+                        impg::paf::parse_paf_file(aln_file, file, threads, &mut seq_index_guard)?
+                    }
+                    AlignmentFormat::OneAln => {
+                        debug!("Parsing 1aln file: {aln_file}");
+                        let parser = OneAlnParser::new(aln_file.clone()).map_err(|e| {
                             io::Error::new(
                                 io::ErrorKind::InvalidData,
-                                format!("Failed to read GZI index {}: {}", gzi_path, e),
+                                format!("Failed to create 1aln parser: {:?}", e),
                             )
                         })?;
-                        let mt_reader =
-                            bgzf::io::MultithreadedReader::with_worker_count(threads, file);
-                        impg::paf::parse_paf_bgzf_with_gzi(
-                            mt_reader,
-                            gzi_index,
-                            &mut seq_index_guard,
-                        )
-                        .map_err(|e| {
+
+                        parser.parse_alignments(&mut seq_index_guard).map_err(|e| {
                             io::Error::new(
                                 io::ErrorKind::InvalidData,
-                                format!("Failed to parse PAF records from {}: {:?}", paf_file, e),
+                                format!("Failed to parse 1aln records: {:?}", e),
                             )
                         })?
-                    } else {
-                        debug!("No GZI index found for {}, using BGZF reader", paf_file);
-                        // No GZI available, use BGZF reader to capture virtual positions directly
-                        let bgzf_reader = bgzf::io::Reader::new(file);
-                        impg::paf::parse_paf_bgzf(bgzf_reader, &mut seq_index_guard).map_err(
-                            |e| {
-                                io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    format!(
-                                        "Failed to parse PAF records from {}: {:?}",
-                                        paf_file, e
-                                    ),
-                                )
-                            },
-                        )?
                     }
-                } else {
-                    // For uncompressed files, use regular buffered reader
-                    let reader = BufReader::new(file);
-                    impg::paf::parse_paf(reader, &mut seq_index_guard).map_err(|e| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("Failed to parse PAF records from {}: {:?}", paf_file, e),
-                        )
-                    })?
                 };
 
-                Ok((records, paf_file.clone()))
+                Ok((records, aln_file.clone()))
             },
         )
         .collect::<Result<Vec<_>, _>>()?; // Propagate any errors

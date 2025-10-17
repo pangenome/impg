@@ -1,6 +1,7 @@
 use crate::forest_map::ForestMap;
 use crate::graph::reverse_complement;
-use crate::paf::{ParseErr, PartialPafRecord, Strand};
+use crate::alignment_record::{AlignmentRecord, Strand};
+use crate::paf::ParseErr;
 use crate::seqidx::SequenceIndex;
 use crate::sequence_index::SequenceIndex as _; // The as _ syntax imports the trait so its methods are available, but doesn't bring the name into scope (avoiding the naming conflict)
 use crate::sequence_index::UnifiedSequenceIndex;
@@ -505,7 +506,7 @@ impl Impg {
     }
 
     pub fn from_multi_paf_records(
-        records_by_file: &[(Vec<PartialPafRecord>, String)],
+        records_by_file: &[(Vec<AlignmentRecord>, String)],
         seq_index: SequenceIndex,
     ) -> Result<Self, ParseErr> {
         // Extract just the PAF file paths
@@ -528,8 +529,8 @@ impl Impg {
                             query_start: record.query_start as i32,
                             query_end: record.query_end as i32,
                             paf_file_index: file_index as u16,
-                            strand_and_data_offset: record.strand_and_cigar_offset, // Already includes strand bit
-                            data_bytes: record.cigar_bytes,
+                            strand_and_data_offset: record.strand_and_data_offset, // Already includes strand bit
+                            data_bytes: record.data_bytes,
                         };
 
                         Some((
@@ -1860,7 +1861,7 @@ mod tests {
         let target_id = seq_index.get_or_insert_id("t1", Some(200));
         let reader = BufReader::new(&paf_data[..]);
         let expected_records = vec![
-            PartialPafRecord {
+            AlignmentRecord {
                 query_id,
                 query_start: 10,
                 query_end: 20,
@@ -1868,7 +1869,7 @@ mod tests {
                 target_start: 30,
                 target_end: 40,
                 strand_and_data_offset: 45, // Forward strand
-                cigar_bytes: 3,
+                data_bytes: 3,
             },
             // Add more test records as needed
         ];
