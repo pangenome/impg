@@ -568,11 +568,18 @@ impl Impg {
             })
             .collect();
 
+        // Populate forest map with placeholder offsets for in-memory trees
+        // This allows stats and other operations to work before serialization
+        let mut forest_map = ForestMap::new();
+        for &target_id in trees.keys() {
+            forest_map.add_entry(target_id, 0); // Offset 0 = in-memory tree
+        }
+
         Ok(Self {
             trees: RwLock::new(trees),
             seq_index,
             paf_files,
-            forest_map: ForestMap::new(), // All trees are in memory, no need for forest map
+            forest_map,
             index_file_path: String::new(), // All trees are in memory, no need for index file path
         })
     }
