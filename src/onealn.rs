@@ -206,33 +206,39 @@ impl OneAlnParser {
         let query_id = file.int(0);
         let target_id = file.int(3);
 
+        let query_name = self
+            .metadata
+            .seq_names
+            .get(&query_id)
+            .cloned()
+            .ok_or_else(|| ParseErr::InvalidFormat(format!("Query sequence with ID {} not found in metadata", query_id)))?;
+        let query_length = self
+            .metadata
+            .seq_lengths
+            .get(&query_id)
+            .copied()
+            .ok_or_else(|| ParseErr::InvalidFormat(format!("Query sequence length for ID {} not found in metadata", query_id)))?;
+
+        let target_name = self
+            .metadata
+            .seq_names
+            .get(&target_id)
+            .cloned()
+            .ok_or_else(|| ParseErr::InvalidFormat(format!("Target sequence with ID {} not found in metadata", target_id)))?;
+        let target_length = self
+            .metadata
+            .seq_lengths
+            .get(&target_id)
+            .copied()
+            .ok_or_else(|| ParseErr::InvalidFormat(format!("Target sequence length for ID {} not found in metadata", target_id)))?;
+
         let alignment = OneAlnAlignment {
-            query_name: self
-                .metadata
-                .seq_names
-                .get(&query_id)
-                .cloned()
-                .unwrap_or_else(|| "unknown".to_string()),
-            query_length: self
-                .metadata
-                .seq_lengths
-                .get(&query_id)
-                .copied()
-                .unwrap_or(0),
+            query_name,
+            query_length,
             query_start: file.int(1),
             query_end: file.int(2),
-            target_name: self
-                .metadata
-                .seq_names
-                .get(&target_id)
-                .cloned()
-                .unwrap_or_else(|| "unknown".to_string()),
-            target_length: self
-                .metadata
-                .seq_lengths
-                .get(&target_id)
-                .copied()
-                .unwrap_or(0),
+            target_name,
+            target_length,
             target_start: file.int(4),
             target_end: file.int(5),
             strand: '+',
