@@ -1,8 +1,8 @@
 use clap::Parser;
 use coitrees::{Interval, IntervalTree};
+use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
 use impg::commands::{lace, partition, similarity};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
-use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
 use impg::seqidx::SequenceIndex;
 use impg::sequence_index::{SequenceIndex as SeqIndexTrait, UnifiedSequenceIndex};
 use impg::subset_filter::{load_subset_filter, SubsetFilter};
@@ -42,7 +42,12 @@ struct AlignmentOpts {
 
     /// Path to a text file containing paths to alignment files (one per line, PAF or .1aln format).
     #[arg(help_heading = "Alignment input")]
-    #[clap(long, value_parser, required = false, conflicts_with = "alignment_files")]
+    #[clap(
+        long,
+        value_parser,
+        required = false,
+        conflicts_with = "alignment_files"
+    )]
     alignment_list: Option<String>,
 
     /// Path to the IMPG index file.
@@ -204,7 +209,10 @@ impl GfaMafFastaOpts {
     )> {
         // Check if any of the alignment files are .1aln files (which require sequence data for tracepoint conversion)
         let has_onealn_files = if !alignment_opts.alignment_files.is_empty() {
-            alignment_opts.alignment_files.iter().any(|f| f.ends_with(".1aln"))
+            alignment_opts
+                .alignment_files
+                .iter()
+                .any(|f| f.ends_with(".1aln"))
         } else if let Some(alignment_list) = &alignment_opts.alignment_list {
             // Read and check files from list
             if let Ok(content) = std::fs::read_to_string(alignment_list) {
@@ -237,7 +245,7 @@ impl GfaMafFastaOpts {
                 } else {
                     "FASTA"
                 };
-                
+
                 let msg = if has_onealn_files {
                     format!("Sequence files ({file_types}) are required for .1aln alignment files to convert tracepoints to CIGAR strings. Use --sequence-files or --sequence-list")
                 } else {
@@ -401,9 +409,7 @@ fn get_original_sequence_length(
         }
     } else {
         // Emit warning when no index is provided
-        warn!(
-            "No sequence index provided, using 0 as length for sequence '{original_seq_name}'"
-        );
+        warn!("No sequence index provided, using 0 as length for sequence '{original_seq_name}'");
     }
 
     0 // Return 0 if the sequence is not found or no index is provided
@@ -828,7 +834,6 @@ fn main() -> io::Result<()> {
                 reverse_complement,
                 common.verbose > 1,
                 separate_files,
-                alignment.trace_spacing,
             )?;
         }
         Args::Query {
@@ -936,7 +941,6 @@ fn main() -> io::Result<()> {
                     &query.transitive_opts,
                     sequence_index.as_ref(),
                     scoring_params,
-                    alignment.trace_spacing,
                 )?;
 
                 // Apply subset filter if provided
@@ -1187,7 +1191,6 @@ fn main() -> io::Result<()> {
                     &query.transitive_opts,
                     Some(&sequence_index),
                     Some(scoring_params),
-                    alignment.trace_spacing,
                 )?;
 
                 let region_label = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
@@ -1612,52 +1615,52 @@ fn generate_multi_index(
     // Process alignment files in parallel
     let mut records_by_file: Vec<(Vec<AlignmentRecord>, String)> = (0..alignment_files.len())
         .into_par_iter()
-        .map(
-            |file_index| -> io::Result<(Vec<AlignmentRecord>, String)> {
-                let aln_file = &alignment_files[file_index];
+        .map(|file_index| -> io::Result<(Vec<AlignmentRecord>, String)> {
+            let aln_file = &alignment_files[file_index];
 
-                // Increment the counter and get the new value atomically
-                let current_count = files_processed.fetch_add(1, Ordering::SeqCst) + 1;
-                debug!("Processing alignment file ({current_count}/{num_alignment_files}): {aln_file}");
+            // Increment the counter and get the new value atomically
+            let current_count = files_processed.fetch_add(1, Ordering::SeqCst) + 1;
+            debug!("Processing alignment file ({current_count}/{num_alignment_files}): {aln_file}");
 
-                // Lock, get IDs, build records
-                let mut seq_index_guard = tmp_seq_index.lock().unwrap();
+            // Lock, get IDs, build records
+            let mut seq_index_guard = tmp_seq_index.lock().unwrap();
 
-                // Detect file format and parse accordingly
-                use impg::onealn::OneAlnParser;
-                let format = AlignmentFormat::from_path(aln_file).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("Unsupported alignment format: {aln_file}"),
-                    )
-                })?;
+            // Detect file format and parse accordingly
+            use impg::onealn::OneAlnParser;
+            let format = AlignmentFormat::from_path(aln_file).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Unsupported alignment format: {aln_file}"),
+                )
+            })?;
 
-                let records = match format {
-                    AlignmentFormat::Paf => {
-                        let file = File::open(aln_file)?;
-                        impg::paf::parse_paf_file(aln_file, file, threads, &mut seq_index_guard)?
-                    }
-                    AlignmentFormat::OneAln => {
-                        debug!("Parsing 1aln file: {aln_file}");
-                        let parser = OneAlnParser::new(aln_file.clone()).map_err(|e| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                format!("Failed to create 1aln parser: {:?}", e),
-                            )
-                        })?;
+            let records = match format {
+                AlignmentFormat::Paf => {
+                    let file = File::open(aln_file)?;
+                    impg::paf::parse_paf_file(aln_file, file, threads, &mut seq_index_guard)?
+                }
+                AlignmentFormat::OneAln => {
+                    let parser = OneAlnParser::new(aln_file.clone()).map_err(|e| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Failed to create 1aln parser: {:?}", e),
+                        )
+                    })?;
 
-                        parser.parse_alignments(&mut seq_index_guard).map_err(|e| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                format!("Failed to parse 1aln records: {:?}", e),
-                            )
-                        })?
-                    }
-                };
-
-                Ok((records, aln_file.clone()))
-            },
-        )
+                    parser.parse_alignments(&mut seq_index_guard).map_err(|e| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Failed to parse 1aln records: {:?}", e),
+                        )
+                    })?
+                }
+            };
+            debug!(
+                "Parsed {} alignment records from file: {aln_file}",
+                records.len()
+            );
+            Ok((records, aln_file.clone()))
+        })
         .collect::<Result<Vec<_>, _>>()?; // Propagate any errors
 
     // Take back ownership of the SequenceIndex
@@ -1741,7 +1744,6 @@ fn perform_query(
     transitive_opts: &TransitiveOpts,
     sequence_index: Option<&UnifiedSequenceIndex>,
     penalties: Option<(u8, u8, u8, u8, u8, u8)>,
-    trace_spacing: u32,
 ) -> io::Result<Vec<AdjustedInterval>> {
     let (target_start, target_end) = target_range;
     let target_id = impg.seq_index.get_id(target_name).ok_or_else(|| {
@@ -1778,7 +1780,6 @@ fn perform_query(
             min_identity,
             sequence_index,
             penalties,
-            trace_spacing,
         )
     } else if transitive_dfs {
         impg.query_transitive_dfs(
@@ -1793,7 +1794,6 @@ fn perform_query(
             min_identity,
             sequence_index,
             penalties,
-            trace_spacing,
         )
     } else {
         impg.query(
@@ -1804,7 +1804,6 @@ fn perform_query(
             min_identity,
             sequence_index,
             penalties,
-            trace_spacing,
         )
     };
 
@@ -1909,11 +1908,7 @@ fn output_results_bed(
         writeln!(
             out,
             "{}\t{}\t{}\t{}\t.\t{}",
-            transformed_name,
-            transformed_first,
-            transformed_last,
-            name,
-            strand
+            transformed_name, transformed_first, transformed_last, name, strand
         )?;
     }
 
@@ -2095,11 +2090,26 @@ fn output_results_paf(
             .map(|op| format!("{}{}", op.len(), op.op()))
             .collect();
 
-        writeln!(out,
-                            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{}\tbi:f:{}\tcg:Z:{}\tan:Z:{}",
-                            transformed_query_name, query_length, transformed_first, transformed_last, strand,
-                            transformed_target_name, target_length, transformed_target_first, transformed_target_last,
-                            matches, block_len, 255, gi_str, bi_str, cigar_str, name)?;
+        writeln!(
+            out,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tgi:f:{}\tbi:f:{}\tcg:Z:{}\tan:Z:{}",
+            transformed_query_name,
+            query_length,
+            transformed_first,
+            transformed_last,
+            strand,
+            transformed_target_name,
+            target_length,
+            transformed_target_first,
+            transformed_target_last,
+            matches,
+            block_len,
+            255,
+            gi_str,
+            bi_str,
+            cigar_str,
+            name
+        )?;
     }
 
     Ok(())

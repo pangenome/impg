@@ -27,7 +27,8 @@ spoa_rs = { git = "https://github.com/AndreaGuarracino/spoa-rs.git" }
 rust-htslib = { version = "0.46.0", default-features = false } # Don't update it, see https://github.com/rust-bio/rust-htslib/issues/434
 
 lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2"}
-lib_tracepoints = { git = "https://github.com/AndreaGuarracino/lib_tracepoints"}
+#lib_tracepoints = { git = "https://github.com/AndreaGuarracino/lib_tracepoints"}
+lib_tracepoints = { path = "/home/guarracino/Dropbox/git/lib_tracepoints"}
 onecode = { git = "https://github.com/pangenome/onecode-rs" }
 
 # Additional dependencies for lace functionality

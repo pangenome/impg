@@ -17,6 +17,7 @@ pub struct OneAlnParser {
 struct OneAlnMetadata {
     seq_names: HashMap<i64, String>,
     seq_lengths: HashMap<i64, i64>,
+    contig_offsets: HashMap<i64, (i64, i64)>, // Maps contig ID to (sbeg, clen)
 }
 
 /// Error type for 1aln parsing
@@ -34,6 +35,7 @@ impl OneAlnParser {
         let metadata = OneAlnMetadata {
             seq_names: file.get_all_sequence_names(),
             seq_lengths: file.get_all_sequence_lengths(),
+            contig_offsets: file.get_all_contig_offsets(),
         };
 
         // Get trace spacing
@@ -63,30 +65,24 @@ impl OneAlnParser {
     ) -> Result<Vec<AlignmentRecord>, ParseErr> {
         let mut file = OneFile::open_read(&self.file_path, None, None, 1)
             .map_err(|e| ParseErr::InvalidFormat(format!("Failed to open 1aln file: {}", e)))?;
-
         let mut records = Vec::new();
         let mut alignment_index: u64 = 0;
-        let mut next_line_is_a = false; // Track if we already read an 'A' in parse_single_alignment
+        let mut current_line = file.read_line();
 
         loop {
-            let line_type = if next_line_is_a {
-                next_line_is_a = false;
-                'A'
-            } else {
-                file.read_line()
-            };
-
-            match line_type {
+            match current_line {
                 '\0' => break,
                 'A' => {
-                    let (record, found_next_a) =
+                    let (record, next_line) =
                         self.parse_single_alignment(&mut file, seq_index, alignment_index)?;
                     records.push(record);
                     alignment_index += 1;
-                    next_line_is_a = found_next_a; // If inner loop found next 'A', don't read again
+                    current_line = next_line;
                 }
-                _ => {}
-            }
+                _ => {
+                    current_line = file.read_line();
+                }
+            };
         }
 
         Ok(records)
@@ -99,7 +95,7 @@ impl OneAlnParser {
         file: &mut OneFile,
         seq_index: &mut SequenceIndex,
         alignment_index: u64,
-    ) -> Result<(AlignmentRecord, bool), ParseErr> {
+    ) -> Result<(AlignmentRecord, char), ParseErr> {
         // Read alignment coordinates from current 'A' line
         let query_id_in_file = file.int(0);
         let target_id_in_file = file.int(3);
@@ -160,12 +156,24 @@ impl OneAlnParser {
         let mut target_start = file.int(4) as usize;
         let mut target_end = file.int(5) as usize;
 
+        let (query_contig_offset, query_contig_len) = self
+            .metadata
+            .contig_offsets
+            .get(&query_id_in_file)
+            .copied()
+            .unwrap();
+        let (target_contig_offset, target_contig_len) = self
+            .metadata
+            .contig_offsets
+            .get(&target_id_in_file)
+            .copied()
+            .unwrap();
+
         let mut strand = Strand::Forward;
         let mut num_tracepoints = 0;
-        let mut found_next_a = false;
 
         // Read associated lines
-        loop {
+        let next_line = loop {
             let line_type = file.read_line();
             match line_type {
                 'R' => strand = Strand::Reverse,
@@ -181,38 +189,53 @@ impl OneAlnParser {
                 'X' => {
                     // Trace diffs (ignore for now)
                 }
-                'A' => {
-                    // Found next alignment, signal to main loop
-                    found_next_a = true;
-                    break;
-                }
-                'a' | 'g' | 'S' | '\0' => break,
+                'A' | 'a' | 'g' | 'S' | '^' | '\0' => break line_type,
                 _ => {
                     // Skip other line types (D, X, etc.)
                 }
             }
-        }
+        };
 
         if strand == Strand::Reverse {
+            let contig_len = target_contig_len as usize;
             let orig_start = target_start;
             let orig_end = target_end;
-            target_start = target_length - orig_end;
-            target_end = target_length - orig_start;
+            target_start = contig_len - orig_end;
+            target_end = contig_len - orig_start;
         }
 
         let mut record = AlignmentRecord {
             query_id,
             query_start,
             query_end,
+            query_contig_offset,
+            query_contig_len,
             target_id,
             target_start,
             target_end,
+            target_contig_offset,
+            target_contig_len,
             strand_and_data_offset: alignment_index, // Store alignment index for O(1) seeking
             data_bytes: num_tracepoints,             // Store number of tracepoints
         };
         record.set_strand(strand);
 
-        Ok((record, found_next_a))
+        Ok((record, next_line))
+    }
+
+    /// Get trace spacing from the .1aln file
+    pub fn get_trace_spacing(&self) -> u32 {
+        self.trace_spacing as u32
+    }
+
+    /// Get sequence names mapping (contig_id -> name)
+    pub fn get_sequence_names(&self) -> &HashMap<i64, String> {
+        &self.metadata.seq_names
+    }
+
+    /// Get contig offset information (sbeg, clen) for all contigs
+    pub fn get_contig_offsets(&self) -> &HashMap<i64, (i64, i64)> {
+        &self.metadata.contig_offsets
     }
 
     /// Seek to a specific alignment using O(1) access
@@ -315,7 +338,7 @@ impl OneAlnParser {
                 'X' => {
                     alignment.trace_diffs = file.int_list().map(|v| v.to_vec()).unwrap_or_default()
                 }
-                'A' | 'a' | 'g' | '\0' => break,
+                'A' | 'a' | 'g' | '^' | '\0' => break,
                 _ => {}
             }
         }
