@@ -157,8 +157,8 @@ impl OneAlnParser {
 
         let query_start = file.int(1) as usize;
         let query_end = file.int(2) as usize;
-        let target_start = file.int(4) as usize;
-        let target_end = file.int(5) as usize;
+        let mut target_start = file.int(4) as usize;
+        let mut target_end = file.int(5) as usize;
 
         let mut strand = Strand::Forward;
         let mut num_tracepoints = 0;
@@ -191,6 +191,13 @@ impl OneAlnParser {
                     // Skip other line types (D, X, etc.)
                 }
             }
+        }
+
+        if strand == Strand::Reverse {
+            let orig_start = target_start;
+            let orig_end = target_end;
+            target_start = target_length - orig_end;
+            target_end = target_length - orig_start;
         }
 
         let mut record = AlignmentRecord {
@@ -311,6 +318,13 @@ impl OneAlnParser {
                 'A' | 'a' | 'g' | '\0' => break,
                 _ => {}
             }
+        }
+
+        if alignment.strand == '-' {
+            let orig_start = alignment.target_start;
+            let orig_end = alignment.target_end;
+            alignment.target_start = alignment.target_length - orig_end;
+            alignment.target_end = alignment.target_length - orig_start;
         }
 
         Ok(alignment)
