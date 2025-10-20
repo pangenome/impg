@@ -46,6 +46,7 @@ pub fn partition_alignments(
     reverse_complement: bool,
     debug: bool,
     separate_files: bool,
+    trace_spacing: u32,
 ) -> io::Result<()> {
     // Initialize windows from starting sequences if provided
     let mut windows = Vec::<(u32, i32, i32)>::new();
@@ -237,6 +238,7 @@ pub fn partition_alignments(
                     min_identity,
                     sequence_index,
                     scoring_params,
+                    trace_spacing,
                 )
             } else {
                 impg.query_transitive_bfs(
@@ -251,6 +253,7 @@ pub fn partition_alignments(
                     min_identity,
                     sequence_index,
                     scoring_params,
+                    trace_spacing,
                 )
             };
             //let query_time = query_start.elapsed();

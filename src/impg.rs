@@ -420,6 +420,7 @@ impl Impg {
         sequence_index: &UnifiedSequenceIndex,
         penalties: (u8, u8, u8, u8, u8, u8),
         requested_range: (i32, i32),
+        trace_spacing: u32,
     ) -> (i32, i32, i32, i32, Vec<CigarOp>) {
         // Get the tracepoints
         let tracepoints = metadata.get_tracepoints_from_bytes(data_buffer);
@@ -828,6 +829,7 @@ impl Impg {
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
         penalties: Option<(u8, u8, u8, u8, u8, u8)>,
+        trace_spacing: u32,
     ) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
         // Add the input range to the results
@@ -884,6 +886,7 @@ impl Impg {
                             sequence_index.unwrap(),
                             (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
                             (range_start, range_end),
+                            trace_spacing,
                         )
                     } else {
                         // Handle regular CIGAR
@@ -962,6 +965,7 @@ impl Impg {
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
         penalties: Option<(u8, u8, u8, u8, u8, u8)>,
+        trace_spacing: u32,
     ) -> Vec<AdjustedInterval> {
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
@@ -1074,6 +1078,7 @@ impl Impg {
                                 sequence_index.unwrap(),
                                 (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
                                 (current_target_start, current_target_end),
+                                trace_spacing,
                             )
                         } else {
                             // Handle regular CIGAR
@@ -1245,6 +1250,7 @@ impl Impg {
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
         penalties: Option<(u8, u8, u8, u8, u8, u8)>,
+        trace_spacing: u32,
     ) -> Vec<AdjustedInterval> {
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
@@ -1355,6 +1361,7 @@ impl Impg {
                                                     gap_open2, gap_ext2,
                                                 ),
                                                 (*current_target_start, *current_target_end),
+                                                trace_spacing,
                                             )
                                         } else {
                                             // Handle regular CIGAR

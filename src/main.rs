@@ -54,6 +54,11 @@ struct AlignmentOpts {
     #[arg(help_heading = "Index options")]
     #[clap(short = 'f', long, action)]
     force_reindex: bool,
+
+    /// Trace spacing for .1aln alignment files (used when converting tracepoints to CIGAR)
+    #[arg(help_heading = "Alignment options")]
+    #[clap(long, value_parser, default_value = "100")]
+    trace_spacing: u32,
 }
 
 /// Sequence file options for commands that need FASTA/AGC files
@@ -823,6 +828,7 @@ fn main() -> io::Result<()> {
                 reverse_complement,
                 common.verbose > 1,
                 separate_files,
+                alignment.trace_spacing,
             )?;
         }
         Args::Query {
@@ -930,6 +936,7 @@ fn main() -> io::Result<()> {
                     &query.transitive_opts,
                     sequence_index.as_ref(),
                     scoring_params,
+                    alignment.trace_spacing,
                 )?;
 
                 // Apply subset filter if provided
@@ -1180,6 +1187,7 @@ fn main() -> io::Result<()> {
                     &query.transitive_opts,
                     Some(&sequence_index),
                     Some(scoring_params),
+                    alignment.trace_spacing,
                 )?;
 
                 let region_label = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
@@ -1733,6 +1741,7 @@ fn perform_query(
     transitive_opts: &TransitiveOpts,
     sequence_index: Option<&UnifiedSequenceIndex>,
     penalties: Option<(u8, u8, u8, u8, u8, u8)>,
+    trace_spacing: u32,
 ) -> io::Result<Vec<AdjustedInterval>> {
     let (target_start, target_end) = target_range;
     let target_id = impg.seq_index.get_id(target_name).ok_or_else(|| {
@@ -1769,6 +1778,7 @@ fn perform_query(
             min_identity,
             sequence_index,
             penalties,
+            trace_spacing,
         )
     } else if transitive_dfs {
         impg.query_transitive_dfs(
@@ -1783,6 +1793,7 @@ fn perform_query(
             min_identity,
             sequence_index,
             penalties,
+            trace_spacing,
         )
     } else {
         impg.query(
@@ -1793,6 +1804,7 @@ fn perform_query(
             min_identity,
             sequence_index,
             penalties,
+            trace_spacing,
         )
     };
 
