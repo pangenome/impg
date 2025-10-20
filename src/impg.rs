@@ -1,6 +1,6 @@
+use crate::alignment_record::{AlignmentRecord, Strand};
 use crate::forest_map::ForestMap;
 use crate::graph::reverse_complement;
-use crate::alignment_record::{AlignmentRecord, Strand};
 use crate::onealn::OneAlnParser;
 use crate::paf::ParseErr;
 use crate::seqidx::SequenceIndex;
@@ -157,7 +157,10 @@ impl QueryMetadata {
                 let alignment_index = self.data_offset(); // This is actually alignment_index for .1aln
 
                 let parser = OneAlnParser::new(alignment_file.clone()).map_err(|e| {
-                    format!("Failed to create OneAlnParser for '{}': {:?}", alignment_file, e)
+                    format!(
+                        "Failed to create OneAlnParser for '{}': {:?}",
+                        alignment_file, e
+                    )
                 })?;
 
                 let alignment = parser.seek_alignment(alignment_index).map_err(|e| {
@@ -185,24 +188,32 @@ impl QueryMetadata {
 
                 if [".gz", ".bgz"].iter().any(|e| alignment_file.ends_with(e)) {
                     // For compressed files, use virtual position directly
-                    let mut reader = bgzf::io::Reader::new(File::open(alignment_file).map_err(|e| {
-                        format!("Failed to open compressed file '{}': {}", alignment_file, e)
-                    })?);
+                    let mut reader =
+                        bgzf::io::Reader::new(File::open(alignment_file).map_err(|e| {
+                            format!("Failed to open compressed file '{}': {}", alignment_file, e)
+                        })?);
                     let virtual_position = bgzf::VirtualPosition::from(self.data_offset());
                     reader.seek(virtual_position).map_err(|e| {
-                        format!("Failed to seek in compressed file '{}': {}", alignment_file, e)
+                        format!(
+                            "Failed to seek in compressed file '{}': {}",
+                            alignment_file, e
+                        )
                     })?;
                     reader.read_exact(&mut data_buffer).map_err(|e| {
-                        format!("Failed to read data from compressed file '{}': {}", alignment_file, e)
+                        format!(
+                            "Failed to read data from compressed file '{}': {}",
+                            alignment_file, e
+                        )
                     })?;
                 } else {
                     // For uncompressed files, use byte offset
-                    let mut reader = File::open(alignment_file).map_err(|e| {
-                        format!("Failed to open file '{}': {}", alignment_file, e)
-                    })?;
-                    reader.seek(SeekFrom::Start(self.data_offset())).map_err(|e| {
-                        format!("Failed to seek in file '{}': {}", alignment_file, e)
-                    })?;
+                    let mut reader = File::open(alignment_file)
+                        .map_err(|e| format!("Failed to open file '{}': {}", alignment_file, e))?;
+                    reader
+                        .seek(SeekFrom::Start(self.data_offset()))
+                        .map_err(|e| {
+                            format!("Failed to seek in file '{}': {}", alignment_file, e)
+                        })?;
                     reader.read_exact(&mut data_buffer).map_err(|e| {
                         format!("Failed to read data from file '{}': {}", alignment_file, e)
                     })?;
@@ -401,7 +412,7 @@ where
 }
 
 impl Impg {
-        fn process_tracepoints_data(
+    fn process_tracepoints_data(
         &self,
         data_buffer: Vec<u8>,
         metadata: &QueryMetadata,
@@ -449,8 +460,7 @@ impl Impg {
             let next_target_pos = target_pos + target_delta;
 
             // Check if this tracepoint overlaps with the requested range
-            let overlaps =
-                target_pos < requested_range.1 && next_target_pos >= requested_range.0;
+            let overlaps = target_pos < requested_range.1 && next_target_pos >= requested_range.0;
 
             if overlaps && !found_start {
                 // Found the start of the relevant region
@@ -859,9 +869,11 @@ impl Impg {
                 let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
 
                 // Get data bytes with all validation checks
-                let data_buffer = metadata.get_data_bytes(&self.alignment_files).unwrap_or_else(|e| {
-                    panic!("{}", e);
-                });
+                let data_buffer = metadata
+                    .get_data_bytes(&self.alignment_files)
+                    .unwrap_or_else(|e| {
+                        panic!("{}", e);
+                    });
 
                 let (adj_target_start, adj_target_end, adj_query_start, adj_query_end, cigar_ops) =
                     if QueryMetadata::get_file_type(alignment_file) == FileType::OneAln {
@@ -1038,12 +1050,15 @@ impl Impg {
                 let processed_results: Vec<_> = intervals
                     .into_par_iter()
                     .filter_map(|metadata| {
-                        let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
+                        let alignment_file =
+                            &self.alignment_files[metadata.alignment_file_index as usize];
 
                         // Get data bytes with all validation checks
-                        let data_buffer = metadata.get_data_bytes(&self.alignment_files).unwrap_or_else(|e| {
-                            panic!("{}", e);
-                        });
+                        let data_buffer = metadata
+                            .get_data_bytes(&self.alignment_files)
+                            .unwrap_or_else(|e| {
+                                panic!("{}", e);
+                            });
 
                         let (
                             adj_target_start,
@@ -1311,12 +1326,15 @@ impl Impg {
                                     |interval| {
                                         let metadata = &interval.metadata;
 
-                                        let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
+                                        let alignment_file = &self.alignment_files
+                                            [metadata.alignment_file_index as usize];
 
                                         // Get data bytes with all validation checks
-                                        let data_buffer = metadata.get_data_bytes(&self.alignment_files).unwrap_or_else(|e| {
-                                            panic!("{}", e);
-                                        });
+                                        let data_buffer = metadata
+                                            .get_data_bytes(&self.alignment_files)
+                                            .unwrap_or_else(|e| {
+                                                panic!("{}", e);
+                                            });
 
                                         let (
                                             adj_target_start,
@@ -1324,7 +1342,9 @@ impl Impg {
                                             adj_query_start,
                                             adj_query_end,
                                             cigar_ops,
-                                        ) = if QueryMetadata::get_file_type(alignment_file) == FileType::OneAln {
+                                        ) = if QueryMetadata::get_file_type(alignment_file)
+                                            == FileType::OneAln
+                                        {
                                             self.process_tracepoints_data(
                                                 data_buffer,
                                                 metadata,

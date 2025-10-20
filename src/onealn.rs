@@ -79,7 +79,8 @@ impl OneAlnParser {
             match line_type {
                 '\0' => break,
                 'A' => {
-                    let (record, found_next_a) = self.parse_single_alignment(&mut file, seq_index, alignment_index)?;
+                    let (record, found_next_a) =
+                        self.parse_single_alignment(&mut file, seq_index, alignment_index)?;
                     records.push(record);
                     alignment_index += 1;
                     next_line_is_a = found_next_a; // If inner loop found next 'A', don't read again
@@ -109,26 +110,46 @@ impl OneAlnParser {
             .seq_names
             .get(&query_id_in_file)
             .cloned()
-            .ok_or_else(|| ParseErr::InvalidFormat(format!("Query sequence with ID {} not found in metadata", query_id_in_file)))?;
+            .ok_or_else(|| {
+                ParseErr::InvalidFormat(format!(
+                    "Query sequence with ID {} not found in metadata",
+                    query_id_in_file
+                ))
+            })?;
         let query_length = self
             .metadata
             .seq_lengths
             .get(&query_id_in_file)
             .copied()
-            .ok_or_else(|| ParseErr::InvalidFormat(format!("Query sequence length for ID {} not found in metadata", query_id_in_file)))? as usize;
+            .ok_or_else(|| {
+                ParseErr::InvalidFormat(format!(
+                    "Query sequence length for ID {} not found in metadata",
+                    query_id_in_file
+                ))
+            })? as usize;
 
         let target_name = self
             .metadata
             .seq_names
             .get(&target_id_in_file)
             .cloned()
-            .ok_or_else(|| ParseErr::InvalidFormat(format!("Target sequence with ID {} not found in metadata", target_id_in_file)))?;
+            .ok_or_else(|| {
+                ParseErr::InvalidFormat(format!(
+                    "Target sequence with ID {} not found in metadata",
+                    target_id_in_file
+                ))
+            })?;
         let target_length = self
             .metadata
             .seq_lengths
             .get(&target_id_in_file)
             .copied()
-            .ok_or_else(|| ParseErr::InvalidFormat(format!("Target sequence length for ID {} not found in metadata", target_id_in_file)))? as usize;
+            .ok_or_else(|| {
+                ParseErr::InvalidFormat(format!(
+                    "Target sequence length for ID {} not found in metadata",
+                    target_id_in_file
+                ))
+            })? as usize;
 
         // Register sequences in the SequenceIndex
         let query_id = seq_index.get_or_insert_id(&query_name, Some(query_length));
@@ -211,26 +232,46 @@ impl OneAlnParser {
             .seq_names
             .get(&query_id)
             .cloned()
-            .ok_or_else(|| ParseErr::InvalidFormat(format!("Query sequence with ID {} not found in metadata", query_id)))?;
+            .ok_or_else(|| {
+                ParseErr::InvalidFormat(format!(
+                    "Query sequence with ID {} not found in metadata",
+                    query_id
+                ))
+            })?;
         let query_length = self
             .metadata
             .seq_lengths
             .get(&query_id)
             .copied()
-            .ok_or_else(|| ParseErr::InvalidFormat(format!("Query sequence length for ID {} not found in metadata", query_id)))?;
+            .ok_or_else(|| {
+                ParseErr::InvalidFormat(format!(
+                    "Query sequence length for ID {} not found in metadata",
+                    query_id
+                ))
+            })?;
 
         let target_name = self
             .metadata
             .seq_names
             .get(&target_id)
             .cloned()
-            .ok_or_else(|| ParseErr::InvalidFormat(format!("Target sequence with ID {} not found in metadata", target_id)))?;
+            .ok_or_else(|| {
+                ParseErr::InvalidFormat(format!(
+                    "Target sequence with ID {} not found in metadata",
+                    target_id
+                ))
+            })?;
         let target_length = self
             .metadata
             .seq_lengths
             .get(&target_id)
             .copied()
-            .ok_or_else(|| ParseErr::InvalidFormat(format!("Target sequence length for ID {} not found in metadata", target_id)))?;
+            .ok_or_else(|| {
+                ParseErr::InvalidFormat(format!(
+                    "Target sequence length for ID {} not found in metadata",
+                    target_id
+                ))
+            })?;
 
         let alignment = OneAlnAlignment {
             query_name,
