@@ -63,6 +63,8 @@ impl OneAlnParser {
         &self,
         seq_index: &mut SequenceIndex,
     ) -> Result<Vec<AlignmentRecord>, ParseErr> {
+        let contig_to_seq_id = self.prepare_sequence_index(seq_index)?;
+
         let mut file = OneFile::open_read(&self.file_path, None, None, 1)
             .map_err(|e| ParseErr::InvalidFormat(format!("Failed to open 1aln file: {}", e)))?;
         let mut records = Vec::new();
@@ -74,7 +76,7 @@ impl OneAlnParser {
                 '\0' => break,
                 'A' => {
                     let (record, next_line) =
-                        self.parse_single_alignment(&mut file, seq_index, alignment_index)?;
+                        self.parse_single_alignment(&mut file, &contig_to_seq_id, alignment_index)?;
                     records.push(record);
                     alignment_index += 1;
                     current_line = next_line;
@@ -93,7 +95,7 @@ impl OneAlnParser {
     fn parse_single_alignment(
         &self,
         file: &mut OneFile,
-        seq_index: &mut SequenceIndex,
+        contig_to_seq_id: &HashMap<i64, u32>,
         alignment_index: u64,
     ) -> Result<(AlignmentRecord, char), ParseErr> {
         // Read alignment coordinates from current 'A' line
@@ -112,18 +114,6 @@ impl OneAlnParser {
                     query_id_in_file
                 ))
             })?;
-        let query_length = self
-            .metadata
-            .seq_lengths
-            .get(&query_id_in_file)
-            .copied()
-            .ok_or_else(|| {
-                ParseErr::InvalidFormat(format!(
-                    "Query sequence length for ID {} not found in metadata",
-                    query_id_in_file
-                ))
-            })? as usize;
-
         let target_name = self
             .metadata
             .seq_names
@@ -135,21 +125,24 @@ impl OneAlnParser {
                     target_id_in_file
                 ))
             })?;
-        let target_length = self
-            .metadata
-            .seq_lengths
+
+        // Lookup already-registered scaffold IDs
+        let query_id = contig_to_seq_id
+            .get(&query_id_in_file)
+            .copied()
+            .ok_or_else(|| {
+                ParseErr::InvalidFormat(format!(
+                    "Sequence index ID for query {query_name} (contig {query_id_in_file}) missing"
+                ))
+            })?;
+        let target_id = contig_to_seq_id
             .get(&target_id_in_file)
             .copied()
             .ok_or_else(|| {
                 ParseErr::InvalidFormat(format!(
-                    "Target sequence length for ID {} not found in metadata",
-                    target_id_in_file
+                    "Sequence index ID for target {target_name} (contig {target_id_in_file}) missing"
                 ))
-            })? as usize;
-
-        // Register sequences in the SequenceIndex
-        let query_id = seq_index.get_or_insert_id(&query_name, Some(query_length));
-        let target_id = seq_index.get_or_insert_id(&target_name, Some(target_length));
+            })?;
 
         let query_start = file.int(1) as usize;
         let query_end = file.int(2) as usize;
@@ -221,6 +214,28 @@ impl OneAlnParser {
         record.set_strand(strand);
 
         Ok((record, next_line))
+    }
+
+    fn prepare_sequence_index(
+        &self,
+        seq_index: &mut SequenceIndex,
+    ) -> Result<HashMap<i64, u32>, ParseErr> {
+        let mut contig_to_seq_id = HashMap::with_capacity(self.metadata.seq_names.len());
+        for (&contig_id, name) in &self.metadata.seq_names {
+            let length = self
+                .metadata
+                .seq_lengths
+                .get(&contig_id)
+                .copied()
+                .ok_or_else(|| {
+                    ParseErr::InvalidFormat(format!(
+                        "Sequence length for contig {contig_id} ({name}) missing from metadata"
+                    ))
+                })? as usize;
+            let seq_id = seq_index.get_or_insert_id(name, Some(length));
+            contig_to_seq_id.insert(contig_id, seq_id);
+        }
+        Ok(contig_to_seq_id)
     }
 
     /// Get trace spacing from the .1aln file
