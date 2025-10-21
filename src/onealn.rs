@@ -149,18 +149,24 @@ impl OneAlnParser {
         let mut target_start = file.int(4) as usize;
         let mut target_end = file.int(5) as usize;
 
-        let (query_contig_offset, query_contig_len) = self
-            .metadata
-            .contig_offsets
-            .get(&query_contig_id)
-            .copied()
-            .unwrap();
-        let (target_contig_offset, target_contig_len) = self
+        if !self.metadata.contig_offsets.contains_key(&query_contig_id) {
+            return Err(ParseErr::InvalidFormat(format!(
+                "Contig offset for query contig {} missing from metadata",
+                query_contig_id
+            )));
+        }
+
+        let (_, target_contig_len) = self
             .metadata
             .contig_offsets
             .get(&target_contig_id)
             .copied()
-            .unwrap();
+            .ok_or_else(|| {
+                ParseErr::InvalidFormat(format!(
+                    "Contig offset for target contig {} missing from metadata",
+                    target_contig_id
+                ))
+            })?;
 
         let mut strand = Strand::Forward;
         let mut num_tracepoints = 0;
@@ -201,13 +207,9 @@ impl OneAlnParser {
             query_id,
             query_start,
             query_end,
-            query_contig_offset,
-            query_contig_len,
             target_id,
             target_start,
             target_end,
-            target_contig_offset,
-            target_contig_len,
             strand_and_data_offset: alignment_index, // Store alignment index for O(1) seeking
             data_bytes: num_tracepoints,             // Store number of tracepoints
         };
@@ -318,15 +320,41 @@ impl OneAlnParser {
                 ))
             })?;
 
+        let (query_contig_offset, _) = self
+            .metadata
+            .contig_offsets
+            .get(&query_contig_id)
+            .copied()
+            .ok_or_else(|| {
+                ParseErr::InvalidFormat(format!(
+                    "Contig offset for query contig {} missing from metadata",
+                    query_contig_id
+                ))
+            })?;
+
+        let (target_contig_offset, _) = self
+            .metadata
+            .contig_offsets
+            .get(&target_contig_id)
+            .copied()
+            .ok_or_else(|| {
+                ParseErr::InvalidFormat(format!(
+                    "Contig offset for target contig {} missing from metadata",
+                    target_contig_id
+                ))
+            })?;
+
         let alignment = OneAlnAlignment {
             query_name,
             query_length,
             query_start: file.int(1),
             query_end: file.int(2),
+            query_contig_offset,
             target_name,
             target_length,
             target_start: file.int(4),
             target_end: file.int(5),
+            target_contig_offset,
             strand: '+',
             differences: 0,
             tracepoints: Vec::new(),
@@ -376,10 +404,12 @@ pub struct OneAlnAlignment {
     pub query_length: i64,
     pub query_start: i64,
     pub query_end: i64,
+    pub query_contig_offset: i64,
     pub target_name: String,
     pub target_length: i64,
     pub target_start: i64,
     pub target_end: i64,
+    pub target_contig_offset: i64,
     pub strand: char,
     pub differences: i64,
     pub tracepoints: Vec<i64>,
