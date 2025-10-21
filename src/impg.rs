@@ -233,12 +233,24 @@ impl QueryMetadata {
 
     fn get_cigar_ops_from_bytes(&self, data_bytes: Vec<u8>) -> Vec<CigarOp> {
         let cigar_str = std::str::from_utf8(&data_bytes).unwrap();
-        parse_cigar_to_delta(cigar_str).ok().unwrap_or_default()
+        match parse_cigar_to_delta(cigar_str) {
+            Ok(ops) => ops,
+            Err(e) => panic!(
+                "Failed to parse CIGAR string '{cigar_str}' in QueryMetadata: {:?}",
+                e
+            ),
+        }
     }
 
     fn get_tracepoints_from_bytes(&self, data_bytes: Vec<u8>) -> Vec<(usize, usize)> {
         let tracepoints_str = std::str::from_utf8(&data_bytes).unwrap();
-        parse_tracepoints(tracepoints_str).ok().unwrap_or_default()
+        match parse_tracepoints(tracepoints_str) {
+            Ok(tp) => tp,
+            Err(e) => panic!(
+                "Failed to parse tracepoints '{tracepoints_str}' in QueryMetadata: {:?}",
+                e
+            ),
+        }
     }
 }
 
@@ -473,7 +485,11 @@ impl Impg {
         let len = self
             .seq_index
             .get_len_from_id(sequence_id)
-            .unwrap_or_default() as i64;
+            .unwrap_or_else(|| {
+                panic!(
+                    "Missing sequence length for scaffold id {sequence_id} while building default contig layout"
+                )
+            }) as i64;
         vec![ContigInfo { sbeg: 0, clen: len }]
     }
 
@@ -585,8 +601,13 @@ impl Impg {
                     metadata.target_end,
                     metadata.query_start,
                     metadata.query_end,
-                    // Parse the CIGAR string to CigarOp vector
-                    parse_cigar_to_delta(&cigar_str).ok().unwrap_or_default(),
+                    match parse_cigar_to_delta(&cigar_str) {
+                        Ok(ops) => ops,
+                        Err(e) => panic!(
+                            "Failed to parse CIGAR string '{cigar_str}' during tracepoint processing: {:?}",
+                            e
+                        ),
+                    },
                 )
             }
             (Err(e), _) => {
