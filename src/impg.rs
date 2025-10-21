@@ -17,6 +17,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::cmp::{max, min};
+use std::convert::TryFrom;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::mem::MaybeUninit;
@@ -165,11 +166,10 @@ impl QueryMetadata {
         }
     }
 
-    /// Get alignment data bytes (CIGAR or tracepoints)
+    /// Get alignment data bytes (CIGAR)
     fn get_data_bytes(
         &self,
         alignment_files: &[String],
-        onealn_parsers: &[Option<Arc<OneAlnParser>>],
     ) -> Result<Vec<u8>, String> {
         // Get the correct file and type
         let alignment_file = &alignment_files[self.alignment_file_index as usize];
@@ -572,19 +572,13 @@ impl Impg {
 
         // Fetch only the relevant portions of the sequences from scaffold coordinates
         let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
-        let query_fetch_start =
-            self.to_scaffold_coordinate(metadata.query_start, alignment.query_contig_offset);
-        let query_fetch_end =
-            self.to_scaffold_coordinate(metadata.query_end, alignment.query_contig_offset);
         let query_seq_result =
-            sequence_index.fetch_sequence(query_name, query_fetch_start, query_fetch_end);
+            sequence_index.fetch_sequence(query_name, metadata.query_start, metadata.query_end);
 
         // Fetch target sequence
         let target_name = self.seq_index.get_name(target_id).unwrap();
-        let target_fetch_start =
-            self.to_scaffold_coordinate(metadata.target_start, alignment.target_contig_offset);
-        let target_fetch_end =
-            self.to_scaffold_coordinate(metadata.target_end, alignment.target_contig_offset);
+        let target_fetch_start = metadata.target_start;
+        let target_fetch_end = metadata.target_end;
         let target_seq_result = if metadata.strand() == Strand::Forward {
             sequence_index.fetch_sequence(target_name, target_fetch_start, target_fetch_end)
         } else {
@@ -596,13 +590,20 @@ impl Impg {
         };
 
         // Determine contig-relative starting position compatible with the aligner
-        let contig_target_start = if metadata.strand() == Strand::Forward {
-            metadata.target_start
+        let contig_target_start_i64 = if metadata.strand() == Strand::Forward {
+            alignment.target_contig_start
         } else {
-            (alignment
-                .target_length
-                .saturating_sub(metadata.target_end as i64)) as i32
+            alignment.target_length - alignment.target_contig_end
         };
+        let contig_target_start = usize::try_from(contig_target_start_i64).unwrap_or_else(|_| {
+            panic!("Invalid contig target start derived from alignment: {contig_target_start_i64}")
+        });
+        let contig_query_start = usize::try_from(alignment.query_contig_start).unwrap_or_else(|_| {
+            panic!(
+                "Invalid contig query start derived from alignment: {}",
+                alignment.query_contig_start
+            )
+        });
 
         // Convert tracepoints to CIGAR if we successfully fetched both sequences
         match (query_seq_result, target_seq_result) {
@@ -624,8 +625,8 @@ impl Impg {
                         trace_spacing,
                         &query_seq,
                         &target_seq,
-                        metadata.query_start as usize,
-                        contig_target_start as usize, // Use contig-level coordinates
+                        contig_query_start,
+                        contig_target_start, // Use contig-level coordinates
                         metadata.strand() == Strand::Reverse,
                         aligner,
                     );
@@ -1043,7 +1044,7 @@ impl Impg {
                             }
 
                             let data_buffer = metadata
-                                .get_data_bytes(&self.alignment_files, &self.onealn_parsers)
+                                .get_data_bytes(&self.alignment_files)
                                 .unwrap_or_else(|e| panic!("{}", e));
 
                             (
@@ -1282,7 +1283,7 @@ impl Impg {
                                     return None;
                                 }
                                 let data_buffer = metadata
-                                    .get_data_bytes(&self.alignment_files, &self.onealn_parsers)
+                                    .get_data_bytes(&self.alignment_files)
                                     .unwrap_or_else(|e| panic!("{}", e));
 
                                 (
@@ -1603,10 +1604,7 @@ impl Impg {
                                                 }
 
                                                 let data_buffer = metadata
-                                                    .get_data_bytes(
-                                                        &self.alignment_files,
-                                                        &self.onealn_parsers,
-                                                    )
+                                                    .get_data_bytes(&self.alignment_files)
                                                     .unwrap_or_else(|e| panic!("{}", e));
 
                                                 (

@@ -6,6 +6,7 @@ use crate::alignment_record::{AlignmentRecord, Strand};
 use crate::seqidx::SequenceIndex;
 use onecode::OneFile;
 use std::collections::HashMap;
+use std::convert::TryFrom;
 
 /// 1aln file parser with metadata and O(1) seeking support
 pub struct OneAlnParser {
@@ -144,19 +145,24 @@ impl OneAlnParser {
                 ))
             })?;
 
-        let query_start = file.int(1) as usize;
-        let query_end = file.int(2) as usize;
-        let mut target_start = file.int(4) as usize;
-        let mut target_end = file.int(5) as usize;
+        let query_contig_start = file.int(1) as usize;
+        let query_contig_end = file.int(2) as usize;
+        let mut target_contig_start = file.int(4) as usize;
+        let mut target_contig_end = file.int(5) as usize;
 
-        if !self.metadata.contig_offsets.contains_key(&query_contig_id) {
-            return Err(ParseErr::InvalidFormat(format!(
-                "Contig offset for query contig {} missing from metadata",
-                query_contig_id
-            )));
-        }
+        let (query_contig_offset, _query_contig_len) = self
+            .metadata
+            .contig_offsets
+            .get(&query_contig_id)
+            .copied()
+            .ok_or_else(|| {
+                ParseErr::InvalidFormat(format!(
+                    "Contig offset for query contig {} missing from metadata",
+                    query_contig_id
+                ))
+            })?;
 
-        let (_, target_contig_len) = self
+        let (target_contig_offset, target_contig_len) = self
             .metadata
             .contig_offsets
             .get(&target_contig_id)
@@ -197,19 +203,44 @@ impl OneAlnParser {
 
         if strand == Strand::Reverse {
             let contig_len = target_contig_len as usize;
-            let orig_start = target_start;
-            let orig_end = target_end;
-            target_start = contig_len - orig_end;
-            target_end = contig_len - orig_start;
+            let orig_start = target_contig_start;
+            let orig_end = target_contig_end;
+            target_contig_start = contig_len - orig_end;
+            target_contig_end = contig_len - orig_start;
         }
 
+        let query_scaffold_start = usize::try_from(query_contig_offset + query_contig_start as i64)
+            .map_err(|_| {
+                ParseErr::InvalidFormat(format!(
+                    "Query scaffold start overflow: offset {query_contig_offset}, start {query_contig_start}"
+                ))
+            })?;
+        let query_scaffold_end = usize::try_from(query_contig_offset + query_contig_end as i64)
+            .map_err(|_| {
+                ParseErr::InvalidFormat(format!(
+                    "Query scaffold end overflow: offset {query_contig_offset}, end {query_contig_end}"
+                ))
+            })?;
+        let target_scaffold_start =
+            usize::try_from(target_contig_offset + target_contig_start as i64).map_err(|_| {
+                ParseErr::InvalidFormat(format!(
+                    "Target scaffold start overflow: offset {target_contig_offset}, start {target_contig_start}"
+                ))
+            })?;
+        let target_scaffold_end =
+            usize::try_from(target_contig_offset + target_contig_end as i64).map_err(|_| {
+                ParseErr::InvalidFormat(format!(
+                    "Target scaffold end overflow: offset {target_contig_offset}, end {target_contig_end}"
+                ))
+            })?;
+
         let mut record = AlignmentRecord {
-            query_id,
-            query_start,
-            query_end,
-            target_id,
-            target_start,
-            target_end,
+            query_id, // Scaffold ID from SequenceIndex
+            query_start: query_scaffold_start,
+            query_end: query_scaffold_end,
+            target_id, // Scaffold ID from SequenceIndex
+            target_start: target_scaffold_start,
+            target_end: target_scaffold_end,
             strand_and_data_offset: alignment_index, // Store alignment index for O(1) seeking
             data_bytes: num_tracepoints,             // Store number of tracepoints
         };
@@ -347,13 +378,13 @@ impl OneAlnParser {
         let alignment = OneAlnAlignment {
             query_name,
             query_length,
-            query_start: file.int(1),
-            query_end: file.int(2),
+            query_contig_start: file.int(1),
+            query_contig_end: file.int(2),
             query_contig_offset,
             target_name,
             target_length,
-            target_start: file.int(4),
-            target_end: file.int(5),
+            target_contig_start: file.int(4),
+            target_contig_end: file.int(5),
             target_contig_offset,
             strand: '+',
             differences: 0,
@@ -386,12 +417,12 @@ impl OneAlnParser {
             }
         }
 
-        if alignment.strand == '-' {
-            let orig_start = alignment.target_start;
-            let orig_end = alignment.target_end;
-            alignment.target_start = alignment.target_length - orig_end;
-            alignment.target_end = alignment.target_length - orig_start;
-        }
+        // if alignment.strand == '-' {
+        //     let orig_start = alignment.target_contig_start;
+        //     let orig_end = alignment.target_contig_end;
+        //     alignment.target_contig_start = alignment.target_length - orig_end;
+        //     alignment.target_contig_end = alignment.target_length - orig_start;
+        // }
 
         Ok(alignment)
     }
@@ -402,13 +433,13 @@ impl OneAlnParser {
 pub struct OneAlnAlignment {
     pub query_name: String,
     pub query_length: i64,
-    pub query_start: i64,
-    pub query_end: i64,
+    pub query_contig_start: i64,
+    pub query_contig_end: i64,
     pub query_contig_offset: i64,
     pub target_name: String,
     pub target_length: i64,
-    pub target_start: i64,
-    pub target_end: i64,
+    pub target_contig_start: i64,
+    pub target_contig_end: i64,
     pub target_contig_offset: i64,
     pub strand: char,
     pub differences: i64,
