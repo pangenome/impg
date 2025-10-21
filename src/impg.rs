@@ -423,6 +423,45 @@ where
 }
 
 impl Impg {
+    fn collect_contig_metadata(
+        alignment_files: &[String],
+        seq_index: &SequenceIndex,
+    ) -> (FxHashMap<u32, Vec<ContigInfo>>, Vec<u32>) {
+        let mut scaffold_contigs: FxHashMap<u32, Vec<ContigInfo>> = FxHashMap::default();
+        let mut trace_spacing_by_file: Vec<u32> = Vec::with_capacity(alignment_files.len());
+
+        for alignment_file in alignment_files {
+            let mut file_trace_spacing = 100u32;
+
+            if alignment_file.ends_with(".1aln") {
+                if let Ok(parser) = OneAlnParser::new(alignment_file.clone()) {
+                    file_trace_spacing = parser.get_trace_spacing();
+                    let seq_names = parser.get_sequence_names();
+                    let contig_offsets_map = parser.get_contig_offsets();
+
+                    for (&contig_id, &(sbeg, clen)) in contig_offsets_map {
+                        let scaffold_name = seq_names.get(&contig_id).unwrap();
+                        let scaffold_id = seq_index.get_id(scaffold_name).unwrap();
+                        let contig_info = ContigInfo { sbeg, clen };
+                        scaffold_contigs
+                            .entry(scaffold_id)
+                            .or_insert_with(Vec::new)
+                            .push(contig_info);
+                    }
+                }
+            }
+
+            trace_spacing_by_file.push(file_trace_spacing);
+        }
+
+        for contigs in scaffold_contigs.values_mut() {
+            contigs.sort_by_key(|c| c.sbeg);
+            contigs.dedup_by(|a, b| a.sbeg == b.sbeg && a.clen == b.clen);
+        }
+
+        (scaffold_contigs, trace_spacing_by_file)
+    }
+
     /// Get contig layout for a sequence, falling back to a single contig if no data is available
     fn sequence_contigs(&self, sequence_id: u32) -> Vec<ContigInfo> {
         if let Some(contigs) = self.scaffold_contigs.get(&sequence_id) {
@@ -569,37 +608,8 @@ impl Impg {
             .map(|(_, alignment_file)| alignment_file.clone())
             .collect();
 
-        // Extract contig information and trace spacing from .1aln files
-        let mut scaffold_contigs: FxHashMap<u32, Vec<ContigInfo>> = FxHashMap::default();
-        let mut trace_spacing_by_file: Vec<u32> = Vec::new();
-        for (_, alignment_file) in records_by_file {
-            let mut file_trace_spacing = 100u32; // default value
-
-            if alignment_file.ends_with(".1aln") {
-                if let Ok(parser) = OneAlnParser::new(alignment_file.clone()) {
-                    file_trace_spacing = parser.get_trace_spacing();
-                    let seq_names = parser.get_sequence_names();
-                    let contig_offsets_map = parser.get_contig_offsets();
-
-                    // Build scaffold -> Vec<ContigInfo> mapping
-                    for (&contig_id, &(sbeg, clen)) in contig_offsets_map {
-                        let scaffold_name = seq_names.get(&contig_id).unwrap();
-                        let target_id = seq_index.get_id(scaffold_name).unwrap();
-                        let contig_info = ContigInfo { sbeg, clen };
-                        scaffold_contigs
-                            .entry(target_id)
-                            .or_insert_with(Vec::new)
-                            .push(contig_info);
-                    }
-                }
-            }
-            trace_spacing_by_file.push(file_trace_spacing);
-        }
-
-        for contigs in scaffold_contigs.values_mut() {
-            contigs.sort_by_key(|c| c.sbeg);
-            contigs.dedup_by(|a, b| a.sbeg == b.sbeg && a.clen == b.clen);
-        }
+        let (scaffold_contigs, trace_spacing_by_file) =
+            Self::collect_contig_metadata(&alignment_files, &seq_index);
 
         let intervals: FxHashMap<u32, Vec<Interval<QueryMetadata>>> = records_by_file
             .par_iter()
@@ -853,37 +863,8 @@ impl Impg {
                     )
                 })?;
 
-        // Build contig information and trace spacing for each alignment file
-        let mut scaffold_contigs: FxHashMap<u32, Vec<ContigInfo>> = FxHashMap::default();
-        let mut trace_spacing_by_file = Vec::new();
-        for alignment_file in alignment_files {
-            let mut file_trace_spacing = 100u32; // default value
-
-            if alignment_file.ends_with(".1aln") {
-                if let Ok(parser) = OneAlnParser::new(alignment_file.clone()) {
-                    file_trace_spacing = parser.get_trace_spacing();
-                    let seq_names = parser.get_sequence_names();
-                    let contig_offsets_map = parser.get_contig_offsets();
-
-                    // Build scaffold -> Vec<ContigInfo> mapping
-                    for (&contig_id, &(sbeg, clen)) in contig_offsets_map {
-                        let scaffold_name = seq_names.get(&contig_id).unwrap();
-                        let target_id = seq_index.get_id(scaffold_name).unwrap();
-                        let contig_info = ContigInfo { sbeg, clen };
-                        scaffold_contigs
-                            .entry(target_id)
-                            .or_insert_with(Vec::new)
-                            .push(contig_info);
-                    }
-                }
-            }
-            trace_spacing_by_file.push(file_trace_spacing);
-        }
-
-        for contigs in scaffold_contigs.values_mut() {
-            contigs.sort_by_key(|c| c.sbeg);
-            contigs.dedup_by(|a, b| a.sbeg == b.sbeg && a.clen == b.clen);
-        }
+        let (scaffold_contigs, trace_spacing_by_file) =
+            Self::collect_contig_metadata(alignment_files, &seq_index);
 
         Ok(Self {
             trees: RwLock::new(FxHashMap::default()), // Start with empty trees - load on demand
