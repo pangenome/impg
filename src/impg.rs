@@ -25,6 +25,24 @@ thread_local! {
     static EDIT_ALIGNER: RefCell<Option<AffineWavefronts>> = const { RefCell::new(None) };
 }
 
+/// Execute a closure with a thread-local edit distance mode aligner
+fn with_edit_aligner<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut AffineWavefronts) -> R,
+{
+    EDIT_ALIGNER.with(|aligner_cell| {
+        let mut aligner_opt = aligner_cell.borrow_mut();
+        if aligner_opt.is_none() {
+            let distance_mode = DistanceMode::Edit {
+                mismatch: 1,
+                gap_opening: 1,
+            };
+            *aligner_opt = Some(distance_mode.create_aligner());
+        }
+        f(aligner_opt.as_mut().unwrap())
+    })
+}
+
 /// Parse a CIGAR string into a vector of CigarOp
 // Note that the query_delta is negative for reverse strand alignments
 #[derive(Debug, Clone, PartialEq)]
@@ -136,7 +154,11 @@ impl QueryMetadata {
     }
 
     /// Get alignment data bytes (CIGAR or tracepoints)
-    fn get_data_bytes(&self, alignment_files: &[String]) -> Result<Vec<u8>, String> {
+    fn get_data_bytes(
+        &self,
+        alignment_files: &[String],
+        onealn_parsers: &[Option<Arc<OneAlnParser>>],
+    ) -> Result<Vec<u8>, String> {
         // Get the correct file and type
         let alignment_file = &alignment_files[self.alignment_file_index as usize];
         let file_type = Self::get_file_type(alignment_file);
@@ -160,12 +182,15 @@ impl QueryMetadata {
                 // The strand_and_data_offset contains the alignment_index (not a file offset)
                 let alignment_index = self.data_offset(); // This is actually alignment_index for .1aln
 
-                let parser = OneAlnParser::new(alignment_file.clone()).map_err(|e| {
-                    format!(
-                        "Failed to create OneAlnParser for '{}': {:?}",
-                        alignment_file, e
-                    )
-                })?;
+                let parser = onealn_parsers
+                    .get(self.alignment_file_index as usize)
+                    .and_then(|p| p.as_ref())
+                    .ok_or_else(|| {
+                        format!(
+                            "No cached OneAln parser available for '{}'. Ensure .1aln files were pre-parsed successfully.",
+                            alignment_file
+                        )
+                    })?;
 
                 let alignment = parser.seek_alignment(alignment_index).map_err(|e| {
                     format!(
@@ -414,53 +439,53 @@ pub struct Impg {
     index_file_path: String,      // Path to the index file for lazy loading
     scaffold_contigs: FxHashMap<u32, Vec<ContigInfo>>, // Aggregated contig info per scaffold across files
     trace_spacing_by_file: Vec<u32>,                   // Per-file trace spacing for .1aln files
-}
-
-/// Execute a closure with a thread-local edit distance mode aligner
-fn with_edit_aligner<F, R>(f: F) -> R
-where
-    F: FnOnce(&mut AffineWavefronts) -> R,
-{
-    EDIT_ALIGNER.with(|aligner_cell| {
-        let mut aligner_opt = aligner_cell.borrow_mut();
-        if aligner_opt.is_none() {
-            let distance_mode = DistanceMode::Edit {
-                mismatch: 1,
-                gap_opening: 1,
-            };
-            *aligner_opt = Some(distance_mode.create_aligner());
-        }
-        f(aligner_opt.as_mut().unwrap())
-    })
+    onealn_parsers: Vec<Option<Arc<OneAlnParser>>>,    // Cached 1aln parsers per file
 }
 
 impl Impg {
     fn collect_contig_metadata(
         alignment_files: &[String],
         seq_index: &SequenceIndex,
-    ) -> (FxHashMap<u32, Vec<ContigInfo>>, Vec<u32>) {
+    ) -> Result<
+        (
+            FxHashMap<u32, Vec<ContigInfo>>,
+            Vec<u32>,
+            Vec<Option<Arc<OneAlnParser>>>,
+        ),
+        ParseErr,
+    > {
         let mut scaffold_contigs: FxHashMap<u32, Vec<ContigInfo>> = FxHashMap::default();
         let mut trace_spacing_by_file: Vec<u32> = Vec::with_capacity(alignment_files.len());
+        let mut onealn_parsers: Vec<Option<Arc<OneAlnParser>>> =
+            Vec::with_capacity(alignment_files.len());
 
         for alignment_file in alignment_files {
             let mut file_trace_spacing = 100u32;
 
             if alignment_file.ends_with(".1aln") {
-                if let Ok(parser) = OneAlnParser::new(alignment_file.clone()) {
-                    file_trace_spacing = parser.get_trace_spacing();
-                    let seq_names = parser.get_sequence_names();
-                    let contig_offsets_map = parser.get_contig_offsets();
+                let parser = OneAlnParser::new(alignment_file.clone()).map_err(|e| {
+                    ParseErr::InvalidFormat(format!(
+                        "Failed to initialize OneAln parser for '{}': {e:?}",
+                        alignment_file
+                    ))
+                })?;
+                file_trace_spacing = parser.get_trace_spacing();
+                let seq_names = parser.get_sequence_names();
+                let contig_offsets_map = parser.get_contig_offsets();
 
-                    for (&contig_id, &(sbeg, clen)) in contig_offsets_map {
-                        let scaffold_name = seq_names.get(&contig_id).unwrap();
-                        let scaffold_id = seq_index.get_id(scaffold_name).unwrap();
-                        let contig_info = ContigInfo { sbeg, clen };
-                        scaffold_contigs
-                            .entry(scaffold_id)
-                            .or_insert_with(Vec::new)
-                            .push(contig_info);
-                    }
+                for (&contig_id, &(sbeg, clen)) in contig_offsets_map {
+                    let scaffold_name = seq_names.get(&contig_id).unwrap();
+                    let scaffold_id = seq_index.get_id(scaffold_name).unwrap();
+                    let contig_info = ContigInfo { sbeg, clen };
+                    scaffold_contigs
+                        .entry(scaffold_id)
+                        .or_insert_with(Vec::new)
+                        .push(contig_info);
                 }
+
+                onealn_parsers.push(Some(Arc::new(parser)));
+            } else {
+                onealn_parsers.push(None);
             }
 
             trace_spacing_by_file.push(file_trace_spacing);
@@ -471,7 +496,7 @@ impl Impg {
             contigs.dedup_by(|a, b| a.sbeg == b.sbeg && a.clen == b.clen);
         }
 
-        (scaffold_contigs, trace_spacing_by_file)
+        Ok((scaffold_contigs, trace_spacing_by_file, onealn_parsers))
     }
 
     /// Get contig layout for a sequence, falling back to a single contig if no data is available
@@ -629,8 +654,8 @@ impl Impg {
             .map(|(_, alignment_file)| alignment_file.clone())
             .collect();
 
-        let (scaffold_contigs, trace_spacing_by_file) =
-            Self::collect_contig_metadata(&alignment_files, &seq_index);
+        let (scaffold_contigs, trace_spacing_by_file, onealn_parsers) =
+            Self::collect_contig_metadata(&alignment_files, &seq_index)?;
 
         let intervals: FxHashMap<u32, Vec<Interval<QueryMetadata>>> = records_by_file
             .par_iter()
@@ -704,6 +729,7 @@ impl Impg {
             index_file_path: String::new(), // All trees are in memory, no need for index file path
             scaffold_contigs,
             trace_spacing_by_file,
+            onealn_parsers,
         })
     }
 
@@ -884,8 +910,13 @@ impl Impg {
                     )
                 })?;
 
-        let (scaffold_contigs, trace_spacing_by_file) =
-            Self::collect_contig_metadata(alignment_files, &seq_index);
+        let (scaffold_contigs, trace_spacing_by_file, onealn_parsers) =
+            Self::collect_contig_metadata(alignment_files, &seq_index).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Failed to collect contig metadata: {e:?}"),
+                )
+            })?;
 
         Ok(Self {
             trees: RwLock::new(FxHashMap::default()), // Start with empty trees - load on demand
@@ -895,6 +926,7 @@ impl Impg {
             index_file_path,
             scaffold_contigs,
             trace_spacing_by_file,
+            onealn_parsers,
         })
     }
 
@@ -958,7 +990,7 @@ impl Impg {
 
                     // Get data bytes with all validation checks
                     let data_buffer = metadata
-                        .get_data_bytes(&self.alignment_files)
+                        .get_data_bytes(&self.alignment_files, &self.onealn_parsers)
                         .unwrap_or_else(|e| {
                             panic!("{}", e);
                         });
@@ -1170,7 +1202,7 @@ impl Impg {
 
                         // Get data bytes with all validation checks
                         let data_buffer = metadata
-                            .get_data_bytes(&self.alignment_files)
+                            .get_data_bytes(&self.alignment_files, &self.onealn_parsers)
                             .unwrap_or_else(|e| {
                                 panic!("{}", e);
                             });
@@ -1470,7 +1502,10 @@ impl Impg {
 
                                         // Get data bytes with all validation checks
                                         let data_buffer = metadata
-                                            .get_data_bytes(&self.alignment_files)
+                                            .get_data_bytes(
+                                                &self.alignment_files,
+                                                &self.onealn_parsers,
+                                            )
                                             .unwrap_or_else(|e| {
                                                 panic!("{}", e);
                                             });
