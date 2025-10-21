@@ -33,9 +33,9 @@ impl OneAlnParser {
             .map_err(|e| ParseErr::InvalidFormat(format!("Failed to open 1aln file: {}", e)))?;
 
         let metadata = OneAlnMetadata {
-            seq_names: file.get_all_sequence_names(),
-            seq_lengths: file.get_all_sequence_lengths(),
-            contig_offsets: file.get_all_contig_offsets(),
+            seq_names: file.get_all_sequence_names(), // contig id (0-indexed) to scaffold name
+            seq_lengths: file.get_all_sequence_lengths(), // contig id (0-indexed) to scaffold length
+            contig_offsets: file.get_all_contig_offsets(), // contig id (0-indexed) to (scaffold_offset, contig_length)
         };
 
         // Get trace spacing
@@ -99,48 +99,48 @@ impl OneAlnParser {
         alignment_index: u64,
     ) -> Result<(AlignmentRecord, char), ParseErr> {
         // Read alignment coordinates from current 'A' line
-        let query_id_in_file = file.int(0);
-        let target_id_in_file = file.int(3);
+        let query_contig_id = file.int(0);
+        let target_contig_id = file.int(3);
 
         // Get sequence names and lengths from metadata
         let query_name = self
             .metadata
             .seq_names
-            .get(&query_id_in_file)
+            .get(&query_contig_id)
             .cloned()
             .ok_or_else(|| {
                 ParseErr::InvalidFormat(format!(
-                    "Query sequence with ID {} not found in metadata",
-                    query_id_in_file
+                    "Query sequence with contig ID {} not found in metadata",
+                    query_contig_id
                 ))
             })?;
         let target_name = self
             .metadata
             .seq_names
-            .get(&target_id_in_file)
+            .get(&target_contig_id)
             .cloned()
             .ok_or_else(|| {
                 ParseErr::InvalidFormat(format!(
-                    "Target sequence with ID {} not found in metadata",
-                    target_id_in_file
+                    "Target sequence with contig ID {} not found in metadata",
+                    target_contig_id
                 ))
             })?;
 
         // Lookup already-registered scaffold IDs
         let query_id = contig_to_seq_id
-            .get(&query_id_in_file)
+            .get(&query_contig_id)
             .copied()
             .ok_or_else(|| {
                 ParseErr::InvalidFormat(format!(
-                    "Sequence index ID for query {query_name} (contig {query_id_in_file}) missing"
+                    "Sequence index ID for query {query_name} (contig {query_contig_id}) missing"
                 ))
             })?;
         let target_id = contig_to_seq_id
-            .get(&target_id_in_file)
+            .get(&target_contig_id)
             .copied()
             .ok_or_else(|| {
                 ParseErr::InvalidFormat(format!(
-                    "Sequence index ID for target {target_name} (contig {target_id_in_file}) missing"
+                    "Sequence index ID for target {target_name} (contig {target_contig_id}) missing"
                 ))
             })?;
 
@@ -152,13 +152,13 @@ impl OneAlnParser {
         let (query_contig_offset, query_contig_len) = self
             .metadata
             .contig_offsets
-            .get(&query_id_in_file)
+            .get(&query_contig_id)
             .copied()
             .unwrap();
         let (target_contig_offset, target_contig_len) = self
             .metadata
             .contig_offsets
-            .get(&target_id_in_file)
+            .get(&target_contig_id)
             .copied()
             .unwrap();
 
@@ -269,52 +269,52 @@ impl OneAlnParser {
         file.read_line(); // Read the 'A' line we jumped to
 
         // Read alignment coordinates
-        let query_id = file.int(0);
-        let target_id = file.int(3);
+        let query_contig_id = file.int(0);
+        let target_contig_id = file.int(3);
 
         let query_name = self
             .metadata
             .seq_names
-            .get(&query_id)
+            .get(&query_contig_id)
             .cloned()
             .ok_or_else(|| {
                 ParseErr::InvalidFormat(format!(
-                    "Query sequence with ID {} not found in metadata",
-                    query_id
+                    "Query sequence with contig ID {} not found in metadata",
+                    query_contig_id
                 ))
             })?;
         let query_length = self
             .metadata
             .seq_lengths
-            .get(&query_id)
+            .get(&query_contig_id)
             .copied()
             .ok_or_else(|| {
                 ParseErr::InvalidFormat(format!(
-                    "Query sequence length for ID {} not found in metadata",
-                    query_id
+                    "Query sequence length for contig ID {} not found in metadata",
+                    query_contig_id
                 ))
             })?;
 
         let target_name = self
             .metadata
             .seq_names
-            .get(&target_id)
+            .get(&target_contig_id)
             .cloned()
             .ok_or_else(|| {
                 ParseErr::InvalidFormat(format!(
-                    "Target sequence with ID {} not found in metadata",
-                    target_id
+                    "Target sequence with contig ID {} not found in metadata",
+                    target_contig_id
                 ))
             })?;
         let target_length = self
             .metadata
             .seq_lengths
-            .get(&target_id)
+            .get(&target_contig_id)
             .copied()
             .ok_or_else(|| {
                 ParseErr::InvalidFormat(format!(
-                    "Target sequence length for ID {} not found in metadata",
-                    target_id
+                    "Target sequence length for contig ID {} not found in metadata",
+                    target_contig_id
                 ))
             })?;
 

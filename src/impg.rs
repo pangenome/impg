@@ -8,7 +8,7 @@ use crate::sequence_index::SequenceIndex as _; // The as _ syntax imports the tr
 use crate::sequence_index::UnifiedSequenceIndex;
 use coitrees::{BasicCOITree, Interval, IntervalTree};
 use lib_tracepoints::{tracepoints_to_cigar_fastga_with_aligner, DistanceMode};
-use lib_wfa2::affine_wavefront::{AlignerStats, AffineWavefronts};
+use lib_wfa2::affine_wavefront::AffineWavefronts;
 use libc;
 use log::{debug, info};
 use noodles::bgzf;

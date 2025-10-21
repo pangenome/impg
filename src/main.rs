@@ -3,6 +3,7 @@ use coitrees::{Interval, IntervalTree};
 use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
 use impg::commands::{lace, partition, similarity};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
+use impg::onealn::OneAlnParser;
 use impg::seqidx::SequenceIndex;
 use impg::sequence_index::{SequenceIndex as SeqIndexTrait, UnifiedSequenceIndex};
 use impg::subset_filter::{load_subset_filter, SubsetFilter};
@@ -14,7 +15,6 @@ use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
-
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1626,7 +1626,6 @@ fn generate_multi_index(
             let mut seq_index_guard = tmp_seq_index.lock().unwrap();
 
             // Detect file format and parse accordingly
-            use impg::onealn::OneAlnParser;
             let format = AlignmentFormat::from_path(aln_file).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
