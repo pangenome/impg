@@ -439,13 +439,6 @@ impl OneAlnParser {
             }
         }
 
-        if alignment.strand == '-' {
-            let orig_start = alignment.target_contig_start;
-            let orig_end = alignment.target_contig_end;
-            alignment.target_contig_start = alignment.target_contig_len - orig_end;
-            alignment.target_contig_end = alignment.target_contig_len - orig_start;
-        }
-
         Ok(alignment)
     }
 }
@@ -469,4 +462,105 @@ pub struct OneAlnAlignment {
     pub tracepoints: Vec<i64>,
     pub trace_diffs: Vec<i64>,
     pub trace_spacing: i64,
+}
+
+impl OneAlnAlignment {
+    pub fn query_scaffold_span(&self) -> Result<(i32, i32), ParseErr> {
+        let start = self
+            .query_contig_offset
+            .checked_add(self.query_contig_start)
+            .ok_or_else(|| {
+                ParseErr::InvalidFormat(format!(
+                    "Overflow computing query scaffold start: offset {}, start {}",
+                    self.query_contig_offset, self.query_contig_start
+                ))
+            })?;
+        let end = self
+            .query_contig_offset
+            .checked_add(self.query_contig_end)
+            .ok_or_else(|| {
+                ParseErr::InvalidFormat(format!(
+                    "Overflow computing query scaffold end: offset {}, end {}",
+                    self.query_contig_offset, self.query_contig_end
+                ))
+            })?;
+        let start_i32 = i32::try_from(start).map_err(|_| {
+            ParseErr::InvalidFormat(format!(
+                "Query scaffold start outside i32 range: {}",
+                start
+            ))
+        })?;
+        let end_i32 = i32::try_from(end).map_err(|_| {
+            ParseErr::InvalidFormat(format!(
+                "Query scaffold end outside i32 range: {}",
+                end
+            ))
+        })?;
+        Ok((start_i32, end_i32))
+    }
+
+    pub fn target_scaffold_span(&self) -> Result<(i32, i32), ParseErr> {
+        // Adjust target contig-relative coordinates based on strand
+        let (contig_start, contig_end) = match self.strand {
+            '+' => (self.target_contig_start, self.target_contig_end),
+            '-' => {
+                let start = self
+                    .target_contig_len
+                    .checked_sub(self.target_contig_end)
+                    .ok_or_else(|| {
+                        ParseErr::InvalidFormat(format!(
+                            "Invalid reverse-strand alignment: contig length {} smaller than end {}",
+                            self.target_contig_len, self.target_contig_end
+                        ))
+                    })?;
+                let end = self
+                    .target_contig_len
+                    .checked_sub(self.target_contig_start)
+                    .ok_or_else(|| {
+                        ParseErr::InvalidFormat(format!(
+                            "Invalid reverse-strand alignment: contig length {} smaller than start {}",
+                            self.target_contig_len, self.target_contig_start
+                        ))
+                    })?;
+                (start, end)
+            }
+            other => {
+                return Err(ParseErr::InvalidFormat(format!(
+                    "Unexpected strand character '{other}' in OneAlnAlignment"
+                )))
+            }
+        };
+
+        let start = self
+            .target_contig_offset
+            .checked_add(contig_start)
+            .ok_or_else(|| {
+                ParseErr::InvalidFormat(format!(
+                    "Overflow computing target scaffold start: offset {}, start {}",
+                    self.target_contig_offset, contig_start
+                ))
+            })?;
+        let end = self
+            .target_contig_offset
+            .checked_add(contig_end)
+            .ok_or_else(|| {
+                ParseErr::InvalidFormat(format!(
+                    "Overflow computing target scaffold end: offset {}, end {}",
+                    self.target_contig_offset, contig_end
+                ))
+            })?;
+        let start_i32 = i32::try_from(start).map_err(|_| {
+            ParseErr::InvalidFormat(format!(
+                "Target scaffold start outside i32 range: {}",
+                start
+            ))
+        })?;
+        let end_i32 = i32::try_from(end).map_err(|_| {
+            ParseErr::InvalidFormat(format!(
+                "Target scaffold end outside i32 range: {}",
+                end
+            ))
+        })?;
+        Ok((start_i32, end_i32))
+    }
 }

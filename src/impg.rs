@@ -15,7 +15,6 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::cmp::{max, min};
-use std::convert::TryFrom;
 use std::fs::File;
 use std::io::{BufReader, Seek, SeekFrom};
 use std::sync::Arc;
@@ -426,12 +425,6 @@ impl Impg {
         Ok(onealn_parsers)
     }
 
-    #[inline]
-    fn to_scaffold_coordinate(&self, coord: i32, contig_offset: i64) -> i32 {
-        let value = coord as i64 + contig_offset;
-        value.clamp(i32::MIN as i64, i32::MAX as i64) as i32
-    }
-
     fn process_tracepoints_data(
         &self,
         alignment: &OneAlnAlignment,
@@ -464,23 +457,6 @@ impl Impg {
             }
         };
 
-        // Determine contig-relative starting position compatible with the aligner
-        let contig_target_start_i64 = if metadata.strand() == Strand::Forward {
-            alignment.target_contig_start
-        } else {
-            alignment.target_length - alignment.target_contig_end
-        };
-        let contig_target_start = usize::try_from(contig_target_start_i64).unwrap_or_else(|_| {
-            panic!("Invalid contig target start derived from alignment: {contig_target_start_i64}")
-        });
-        let contig_query_start =
-            usize::try_from(alignment.query_contig_start).unwrap_or_else(|_| {
-                panic!(
-                    "Invalid contig query start derived from alignment: {}",
-                    alignment.query_contig_start
-                )
-            });
-
         // Convert tracepoints to CIGAR if we successfully fetched both sequences
         match (query_seq, target_seq) {
             (Ok(query_seq), Ok(target_seq)) => {
@@ -490,27 +466,25 @@ impl Impg {
                         trace_spacing,
                         &query_seq,
                         &target_seq,
-                        contig_query_start,
-                        contig_target_start,
+                        alignment.query_contig_start.try_into().unwrap(),
+                        alignment.target_contig_start.try_into().unwrap(),
                         metadata.strand() == Strand::Reverse,
                         aligner,
                     )
                 });
 
-                // TODO: would it be better to adjust for scaffold coordinates here instead of outside the function?
+                let (target_start, target_end) = alignment
+                    .target_scaffold_span()
+                    .unwrap_or_else(|e| panic!("Invalid target scaffold span returned by alignment: {:?}", e));
+                let (query_start, query_end) = alignment
+                    .query_scaffold_span()
+                    .unwrap_or_else(|e| panic!("Invalid query scaffold span returned by alignment: {:?}", e));
+
                 (
-                    i32::try_from(alignment.target_contig_start).unwrap_or_else(|_| {
-                        panic!("Invalid target contig start returned by alignment")
-                    }),
-                    i32::try_from(alignment.target_contig_end).unwrap_or_else(|_| {
-                        panic!("Invalid target contig end returned by alignment")
-                    }),
-                    i32::try_from(alignment.query_contig_start).unwrap_or_else(|_| {
-                        panic!("Invalid query contig start returned by alignment")
-                    }),
-                    i32::try_from(alignment.query_contig_end).unwrap_or_else(|_| {
-                        panic!("Invalid query contig end returned by alignment")
-                    }),
+                    target_start,
+                    target_end,
+                    query_start,
+                    query_end,
                     match parse_cigar_to_delta(&cigar_str) {
                         Ok(ops) => ops,
                         Err(e) => panic!(
@@ -554,22 +528,13 @@ impl Impg {
                     .get_onealn_alignment(&self.alignment_files, &self.onealn_parsers)
                     .unwrap_or_else(|e| panic!("{}", e));
 
-                let (adj_target_start, adj_target_end, adj_query_start, adj_query_end, cigar) =
-                    self.process_tracepoints_data(
-                        &alignment,
-                        metadata,
-                        target_id,
-                        sequence_index.expect(
-                            "Sequence index is required when processing tracepoints for .1aln data",
-                        ),
-                    );
-
-                (
-                    self.to_scaffold_coordinate(adj_target_start, alignment.target_contig_offset),
-                    self.to_scaffold_coordinate(adj_target_end, alignment.target_contig_offset),
-                    self.to_scaffold_coordinate(adj_query_start, alignment.query_contig_offset),
-                    self.to_scaffold_coordinate(adj_query_end, alignment.query_contig_offset),
-                    cigar,
+                self.process_tracepoints_data(
+                    &alignment,
+                    metadata,
+                    target_id,
+                    sequence_index.expect(
+                        "Sequence index is required when processing tracepoints for .1aln data",
+                    ),
                 )
             }
             FileType::Paf => {
