@@ -2,7 +2,7 @@ use crate::alignment_record::{AlignmentRecord, Strand};
 use crate::forest_map::ForestMap;
 use crate::graph::reverse_complement;
 use crate::onealn::{OneAlnAlignment, OneAlnParser};
-use crate::paf::ParseErr;
+use crate::paf::{read_cigar_data, ParseErr};
 use crate::seqidx::SequenceIndex;
 use crate::sequence_index::SequenceIndex as _; // The as _ syntax imports the trait so its methods are available, but doesn't bring the name into scope (avoiding the naming conflict)
 use crate::sequence_index::UnifiedSequenceIndex;
@@ -10,7 +10,6 @@ use coitrees::{BasicCOITree, Interval, IntervalTree};
 use lib_tracepoints::{tracepoints_to_cigar_fastga_with_aligner, DistanceMode};
 use lib_wfa2::affine_wavefront::AffineWavefronts;
 use log::{debug, info, warn};
-use noodles::bgzf;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -18,7 +17,7 @@ use std::cell::RefCell;
 use std::cmp::{max, min};
 use std::convert::TryFrom;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{BufReader, Seek, SeekFrom};
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -198,38 +197,7 @@ impl QueryMetadata {
                 // Allocate space for cigar
                 let mut data_buffer = vec![0; self.data_bytes];
 
-                if [".gz", ".bgz"].iter().any(|e| alignment_file.ends_with(e)) {
-                    // For compressed files, use virtual position directly
-                    let mut reader =
-                        bgzf::io::Reader::new(File::open(alignment_file).map_err(|e| {
-                            format!("Failed to open compressed file '{}': {}", alignment_file, e)
-                        })?);
-                    let virtual_position = bgzf::VirtualPosition::from(self.data_offset());
-                    reader.seek(virtual_position).map_err(|e| {
-                        format!(
-                            "Failed to seek in compressed file '{}': {}",
-                            alignment_file, e
-                        )
-                    })?;
-                    reader.read_exact(&mut data_buffer).map_err(|e| {
-                        format!(
-                            "Failed to read data from compressed file '{}': {}",
-                            alignment_file, e
-                        )
-                    })?;
-                } else {
-                    // For uncompressed files, use byte offset
-                    let mut reader = File::open(alignment_file)
-                        .map_err(|e| format!("Failed to open file '{}': {}", alignment_file, e))?;
-                    reader
-                        .seek(SeekFrom::Start(self.data_offset()))
-                        .map_err(|e| {
-                            format!("Failed to seek in file '{}': {}", alignment_file, e)
-                        })?;
-                    reader.read_exact(&mut data_buffer).map_err(|e| {
-                        format!("Failed to read data from file '{}': {}", alignment_file, e)
-                    })?;
-                }
+                read_cigar_data(alignment_file, self.data_offset(), &mut data_buffer)?;
 
                 Ok(data_buffer)
             }

@@ -6,8 +6,11 @@
 use crate::alignment_record::{AlignmentRecord, Strand};
 use crate::seqidx::SequenceIndex;
 use log::debug;
+use noodles::bgzf;
+use std::cell::RefCell;
+use std::collections::{hash_map::Entry, HashMap};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Error as IoError};
+use std::io::{BufRead, BufReader, Error as IoError, Read, Seek, SeekFrom};
 use std::num::{NonZeroUsize, ParseIntError};
 
 #[derive(Debug)]
@@ -19,6 +22,81 @@ pub enum ParseErr {
     InvalidCigarFormat,
     UnsupportedCigarOperation,
     InvalidFormat(String),
+}
+
+enum PafHandle {
+    Plain(File),
+    Compressed(bgzf::io::Reader<File>),
+}
+
+thread_local! {
+    static PAF_FILE_CACHE: RefCell<HashMap<String, PafHandle>> = RefCell::new(HashMap::new());
+}
+
+pub fn read_cigar_data(
+    alignment_file: &str,
+    offset: u64,
+    buffer: &mut [u8],
+) -> Result<(), String> {
+    let is_compressed = [".gz", ".bgz"]
+        .iter()
+        .any(|extension| alignment_file.ends_with(extension));
+
+    with_paf_file_handle(alignment_file, is_compressed, |handle| match handle {
+        PafHandle::Compressed(reader) => {
+            let virtual_position = bgzf::VirtualPosition::from(offset);
+            reader.seek(virtual_position).map_err(|e| {
+                format!(
+                    "Failed to seek in compressed file '{}': {}",
+                    alignment_file, e
+                )
+            })?;
+            reader.read_exact(buffer).map_err(|e| {
+                format!(
+                    "Failed to read data from compressed file '{}': {}",
+                    alignment_file, e
+                )
+            })
+        }
+        PafHandle::Plain(file) => {
+            file.seek(SeekFrom::Start(offset)).map_err(|e| {
+                format!("Failed to seek in file '{}': {}", alignment_file, e)
+            })?;
+            file.read_exact(buffer).map_err(|e| {
+                format!("Failed to read data from file '{}': {}", alignment_file, e)
+            })
+        }
+    })
+}
+
+fn with_paf_file_handle<R, F>(
+    alignment_file: &str,
+    is_compressed: bool,
+    f: F,
+) -> Result<R, String>
+where
+    F: FnOnce(&mut PafHandle) -> Result<R, String>,
+{
+    PAF_FILE_CACHE.with(|cache_cell| -> Result<R, String> {
+        let mut cache = cache_cell.borrow_mut();
+        let entry = cache.entry(alignment_file.to_string());
+        let handle = match entry {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let handle = if is_compressed {
+                    let file = File::open(alignment_file)
+                        .map_err(|e| format!("Failed to open compressed file '{}': {}", alignment_file, e))?;
+                    PafHandle::Compressed(bgzf::io::Reader::new(file))
+                } else {
+                    let file = File::open(alignment_file)
+                        .map_err(|e| format!("Failed to open file '{}': {}", alignment_file, e))?;
+                    PafHandle::Plain(file)
+                };
+                entry.insert(handle)
+            }
+        };
+        f(handle)
+    })
 }
 
 /// Parse a single PAF line into an AlignmentRecord
