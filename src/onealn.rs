@@ -363,7 +363,7 @@ impl OneAlnParser {
                 ))
             })?;
 
-        let (target_contig_offset, _) = self
+        let (target_contig_offset, target_contig_len) = self
             .metadata
             .contig_offsets
             .get(&target_contig_id)
@@ -386,6 +386,7 @@ impl OneAlnParser {
             target_contig_start: file.int(4),
             target_contig_end: file.int(5),
             target_contig_offset,
+            target_contig_len: target_contig_len,
             strand: '+',
             differences: 0,
             tracepoints: Vec::new(),
@@ -420,8 +421,8 @@ impl OneAlnParser {
         if alignment.strand == '-' {
             let orig_start = alignment.target_contig_start;
             let orig_end = alignment.target_contig_end;
-            alignment.target_contig_start = alignment.target_length - orig_end;
-            alignment.target_contig_end = alignment.target_length - orig_start;
+            alignment.target_contig_start = alignment.target_contig_len - orig_end;
+            alignment.target_contig_end = alignment.target_contig_len - orig_start;
         }
 
         Ok(alignment)
@@ -441,6 +442,7 @@ pub struct OneAlnAlignment {
     pub target_contig_start: i64,
     pub target_contig_end: i64,
     pub target_contig_offset: i64,
+    pub target_contig_len: i64,
     pub strand: char,
     pub differences: i64,
     pub tracepoints: Vec<i64>,

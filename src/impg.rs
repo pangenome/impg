@@ -610,23 +610,6 @@ impl Impg {
                     .get_onealn_alignment(&self.alignment_files, &self.onealn_parsers)
                     .unwrap_or_else(|e| panic!("{}", e));
 
-                let contig_start_scaff = alignment.target_contig_offset;
-                let contig_end_scaff = contig_start_scaff + alignment.target_length;
-                let overlap_start_i64 = (range_start as i64).max(contig_start_scaff);
-                let overlap_end_i64 = (range_end as i64).min(contig_end_scaff);
-                if overlap_start_i64 >= overlap_end_i64 {
-                    debug!(
-                        "Skipping .1aln overlap (target_id={target_id}, file={}, contig_offset={}): requested range {}-{} outside contig span {}-{}",
-                        alignment_file,
-                        alignment.target_contig_offset,
-                        range_start,
-                        range_end,
-                        contig_start_scaff,
-                        contig_end_scaff
-                    );
-                    return None;
-                }
-
                 let (adj_target_start, adj_target_end, adj_query_start, adj_query_end, cigar) =
                     self.process_tracepoints_data(
                         &alignment,
@@ -1195,8 +1178,8 @@ impl Impg {
                 ) in processed_results
                 {
                     results.push((query_interval, cigar, target_interval));
-                    debug!("bfs_results_len={}", results.len());
-                    log_memory_usage("dfs_after_push");
+                    // debug!("bfs_results_len={}", results.len());
+                    // log_memory_usage("dfs_after_push");
 
                     // Only add non-overlapping portions to the stack for further exploration
                     if query_id != current_target_id {
@@ -1396,8 +1379,8 @@ impl Impg {
                                                 target_interval.last,
                                                 *current_target_id,
                                             ));
-                                            debug!("bfs_local_results_len={}", local_results.len());
-                                            log_memory_usage("bfs_after_local_push");
+                                            // debug!("bfs_local_results_len={}", local_results.len());
+                                            // log_memory_usage("bfs_after_local_push");
                                         }
                                     },
                                 );
@@ -1437,8 +1420,8 @@ impl Impg {
                             metadata: current_target_id,
                         },
                     ));
-                    debug!("bfs_results_len={}", results.len());
-                    log_memory_usage("bfs_after_push");
+                    // debug!("bfs_results_len={}", results.len());
+                    // log_memory_usage("bfs_after_push");
 
                     // Only consider for next depth if it's a different sequence
                     if query_id != current_target_id {
