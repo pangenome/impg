@@ -17,7 +17,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::cmp::{max, min};
-use std::convert::TryFrom;
+use std::convert::{TryFrom, TryInto};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::mem::MaybeUninit;
@@ -170,6 +170,7 @@ impl QueryMetadata {
     fn get_data_bytes(
         &self,
         alignment_files: &[String],
+        _onealn_parsers: &[Option<Arc<OneAlnParser>>],
     ) -> Result<Vec<u8>, String> {
         // Get the correct file and type
         let alignment_file = &alignment_files[self.alignment_file_index as usize];
@@ -426,35 +427,19 @@ impl SortedRanges {
     }
 }
 
-/// Information about a contig within a scaffold for .1aln files
-#[derive(Debug, Clone, Copy)]
-struct ContigInfo {
-    sbeg: i64, // Scaffold begin (position where this contig starts)
-    clen: i64, // Contig length
-}
-
 pub struct Impg {
     pub trees: RwLock<TreeMap>,
     pub seq_index: SequenceIndex,
     alignment_files: Vec<String>, // List of all alignment files (PAF or 1aln)
     pub forest_map: ForestMap,    // Forest map for lazy loading
     index_file_path: String,      // Path to the index file for lazy loading
-    scaffold_contigs: FxHashMap<u32, Vec<ContigInfo>>, // Aggregated contig info per scaffold across files
     onealn_parsers: Vec<Option<Arc<OneAlnParser>>>,    // Cached 1aln parsers per file
 }
 
 impl Impg {
     fn collect_contig_metadata(
         alignment_files: &[String],
-        seq_index: &SequenceIndex,
-    ) -> Result<
-        (
-            FxHashMap<u32, Vec<ContigInfo>>,
-            Vec<Option<Arc<OneAlnParser>>>,
-        ),
-        ParseErr,
-    > {
-        let mut scaffold_contigs: FxHashMap<u32, Vec<ContigInfo>> = FxHashMap::default();
+    ) -> Result<Vec<Option<Arc<OneAlnParser>>>, ParseErr> {
         let mut onealn_parsers: Vec<Option<Arc<OneAlnParser>>> =
             Vec::with_capacity(alignment_files.len());
 
@@ -466,84 +451,12 @@ impl Impg {
                         alignment_file
                     ))
                 })?;
-                let seq_names = parser.get_sequence_names();
-                let contig_offsets_map = parser.get_contig_offsets();
-
-                for (&contig_id, &(sbeg, clen)) in contig_offsets_map {
-                    let scaffold_name = seq_names.get(&contig_id).unwrap();
-                    let scaffold_id = seq_index.get_id(scaffold_name).unwrap_or_else(|| {
-                        panic!(
-                            "Sequence '{}' not found in index while collecting contig metadata",
-                            scaffold_name
-                        )
-                    });
-                    let contig_info = ContigInfo { sbeg, clen };
-                    scaffold_contigs
-                        .entry(scaffold_id)
-                        .or_insert_with(Vec::new)
-                        .push(contig_info);
-                }
-
                 onealn_parsers.push(Some(Arc::new(parser)));
             } else {
                 onealn_parsers.push(None);
             }
         }
-
-        for contigs in scaffold_contigs.values_mut() {
-            contigs.sort_by_key(|c| c.sbeg);
-            contigs.dedup_by(|a, b| a.sbeg == b.sbeg && a.clen == b.clen);
-        }
-
-        Ok((scaffold_contigs, onealn_parsers))
-    }
-
-    /// Get contig layout for a sequence, falling back to a single contig if no data is available
-    fn sequence_contigs(&self, sequence_id: u32) -> Vec<ContigInfo> {
-        if let Some(contigs) = self.scaffold_contigs.get(&sequence_id) {
-            if !contigs.is_empty() {
-                return contigs.clone();
-            }
-        }
-
-        let len = self
-            .seq_index
-            .get_len_from_id(sequence_id)
-            .unwrap_or_else(|| {
-                panic!(
-                    "Missing sequence length for scaffold id {sequence_id} while building default contig layout"
-                )
-            }) as i64;
-        vec![ContigInfo { sbeg: 0, clen: len }]
-    }
-
-    /// Convert a scaffold-level range into contig-level ranges with corresponding offsets
-    fn scaffold_range_to_contig_ranges(
-        &self,
-        sequence_id: u32,
-        range: (i32, i32),
-    ) -> Vec<(i32, i32, i64)> {
-        let mut start = range.0 as i64;
-        let mut end = range.1 as i64;
-        if start > end {
-            std::mem::swap(&mut start, &mut end);
-        }
-
-        let mut ranges = Vec::new();
-        for contig in self.sequence_contigs(sequence_id) {
-            let contig_start = contig.sbeg;
-            let contig_end = contig.sbeg + contig.clen;
-            let overlap_start = start.max(contig_start);
-            let overlap_end = end.min(contig_end);
-
-            if overlap_start < overlap_end {
-                let contig_range_start = (overlap_start - contig_start) as i32;
-                let contig_range_end = (overlap_end - contig_start) as i32;
-                ranges.push((contig_range_start, contig_range_end, contig_start));
-            }
-        }
-
-        ranges
+        Ok(onealn_parsers)
     }
 
     #[inline]
@@ -598,12 +511,13 @@ impl Impg {
         let contig_target_start = usize::try_from(contig_target_start_i64).unwrap_or_else(|_| {
             panic!("Invalid contig target start derived from alignment: {contig_target_start_i64}")
         });
-        let contig_query_start = usize::try_from(alignment.query_contig_start).unwrap_or_else(|_| {
-            panic!(
-                "Invalid contig query start derived from alignment: {}",
-                alignment.query_contig_start
-            )
-        });
+        let contig_query_start =
+            usize::try_from(alignment.query_contig_start).unwrap_or_else(|_| {
+                panic!(
+                    "Invalid contig query start derived from alignment: {}",
+                    alignment.query_contig_start
+                )
+            });
 
         // Convert tracepoints to CIGAR if we successfully fetched both sequences
         match (query_seq_result, target_seq_result) {
@@ -645,10 +559,18 @@ impl Impg {
                 });
 
                 (
-                    metadata.target_start,
-                    metadata.target_end,
-                    metadata.query_start,
-                    metadata.query_end,
+                    i32::try_from(alignment.target_contig_start).unwrap_or_else(|_| {
+                        panic!("Invalid target contig start returned by alignment")
+                    }),
+                    i32::try_from(alignment.target_contig_end).unwrap_or_else(|_| {
+                        panic!("Invalid target contig end returned by alignment")
+                    }),
+                    i32::try_from(alignment.query_contig_start).unwrap_or_else(|_| {
+                        panic!("Invalid query contig start returned by alignment")
+                    }),
+                    i32::try_from(alignment.query_contig_end).unwrap_or_else(|_| {
+                        panic!("Invalid query contig end returned by alignment")
+                    }),
                     match parse_cigar_to_delta(&cigar_str) {
                         Ok(ops) => ops,
                         Err(e) => panic!(
@@ -667,6 +589,151 @@ impl Impg {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn project_overlapping_interval(
+        &self,
+        metadata: &QueryMetadata,
+        target_id: u32,
+        overlap_start: i32,
+        overlap_end: i32,
+        sequence_index: Option<&UnifiedSequenceIndex>,
+        penalties: (u8, u8, u8, u8, u8, u8),
+        min_gap_compressed_identity: Option<f64>,
+    ) -> Option<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
+        let (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) = penalties;
+        let file_index = metadata.alignment_file_index as usize;
+        let alignment_file = &self.alignment_files[file_index];
+
+        let mut query_offset: i64 = 0;
+        let mut target_offset: i64 = 0;
+
+        let (
+            requested_range_contig,
+            adj_target_start,
+            adj_target_end,
+            adj_query_start,
+            adj_query_end,
+            mut cigar_ops,
+        ) = match QueryMetadata::get_file_type(alignment_file) {
+            FileType::OneAln => {
+                let alignment = metadata
+                    .get_onealn_alignment(&self.alignment_files, &self.onealn_parsers)
+                    .unwrap_or_else(|e| panic!("{}", e));
+
+                let contig_start_scaff = alignment.target_contig_offset;
+                let contig_end_scaff = contig_start_scaff + alignment.target_length;
+                let overlap_start_i64 = (overlap_start as i64).max(contig_start_scaff);
+                let overlap_end_i64 = (overlap_end as i64).min(contig_end_scaff);
+                if overlap_start_i64 >= overlap_end_i64 {
+                    return None;
+                }
+
+                let requested_range_contig = (
+                    (overlap_start_i64 - contig_start_scaff)
+                        .try_into()
+                        .unwrap_or_else(|_| {
+                            panic!(
+                                "Failed to convert requested contig start for alignment {}",
+                                alignment_file
+                            )
+                        }),
+                    (overlap_end_i64 - contig_start_scaff)
+                        .try_into()
+                        .unwrap_or_else(|_| {
+                            panic!(
+                                "Failed to convert requested contig end for alignment {}",
+                                alignment_file
+                            )
+                        }),
+                );
+
+                let (adj_target_start, adj_target_end, adj_query_start, adj_query_end, cigar) =
+                    self.process_tracepoints_data(
+                        &alignment,
+                        metadata,
+                        target_id,
+                        sequence_index.expect(
+                            "Sequence index is required when processing tracepoints for .1aln data",
+                        ),
+                        (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
+                        requested_range_contig,
+                    );
+
+                query_offset = alignment.query_contig_offset;
+                target_offset = alignment.target_contig_offset;
+
+                (
+                    requested_range_contig,
+                    adj_target_start,
+                    adj_target_end,
+                    adj_query_start,
+                    adj_query_end,
+                    cigar,
+                )
+            }
+            FileType::Paf => {
+                let requested_range_contig = (overlap_start, overlap_end);
+                let data_buffer = metadata
+                    .get_data_bytes(&self.alignment_files, &self.onealn_parsers)
+                    .unwrap_or_else(|e| panic!("{}", e));
+
+                (
+                    requested_range_contig,
+                    metadata.target_start,
+                    metadata.target_end,
+                    metadata.query_start,
+                    metadata.query_end,
+                    metadata.get_cigar_ops_from_bytes(data_buffer),
+                )
+            }
+        };
+
+        let projection = project_target_range_through_alignment(
+            requested_range_contig,
+            (
+                adj_target_start,
+                adj_target_end,
+                adj_query_start,
+                adj_query_end,
+                metadata.strand(),
+            ),
+            &cigar_ops,
+        );
+
+        if let Some((
+            adjusted_query_start,
+            adjusted_query_end,
+            adjusted_cigar,
+            adjusted_target_start,
+            adjusted_target_end,
+        )) = projection
+        {
+            if let Some(threshold) = min_gap_compressed_identity {
+                if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
+                    return None;
+                }
+            }
+
+            let query_interval = Interval {
+                first: self.to_scaffold_coordinate(adjusted_query_start, query_offset),
+                last: self.to_scaffold_coordinate(adjusted_query_end, query_offset),
+                metadata: metadata.query_id,
+            };
+
+            let target_interval = Interval {
+                first: self.to_scaffold_coordinate(adjusted_target_start, target_offset),
+                last: self.to_scaffold_coordinate(adjusted_target_end, target_offset),
+                metadata: target_id,
+            };
+
+            cigar_ops = adjusted_cigar;
+
+            Some((query_interval, cigar_ops, target_interval))
+        } else {
+            None
+        }
+    }
+
     pub fn from_multi_alignment_records(
         records_by_file: &[(Vec<AlignmentRecord>, String)],
         seq_index: SequenceIndex,
@@ -677,8 +744,7 @@ impl Impg {
             .map(|(_, alignment_file)| alignment_file.clone())
             .collect();
 
-        let (scaffold_contigs, onealn_parsers) =
-            Self::collect_contig_metadata(&alignment_files, &seq_index)?;
+        let onealn_parsers = Self::collect_contig_metadata(&alignment_files)?;
 
         let intervals: FxHashMap<u32, Vec<Interval<QueryMetadata>>> = records_by_file
             .par_iter()
@@ -746,7 +812,6 @@ impl Impg {
             alignment_files,
             forest_map,
             index_file_path: String::new(), // All trees are in memory, no need for index file path
-            scaffold_contigs,
             onealn_parsers,
         })
     }
@@ -928,8 +993,7 @@ impl Impg {
                     )
                 })?;
 
-        let (scaffold_contigs, onealn_parsers) =
-            Self::collect_contig_metadata(alignment_files, &seq_index).map_err(|e| {
+        let onealn_parsers = Self::collect_contig_metadata(alignment_files).map_err(|e| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!("Failed to collect contig metadata: {e:?}"),
@@ -942,7 +1006,6 @@ impl Impg {
             alignment_files: alignment_files.to_vec(),
             forest_map,
             index_file_path,
-            scaffold_contigs,
             onealn_parsers,
         })
     }
@@ -991,128 +1054,32 @@ impl Impg {
 
         // Get or load the tree - if None, no overlaps exist for this target
         if let Some(tree) = self.get_or_load_tree(target_id) {
-            let contig_ranges =
-                self.scaffold_range_to_contig_ranges(target_id, (range_start, range_end));
+            let penalties_tuple = (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
+            tree.query(range_start, range_end, |interval| {
+                let metadata = &interval.metadata;
+                let overlap_start = range_start.max(interval.first);
+                let overlap_end = range_end.min(interval.last);
+                if overlap_start >= overlap_end {
+                    return;
+                }
 
-            for (contig_start, contig_end, contig_offset) in contig_ranges {
-                tree.query(contig_start, contig_end, |interval| {
-                    let metadata = &interval.metadata;
-                    let file_index = metadata.alignment_file_index as usize;
-                    let alignment_file = &self.alignment_files[file_index];
-
-                    let (
-                        adj_target_start,
-                        adj_target_end,
-                        adj_query_start,
-                        adj_query_end,
-                        cigar_ops,
-                        query_offset,
-                        target_offset,
-                    ) = match QueryMetadata::get_file_type(alignment_file) {
-                        FileType::OneAln => {
-                            let alignment = metadata
-                                .get_onealn_alignment(&self.alignment_files, &self.onealn_parsers)
-                                .unwrap_or_else(|e| panic!("{}", e));
-
-                            if alignment.target_contig_offset != contig_offset {
-                                return;
-                            }
-
-                            let (t_start, t_end, q_start, q_end, cigar) = self
-                                .process_tracepoints_data(
-                                    &alignment,
-                                    metadata,
-                                    target_id,
-                                    sequence_index.unwrap(),
-                                    (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
-                                    (contig_start, contig_end),
-                                );
-
-                            (
-                                t_start,
-                                t_end,
-                                q_start,
-                                q_end,
-                                cigar,
-                                alignment.query_contig_offset,
-                                alignment.target_contig_offset,
-                            )
-                        }
-                        FileType::Paf => {
-                            if contig_offset != 0 {
-                                return;
-                            }
-
-                            let data_buffer = metadata
-                                .get_data_bytes(&self.alignment_files)
-                                .unwrap_or_else(|e| panic!("{}", e));
-
-                            (
-                                metadata.target_start,
-                                metadata.target_end,
-                                metadata.query_start,
-                                metadata.query_end,
-                                metadata.get_cigar_ops_from_bytes(data_buffer),
-                                0,
-                                0,
-                            )
-                        }
-                    };
-
-                    // Project through alignment in contig coordinates
-                    let result = project_target_range_through_alignment(
-                        (contig_start, contig_end),
-                        (
-                            adj_target_start,
-                            adj_target_end,
-                            adj_query_start,
-                            adj_query_end,
-                            metadata.strand(),
-                        ),
-                        &cigar_ops,
-                    );
-
-                    if let Some((
-                        adjusted_query_start,
-                        adjusted_query_end,
-                        adjusted_cigar,
-                        adjusted_target_start,
-                        adjusted_target_end,
-                    )) = result
-                    {
-                        // Check gap-compressed identity if threshold is provided
-                        if let Some(threshold) = min_gap_compressed_identity {
-                            if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
-                                return; // Skip this result
-                            }
-                        }
-
-                        let adjusted_interval = (
-                            Interval {
-                                first: self
-                                    .to_scaffold_coordinate(adjusted_query_start, query_offset),
-                                last: self.to_scaffold_coordinate(adjusted_query_end, query_offset),
-                                metadata: metadata.query_id,
-                            },
-                            if store_cigar {
-                                adjusted_cigar
-                            } else {
-                                Vec::new()
-                            },
-                            Interval {
-                                first: self
-                                    .to_scaffold_coordinate(adjusted_target_start, target_offset),
-                                last: self
-                                    .to_scaffold_coordinate(adjusted_target_end, target_offset),
-                                metadata: target_id,
-                            },
-                        );
-                        results.push(adjusted_interval);
-                        debug!("results_len={}", results.len());
-                        log_memory_usage("after_push");
-                    }
-                });
-            }
+                if let Some((query_interval, cigar_ops, target_interval)) = self
+                    .project_overlapping_interval(
+                        metadata,
+                        target_id,
+                        overlap_start,
+                        overlap_end,
+                        sequence_index,
+                        penalties_tuple,
+                        min_gap_compressed_identity,
+                    )
+                {
+                    let cigar_vec = if store_cigar { cigar_ops } else { Vec::new() };
+                    results.push((query_interval, cigar_vec, target_interval));
+                    debug!("results_len={}", results.len());
+                    log_memory_usage("after_push");
+                }
+            });
         }
 
         results
@@ -1208,155 +1175,46 @@ impl Impg {
 
             // Get or load the tree - if None, no overlaps exist for this target
             if let Some(tree) = self.get_or_load_tree(current_target_id) {
-                // Collect intervals first to process them in parallel
-                let mut intervals: Vec<(QueryMetadata, (i32, i32), i64)> = Vec::new();
+                let mut intervals: Vec<(QueryMetadata, (i32, i32))> = Vec::new();
+                tree.query(current_target_start, current_target_end, |interval| {
+                    let overlap_start = current_target_start.max(interval.first);
+                    let overlap_end = current_target_end.min(interval.last);
+                    if overlap_start < overlap_end {
+                        intervals.push((interval.metadata.clone(), (overlap_start, overlap_end)));
+                    }
+                });
 
-                for (contig_start, contig_end, contig_offset) in self
-                    .scaffold_range_to_contig_ranges(
-                        current_target_id,
-                        (current_target_start, current_target_end),
-                    )
-                {
-                    tree.query(contig_start, contig_end, |interval| {
-                        intervals.push((
-                            interval.metadata.clone(),
-                            (contig_start, contig_end),
-                            contig_offset,
-                        ));
-                    });
-                }
+                let penalties_tuple = (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
 
-                // Process the intervals in parallel
                 let processed_results: Vec<_> = intervals
                     .into_par_iter()
-                    .filter_map(|(metadata, requested_range, contig_offset)| {
-                        let file_index = metadata.alignment_file_index as usize;
-                        let alignment_file = &self.alignment_files[file_index];
-                        let file_type = QueryMetadata::get_file_type(alignment_file);
-
-                        let (
-                            adj_target_start,
-                            adj_target_end,
-                            adj_query_start,
-                            adj_query_end,
-                            cigar_ops,
-                            query_offset,
-                            target_offset,
-                        ) = match file_type {
-                            FileType::OneAln => {
-                                let alignment = metadata
-                                    .get_onealn_alignment(
-                                        &self.alignment_files,
-                                        &self.onealn_parsers,
-                                    )
-                                    .unwrap_or_else(|e| panic!("{}", e));
-
-                                if alignment.target_contig_offset != contig_offset {
-                                    return None;
-                                }
-
-                                let (t_start, t_end, q_start, q_end, cigar) = self
-                                    .process_tracepoints_data(
-                                        &alignment,
-                                        &metadata,
-                                        current_target_id,
-                                        sequence_index.unwrap(),
-                                        (
-                                            _match, mismatch, gap_open1, gap_ext1, gap_open2,
-                                            gap_ext2,
-                                        ),
-                                        requested_range,
-                                    );
+                    .filter_map(|(metadata, overlap_range)| {
+                        self.project_overlapping_interval(
+                            &metadata,
+                            current_target_id,
+                            overlap_range.0,
+                            overlap_range.1,
+                            sequence_index,
+                            penalties_tuple,
+                            min_gap_compressed_identity,
+                        )
+                        .map(
+                            |(query_interval, cigar_ops, target_interval)| {
+                                let query_id = query_interval.metadata;
+                                let adjusted_query_start = query_interval.first;
+                                let adjusted_query_end = query_interval.last;
+                                let cigar_vec = if store_cigar { cigar_ops } else { Vec::new() };
 
                                 (
-                                    t_start,
-                                    t_end,
-                                    q_start,
-                                    q_end,
-                                    cigar,
-                                    alignment.query_contig_offset,
-                                    alignment.target_contig_offset,
+                                    query_interval,
+                                    cigar_vec,
+                                    target_interval,
+                                    query_id,
+                                    adjusted_query_start,
+                                    adjusted_query_end,
                                 )
-                            }
-                            FileType::Paf => {
-                                if contig_offset != 0 {
-                                    return None;
-                                }
-                                let data_buffer = metadata
-                                    .get_data_bytes(&self.alignment_files)
-                                    .unwrap_or_else(|e| panic!("{}", e));
-
-                                (
-                                    metadata.target_start,
-                                    metadata.target_end,
-                                    metadata.query_start,
-                                    metadata.query_end,
-                                    metadata.get_cigar_ops_from_bytes(data_buffer),
-                                    0,
-                                    0,
-                                )
-                            }
-                        };
-
-                        let result = project_target_range_through_alignment(
-                            requested_range,
-                            (
-                                adj_target_start,
-                                adj_target_end,
-                                adj_query_start,
-                                adj_query_end,
-                                metadata.strand(),
-                            ),
-                            &cigar_ops,
-                        );
-
-                        if let Some((
-                            adjusted_query_start,
-                            adjusted_query_end,
-                            adjusted_cigar,
-                            adjusted_target_start,
-                            adjusted_target_end,
-                        )) = result
-                        {
-                            // Check gap-compressed identity if threshold is provided
-                            if let Some(threshold) = min_gap_compressed_identity {
-                                if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
-                                    return None; // Skip this result
-                                }
-                            }
-
-                            let adjusted_query_start_scaff =
-                                self.to_scaffold_coordinate(adjusted_query_start, query_offset);
-                            let adjusted_query_end_scaff =
-                                self.to_scaffold_coordinate(adjusted_query_end, query_offset);
-                            let adjusted_target_start_scaff =
-                                self.to_scaffold_coordinate(adjusted_target_start, target_offset);
-                            let adjusted_target_end_scaff =
-                                self.to_scaffold_coordinate(adjusted_target_end, target_offset);
-
-                            Some((
-                                Interval {
-                                    first: adjusted_query_start_scaff,
-                                    last: adjusted_query_end_scaff,
-                                    metadata: metadata.query_id,
-                                },
-                                if store_cigar {
-                                    adjusted_cigar
-                                } else {
-                                    Vec::new()
-                                },
-                                Interval {
-                                    first: adjusted_target_start_scaff,
-                                    last: adjusted_target_end_scaff,
-                                    metadata: current_target_id,
-                                },
-                                metadata.query_id,
-                                adjusted_query_start_scaff,
-                                adjusted_query_end_scaff,
-                            ))
-                        } else {
-                            None
-                        }
+                            },
+                        )
                     })
                     .collect();
 
@@ -1543,153 +1401,49 @@ impl Impg {
 
                             // Get or load the tree - if None, no overlaps exist for this target
                             if let Some(tree) = self.get_or_load_tree(*current_target_id) {
-                                for (contig_start, contig_end, contig_offset) in self
-                                    .scaffold_range_to_contig_ranges(
-                                        *current_target_id,
-                                        (*current_target_start, *current_target_end),
-                                    )
-                                {
-                                    tree.query(contig_start, contig_end, |interval| {
+                                let penalties_tuple =
+                                    (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
+
+                                tree.query(
+                                    *current_target_start,
+                                    *current_target_end,
+                                    |interval| {
                                         let metadata = &interval.metadata;
-                                        let alignment_file = &self.alignment_files
-                                            [metadata.alignment_file_index as usize];
+                                        let overlap_start =
+                                            (*current_target_start).max(interval.first);
+                                        let overlap_end = (*current_target_end).min(interval.last);
+                                        if overlap_start >= overlap_end {
+                                            return;
+                                        }
 
-                                        let (
-                                            adj_target_start,
-                                            adj_target_end,
-                                            adj_query_start,
-                                            adj_query_end,
-                                            cigar_ops,
-                                            query_offset,
-                                            target_offset,
-                                        ) = match QueryMetadata::get_file_type(alignment_file) {
-                                            FileType::OneAln => {
-                                                let alignment = metadata
-                                                    .get_onealn_alignment(
-                                                        &self.alignment_files,
-                                                        &self.onealn_parsers,
-                                                    )
-                                                    .unwrap_or_else(|e| panic!("{}", e));
-
-                                                if alignment.target_contig_offset != contig_offset {
-                                                    return;
-                                                }
-
-                                                let (t_start, t_end, q_start, q_end, cigar) = self
-                                                    .process_tracepoints_data(
-                                                        &alignment,
-                                                        metadata,
-                                                        *current_target_id,
-                                                        sequence_index.unwrap(),
-                                                        (
-                                                            _match, mismatch, gap_open1, gap_ext1,
-                                                            gap_open2, gap_ext2,
-                                                        ),
-                                                        (contig_start, contig_end),
-                                                    );
-
-                                                (
-                                                    t_start,
-                                                    t_end,
-                                                    q_start,
-                                                    q_end,
-                                                    cigar,
-                                                    alignment.query_contig_offset,
-                                                    alignment.target_contig_offset,
-                                                )
-                                            }
-                                            FileType::Paf => {
-                                                if contig_offset != 0 {
-                                                    return;
-                                                }
-
-                                                let data_buffer = metadata
-                                                    .get_data_bytes(&self.alignment_files)
-                                                    .unwrap_or_else(|e| panic!("{}", e));
-
-                                                (
-                                                    metadata.target_start,
-                                                    metadata.target_end,
-                                                    metadata.query_start,
-                                                    metadata.query_end,
-                                                    metadata.get_cigar_ops_from_bytes(data_buffer),
-                                                    0,
-                                                    0,
-                                                )
-                                            }
-                                        };
-
-                                        let result = project_target_range_through_alignment(
-                                            (contig_start, contig_end),
-                                            (
-                                                adj_target_start,
-                                                adj_target_end,
-                                                adj_query_start,
-                                                adj_query_end,
-                                                metadata.strand(),
-                                            ),
-                                            &cigar_ops,
-                                        );
-
-                                        if let Some((
-                                            adjusted_query_start,
-                                            adjusted_query_end,
-                                            adjusted_cigar,
-                                            adjusted_target_start,
-                                            adjusted_target_end,
-                                        )) = result
+                                        if let Some((query_interval, cigar_ops, target_interval)) =
+                                            self.project_overlapping_interval(
+                                                metadata,
+                                                *current_target_id,
+                                                overlap_start,
+                                                overlap_end,
+                                                sequence_index,
+                                                penalties_tuple,
+                                                min_gap_compressed_identity,
+                                            )
                                         {
-                                            // Check gap-compressed identity if threshold is provided
-                                            if let Some(threshold) = min_gap_compressed_identity {
-                                                if calculate_gap_compressed_identity(
-                                                    &adjusted_cigar,
-                                                ) < threshold
-                                                {
-                                                    return; // Skip this result
-                                                }
-                                            }
-
-                                            let adjusted_query_start_scaff = self
-                                                .to_scaffold_coordinate(
-                                                    adjusted_query_start,
-                                                    query_offset,
-                                                );
-                                            let adjusted_query_end_scaff = self
-                                                .to_scaffold_coordinate(
-                                                    adjusted_query_end,
-                                                    query_offset,
-                                                );
-                                            let adjusted_target_start_scaff = self
-                                                .to_scaffold_coordinate(
-                                                    adjusted_target_start,
-                                                    target_offset,
-                                                );
-                                            let adjusted_target_end_scaff = self
-                                                .to_scaffold_coordinate(
-                                                    adjusted_target_end,
-                                                    target_offset,
-                                                );
-
-                                            let cigar_vec = if store_cigar {
-                                                adjusted_cigar
-                                            } else {
-                                                Vec::new()
-                                            };
+                                            let cigar_vec =
+                                                if store_cigar { cigar_ops } else { Vec::new() };
 
                                             local_results.push((
-                                                metadata.query_id,
-                                                adjusted_query_start_scaff,
-                                                adjusted_query_end_scaff,
+                                                query_interval.metadata,
+                                                query_interval.first,
+                                                query_interval.last,
                                                 cigar_vec,
-                                                adjusted_target_start_scaff,
-                                                adjusted_target_end_scaff,
+                                                target_interval.first,
+                                                target_interval.last,
                                                 *current_target_id,
                                             ));
                                             debug!("bfs_local_results_len={}", local_results.len());
                                             log_memory_usage("bfs_after_local_push");
                                         }
-                                    });
-                                }
+                                    },
+                                );
                             }
 
                             local_results
