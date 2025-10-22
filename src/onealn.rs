@@ -417,12 +417,12 @@ impl OneAlnParser {
             }
         }
 
-        // if alignment.strand == '-' {
-        //     let orig_start = alignment.target_contig_start;
-        //     let orig_end = alignment.target_contig_end;
-        //     alignment.target_contig_start = alignment.target_length - orig_end;
-        //     alignment.target_contig_end = alignment.target_length - orig_start;
-        // }
+        if alignment.strand == '-' {
+            let orig_start = alignment.target_contig_start;
+            let orig_end = alignment.target_contig_end;
+            alignment.target_contig_start = alignment.target_length - orig_end;
+            alignment.target_contig_end = alignment.target_length - orig_start;
+        }
 
         Ok(alignment)
     }

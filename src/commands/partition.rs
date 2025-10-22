@@ -236,7 +236,6 @@ pub fn partition_alignments(
                     false, // Don't store CIGAR strings during partitioning
                     min_identity,
                     sequence_index,
-                    scoring_params,
                 )
             } else {
                 impg.query_transitive_bfs(
@@ -250,7 +249,6 @@ pub fn partition_alignments(
                     false, // Don't store CIGAR strings during partitioning
                     min_identity,
                     sequence_index,
-                    scoring_params,
                 )
             };
             //let query_time = query_start.elapsed();

@@ -10,14 +10,14 @@ use coitrees::{BasicCOITree, Interval, IntervalTree};
 use lib_tracepoints::{tracepoints_to_cigar_fastga_with_aligner, DistanceMode};
 use lib_wfa2::affine_wavefront::AffineWavefronts;
 use libc;
-use log::debug;
+use log::{debug, info, warn};
 use noodles::bgzf;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::cmp::{max, min};
-use std::convert::{TryFrom, TryInto};
+use std::convert::TryFrom;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::mem::MaybeUninit;
@@ -433,7 +433,7 @@ pub struct Impg {
     alignment_files: Vec<String>, // List of all alignment files (PAF or 1aln)
     pub forest_map: ForestMap,    // Forest map for lazy loading
     index_file_path: String,      // Path to the index file for lazy loading
-    onealn_parsers: Vec<Option<Arc<OneAlnParser>>>,    // Cached 1aln parsers per file
+    onealn_parsers: Vec<Option<Arc<OneAlnParser>>>, // Cached 1aln parsers per file
 }
 
 impl Impg {
@@ -471,8 +471,6 @@ impl Impg {
         metadata: &QueryMetadata,
         target_id: u32,
         sequence_index: &UnifiedSequenceIndex,
-        _penalties: (u8, u8, u8, u8, u8, u8),
-        _requested_range: (i32, i32),
     ) -> (i32, i32, i32, i32, Vec<CigarOp>) {
         let tracepoints: Vec<(usize, usize)> = alignment
             .trace_diffs
@@ -480,23 +478,21 @@ impl Impg {
             .zip(alignment.tracepoints.iter())
             .map(|(&diff, &tp)| (diff as usize, tp as usize))
             .collect();
-        let file_index = metadata.alignment_file_index as usize;
+        // let file_index = metadata.alignment_file_index as usize;
         let trace_spacing = alignment.trace_spacing as usize;
 
         // Fetch only the relevant portions of the sequences from scaffold coordinates
         let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
-        let query_seq_result =
+        let query_seq =
             sequence_index.fetch_sequence(query_name, metadata.query_start, metadata.query_end);
 
         // Fetch target sequence
         let target_name = self.seq_index.get_name(target_id).unwrap();
-        let target_fetch_start = metadata.target_start;
-        let target_fetch_end = metadata.target_end;
-        let target_seq_result = if metadata.strand() == Strand::Forward {
-            sequence_index.fetch_sequence(target_name, target_fetch_start, target_fetch_end)
+        let target_seq = if metadata.strand() == Strand::Forward {
+            sequence_index.fetch_sequence(target_name, metadata.target_start, metadata.target_end)
         } else {
             // Fetch and reverse complement for reverse strand alignments
-            match sequence_index.fetch_sequence(target_name, target_fetch_start, target_fetch_end) {
+            match sequence_index.fetch_sequence(target_name, metadata.target_start, metadata.target_end) {
                 Ok(seq) => Ok(reverse_complement(&seq)),
                 Err(e) => Err(e),
             }
@@ -520,19 +516,19 @@ impl Impg {
             });
 
         // Convert tracepoints to CIGAR if we successfully fetched both sequences
-        match (query_seq_result, target_seq_result) {
+        match (query_seq, target_seq) {
             (Ok(query_seq), Ok(target_seq)) => {
                 let cigar_str = with_edit_aligner(|aligner| {
-                    let before_bytes = aligner.stats().memory_bytes;
-                    debug!(
-                        "aligner_before file={} tracepoints={} query_len={} target_len={} bytes={}",
-                        self.alignment_files[file_index],
-                        tracepoints.len(),
-                        query_seq.len(),
-                        target_seq.len(),
-                        before_bytes
-                    );
-                    log_memory_usage("before_tracepoint_alignment");
+                    // let before_bytes = aligner.stats().memory_bytes;
+                    // debug!(
+                    //     "aligner_before file={} tracepoints={} query_len={} target_len={} bytes={}",
+                    //     self.alignment_files[file_index],
+                    //     tracepoints.len(),
+                    //     query_seq.len(),
+                    //     target_seq.len(),
+                    //     before_bytes
+                    // );
+                    // log_memory_usage("before_tracepoint_alignment");
 
                     let cigar = tracepoints_to_cigar_fastga_with_aligner(
                         &tracepoints,
@@ -540,21 +536,21 @@ impl Impg {
                         &query_seq,
                         &target_seq,
                         contig_query_start,
-                        contig_target_start, // Use contig-level coordinates
+                        contig_target_start,
                         metadata.strand() == Strand::Reverse,
                         aligner,
                     );
 
-                    let after_bytes = aligner.stats().memory_bytes;
-                    debug!(
-                        "aligner_after file={} tracepoints={} query_len={} target_len={} bytes={}",
-                        self.alignment_files[file_index],
-                        tracepoints.len(),
-                        query_seq.len(),
-                        target_seq.len(),
-                        after_bytes
-                    );
-                    log_memory_usage("after_tracepoint_alignment");
+                    // let after_bytes = aligner.stats().memory_bytes;
+                    // debug!(
+                    //     "aligner_after file={} tracepoints={} query_len={} target_len={} bytes={}",
+                    //     self.alignment_files[file_index],
+                    //     tracepoints.len(),
+                    //     query_seq.len(),
+                    //     target_seq.len(),
+                    //     after_bytes
+                    // );
+                    // log_memory_usage("after_tracepoint_alignment");
                     cigar
                 });
 
@@ -594,21 +590,15 @@ impl Impg {
         &self,
         metadata: &QueryMetadata,
         target_id: u32,
-        overlap_start: i32,
-        overlap_end: i32,
+        range_start: i32,
+        range_end: i32,
         sequence_index: Option<&UnifiedSequenceIndex>,
-        penalties: (u8, u8, u8, u8, u8, u8),
         min_gap_compressed_identity: Option<f64>,
     ) -> Option<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
-        let (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) = penalties;
         let file_index = metadata.alignment_file_index as usize;
         let alignment_file = &self.alignment_files[file_index];
 
-        let mut query_offset: i64 = 0;
-        let mut target_offset: i64 = 0;
-
         let (
-            requested_range_contig,
             adj_target_start,
             adj_target_end,
             adj_query_start,
@@ -622,30 +612,20 @@ impl Impg {
 
                 let contig_start_scaff = alignment.target_contig_offset;
                 let contig_end_scaff = contig_start_scaff + alignment.target_length;
-                let overlap_start_i64 = (overlap_start as i64).max(contig_start_scaff);
-                let overlap_end_i64 = (overlap_end as i64).min(contig_end_scaff);
+                let overlap_start_i64 = (range_start as i64).max(contig_start_scaff);
+                let overlap_end_i64 = (range_end as i64).min(contig_end_scaff);
                 if overlap_start_i64 >= overlap_end_i64 {
+                    debug!(
+                        "Skipping .1aln overlap (target_id={target_id}, file={}, contig_offset={}): requested range {}-{} outside contig span {}-{}",
+                        alignment_file,
+                        alignment.target_contig_offset,
+                        range_start,
+                        range_end,
+                        contig_start_scaff,
+                        contig_end_scaff
+                    );
                     return None;
                 }
-
-                let requested_range_contig = (
-                    (overlap_start_i64 - contig_start_scaff)
-                        .try_into()
-                        .unwrap_or_else(|_| {
-                            panic!(
-                                "Failed to convert requested contig start for alignment {}",
-                                alignment_file
-                            )
-                        }),
-                    (overlap_end_i64 - contig_start_scaff)
-                        .try_into()
-                        .unwrap_or_else(|_| {
-                            panic!(
-                                "Failed to convert requested contig end for alignment {}",
-                                alignment_file
-                            )
-                        }),
-                );
 
                 let (adj_target_start, adj_target_end, adj_query_start, adj_query_end, cigar) =
                     self.process_tracepoints_data(
@@ -655,30 +635,22 @@ impl Impg {
                         sequence_index.expect(
                             "Sequence index is required when processing tracepoints for .1aln data",
                         ),
-                        (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
-                        requested_range_contig,
                     );
 
-                query_offset = alignment.query_contig_offset;
-                target_offset = alignment.target_contig_offset;
-
                 (
-                    requested_range_contig,
-                    adj_target_start,
-                    adj_target_end,
-                    adj_query_start,
-                    adj_query_end,
+                    self.to_scaffold_coordinate(adj_target_start, alignment.target_contig_offset),
+                    self.to_scaffold_coordinate(adj_target_end, alignment.target_contig_offset),
+                    self.to_scaffold_coordinate(adj_query_start, alignment.query_contig_offset),
+                    self.to_scaffold_coordinate(adj_query_end, alignment.query_contig_offset),
                     cigar,
                 )
             }
             FileType::Paf => {
-                let requested_range_contig = (overlap_start, overlap_end);
                 let data_buffer = metadata
                     .get_data_bytes(&self.alignment_files, &self.onealn_parsers)
                     .unwrap_or_else(|e| panic!("{}", e));
 
                 (
-                    requested_range_contig,
                     metadata.target_start,
                     metadata.target_end,
                     metadata.query_start,
@@ -689,7 +661,7 @@ impl Impg {
         };
 
         let projection = project_target_range_through_alignment(
-            requested_range_contig,
+            (range_start, range_end),
             (
                 adj_target_start,
                 adj_target_end,
@@ -699,6 +671,7 @@ impl Impg {
             ),
             &cigar_ops,
         );
+        info!("Projection result: {:?}", projection);
 
         if let Some((
             adjusted_query_start,
@@ -715,14 +688,14 @@ impl Impg {
             }
 
             let query_interval = Interval {
-                first: self.to_scaffold_coordinate(adjusted_query_start, query_offset),
-                last: self.to_scaffold_coordinate(adjusted_query_end, query_offset),
+                first: adjusted_query_start,
+                last: adjusted_query_end,
                 metadata: metadata.query_id,
             };
 
             let target_interval = Interval {
-                first: self.to_scaffold_coordinate(adjusted_target_start, target_offset),
-                last: self.to_scaffold_coordinate(adjusted_target_end, target_offset),
+                first: adjusted_target_start,
+                last: adjusted_target_end,
                 metadata: target_id,
             };
 
@@ -730,6 +703,12 @@ impl Impg {
 
             Some((query_interval, cigar_ops, target_interval))
         } else {
+            warn!(
+                "Projection failed for alignment (target_id={target_id}, file_index={}, range={}-{})",
+                metadata.alignment_file_index,
+                range_start,
+                range_end
+            );
             None
         }
     }
@@ -994,11 +973,11 @@ impl Impg {
                 })?;
 
         let onealn_parsers = Self::collect_contig_metadata(alignment_files).map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Failed to collect contig metadata: {e:?}"),
-                )
-            })?;
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Failed to collect contig metadata: {e:?}"),
+            )
+        })?;
 
         Ok(Self {
             trees: RwLock::new(FxHashMap::default()), // Start with empty trees - load on demand
@@ -1018,7 +997,6 @@ impl Impg {
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
-        penalties: Option<(u8, u8, u8, u8, u8, u8)>,
     ) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
         // Add the input range to the results
@@ -1048,36 +1026,32 @@ impl Impg {
             range_end - range_start
         );
 
-        // Use default penalties if not provided
-        let (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) =
-            penalties.unwrap_or((0, 4, 6, 2, 26, 1));
-
         // Get or load the tree - if None, no overlaps exist for this target
         if let Some(tree) = self.get_or_load_tree(target_id) {
-            let penalties_tuple = (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
-                let overlap_start = range_start.max(interval.first);
-                let overlap_end = range_end.min(interval.last);
-                if overlap_start >= overlap_end {
-                    return;
-                }
-
+                debug!(
+                    "Processing overlap: query_id={}, target_id={}, target_range={} - {}, alignment_file_index={}",
+                    metadata.query_id,
+                    target_id,
+                    interval.first,
+                    interval.last,
+                    metadata.alignment_file_index
+                );
                 if let Some((query_interval, cigar_ops, target_interval)) = self
                     .project_overlapping_interval(
                         metadata,
                         target_id,
-                        overlap_start,
-                        overlap_end,
+                        range_start,
+                        range_end,
                         sequence_index,
-                        penalties_tuple,
                         min_gap_compressed_identity,
                     )
                 {
                     let cigar_vec = if store_cigar { cigar_ops } else { Vec::new() };
                     results.push((query_interval, cigar_vec, target_interval));
-                    debug!("results_len={}", results.len());
-                    log_memory_usage("after_push");
+                    // debug!("results_len={}", results.len());
+                    // log_memory_usage("after_push");
                 }
             });
         }
@@ -1097,7 +1071,6 @@ impl Impg {
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
-        penalties: Option<(u8, u8, u8, u8, u8, u8)>,
     ) -> Vec<AdjustedInterval> {
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
@@ -1147,10 +1120,6 @@ impl Impg {
             }
         }
 
-        // Use default penalties if not provided
-        let (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) =
-            penalties.unwrap_or((0, 4, 6, 2, 26, 1));
-
         while let Some((
             current_target_id,
             current_target_start,
@@ -1184,8 +1153,6 @@ impl Impg {
                     }
                 });
 
-                let penalties_tuple = (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
-
                 let processed_results: Vec<_> = intervals
                     .into_par_iter()
                     .filter_map(|(metadata, overlap_range)| {
@@ -1195,7 +1162,6 @@ impl Impg {
                             overlap_range.0,
                             overlap_range.1,
                             sequence_index,
-                            penalties_tuple,
                             min_gap_compressed_identity,
                         )
                         .map(
@@ -1325,7 +1291,6 @@ impl Impg {
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
-        penalties: Option<(u8, u8, u8, u8, u8, u8)>,
     ) -> Vec<AdjustedInterval> {
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
@@ -1379,10 +1344,6 @@ impl Impg {
             }
         }
 
-        // Use default penalties if not provided
-        let (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) =
-            penalties.unwrap_or((0, 4, 6, 2, 26, 1));
-
         // Process by depth until max_depth or no more ranges
         while !current_ranges.is_empty() && (max_depth == 0 || current_depth < max_depth) {
             debug!(
@@ -1401,9 +1362,6 @@ impl Impg {
 
                             // Get or load the tree - if None, no overlaps exist for this target
                             if let Some(tree) = self.get_or_load_tree(*current_target_id) {
-                                let penalties_tuple =
-                                    (_match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
-
                                 tree.query(
                                     *current_target_start,
                                     *current_target_end,
@@ -1423,7 +1381,6 @@ impl Impg {
                                                 overlap_start,
                                                 overlap_end,
                                                 sequence_index,
-                                                penalties_tuple,
                                                 min_gap_compressed_identity,
                                             )
                                         {
@@ -1583,6 +1540,16 @@ fn project_target_range_through_alignment(
     cigar_ops: &[CigarOp],
 ) -> Option<(i32, i32, Vec<CigarOp>, i32, i32)> {
     let (target_start, target_end, query_start, query_end, strand) = record;
+    info!(
+        "Projecting target range {}-{} through alignment with target {}-{}, query {}-{}, strand {:?}",
+        requested_target_range.0,
+        requested_target_range.1,
+        target_start,
+        target_end,
+        query_start,
+        query_end,
+        strand
+    );
 
     let dir = if strand == Strand::Forward { 1 } else { -1 };
     let mut query_pos = if strand == Strand::Forward {
