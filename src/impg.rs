@@ -9,7 +9,6 @@ use crate::sequence_index::UnifiedSequenceIndex;
 use coitrees::{BasicCOITree, Interval, IntervalTree};
 use lib_tracepoints::{tracepoints_to_cigar_fastga_with_aligner, DistanceMode};
 use lib_wfa2::affine_wavefront::AffineWavefronts;
-use libc;
 use log::{debug, info, warn};
 use noodles::bgzf;
 use rayon::prelude::*;
@@ -20,26 +19,26 @@ use std::cmp::{max, min};
 use std::convert::TryFrom;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
-use std::mem::MaybeUninit;
 use std::sync::Arc;
 use std::sync::RwLock;
 
+// use libc;
+// fn log_memory_usage(label: &str) {
+//     let mut usage = MaybeUninit::<libc::rusage>::uninit();
+//     let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+//     if result == 0 {
+//         let usage = unsafe { usage.assume_init() };
+//         debug!(
+//             "mem[{label}] max_rss_kb={} ixrss_kb={} idrss_kb={}",
+//             usage.ru_maxrss, usage.ru_ixrss, usage.ru_idrss
+//         );
+//     } else {
+//         debug!("mem[{label}] getrusage_failed code={}", result);
+//     }
+// }
+
 thread_local! {
     static EDIT_ALIGNER: RefCell<Option<AffineWavefronts>> = const { RefCell::new(None) };
-}
-
-fn log_memory_usage(label: &str) {
-    let mut usage = MaybeUninit::<libc::rusage>::uninit();
-    let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
-    if result == 0 {
-        let usage = unsafe { usage.assume_init() };
-        debug!(
-            "mem[{label}] max_rss_kb={} ixrss_kb={} idrss_kb={}",
-            usage.ru_maxrss, usage.ru_ixrss, usage.ru_idrss
-        );
-    } else {
-        debug!("mem[{label}] getrusage_failed code={}", result);
-    }
 }
 
 /// Execute a closure with a thread-local edit distance mode aligner
@@ -478,7 +477,6 @@ impl Impg {
             .zip(alignment.tracepoints.iter())
             .map(|(&diff, &tp)| (diff as usize, tp as usize))
             .collect();
-        // let file_index = metadata.alignment_file_index as usize;
         let trace_spacing = alignment.trace_spacing as usize;
 
         // Fetch only the relevant portions of the sequences from scaffold coordinates
@@ -519,18 +517,7 @@ impl Impg {
         match (query_seq, target_seq) {
             (Ok(query_seq), Ok(target_seq)) => {
                 let cigar_str = with_edit_aligner(|aligner| {
-                    // let before_bytes = aligner.stats().memory_bytes;
-                    // debug!(
-                    //     "aligner_before file={} tracepoints={} query_len={} target_len={} bytes={}",
-                    //     self.alignment_files[file_index],
-                    //     tracepoints.len(),
-                    //     query_seq.len(),
-                    //     target_seq.len(),
-                    //     before_bytes
-                    // );
-                    // log_memory_usage("before_tracepoint_alignment");
-
-                    let cigar = tracepoints_to_cigar_fastga_with_aligner(
+                    tracepoints_to_cigar_fastga_with_aligner(
                         &tracepoints,
                         trace_spacing,
                         &query_seq,
@@ -539,21 +526,10 @@ impl Impg {
                         contig_target_start,
                         metadata.strand() == Strand::Reverse,
                         aligner,
-                    );
-
-                    // let after_bytes = aligner.stats().memory_bytes;
-                    // debug!(
-                    //     "aligner_after file={} tracepoints={} query_len={} target_len={} bytes={}",
-                    //     self.alignment_files[file_index],
-                    //     tracepoints.len(),
-                    //     query_seq.len(),
-                    //     target_seq.len(),
-                    //     after_bytes
-                    // );
-                    // log_memory_usage("after_tracepoint_alignment");
-                    cigar
+                    )
                 });
 
+                // TODO: would it be better to adjust for scaffold coordinates here instead of outside the function?
                 (
                     i32::try_from(alignment.target_contig_start).unwrap_or_else(|_| {
                         panic!("Invalid target contig start returned by alignment")
@@ -654,7 +630,6 @@ impl Impg {
             ),
             &cigar_ops,
         );
-        info!("Projection result: {:?}", projection);
 
         if let Some((
             adjusted_query_start,
@@ -1013,14 +988,6 @@ impl Impg {
         if let Some(tree) = self.get_or_load_tree(target_id) {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
-                debug!(
-                    "Processing overlap: query_id={}, target_id={}, target_range={} - {}, alignment_file_index={}",
-                    metadata.query_id,
-                    target_id,
-                    interval.first,
-                    interval.last,
-                    metadata.alignment_file_index
-                );
                 if let Some((query_interval, cigar_ops, target_interval)) = self
                     .project_overlapping_interval(
                         metadata,
@@ -1033,8 +1000,6 @@ impl Impg {
                 {
                     let cigar_vec = if store_cigar { cigar_ops } else { Vec::new() };
                     results.push((query_interval, cigar_vec, target_interval));
-                    // debug!("results_len={}", results.len());
-                    // log_memory_usage("after_push");
                 }
             });
         }
@@ -1178,8 +1143,6 @@ impl Impg {
                 ) in processed_results
                 {
                     results.push((query_interval, cigar, target_interval));
-                    // debug!("bfs_results_len={}", results.len());
-                    // log_memory_usage("dfs_after_push");
 
                     // Only add non-overlapping portions to the stack for further exploration
                     if query_id != current_target_id {
@@ -1379,8 +1342,6 @@ impl Impg {
                                                 target_interval.last,
                                                 *current_target_id,
                                             ));
-                                            // debug!("bfs_local_results_len={}", local_results.len());
-                                            // log_memory_usage("bfs_after_local_push");
                                         }
                                     },
                                 );
@@ -1420,9 +1381,6 @@ impl Impg {
                             metadata: current_target_id,
                         },
                     ));
-                    // debug!("bfs_results_len={}", results.len());
-                    // log_memory_usage("bfs_after_push");
-
                     // Only consider for next depth if it's a different sequence
                     if query_id != current_target_id {
                         let ranges = visited_ranges.entry(query_id).or_default();
