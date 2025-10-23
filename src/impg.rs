@@ -6,8 +6,10 @@ use crate::paf::{read_cigar_data, ParseErr};
 use crate::seqidx::SequenceIndex;
 use crate::sequence_index::SequenceIndex as _; // The as _ syntax imports the trait so its methods are available, but doesn't bring the name into scope (avoiding the naming conflict)
 use crate::sequence_index::UnifiedSequenceIndex;
+use astarpa2::AstarPa2Params;
+use astarpa2::AstarPa2StatsAligner;
 use coitrees::{BasicCOITree, Interval, IntervalTree};
-use lib_tracepoints::{tracepoints_to_cigar_fastga_with_aligner, DistanceMode};
+use lib_tracepoints::{tracepoints_to_cigar_fastga_with_aligner, tracepoints_to_cigar_fastga_with_aligner_astarpa, DistanceMode};
 use lib_wfa2::affine_wavefront::AffineWavefronts;
 use log::{debug, info, warn};
 use rayon::prelude::*;
@@ -39,6 +41,10 @@ thread_local! {
     static EDIT_ALIGNER: RefCell<Option<AffineWavefronts>> = const { RefCell::new(None) };
 }
 
+thread_local! {
+    static ASTARPA_ALIGNER: RefCell<Option<Box<dyn AstarPa2StatsAligner>>> = const { RefCell::new(None) };
+}
+
 /// Execute a closure with a thread-local edit distance mode aligner
 fn with_edit_aligner<F, R>(f: F) -> R
 where
@@ -52,6 +58,20 @@ where
                 gap_opening: 1,
             };
             *aligner_opt = Some(distance_mode.create_aligner());
+        }
+        f(aligner_opt.as_mut().unwrap())
+    })
+}
+
+/// Execute a closure with a thread-local astarpa edit distance aligner
+fn with_edit_aligner_astarpa<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut Box<dyn AstarPa2StatsAligner>) -> R,
+{
+    ASTARPA_ALIGNER.with(|aligner_cell| {
+        let mut aligner_opt = aligner_cell.borrow_mut();
+        if aligner_opt.is_none() {
+            *aligner_opt = Some(AstarPa2Params::nw().make_aligner(true));
         }
         f(aligner_opt.as_mut().unwrap())
     })
@@ -460,8 +480,8 @@ impl Impg {
         // Convert tracepoints to CIGAR if we successfully fetched both sequences
         match (query_seq, target_seq) {
             (Ok(query_seq), Ok(target_seq)) => {
-                let cigar_str = with_edit_aligner(|aligner| {
-                    tracepoints_to_cigar_fastga_with_aligner(
+                let cigar_str = with_edit_aligner_astarpa(|aligner| {
+                    tracepoints_to_cigar_fastga_with_aligner_astarpa(
                         &tracepoints,
                         trace_spacing,
                         &query_seq,
@@ -469,7 +489,7 @@ impl Impg {
                         alignment.query_contig_start.try_into().unwrap(),
                         alignment.target_contig_start.try_into().unwrap(),
                         metadata.strand() == Strand::Reverse,
-                        aligner,
+                        aligner.as_mut(),
                     )
                 });
 
