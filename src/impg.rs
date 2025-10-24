@@ -7,8 +7,8 @@ use crate::seqidx::SequenceIndex;
 use crate::sequence_index::SequenceIndex as _; // The as _ syntax imports the trait so its methods are available, but doesn't bring the name into scope (avoiding the naming conflict)
 use crate::sequence_index::UnifiedSequenceIndex;
 use coitrees::{BasicCOITree, Interval, IntervalTree};
-use lib_tracepoints::{tracepoints_to_cigar_fastga_with_aligner, DistanceMode};
-use lib_wfa2::affine_wavefront::AffineWavefronts;
+use lib_tracepoints::tracepoints_to_cigar_fastga_with_aligner;
+use lib_wfa2::affine_wavefront::{AffineWavefronts, Distance};
 use log::{debug, info, warn};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -47,11 +47,7 @@ where
     EDIT_ALIGNER.with(|aligner_cell| {
         let mut aligner_opt = aligner_cell.borrow_mut();
         if aligner_opt.is_none() {
-            let distance_mode = DistanceMode::Edit {
-                mismatch: 1,
-                gap_opening: 1,
-            };
-            *aligner_opt = Some(distance_mode.create_aligner());
+            *aligner_opt = Some(Distance::Edit.create_aligner(None));
         }
         f(aligner_opt.as_mut().unwrap())
     })
