@@ -8,6 +8,7 @@ use onecode::OneFile;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::convert::TryFrom;
+use log::warn;
 
 thread_local! {
     static ONE_ALN_FILE_CACHE: RefCell<HashMap<String, OneFile>> = RefCell::new(HashMap::new());
@@ -437,6 +438,26 @@ impl OneAlnParser {
                 'A' | 'a' | 'g' | '^' | '\0' => break,
                 _ => {}
             }
+        }
+
+        // PAFtoALN can produce zero-length self-alignments with:
+        // - query_start == query_end, target_start == target_end, 
+        // - no differences, and one tracepoint.
+        // This causes bugs in ALNtoPAF and needs fixing.
+        if alignment.query_contig_start == alignment.query_contig_end && alignment.target_contig_start == alignment.target_contig_end
+            && alignment.differences == 0
+            && alignment.tracepoints.len() == 1 && alignment.trace_diffs.len() == 1
+            // Check it's the same sequence
+            && alignment.query_contig_end == alignment.target_contig_end && alignment.query_name == alignment.target_name
+        {
+            warn!(
+                "Zero-length self-alignment at {}:{} (PAFtoALN artifact) - fixing coordinates",
+                alignment.query_name,
+                alignment.query_contig_start
+            );
+
+            alignment.query_contig_start = 0;
+            alignment.target_contig_start = 0;
         }
 
         Ok(alignment)
