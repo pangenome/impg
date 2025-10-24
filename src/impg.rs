@@ -432,6 +432,23 @@ impl Impg {
         target_id: u32,
         sequence_index: &UnifiedSequenceIndex,
     ) -> (i32, i32, i32, i32, Vec<CigarOp>) {
+        // if there are no differences, we can shortcut to a perfect match CIGAR
+        if alignment.differences == 0 {
+            let (target_start, target_end) = alignment
+                .target_scaffold_span()
+                .unwrap_or_else(|e| panic!("Invalid target scaffold span returned by alignment: {:?}", e));
+            let (query_start, query_end) = alignment
+                .query_scaffold_span()
+                .unwrap_or_else(|e| panic!("Invalid query scaffold span returned by alignment: {:?}", e));
+
+            let match_len = query_end - query_start;
+
+            assert_eq!(target_end - target_start, match_len, "No differences, but target and query lengths do not match");
+
+            let cigar_ops = vec![CigarOp::new(match_len, '=')];
+            return (target_start, target_end, query_start, query_end, cigar_ops);
+        }
+
         let tracepoints: Vec<(usize, usize)> = alignment
             .trace_diffs
             .iter()
