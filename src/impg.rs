@@ -426,17 +426,14 @@ impl Impg {
         alignment: &OneAlnAlignment,
         metadata: &QueryMetadata,
         target_id: u32,
+        range_start: i32,
+        range_end: i32,
         sequence_index: &UnifiedSequenceIndex,
     ) -> (i32, i32, i32, i32, Vec<CigarOp>) {
         // if there are no differences, we can shortcut to a perfect match CIGAR
         if alignment.differences == 0 {
-            let (target_start, target_end) = alignment
-                .target_scaffold_span()
-                .unwrap_or_else(|e| panic!("Invalid target scaffold span returned by alignment: {:?}", e));
-            let (query_start, query_end) = alignment
-                .query_scaffold_span()
-                .unwrap_or_else(|e| panic!("Invalid query scaffold span returned by alignment: {:?}", e));
-
+            let (target_start, target_end) = (metadata.target_start, metadata.target_end);
+            let (query_start, query_end) = (metadata.query_start, metadata.query_end);
             let match_len = query_end - query_start;
 
             assert_eq!(target_end - target_start, match_len, "No differences, but target and query lengths do not match");
@@ -516,7 +513,6 @@ impl Impg {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn project_overlapping_interval(
         &self,
         metadata: &QueryMetadata,
@@ -545,6 +541,8 @@ impl Impg {
                     &alignment,
                     metadata,
                     target_id,
+                    range_start,
+                    range_end,
                     sequence_index.expect(
                         "Sequence index is required when processing tracepoints for .1aln data",
                     ),

@@ -1236,7 +1236,6 @@ fn main() -> io::Result<()> {
                 progress_bar,
             )?;
         }
-
         Args::Stats { common, alignment } => {
             initialize_threads_and_log(&common);
             let impg = initialize_impg(&common, &alignment)?;
@@ -1633,18 +1632,27 @@ fn generate_multi_index(
 
             let records = match format {
                 AlignmentFormat::Paf => {
-                    let file = File::open(aln_file)?;
-                    impg::paf::parse_paf_file(aln_file, file, threads, &mut seq_index_guard)?
+                    let file = File::open(aln_file).map_err(|e| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Failed to open PAF file: {:?}", e),
+                        )
+                    })?;
+                    impg::paf::parse_paf_file(aln_file, file, threads, &mut seq_index_guard).map_err(|e| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Failed to parse PAF records: {:?}", e),
+                        )
+                    })?
                 }
                 AlignmentFormat::OneAln => {
-                    let parser = OneAlnParser::new(aln_file.clone()).map_err(|e| {
+                    let file = OneAlnParser::new(aln_file.clone()).map_err(|e| {
                         io::Error::new(
                             io::ErrorKind::InvalidData,
                             format!("Failed to create 1aln parser: {:?}", e),
                         )
                     })?;
-
-                    parser.parse_alignments(&mut seq_index_guard).map_err(|e| {
+                    file.parse_alignments(&mut seq_index_guard).map_err(|e| {
                         io::Error::new(
                             io::ErrorKind::InvalidData,
                             format!("Failed to parse 1aln records: {:?}", e),
