@@ -436,8 +436,6 @@ impl Impg {
         // if there are no differences, we can shortcut to a perfect match CIGAR
         if alignment.differences == 0 {
             let match_len = query_end - query_start;
-            assert_eq!(target_end - target_start, match_len, "No differences, but target and query lengths do not match");
-
             let cigar_ops = vec![CigarOp::new(match_len, '=')];
             return (target_start, target_end, query_start, query_end, cigar_ops);
         }

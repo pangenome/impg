@@ -460,6 +460,17 @@ impl OneAlnParser {
             alignment.target_contig_start = 0;
         }
 
+        if alignment.differences == 0 {
+            let query_len = alignment.query_contig_end - alignment.query_contig_start;
+            let target_len = alignment.target_contig_end - alignment.target_contig_start;
+            if query_len != target_len {
+                return Err(ParseErr::InvalidFormat(format!(
+                    "Zero-difference alignment but mismatched lengths: query {} (len {}), target {} (len {})",
+                    alignment.query_name, query_len, alignment.target_name, target_len
+                )));
+            }
+        }
+        
         Ok(alignment)
     }
 }
