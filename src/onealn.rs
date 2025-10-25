@@ -218,25 +218,25 @@ impl OneAlnParser {
         let query_scaffold_start = usize::try_from(query_contig_offset + query_contig_start as i64)
             .map_err(|_| {
                 ParseErr::InvalidFormat(format!(
-                    "Query scaffold start overflow: offset {query_contig_offset}, start {query_contig_start}"
+                    "Query scaffold start overflow for {query_name}: offset {query_contig_offset}, start {query_contig_start}"
                 ))
             })?;
         let query_scaffold_end = usize::try_from(query_contig_offset + query_contig_end as i64)
             .map_err(|_| {
                 ParseErr::InvalidFormat(format!(
-                    "Query scaffold end overflow: offset {query_contig_offset}, end {query_contig_end}"
+                    "Query scaffold end overflow for {query_name}: offset {query_contig_offset}, end {query_contig_end}"
                 ))
             })?;
         let target_scaffold_start =
             usize::try_from(target_contig_offset + target_contig_start as i64).map_err(|_| {
                 ParseErr::InvalidFormat(format!(
-                    "Target scaffold start overflow: offset {target_contig_offset}, start {target_contig_start}"
+                    "Target scaffold start overflow for {target_name}: offset {target_contig_offset}, start {target_contig_start}"
                 ))
             })?;
         let target_scaffold_end =
             usize::try_from(target_contig_offset + target_contig_end as i64).map_err(|_| {
                 ParseErr::InvalidFormat(format!(
-                    "Target scaffold end overflow: offset {target_contig_offset}, end {target_contig_end}"
+                    "Target scaffold end overflow for {target_name}: offset {target_contig_offset}, end {target_contig_end}"
                 ))
             })?;
 
