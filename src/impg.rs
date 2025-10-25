@@ -430,12 +430,12 @@ impl Impg {
         range_end: i32,
         sequence_index: &UnifiedSequenceIndex,
     ) -> (i32, i32, i32, i32, Vec<CigarOp>) {
+        let (query_start, query_end) = (metadata.query_start, metadata.query_end);
+        let (target_start, target_end) = (metadata.target_start, metadata.target_end);
+
         // if there are no differences, we can shortcut to a perfect match CIGAR
         if alignment.differences == 0 {
-            let (target_start, target_end) = (metadata.target_start, metadata.target_end);
-            let (query_start, query_end) = (metadata.query_start, metadata.query_end);
             let match_len = query_end - query_start;
-
             assert_eq!(target_end - target_start, match_len, "No differences, but target and query lengths do not match");
 
             let cigar_ops = vec![CigarOp::new(match_len, '=')];
@@ -453,15 +453,15 @@ impl Impg {
         // Fetch only the relevant portions of the sequences from scaffold coordinates
         let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
         let query_seq =
-            sequence_index.fetch_sequence(query_name, metadata.query_start, metadata.query_end);
+            sequence_index.fetch_sequence(query_name, query_start, query_end);
 
         // Fetch target sequence
         let target_name = self.seq_index.get_name(target_id).unwrap();
         let target_seq = if metadata.strand() == Strand::Forward {
-            sequence_index.fetch_sequence(target_name, metadata.target_start, metadata.target_end)
+            sequence_index.fetch_sequence(target_name, target_start, target_end)
         } else {
             // Fetch and reverse complement for reverse strand alignments
-            match sequence_index.fetch_sequence(target_name, metadata.target_start, metadata.target_end) {
+            match sequence_index.fetch_sequence(target_name, target_start, target_end) {
                 Ok(seq) => Ok(reverse_complement(&seq)),
                 Err(e) => Err(e),
             }
@@ -482,13 +482,6 @@ impl Impg {
                         aligner,
                     )
                 });
-
-                let (target_start, target_end) = alignment
-                    .target_scaffold_span()
-                    .unwrap_or_else(|e| panic!("Invalid target scaffold span returned by alignment: {:?}", e));
-                let (query_start, query_end) = alignment
-                    .query_scaffold_span()
-                    .unwrap_or_else(|e| panic!("Invalid query scaffold span returned by alignment: {:?}", e));
 
                 (
                     target_start,
