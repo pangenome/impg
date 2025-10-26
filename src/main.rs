@@ -7,7 +7,7 @@ use impg::onealn::OneAlnParser;
 use impg::seqidx::SequenceIndex;
 use impg::sequence_index::{SequenceIndex as SeqIndexTrait, UnifiedSequenceIndex};
 use impg::subset_filter::{load_subset_filter, SubsetFilter};
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use rustc_hash::FxHashMap;
@@ -659,7 +659,14 @@ enum Args {
     },
 }
 
-fn main() -> io::Result<()> {
+fn main() {
+    if let Err(e) = run() {
+        error!("{}", e);
+        std::process::exit(1);
+    }
+}
+
+fn run() -> io::Result<()> {
     let args = Args::parse();
 
     match args {
@@ -1635,13 +1642,13 @@ fn generate_multi_index(
                     let file = File::open(aln_file).map_err(|e| {
                         io::Error::new(
                             io::ErrorKind::InvalidData,
-                            format!("Failed to open PAF file: {:?}", e),
+                            format!("Failed to open PAF file: {}", e),
                         )
                     })?;
                     impg::paf::parse_paf_file(aln_file, file, threads, &mut seq_index_guard).map_err(|e| {
                         io::Error::new(
                             io::ErrorKind::InvalidData,
-                            format!("Failed to parse PAF records: {:?}", e),
+                            format!("Failed to parse PAF records: {}", e),
                         )
                     })?
                 }
@@ -1649,13 +1656,13 @@ fn generate_multi_index(
                     let file = OneAlnParser::new(aln_file.clone()).map_err(|e| {
                         io::Error::new(
                             io::ErrorKind::InvalidData,
-                            format!("Failed to create 1aln parser: {:?}", e),
+                            format!("Failed to create 1aln parser: {}", e),
                         )
                     })?;
                     file.parse_alignments(&mut seq_index_guard).map_err(|e| {
                         io::Error::new(
                             io::ErrorKind::InvalidData,
-                            format!("Failed to parse 1aln records: {:?}", e),
+                            format!("Failed to parse 1aln records: {}", e),
                         )
                     })?
                 }
@@ -1703,7 +1710,7 @@ fn generate_multi_index(
     let impg = Impg::from_multi_alignment_records(&records_by_file, seq_index).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Failed to create index: {e:?}"),
+            format!("Failed to create index: {e}"),
         )
     })?;
 

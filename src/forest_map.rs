@@ -1,13 +1,6 @@
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
-/// Forest map entry: target_id -> tree_offset in the serialized IMPG index
-#[derive(Serialize, Deserialize)]
-struct ForestMapEntry {
-    target_id: u32,
-    tree_offset: u64,
-}
-
 /// Forest map structure containing mappings from target_id to tree offsets
 #[derive(Serialize, Deserialize)]
 pub struct ForestMap {

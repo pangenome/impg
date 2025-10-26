@@ -24,6 +24,22 @@ pub enum ParseErr {
     InvalidFormat(String),
 }
 
+impl std::fmt::Display for ParseErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParseErr::NotEnoughFields => write!(f, "Not enough fields in PAF record"),
+            ParseErr::IoError(e) => write!(f, "IO error: {}", e),
+            ParseErr::InvalidField(e) => write!(f, "Invalid field: {}", e),
+            ParseErr::InvalidStrand => write!(f, "Invalid strand"),
+            ParseErr::InvalidCigarFormat => write!(f, "Invalid CIGAR format"),
+            ParseErr::UnsupportedCigarOperation => write!(f, "Unsupported CIGAR operation"),
+            ParseErr::InvalidFormat(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+impl std::error::Error for ParseErr {}
+
 enum PafHandle {
     Plain(File),
     Compressed(bgzf::io::Reader<File>),
@@ -273,7 +289,7 @@ pub fn parse_paf_file(
             parse_paf_bgzf_with_gzi(mt_reader, gzi_index, seq_index).map_err(|e| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("Failed to parse PAF from {}: {:?}", paf_file, e),
+                    format!("Failed to parse PAF from {}: {}", paf_file, e),
                 )
             })
         } else {
@@ -282,7 +298,7 @@ pub fn parse_paf_file(
             parse_paf_bgzf(bgzf_reader, seq_index).map_err(|e| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("Failed to parse PAF from {}: {:?}", paf_file, e),
+                    format!("Failed to parse PAF from {}: {}", paf_file, e),
                 )
             })
         }
@@ -291,7 +307,7 @@ pub fn parse_paf_file(
         parse_paf(reader, seq_index).map_err(|e| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("Failed to parse PAF from {}: {:?}", paf_file, e),
+                format!("Failed to parse PAF from {}: {}", paf_file, e),
             )
         })
     }

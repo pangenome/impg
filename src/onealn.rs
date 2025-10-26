@@ -8,7 +8,7 @@ use onecode::OneFile;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::convert::TryFrom;
-use log::warn;
+use log::{debug, warn};
 
 thread_local! {
     static ONE_ALN_FILE_CACHE: RefCell<HashMap<String, OneFile>> = RefCell::new(HashMap::new());
@@ -38,6 +38,16 @@ struct OneAlnMetadata {
 pub enum ParseErr {
     InvalidFormat(String),
 }
+
+impl std::fmt::Display for ParseErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParseErr::InvalidFormat(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+impl std::error::Error for ParseErr {}
 
 impl OneAlnParser {
     /// Open a 1aln file and read its metadata
@@ -82,7 +92,7 @@ impl OneAlnParser {
             let is_query = *ref_count == 1;    // First reference is query (A-read)
             let is_target = *ref_count == 2;   // Second reference is target (B-read)
 
-            warn!(
+            debug!(
                 "Processing reference {}: {} (count: {}, type: {})",
                 ref_idx + 1,
                 ref_path,
@@ -176,36 +186,35 @@ impl OneAlnParser {
             let gdb_path = if let Some(found_path) = gdb_path {
                 found_path
             } else {
-                warn!("Warning: Could not find GDB file for reference: {}", ref_path);
-                warn!("Tried:");
-                warn!("  - {}", ref_path);
-                warn!("  - {}.1gdb / {}.gdb", ref_path, ref_path);
-                let base = strip_fasta_ext(ref_path);
-                if base != *ref_path {
-                    warn!("  - {}.1gdb / {}.gdb", base, base);
-                }
-                warn!("  - Relative paths in {}", aln_dir.display());
-                warn!("Contig-to-scaffold mappings will not be available");
-                continue;
+                return Err(ParseErr::InvalidFormat(format!(
+                    "GDB file not found for '{}'. Run: FAtoGDB {}",
+                    ref_path, ref_path
+                )));
             };
 
             // Try to load the GDB metadata
-            if let Ok((ref_names, ref_lengths, ref_offsets)) = OneFile::read_gdb_metadata(&gdb_path) {
-                if is_query {
-                    query_seq_names = ref_names;
-                    query_seq_lengths = ref_lengths;
-                    query_contig_offsets = ref_offsets;
-                    has_external_query = true;
-                    warn!("Loaded query genome metadata from: {} ({} sequences)", gdb_path, query_seq_names.len());
-                } else if is_target {
-                    target_seq_names = ref_names;
-                    target_seq_lengths = ref_lengths;
-                    target_contig_offsets = ref_offsets;
-                    has_external_target = true;
-                    warn!("Loaded target genome metadata from: {} ({} sequences)", gdb_path, target_seq_names.len());
+            match OneFile::read_gdb_metadata(&gdb_path) {
+                Ok((ref_names, ref_lengths, ref_offsets)) => {
+                    if is_query {
+                        query_seq_names = ref_names;
+                        query_seq_lengths = ref_lengths;
+                        query_contig_offsets = ref_offsets;
+                        has_external_query = true;
+                        debug!("Loaded query genome metadata from: {} ({} sequences)", gdb_path, query_seq_names.len());
+                    } else if is_target {
+                        target_seq_names = ref_names;
+                        target_seq_lengths = ref_lengths;
+                        target_contig_offsets = ref_offsets;
+                        has_external_target = true;
+                        debug!("Loaded target genome metadata from: {} ({} sequences)", gdb_path, target_seq_names.len());
+                    }
                 }
-            } else {
-                warn!("Warning: Failed to load GDB metadata from: {}", gdb_path);
+                Err(e) => {
+                    return Err(ParseErr::InvalidFormat(format!(
+                        "Failed to read GDB file '{}': {}. Run: FAtoGDB {}",
+                        gdb_path, e, ref_path
+                    )));
+                }
             }
         }
 
@@ -214,7 +223,7 @@ impl OneAlnParser {
             target_seq_names = embedded_names;
             target_seq_lengths = embedded_lengths;
             target_contig_offsets = embedded_offsets;
-            warn!("Using embedded skeleton for target genome ({} sequences)", target_seq_names.len());
+            debug!("Using embedded skeleton for target genome ({} sequences)", target_seq_names.len());
         }
 
         // If this is a self-alignment (no external query), use target for query too

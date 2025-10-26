@@ -409,7 +409,7 @@ impl Impg {
             if alignment_file.ends_with(".1aln") {
                 let parser = OneAlnParser::new(alignment_file.clone()).map_err(|e| {
                     ParseErr::InvalidFormat(format!(
-                        "Failed to initialize OneAln parser for '{}': {e:?}",
+                        "Failed to initialize OneAln parser for '{}': {e}",
                         alignment_file
                     ))
                 })?;
@@ -530,8 +530,6 @@ impl Impg {
                     &alignment,
                     metadata,
                     target_id,
-                    range_start,
-                    range_end,
                     sequence_index.expect(
                         "Sequence index is required when processing tracepoints for .1aln data",
                     ),
@@ -705,7 +703,7 @@ impl Impg {
         // Serialize sequence index
         let seq_index_data =
             bincode::serde::encode_to_vec(&self.seq_index, bincode::config::standard()).map_err(
-                |e| std::io::Error::other(format!("Failed to encode sequence index: {e:?}")),
+                |e| std::io::Error::other(format!("Failed to encode sequence index: {e}")),
             )?;
 
         writer.write_all(&seq_index_data)?;
@@ -732,7 +730,7 @@ impl Impg {
                 bincode::serde::encode_to_vec(&(target_id, intervals), bincode::config::standard())
                     .map_err(|e| {
                         std::io::Error::other(format!(
-                            "Failed to encode tree for target {target_id}: {e:?}"
+                            "Failed to encode tree for target {target_id}: {e}"
                         ))
                     })?;
 
@@ -744,7 +742,7 @@ impl Impg {
         let forest_map_offset = current_offset;
         let forest_map_data =
             bincode::serde::encode_to_vec(&forest_map, bincode::config::standard()).map_err(
-                |e| std::io::Error::other(format!("Failed to encode forest map: {e:?}")),
+                |e| std::io::Error::other(format!("Failed to encode forest map: {e}")),
             )?;
 
         writer.write_all(&forest_map_data)?;
@@ -848,7 +846,7 @@ impl Impg {
                 .map_err(|e| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        format!("Failed to load sequence index: {e:?}"),
+                        format!("Failed to load sequence index: {e}"),
                     )
                 })?;
 
@@ -859,14 +857,14 @@ impl Impg {
                 .map_err(|e| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        format!("Failed to load forest map: {e:?}"),
+                        format!("Failed to load forest map: {e}"),
                     )
                 })?;
 
         let onealn_parsers = Self::collect_contig_metadata(alignment_files).map_err(|e| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("Failed to collect contig metadata: {e:?}"),
+                format!("Failed to collect contig metadata: {e}"),
             )
         })?;
 
