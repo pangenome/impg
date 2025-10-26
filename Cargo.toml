@@ -32,7 +32,8 @@ lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2"}
 #lib_wfa2 = { path = "/home/guarracino/Dropbox/git//lib_wfa2"}
 lib_tracepoints = { git = "https://github.com/AndreaGuarracino/lib_tracepoints"}
 #lib_tracepoints = { path = "/home/guarracino/Dropbox/git/lib_tracepoints"}
-onecode = { git = "https://github.com/pangenome/onecode-rs" }
+#onecode = { path = "/home/guarracino/git/onecode-rs" }
+onecode = { git = "https://github.com/pangenome/onecode-rs"}
 
 # Dependencies for lace functionality
 handlegraph = { git = "https://github.com/chfi/rs-handlegraph", rev = "3ac575e4216ce16a16667503a8875e469a40a97a" }
