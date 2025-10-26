@@ -426,8 +426,6 @@ impl Impg {
         alignment: &OneAlnAlignment,
         metadata: &QueryMetadata,
         target_id: u32,
-        range_start: i32,
-        range_end: i32,
         sequence_index: &UnifiedSequenceIndex,
     ) -> (i32, i32, i32, i32, Vec<CigarOp>) {
         let (query_start, query_end) = (metadata.query_start, metadata.query_end);

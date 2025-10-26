@@ -22,9 +22,15 @@ pub struct OneAlnParser {
 }
 
 struct OneAlnMetadata {
-    seq_names: HashMap<i64, String>,
-    seq_lengths: HashMap<i64, i64>,
-    contig_offsets: HashMap<i64, (i64, i64)>, // Maps contig ID to (sbeg, clen)
+    // Query genome (gdb1 - first reference, or embedded if self-alignment)
+    query_seq_names: HashMap<i64, String>,
+    query_seq_lengths: HashMap<i64, i64>,
+    query_contig_offsets: HashMap<i64, (i64, i64)>,
+
+    // Target genome (gdb2 - second reference, or embedded skeleton)
+    target_seq_names: HashMap<i64, String>,
+    target_seq_lengths: HashMap<i64, i64>,
+    target_contig_offsets: HashMap<i64, (i64, i64)>,
 }
 
 /// Error type for 1aln parsing
@@ -39,10 +45,197 @@ impl OneAlnParser {
         let mut file = OneFile::open_read(&file_path, None, None, 1)
             .map_err(|e| ParseErr::InvalidFormat(format!("Failed to open 1aln file: {}", e)))?;
 
+        // Check if there are reference paths to external GDB files
+        let references = file.get_references();
+
+        // Initialize empty metadata structures
+        let mut query_seq_names = HashMap::new();
+        let mut query_seq_lengths = HashMap::new();
+        let mut query_contig_offsets = HashMap::new();
+        let mut target_seq_names = HashMap::new();
+        let mut target_seq_lengths = HashMap::new();
+        let mut target_contig_offsets = HashMap::new();
+
+        // The embedded GDB skeleton (if present) is the target genome (gdb2)
+        let embedded_names = file.get_all_sequence_names();
+        let embedded_lengths = file.get_all_sequence_lengths();
+        let embedded_offsets = file.get_all_contig_offsets();
+
+        // Process references:
+        // - First reference (count=1) is the QUERY genome (gdb1/A-read)
+        // - Second reference (count=2) is the TARGET genome (gdb2/B-read)
+        // - If there's an embedded skeleton, it's for the TARGET (gdb2/B-read)
+
+        let mut has_external_query = false;
+        let mut has_external_target = false;
+
+        for (ref_idx, (ref_path, ref_count)) in references.iter().enumerate() {
+            if ref_path.is_empty() {
+                continue;
+            }
+
+            // Skip if this is not a genome reference (count > 2 might be other metadata)
+            if *ref_count > 2 {
+                continue;
+            }
+
+            let is_query = *ref_count == 1;    // First reference is query (A-read)
+            let is_target = *ref_count == 2;   // Second reference is target (B-read)
+
+            warn!(
+                "Processing reference {}: {} (count: {}, type: {})",
+                ref_idx + 1,
+                ref_path,
+                ref_count,
+                if is_query { "query" } else if is_target { "target" } else { "unknown" }
+            );
+
+            // Helper function to strip fasta extensions
+            let strip_fasta_ext = |p: &str| -> String {
+                let path_str = p.to_string();
+                // Try to remove common fasta extensions
+                for ext in &[".fasta.gz", ".fa.gz", ".fna.gz", ".fasta", ".fa", ".fna"] {
+                    if path_str.ends_with(ext) {
+                        return path_str[..path_str.len() - ext.len()].to_string();
+                    }
+                }
+                path_str
+            };
+
+            // Get alignment file directory for relative path resolution
+            let aln_dir = std::path::Path::new(&file_path)
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
+
+            // Try multiple strategies to find the GDB file
+            let mut gdb_path: Option<String> = None;
+
+            // Strategy 1: Try as absolute path (as-is) - but only if it's a GDB file
+            if std::path::Path::new(ref_path).exists() && (ref_path.ends_with(".1gdb") || ref_path.ends_with(".gdb")) {
+                gdb_path = Some(ref_path.clone());
+            }
+
+            // Strategy 2: Try adding .1gdb or .gdb extension to the original path
+            if gdb_path.is_none() {
+                for ext in &[".1gdb", ".gdb"] {
+                    let with_ext = format!("{}{}", ref_path, ext);
+                    if std::path::Path::new(&with_ext).exists() {
+                        gdb_path = Some(with_ext);
+                        break;
+                    }
+                }
+            }
+
+            // Strategy 3: Strip fasta extension and try with GDB extensions (absolute path)
+            if gdb_path.is_none() {
+                let base_path = strip_fasta_ext(ref_path);
+                if base_path != *ref_path {
+                    for ext in &[".1gdb", ".gdb"] {
+                        let with_ext = format!("{}{}", base_path, ext);
+                        if std::path::Path::new(&with_ext).exists() {
+                            gdb_path = Some(with_ext);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Strategy 4: Try relative path with fasta extension stripped and GDB extension added
+            if gdb_path.is_none() {
+                let base_path = strip_fasta_ext(ref_path);
+                if base_path != *ref_path {
+                    for ext in &[".1gdb", ".gdb"] {
+                        let relative_with_ext = aln_dir.join(format!("{}{}", base_path, ext));
+                        if relative_with_ext.exists() {
+                            gdb_path = Some(relative_with_ext.to_string_lossy().to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Strategy 5: Try relative path with .1gdb or .gdb extension
+            if gdb_path.is_none() {
+                for ext in &[".1gdb", ".gdb"] {
+                    let relative_with_ext = aln_dir.join(format!("{}{}", ref_path, ext));
+                    if relative_with_ext.exists() {
+                        gdb_path = Some(relative_with_ext.to_string_lossy().to_string());
+                        break;
+                    }
+                }
+            }
+
+            // Strategy 6: Try relative to alignment file directory (as-is) - but only if it's a GDB file
+            if gdb_path.is_none() {
+                let relative_path = aln_dir.join(ref_path);
+                if relative_path.exists() && (ref_path.ends_with(".1gdb") || ref_path.ends_with(".gdb")) {
+                    gdb_path = Some(relative_path.to_string_lossy().to_string());
+                }
+            }
+
+            let gdb_path = if let Some(found_path) = gdb_path {
+                found_path
+            } else {
+                warn!("Warning: Could not find GDB file for reference: {}", ref_path);
+                warn!("Tried:");
+                warn!("  - {}", ref_path);
+                warn!("  - {}.1gdb / {}.gdb", ref_path, ref_path);
+                let base = strip_fasta_ext(ref_path);
+                if base != *ref_path {
+                    warn!("  - {}.1gdb / {}.gdb", base, base);
+                }
+                warn!("  - Relative paths in {}", aln_dir.display());
+                warn!("Contig-to-scaffold mappings will not be available");
+                continue;
+            };
+
+            // Try to load the GDB metadata
+            if let Ok((ref_names, ref_lengths, ref_offsets)) = OneFile::read_gdb_metadata(&gdb_path) {
+                if is_query {
+                    query_seq_names = ref_names;
+                    query_seq_lengths = ref_lengths;
+                    query_contig_offsets = ref_offsets;
+                    has_external_query = true;
+                    warn!("Loaded query genome metadata from: {} ({} sequences)", gdb_path, query_seq_names.len());
+                } else if is_target {
+                    target_seq_names = ref_names;
+                    target_seq_lengths = ref_lengths;
+                    target_contig_offsets = ref_offsets;
+                    has_external_target = true;
+                    warn!("Loaded target genome metadata from: {} ({} sequences)", gdb_path, target_seq_names.len());
+                }
+            } else {
+                warn!("Warning: Failed to load GDB metadata from: {}", gdb_path);
+            }
+        }
+
+        // If we didn't load external target, use embedded skeleton
+        if !has_external_target && !embedded_names.is_empty() {
+            target_seq_names = embedded_names;
+            target_seq_lengths = embedded_lengths;
+            target_contig_offsets = embedded_offsets;
+            warn!("Using embedded skeleton for target genome ({} sequences)", target_seq_names.len());
+        }
+
+        // If this is a self-alignment (no external query), use target for query too
+        if !has_external_query && !target_seq_names.is_empty() {
+            query_seq_names = target_seq_names.clone();
+            query_seq_lengths = target_seq_lengths.clone();
+            query_contig_offsets = target_contig_offsets.clone();
+            warn!("Self-alignment detected: using target genome for query");
+        }
+
+        if query_seq_names.is_empty() && target_seq_names.is_empty() {
+            warn!("Warning: No sequence metadata found in file or external references");
+        }
+
         let metadata = OneAlnMetadata {
-            seq_names: file.get_all_sequence_names(), // contig id (0-indexed) to scaffold name
-            seq_lengths: file.get_all_sequence_lengths(), // contig id (0-indexed) to scaffold length
-            contig_offsets: file.get_all_contig_offsets(), // contig id (0-indexed) to (scaffold_offset, contig_length)
+            query_seq_names,
+            query_seq_lengths,
+            query_contig_offsets,
+            target_seq_names,
+            target_seq_lengths,
+            target_contig_offsets,
         };
 
         // Get trace spacing
@@ -70,7 +263,7 @@ impl OneAlnParser {
         &self,
         seq_index: &mut SequenceIndex,
     ) -> Result<Vec<AlignmentRecord>, ParseErr> {
-        let contig_to_seq_id = self.prepare_sequence_index(seq_index)?;
+        let (query_contig_to_seq_id, target_contig_to_seq_id) = self.prepare_sequence_index(seq_index)?;
 
         let mut file = OneFile::open_read(&self.file_path, None, None, 1)
             .map_err(|e| ParseErr::InvalidFormat(format!("Failed to open 1aln file: {}", e)))?;
@@ -83,7 +276,7 @@ impl OneAlnParser {
                 '\0' => break,
                 'A' => {
                     let (record, next_line) =
-                        self.parse_single_alignment(&mut file, &contig_to_seq_id, alignment_index)?;
+                        self.parse_single_alignment(&mut file, &query_contig_to_seq_id, &target_contig_to_seq_id, alignment_index)?;
                     records.push(record);
                     alignment_index += 1;
                     current_line = next_line;
@@ -102,7 +295,8 @@ impl OneAlnParser {
     fn parse_single_alignment(
         &self,
         file: &mut OneFile,
-        contig_to_seq_id: &HashMap<i64, u32>,
+        query_contig_to_seq_id: &HashMap<i64, u32>,
+        target_contig_to_seq_id: &HashMap<i64, u32>,
         alignment_index: u64,
     ) -> Result<(AlignmentRecord, char), ParseErr> {
         // Read alignment coordinates from current 'A' line
@@ -112,7 +306,7 @@ impl OneAlnParser {
         // Get sequence names and lengths from metadata
         let query_name = self
             .metadata
-            .seq_names
+            .query_seq_names
             .get(&query_contig_id)
             .cloned()
             .ok_or_else(|| {
@@ -123,7 +317,7 @@ impl OneAlnParser {
             })?;
         let target_name = self
             .metadata
-            .seq_names
+            .target_seq_names
             .get(&target_contig_id)
             .cloned()
             .ok_or_else(|| {
@@ -133,8 +327,8 @@ impl OneAlnParser {
                 ))
             })?;
 
-        // Lookup already-registered scaffold IDs
-        let query_id = contig_to_seq_id
+        // Lookup already-registered scaffold IDs from separate namespaces
+        let query_id = query_contig_to_seq_id
             .get(&query_contig_id)
             .copied()
             .ok_or_else(|| {
@@ -142,7 +336,7 @@ impl OneAlnParser {
                     "Sequence index ID for query {query_name} (contig {query_contig_id}) missing"
                 ))
             })?;
-        let target_id = contig_to_seq_id
+        let target_id = target_contig_to_seq_id
             .get(&target_contig_id)
             .copied()
             .ok_or_else(|| {
@@ -158,7 +352,7 @@ impl OneAlnParser {
 
         let (query_contig_offset, _query_contig_len) = self
             .metadata
-            .contig_offsets
+            .query_contig_offsets
             .get(&query_contig_id)
             .copied()
             .ok_or_else(|| {
@@ -170,7 +364,7 @@ impl OneAlnParser {
 
         let (target_contig_offset, target_contig_len) = self
             .metadata
-            .contig_offsets
+            .target_contig_offsets
             .get(&target_contig_id)
             .copied()
             .ok_or_else(|| {
@@ -258,23 +452,43 @@ impl OneAlnParser {
     fn prepare_sequence_index(
         &self,
         seq_index: &mut SequenceIndex,
-    ) -> Result<HashMap<i64, u32>, ParseErr> {
-        let mut contig_to_seq_id = HashMap::with_capacity(self.metadata.seq_names.len());
-        for (&contig_id, name) in &self.metadata.seq_names {
+    ) -> Result<(HashMap<i64, u32>, HashMap<i64, u32>), ParseErr> {
+        let mut query_contig_to_seq_id = HashMap::with_capacity(self.metadata.query_seq_names.len());
+        let mut target_contig_to_seq_id = HashMap::with_capacity(self.metadata.target_seq_names.len());
+
+        // Register query sequences
+        for (&contig_id, name) in &self.metadata.query_seq_names {
             let length = self
                 .metadata
-                .seq_lengths
+                .query_seq_lengths
                 .get(&contig_id)
                 .copied()
                 .ok_or_else(|| {
                     ParseErr::InvalidFormat(format!(
-                        "Sequence length for contig {contig_id} ({name}) missing from metadata"
+                        "Query sequence length for contig {contig_id} ({name}) missing from metadata"
                     ))
                 })? as usize;
             let seq_id = seq_index.get_or_insert_id(name, Some(length));
-            contig_to_seq_id.insert(contig_id, seq_id);
+            query_contig_to_seq_id.insert(contig_id, seq_id);
         }
-        Ok(contig_to_seq_id)
+
+        // Register target sequences
+        for (&contig_id, name) in &self.metadata.target_seq_names {
+            let length = self
+                .metadata
+                .target_seq_lengths
+                .get(&contig_id)
+                .copied()
+                .ok_or_else(|| {
+                    ParseErr::InvalidFormat(format!(
+                        "Target sequence length for contig {contig_id} ({name}) missing from metadata"
+                    ))
+                })? as usize;
+            let seq_id = seq_index.get_or_insert_id(name, Some(length));
+            target_contig_to_seq_id.insert(contig_id, seq_id);
+        }
+
+        Ok((query_contig_to_seq_id, target_contig_to_seq_id))
     }
 
     /// Get trace spacing from the .1aln file
@@ -282,14 +496,24 @@ impl OneAlnParser {
         self.trace_spacing as u32
     }
 
-    /// Get sequence names mapping (contig_id -> name)
-    pub fn get_sequence_names(&self) -> &HashMap<i64, String> {
-        &self.metadata.seq_names
+    /// Get query sequence names mapping (contig_id -> name)
+    pub fn get_query_sequence_names(&self) -> &HashMap<i64, String> {
+        &self.metadata.query_seq_names
     }
 
-    /// Get contig offset information (sbeg, clen) for all contigs
-    pub fn get_contig_offsets(&self) -> &HashMap<i64, (i64, i64)> {
-        &self.metadata.contig_offsets
+    /// Get target sequence names mapping (contig_id -> name)
+    pub fn get_target_sequence_names(&self) -> &HashMap<i64, String> {
+        &self.metadata.target_seq_names
+    }
+
+    /// Get query contig offset information (sbeg, clen) for all contigs
+    pub fn get_query_contig_offsets(&self) -> &HashMap<i64, (i64, i64)> {
+        &self.metadata.query_contig_offsets
+    }
+
+    /// Get target contig offset information (sbeg, clen) for all contigs
+    pub fn get_target_contig_offsets(&self) -> &HashMap<i64, (i64, i64)> {
+        &self.metadata.target_contig_offsets
     }
 
     /// Seek to a specific alignment using O(1) access
@@ -311,7 +535,7 @@ impl OneAlnParser {
 
             let query_name = self
                 .metadata
-                .seq_names
+                .query_seq_names
                 .get(&query_contig_id)
                 .cloned()
                 .ok_or_else(|| {
@@ -322,7 +546,7 @@ impl OneAlnParser {
                 })?;
             let query_length = self
                 .metadata
-                .seq_lengths
+                .query_seq_lengths
                 .get(&query_contig_id)
                 .copied()
                 .ok_or_else(|| {
@@ -334,7 +558,7 @@ impl OneAlnParser {
 
             let target_name = self
                 .metadata
-                .seq_names
+                .target_seq_names
                 .get(&target_contig_id)
                 .cloned()
                 .ok_or_else(|| {
@@ -345,7 +569,7 @@ impl OneAlnParser {
                 })?;
             let target_length = self
                 .metadata
-                .seq_lengths
+                .target_seq_lengths
                 .get(&target_contig_id)
                 .copied()
                 .ok_or_else(|| {
@@ -357,7 +581,7 @@ impl OneAlnParser {
 
             let (query_contig_offset, _) = self
                 .metadata
-                .contig_offsets
+                .query_contig_offsets
                 .get(&query_contig_id)
                 .copied()
                 .ok_or_else(|| {
@@ -369,7 +593,7 @@ impl OneAlnParser {
 
             let (target_contig_offset, target_contig_len) = self
                 .metadata
-                .contig_offsets
+                .target_contig_offsets
                 .get(&target_contig_id)
                 .copied()
                 .ok_or_else(|| {
