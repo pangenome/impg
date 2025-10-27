@@ -163,7 +163,6 @@ impl QueryMetadata {
     fn get_data_bytes(
         &self,
         alignment_files: &[String],
-        _onealn_parsers: &[Option<Arc<OneAlnParser>>],
     ) -> Result<Vec<u8>, String> {
         // Get the correct file and type
         let alignment_file = &alignment_files[self.alignment_file_index as usize];
@@ -210,38 +209,6 @@ impl QueryMetadata {
         }
     }
 
-    fn get_onealn_alignment(
-        &self,
-        alignment_files: &[String],
-        onealn_parsers: &[Option<Arc<OneAlnParser>>],
-    ) -> Result<OneAlnAlignment, String> {
-        let file_index = self.alignment_file_index as usize;
-        let alignment_file = &alignment_files[file_index];
-        if Self::get_file_type(alignment_file) != FileType::OneAln {
-            return Err(format!(
-                "Alignment '{}' is not a .1aln file; tracepoints unavailable",
-                alignment_file
-            ));
-        }
-
-        let parser = onealn_parsers
-            .get(file_index)
-            .and_then(|p| p.as_ref())
-            .ok_or_else(|| {
-                format!(
-                    "No cached OneAln parser available for '{}'. Ensure .1aln files were pre-parsed successfully.",
-                    alignment_file
-                )
-            })?;
-
-        let alignment_index = self.data_offset();
-        parser.seek_alignment(alignment_index).map_err(|e| {
-            format!(
-                "Failed to seek to alignment {} in '{}': {:?}",
-                alignment_index, alignment_file, e
-            )
-        })
-    }
 }
 
 pub type AdjustedInterval = (Interval<u32>, Vec<CigarOp>, Interval<u32>);
@@ -395,31 +362,78 @@ pub struct Impg {
     alignment_files: Vec<String>, // List of all alignment files (PAF or 1aln)
     pub forest_map: ForestMap,    // Forest map for lazy loading
     index_file_path: String,      // Path to the index file for lazy loading
-    onealn_parsers: Vec<Option<Arc<OneAlnParser>>>, // Cached 1aln parsers per file
+    onealn_parsers: RwLock<FxHashMap<usize, Arc<OneAlnParser>>>, // Lazy-loaded cached 1aln parsers per file index
+    sequence_files: Vec<String>,  // Sequence files for lazy parser creation
 }
 
 impl Impg {
-    fn collect_contig_metadata(
-        alignment_files: &[String],
-        sequence_files: Option<&[String]>,
-    ) -> Result<Vec<Option<Arc<OneAlnParser>>>, ParseErr> {
-        let mut onealn_parsers: Vec<Option<Arc<OneAlnParser>>> =
-            Vec::with_capacity(alignment_files.len());
-
-        for alignment_file in alignment_files {
-            if alignment_file.ends_with(".1aln") {
-                let parser = OneAlnParser::new(alignment_file.clone(), sequence_files).map_err(|e| {
-                    ParseErr::InvalidFormat(format!(
-                        "Failed to initialize OneAln parser for '{}': {e}",
-                        alignment_file
-                    ))
-                })?;
-                onealn_parsers.push(Some(Arc::new(parser)));
-            } else {
-                onealn_parsers.push(None);
-            }
+    /// Get or create a OneAlnParser for a specific file index (lazy loading)
+    fn get_or_create_parser(&self, file_index: usize) -> Result<Arc<OneAlnParser>, ParseErr> {
+        // First check if parser is already cached
+        if let Some(parser) = self.onealn_parsers.read().unwrap().get(&file_index) {
+            return Ok(Arc::clone(parser));
         }
-        Ok(onealn_parsers)
+
+        // Not cached - create it
+        let alignment_file = &self.alignment_files[file_index];
+
+        if !alignment_file.ends_with(".1aln") {
+            return Err(ParseErr::InvalidFormat(format!(
+                "File '{}' is not a .1aln file",
+                alignment_file
+            )));
+        }
+
+        let sequence_files = if self.sequence_files.is_empty() {
+            None
+        } else {
+            Some(self.sequence_files.as_slice())
+        };
+
+        let parser = OneAlnParser::new(alignment_file.clone(), sequence_files).map_err(|e| {
+            ParseErr::InvalidFormat(format!(
+                "Failed to initialize OneAln parser for '{}': {e}",
+                alignment_file
+            ))
+        })?;
+
+        let parser_arc = Arc::new(parser);
+
+        // Cache it for future use
+        self.onealn_parsers
+            .write()
+            .unwrap()
+            .insert(file_index, Arc::clone(&parser_arc));
+
+        Ok(parser_arc)
+    }
+
+    /// Get a OneAlnAlignment from metadata (lazy loading the parser)
+    fn get_onealn_alignment(&self, metadata: &QueryMetadata) -> Result<OneAlnAlignment, String> {
+        let file_index = metadata.alignment_file_index as usize;
+        let alignment_file = &self.alignment_files[file_index];
+
+        if !alignment_file.ends_with(".1aln") {
+            return Err(format!(
+                "Alignment '{}' is not a .1aln file; tracepoints unavailable",
+                alignment_file
+            ));
+        }
+
+        let parser = self.get_or_create_parser(file_index).map_err(|e| {
+            format!(
+                "Failed to get parser for '{}': {:?}",
+                alignment_file, e
+            )
+        })?;
+
+        let alignment_index = metadata.data_offset();
+        parser.seek_alignment(alignment_index).map_err(|e| {
+            format!(
+                "Failed to seek to alignment {} in '{}': {:?}",
+                alignment_index, alignment_file, e
+            )
+        })
     }
 
     fn process_tracepoints_data(
@@ -523,8 +537,8 @@ impl Impg {
             mut cigar_ops,
         ) = match QueryMetadata::get_file_type(alignment_file) {
             FileType::OneAln => {
-                let alignment = metadata
-                    .get_onealn_alignment(&self.alignment_files, &self.onealn_parsers)
+                let alignment = self
+                    .get_onealn_alignment(metadata)
                     .unwrap_or_else(|e| panic!("{}", e));
 
                 self.process_tracepoints_data(
@@ -538,7 +552,7 @@ impl Impg {
             }
             FileType::Paf => {
                 let data_buffer = metadata
-                    .get_data_bytes(&self.alignment_files, &self.onealn_parsers)
+                    .get_data_bytes(&self.alignment_files)
                     .unwrap_or_else(|e| panic!("{}", e));
 
                 (
@@ -614,8 +628,6 @@ impl Impg {
             .map(|(_, alignment_file)| alignment_file.clone())
             .collect();
 
-        let onealn_parsers = Self::collect_contig_metadata(&alignment_files, sequence_files)?;
-
         let intervals: FxHashMap<u32, Vec<Interval<QueryMetadata>>> = records_by_file
             .par_iter()
             .enumerate() // Add enumeration to get the position as index
@@ -682,7 +694,8 @@ impl Impg {
             alignment_files,
             forest_map,
             index_file_path: String::new(), // All trees are in memory, no need for index file path
-            onealn_parsers,
+            onealn_parsers: RwLock::new(FxHashMap::default()), // Start with empty parsers - create on demand
+            sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
         })
     }
 
@@ -864,20 +877,14 @@ impl Impg {
                     )
                 })?;
 
-        let onealn_parsers = Self::collect_contig_metadata(alignment_files, sequence_files).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Failed to collect contig metadata: {e}"),
-            )
-        })?;
-
         Ok(Self {
             trees: RwLock::new(FxHashMap::default()), // Start with empty trees - load on demand
             seq_index,
             alignment_files: alignment_files.to_vec(),
             forest_map,
             index_file_path,
-            onealn_parsers,
+            onealn_parsers: RwLock::new(FxHashMap::default()), // Start with empty parsers - create on demand
+            sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
         })
     }
 
