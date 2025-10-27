@@ -877,6 +877,14 @@ fn run() -> io::Result<()> {
                 ],
             )?;
 
+            // Check that either --target-range or --target-bed is provided (cheap validation)
+            if query.target_range.is_none() && query.target_bed.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Either --target-range or --target-bed must be provided",
+                ));
+            }
+
             // Extract sequence files before consuming gfa_maf_fasta
             let sequence_files_for_impg = gfa_maf_fasta.sequence.resolve_sequence_files()?;
 
@@ -921,10 +929,7 @@ fn run() -> io::Result<()> {
                     }
                     (targets, false)
                 } else {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Either --target-range or --target-bed must be provided",
-                    ));
+                    unreachable!("Already validated that either target_range or target_bed is present");
                 };
 
             // Resolve output format based on 'auto' and parameter used
@@ -1129,6 +1134,14 @@ fn run() -> io::Result<()> {
                 }
             }
 
+            // Check that either --target-range or --target-bed is provided
+            if query.target_range.is_none() && query.target_bed.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Either --target-range or --target-bed must be provided",
+                ));
+            }
+
             // Extract fields and resolve sequence files before moving gfa_maf_fasta
             let force_large_region = gfa_maf_fasta.force_large_region;
             let sequence_files_for_impg = gfa_maf_fasta.sequence.resolve_sequence_files()?;
@@ -1189,12 +1202,7 @@ fn run() -> io::Result<()> {
 
                 targets
             };
-            if target_ranges.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Either --target-range or --target-bed must be provided",
-                ));
-            }
+            // Note: Already validated that either target_range or target_bed is present
 
             info!("Parsed {} target ranges from BED file", target_ranges.len());
 
