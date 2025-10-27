@@ -150,7 +150,24 @@ impl OneAlnParser {
                 }
             }
 
-            // Strategy 4: Try relative path with fasta extension stripped and GDB extension added
+            // Strategy 4: Try in the same directory as the reference sequence file
+            if gdb_path.is_none() {
+                let ref_path_obj = std::path::Path::new(ref_path);
+                if let Some(ref_dir) = ref_path_obj.parent() {
+                    if let Some(file_name) = ref_path_obj.file_name().and_then(|n| n.to_str()) {
+                        let base_name = strip_fasta_ext(file_name);
+                        for ext in &[".1gdb", ".gdb"] {
+                            let with_ext = ref_dir.join(format!("{}{}", base_name, ext));
+                            if with_ext.exists() {
+                                gdb_path = Some(with_ext.to_string_lossy().to_string());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Strategy 5: Try relative path with fasta extension stripped and GDB extension added
             if gdb_path.is_none() {
                 let base_path = strip_fasta_ext(ref_path);
                 if base_path != *ref_path {
@@ -164,7 +181,7 @@ impl OneAlnParser {
                 }
             }
 
-            // Strategy 5: Try relative path with .1gdb or .gdb extension
+            // Strategy 6: Try relative path with .1gdb or .gdb extension
             if gdb_path.is_none() {
                 for ext in &[".1gdb", ".gdb"] {
                     let relative_with_ext = aln_dir.join(format!("{}{}", ref_path, ext));
@@ -175,7 +192,7 @@ impl OneAlnParser {
                 }
             }
 
-            // Strategy 6: Try relative to alignment file directory (as-is) - but only if it's a GDB file
+            // Strategy 7: Try relative to alignment file directory (as-is) - but only if it's a GDB file
             if gdb_path.is_none() {
                 let relative_path = aln_dir.join(ref_path);
                 if relative_path.exists() && (ref_path.ends_with(".1gdb") || ref_path.ends_with(".gdb")) {
