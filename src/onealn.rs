@@ -51,7 +51,11 @@ impl std::error::Error for ParseErr {}
 
 impl OneAlnParser {
     /// Open a 1aln file and read its metadata
-    pub fn new(file_path: String) -> Result<Self, ParseErr> {
+    ///
+    /// # Arguments
+    /// * `file_path` - Path to the .1aln file
+    /// * `sequence_file_hints` - Optional list of sequence file paths to help locate GDB files in their directories
+    pub fn new(file_path: String, sequence_file_hints: Option<&[String]>) -> Result<Self, ParseErr> {
         let mut file = OneFile::open_read(&file_path, None, None, 1)
             .map_err(|e| ParseErr::InvalidFormat(format!("Failed to open 1aln file: {}", e)))?;
 
@@ -100,11 +104,11 @@ impl OneAlnParser {
                 if is_query { "query" } else if is_target { "target" } else { "unknown" }
             );
 
-            // Helper function to strip fasta extensions
-            let strip_fasta_ext = |p: &str| -> String {
+            // Helper function to strip fasta and AGC extensions
+            let strip_seq_ext = |p: &str| -> String {
                 let path_str = p.to_string();
-                // Try to remove common fasta extensions
-                for ext in &[".fasta.gz", ".fa.gz", ".fna.gz", ".fasta", ".fa", ".fna"] {
+                // Try to remove common sequence file extensions (FASTA and AGC)
+                for ext in &[".fasta.gz", ".fa.gz", ".fna.gz", ".fasta", ".fa", ".fna", ".agc"] {
                     if path_str.ends_with(ext) {
                         return path_str[..path_str.len() - ext.len()].to_string();
                     }
@@ -120,12 +124,53 @@ impl OneAlnParser {
             // Try multiple strategies to find the GDB file
             let mut gdb_path: Option<String> = None;
 
-            // Strategy 1: Try as absolute path (as-is) - but only if it's a GDB file
-            if std::path::Path::new(ref_path).exists() && (ref_path.ends_with(".1gdb") || ref_path.ends_with(".gdb")) {
+            // Strategy 1: Check in directories of sequence files provided via command-line hints
+            if gdb_path.is_none() {
+                if let Some(seq_files) = sequence_file_hints {
+                    // Extract the base name from ref_path (just the filename without directory)
+                    let ref_base_name = std::path::Path::new(ref_path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("");
+                    let ref_base_stripped = strip_seq_ext(ref_base_name);
+
+                    // Check each sequence file directory
+                    for seq_file in seq_files {
+                        let seq_path = std::path::Path::new(seq_file);
+                        if let Some(seq_dir) = seq_path.parent() {
+                            // Check if this sequence file matches the reference
+                            let seq_base_name = seq_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                            let seq_base_stripped = strip_seq_ext(seq_base_name);
+
+                            // If basenames match (with or without extensions), look for GDB here
+                            if !ref_base_stripped.is_empty() && (
+                                seq_base_stripped == ref_base_stripped ||
+                                seq_base_name == ref_base_name ||
+                                seq_base_name == ref_base_stripped
+                            ) {
+                                for ext in &[".1gdb", ".gdb"] {
+                                    let with_ext = seq_dir.join(format!("{}{}", seq_base_stripped, ext));
+                                    if with_ext.exists() {
+                                        gdb_path = Some(with_ext.to_string_lossy().to_string());
+                                        debug!("Found GDB via sequence file hint: {}", gdb_path.as_ref().unwrap());
+                                        break;
+                                    }
+                                }
+                                if gdb_path.is_some() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Strategy 2: Try as absolute path (as-is) - but only if it's a GDB file
+            if gdb_path.is_none() && std::path::Path::new(ref_path).exists() && (ref_path.ends_with(".1gdb") || ref_path.ends_with(".gdb")) {
                 gdb_path = Some(ref_path.clone());
             }
 
-            // Strategy 2: Try adding .1gdb or .gdb extension to the original path
+            // Strategy 3: Try adding .1gdb or .gdb extension to the original path
             if gdb_path.is_none() {
                 for ext in &[".1gdb", ".gdb"] {
                     let with_ext = format!("{}{}", ref_path, ext);
@@ -136,9 +181,9 @@ impl OneAlnParser {
                 }
             }
 
-            // Strategy 3: Strip fasta extension and try with GDB extensions (absolute path)
+            // Strategy 4: Strip sequence file extension and try with GDB extensions (absolute path)
             if gdb_path.is_none() {
-                let base_path = strip_fasta_ext(ref_path);
+                let base_path = strip_seq_ext(ref_path);
                 if base_path != *ref_path {
                     for ext in &[".1gdb", ".gdb"] {
                         let with_ext = format!("{}{}", base_path, ext);
@@ -150,12 +195,12 @@ impl OneAlnParser {
                 }
             }
 
-            // Strategy 4: Try in the same directory as the reference sequence file
+            // Strategy 5: Try in the same directory as the reference sequence file
             if gdb_path.is_none() {
                 let ref_path_obj = std::path::Path::new(ref_path);
                 if let Some(ref_dir) = ref_path_obj.parent() {
                     if let Some(file_name) = ref_path_obj.file_name().and_then(|n| n.to_str()) {
-                        let base_name = strip_fasta_ext(file_name);
+                        let base_name = strip_seq_ext(file_name);
                         for ext in &[".1gdb", ".gdb"] {
                             let with_ext = ref_dir.join(format!("{}{}", base_name, ext));
                             if with_ext.exists() {
@@ -167,9 +212,9 @@ impl OneAlnParser {
                 }
             }
 
-            // Strategy 5: Try relative path with fasta extension stripped and GDB extension added
+            // Strategy 6: Try relative path with sequence file extension stripped and GDB extension added
             if gdb_path.is_none() {
-                let base_path = strip_fasta_ext(ref_path);
+                let base_path = strip_seq_ext(ref_path);
                 if base_path != *ref_path {
                     for ext in &[".1gdb", ".gdb"] {
                         let relative_with_ext = aln_dir.join(format!("{}{}", base_path, ext));
@@ -181,7 +226,7 @@ impl OneAlnParser {
                 }
             }
 
-            // Strategy 6: Try relative path with .1gdb or .gdb extension
+            // Strategy 7: Try relative path with .1gdb or .gdb extension
             if gdb_path.is_none() {
                 for ext in &[".1gdb", ".gdb"] {
                     let relative_with_ext = aln_dir.join(format!("{}{}", ref_path, ext));
@@ -192,7 +237,7 @@ impl OneAlnParser {
                 }
             }
 
-            // Strategy 7: Try relative to alignment file directory (as-is) - but only if it's a GDB file
+            // Strategy 8: Try relative to alignment file directory (as-is) - but only if it's a GDB file
             if gdb_path.is_none() {
                 let relative_path = aln_dir.join(ref_path);
                 if relative_path.exists() && (ref_path.ends_with(".1gdb") || ref_path.ends_with(".gdb")) {

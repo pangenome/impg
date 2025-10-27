@@ -401,13 +401,14 @@ pub struct Impg {
 impl Impg {
     fn collect_contig_metadata(
         alignment_files: &[String],
+        sequence_files: Option<&[String]>,
     ) -> Result<Vec<Option<Arc<OneAlnParser>>>, ParseErr> {
         let mut onealn_parsers: Vec<Option<Arc<OneAlnParser>>> =
             Vec::with_capacity(alignment_files.len());
 
         for alignment_file in alignment_files {
             if alignment_file.ends_with(".1aln") {
-                let parser = OneAlnParser::new(alignment_file.clone()).map_err(|e| {
+                let parser = OneAlnParser::new(alignment_file.clone(), sequence_files).map_err(|e| {
                     ParseErr::InvalidFormat(format!(
                         "Failed to initialize OneAln parser for '{}': {e}",
                         alignment_file
@@ -605,6 +606,7 @@ impl Impg {
     pub fn from_multi_alignment_records(
         records_by_file: &[(Vec<AlignmentRecord>, String)],
         seq_index: SequenceIndex,
+        sequence_files: Option<&[String]>,
     ) -> Result<Self, ParseErr> {
         // Extract just the alignment file paths
         let alignment_files: Vec<String> = records_by_file
@@ -612,7 +614,7 @@ impl Impg {
             .map(|(_, alignment_file)| alignment_file.clone())
             .collect();
 
-        let onealn_parsers = Self::collect_contig_metadata(&alignment_files)?;
+        let onealn_parsers = Self::collect_contig_metadata(&alignment_files, sequence_files)?;
 
         let intervals: FxHashMap<u32, Vec<Interval<QueryMetadata>>> = records_by_file
             .par_iter()
@@ -822,6 +824,7 @@ impl Impg {
         mut reader: R,
         alignment_files: &[String],
         index_file_path: String,
+        sequence_files: Option<&[String]>,
     ) -> std::io::Result<Self> {
         const MAGIC: &[u8] = b"IMPGIDX1";
 
@@ -861,7 +864,7 @@ impl Impg {
                     )
                 })?;
 
-        let onealn_parsers = Self::collect_contig_metadata(alignment_files).map_err(|e| {
+        let onealn_parsers = Self::collect_contig_metadata(alignment_files, sequence_files).map_err(|e| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("Failed to collect contig metadata: {e}"),

@@ -93,13 +93,13 @@ struct SequenceOpts {
 
 impl SequenceOpts {
     /// Resolve sequence files from either --sequence-files or --sequence-list
-    fn resolve_sequence_files(self) -> io::Result<Vec<String>> {
-        match (self.sequence_files, self.sequence_list) {
-            // Handle --sequence-files option - no clone needed!
-            (Some(files), None) => Ok(files),
+    fn resolve_sequence_files(&self) -> io::Result<Vec<String>> {
+        match (&self.sequence_files, &self.sequence_list) {
+            // Handle --sequence-files option
+            (Some(files), None) => Ok(files.clone()),
             // Handle --sequence-list option
             (None, Some(list_file)) => {
-                let content = std::fs::read_to_string(&list_file).map_err(|e| {
+                let content = std::fs::read_to_string(list_file).map_err(|e| {
                     io::Error::new(
                         io::ErrorKind::NotFound,
                         format!("Failed to read sequence list file '{list_file}': {e}"),
@@ -121,7 +121,7 @@ impl SequenceOpts {
     }
 
     /// Build sequence index if files are provided
-    fn build_sequence_index(self) -> io::Result<Option<UnifiedSequenceIndex>> {
+    fn build_sequence_index(&self) -> io::Result<Option<UnifiedSequenceIndex>> {
         let seq_files = self.resolve_sequence_files()?;
 
         if seq_files.is_empty() {
@@ -425,6 +425,9 @@ enum Args {
         alignment: AlignmentOpts,
 
         #[clap(flatten)]
+        sequence: SequenceOpts,
+
+        #[clap(flatten)]
         common: CommonOpts,
     },
     /// Lace files together
@@ -655,6 +658,9 @@ enum Args {
         alignment: AlignmentOpts,
 
         #[clap(flatten)]
+        sequence: SequenceOpts,
+
+        #[clap(flatten)]
         common: CommonOpts,
     },
 }
@@ -670,9 +676,9 @@ fn run() -> io::Result<()> {
     let args = Args::parse();
 
     match args {
-        Args::Index { common, alignment } => {
+        Args::Index { common, alignment, sequence } => {
             initialize_threads_and_log(&common);
-            let _ = initialize_impg(&common, &alignment)?;
+            let _ = initialize_impg(&common, &alignment, &sequence)?;
 
             info!("Index created successfully");
         }
@@ -815,11 +821,12 @@ fn run() -> io::Result<()> {
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
 
+            // Initialize impg before moving gfa_maf_fasta
+            let impg = initialize_impg(&common, &alignment, &gfa_maf_fasta.sequence)?;
+
             // Setup POA/sequence resources
             let (sequence_index, scoring_params) =
                 gfa_maf_fasta.setup_output_resources(&output_format, false, &alignment)?;
-
-            let impg = initialize_impg(&common, &alignment)?;
 
             partition::partition_alignments(
                 &impg,
@@ -868,7 +875,7 @@ fn run() -> io::Result<()> {
                 ],
             )?;
 
-            let impg = initialize_impg(&common, &alignment)?;
+            let impg = initialize_impg(&common, &alignment, &gfa_maf_fasta.sequence)?;
 
             // Load subset filter if provided
             let subset_filter = load_subset_filter_if_provided(&query.subset_sequence_list)?;
@@ -1119,6 +1126,9 @@ fn run() -> io::Result<()> {
             // Extract force_large_region before moving gfa_maf_fasta
             let force_large_region = gfa_maf_fasta.force_large_region;
 
+            // Initialize impg before moving gfa_maf_fasta
+            let impg = initialize_impg(&common, &alignment, &gfa_maf_fasta.sequence)?;
+
             // Setup POA/sequence resources (always required for similarity)
             let (sequence_index, scoring_params) =
                 gfa_maf_fasta.setup_output_resources("gfa", false, &alignment)?;
@@ -1126,8 +1136,6 @@ fn run() -> io::Result<()> {
             let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA
 
             let subset_filter = load_subset_filter_if_provided(&query.subset_sequence_list)?;
-
-            let impg = initialize_impg(&common, &alignment)?;
 
             // Validate target_range and target_bed before ANY expensive operations,
             let target_ranges = {
@@ -1243,9 +1251,9 @@ fn run() -> io::Result<()> {
                 progress_bar,
             )?;
         }
-        Args::Stats { common, alignment } => {
+        Args::Stats { common, alignment, sequence } => {
             initialize_threads_and_log(&common);
-            let impg = initialize_impg(&common, &alignment)?;
+            let impg = initialize_impg(&common, &alignment, &sequence)?;
 
             print_stats(&impg);
         }
@@ -1497,16 +1505,58 @@ fn find_output_stream(basename: &Option<String>, extension: &str) -> io::Result<
 }
 
 /// Load/generate index based on common and alignment options
-fn initialize_impg(common: &CommonOpts, alignment: &AlignmentOpts) -> io::Result<Impg> {
+fn initialize_impg(
+    common: &CommonOpts,
+    alignment: &AlignmentOpts,
+    sequence: &SequenceOpts,
+) -> io::Result<Impg> {
     // Resolve the list of alignment files (PAF or .1aln)
     let alignment_files = resolve_alignment_files(alignment)?;
     info!("Found {} alignment file(s)", alignment_files.len());
 
+    // Resolve sequence files
+    let sequence_files = sequence.resolve_sequence_files()?;
+
+    // Check if we have .1aln files and validate sequence files are provided
+    let has_onealn_files = alignment_files.iter().any(|f| f.ends_with(".1aln"));
+    if has_onealn_files && sequence_files.is_empty() {
+        #[cfg(feature = "agc")]
+        let file_types = "FASTA or AGC";
+        #[cfg(not(feature = "agc"))]
+        let file_types = "FASTA";
+
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Sequence files ({}) are required when working with .1aln alignment files to locate GDB files. Use --sequence-files or --sequence-list",
+                file_types
+            ),
+        ));
+    }
+
     // Load or generate index
     if alignment.force_reindex {
-        generate_multi_index(&alignment_files, common.threads, alignment.index.as_deref())
+        generate_multi_index(
+            &alignment_files,
+            common.threads,
+            alignment.index.as_deref(),
+            if sequence_files.is_empty() {
+                None
+            } else {
+                Some(&sequence_files)
+            },
+        )
     } else {
-        load_or_generate_multi_index(&alignment_files, common.threads, alignment.index.as_deref())
+        load_or_generate_multi_index(
+            &alignment_files,
+            common.threads,
+            alignment.index.as_deref(),
+            if sequence_files.is_empty() {
+                None
+            } else {
+                Some(&sequence_files)
+            },
+        )
     }
 }
 
@@ -1563,16 +1613,21 @@ fn load_or_generate_multi_index(
     alignment_files: &[String],
     threads: NonZeroUsize,
     custom_index: Option<&str>,
+    sequence_files: Option<&[String]>,
 ) -> io::Result<Impg> {
     let index_file = get_combined_index_filename(alignment_files, custom_index);
     if std::path::Path::new(&index_file).exists() {
-        load_multi_index(alignment_files, custom_index)
+        load_multi_index(alignment_files, custom_index, sequence_files)
     } else {
-        generate_multi_index(alignment_files, threads, custom_index)
+        generate_multi_index(alignment_files, threads, custom_index, sequence_files)
     }
 }
 
-fn load_multi_index(alignment_files: &[String], custom_index: Option<&str>) -> io::Result<Impg> {
+fn load_multi_index(
+    alignment_files: &[String],
+    custom_index: Option<&str>,
+    sequence_files: Option<&[String]>,
+) -> io::Result<Impg> {
     let index_file = get_combined_index_filename(alignment_files, custom_index);
     info!("Reading IMPG index from {index_file}");
 
@@ -1598,13 +1653,14 @@ fn load_multi_index(alignment_files: &[String], custom_index: Option<&str>) -> i
     let file = File::open(&index_file)?;
     let reader = BufReader::new(file);
 
-    Impg::load_from_file(reader, alignment_files, index_file)
+    Impg::load_from_file(reader, alignment_files, index_file, sequence_files)
 }
 
 fn generate_multi_index(
     alignment_files: &[String],
     threads: NonZeroUsize,
     custom_index: Option<&str>,
+    sequence_files: Option<&[String]>,
 ) -> io::Result<Impg> {
     let index_file = get_combined_index_filename(alignment_files, custom_index);
     info!("No index found at {index_file}. Creating it now.");
@@ -1653,7 +1709,7 @@ fn generate_multi_index(
                     })?
                 }
                 AlignmentFormat::OneAln => {
-                    let file = OneAlnParser::new(aln_file.clone()).map_err(|e| {
+                    let file = OneAlnParser::new(aln_file.clone(), sequence_files).map_err(|e| {
                         io::Error::new(
                             io::ErrorKind::InvalidData,
                             format!("Failed to create 1aln parser: {}", e),
@@ -1707,7 +1763,7 @@ fn generate_multi_index(
         }
     });
 
-    let impg = Impg::from_multi_alignment_records(&records_by_file, seq_index).map_err(|e| {
+    let impg = Impg::from_multi_alignment_records(&records_by_file, seq_index, sequence_files).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("Failed to create index: {e}"),
