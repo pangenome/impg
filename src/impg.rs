@@ -9,7 +9,7 @@ use crate::sequence_index::UnifiedSequenceIndex;
 use coitrees::{BasicCOITree, Interval, IntervalTree};
 use lib_tracepoints::tracepoints_to_cigar_fastga_with_aligner;
 use lib_wfa2::affine_wavefront::{AffineWavefronts, Distance};
-use log::{debug, info, warn};
+use log::{debug, warn};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -1415,7 +1415,7 @@ fn project_target_range_through_alignment(
     cigar_ops: &[CigarOp],
 ) -> Option<(i32, i32, Vec<CigarOp>, i32, i32)> {
     let (target_start, target_end, query_start, query_end, strand) = record;
-    info!(
+    debug!(
         "Projecting target range {}-{} through alignment with target {}-{}, query {}-{}, strand {:?}",
         requested_target_range.0,
         requested_target_range.1,
