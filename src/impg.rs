@@ -160,10 +160,7 @@ impl QueryMetadata {
     }
 
     /// Get alignment data bytes (CIGAR)
-    fn get_data_bytes(
-        &self,
-        alignment_files: &[String],
-    ) -> Result<Vec<u8>, String> {
+    fn get_data_bytes(&self, alignment_files: &[String]) -> Result<Vec<u8>, String> {
         // Get the correct file and type
         let alignment_file = &alignment_files[self.alignment_file_index as usize];
         let file_type = Self::get_file_type(alignment_file);
@@ -208,7 +205,6 @@ impl QueryMetadata {
             ),
         }
     }
-
 }
 
 pub type AdjustedInterval = (Interval<u32>, Vec<CigarOp>, Interval<u32>);
@@ -356,53 +352,17 @@ impl SortedRanges {
     }
 }
 
-/// Bounded cache for OneAlnParsers to prevent unbounded memory growth
-struct ParserCache {
-    capacity: usize,
-    cache: FxHashMap<usize, Arc<OneAlnParser>>,
-}
-
-impl ParserCache {
-    fn new(capacity: usize) -> Self {
-        Self {
-            capacity,
-            cache: FxHashMap::default(),
-        }
-    }
-
-    fn get_or_insert<F>(&mut self, key: usize, f: F) -> Result<Arc<OneAlnParser>, ParseErr>
-    where
-        F: FnOnce() -> Result<Arc<OneAlnParser>, ParseErr>,
-    {
-        if let Some(parser) = self.cache.get(&key) {
-            return Ok(Arc::clone(parser));
-        }
-
-        // Evict one entry if at capacity
-        if self.cache.len() >= self.capacity && self.capacity > 0 {
-            if let Some(&key_to_evict) = self.cache.keys().next() {
-                self.cache.remove(&key_to_evict);
-            }
-        }
-
-        let parser = f()?;
-        self.cache.insert(key, Arc::clone(&parser));
-        Ok(parser)
-    }
-}
-
 pub struct Impg {
     pub trees: RwLock<TreeMap>,
     pub seq_index: SequenceIndex,
     alignment_files: Vec<String>, // List of all alignment files (PAF or 1aln)
     pub forest_map: ForestMap,    // Forest map for lazy loading
     index_file_path: String,      // Path to the index file for lazy loading
-    onealn_parsers: RwLock<ParserCache>, // Bounded cache (max 32) for 1aln parsers to limit memory
     sequence_files: Vec<String>,  // Sequence files for lazy parser creation
 }
 
 impl Impg {
-    /// Get or create a OneAlnParser for a specific file index (lazy loading with bounded cache)
+    /// Create a OneAlnParser for a specific file index
     fn get_or_create_parser(&self, file_index: usize) -> Result<Arc<OneAlnParser>, ParseErr> {
         let alignment_file = &self.alignment_files[file_index];
 
@@ -416,18 +376,20 @@ impl Impg {
         let alignment_file_clone = alignment_file.clone();
         let seq_files_clone = self.sequence_files.clone();
 
-        // Use LRU cache to limit memory usage
-        let mut cache = self.onealn_parsers.write().unwrap();
-        cache.get_or_insert(file_index, || {
-            OneAlnParser::new(alignment_file_clone.clone(), 
-                if seq_files_clone.is_empty() { None } else { Some(seq_files_clone.as_slice()) })
-                .map(Arc::new)
-                .map_err(|e| {
-                    ParseErr::InvalidFormat(format!(
-                        "Failed to initialize OneAln parser for '{}': {e}",
-                        alignment_file_clone
-                    ))
-                })
+        OneAlnParser::new(
+            alignment_file_clone.clone(),
+            if seq_files_clone.is_empty() {
+                None
+            } else {
+                Some(seq_files_clone.as_slice())
+            },
+        )
+        .map(Arc::new)
+        .map_err(|e| {
+            ParseErr::InvalidFormat(format!(
+                "Failed to initialize OneAln parser for '{}': {e}",
+                alignment_file_clone
+            ))
         })
     }
 
@@ -443,12 +405,9 @@ impl Impg {
             ));
         }
 
-        let parser = self.get_or_create_parser(file_index).map_err(|e| {
-            format!(
-                "Failed to get parser for '{}': {:?}",
-                alignment_file, e
-            )
-        })?;
+        let parser = self
+            .get_or_create_parser(file_index)
+            .map_err(|e| format!("Failed to get parser for '{}': {:?}", alignment_file, e))?;
 
         let alignment_index = metadata.data_offset();
         parser.seek_alignment(alignment_index).map_err(|e| {
@@ -486,8 +445,7 @@ impl Impg {
 
         // Fetch only the relevant portions of the sequences from scaffold coordinates
         let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
-        let query_seq =
-            sequence_index.fetch_sequence(query_name, query_start, query_end);
+        let query_seq = sequence_index.fetch_sequence(query_name, query_start, query_end);
 
         // Fetch target sequence
         let target_name = self.seq_index.get_name(target_id).unwrap();
@@ -552,41 +510,36 @@ impl Impg {
         let file_index = metadata.alignment_file_index as usize;
         let alignment_file = &self.alignment_files[file_index];
 
-        let (
-            adj_target_start,
-            adj_target_end,
-            adj_query_start,
-            adj_query_end,
-            mut cigar_ops,
-        ) = match QueryMetadata::get_file_type(alignment_file) {
-            FileType::OneAln => {
-                let alignment = self
-                    .get_onealn_alignment(metadata)
-                    .unwrap_or_else(|e| panic!("{}", e));
+        let (adj_target_start, adj_target_end, adj_query_start, adj_query_end, mut cigar_ops) =
+            match QueryMetadata::get_file_type(alignment_file) {
+                FileType::OneAln => {
+                    let alignment = self
+                        .get_onealn_alignment(metadata)
+                        .unwrap_or_else(|e| panic!("{}", e));
 
-                self.process_tracepoints_data(
-                    &alignment,
-                    metadata,
-                    target_id,
-                    sequence_index.expect(
-                        "Sequence index is required when processing tracepoints for .1aln data",
-                    ),
-                )
-            }
-            FileType::Paf => {
-                let data_buffer = metadata
-                    .get_data_bytes(&self.alignment_files)
-                    .unwrap_or_else(|e| panic!("{}", e));
+                    self.process_tracepoints_data(
+                        &alignment,
+                        metadata,
+                        target_id,
+                        sequence_index.expect(
+                            "Sequence index is required when processing tracepoints for .1aln data",
+                        ),
+                    )
+                }
+                FileType::Paf => {
+                    let data_buffer = metadata
+                        .get_data_bytes(&self.alignment_files)
+                        .unwrap_or_else(|e| panic!("{}", e));
 
-                (
-                    metadata.target_start,
-                    metadata.target_end,
-                    metadata.query_start,
-                    metadata.query_end,
-                    metadata.get_cigar_ops_from_bytes(data_buffer),
-                )
-            }
-        };
+                    (
+                        metadata.target_start,
+                        metadata.target_end,
+                        metadata.query_start,
+                        metadata.query_end,
+                        metadata.get_cigar_ops_from_bytes(data_buffer),
+                    )
+                }
+            };
 
         let projection = project_target_range_through_alignment(
             (range_start, range_end),
@@ -717,7 +670,6 @@ impl Impg {
             alignment_files,
             forest_map,
             index_file_path: String::new(), // All trees are in memory, no need for index file path
-            onealn_parsers: RwLock::new(ParserCache::new(32)), // Bounded cache, max 32 parsers
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
         })
     }
@@ -779,9 +731,8 @@ impl Impg {
         // Now write the forest map at the end
         let forest_map_offset = current_offset;
         let forest_map_data =
-            bincode::serde::encode_to_vec(&forest_map, bincode::config::standard()).map_err(
-                |e| std::io::Error::other(format!("Failed to encode forest map: {e}")),
-            )?;
+            bincode::serde::encode_to_vec(&forest_map, bincode::config::standard())
+                .map_err(|e| std::io::Error::other(format!("Failed to encode forest map: {e}")))?;
 
         writer.write_all(&forest_map_data)?;
 
@@ -906,7 +857,6 @@ impl Impg {
             alignment_files: alignment_files.to_vec(),
             forest_map,
             index_file_path,
-            onealn_parsers: RwLock::new(ParserCache::new(32)), // Bounded cache, max 32 parsers
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
         })
     }

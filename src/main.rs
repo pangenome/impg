@@ -676,7 +676,11 @@ fn run() -> io::Result<()> {
     let args = Args::parse();
 
     match args {
-        Args::Index { common, alignment, sequence } => {
+        Args::Index {
+            common,
+            alignment,
+            sequence,
+        } => {
             initialize_threads_and_log(&common);
             let sequence_files = sequence.resolve_sequence_files()?;
             let _ = initialize_impg(&common, &alignment, sequence_files)?;
@@ -895,65 +899,61 @@ fn run() -> io::Result<()> {
             let impg = initialize_impg(&common, &alignment, sequence_files_for_impg)?;
 
             // Parse and validate all target ranges, tracking which parameter was used
-            let (target_ranges, from_range_param) =
-                if let Some(target_range_str) = &query.target_range {
-                    let (target_name, target_range, name) = if target_range_str.contains(':') {
-                        partition::parse_target_range(target_range_str)?
-                    } else {
-                        // No interval specified: use the whole sequence [0, len)
-                        let seq_name = target_range_str;
-                        let seq_id = impg.seq_index.get_id(seq_name).ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::NotFound,
-                                format!("Sequence '{seq_name}' not found in index"),
-                            )
-                        })?;
-                        let seq_len = impg
-                            .seq_index
-                            .get_len_from_id(seq_id)
-                            .ok_or_else(|| {
-                                io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    format!(
-                                        "Could not get length for sequence '{seq_name}'"
-                                    ),
-                                )
-                            })? as i32;
-                        let name = format!("{}:{}-{}", seq_name, 0, seq_len);
-                        (seq_name.to_string(), (0, seq_len), name)
-                    };
-                    // Validate sequence exists and range is within bounds
-                    validate_sequence_range(
-                        &target_name,
-                        target_range.0,
-                        target_range.1,
-                        &impg.seq_index,
-                    )?;
+            let (target_ranges, from_range_param) = if let Some(target_range_str) =
+                &query.target_range
+            {
+                let (target_name, target_range, name) = if target_range_str.contains(':') {
+                    partition::parse_target_range(target_range_str)?
+                } else {
+                    // No interval specified: use the whole sequence [0, len)
+                    let seq_name = target_range_str;
+                    let seq_id = impg.seq_index.get_id(seq_name).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::NotFound,
+                            format!("Sequence '{seq_name}' not found in index"),
+                        )
+                    })?;
+                    let seq_len = impg.seq_index.get_len_from_id(seq_id).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Could not get length for sequence '{seq_name}'"),
+                        )
+                    })? as i32;
+                    let name = format!("{}:{}-{}", seq_name, 0, seq_len);
+                    (seq_name.to_string(), (0, seq_len), name)
+                };
+                // Validate sequence exists and range is within bounds
+                validate_sequence_range(
+                    &target_name,
+                    target_range.0,
+                    target_range.1,
+                    &impg.seq_index,
+                )?;
+                validate_region_size(
+                    target_range.0,
+                    target_range.1,
+                    &output_format,
+                    query.effective_merge_distance(),
+                    gfa_maf_fasta.force_large_region,
+                )?;
+                (vec![(target_name, target_range, name)], true)
+            } else if let Some(target_bed) = &query.target_bed {
+                let targets = partition::parse_bed_file(target_bed)?;
+                // Validate all entries in the BED file
+                for (seq_name, (start, end), _) in &targets {
+                    validate_sequence_range(seq_name, *start, *end, &impg.seq_index)?;
                     validate_region_size(
-                        target_range.0,
-                        target_range.1,
+                        *start,
+                        *end,
                         &output_format,
                         query.effective_merge_distance(),
                         gfa_maf_fasta.force_large_region,
                     )?;
-                    (vec![(target_name, target_range, name)], true)
-                } else if let Some(target_bed) = &query.target_bed {
-                    let targets = partition::parse_bed_file(target_bed)?;
-                    // Validate all entries in the BED file
-                    for (seq_name, (start, end), _) in &targets {
-                        validate_sequence_range(seq_name, *start, *end, &impg.seq_index)?;
-                        validate_region_size(
-                            *start,
-                            *end,
-                            &output_format,
-                            query.effective_merge_distance(),
-                            gfa_maf_fasta.force_large_region,
-                        )?;
-                    }
-                    (targets, false)
-                } else {
-                    unreachable!("Already validated that either target_range or target_bed is present");
-                };
+                }
+                (targets, false)
+            } else {
+                unreachable!("Already validated that either target_range or target_bed is present");
+            };
 
             // Resolve output format based on 'auto' and parameter used
             let resolved_output_format = if output_format == "auto" {
@@ -1196,17 +1196,12 @@ fn run() -> io::Result<()> {
                                 format!("Sequence '{seq_name}' not found in index"),
                             )
                         })?;
-                        let seq_len = impg
-                            .seq_index
-                            .get_len_from_id(seq_id)
-                            .ok_or_else(|| {
-                                io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    format!(
-                                        "Could not get length for sequence '{seq_name}'"
-                                    ),
-                                )
-                            })? as i32;
+                        let seq_len = impg.seq_index.get_len_from_id(seq_id).ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("Could not get length for sequence '{seq_name}'"),
+                            )
+                        })? as i32;
                         let name = format!("{}:{}-{}", seq_name, 0, seq_len);
                         (seq_name.to_string(), (0, seq_len), name)
                     };
@@ -1312,7 +1307,11 @@ fn run() -> io::Result<()> {
                 progress_bar,
             )?;
         }
-        Args::Stats { common, alignment, sequence } => {
+        Args::Stats {
+            common,
+            alignment,
+            sequence,
+        } => {
             initialize_threads_and_log(&common);
             let sequence_files = sequence.resolve_sequence_files()?;
             let impg = initialize_impg(&common, &alignment, sequence_files)?;
@@ -1760,20 +1759,22 @@ fn generate_multi_index(
                             format!("Failed to open PAF file: {}", e),
                         )
                     })?;
-                    impg::paf::parse_paf_file(aln_file, file, threads, &mut seq_index_guard).map_err(|e| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("Failed to parse PAF records: {}", e),
-                        )
-                    })?
+                    impg::paf::parse_paf_file(aln_file, file, threads, &mut seq_index_guard)
+                        .map_err(|e| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("Failed to parse PAF records: {}", e),
+                            )
+                        })?
                 }
                 AlignmentFormat::OneAln => {
-                    let file = OneAlnParser::new(aln_file.clone(), sequence_files).map_err(|e| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("Failed to create 1aln parser: {}", e),
-                        )
-                    })?;
+                    let file =
+                        OneAlnParser::new(aln_file.clone(), sequence_files).map_err(|e| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("Failed to create 1aln parser: {}", e),
+                            )
+                        })?;
                     file.parse_alignments(&mut seq_index_guard).map_err(|e| {
                         io::Error::new(
                             io::ErrorKind::InvalidData,
@@ -1822,12 +1823,13 @@ fn generate_multi_index(
         }
     });
 
-    let impg = Impg::from_multi_alignment_records(&records_by_file, seq_index, sequence_files).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("Failed to create index: {e}"),
-        )
-    })?;
+    let impg = Impg::from_multi_alignment_records(&records_by_file, seq_index, sequence_files)
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to create index: {e}"),
+            )
+        })?;
 
     // Serialize the index with embedded forest map
     let index_file_path = index_file.clone();

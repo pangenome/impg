@@ -4,52 +4,10 @@
 
 use crate::alignment_record::{AlignmentRecord, Strand};
 use crate::seqidx::SequenceIndex;
+use log::{debug, warn};
 use onecode::OneFile;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::convert::TryFrom;
-use log::{debug, warn};
-
-/// Simple cache for .1aln file handles with random eviction
-struct OneAlnFileCache {
-    capacity: usize,
-    files: HashMap<String, OneFile>,
-}
-
-impl OneAlnFileCache {
-    fn new(capacity: usize) -> Self {
-        Self {
-            capacity,
-            files: HashMap::with_capacity(capacity),
-        }
-    }
-
-    fn get_or_open(&mut self, path: &str) -> Result<&mut OneFile, ParseErr> {
-        // Fast path: if cached, return it
-        if self.files.contains_key(path) {
-            return Ok(self.files.get_mut(path).unwrap());
-        }
-
-        // Evict one random entry if at capacity
-        if self.files.len() >= self.capacity {
-            if let Some(key_to_remove) = self.files.keys().next().map(|k| k.clone()) {
-                self.files.remove(&key_to_remove);
-            }
-        }
-
-        // Open and cache new file
-        let file = OneFile::open_read(path, None, None, 1)
-            .map_err(|e| ParseErr::InvalidFormat(format!("Failed to open 1aln file '{}': {}", path, e)))?;
-        
-        self.files.insert(path.to_string(), file);
-        Ok(self.files.get_mut(path).unwrap())
-    }
-}
-
-thread_local! {
-    // Per-thread cache: 10 files per thread (with 32 threads worst case = 320 files open)
-    static ONE_ALN_FILE_CACHE: RefCell<OneAlnFileCache> = RefCell::new(OneAlnFileCache::new(10));
-}
 
 /// 1aln file parser with metadata and O(1) seeking support
 pub struct OneAlnParser {
@@ -92,7 +50,10 @@ impl OneAlnParser {
     /// # Arguments
     /// * `file_path` - Path to the .1aln file
     /// * `sequence_file_hints` - Optional list of sequence file paths to help locate GDB files in their directories
-    pub fn new(file_path: String, sequence_file_hints: Option<&[String]>) -> Result<Self, ParseErr> {
+    pub fn new(
+        file_path: String,
+        sequence_file_hints: Option<&[String]>,
+    ) -> Result<Self, ParseErr> {
         let mut file = OneFile::open_read(&file_path, None, None, 1)
             .map_err(|e| ParseErr::InvalidFormat(format!("Failed to open 1aln file: {}", e)))?;
 
@@ -130,22 +91,36 @@ impl OneAlnParser {
                 continue;
             }
 
-            let is_query = *ref_count == 1;    // First reference is query (A-read)
-            let is_target = *ref_count == 2;   // Second reference is target (B-read)
+            let is_query = *ref_count == 1; // First reference is query (A-read)
+            let is_target = *ref_count == 2; // Second reference is target (B-read)
 
             debug!(
                 "Processing reference {}: {} (count: {}, type: {})",
                 ref_idx + 1,
                 ref_path,
                 ref_count,
-                if is_query { "query" } else if is_target { "target" } else { "unknown" }
+                if is_query {
+                    "query"
+                } else if is_target {
+                    "target"
+                } else {
+                    "unknown"
+                }
             );
 
             // Helper function to strip fasta and AGC extensions
             let strip_seq_ext = |p: &str| -> String {
                 let path_str = p.to_string();
                 // Try to remove common sequence file extensions (FASTA and AGC)
-                for ext in &[".fasta.gz", ".fa.gz", ".fna.gz", ".fasta", ".fa", ".fna", ".agc"] {
+                for ext in &[
+                    ".fasta.gz",
+                    ".fa.gz",
+                    ".fna.gz",
+                    ".fasta",
+                    ".fa",
+                    ".fna",
+                    ".agc",
+                ] {
                     if path_str.ends_with(ext) {
                         return path_str[..path_str.len() - ext.len()].to_string();
                     }
@@ -176,20 +151,25 @@ impl OneAlnParser {
                         let seq_path = std::path::Path::new(seq_file);
                         if let Some(seq_dir) = seq_path.parent() {
                             // Check if this sequence file matches the reference
-                            let seq_base_name = seq_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                            let seq_base_name =
+                                seq_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                             let seq_base_stripped = strip_seq_ext(seq_base_name);
 
                             // If basenames match (with or without extensions), look for GDB here
-                            if !ref_base_stripped.is_empty() && (
-                                seq_base_stripped == ref_base_stripped ||
-                                seq_base_name == ref_base_name ||
-                                seq_base_name == ref_base_stripped
-                            ) {
+                            if !ref_base_stripped.is_empty()
+                                && (seq_base_stripped == ref_base_stripped
+                                    || seq_base_name == ref_base_name
+                                    || seq_base_name == ref_base_stripped)
+                            {
                                 for ext in &[".1gdb", ".gdb"] {
-                                    let with_ext = seq_dir.join(format!("{}{}", seq_base_stripped, ext));
+                                    let with_ext =
+                                        seq_dir.join(format!("{}{}", seq_base_stripped, ext));
                                     if with_ext.exists() {
                                         gdb_path = Some(with_ext.to_string_lossy().to_string());
-                                        debug!("Found GDB via sequence file hint: {}", gdb_path.as_ref().unwrap());
+                                        debug!(
+                                            "Found GDB via sequence file hint: {}",
+                                            gdb_path.as_ref().unwrap()
+                                        );
                                         break;
                                     }
                                 }
@@ -203,7 +183,10 @@ impl OneAlnParser {
             }
 
             // Strategy 2: Try as absolute path (as-is) - but only if it's a GDB file
-            if gdb_path.is_none() && std::path::Path::new(ref_path).exists() && (ref_path.ends_with(".1gdb") || ref_path.ends_with(".gdb")) {
+            if gdb_path.is_none()
+                && std::path::Path::new(ref_path).exists()
+                && (ref_path.ends_with(".1gdb") || ref_path.ends_with(".gdb"))
+            {
                 gdb_path = Some(ref_path.clone());
             }
 
@@ -277,7 +260,9 @@ impl OneAlnParser {
             // Strategy 8: Try relative to alignment file directory (as-is) - but only if it's a GDB file
             if gdb_path.is_none() {
                 let relative_path = aln_dir.join(ref_path);
-                if relative_path.exists() && (ref_path.ends_with(".1gdb") || ref_path.ends_with(".gdb")) {
+                if relative_path.exists()
+                    && (ref_path.ends_with(".1gdb") || ref_path.ends_with(".gdb"))
+                {
                     gdb_path = Some(relative_path.to_string_lossy().to_string());
                 }
             }
@@ -299,13 +284,21 @@ impl OneAlnParser {
                         query_seq_lengths = ref_lengths;
                         query_contig_offsets = ref_offsets;
                         has_external_query = true;
-                        debug!("Loaded query genome metadata from: {} ({} sequences)", gdb_path, query_seq_names.len());
+                        debug!(
+                            "Loaded query genome metadata from: {} ({} sequences)",
+                            gdb_path,
+                            query_seq_names.len()
+                        );
                     } else if is_target {
                         target_seq_names = ref_names;
                         target_seq_lengths = ref_lengths;
                         target_contig_offsets = ref_offsets;
                         has_external_target = true;
-                        debug!("Loaded target genome metadata from: {} ({} sequences)", gdb_path, target_seq_names.len());
+                        debug!(
+                            "Loaded target genome metadata from: {} ({} sequences)",
+                            gdb_path,
+                            target_seq_names.len()
+                        );
                     }
                 }
                 Err(e) => {
@@ -322,7 +315,10 @@ impl OneAlnParser {
             target_seq_names = embedded_names;
             target_seq_lengths = embedded_lengths;
             target_contig_offsets = embedded_offsets;
-            debug!("Using embedded skeleton for target genome ({} sequences)", target_seq_names.len());
+            debug!(
+                "Using embedded skeleton for target genome ({} sequences)",
+                target_seq_names.len()
+            );
         }
 
         // If this is a self-alignment (no external query), use target for query too
@@ -371,7 +367,8 @@ impl OneAlnParser {
         &self,
         seq_index: &mut SequenceIndex,
     ) -> Result<Vec<AlignmentRecord>, ParseErr> {
-        let (query_contig_to_seq_id, target_contig_to_seq_id) = self.prepare_sequence_index(seq_index)?;
+        let (query_contig_to_seq_id, target_contig_to_seq_id) =
+            self.prepare_sequence_index(seq_index)?;
 
         let mut file = OneFile::open_read(&self.file_path, None, None, 1)
             .map_err(|e| ParseErr::InvalidFormat(format!("Failed to open 1aln file: {}", e)))?;
@@ -383,8 +380,12 @@ impl OneAlnParser {
             match current_line {
                 '\0' => break,
                 'A' => {
-                    let (record, next_line) =
-                        self.parse_single_alignment(&mut file, &query_contig_to_seq_id, &target_contig_to_seq_id, alignment_index)?;
+                    let (record, next_line) = self.parse_single_alignment(
+                        &mut file,
+                        &query_contig_to_seq_id,
+                        &target_contig_to_seq_id,
+                        alignment_index,
+                    )?;
                     records.push(record);
                     alignment_index += 1;
                     current_line = next_line;
@@ -561,8 +562,10 @@ impl OneAlnParser {
         &self,
         seq_index: &mut SequenceIndex,
     ) -> Result<(HashMap<i64, u32>, HashMap<i64, u32>), ParseErr> {
-        let mut query_contig_to_seq_id = HashMap::with_capacity(self.metadata.query_seq_names.len());
-        let mut target_contig_to_seq_id = HashMap::with_capacity(self.metadata.target_seq_names.len());
+        let mut query_contig_to_seq_id =
+            HashMap::with_capacity(self.metadata.query_seq_names.len());
+        let mut target_contig_to_seq_id =
+            HashMap::with_capacity(self.metadata.target_seq_names.len());
 
         // Register query sequences
         for (&contig_id, name) in &self.metadata.query_seq_names {
@@ -739,11 +742,13 @@ impl OneAlnParser {
     where
         F: FnOnce(&mut OneFile) -> Result<R, ParseErr>,
     {
-        ONE_ALN_FILE_CACHE.with(|cache_cell| -> Result<R, ParseErr> {
-            let mut cache = cache_cell.borrow_mut();
-            let file = cache.get_or_open(&self.file_path)?;
-            f(file)
-        })
+        let mut file = OneFile::open_read(&self.file_path, None, None, 1).map_err(|e| {
+            ParseErr::InvalidFormat(format!(
+                "Failed to open 1aln file '{}': {}",
+                self.file_path, e
+            ))
+        })?;
+        f(&mut file)
     }
 
     fn read_alignment_details(
@@ -767,7 +772,7 @@ impl OneAlnParser {
         }
 
         // PAFtoALN can produce zero-length self-alignments with:
-        // - query_start == query_end, target_start == target_end, 
+        // - query_start == query_end, target_start == target_end,
         // - no differences, and one tracepoint.
         // This causes bugs in ALNtoPAF and needs fixing.
         if alignment.query_contig_start == alignment.query_contig_end && alignment.target_contig_start == alignment.target_contig_end
@@ -778,8 +783,7 @@ impl OneAlnParser {
         {
             warn!(
                 "Zero-length self-alignment at {}:{} (PAFtoALN artifact) - fixing coordinates",
-                alignment.query_name,
-                alignment.query_contig_start
+                alignment.query_name, alignment.query_contig_start
             );
 
             alignment.query_contig_start = 0;
@@ -796,7 +800,7 @@ impl OneAlnParser {
                 )));
             }
         }
-        
+
         Ok(alignment)
     }
 }
@@ -843,16 +847,10 @@ impl OneAlnAlignment {
                 ))
             })?;
         let start_i32 = i32::try_from(start).map_err(|_| {
-            ParseErr::InvalidFormat(format!(
-                "Query scaffold start outside i32 range: {}",
-                start
-            ))
+            ParseErr::InvalidFormat(format!("Query scaffold start outside i32 range: {}", start))
         })?;
         let end_i32 = i32::try_from(end).map_err(|_| {
-            ParseErr::InvalidFormat(format!(
-                "Query scaffold end outside i32 range: {}",
-                end
-            ))
+            ParseErr::InvalidFormat(format!("Query scaffold end outside i32 range: {}", end))
         })?;
         Ok((start_i32, end_i32))
     }
@@ -914,10 +912,7 @@ impl OneAlnAlignment {
             ))
         })?;
         let end_i32 = i32::try_from(end).map_err(|_| {
-            ParseErr::InvalidFormat(format!(
-                "Target scaffold end outside i32 range: {}",
-                end
-            ))
+            ParseErr::InvalidFormat(format!("Target scaffold end outside i32 range: {}", end))
         })?;
         Ok((start_i32, end_i32))
     }
