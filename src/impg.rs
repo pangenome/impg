@@ -356,25 +356,54 @@ impl SortedRanges {
     }
 }
 
+/// Bounded cache for OneAlnParsers to prevent unbounded memory growth
+struct ParserCache {
+    capacity: usize,
+    cache: FxHashMap<usize, Arc<OneAlnParser>>,
+}
+
+impl ParserCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            cache: FxHashMap::default(),
+        }
+    }
+
+    fn get_or_insert<F>(&mut self, key: usize, f: F) -> Result<Arc<OneAlnParser>, ParseErr>
+    where
+        F: FnOnce() -> Result<Arc<OneAlnParser>, ParseErr>,
+    {
+        if let Some(parser) = self.cache.get(&key) {
+            return Ok(Arc::clone(parser));
+        }
+
+        // Evict one entry if at capacity
+        if self.cache.len() >= self.capacity && self.capacity > 0 {
+            if let Some(&key_to_evict) = self.cache.keys().next() {
+                self.cache.remove(&key_to_evict);
+            }
+        }
+
+        let parser = f()?;
+        self.cache.insert(key, Arc::clone(&parser));
+        Ok(parser)
+    }
+}
+
 pub struct Impg {
     pub trees: RwLock<TreeMap>,
     pub seq_index: SequenceIndex,
     alignment_files: Vec<String>, // List of all alignment files (PAF or 1aln)
     pub forest_map: ForestMap,    // Forest map for lazy loading
     index_file_path: String,      // Path to the index file for lazy loading
-    onealn_parsers: RwLock<FxHashMap<usize, Arc<OneAlnParser>>>, // Lazy-loaded cached 1aln parsers per file index
+    onealn_parsers: RwLock<ParserCache>, // Bounded cache (max 32) for 1aln parsers to limit memory
     sequence_files: Vec<String>,  // Sequence files for lazy parser creation
 }
 
 impl Impg {
-    /// Get or create a OneAlnParser for a specific file index (lazy loading)
+    /// Get or create a OneAlnParser for a specific file index (lazy loading with bounded cache)
     fn get_or_create_parser(&self, file_index: usize) -> Result<Arc<OneAlnParser>, ParseErr> {
-        // First check if parser is already cached
-        if let Some(parser) = self.onealn_parsers.read().unwrap().get(&file_index) {
-            return Ok(Arc::clone(parser));
-        }
-
-        // Not cached - create it
         let alignment_file = &self.alignment_files[file_index];
 
         if !alignment_file.ends_with(".1aln") {
@@ -384,28 +413,22 @@ impl Impg {
             )));
         }
 
-        let sequence_files = if self.sequence_files.is_empty() {
-            None
-        } else {
-            Some(self.sequence_files.as_slice())
-        };
+        let alignment_file_clone = alignment_file.clone();
+        let seq_files_clone = self.sequence_files.clone();
 
-        let parser = OneAlnParser::new(alignment_file.clone(), sequence_files).map_err(|e| {
-            ParseErr::InvalidFormat(format!(
-                "Failed to initialize OneAln parser for '{}': {e}",
-                alignment_file
-            ))
-        })?;
-
-        let parser_arc = Arc::new(parser);
-
-        // Cache it for future use
-        self.onealn_parsers
-            .write()
-            .unwrap()
-            .insert(file_index, Arc::clone(&parser_arc));
-
-        Ok(parser_arc)
+        // Use LRU cache to limit memory usage
+        let mut cache = self.onealn_parsers.write().unwrap();
+        cache.get_or_insert(file_index, || {
+            OneAlnParser::new(alignment_file_clone.clone(), 
+                if seq_files_clone.is_empty() { None } else { Some(seq_files_clone.as_slice()) })
+                .map(Arc::new)
+                .map_err(|e| {
+                    ParseErr::InvalidFormat(format!(
+                        "Failed to initialize OneAln parser for '{}': {e}",
+                        alignment_file_clone
+                    ))
+                })
+        })
     }
 
     /// Get a OneAlnAlignment from metadata (lazy loading the parser)
@@ -694,7 +717,7 @@ impl Impg {
             alignment_files,
             forest_map,
             index_file_path: String::new(), // All trees are in memory, no need for index file path
-            onealn_parsers: RwLock::new(FxHashMap::default()), // Start with empty parsers - create on demand
+            onealn_parsers: RwLock::new(ParserCache::new(32)), // Bounded cache, max 32 parsers
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
         })
     }
@@ -883,7 +906,7 @@ impl Impg {
             alignment_files: alignment_files.to_vec(),
             forest_map,
             index_file_path,
-            onealn_parsers: RwLock::new(FxHashMap::default()), // Start with empty parsers - create on demand
+            onealn_parsers: RwLock::new(ParserCache::new(32)), // Bounded cache, max 32 parsers
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
         })
     }
