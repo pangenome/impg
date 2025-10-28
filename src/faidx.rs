@@ -82,7 +82,7 @@ impl FastaIndex {
                 format!("Sequence '{seq_name}' not found in any FASTA file"),
             )
         })?;
-        
+
         let reader = faidx::Reader::from_path(fasta_path).map_err(|e| {
             io::Error::other(format!("Failed to open FASTA file '{fasta_path}': {e}"))
         })?;

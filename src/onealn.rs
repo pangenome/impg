@@ -6,7 +6,7 @@ use crate::alignment_record::{AlignmentRecord, Strand};
 use crate::seqidx::SequenceIndex;
 use log::{debug, warn};
 use onecode::OneFile;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 
 /// 1aln file parser with metadata and O(1) seeking support
@@ -139,35 +139,39 @@ impl OneAlnParser {
             // Strategy 1: Check in directories of sequence files provided via command-line hints
             if gdb_path.is_none() {
                 if let Some(seq_files) = sequence_file_hints {
-                    // Extract the base name from ref_path (just the filename without directory)
-                    let ref_base_name = std::path::Path::new(ref_path)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("");
-                    let ref_base_stripped = strip_seq_ext(ref_base_name);
+                    let ref_path_obj = std::path::Path::new(ref_path);
 
-                    // Check each sequence file directory
+                    let mut candidate_bases: HashSet<String> = HashSet::new();
+                    let mut add_candidate = |value: &str| {
+                        if value.is_empty() || value.ends_with(".1gdb") || value.ends_with(".gdb") {
+                            return;
+                        }
+                        candidate_bases.insert(value.to_string());
+                        if let Some(no_prefix) = value.strip_prefix("./") {
+                            if !no_prefix.is_empty() {
+                                candidate_bases.insert(no_prefix.to_string());
+                            }
+                        }
+                    };
+
+                    let stripped_full = strip_seq_ext(ref_path);
+                    add_candidate(&stripped_full);
+
+                    if let Some(ref_base_name) = ref_path_obj.file_name().and_then(|n| n.to_str()) {
+                        let stripped_name = strip_seq_ext(ref_base_name);
+                        add_candidate(&stripped_name);
+                    }
+
                     for seq_file in seq_files {
                         let seq_path = std::path::Path::new(seq_file);
                         if let Some(seq_dir) = seq_path.parent() {
-                            // Check if this sequence file matches the reference
-                            let seq_base_name =
-                                seq_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                            let seq_base_stripped = strip_seq_ext(seq_base_name);
-
-                            // If basenames match (with or without extensions), look for GDB here
-                            if !ref_base_stripped.is_empty()
-                                && (seq_base_stripped == ref_base_stripped
-                                    || seq_base_name == ref_base_name
-                                    || seq_base_name == ref_base_stripped)
-                            {
+                            for stem in &candidate_bases {
                                 for ext in &[".1gdb", ".gdb"] {
-                                    let with_ext =
-                                        seq_dir.join(format!("{}{}", seq_base_stripped, ext));
-                                    if with_ext.exists() {
-                                        gdb_path = Some(with_ext.to_string_lossy().to_string());
+                                    let candidate = seq_dir.join(format!("{}{}", stem, ext));
+                                    if candidate.exists() {
+                                        gdb_path = Some(candidate.to_string_lossy().to_string());
                                         debug!(
-                                            "Found GDB via sequence file hint: {}",
+                                            "Found GDB via sequence file hint directory: {}",
                                             gdb_path.as_ref().unwrap()
                                         );
                                         break;
@@ -177,6 +181,9 @@ impl OneAlnParser {
                                     break;
                                 }
                             }
+                        }
+                        if gdb_path.is_some() {
+                            break;
                         }
                     }
                 }
