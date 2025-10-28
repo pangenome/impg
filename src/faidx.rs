@@ -42,7 +42,7 @@ impl FaidxCache {
 }
 
 thread_local! {
-    // Per-thread cache: 10 files per thread (with 32 threads worst case = 320 files open)
+    // Per-thread cache: 10 files per thread (with 32 threads worst case = 320 x 2 (fai and gzi) files open)
     static FAIDX_CACHE: RefCell<FaidxCache> = RefCell::new(FaidxCache::new(10));
 }
 
