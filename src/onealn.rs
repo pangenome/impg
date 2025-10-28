@@ -10,8 +10,54 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 use log::{debug, warn};
 
+/// LRU cache for .1aln file handles using generation counter for O(1) operations
+struct OneAlnFileCache {
+    capacity: usize,
+    generation: u64,
+    files: HashMap<String, (OneFile, u64)>, // (file, last_access_generation)
+}
+
+impl OneAlnFileCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            generation: 0,
+            files: HashMap::with_capacity(capacity),
+        }
+    }
+
+    fn get_or_open(&mut self, path: &str) -> Result<&mut OneFile, ParseErr> {
+        self.generation = self.generation.wrapping_add(1);
+
+        // Fast path: if cached, update generation and return
+        if self.files.contains_key(path) {
+            let (file, gen) = self.files.get_mut(path).unwrap();
+            *gen = self.generation;
+            return Ok(file);
+        }
+
+        // Evict oldest if at capacity
+        if self.files.len() >= self.capacity {
+            if let Some(oldest_path) = self.files.iter()
+                .min_by_key(|(_, (_, gen))| gen)
+                .map(|(k, _)| k.clone())
+            {
+                self.files.remove(&oldest_path);
+            }
+        }
+
+        // Open and cache new file
+        let file = OneFile::open_read(path, None, None, 1)
+            .map_err(|e| ParseErr::InvalidFormat(format!("Failed to open 1aln file '{}': {}", path, e)))?;
+        
+        self.files.insert(path.to_string(), (file, self.generation));
+        Ok(&mut self.files.get_mut(path).unwrap().0)
+    }
+}
+
 thread_local! {
-    static ONE_ALN_FILE_CACHE: RefCell<HashMap<String, OneFile>> = RefCell::new(HashMap::new());
+    // Cap number of concurrent open .1aln files
+    static ONE_ALN_FILE_CACHE: RefCell<OneAlnFileCache> = RefCell::new(OneAlnFileCache::new(512));
 }
 
 /// 1aln file parser with metadata and O(1) seeking support
@@ -702,15 +748,9 @@ impl OneAlnParser {
     where
         F: FnOnce(&mut OneFile) -> Result<R, ParseErr>,
     {
-        ONE_ALN_FILE_CACHE.with(|cache| -> Result<R, ParseErr> {
-            let mut cache = cache.borrow_mut();
-            if !cache.contains_key(&self.file_path) {
-                let file = OneFile::open_read(&self.file_path, None, None, 1).map_err(|e| {
-                    ParseErr::InvalidFormat(format!("Failed to open 1aln file: {}", e))
-                })?;
-                cache.insert(self.file_path.clone(), file);
-            }
-            let file = cache.get_mut(&self.file_path).expect("entry inserted above");
+        ONE_ALN_FILE_CACHE.with(|cache_cell| -> Result<R, ParseErr> {
+            let mut cache = cache_cell.borrow_mut();
+            let file = cache.get_or_open(&self.file_path)?;
             f(file)
         })
     }
