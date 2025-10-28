@@ -13,13 +13,11 @@ use log::{debug, warn};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use lru::LruCache;
-use std::num::NonZeroUsize;
 use std::cell::RefCell;
 use std::cmp::{max, min};
 use std::fs::File;
 use std::io::{BufReader, Seek, SeekFrom};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 // use libc;
 // fn log_memory_usage(label: &str) {
@@ -356,15 +354,14 @@ impl SortedRanges {
 pub struct Impg {
     pub trees: RwLock<TreeMap>,
     pub seq_index: SequenceIndex,
-    alignment_files: Vec<String>, // List of all alignment files (PAF or 1aln)
-    pub forest_map: ForestMap,    // Forest map for lazy loading
-    index_file_path: String,      // Path to the index file for lazy loading
-    sequence_files: Vec<String>,  // Sequence files for lazy parser creation
-    parser_cache: Mutex<LruCache<usize, Arc<OneAlnParser>>>, // Bounded cache for parsers
+    alignment_files: Vec<String>,
+    pub forest_map: ForestMap,
+    index_file_path: String,
+    sequence_files: Vec<String>,
 }
 
 impl Impg {
-    /// Create or retrieve cached OneAlnParser for a specific file index
+    /// Create a OneAlnParser for a specific file index
     fn get_or_create_parser(&self, file_index: usize) -> Result<Arc<OneAlnParser>, ParseErr> {
         let alignment_file = &self.alignment_files[file_index];
 
@@ -375,13 +372,7 @@ impl Impg {
             )));
         }
 
-        // Check cache first
-        if let Some(parser) = self.parser_cache.lock().unwrap().get(&file_index) {
-            return Ok(Arc::clone(parser));
-        }
-
-        // Create new parser
-        let parser = OneAlnParser::new(
+        OneAlnParser::new(
             alignment_file.clone(),
             if self.sequence_files.is_empty() {
                 None
@@ -395,15 +386,7 @@ impl Impg {
                 "Failed to initialize OneAln parser for '{}': {e}",
                 alignment_file
             ))
-        })?;
-
-        // Cache it (LRU will evict oldest if full)
-        self.parser_cache
-            .lock()
-            .unwrap()
-            .put(file_index, Arc::clone(&parser));
-
-        Ok(parser)
+        })
     }
 
     /// Get a OneAlnAlignment from metadata (lazy loading the parser)
@@ -684,7 +667,6 @@ impl Impg {
             forest_map,
             index_file_path: String::new(),
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
-            parser_cache: Mutex::new(LruCache::new(NonZeroUsize::new(100).unwrap())),
         })
     }
 
@@ -872,7 +854,6 @@ impl Impg {
             forest_map,
             index_file_path,
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
-            parser_cache: Mutex::new(LruCache::new(NonZeroUsize::new(100).unwrap())),
         })
     }
 
