@@ -633,15 +633,17 @@ fn _convert_and_write_gfa<R: AsRef<str>, W: Write>(raw_gfa: R, writer: &mut W) -
 }
 
 pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
-    seq.iter()
-        .rev()
-        .map(|&base| match base {
+    let len = seq.len();
+    let mut result = Vec::with_capacity(len);
+    for &base in seq.iter().rev() {
+        result.push(match base {
             b'A' | b'a' => b'T',
             b'T' | b't' => b'A',
             b'C' | b'c' => b'G',
             b'G' | b'g' => b'C',
             b'N' | b'n' => b'N',
             _ => base,
-        })
-        .collect()
+        });
+    }
+    result
 }

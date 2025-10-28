@@ -22,9 +22,15 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 // Thread-local CIGAR cache: stores expensive tracepoint->CIGAR reconstructions
-// Key: (alignment_file_index, alignment_offset) -> CIGAR string  
+// Key: (alignment_file_index, alignment_offset) -> parsed CIGAR ops (avoids string parsing)
 thread_local! {
-    static CIGAR_CACHE: RefCell<HashMap<(u16, u64), String>> = RefCell::new(HashMap::with_capacity(2000));
+    static CIGAR_CACHE: RefCell<HashMap<(u16, u64), Vec<CigarOp>>> = RefCell::new(HashMap::with_capacity(1000));
+}
+
+// Thread-local alignment metadata cache: avoids redundant .1aln file seeks
+// Key: (alignment_file_index, alignment_offset) -> (differences, trace_spacing, tracepoints, trace_diffs)
+thread_local! {
+    static ALIGNMENT_META_CACHE: RefCell<HashMap<(u16, u64), (i64, i64, Vec<i64>, Vec<i64>)>> = RefCell::new(HashMap::with_capacity(1000));
 }
 
 // use libc;
@@ -435,12 +441,48 @@ impl Impg {
         })?;
 
         let alignment_index = metadata.data_offset();
-        parser.seek_alignment(alignment_index).map_err(|e| {
+        
+        // Check metadata cache first
+        let cache_key = (metadata.alignment_file_index, alignment_index);
+        let cached_meta = ALIGNMENT_META_CACHE.with(|cache| {
+            cache.borrow().get(&cache_key).cloned()
+        });
+
+        let mut alignment = parser.seek_alignment(alignment_index).map_err(|e| {
             format!(
                 "Failed to seek to alignment {} in '{}': {:?}",
                 alignment_index, alignment_file, e
             )
-        })
+        })?;
+
+        // Restore cached tracepoint data if available (skips file I/O)
+        if let Some((differences, trace_spacing, tracepoints, trace_diffs)) = cached_meta {
+            alignment.differences = differences;
+            alignment.trace_spacing = trace_spacing;
+            alignment.tracepoints = tracepoints;
+            alignment.trace_diffs = trace_diffs;
+        } else {
+            // Cache the tracepoint data for future use
+            ALIGNMENT_META_CACHE.with(|cache| {
+                let mut cache_mut = cache.borrow_mut();
+                if cache_mut.len() >= 1000 {
+                    if let Some(key) = cache_mut.keys().next().cloned() {
+                        cache_mut.remove(&key);
+                    }
+                }
+                cache_mut.insert(
+                    cache_key,
+                    (
+                        alignment.differences,
+                        alignment.trace_spacing,
+                        alignment.tracepoints.clone(),
+                        alignment.trace_diffs.clone(),
+                    ),
+                );
+            });
+        }
+
+        Ok(alignment)
     }
 
     fn process_tracepoints_data(
@@ -453,34 +495,31 @@ impl Impg {
         let (query_start, query_end) = (metadata.query_start, metadata.query_end);
         let (target_start, target_end) = (metadata.target_start, metadata.target_end);
 
-        // if there are no differences, we can shortcut to a perfect match CIGAR
+        // Fast path: perfect match (no differences)
         if alignment.differences == 0 {
             let match_len = query_end - query_start;
-            let cigar_ops = vec![CigarOp::new(match_len, '=')];
-            return (target_start, target_end, query_start, query_end, cigar_ops);
+            return (target_start, target_end, query_start, query_end, vec![CigarOp::new(match_len, '=')]);
         }
 
-        // Check cache first (key: file_index + alignment_offset)
+        // Check cache first - stores parsed CigarOps directly
         let cache_key = (metadata.alignment_file_index, metadata.data_offset());
-        let cigar_str = CIGAR_CACHE.with(|cache| {
-            let cache_ref = cache.borrow();
-            cache_ref.get(&cache_key).cloned()
+        let cached_ops = CIGAR_CACHE.with(|cache| {
+            cache.borrow().get(&cache_key).cloned()
         });
 
-        let cigar_str = if let Some(cached) = cigar_str {
-            // Cache hit - skip expensive WFA2 alignment
-            cached
+        let cigar_ops = if let Some(ops) = cached_ops {
+            // Cache hit - return pre-parsed ops (no string parsing needed)
+            ops
         } else {
-            // Cache miss - reconstruct CIGAR from tracepoints
-            let tracepoints: Vec<(usize, usize)> = alignment
-                .trace_diffs
-                .iter()
-                .zip(alignment.tracepoints.iter())
-                .map(|(&diff, &tp)| (diff as usize, tp as usize))
-                .collect();
+            // Cache miss - reconstruct from tracepoints
+            let num_tps = alignment.tracepoints.len();
+            let mut tracepoints = Vec::with_capacity(num_tps);
+            for i in 0..num_tps {
+                tracepoints.push((alignment.trace_diffs[i] as usize, alignment.tracepoints[i] as usize));
+            }
             let trace_spacing = alignment.trace_spacing as usize;
 
-            // Fetch sequences
+            // Fetch sequences (only on cache miss)
             let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
             let query_seq = sequence_index.fetch_sequence(query_name, query_start, query_end);
 
@@ -495,9 +534,9 @@ impl Impg {
             };
 
             // Reconstruct CIGAR with WFA2
-            match (query_seq, target_seq) {
+            let cigar_str = match (query_seq, target_seq) {
                 (Ok(query_seq), Ok(target_seq)) => {
-                    let cigar = with_edit_aligner(|aligner| {
+                    with_edit_aligner(|aligner| {
                         tracepoints_to_cigar_fastga_with_aligner(
                             &tracepoints,
                             trace_spacing,
@@ -508,40 +547,34 @@ impl Impg {
                             metadata.strand() == Strand::Reverse,
                             aligner,
                         )
-                    });
-
-                    // Store in cache
-                    CIGAR_CACHE.with(|cache| {
-                        let mut cache_mut = cache.borrow_mut();
-                        // Simple size limit: evict random entry if > 2000
-                        if cache_mut.len() >= 2000 {
-                            if let Some(key) = cache_mut.keys().next().cloned() {
-                                cache_mut.remove(&key);
-                            }
-                        }
-                        cache_mut.insert(cache_key, cigar.clone());
-                    });
-
-                    cigar
+                    })
                 }
                 (Err(e), _) => panic!("Failed to fetch query sequence: {e}"),
                 (_, Err(e)) => panic!("Failed to fetch target sequence: {e}"),
-            }
+            };
+
+            // Parse once and cache the ops
+            let ops = match parse_cigar_to_delta(&cigar_str) {
+                Ok(ops) => ops,
+                Err(e) => panic!("Failed to parse CIGAR '{cigar_str}': {:?}", e),
+            };
+
+            // Store parsed ops in cache
+            CIGAR_CACHE.with(|cache| {
+                let mut cache_mut = cache.borrow_mut();
+                if cache_mut.len() >= 2000 {
+                    // Evict random entry
+                    if let Some(key) = cache_mut.keys().next().cloned() {
+                        cache_mut.remove(&key);
+                    }
+                }
+                cache_mut.insert(cache_key, ops.clone());
+            });
+
+            ops
         };
 
-        (
-            target_start,
-            target_end,
-            query_start,
-            query_end,
-            match parse_cigar_to_delta(&cigar_str) {
-                Ok(ops) => ops,
-                Err(e) => panic!(
-                    "Failed to parse CIGAR string '{cigar_str}' during tracepoint processing: {:?}",
-                    e
-                ),
-            },
-        )
+        (target_start, target_end, query_start, query_end, cigar_ops)
     }
 
     fn project_overlapping_interval(
