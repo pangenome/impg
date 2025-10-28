@@ -15,10 +15,17 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::cmp::{max, min};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Seek, SeekFrom};
 use std::sync::Arc;
 use std::sync::RwLock;
+
+// Thread-local CIGAR cache: stores expensive tracepoint->CIGAR reconstructions
+// Key: (alignment_file_index, alignment_offset) -> CIGAR string  
+thread_local! {
+    static CIGAR_CACHE: RefCell<HashMap<(u16, u64), String>> = RefCell::new(HashMap::with_capacity(2000));
+}
 
 // use libc;
 // fn log_memory_usage(label: &str) {
@@ -453,68 +460,88 @@ impl Impg {
             return (target_start, target_end, query_start, query_end, cigar_ops);
         }
 
-        let tracepoints: Vec<(usize, usize)> = alignment
-            .trace_diffs
-            .iter()
-            .zip(alignment.tracepoints.iter())
-            .map(|(&diff, &tp)| (diff as usize, tp as usize))
-            .collect();
-        let trace_spacing = alignment.trace_spacing as usize;
+        // Check cache first (key: file_index + alignment_offset)
+        let cache_key = (metadata.alignment_file_index, metadata.data_offset());
+        let cigar_str = CIGAR_CACHE.with(|cache| {
+            let cache_ref = cache.borrow();
+            cache_ref.get(&cache_key).cloned()
+        });
 
-        // Fetch only the relevant portions of the sequences from scaffold coordinates
-        let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
-        let query_seq =
-            sequence_index.fetch_sequence(query_name, query_start, query_end);
-
-        // Fetch target sequence
-        let target_name = self.seq_index.get_name(target_id).unwrap();
-        let target_seq = if metadata.strand() == Strand::Forward {
-            sequence_index.fetch_sequence(target_name, target_start, target_end)
+        let cigar_str = if let Some(cached) = cigar_str {
+            // Cache hit - skip expensive WFA2 alignment
+            cached
         } else {
-            // Fetch and reverse complement for reverse strand alignments
-            match sequence_index.fetch_sequence(target_name, target_start, target_end) {
-                Ok(seq) => Ok(reverse_complement(&seq)),
-                Err(e) => Err(e),
+            // Cache miss - reconstruct CIGAR from tracepoints
+            let tracepoints: Vec<(usize, usize)> = alignment
+                .trace_diffs
+                .iter()
+                .zip(alignment.tracepoints.iter())
+                .map(|(&diff, &tp)| (diff as usize, tp as usize))
+                .collect();
+            let trace_spacing = alignment.trace_spacing as usize;
+
+            // Fetch sequences
+            let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
+            let query_seq = sequence_index.fetch_sequence(query_name, query_start, query_end);
+
+            let target_name = self.seq_index.get_name(target_id).unwrap();
+            let target_seq = if metadata.strand() == Strand::Forward {
+                sequence_index.fetch_sequence(target_name, target_start, target_end)
+            } else {
+                match sequence_index.fetch_sequence(target_name, target_start, target_end) {
+                    Ok(seq) => Ok(reverse_complement(&seq)),
+                    Err(e) => Err(e),
+                }
+            };
+
+            // Reconstruct CIGAR with WFA2
+            match (query_seq, target_seq) {
+                (Ok(query_seq), Ok(target_seq)) => {
+                    let cigar = with_edit_aligner(|aligner| {
+                        tracepoints_to_cigar_fastga_with_aligner(
+                            &tracepoints,
+                            trace_spacing,
+                            &query_seq,
+                            &target_seq,
+                            alignment.query_contig_start.try_into().unwrap(),
+                            alignment.target_contig_start.try_into().unwrap(),
+                            metadata.strand() == Strand::Reverse,
+                            aligner,
+                        )
+                    });
+
+                    // Store in cache
+                    CIGAR_CACHE.with(|cache| {
+                        let mut cache_mut = cache.borrow_mut();
+                        // Simple size limit: evict random entry if > 2000
+                        if cache_mut.len() >= 2000 {
+                            if let Some(key) = cache_mut.keys().next().cloned() {
+                                cache_mut.remove(&key);
+                            }
+                        }
+                        cache_mut.insert(cache_key, cigar.clone());
+                    });
+
+                    cigar
+                }
+                (Err(e), _) => panic!("Failed to fetch query sequence: {e}"),
+                (_, Err(e)) => panic!("Failed to fetch target sequence: {e}"),
             }
         };
 
-        // Convert tracepoints to CIGAR if we successfully fetched both sequences
-        match (query_seq, target_seq) {
-            (Ok(query_seq), Ok(target_seq)) => {
-                let cigar_str = with_edit_aligner(|aligner| {
-                    tracepoints_to_cigar_fastga_with_aligner(
-                        &tracepoints,
-                        trace_spacing,
-                        &query_seq,
-                        &target_seq,
-                        alignment.query_contig_start.try_into().unwrap(),
-                        alignment.target_contig_start.try_into().unwrap(),
-                        metadata.strand() == Strand::Reverse,
-                        aligner,
-                    )
-                });
-
-                (
-                    target_start,
-                    target_end,
-                    query_start,
-                    query_end,
-                    match parse_cigar_to_delta(&cigar_str) {
-                        Ok(ops) => ops,
-                        Err(e) => panic!(
-                            "Failed to parse CIGAR string '{cigar_str}' during tracepoint processing: {:?}",
-                            e
-                        ),
-                    },
-                )
-            }
-            (Err(e), _) => {
-                panic!("Failed to fetch query sequence: {e}");
-            }
-            (_, Err(e)) => {
-                panic!("Failed to fetch target sequence: {e}");
-            }
-        }
+        (
+            target_start,
+            target_end,
+            query_start,
+            query_end,
+            match parse_cigar_to_delta(&cigar_str) {
+                Ok(ops) => ops,
+                Err(e) => panic!(
+                    "Failed to parse CIGAR string '{cigar_str}' during tracepoint processing: {:?}",
+                    e
+                ),
+            },
+        )
     }
 
     fn project_overlapping_interval(
