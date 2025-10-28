@@ -1,6 +1,49 @@
 use rust_htslib::faidx;
 use rustc_hash::FxHashMap;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io::{self};
+
+// Simple cache for FASTA file handles with random eviction
+struct FaidxCache {
+    capacity: usize,
+    readers: HashMap<String, faidx::Reader>,
+}
+
+impl FaidxCache {
+    fn new(capacity: usize) -> Self {
+        FaidxCache {
+            capacity,
+            readers: HashMap::with_capacity(capacity),
+        }
+    }
+
+    fn get_or_open(&mut self, path: &str) -> io::Result<&mut faidx::Reader> {
+        // Fast path: if cached, return it
+        if self.readers.contains_key(path) {
+            return Ok(self.readers.get_mut(path).unwrap());
+        }
+
+        // Evict one random entry if at capacity
+        if self.readers.len() >= self.capacity {
+            if let Some(key_to_remove) = self.readers.keys().next().map(|k| k.clone()) {
+                self.readers.remove(&key_to_remove);
+            }
+        }
+
+        // Open the new reader
+        let reader = faidx::Reader::from_path(path).map_err(|e| {
+            io::Error::other(format!("Failed to open FASTA file '{path}': {e}"))
+        })?;
+
+        self.readers.insert(path.to_string(), reader);
+        Ok(self.readers.get_mut(path).unwrap())
+    }
+}
+
+thread_local! {
+    static FAIDX_CACHE: RefCell<FaidxCache> = RefCell::new(FaidxCache::new(256));
+}
 
 // Structure to manage multiple FASTA files
 #[derive(Debug)]
@@ -83,30 +126,32 @@ impl FastaIndex {
             )
         })?;
 
-        let reader = faidx::Reader::from_path(fasta_path).map_err(|e| {
-            io::Error::other(format!("Failed to open FASTA file '{fasta_path}': {e}"))
-        })?;
+        // Use the LRU cache to get or open the reader
+        FAIDX_CACHE.with(|cache_cell| -> io::Result<Vec<u8>> {
+            let mut cache = cache_cell.borrow_mut();
+            let reader = cache.get_or_open(fasta_path)?;
 
-        // Fetch sequence and properly handle memory
-        // rust-htslib uses 0-based half-open coordinates internally
-        // but fetch_seq expects 0-based inclusive end coordinate
-        let seq_vec = match reader.fetch_seq(seq_name, start as usize, (end - 1) as usize) {
-            Ok(seq) => {
-                let mut seq_vec = seq.to_vec();
-                unsafe { libc::free(seq.as_ptr() as *mut std::ffi::c_void) }; // Free up memory to avoid memory leak (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
-                seq_vec
-                    .iter_mut()
-                    .for_each(|byte| *byte = byte.to_ascii_uppercase());
-                seq_vec
-            }
-            Err(e) => {
-                return Err(io::Error::other(format!(
-                    "Failed to fetch sequence for {seq_name}: {e}"
-                )))
-            }
-        };
+            // Fetch sequence and properly handle memory
+            // rust-htslib uses 0-based half-open coordinates internally
+            // but fetch_seq expects 0-based inclusive end coordinate
+            let seq_vec = match reader.fetch_seq(seq_name, start as usize, (end - 1) as usize) {
+                Ok(seq) => {
+                    let mut seq_vec = seq.to_vec();
+                    unsafe { libc::free(seq.as_ptr() as *mut std::ffi::c_void) }; // Free up memory to avoid memory leak (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
+                    seq_vec
+                        .iter_mut()
+                        .for_each(|byte| *byte = byte.to_ascii_uppercase());
+                    seq_vec
+                }
+                Err(e) => {
+                    return Err(io::Error::other(format!(
+                        "Failed to fetch sequence for {seq_name}: {e}"
+                    )))
+                }
+            };
 
-        Ok(seq_vec)
+            Ok(seq_vec)
+        })
     }
 
     pub fn get_sequence_length(&self, seq_name: &str) -> io::Result<usize> {

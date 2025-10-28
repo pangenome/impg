@@ -10,39 +10,30 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 use log::{debug, warn};
 
-/// LRU cache for .1aln file handles using generation counter for O(1) operations
+/// Simple cache for .1aln file handles with random eviction
 struct OneAlnFileCache {
     capacity: usize,
-    generation: u64,
-    files: HashMap<String, (OneFile, u64)>, // (file, last_access_generation)
+    files: HashMap<String, OneFile>,
 }
 
 impl OneAlnFileCache {
     fn new(capacity: usize) -> Self {
         Self {
             capacity,
-            generation: 0,
             files: HashMap::with_capacity(capacity),
         }
     }
 
     fn get_or_open(&mut self, path: &str) -> Result<&mut OneFile, ParseErr> {
-        self.generation = self.generation.wrapping_add(1);
-
-        // Fast path: if cached, update generation and return
+        // Fast path: if cached, return it
         if self.files.contains_key(path) {
-            let (file, gen) = self.files.get_mut(path).unwrap();
-            *gen = self.generation;
-            return Ok(file);
+            return Ok(self.files.get_mut(path).unwrap());
         }
 
-        // Evict oldest if at capacity
+        // Evict one random entry if at capacity
         if self.files.len() >= self.capacity {
-            if let Some(oldest_path) = self.files.iter()
-                .min_by_key(|(_, (_, gen))| gen)
-                .map(|(k, _)| k.clone())
-            {
-                self.files.remove(&oldest_path);
+            if let Some(key_to_remove) = self.files.keys().next().map(|k| k.clone()) {
+                self.files.remove(&key_to_remove);
             }
         }
 
@@ -50,14 +41,13 @@ impl OneAlnFileCache {
         let file = OneFile::open_read(path, None, None, 1)
             .map_err(|e| ParseErr::InvalidFormat(format!("Failed to open 1aln file '{}': {}", path, e)))?;
         
-        self.files.insert(path.to_string(), (file, self.generation));
-        Ok(&mut self.files.get_mut(path).unwrap().0)
+        self.files.insert(path.to_string(), file);
+        Ok(self.files.get_mut(path).unwrap())
     }
 }
 
 thread_local! {
-    // Cap number of concurrent open .1aln files
-    static ONE_ALN_FILE_CACHE: RefCell<OneAlnFileCache> = RefCell::new(OneAlnFileCache::new(512));
+    static ONE_ALN_FILE_CACHE: RefCell<OneAlnFileCache> = RefCell::new(OneAlnFileCache::new(256));
 }
 
 /// 1aln file parser with metadata and O(1) seeking support
