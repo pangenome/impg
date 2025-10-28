@@ -88,7 +88,8 @@ impl PafFileCache {
 }
 
 thread_local! {
-    static PAF_FILE_CACHE: RefCell<PafFileCache> = RefCell::new(PafFileCache::new(256));
+    // Per-thread cache: 10 files per thread (with 32 threads worst case = 320 files open)
+    static PAF_FILE_CACHE: RefCell<PafFileCache> = RefCell::new(PafFileCache::new(10));
 }
 
 pub fn read_cigar_data(

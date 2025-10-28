@@ -42,7 +42,8 @@ impl FaidxCache {
 }
 
 thread_local! {
-    static FAIDX_CACHE: RefCell<FaidxCache> = RefCell::new(FaidxCache::new(256));
+    // Per-thread cache: 10 files per thread (with 32 threads worst case = 320 files open)
+    static FAIDX_CACHE: RefCell<FaidxCache> = RefCell::new(FaidxCache::new(10));
 }
 
 // Structure to manage multiple FASTA files
@@ -126,7 +127,7 @@ impl FastaIndex {
             )
         })?;
 
-        // Use the LRU cache to get or open the reader
+        // Use the per-thread cache to get or open the reader
         FAIDX_CACHE.with(|cache_cell| -> io::Result<Vec<u8>> {
             let mut cache = cache_cell.borrow_mut();
             let reader = cache.get_or_open(fasta_path)?;

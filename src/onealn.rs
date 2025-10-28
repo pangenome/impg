@@ -47,7 +47,8 @@ impl OneAlnFileCache {
 }
 
 thread_local! {
-    static ONE_ALN_FILE_CACHE: RefCell<OneAlnFileCache> = RefCell::new(OneAlnFileCache::new(256));
+    // Per-thread cache: 10 files per thread (with 32 threads worst case = 320 files open)
+    static ONE_ALN_FILE_CACHE: RefCell<OneAlnFileCache> = RefCell::new(OneAlnFileCache::new(10));
 }
 
 /// 1aln file parser with metadata and O(1) seeking support
