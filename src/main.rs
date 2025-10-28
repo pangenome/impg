@@ -897,8 +897,31 @@ fn run() -> io::Result<()> {
             // Parse and validate all target ranges, tracking which parameter was used
             let (target_ranges, from_range_param) =
                 if let Some(target_range_str) = &query.target_range {
-                    let (target_name, target_range, name) =
-                        partition::parse_target_range(target_range_str)?;
+                    let (target_name, target_range, name) = if target_range_str.contains(':') {
+                        partition::parse_target_range(target_range_str)?
+                    } else {
+                        // No interval specified: use the whole sequence [0, len)
+                        let seq_name = target_range_str;
+                        let seq_id = impg.seq_index.get_id(seq_name).ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::NotFound,
+                                format!("Sequence '{seq_name}' not found in index"),
+                            )
+                        })?;
+                        let seq_len = impg
+                            .seq_index
+                            .get_len_from_id(seq_id)
+                            .ok_or_else(|| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!(
+                                        "Could not get length for sequence '{seq_name}'"
+                                    ),
+                                )
+                            })? as i32;
+                        let name = format!("{}:{}-{}", seq_name, 0, seq_len);
+                        (seq_name.to_string(), (0, seq_len), name)
+                    };
                     // Validate sequence exists and range is within bounds
                     validate_sequence_range(
                         &target_name,
@@ -1162,8 +1185,31 @@ fn run() -> io::Result<()> {
                 let mut targets = Vec::new();
 
                 if let Some(target_range_str) = &query.target_range {
-                    let (target_name, target_range, name) =
-                        partition::parse_target_range(target_range_str)?;
+                    let (target_name, target_range, name) = if target_range_str.contains(':') {
+                        partition::parse_target_range(target_range_str)?
+                    } else {
+                        // No interval specified: use the whole sequence [0, len)
+                        let seq_name = target_range_str;
+                        let seq_id = impg.seq_index.get_id(seq_name).ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::NotFound,
+                                format!("Sequence '{seq_name}' not found in index"),
+                            )
+                        })?;
+                        let seq_len = impg
+                            .seq_index
+                            .get_len_from_id(seq_id)
+                            .ok_or_else(|| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!(
+                                        "Could not get length for sequence '{seq_name}'"
+                                    ),
+                                )
+                            })? as i32;
+                        let name = format!("{}:{}-{}", seq_name, 0, seq_len);
+                        (seq_name.to_string(), (0, seq_len), name)
+                    };
                     validate_sequence_range(
                         &target_name,
                         target_range.0,

@@ -86,6 +86,9 @@ Query overlaps in the alignment:
 # Query a single region
 impg query -a alignments.paf -r chr1:1000-2000
 
+# Query a whole sequence by name
+impg query -a alignments.paf -r chr1
+
 # Query multiple regions from a BED file (mix PAF and .1aln)
 impg query -a file1.paf file2.1aln -b regions.bed
 
