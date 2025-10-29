@@ -1,8 +1,8 @@
 use crate::alignment_record::{AlignmentRecord, Strand};
 use crate::forest_map::ForestMap;
 use crate::graph::reverse_complement;
-use crate::onealn::{OneAlnAlignment, OneAlnParser};
-use crate::paf::{read_cigar_data, ParseErr};
+use crate::onealn::{OneAlnAlignment, OneAlnParser, ParseErr as OneAlnParseErr};
+use crate::paf::read_cigar_data;
 use crate::seqidx::SequenceIndex;
 use crate::sequence_index::SequenceIndex as _; // The as _ syntax imports the trait so its methods are available, but doesn't bring the name into scope (avoiding the naming conflict)
 use crate::sequence_index::UnifiedSequenceIndex;
@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::cmp::{max, min};
 use std::fs::File;
-use std::io::{BufReader, Seek, SeekFrom};
-use std::sync::{Arc, RwLock};
+use std::io::{self, BufReader, Seek, SeekFrom};
+use std::sync::{Arc, Mutex, RwLock};
 
 // use libc;
 // fn log_memory_usage(label: &str) {
@@ -36,6 +36,77 @@ use std::sync::{Arc, RwLock};
 
 thread_local! {
     static EDIT_ALIGNER: RefCell<Option<AffineWavefronts>> = const { RefCell::new(None) };
+}
+
+const MAX_CACHE_CONTIG_LENGTH: usize = 5_000_000;
+
+struct SequenceCache {
+    contigs: FxHashMap<String, Arc<Vec<u8>>>,
+}
+
+impl SequenceCache {
+    fn new() -> Self {
+        Self {
+            contigs: FxHashMap::default(),
+        }
+    }
+
+    fn fetch_slice(
+        &mut self,
+        sequence_index: &UnifiedSequenceIndex,
+        seq_name: &str,
+        start: i32,
+        end: i32,
+    ) -> io::Result<SequenceSlice> {
+        let length = sequence_index.get_sequence_length(seq_name)?;
+        let start_usize = start.max(0).min(length as i32) as usize;
+        let end_usize = end.max(start).min(length as i32) as usize;
+
+        if let Some(cached) = self.contigs.get(seq_name) {
+            return Ok(SequenceSlice::Cached {
+                data: cached.clone(),
+                start: start_usize,
+                end: end_usize,
+            });
+        }
+
+        if length <= MAX_CACHE_CONTIG_LENGTH {
+            let full = sequence_index.fetch_sequence(seq_name, 0, length as i32)?;
+            let arc = Arc::new(full);
+            self.contigs.insert(seq_name.to_string(), arc.clone());
+            return Ok(SequenceSlice::Cached {
+                data: arc,
+                start: start_usize,
+                end: end_usize,
+            });
+        }
+
+        if start_usize >= end_usize {
+            return Ok(SequenceSlice::Owned(Vec::new()));
+        }
+
+        let partial =
+            sequence_index.fetch_sequence(seq_name, start_usize as i32, end_usize as i32)?;
+        Ok(SequenceSlice::Owned(partial))
+    }
+}
+
+enum SequenceSlice {
+    Cached {
+        data: Arc<Vec<u8>>,
+        start: usize,
+        end: usize,
+    },
+    Owned(Vec<u8>),
+}
+
+impl SequenceSlice {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            SequenceSlice::Cached { data, start, end } => &data[*start..*end],
+            SequenceSlice::Owned(buf) => buf.as_slice(),
+        }
+    }
 }
 
 /// Execute a closure with a thread-local edit distance mode aligner
@@ -358,21 +429,31 @@ pub struct Impg {
     pub forest_map: ForestMap,
     index_file_path: String,
     sequence_files: Vec<String>,
+    sequence_cache: Mutex<SequenceCache>,
+    parser_cache: Vec<Mutex<Option<Arc<OneAlnParser>>>>,
 }
 
 impl Impg {
     /// Create a OneAlnParser for a specific file index
-    fn get_or_create_parser(&self, file_index: usize) -> Result<Arc<OneAlnParser>, ParseErr> {
+    fn get_or_create_parser(&self, file_index: usize) -> Result<Arc<OneAlnParser>, OneAlnParseErr> {
         let alignment_file = &self.alignment_files[file_index];
 
         if !alignment_file.ends_with(".1aln") {
-            return Err(ParseErr::InvalidFormat(format!(
+            return Err(OneAlnParseErr::InvalidFormat(format!(
                 "File '{}' is not a .1aln file",
                 alignment_file
             )));
         }
 
-        OneAlnParser::new(
+        if let Some(cached) = self
+            .parser_cache
+            .get(file_index)
+            .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()))
+        {
+            return Ok(cached);
+        }
+
+        let parser = OneAlnParser::new(
             alignment_file.clone(),
             if self.sequence_files.is_empty() {
                 None
@@ -382,11 +463,19 @@ impl Impg {
         )
         .map(Arc::new)
         .map_err(|e| {
-            ParseErr::InvalidFormat(format!(
+            OneAlnParseErr::InvalidFormat(format!(
                 "Failed to initialize OneAln parser for '{}': {e}",
                 alignment_file
             ))
-        })
+        })?;
+
+        if let Some(slot) = self.parser_cache.get(file_index) {
+            if let Ok(mut guard) = slot.lock() {
+                *guard = Some(parser.clone());
+            }
+        }
+
+        Ok(parser)
     }
 
     /// Get a OneAlnAlignment from metadata (lazy loading the parser)
@@ -412,6 +501,17 @@ impl Impg {
                 alignment_index, alignment_file, e
             )
         })
+    }
+
+    fn fetch_sequence_slice(
+        &self,
+        sequence_index: &UnifiedSequenceIndex,
+        seq_name: &str,
+        start: i32,
+        end: i32,
+    ) -> io::Result<SequenceSlice> {
+        let mut cache = self.sequence_cache.lock().unwrap();
+        cache.fetch_slice(sequence_index, seq_name, start, end)
     }
 
     fn process_tracepoints_data(
@@ -441,29 +541,28 @@ impl Impg {
 
         // Fetch only the relevant portions of the sequences from scaffold coordinates
         let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
-        let query_seq = sequence_index.fetch_sequence(query_name, query_start, query_end);
+        let query_seq =
+            self.fetch_sequence_slice(sequence_index, query_name, query_start, query_end);
 
-        // Fetch target sequence
         let target_name = self.seq_index.get_name(target_id).unwrap();
-        let target_seq = if metadata.strand() == Strand::Forward {
-            sequence_index.fetch_sequence(target_name, target_start, target_end)
-        } else {
-            // Fetch and reverse complement for reverse strand alignments
-            match sequence_index.fetch_sequence(target_name, target_start, target_end) {
-                Ok(seq) => Ok(reverse_complement(&seq)),
-                Err(e) => Err(e),
-            }
-        };
+        let target_seq =
+            self.fetch_sequence_slice(sequence_index, target_name, target_start, target_end);
 
         // Convert tracepoints to CIGAR if we successfully fetched both sequences
         match (query_seq, target_seq) {
-            (Ok(query_seq), Ok(target_seq)) => {
+            (Ok(query_seq), Ok(target_seq_raw)) => {
+                let mut target_seq = target_seq_raw;
+                if metadata.strand() == Strand::Reverse {
+                    let rc = reverse_complement(target_seq.as_slice());
+                    target_seq = SequenceSlice::Owned(rc);
+                }
+
                 let cigar_str = with_edit_aligner(|aligner| {
                     tracepoints_to_cigar_fastga_with_aligner(
                         &tracepoints,
                         trace_spacing,
-                        &query_seq,
-                        &target_seq,
+                        query_seq.as_slice(),
+                        target_seq.as_slice(),
                         alignment.query_contig_start.try_into().unwrap(),
                         alignment.target_contig_start.try_into().unwrap(),
                         metadata.strand() == Strand::Reverse,
@@ -593,7 +692,7 @@ impl Impg {
         records_by_file: &[(Vec<AlignmentRecord>, String)],
         seq_index: SequenceIndex,
         sequence_files: Option<&[String]>,
-    ) -> Result<Self, ParseErr> {
+    ) -> io::Result<Self> {
         // Extract just the alignment file paths
         let alignment_files: Vec<String> = records_by_file
             .par_iter()
@@ -660,6 +759,11 @@ impl Impg {
             forest_map.add_entry(target_id, 0); // Offset 0 = in-memory tree
         }
 
+        let parser_cache = alignment_files
+            .iter()
+            .map(|_| Mutex::new(None))
+            .collect::<Vec<_>>();
+
         Ok(Self {
             trees: RwLock::new(trees),
             seq_index,
@@ -667,6 +771,8 @@ impl Impg {
             forest_map,
             index_file_path: String::new(),
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
+            sequence_cache: Mutex::new(SequenceCache::new()),
+            parser_cache,
         })
     }
 
@@ -847,6 +953,11 @@ impl Impg {
                     )
                 })?;
 
+        let parser_cache = alignment_files
+            .iter()
+            .map(|_| Mutex::new(None))
+            .collect::<Vec<_>>();
+
         Ok(Self {
             trees: RwLock::new(FxHashMap::default()),
             seq_index,
@@ -854,6 +965,8 @@ impl Impg {
             forest_map,
             index_file_path,
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
+            sequence_cache: Mutex::new(SequenceCache::new()),
+            parser_cache,
         })
     }
 
@@ -1525,7 +1638,7 @@ fn project_target_range_through_alignment(
     }
 }
 
-fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, ParseErr> {
+fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, OneAlnParseErr> {
     let mut ops = Vec::new();
     let mut len: i32 = 0;
 

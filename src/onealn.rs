@@ -636,126 +636,117 @@ impl OneAlnParser {
 
     /// Seek to a specific alignment using O(1) access
     pub fn seek_alignment(&self, alignment_index: u64) -> Result<OneAlnAlignment, ParseErr> {
-        self.with_cached_file(|file| {
-            // Use O(1) binary index to jump to alignment
-            file.goto('A', (alignment_index + 1) as i64).map_err(|e| {
-                ParseErr::InvalidFormat(format!(
-                    "Failed to seek to alignment {}: {}.",
-                    alignment_index, e
-                ))
-            })?;
-
-            file.read_line(); // Read the 'A' line we jumped to
-
-            // Read alignment coordinates
-            let query_contig_id = file.int(0);
-            let target_contig_id = file.int(3);
-
-            let query_name = self
-                .metadata
-                .query_seq_names
-                .get(&query_contig_id)
-                .cloned()
-                .ok_or_else(|| {
-                    ParseErr::InvalidFormat(format!(
-                        "Query sequence with contig ID {} not found in metadata",
-                        query_contig_id
-                    ))
-                })?;
-            let query_length = self
-                .metadata
-                .query_seq_lengths
-                .get(&query_contig_id)
-                .copied()
-                .ok_or_else(|| {
-                    ParseErr::InvalidFormat(format!(
-                        "Query sequence length for contig ID {} not found in metadata",
-                        query_contig_id
-                    ))
-                })?;
-
-            let target_name = self
-                .metadata
-                .target_seq_names
-                .get(&target_contig_id)
-                .cloned()
-                .ok_or_else(|| {
-                    ParseErr::InvalidFormat(format!(
-                        "Target sequence with contig ID {} not found in metadata",
-                        target_contig_id
-                    ))
-                })?;
-            let target_length = self
-                .metadata
-                .target_seq_lengths
-                .get(&target_contig_id)
-                .copied()
-                .ok_or_else(|| {
-                    ParseErr::InvalidFormat(format!(
-                        "Target sequence length for contig ID {} not found in metadata",
-                        target_contig_id
-                    ))
-                })?;
-
-            let (query_contig_offset, _) = self
-                .metadata
-                .query_contig_offsets
-                .get(&query_contig_id)
-                .copied()
-                .ok_or_else(|| {
-                    ParseErr::InvalidFormat(format!(
-                        "Contig offset for query contig {} missing from metadata",
-                        query_contig_id
-                    ))
-                })?;
-
-            let (target_contig_offset, target_contig_len) = self
-                .metadata
-                .target_contig_offsets
-                .get(&target_contig_id)
-                .copied()
-                .ok_or_else(|| {
-                    ParseErr::InvalidFormat(format!(
-                        "Contig offset for target contig {} missing from metadata",
-                        target_contig_id
-                    ))
-                })?;
-
-            let alignment = OneAlnAlignment {
-                query_name,
-                query_length,
-                query_contig_start: file.int(1),
-                query_contig_end: file.int(2),
-                query_contig_offset,
-                target_name,
-                target_length,
-                target_contig_start: file.int(4),
-                target_contig_end: file.int(5),
-                target_contig_offset,
-                target_contig_len,
-                strand: '+',
-                differences: 0,
-                tracepoints: Vec::new(),
-                trace_diffs: Vec::new(),
-                trace_spacing: self.trace_spacing,
-            };
-
-            // Read associated lines to get tracepoints
-            self.read_alignment_details(file, alignment)
-        })
-    }
-
-    fn with_cached_file<R, F>(&self, f: F) -> Result<R, ParseErr>
-    where
-        F: FnOnce(&mut OneFile) -> Result<R, ParseErr>,
-    {
         let mut file = OneFile::open_read(&self.file_path, None, None, 1).map_err(|e| {
             ParseErr::InvalidFormat(format!(
                 "Failed to open 1aln file '{}': {}",
                 self.file_path, e
             ))
         })?;
-        f(&mut file)
+
+        file.goto('A', (alignment_index + 1) as i64).map_err(|e| {
+            ParseErr::InvalidFormat(format!(
+                "Failed to seek to alignment {}: {}.",
+                alignment_index, e
+            ))
+        })?;
+
+        file.read_line(); // Read the 'A' line we jumped to
+
+        // Read alignment coordinates
+        let query_contig_id = file.int(0);
+        let target_contig_id = file.int(3);
+
+        let query_name = self
+            .metadata
+            .query_seq_names
+            .get(&query_contig_id)
+            .cloned()
+            .ok_or_else(|| {
+                ParseErr::InvalidFormat(format!(
+                    "Query sequence with contig ID {} not found in metadata",
+                    query_contig_id
+                ))
+            })?;
+        let query_length = self
+            .metadata
+            .query_seq_lengths
+            .get(&query_contig_id)
+            .copied()
+            .ok_or_else(|| {
+                ParseErr::InvalidFormat(format!(
+                    "Query sequence length for contig ID {} not found in metadata",
+                    query_contig_id
+                ))
+            })?;
+
+        let target_name = self
+            .metadata
+            .target_seq_names
+            .get(&target_contig_id)
+            .cloned()
+            .ok_or_else(|| {
+                ParseErr::InvalidFormat(format!(
+                    "Target sequence with contig ID {} not found in metadata",
+                    target_contig_id
+                ))
+            })?;
+        let target_length = self
+            .metadata
+            .target_seq_lengths
+            .get(&target_contig_id)
+            .copied()
+            .ok_or_else(|| {
+                ParseErr::InvalidFormat(format!(
+                    "Target sequence length for contig ID {} not found in metadata",
+                    target_contig_id
+                ))
+            })?;
+
+        let (query_contig_offset, _) = self
+            .metadata
+            .query_contig_offsets
+            .get(&query_contig_id)
+            .copied()
+            .ok_or_else(|| {
+                ParseErr::InvalidFormat(format!(
+                    "Contig offset for query contig {} missing from metadata",
+                    query_contig_id
+                ))
+            })?;
+
+        let (target_contig_offset, target_contig_len) = self
+            .metadata
+            .target_contig_offsets
+            .get(&target_contig_id)
+            .copied()
+            .ok_or_else(|| {
+                ParseErr::InvalidFormat(format!(
+                    "Contig offset for target contig {} missing from metadata",
+                    target_contig_id
+                ))
+            })?;
+
+        let alignment = OneAlnAlignment {
+            query_name,
+            query_length,
+            query_contig_start: file.int(1),
+            query_contig_end: file.int(2),
+            query_contig_offset,
+            target_name,
+            target_length,
+            target_contig_start: file.int(4),
+            target_contig_end: file.int(5),
+            target_contig_offset,
+            target_contig_len,
+            strand: '+',
+            differences: 0,
+            tracepoints: Vec::new(),
+            trace_diffs: Vec::new(),
+            trace_spacing: self.trace_spacing,
+        };
+
+        // Read associated lines to get tracepoints
+        self.read_alignment_details(&mut file, alignment)
     }
 
     fn read_alignment_details(
