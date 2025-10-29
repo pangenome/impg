@@ -202,27 +202,13 @@ impl GfaMafFastaOpts {
         self,
         output_format: &str,
         original_sequence_coordinates: bool,
-        alignment_opts: &AlignmentOpts,
+        alignment_files: &[String],
     ) -> io::Result<(
         Option<UnifiedSequenceIndex>,
         Option<(u8, u8, u8, u8, u8, u8)>,
     )> {
         // Check if any of the alignment files are .1aln files (which require sequence data for tracepoint conversion)
-        let has_onealn_files = if !alignment_opts.alignment_files.is_empty() {
-            alignment_opts
-                .alignment_files
-                .iter()
-                .any(|f| f.ends_with(".1aln"))
-        } else if let Some(alignment_list) = &alignment_opts.alignment_list {
-            // Read and check files from list
-            if let Ok(content) = std::fs::read_to_string(alignment_list) {
-                content.lines().any(|line| line.trim().ends_with(".1aln"))
-            } else {
-                false
-            }
-        } else {
-            false
-        };
+        let has_onealn_files = alignment_files.iter().any(|f| f.ends_with(".1aln"));
 
         let needs_sequence_mandatory = matches!(
             output_format,
@@ -682,8 +668,14 @@ fn run() -> io::Result<()> {
             sequence,
         } => {
             initialize_threads_and_log(&common);
+            let alignment_files = resolve_alignment_files(&alignment)?;
             let sequence_files = sequence.resolve_sequence_files()?;
-            let _ = initialize_impg(&common, &alignment, sequence_files)?;
+            let _ = initialize_impg(
+                &common,
+                &alignment,
+                alignment_files.as_slice(),
+                sequence_files,
+            )?;
 
             info!("Index created successfully");
         }
@@ -823,16 +815,27 @@ fn run() -> io::Result<()> {
                 ));
             }
 
+            // Resolve alignment files once (supports process substitution inputs)
+            let alignment_files = resolve_alignment_files(&alignment)?;
+
             // Extract fields and resolve sequence files before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
             let sequence_files_for_impg = gfa_maf_fasta.sequence.resolve_sequence_files()?;
 
             // Setup POA/sequence resources
-            let (sequence_index, scoring_params) =
-                gfa_maf_fasta.setup_output_resources(&output_format, false, &alignment)?;
+            let (sequence_index, scoring_params) = gfa_maf_fasta.setup_output_resources(
+                &output_format,
+                false,
+                alignment_files.as_slice(),
+            )?;
 
             // Initialize impg after validation
-            let impg = initialize_impg(&common, &alignment, sequence_files_for_impg)?;
+            let impg = initialize_impg(
+                &common,
+                &alignment,
+                alignment_files.as_slice(),
+                sequence_files_for_impg,
+            )?;
 
             partition::partition_alignments(
                 &impg,
@@ -889,6 +892,9 @@ fn run() -> io::Result<()> {
                 ));
             }
 
+            // Resolve alignment files once (handles process substitution inputs)
+            let alignment_files = resolve_alignment_files(&alignment)?;
+
             // Extract sequence files before consuming gfa_maf_fasta
             let sequence_files_for_impg = gfa_maf_fasta.sequence.resolve_sequence_files()?;
 
@@ -896,7 +902,12 @@ fn run() -> io::Result<()> {
             let subset_filter = load_subset_filter_if_provided(&query.subset_sequence_list)?;
 
             // Initialize impg after validation but before target range validation (which needs seq_index)
-            let impg = initialize_impg(&common, &alignment, sequence_files_for_impg)?;
+            let impg = initialize_impg(
+                &common,
+                &alignment,
+                alignment_files.as_slice(),
+                sequence_files_for_impg,
+            )?;
 
             // Parse and validate all target ranges, tracking which parameter was used
             let (target_ranges, from_range_param) = if let Some(target_range_str) =
@@ -973,7 +984,7 @@ fn run() -> io::Result<()> {
             let (sequence_index, scoring_params) = gfa_maf_fasta.setup_output_resources(
                 resolved_output_format,
                 query.original_sequence_coordinates,
-                &alignment,
+                alignment_files.as_slice(),
             )?;
 
             // Process all target ranges in a unified loop
@@ -1165,20 +1176,28 @@ fn run() -> io::Result<()> {
                 ));
             }
 
+            // Resolve alignment files once (supports process substitution inputs)
+            let alignment_files = resolve_alignment_files(&alignment)?;
+
             // Extract fields and resolve sequence files before moving gfa_maf_fasta
             let force_large_region = gfa_maf_fasta.force_large_region;
             let sequence_files_for_impg = gfa_maf_fasta.sequence.resolve_sequence_files()?;
 
             // Setup POA/sequence resources (always required for similarity)
             let (sequence_index, scoring_params) =
-                gfa_maf_fasta.setup_output_resources("gfa", false, &alignment)?;
+                gfa_maf_fasta.setup_output_resources("gfa", false, alignment_files.as_slice())?;
             let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
             let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA
 
             let subset_filter = load_subset_filter_if_provided(&query.subset_sequence_list)?;
 
             // Initialize impg after validation but before target range validation (which needs seq_index)
-            let impg = initialize_impg(&common, &alignment, sequence_files_for_impg)?;
+            let impg = initialize_impg(
+                &common,
+                &alignment,
+                alignment_files.as_slice(),
+                sequence_files_for_impg,
+            )?;
 
             // Validate target_range and target_bed before any expensive operations
             let target_ranges = {
@@ -1313,8 +1332,14 @@ fn run() -> io::Result<()> {
             sequence,
         } => {
             initialize_threads_and_log(&common);
+            let alignment_files = resolve_alignment_files(&alignment)?;
             let sequence_files = sequence.resolve_sequence_files()?;
-            let impg = initialize_impg(&common, &alignment, sequence_files)?;
+            let impg = initialize_impg(
+                &common,
+                &alignment,
+                alignment_files.as_slice(),
+                sequence_files,
+            )?;
 
             print_stats(&impg);
         }
@@ -1569,10 +1594,10 @@ fn find_output_stream(basename: &Option<String>, extension: &str) -> io::Result<
 fn initialize_impg(
     common: &CommonOpts,
     alignment: &AlignmentOpts,
+    alignment_files: &[String],
     sequence_files: Vec<String>,
 ) -> io::Result<Impg> {
-    // Resolve the list of alignment files (PAF or .1aln)
-    let alignment_files = resolve_alignment_files(alignment)?;
+    // The list of alignment files (PAF or .1aln) is pre-resolved
     info!("Found {} alignment file(s)", alignment_files.len());
 
     // Check if we have .1aln files and validate sequence files are provided
@@ -1595,7 +1620,7 @@ fn initialize_impg(
     // Load or generate index
     if alignment.force_reindex {
         generate_multi_index(
-            &alignment_files,
+            alignment_files,
             common.threads,
             alignment.index.as_deref(),
             if sequence_files.is_empty() {
@@ -1606,7 +1631,7 @@ fn initialize_impg(
         )
     } else {
         load_or_generate_multi_index(
-            &alignment_files,
+            alignment_files,
             common.threads,
             alignment.index.as_deref(),
             if sequence_files.is_empty() {
