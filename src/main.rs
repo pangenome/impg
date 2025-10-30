@@ -17,7 +17,6 @@ use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 
 /// Basic common options shared between all commands
 #[derive(Parser, Debug)]
@@ -1752,21 +1751,20 @@ fn generate_multi_index(
     // Thread-safe counter for tracking progress
     let files_processed = AtomicUsize::new(0);
 
-    // Create a shared, thread-safe index
-    let tmp_seq_index = Arc::new(Mutex::new(SequenceIndex::new()));
+    // Process alignment files in parallel, using a per-file local SequenceIndex to avoid global locking
+    // We will merge names after parsing and remap IDs in a parallel pass.
+    let mut records_by_file_with_local_index: Vec<(Vec<AlignmentRecord>, String, SequenceIndex)> =
+        (0..alignment_files.len())
+            .into_par_iter()
+            .map(|file_index| -> io::Result<(Vec<AlignmentRecord>, String, SequenceIndex)> {
+                let aln_file = &alignment_files[file_index];
 
-    // Process alignment files in parallel
-    let mut records_by_file: Vec<(Vec<AlignmentRecord>, String)> = (0..alignment_files.len())
-        .into_par_iter()
-        .map(|file_index| -> io::Result<(Vec<AlignmentRecord>, String)> {
-            let aln_file = &alignment_files[file_index];
+                // Increment the counter and get the new value atomically
+                let current_count = files_processed.fetch_add(1, Ordering::SeqCst) + 1;
+                debug!("Processing alignment file ({current_count}/{num_alignment_files}): {aln_file}");
 
-            // Increment the counter and get the new value atomically
-            let current_count = files_processed.fetch_add(1, Ordering::SeqCst) + 1;
-            debug!("Processing alignment file ({current_count}/{num_alignment_files}): {aln_file}");
-
-            // Lock, get IDs, build records
-            let mut seq_index_guard = tmp_seq_index.lock().unwrap();
+                // Local sequence index for this file only
+                let mut local_seq_index = SequenceIndex::new();
 
             // Detect file format and parse accordingly
             let format = AlignmentFormat::from_path(aln_file).ok_or_else(|| {
@@ -1776,77 +1774,88 @@ fn generate_multi_index(
                 )
             })?;
 
-            let records = match format {
-                AlignmentFormat::Paf => {
-                    let file = File::open(aln_file).map_err(|e| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("Failed to open PAF file: {}", e),
-                        )
-                    })?;
-                    impg::paf::parse_paf_file(aln_file, file, threads, &mut seq_index_guard)
+                let records = match format {
+                    AlignmentFormat::Paf => {
+                        let file = File::open(aln_file).map_err(|e| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("Failed to open PAF file: {}", e),
+                            )
+                        })?;
+                    impg::paf::parse_paf_file(aln_file, file, threads, &mut local_seq_index)
                         .map_err(|e| {
                             io::Error::new(
                                 io::ErrorKind::InvalidData,
                                 format!("Failed to parse PAF records: {}", e),
                             )
                         })?
-                }
-                AlignmentFormat::OneAln => {
-                    let file =
-                        OneAlnParser::new(aln_file.clone(), sequence_files).map_err(|e| {
+                    }
+                    AlignmentFormat::OneAln => {
+                        let file =
+                            OneAlnParser::new(aln_file.clone(), sequence_files).map_err(|e| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!("Failed to create 1aln parser: {}", e),
+                                )
+                            })?;
+                    file.parse_alignments(&mut local_seq_index).map_err(|e| {
                             io::Error::new(
                                 io::ErrorKind::InvalidData,
-                                format!("Failed to create 1aln parser: {}", e),
+                                format!("Failed to parse 1aln records: {}", e),
                             )
-                        })?;
-                    file.parse_alignments(&mut seq_index_guard).map_err(|e| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("Failed to parse 1aln records: {}", e),
-                        )
-                    })?
-                }
-            };
-            debug!(
-                "Parsed {} alignment records from file: {aln_file}",
-                records.len()
-            );
-            Ok((records, aln_file.clone()))
-        })
+                        })?
+                    }
+                };
+                debug!(
+                    "Parsed {} alignment records from file: {aln_file}",
+                    records.len()
+                );
+                Ok((records, aln_file.clone(), local_seq_index))
+            })
         .collect::<Result<Vec<_>, _>>()?; // Propagate any errors
 
-    // Take back ownership of the SequenceIndex
-    let tmp_seq_index = Arc::try_unwrap(tmp_seq_index)
-        .unwrap_or_else(|_| panic!("Failed to unwrap SequenceIndex"))
-        .into_inner()
-        .unwrap_or_else(|_| panic!("Failed to get inner SequenceIndex"));
+    // Build a temporary union of all sequence names and lengths from local indices
+    let mut tmp_union_index = SequenceIndex::new();
+    for (_, _, local_idx) in &records_by_file_with_local_index {
+        for (name, id) in &local_idx.name_to_id {
+            let length = local_idx.get_len_from_id(*id).unwrap_or(0);
+            tmp_union_index.get_or_insert_id(name, Some(length));
+        }
+    }
 
     // Sort sequence names to ensure deterministic order
-    let mut sequence_names = tmp_seq_index
+    let mut sequence_names = tmp_union_index
         .name_to_id
         .keys()
         .cloned()
         .collect::<Vec<String>>();
     sequence_names.par_sort_unstable(); // Order of identical sequence names is irrelevant
 
-    // Create a deterministic SequenceIndex
+    // Create a deterministic global SequenceIndex
     let mut seq_index = SequenceIndex::new();
-    for (name, id) in &tmp_seq_index.name_to_id {
-        let length = tmp_seq_index.get_len_from_id(*id).unwrap();
+    for (name, id) in &tmp_union_index.name_to_id {
+        let length = tmp_union_index.get_len_from_id(*id).unwrap_or(0);
         seq_index.get_or_insert_id(name, Some(length));
     }
 
     // Update query and target IDs with the new SequenceIndex
-    records_by_file.par_iter_mut().for_each(|(records, _)| {
-        for record in records.iter_mut() {
-            let query_name = tmp_seq_index.get_name(record.query_id).unwrap();
-            record.query_id = seq_index.get_id(query_name).unwrap();
+    records_by_file_with_local_index
+        .par_iter_mut()
+        .for_each(|(records, _path, local_idx)| {
+            for record in records.iter_mut() {
+                let query_name = local_idx.get_name(record.query_id).unwrap();
+                record.query_id = seq_index.get_id(query_name).unwrap();
 
-            let target_name = tmp_seq_index.get_name(record.target_id).unwrap();
-            record.target_id = seq_index.get_id(target_name).unwrap();
-        }
-    });
+                let target_name = local_idx.get_name(record.target_id).unwrap();
+                record.target_id = seq_index.get_id(target_name).unwrap();
+            }
+        });
+
+    // Drop local indices and keep only (records, path)
+    let records_by_file: Vec<(Vec<AlignmentRecord>, String)> = records_by_file_with_local_index
+        .into_iter()
+        .map(|(records, path, _)| (records, path))
+        .collect();
 
     let impg = Impg::from_multi_alignment_records(&records_by_file, seq_index, sequence_files)
         .map_err(|e| {
