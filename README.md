@@ -225,6 +225,23 @@ impg similarity -p alignments.paf -b regions.bed --sequence-files *.fa --pca --p
 impg similarity -p alignments.paf -b regions.bed --sequence-files *.fa --pca --polarize-guide-samples sample1,sample2
 ```
 
+### Refine
+
+Refine loci to maximize sample support:
+
+```bash
+# Refine a single region to maximize samples spanning both ends
+impg refine -p alignments.paf -r chr1:1000-2000
+
+# Refine many regions from a BED file
+impg refine -p alignments.paf -b loci.bed
+
+# Allow merging within 200 kb and require at least 2 kb coverage near each end
+impg refine -p alignments.paf -r chr1:1000-2000 -d 200000 --span-bp 2000
+```
+
+`impg refine` explores asymmetric left/right expansions around each target region to find the smallest window that maximizes the number of samples spanning both boundaries. Keeping start/end alignment anchors outside structural variants helps avoid selecting loci that terminate inside large insertions or deletions.
+
 ### Stats
 
 Print alignment statistics:

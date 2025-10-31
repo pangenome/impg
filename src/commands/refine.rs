@@ -6,7 +6,9 @@ use rustc_hash::FxHashMap;
 use std::cmp::Ordering;
 use std::io;
 
-/// Configuration parameters for the refinement routine
+/// Configuration parameters for the refinement routine.
+/// Mirrors CLI flags and constrains how aggressively flanks can be explored while
+/// searching for loci that remain well supported at both boundaries.
 pub struct RefineConfig<'a> {
     pub span_bp: i32,
     pub max_extension: i32,
@@ -21,7 +23,7 @@ pub struct RefineConfig<'a> {
     pub subset_filter: Option<&'a SubsetFilter>,
 }
 
-/// Summary for each refined interval
+/// Summary for each refined interval produced by [`run_refine`].
 pub struct RefineRecord {
     pub chrom: String,
     pub refined_start: i32,
@@ -41,6 +43,7 @@ struct SampleInterval {
     target_end: i32,
 }
 
+/// Candidate solution capturing a concrete left/right expansion and its support.
 #[derive(Clone)]
 struct CandidateResult {
     start: i32,
@@ -108,6 +111,7 @@ fn refine_single_range(
     };
     let seq_len = seq_len as i32;
 
+    // Build the grid of candidate flank sizes.
     let flanks = build_flanks(config.max_extension, config.extension_step);
     debug!(
         "Evaluating {}x{} flank sizes for region {}:{}-{}",
@@ -126,6 +130,7 @@ fn refine_single_range(
         )
     };
 
+    // First, search for the minimal left extension that still satisfies the span requirement on the left boundary.
     if let Some(candidate) = flanks
         .par_iter()
         .filter_map(|&left| evaluate(left, 0))
@@ -139,6 +144,7 @@ fn refine_single_range(
         .map(|c| c.left_extension)
         .unwrap_or(0);
 
+    // Next, keep the chosen left flank fixed and look for the best right expansion.
     if let Some(candidate) = flanks
         .par_iter()
         .filter_map(|&right| evaluate(left_fixed, right))
@@ -152,6 +158,7 @@ fn refine_single_range(
         .map(|c| c.right_extension)
         .unwrap_or(0);
 
+    // Finally, re-optimise the left flank while holding the right flank steady to capture asymmetric trade-offs.
     if let Some(candidate) = flanks
         .par_iter()
         .filter_map(|&left| evaluate(left, right_fixed))
@@ -193,6 +200,7 @@ fn refine_single_range(
     })
 }
 
+/// Evaluate a single `(left_flank, right_flank)` combination and return its support summary.
 fn evaluate_candidate(
     impg: &Impg,
     target_id: u32,
@@ -250,6 +258,8 @@ fn evaluate_candidate(
         support_count,
     };
 
+    // Large expansions only survive if they keep both boundaries well supported, helping us avoid
+    // loci that terminate inside structural variants.
     debug!(
         "Region {}:{}-{} flank L{} R{} -> {} supporting samples",
         chrom, start, end, left_extension, right_extension, candidate.support_count
@@ -335,6 +345,7 @@ fn apply_subset_filter(
     }
 }
 
+/// Return whichever candidate ranks higher according to `compare_candidates`.
 fn better_candidate(a: CandidateResult, b: CandidateResult) -> CandidateResult {
     if compare_candidates(&a, &b) == Ordering::Greater {
         a
@@ -343,6 +354,7 @@ fn better_candidate(a: CandidateResult, b: CandidateResult) -> CandidateResult {
     }
 }
 
+/// Maintain the best-so-far candidate when combining sequential passes.
 fn update_best_candidate(
     best: Option<CandidateResult>,
     candidate: CandidateResult,

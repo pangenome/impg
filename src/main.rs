@@ -324,17 +324,17 @@ struct RefineOpts {
     #[clap(flatten)]
     query: QueryOpts,
 
-    /// Minimum number of bases that must be covered at each region boundary
+    /// Minimum number of bases that supporting samples must span at each region boundary
     #[arg(help_heading = "Refinement options")]
     #[clap(long, value_parser, default_value_t = 1000)]
     span_bp: i32,
 
-    /// Maximum symmetric extension to explore around each region (bp)
+    /// Maximum per-side extension explored when trying to maximize boundary support (bp)
     #[arg(help_heading = "Refinement options")]
     #[clap(long, value_parser, default_value_t = 100000)]
     max_extension: i32,
 
-    /// Step size used when exploring additional flanks (bp)
+    /// Step size for expanding flanks (bp)
     #[arg(help_heading = "Refinement options")]
     #[clap(long, value_parser, default_value_t = 1000)]
     extension_step: i32,
@@ -588,7 +588,7 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
     },
-    /// Refine regions by expanding flanks to maximize supporting samples
+    /// Refine loci to maximize the number of samples that span both ends of the region
     Refine {
         #[clap(flatten)]
         paf: PafOpts,
@@ -1156,6 +1156,8 @@ fn main() -> io::Result<()> {
                     name_field = original_range.clone();
                 }
 
+                // Emit an informative BED-like row: chrom start end name support left_extension right_extension.
+                // Maximizing the sample count while minimizing the expansion helps avoid loci that start or end inside SVs.
                 writeln!(
                     writer,
                     "{}\t{}\t{}\t{}\t{}\t{}\t{}",
