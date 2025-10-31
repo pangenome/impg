@@ -1,6 +1,6 @@
 use clap::Parser;
 use coitrees::{Interval, IntervalTree};
-use impg::commands::{lace, partition, similarity};
+use impg::commands::{lace, partition, refine, similarity};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::paf::{PartialPafRecord, Strand};
 use impg::seqidx::SequenceIndex;
@@ -317,6 +317,58 @@ impl QueryOpts {
     }
 }
 
+/// Refinement-specific options
+#[derive(Parser, Debug)]
+#[command(next_help_heading = "Refinement options")]
+struct RefineOpts {
+    #[clap(flatten)]
+    query: QueryOpts,
+
+    /// Minimum number of bases that must be covered at each region boundary
+    #[arg(help_heading = "Refinement options")]
+    #[clap(long, value_parser, default_value_t = 1000)]
+    span_bp: i32,
+
+    /// Maximum symmetric extension to explore around each region (bp)
+    #[arg(help_heading = "Refinement options")]
+    #[clap(long, value_parser, default_value_t = 100000)]
+    max_extension: i32,
+
+    /// Step size used when exploring additional flanks (bp)
+    #[arg(help_heading = "Refinement options")]
+    #[clap(long, value_parser, default_value_t = 5000)]
+    extension_step: i32,
+
+    /// Optional output path for the refined BED-like results (default: stdout)
+    #[arg(help_heading = "Output options")]
+    #[clap(short, long, value_parser)]
+    output: Option<String>,
+}
+
+impl RefineOpts {
+    fn validate(&self) -> io::Result<()> {
+        if self.span_bp < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--span-bp must be >= 0",
+            ));
+        }
+        if self.max_extension < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--max-extension must be >= 0",
+            ));
+        }
+        if self.extension_step <= 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--extension-step must be > 0",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Parse sequence name to extract subsequence coordinates and original sequence name
 /// Format: `seq_name:start-end` -> (original_seq_name, start_offset)
 fn parse_subsequence_coordinates(seq_name: &str) -> Option<(String, i32)> {
@@ -537,6 +589,17 @@ enum Args {
 
         #[clap(flatten)]
         gfa_maf_fasta: GfaMafFastaOpts,
+
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+    /// Refine regions by expanding flanks to maximize supporting samples
+    Refine {
+        #[clap(flatten)]
+        paf: PafOpts,
+
+        #[clap(flatten)]
+        refine: RefineOpts,
 
         #[clap(flatten)]
         common: CommonOpts,
@@ -1031,6 +1094,98 @@ fn main() -> io::Result<()> {
                     }
                 }
             }
+        }
+        Args::Refine {
+            paf,
+            refine,
+            common,
+        } => {
+            initialize_threads_and_log(&common);
+            refine.validate()?;
+
+            let impg = initialize_impg(&common, &paf)?;
+            let subset_filter = load_subset_filter_if_provided(&refine.query.subset_sequence_list)?;
+
+            let target_ranges = if let Some(target_range_str) = &refine.query.target_range {
+                let (target_name, target_range, name) =
+                    partition::parse_target_range(target_range_str)?;
+                validate_sequence_range(
+                    &target_name,
+                    target_range.0,
+                    target_range.1,
+                    &impg.seq_index,
+                )?;
+                vec![(target_name, target_range, name)]
+            } else if let Some(target_bed) = &refine.query.target_bed {
+                let targets = partition::parse_bed_file(target_bed)?;
+                let mut validated = Vec::with_capacity(targets.len());
+                for (seq_name, (start, end), name) in targets {
+                    validate_sequence_range(&seq_name, start, end, &impg.seq_index)?;
+                    validated.push((seq_name, (start, end), name));
+                }
+                validated
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Either --target-range or --target-bed must be provided",
+                ));
+            };
+
+            let config = refine::RefineConfig {
+                span_bp: refine.span_bp,
+                max_extension: refine.max_extension,
+                extension_step: refine.extension_step,
+                merge_distance: refine.query.effective_merge_distance(),
+                min_identity: refine.query.min_identity,
+                use_transitive_bfs: refine.query.transitive,
+                use_transitive_dfs: refine.query.transitive_opts.transitive_dfs,
+                max_transitive_depth: refine.query.transitive_opts.max_depth,
+                min_transitive_len: refine.query.transitive_opts.min_transitive_len,
+                min_distance_between_ranges: refine
+                    .query
+                    .transitive_opts
+                    .min_distance_between_ranges,
+                subset_filter: subset_filter.as_ref(),
+            };
+
+            let mut records = refine::run_refine(&impg, &target_ranges, config)?;
+
+            let mut writer: Box<dyn Write> = if let Some(path) = &refine.output {
+                if let Some(parent) = std::path::Path::new(path).parent() {
+                    if !parent.as_os_str().is_empty() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                }
+                let file = File::create(path)?;
+                Box::new(BufWriter::new(file))
+            } else {
+                Box::new(BufWriter::new(io::stdout()))
+            };
+
+            for record in records.drain(..) {
+                let original_range = format!(
+                    "{}:{}-{}",
+                    record.chrom, record.original_start, record.original_end
+                );
+                let mut name_field = record.label.clone();
+                if name_field.trim().is_empty() || name_field == "." {
+                    name_field = original_range.clone();
+                }
+
+                writeln!(
+                    writer,
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    record.chrom,
+                    record.refined_start,
+                    record.refined_end,
+                    name_field,
+                    record.support_count,
+                    record.selected_flank,
+                    record.applied_left_extension,
+                    record.applied_right_extension
+                )?;
+            }
+            writer.flush()?;
         }
         Args::Similarity {
             common,
