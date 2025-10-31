@@ -1,8 +1,9 @@
 use crate::impg::{AdjustedInterval, Impg};
 use crate::subset_filter::SubsetFilter;
+use clap::ValueEnum;
 use log::{debug, info, warn};
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::cmp::Ordering;
 use std::io;
 
@@ -13,6 +14,8 @@ pub struct RefineConfig<'a> {
     pub span_bp: i32,
     /// Maximum per-side expansion; <=1 interpreted as fraction of the locus, >1 as absolute bp.
     pub max_extension: f64,
+    /// Aggregation mode used when counting boundary support.
+    pub support_mode: SupportMode,
     pub extension_step: i32,
     pub merge_distance: i32,
     pub min_identity: Option<f64>,
@@ -35,6 +38,30 @@ pub struct RefineRecord {
     pub applied_left_extension: i32,
     pub applied_right_extension: i32,
     pub support_count: usize,
+}
+
+/// How to aggregate PanSN identifiers when counting support.
+#[derive(Clone, Copy, Debug)]
+pub enum SupportMode {
+    Sequence,
+    Sample,
+    Haplotype,
+}
+
+/// CLI-level PanSN aggregation mode (sample/haplotype).
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub enum RefineSupportArg {
+    Sample,
+    Haplotype,
+}
+
+impl From<RefineSupportArg> for SupportMode {
+    fn from(value: RefineSupportArg) -> Self {
+        match value {
+            RefineSupportArg::Sample => SupportMode::Sample,
+            RefineSupportArg::Haplotype => SupportMode::Haplotype,
+        }
+    }
 }
 
 struct SampleInterval {
@@ -255,6 +282,8 @@ fn evaluate_candidate(
     );
 
     let support_count = compute_supporting_samples(
+        impg,
+        config.support_mode,
         target_id,
         &overlaps,
         start,
@@ -408,6 +437,8 @@ fn compare_candidates(a: &CandidateResult, b: &CandidateResult) -> Ordering {
 }
 
 fn compute_supporting_samples(
+    impg: &Impg,
+    mode: SupportMode,
     target_id: u32,
     overlaps: &[AdjustedInterval],
     region_start: i32,
@@ -447,7 +478,7 @@ fn compute_supporting_samples(
     let left_threshold = region_start + effective_span;
     let right_threshold = region_end - effective_span;
 
-    let mut support_ids = Vec::new();
+    let mut support_keys: FxHashSet<String> = FxHashSet::default();
 
     for (sample_id, intervals) in per_sample {
         let merged = merge_intervals(intervals, merge_distance);
@@ -462,13 +493,15 @@ fn compute_supporting_samples(
                 right_threshold,
             )
         }) {
-            support_ids.push(sample_id);
+            if let Some(name) = impg.seq_index.get_name(sample_id) {
+                if let Some(key) = pansn_key(name, mode) {
+                    support_keys.insert(key);
+                }
+            }
         }
     }
 
-    support_ids.sort_unstable();
-    support_ids.dedup();
-    support_ids.len()
+    support_keys.len()
 }
 
 fn covers_boundaries(
@@ -562,4 +595,30 @@ fn build_flanks(max_extension: i32, step: i32) -> Vec<i32> {
     flanks.sort_unstable();
     flanks.dedup();
     flanks
+}
+fn pansn_key(name: &str, mode: SupportMode) -> Option<String> {
+    match mode {
+        SupportMode::Sequence => Some(name.to_string()),
+        SupportMode::Sample => {
+            let base = name.split(':').next().unwrap_or(name);
+            let sample = base.split('#').next().unwrap_or(base).trim();
+            if sample.is_empty() {
+                None
+            } else {
+                Some(sample.to_string())
+            }
+        }
+        SupportMode::Haplotype => {
+            let base = name.split(':').next().unwrap_or(name);
+            let mut parts = base.split('#');
+            let sample = parts.next().unwrap_or("").trim();
+            if sample.is_empty() {
+                return None;
+            }
+            match parts.next() {
+                Some(hap) if !hap.is_empty() => Some(format!("{sample}#{hap}")),
+                _ => Some(sample.to_string()),
+            }
+        }
+    }
 }

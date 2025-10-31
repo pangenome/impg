@@ -335,6 +335,11 @@ struct RefineOpts {
     #[clap(long, value_parser, default_value_t = 0.4)]
     max_extension: f64,
 
+    /// PanSN aggregation mode when counting support (sample/haplotype)
+    #[arg(help_heading = "Refinement options")]
+    #[clap(long, value_enum)]
+    pansn_mode: Option<refine::RefineSupportArg>,
+
     /// Step size for expanding flanks (bp)
     #[arg(help_heading = "Refinement options")]
     #[clap(long, value_parser, default_value_t = 1000)]
@@ -1131,6 +1136,10 @@ fn main() -> io::Result<()> {
                 span_bp: refine.span_bp,
                 max_extension: refine.max_extension,
                 extension_step: refine.extension_step,
+                support_mode: refine
+                    .pansn_mode
+                    .map(Into::into)
+                    .unwrap_or(refine::SupportMode::Sequence),
                 merge_distance: refine.query.effective_merge_distance(),
                 min_identity: refine.query.min_identity,
                 use_transitive_bfs: refine.query.transitive,

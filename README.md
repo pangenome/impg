@@ -230,7 +230,7 @@ impg similarity -p alignments.paf -b regions.bed --sequence-files *.fa --pca --p
 Refine loci to maximize sample support:
 
 ```bash
-# Refine a single region to maximize samples spanning both ends
+# Refine a single region to maximize the number of sequences spanning both ends
 impg refine -p alignments.paf -r chr1:1000-2000
 
 # Refine many regions from a BED file
@@ -244,9 +244,13 @@ impg refine -p alignments.paf -r chr1:1000-2000 --max-extension 0.60
 
 # Or cap the search to an absolute flank size
 impg refine -p alignments.paf -r chr1:1000-2000 --max-extension 50000
+
+# Maximize PanSN sample or haplotype counts instead of sequence counts
+impg refine -p alignments.paf -r chr1:1000-2000 --pansn-mode sample
+impg refine -p alignments.paf -r chr1:1000-2000 --pansn-mode haplotype
 ```
 
-`impg refine` explores asymmetric left/right expansions around each target region to find the smallest window that maximizes the number of samples spanning both boundaries. Keeping start/end alignment anchors outside structural variants helps avoid selecting loci that terminate inside large insertions or deletions.
+`impg refine` explores asymmetric left/right expansions around each target region to find the smallest window that maximizes the number of sequences, samples, or haplotypes. Keeping start/end alignment anchors outside structural variants helps avoid selecting loci that terminate inside large insertions or deletions.
 
 ### Stats
 
