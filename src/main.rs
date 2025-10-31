@@ -1174,13 +1174,12 @@ fn main() -> io::Result<()> {
 
                 writeln!(
                     writer,
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}",
                     record.chrom,
                     record.refined_start,
                     record.refined_end,
                     name_field,
                     record.support_count,
-                    record.selected_flank,
                     record.applied_left_extension,
                     record.applied_right_extension
                 )?;

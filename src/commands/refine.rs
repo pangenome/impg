@@ -27,7 +27,6 @@ pub struct RefineRecord {
     pub original_start: i32,
     pub original_end: i32,
     pub label: String,
-    pub selected_flank: i32,
     pub applied_left_extension: i32,
     pub applied_right_extension: i32,
     pub support_count: usize,
@@ -41,7 +40,6 @@ struct SampleInterval {
 }
 
 struct CandidateResult {
-    flank: i32,
     start: i32,
     end: i32,
     left_extension: i32,
@@ -99,7 +97,8 @@ fn refine_single_range(
 
     let flanks = build_flanks(config.max_extension, config.extension_step);
     debug!(
-        "Evaluating {} flank sizes for region {}:{}-{}",
+        "Evaluating {}x{} flank sizes for region {}:{}-{}",
+        flanks.len(),
         flanks.len(),
         chrom,
         orig_start,
@@ -108,56 +107,60 @@ fn refine_single_range(
 
     let mut candidates = Vec::with_capacity(flanks.len());
 
-    for flank in flanks {
-        let tentative_start = orig_start.saturating_sub(flank);
-        let tentative_end = orig_end.saturating_add(flank);
+    for &left_flank in &flanks {
+        for &right_flank in &flanks {
+            let tentative_start = orig_start.saturating_sub(left_flank);
+            let tentative_end = orig_end.saturating_add(right_flank);
 
-        let start = tentative_start.max(0);
-        let end = tentative_end.min(seq_len);
+            let start = tentative_start.max(0);
+            let end = tentative_end.min(seq_len);
 
-        if end <= start {
-            warn!(
-                "Skipping non-positive range {}:{}-{} after applying flank {flank}",
-                chrom, start, end
+            if end <= start {
+                warn!(
+                    "Skipping non-positive range {}:{}-{} after applying flanks L{} R{}",
+                    chrom, start, end, left_flank, right_flank
+                );
+                continue;
+            }
+
+            let mut overlaps = query_overlaps(impg, target_id, (start, end), config);
+
+            apply_subset_filter(
+                impg,
+                target_id,
+                &mut overlaps,
+                chrom,
+                (start, end),
+                config.subset_filter,
             );
-            continue;
+
+            let support_count = compute_supporting_samples(
+                target_id,
+                &overlaps,
+                start,
+                end,
+                config.span_bp,
+                config.merge_distance,
+            );
+
+            let left_extension = orig_start.saturating_sub(start);
+            let right_extension = end.saturating_sub(orig_end);
+
+            let candidate = CandidateResult {
+                start,
+                end,
+                left_extension,
+                right_extension,
+                support_count,
+            };
+
+            debug!(
+                "Region {}:{}-{} flank L{} R{} -> {} supporting samples",
+                chrom, start, end, left_extension, right_extension, candidate.support_count
+            );
+
+            candidates.push(candidate);
         }
-
-        let mut overlaps = query_overlaps(impg, target_id, (start, end), config);
-
-        apply_subset_filter(
-            impg,
-            target_id,
-            &mut overlaps,
-            chrom,
-            (start, end),
-            config.subset_filter,
-        );
-
-        let support_count = compute_supporting_samples(
-            target_id,
-            &overlaps,
-            start,
-            end,
-            config.span_bp,
-            config.merge_distance,
-        );
-
-        let candidate = CandidateResult {
-            flank,
-            start,
-            end,
-            left_extension: orig_start.saturating_sub(start),
-            right_extension: end.saturating_sub(orig_end),
-            support_count,
-        };
-
-        debug!(
-            "Region {}:{}-{} flank {flank}bp -> {} supporting samples",
-            chrom, start, end, candidate.support_count
-        );
-
-        candidates.push(candidate);
     }
 
     if candidates.is_empty() {
@@ -175,9 +178,19 @@ fn refine_single_range(
         .max_by(|a, b| {
             a.support_count
                 .cmp(&b.support_count)
-                .then_with(|| b.flank.cmp(&a.flank))
                 .then_with(|| {
-                    // Prefer shorter expansions when flank matches (should be rare if flank differs)
+                    // Prefer smaller total expansion when support ties
+                    let a_total = a.left_extension + a.right_extension;
+                    let b_total = b.left_extension + b.right_extension;
+                    b_total.cmp(&a_total)
+                })
+                .then_with(|| {
+                    let a_max = a.left_extension.max(a.right_extension);
+                    let b_max = b.left_extension.max(b.right_extension);
+                    b_max.cmp(&a_max)
+                })
+                .then_with(|| {
+                    // Prefer shorter expansions when max flanks match
                     let a_len = a.end - a.start;
                     let b_len = b.end - b.start;
                     b_len.cmp(&a_len)
@@ -186,8 +199,9 @@ fn refine_single_range(
         .expect("at least one candidate available");
 
     info!(
-        "Selected flank {}bp for region {}:{}-{} ({} supporting samples)",
-        best_candidate.flank,
+        "Selected flanks left={}bp right={}bp for region {}:{}-{} ({} supporting samples)",
+        best_candidate.left_extension,
+        best_candidate.right_extension,
         chrom,
         best_candidate.start,
         best_candidate.end,
@@ -201,7 +215,6 @@ fn refine_single_range(
         original_start: orig_start,
         original_end: orig_end,
         label: label.to_string(),
-        selected_flank: best_candidate.flank,
         applied_left_extension: best_candidate.left_extension,
         applied_right_extension: best_candidate.right_extension,
         support_count: best_candidate.support_count,
