@@ -160,7 +160,7 @@ fn refine_single_range(
 
     // Build the grid of candidate flank sizes based on dynamic constraints.
     let flanks = build_flanks(max_extension_bp, config.extension_step);
-    info!(
+    debug!(
         "Evaluating {} flank steps up to {} bp per side (max_extension={}) for region {}:{}-{}",
         flanks.len(),
         max_extension_bp,

@@ -1160,6 +1160,15 @@ fn main() -> io::Result<()> {
             };
 
             let mut records = refine::run_refine(&impg, &target_ranges, config)?;
+            info!(
+                "Refining {} targets with max_extension={} (mode: {:?})",
+                target_ranges.len(),
+                refine.max_extension,
+                refine
+                    .pansn_mode
+                    .map(Into::into)
+                    .unwrap_or(refine::SupportMode::Sequence)
+            );
             let mut writer = BufWriter::new(io::stdout());
             let mut support_writer = if let Some(path) = &refine.support_output {
                 let support_path = Path::new(path);
