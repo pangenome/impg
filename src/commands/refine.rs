@@ -1,7 +1,9 @@
 use crate::impg::{AdjustedInterval, Impg};
 use crate::subset_filter::SubsetFilter;
 use log::{debug, info, warn};
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+use std::cmp::Ordering;
 use std::io;
 
 /// Configuration parameters for the refinement routine
@@ -53,14 +55,24 @@ pub fn run_refine(
     ranges: &[(String, (i32, i32), String)],
     config: RefineConfig<'_>,
 ) -> io::Result<Vec<RefineRecord>> {
-    let mut results = Vec::with_capacity(ranges.len());
+    let intermediate: Vec<Result<(usize, RefineRecord), io::Error>> = ranges
+        .par_iter()
+        .enumerate()
+        .map(|(idx, (chrom, (orig_start, orig_end), label))| {
+            refine_single_range(impg, chrom, *orig_start, *orig_end, label, &config)
+                .map(|record| (idx, record))
+        })
+        .collect();
 
-    for (chrom, (orig_start, orig_end), label) in ranges {
-        let record = refine_single_range(impg, chrom, *orig_start, *orig_end, label, &config)?;
-        results.push(record);
+    let mut ordered = Vec::with_capacity(intermediate.len());
+    for entry in intermediate {
+        let (idx, record) = entry?;
+        ordered.push((idx, record));
     }
 
-    Ok(results)
+    ordered.sort_unstable_by_key(|(idx, _)| *idx);
+
+    Ok(ordered.into_iter().map(|(_, record)| record).collect())
 }
 
 fn refine_single_range(
@@ -105,10 +117,14 @@ fn refine_single_range(
         orig_end
     );
 
-    let mut candidates = Vec::with_capacity(flanks.len());
-
-    for &left_flank in &flanks {
-        for &right_flank in &flanks {
+    let best_candidate = flanks
+        .par_iter()
+        .flat_map_iter(|&left_flank| {
+            flanks
+                .iter()
+                .map(move |&right_flank| (left_flank, right_flank))
+        })
+        .filter_map(|(left_flank, right_flank)| {
             let tentative_start = orig_start.saturating_sub(left_flank);
             let tentative_end = orig_end.saturating_add(right_flank);
 
@@ -120,10 +136,11 @@ fn refine_single_range(
                     "Skipping non-positive range {}:{}-{} after applying flanks L{} R{}",
                     chrom, start, end, left_flank, right_flank
                 );
-                continue;
+                return None;
             }
 
-            let mut overlaps = query_overlaps(impg, target_id, (start, end), config);
+            let mut overlaps = Vec::new();
+            query_overlaps(impg, target_id, (start, end), config, &mut overlaps);
 
             apply_subset_filter(
                 impg,
@@ -159,11 +176,17 @@ fn refine_single_range(
                 chrom, start, end, left_extension, right_extension, candidate.support_count
             );
 
-            candidates.push(candidate);
-        }
-    }
+            Some(candidate)
+        })
+        .reduce_with(|best, candidate| {
+            if compare_candidates(&candidate, &best) == Ordering::Greater {
+                candidate
+            } else {
+                best
+            }
+        });
 
-    if candidates.is_empty() {
+    let Some(best_candidate) = best_candidate else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
@@ -171,32 +194,7 @@ fn refine_single_range(
                 chrom, orig_start, orig_end
             ),
         ));
-    }
-
-    let best_candidate = candidates
-        .into_iter()
-        .max_by(|a, b| {
-            a.support_count
-                .cmp(&b.support_count)
-                .then_with(|| {
-                    // Prefer smaller total expansion when support ties
-                    let a_total = a.left_extension + a.right_extension;
-                    let b_total = b.left_extension + b.right_extension;
-                    b_total.cmp(&a_total)
-                })
-                .then_with(|| {
-                    let a_max = a.left_extension.max(a.right_extension);
-                    let b_max = b.left_extension.max(b.right_extension);
-                    b_max.cmp(&a_max)
-                })
-                .then_with(|| {
-                    // Prefer shorter expansions when max flanks match
-                    let a_len = a.end - a.start;
-                    let b_len = b.end - b.start;
-                    b_len.cmp(&a_len)
-                })
-        })
-        .expect("at least one candidate available");
+    };
 
     info!(
         "Selected flanks left={}bp right={}bp for region {}:{}-{} ({} supporting samples)",
@@ -226,8 +224,11 @@ fn query_overlaps(
     target_id: u32,
     range: (i32, i32),
     config: &RefineConfig<'_>,
-) -> Vec<AdjustedInterval> {
-    if config.use_transitive_bfs {
+    buffer: &mut Vec<AdjustedInterval>,
+) {
+    buffer.clear();
+
+    let mut results = if config.use_transitive_bfs {
         impg.query_transitive_bfs(
             target_id,
             range.0,
@@ -253,7 +254,9 @@ fn query_overlaps(
         )
     } else {
         impg.query(target_id, range.0, range.1, false, config.min_identity)
-    }
+    };
+
+    buffer.append(&mut results);
 }
 
 fn apply_subset_filter(
@@ -291,6 +294,26 @@ fn apply_subset_filter(
             );
         }
     }
+}
+
+fn compare_candidates(a: &CandidateResult, b: &CandidateResult) -> Ordering {
+    a.support_count
+        .cmp(&b.support_count)
+        .then_with(|| {
+            let a_total = a.left_extension + a.right_extension;
+            let b_total = b.left_extension + b.right_extension;
+            b_total.cmp(&a_total)
+        })
+        .then_with(|| {
+            let a_max = a.left_extension.max(a.right_extension);
+            let b_max = b.left_extension.max(b.right_extension);
+            b_max.cmp(&a_max)
+        })
+        .then_with(|| {
+            let a_len = a.end - a.start;
+            let b_len = b.end - b.start;
+            b_len.cmp(&a_len)
+        })
 }
 
 fn compute_supporting_samples(
