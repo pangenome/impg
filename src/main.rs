@@ -2996,7 +2996,7 @@ fn print_stats(impg: &Impg) {
 
         let median = if entries.is_empty() {
             0.0
-        } else if entries.len() % 2 == 0 {
+        } else if entries.len().is_multiple_of(2) {
             let mid = entries.len() / 2;
             (entries[mid - 1].1 + entries[mid].1) as f64 / 2.0
         } else {
