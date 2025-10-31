@@ -336,13 +336,8 @@ struct RefineOpts {
 
     /// Step size used when exploring additional flanks (bp)
     #[arg(help_heading = "Refinement options")]
-    #[clap(long, value_parser, default_value_t = 5000)]
+    #[clap(long, value_parser, default_value_t = 1000)]
     extension_step: i32,
-
-    /// Optional output path for the refined BED-like results (default: stdout)
-    #[arg(help_heading = "Output options")]
-    #[clap(short, long, value_parser)]
-    output: Option<String>,
 }
 
 impl RefineOpts {
@@ -1149,18 +1144,7 @@ fn main() -> io::Result<()> {
             };
 
             let mut records = refine::run_refine(&impg, &target_ranges, config)?;
-
-            let mut writer: Box<dyn Write> = if let Some(path) = &refine.output {
-                if let Some(parent) = std::path::Path::new(path).parent() {
-                    if !parent.as_os_str().is_empty() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                }
-                let file = File::create(path)?;
-                Box::new(BufWriter::new(file))
-            } else {
-                Box::new(BufWriter::new(io::stdout()))
-            };
+            let mut writer = BufWriter::new(io::stdout());
 
             for record in records.drain(..) {
                 let original_range = format!(
