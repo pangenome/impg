@@ -41,6 +41,7 @@ struct SampleInterval {
     target_end: i32,
 }
 
+#[derive(Clone)]
 struct CandidateResult {
     start: i32,
     end: i32,
@@ -117,74 +118,47 @@ fn refine_single_range(
         orig_end
     );
 
-    let best_candidate = flanks
+    let mut best_candidate: Option<CandidateResult> = None;
+
+    let evaluate = |left: i32, right: i32| -> Option<CandidateResult> {
+        evaluate_candidate(
+            impg, target_id, chrom, orig_start, orig_end, seq_len, left, right, config,
+        )
+    };
+
+    if let Some(candidate) = flanks
         .par_iter()
-        .flat_map_iter(|&left_flank| {
-            flanks
-                .iter()
-                .map(move |&right_flank| (left_flank, right_flank))
-        })
-        .filter_map(|(left_flank, right_flank)| {
-            let tentative_start = orig_start.saturating_sub(left_flank);
-            let tentative_end = orig_end.saturating_add(right_flank);
+        .filter_map(|&left| evaluate(left, 0))
+        .reduce_with(better_candidate)
+    {
+        best_candidate = update_best_candidate(best_candidate, candidate);
+    }
 
-            let start = tentative_start.max(0);
-            let end = tentative_end.min(seq_len);
+    let left_fixed = best_candidate
+        .as_ref()
+        .map(|c| c.left_extension)
+        .unwrap_or(0);
 
-            if end <= start {
-                warn!(
-                    "Skipping non-positive range {}:{}-{} after applying flanks L{} R{}",
-                    chrom, start, end, left_flank, right_flank
-                );
-                return None;
-            }
+    if let Some(candidate) = flanks
+        .par_iter()
+        .filter_map(|&right| evaluate(left_fixed, right))
+        .reduce_with(better_candidate)
+    {
+        best_candidate = update_best_candidate(best_candidate, candidate);
+    }
 
-            let mut overlaps = Vec::new();
-            query_overlaps(impg, target_id, (start, end), config, &mut overlaps);
+    let right_fixed = best_candidate
+        .as_ref()
+        .map(|c| c.right_extension)
+        .unwrap_or(0);
 
-            apply_subset_filter(
-                impg,
-                target_id,
-                &mut overlaps,
-                chrom,
-                (start, end),
-                config.subset_filter,
-            );
-
-            let support_count = compute_supporting_samples(
-                target_id,
-                &overlaps,
-                start,
-                end,
-                config.span_bp,
-                config.merge_distance,
-            );
-
-            let left_extension = orig_start.saturating_sub(start);
-            let right_extension = end.saturating_sub(orig_end);
-
-            let candidate = CandidateResult {
-                start,
-                end,
-                left_extension,
-                right_extension,
-                support_count,
-            };
-
-            debug!(
-                "Region {}:{}-{} flank L{} R{} -> {} supporting samples",
-                chrom, start, end, left_extension, right_extension, candidate.support_count
-            );
-
-            Some(candidate)
-        })
-        .reduce_with(|best, candidate| {
-            if compare_candidates(&candidate, &best) == Ordering::Greater {
-                candidate
-            } else {
-                best
-            }
-        });
+    if let Some(candidate) = flanks
+        .par_iter()
+        .filter_map(|&left| evaluate(left, right_fixed))
+        .reduce_with(better_candidate)
+    {
+        best_candidate = update_best_candidate(best_candidate, candidate);
+    }
 
     let Some(best_candidate) = best_candidate else {
         return Err(io::Error::new(
@@ -217,6 +191,71 @@ fn refine_single_range(
         applied_right_extension: best_candidate.right_extension,
         support_count: best_candidate.support_count,
     })
+}
+
+fn evaluate_candidate(
+    impg: &Impg,
+    target_id: u32,
+    chrom: &str,
+    orig_start: i32,
+    orig_end: i32,
+    seq_len: i32,
+    left_flank: i32,
+    right_flank: i32,
+    config: &RefineConfig<'_>,
+) -> Option<CandidateResult> {
+    let tentative_start = orig_start.saturating_sub(left_flank);
+    let tentative_end = orig_end.saturating_add(right_flank);
+
+    let start = tentative_start.max(0);
+    let end = tentative_end.min(seq_len);
+
+    if end <= start {
+        warn!(
+            "Skipping non-positive range {}:{}-{} after applying flanks L{} R{}",
+            chrom, start, end, left_flank, right_flank
+        );
+        return None;
+    }
+
+    let mut overlaps = Vec::new();
+    query_overlaps(impg, target_id, (start, end), config, &mut overlaps);
+
+    apply_subset_filter(
+        impg,
+        target_id,
+        &mut overlaps,
+        chrom,
+        (start, end),
+        config.subset_filter,
+    );
+
+    let support_count = compute_supporting_samples(
+        target_id,
+        &overlaps,
+        start,
+        end,
+        config.span_bp,
+        config.merge_distance,
+    );
+
+    let left_extension = orig_start.saturating_sub(start);
+    let right_extension = end.saturating_sub(orig_end);
+
+    let candidate = CandidateResult {
+        start,
+        end,
+        left_extension,
+        right_extension,
+        support_count,
+    };
+
+    debug!(
+        "Region {}:{}-{} flank L{} R{} -> {} supporting samples",
+        chrom, start, end, left_extension, right_extension, candidate.support_count
+    );
+
+    Some(candidate)
 }
 
 fn query_overlaps(
@@ -293,6 +332,30 @@ fn apply_subset_filter(
                 chrom, range.0, range.1
             );
         }
+    }
+}
+
+fn better_candidate(a: CandidateResult, b: CandidateResult) -> CandidateResult {
+    if compare_candidates(&a, &b) == Ordering::Greater {
+        a
+    } else {
+        b
+    }
+}
+
+fn update_best_candidate(
+    best: Option<CandidateResult>,
+    candidate: CandidateResult,
+) -> Option<CandidateResult> {
+    match best {
+        Some(current) => {
+            if compare_candidates(&candidate, &current) == Ordering::Greater {
+                Some(candidate)
+            } else {
+                Some(current)
+            }
+        }
+        None => Some(candidate),
     }
 }
 
