@@ -11,7 +11,8 @@ use std::io;
 /// searching for loci that remain well supported at both boundaries.
 pub struct RefineConfig<'a> {
     pub span_bp: i32,
-    pub max_extension: i32,
+    /// Maximum per-side expansion; <=1 interpreted as fraction of the locus, >1 as absolute bp.
+    pub max_extension: f64,
     pub extension_step: i32,
     pub merge_distance: i32,
     pub min_identity: Option<f64>,
@@ -111,12 +112,27 @@ fn refine_single_range(
     };
     let seq_len = seq_len as i32;
 
-    // Build the grid of candidate flank sizes.
-    let flanks = build_flanks(config.max_extension, config.extension_step);
+    let locus_len = (orig_end - orig_start).max(0);
+    let max_extension_bp = if config.max_extension <= 1.0 {
+        ((locus_len as f64) * config.max_extension)
+            .ceil()
+            .clamp(0.0, i32::MAX as f64) as i32
+    } else {
+        config.max_extension.ceil().clamp(0.0, i32::MAX as f64) as i32
+    };
+    let max_extension_bp = max_extension_bp.max(0);
+
+    // Build the grid of candidate flank sizes based on dynamic constraints.
+    let flanks = build_flanks(max_extension_bp, config.extension_step);
     debug!(
-        "Evaluating {}x{} flank sizes for region {}:{}-{}",
+        "Evaluating {} flank steps up to {} bp per side (max_extension={}) for region {}:{}-{}",
         flanks.len(),
-        flanks.len(),
+        max_extension_bp,
+        if config.max_extension <= 1.0 {
+            format!("{:.2}x locus", config.max_extension)
+        } else {
+            format!("{:.0} bp", config.max_extension)
+        },
         chrom,
         orig_start,
         orig_end

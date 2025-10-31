@@ -238,6 +238,12 @@ impg refine -p alignments.paf -b loci.bed
 
 # Allow merging within 200 kb and require at least 2 kb coverage near each end
 impg refine -p alignments.paf -r chr1:1000-2000 -d 200000 --span-bp 2000
+
+# Expand up to 40% of the locus length on each side (default: 0.25)
+impg refine -p alignments.paf -r chr1:1000-2000 --max-extension 0.40
+
+# Or cap the search to an absolute flank size
+impg refine -p alignments.paf -r chr1:1000-2000 --max-extension 50000
 ```
 
 `impg refine` explores asymmetric left/right expansions around each target region to find the smallest window that maximizes the number of samples spanning both boundaries. Keeping start/end alignment anchors outside structural variants helps avoid selecting loci that terminate inside large insertions or deletions.

@@ -329,10 +329,11 @@ struct RefineOpts {
     #[clap(long, value_parser, default_value_t = 1000)]
     span_bp: i32,
 
-    /// Maximum per-side extension explored when trying to maximize boundary support (bp)
+    /// Maximum per-side extension explored when maximizing boundary support.
+    /// Values <= 1 are treated as fractions of the locus length; values > 1 as absolute bp.
     #[arg(help_heading = "Refinement options")]
-    #[clap(long, value_parser, default_value_t = 100000)]
-    max_extension: i32,
+    #[clap(long, value_parser, default_value_t = 0.25)]
+    max_extension: f64,
 
     /// Step size for expanding flanks (bp)
     #[arg(help_heading = "Refinement options")]
@@ -348,7 +349,7 @@ impl RefineOpts {
                 "--span-bp must be >= 0",
             ));
         }
-        if self.max_extension < 0 {
+        if self.max_extension < 0.0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "--max-extension must be >= 0",
