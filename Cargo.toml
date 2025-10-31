@@ -20,7 +20,7 @@ natord = "1.0.9"
 rustc-hash = "2.1.1"
 libc = "0.2.177"
 nalgebra = "0.33.2"
-indicatif = "0.18.1"
+indicatif = "0.18.2"
 spoa_rs = { git = "https://github.com/AndreaGuarracino/spoa-rs.git" }
 rust-htslib = { version = "0.46.0", default-features = false } # Don't update it, see https://github.com/rust-bio/rust-htslib/issues/434
 
