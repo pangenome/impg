@@ -1,6 +1,6 @@
 use clap::Parser;
 use coitrees::{Interval, IntervalTree};
-use impg::commands::{lace, partition, similarity};
+use impg::commands::{lace, partition, refine, similarity};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::paf::{PartialPafRecord, Strand};
 use impg::seqidx::SequenceIndex;
@@ -17,6 +17,7 @@ use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 
 use std::num::NonZeroUsize;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -317,6 +318,64 @@ impl QueryOpts {
     }
 }
 
+/// Refinement-specific options
+#[derive(Parser, Debug)]
+#[command(next_help_heading = "Refinement options")]
+struct RefineOpts {
+    #[clap(flatten)]
+    query: QueryOpts,
+
+    /// Minimum number of bases that supporting samples must span at each region boundary
+    #[arg(help_heading = "Refinement options")]
+    #[clap(long, value_parser, default_value_t = 1000)]
+    span_bp: i32,
+
+    /// Maximum per-side extension explored when maximizing boundary support.
+    /// Values <= 1 are treated as fractions of the locus length; values > 1 as absolute bp.
+    #[arg(help_heading = "Refinement options")]
+    #[clap(long, value_parser, default_value_t = 0.4)]
+    max_extension: f64,
+
+    /// PanSN aggregation mode when counting support (sample/haplotype)
+    #[arg(help_heading = "Refinement options")]
+    #[clap(long, value_enum)]
+    pansn_mode: Option<refine::RefineSupportArg>,
+
+    /// Step size for expanding flanks (bp)
+    #[arg(help_heading = "Refinement options")]
+    #[clap(long, value_parser, default_value_t = 1000)]
+    extension_step: i32,
+
+    /// Optional BED file capturing the entities that span the refined region
+    #[arg(help_heading = "Output options")]
+    #[clap(long, value_parser)]
+    support_output: Option<String>,
+}
+
+impl RefineOpts {
+    fn validate(&self) -> io::Result<()> {
+        if self.span_bp < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--span-bp must be >= 0",
+            ));
+        }
+        if self.max_extension < 0.0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--max-extension must be >= 0",
+            ));
+        }
+        if self.extension_step <= 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--extension-step must be > 0",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Parse sequence name to extract subsequence coordinates and original sequence name
 /// Format: `seq_name:start-end` -> (original_seq_name, start_offset)
 fn parse_subsequence_coordinates(seq_name: &str) -> Option<(String, i32)> {
@@ -537,6 +596,17 @@ enum Args {
 
         #[clap(flatten)]
         gfa_maf_fasta: GfaMafFastaOpts,
+
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+    /// Refine loci to maximize the number of samples that span both ends of the region
+    Refine {
+        #[clap(flatten)]
+        paf: PafOpts,
+
+        #[clap(flatten)]
+        refine: RefineOpts,
 
         #[clap(flatten)]
         common: CommonOpts,
@@ -1030,6 +1100,125 @@ fn main() -> io::Result<()> {
                         ));
                     }
                 }
+            }
+        }
+        Args::Refine {
+            paf,
+            refine,
+            common,
+        } => {
+            initialize_threads_and_log(&common);
+            refine.validate()?;
+
+            let impg = initialize_impg(&common, &paf)?;
+            let subset_filter = load_subset_filter_if_provided(&refine.query.subset_sequence_list)?;
+
+            let target_ranges = if let Some(target_range_str) = &refine.query.target_range {
+                let (target_name, target_range, name) =
+                    partition::parse_target_range(target_range_str)?;
+                validate_sequence_range(
+                    &target_name,
+                    target_range.0,
+                    target_range.1,
+                    &impg.seq_index,
+                )?;
+                vec![(target_name, target_range, name)]
+            } else if let Some(target_bed) = &refine.query.target_bed {
+                let targets = partition::parse_bed_file(target_bed)?;
+                let mut validated = Vec::with_capacity(targets.len());
+                for (seq_name, (start, end), name) in targets {
+                    validate_sequence_range(&seq_name, start, end, &impg.seq_index)?;
+                    validated.push((seq_name, (start, end), name));
+                }
+                validated
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Either --target-range or --target-bed must be provided",
+                ));
+            };
+
+            let config = refine::RefineConfig {
+                span_bp: refine.span_bp,
+                max_extension: refine.max_extension,
+                extension_step: refine.extension_step,
+                support_mode: refine
+                    .pansn_mode
+                    .map(Into::into)
+                    .unwrap_or(refine::SupportMode::Sequence),
+                merge_distance: refine.query.effective_merge_distance(),
+                min_identity: refine.query.min_identity,
+                use_transitive_bfs: refine.query.transitive,
+                use_transitive_dfs: refine.query.transitive_opts.transitive_dfs,
+                max_transitive_depth: refine.query.transitive_opts.max_depth,
+                min_transitive_len: refine.query.transitive_opts.min_transitive_len,
+                min_distance_between_ranges: refine
+                    .query
+                    .transitive_opts
+                    .min_distance_between_ranges,
+                subset_filter: subset_filter.as_ref(),
+            };
+
+            let mut records = refine::run_refine(&impg, &target_ranges, config)?;
+            info!(
+                "Refining {} targets with max_extension={} (mode: {:?})",
+                target_ranges.len(),
+                refine.max_extension,
+                refine
+                    .pansn_mode
+                    .map(Into::into)
+                    .unwrap_or(refine::SupportMode::Sequence)
+            );
+            let mut writer = BufWriter::new(io::stdout());
+            let mut support_writer = if let Some(path) = &refine.support_output {
+                let support_path = Path::new(path);
+                if let Some(parent) = support_path.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                }
+                Some(BufWriter::new(File::create(support_path)?))
+            } else {
+                None
+            };
+
+            for record in records.drain(..) {
+                let original_range = format!(
+                    "{}:{}-{}",
+                    record.chrom, record.original_start, record.original_end
+                );
+                let mut name_field = record.label.clone();
+                if name_field.trim().is_empty() || name_field == "." {
+                    name_field = original_range.clone();
+                }
+
+                // Emit an informative BED-like row: chrom start end name support left_extension right_extension.
+                // Maximizing the sample count while minimizing the expansion helps avoid loci that start or end inside SVs.
+                writeln!(
+                    writer,
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    record.chrom,
+                    record.refined_start,
+                    record.refined_end,
+                    name_field,
+                    record.support_count,
+                    record.applied_left_extension,
+                    record.applied_right_extension
+                )?;
+
+                if let Some(ref mut support_out) = support_writer {
+                    for entity in &record.support_entities {
+                        writeln!(
+                            support_out,
+                            "{}\t{}\t{}\t{}",
+                            entity.sequence, entity.start, entity.end, name_field
+                        )?;
+                    }
+                }
+            }
+            writer.flush()?;
+            if let Some(mut support_out) = support_writer {
+                support_out.flush()?;
             }
         }
         Args::Similarity {
@@ -2846,7 +3035,7 @@ fn print_stats(impg: &Impg) {
 
         let median = if entries.is_empty() {
             0.0
-        } else if entries.len() % 2 == 0 {
+        } else if entries.len().is_multiple_of(2) {
             let mid = entries.len() / 2;
             (entries[mid - 1].1 + entries[mid].1) as f64 / 2.0
         } else {

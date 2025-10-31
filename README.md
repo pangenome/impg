@@ -225,6 +225,38 @@ impg similarity -p alignments.paf -b regions.bed --sequence-files *.fa --pca --p
 impg similarity -p alignments.paf -b regions.bed --sequence-files *.fa --pca --polarize-guide-samples sample1,sample2
 ```
 
+### Refine
+
+Refine loci to maximize sample support:
+
+```bash
+# Refine a single region to maximize the number of sequences spanning both ends
+impg refine -p alignments.paf -r chr1:1000-2000
+
+# Refine many regions from a BED file
+impg refine -p alignments.paf -b loci.bed
+
+# Allow merging within 200 kb and require at least 2 kb coverage near each end
+impg refine -p alignments.paf -r chr1:1000-2000 -d 200000 --span-bp 2000
+
+# Expand up to 60% of the locus length on each side (default: 0.25)
+impg refine -p alignments.paf -r chr1:1000-2000 --max-extension 0.60
+
+# Or cap the search to an absolute flank size
+impg refine -p alignments.paf -r chr1:1000-2000 --max-extension 50000
+
+# Maximize PanSN sample or haplotype counts instead of sequence counts
+impg refine -p alignments.paf -r chr1:1000-2000 --pansn-mode sample
+impg refine -p alignments.paf -r chr1:1000-2000 --pansn-mode haplotype
+
+# Capture the supporting entities in a separate BED file
+impg refine -p alignments.paf -r chr1:1000-2000 --support-output refine_support.bed
+```
+
+When `--support-output` is provided, the tool emits a BED file listing every sequence/sample/haplotype that spans the refined region: `sequence	start	end	region-name`.
+
+`impg refine` explores asymmetric left/right expansions around each target region to find the smallest window that maximizes the number of sequences, samples, or haplotypes. Keeping start/end alignment anchors outside structural variants helps avoid selecting loci that terminate inside large insertions or deletions.
+
 ### Stats
 
 Print alignment statistics:
