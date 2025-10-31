@@ -38,6 +38,14 @@ pub struct RefineRecord {
     pub applied_left_extension: i32,
     pub applied_right_extension: i32,
     pub support_count: usize,
+    pub support_entities: Vec<SupportEntity>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SupportEntity {
+    pub sequence: String,
+    pub start: i32,
+    pub end: i32,
 }
 
 /// How to aggregate PanSN identifiers when counting support.
@@ -79,6 +87,7 @@ struct CandidateResult {
     left_extension: i32,
     right_extension: i32,
     support_count: usize,
+    support_entities: Vec<SupportEntity>,
 }
 
 /// Run the refinement procedure on the provided ranges
@@ -240,6 +249,7 @@ fn refine_single_range(
         applied_left_extension: best_candidate.left_extension,
         applied_right_extension: best_candidate.right_extension,
         support_count: best_candidate.support_count,
+        support_entities: best_candidate.support_entities,
     })
 }
 
@@ -281,7 +291,7 @@ fn evaluate_candidate(
         config.subset_filter,
     );
 
-    let support_count = compute_supporting_samples(
+    let stats = compute_supporting_stats(
         impg,
         config.support_mode,
         target_id,
@@ -300,15 +310,9 @@ fn evaluate_candidate(
         end,
         left_extension,
         right_extension,
-        support_count,
+        support_count: stats.aggregated,
+        support_entities: stats.survivors,
     };
-
-    // Large expansions only survive if they keep both boundaries well supported, helping us avoid
-    // loci that terminate inside structural variants.
-    debug!(
-        "Region {}:{}-{} flank L{} R{} -> {} supporting samples",
-        chrom, start, end, left_extension, right_extension, candidate.support_count
-    );
 
     Some(candidate)
 }
@@ -436,7 +440,12 @@ fn compare_candidates(a: &CandidateResult, b: &CandidateResult) -> Ordering {
         })
 }
 
-fn compute_supporting_samples(
+struct SupportStats {
+    aggregated: usize,
+    survivors: Vec<SupportEntity>,
+}
+
+fn compute_supporting_stats(
     impg: &Impg,
     mode: SupportMode,
     target_id: u32,
@@ -445,19 +454,48 @@ fn compute_supporting_samples(
     region_end: i32,
     span_bp: i32,
     merge_distance: i32,
-) -> usize {
+) -> SupportStats {
+    let (aggregated, survivors) = compute_support_sets(
+        impg,
+        mode,
+        target_id,
+        overlaps,
+        region_start,
+        region_end,
+        span_bp,
+        merge_distance,
+    );
+
+    SupportStats {
+        aggregated: aggregated.len(),
+        survivors,
+    }
+}
+
+fn compute_support_sets(
+    impg: &Impg,
+    mode: SupportMode,
+    target_id: u32,
+    overlaps: &[AdjustedInterval],
+    region_start: i32,
+    region_end: i32,
+    span_bp: i32,
+    merge_distance: i32,
+) -> (FxHashSet<String>, Vec<SupportEntity>) {
+    let mut aggregated = FxHashSet::default();
+    let mut sequence_ranges: FxHashMap<String, (i32, i32)> = FxHashMap::default();
+
     if overlaps.len() <= 1 {
-        return 0;
+        return (aggregated, Vec::new());
     }
 
     let mut per_sample: FxHashMap<u32, Vec<SampleInterval>> = FxHashMap::default();
 
     for (query_interval, _, target_interval) in overlaps.iter() {
         if query_interval.metadata == target_id {
-            continue; // Skip the target region itself
+            continue;
         }
 
-        // Store absolute coordinates regardless of strand
         let q_start = query_interval.first.min(query_interval.last);
         let q_end = query_interval.first.max(query_interval.last);
         let t_start = target_interval.first.min(target_interval.last);
@@ -478,30 +516,58 @@ fn compute_supporting_samples(
     let left_threshold = region_start + effective_span;
     let right_threshold = region_end - effective_span;
 
-    let mut support_keys: FxHashSet<String> = FxHashSet::default();
-
     for (sample_id, intervals) in per_sample {
         let merged = merge_intervals(intervals, merge_distance);
 
-        if merged.iter().any(|interval| {
-            covers_boundaries(
+        let mut query_range: Option<(i32, i32)> = None;
+        for interval in &merged {
+            if covers_boundaries(
                 interval.target_start,
                 interval.target_end,
                 region_start,
                 region_end,
                 left_threshold,
                 right_threshold,
-            )
-        }) {
-            if let Some(name) = impg.seq_index.get_name(sample_id) {
-                if let Some(key) = pansn_key(name, mode) {
-                    support_keys.insert(key);
-                }
+            ) {
+                let q_start = interval.query_start.min(interval.query_end);
+                let q_end = interval.query_start.max(interval.query_end);
+                query_range = Some(match query_range {
+                    Some((s, e)) => (s.min(q_start), e.max(q_end)),
+                    None => (q_start, q_end),
+                });
+            }
+        }
+
+        if let (Some((q_start, q_end)), Some(name)) =
+            (query_range, impg.seq_index.get_name(sample_id))
+        {
+            let seq_name = name.to_string();
+            let entry = sequence_ranges
+                .entry(seq_name.clone())
+                .or_insert((q_start, q_end));
+            entry.0 = entry.0.min(q_start);
+            entry.1 = entry.1.max(q_end);
+            if let Some(key) = pansn_key(name, mode) {
+                aggregated.insert(key);
             }
         }
     }
 
-    support_keys.len()
+    let mut survivors: Vec<SupportEntity> = sequence_ranges
+        .into_iter()
+        .map(|(sequence, (start, end))| SupportEntity {
+            sequence,
+            start,
+            end,
+        })
+        .collect();
+    survivors.sort_unstable_by(|a, b| {
+        a.sequence
+            .cmp(&b.sequence)
+            .then_with(|| a.start.cmp(&b.start))
+    });
+
+    (aggregated, survivors)
 }
 
 fn covers_boundaries(

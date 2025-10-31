@@ -17,6 +17,7 @@ use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 
 use std::num::NonZeroUsize;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -344,6 +345,11 @@ struct RefineOpts {
     #[arg(help_heading = "Refinement options")]
     #[clap(long, value_parser, default_value_t = 1000)]
     extension_step: i32,
+
+    /// Optional BED file capturing the entities that span the refined region
+    #[arg(help_heading = "Output options")]
+    #[clap(long, value_parser)]
+    support_output: Option<String>,
 }
 
 impl RefineOpts {
@@ -1155,6 +1161,17 @@ fn main() -> io::Result<()> {
 
             let mut records = refine::run_refine(&impg, &target_ranges, config)?;
             let mut writer = BufWriter::new(io::stdout());
+            let mut support_writer = if let Some(path) = &refine.support_output {
+                let support_path = Path::new(path);
+                if let Some(parent) = support_path.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                }
+                Some(BufWriter::new(File::create(support_path)?))
+            } else {
+                None
+            };
 
             for record in records.drain(..) {
                 let original_range = format!(
@@ -1179,8 +1196,21 @@ fn main() -> io::Result<()> {
                     record.applied_left_extension,
                     record.applied_right_extension
                 )?;
+
+                if let Some(ref mut support_out) = support_writer {
+                    for entity in &record.support_entities {
+                        writeln!(
+                            support_out,
+                            "{}\t{}\t{}\t{}",
+                            entity.sequence, entity.start, entity.end, name_field
+                        )?;
+                    }
+                }
             }
             writer.flush()?;
+            if let Some(mut support_out) = support_writer {
+                support_out.flush()?;
+            }
         }
         Args::Similarity {
             common,
