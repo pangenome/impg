@@ -63,6 +63,14 @@ pub enum RefineSupportArg {
     Haplotype,
 }
 
+fn support_mode_label(mode: SupportMode) -> &'static str {
+    match mode {
+        SupportMode::Sequence => "sequences",
+        SupportMode::Sample => "samples",
+        SupportMode::Haplotype => "haplotypes",
+    }
+}
+
 impl From<RefineSupportArg> for SupportMode {
     fn from(value: RefineSupportArg) -> Self {
         match value {
@@ -96,6 +104,15 @@ pub fn run_refine(
     ranges: &[(String, (i32, i32), String)],
     config: RefineConfig<'_>,
 ) -> io::Result<Vec<RefineRecord>> {
+    info!(
+        "Refining {} range(s) with support aggregated by {} (span_bp={}, max_extension={}, extension_step={})",
+        ranges.len(),
+        support_mode_label(config.support_mode),
+        config.span_bp,
+        config.max_extension,
+        config.extension_step
+    );
+
     let intermediate: Vec<Result<(usize, RefineRecord), io::Error>> = ranges
         .par_iter()
         .enumerate()
@@ -229,14 +246,15 @@ fn refine_single_range(
         ));
     };
 
-    info!(
-        "Selected flanks left={}bp right={}bp for region {}:{}-{} ({} supporting samples)",
+    debug!(
+        "Selected flanks left={}bp right={}bp for region {}:{}-{} ({} supporting {})",
         best_candidate.left_extension,
         best_candidate.right_extension,
         chrom,
         best_candidate.start,
         best_candidate.end,
-        best_candidate.support_count
+        best_candidate.support_count,
+        support_mode_label(config.support_mode)
     );
 
     Ok(RefineRecord {
