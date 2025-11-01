@@ -1192,15 +1192,16 @@ fn main() -> io::Result<()> {
                     name_field = original_range.clone();
                 }
 
-                // Emit an informative BED-like row: chrom start end name support left_extension right_extension.
+                // Emit an informative BED-like row: chrom start end name new_support old_support left_extension right_extension.
                 // Maximizing the sample count while minimizing the expansion helps avoid loci that start or end inside SVs.
                 writeln!(
                     writer,
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                     record.chrom,
                     record.refined_start,
                     record.refined_end,
                     name_field,
+                    record.original_support_count,
                     record.support_count,
                     record.applied_left_extension,
                     record.applied_right_extension
