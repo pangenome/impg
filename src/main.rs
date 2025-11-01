@@ -333,7 +333,7 @@ struct RefineOpts {
     /// Maximum per-side extension explored when maximizing boundary support.
     /// Values <= 1 are treated as fractions of the locus length; values > 1 as absolute bp.
     #[arg(help_heading = "Refinement options")]
-    #[clap(long, value_parser, default_value_t = 0.4)]
+    #[clap(long, value_parser, default_value_t = 0.5)]
     max_extension: f64,
 
     /// PanSN aggregation mode when counting support (sample/haplotype)
