@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 bincode = { version = "2.0.1", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
-clap = { version = "4.5.49", features = ["derive"] }
+clap = { version = "4.5.51", features = ["derive"] }
 coitrees = "0.4.0"
 num_cpus = "1.17.0"
 rayon = "1.11.0"
@@ -20,7 +20,7 @@ natord = "1.0.9"
 rustc-hash = "2.1.1"
 libc = "0.2.177"
 nalgebra = "0.33.2"
-indicatif = "0.18.0"
+indicatif = "0.18.2"
 
 agc-rs = { git = "https://github.com/pangenome/agc-rs.git", optional = true }
 spoa_rs = { git = "https://github.com/AndreaGuarracino/spoa-rs.git" }
