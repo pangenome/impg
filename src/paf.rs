@@ -153,9 +153,6 @@ pub fn parse_paf_bgzf<R: std::io::Read + std::io::Seek>(
             break; // EOF
         }
 
-        // Capture position after reading the line (for next iteration)
-        let line_end_vpos = reader.virtual_position();
-
         // Convert to string for parsing (excluding newline)
         let line_len = if line_bytes.ends_with(&[b'\n']) {
             line_bytes.len() - 1
@@ -173,17 +170,16 @@ pub fn parse_paf_bgzf<R: std::io::Read + std::io::Seek>(
         let mut record = PartialPafRecord::parse(line, 0, seq_index)?;
         let cigar_byte_offset = record.strand_and_cigar_offset & !PartialPafRecord::STRAND_BIT;
 
-        // Compute CIGAR virtual position by seeking back and advancing by the offset
+        // Compute CIGAR virtual position by seeking back and advancing
         // This correctly handles BGZF block boundaries
+        reader.seek(line_start_vpos).map_err(ParseErr::IoError)?;
+
         if cigar_byte_offset > 0 {
-            reader.seek(line_start_vpos).map_err(ParseErr::IoError)?;
             std::io::copy(
                 &mut reader.by_ref().take(cigar_byte_offset),
                 &mut std::io::sink(),
             )
             .map_err(ParseErr::IoError)?;
-        } else {
-            reader.seek(line_start_vpos).map_err(ParseErr::IoError)?;
         }
 
         let cigar_vpos = reader.virtual_position();
@@ -194,8 +190,16 @@ pub fn parse_paf_bgzf<R: std::io::Read + std::io::Seek>(
 
         records.push(record);
 
-        // Restore reader position to end of line for next iteration
-        reader.seek(line_end_vpos).map_err(ParseErr::IoError)?;
+        // Skip remaining bytes to end of line instead of seeking
+        // This eliminates one seek operation per line
+        let remaining_bytes = line_bytes.len() as u64 - cigar_byte_offset;
+        if remaining_bytes > 0 {
+            std::io::copy(
+                &mut reader.by_ref().take(remaining_bytes),
+                &mut std::io::sink(),
+            )
+            .map_err(ParseErr::IoError)?;
+        }
     }
 
     Ok(records)
