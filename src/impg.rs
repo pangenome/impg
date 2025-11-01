@@ -89,7 +89,7 @@ pub struct QueryMetadata {
     target_end: i32,
     query_start: i32,
     query_end: i32,
-    paf_file_index: u16,
+    paf_file_index: u32,
     strand_and_cigar_offset: u64, // Track strand and cigar offset
     cigar_bytes: usize,
 }
@@ -308,7 +308,7 @@ impl Impg {
                             target_end: record.target_end as i32,
                             query_start: record.query_start as i32,
                             query_end: record.query_end as i32,
-                            paf_file_index: file_index as u16,
+                            paf_file_index: file_index as u32,
                             strand_and_cigar_offset: record.strand_and_cigar_offset, // Already includes strand bit
                             cigar_bytes: record.cigar_bytes,
                         };
