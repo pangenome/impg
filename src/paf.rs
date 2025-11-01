@@ -139,52 +139,63 @@ pub fn parse_paf_bgzf<R: std::io::Read + std::io::Seek>(
     use std::io::{BufRead, Read};
 
     let mut records = Vec::new();
-    let mut line_buf = String::new();
+    let mut line_bytes = Vec::new();
 
     loop {
-        // Get virtual position BEFORE reading the line
+        // Get virtual position BEFORE reading
         let line_start_vpos = reader.virtual_position();
-        line_buf.clear();
+        line_bytes.clear();
 
-        let bytes_read = reader.read_line(&mut line_buf).map_err(ParseErr::IoError)?;
+        let bytes_read = reader
+            .read_until(b'\n', &mut line_bytes)
+            .map_err(ParseErr::IoError)?;
         if bytes_read == 0 {
             break; // EOF
         }
 
-        // Remove trailing newline
-        let line = line_buf.trim_end();
+        // Capture position after reading the line (for next iteration)
+        let line_end_vpos = reader.virtual_position();
+
+        // Convert to string for parsing (excluding newline)
+        let line_len = if line_bytes.ends_with(&[b'\n']) {
+            line_bytes.len() - 1
+        } else {
+            line_bytes.len()
+        };
+        let line = std::str::from_utf8(&line_bytes[..line_len])
+            .map_err(|_| ParseErr::InvalidFormat("Invalid UTF-8".to_string()))?;
+
         if line.is_empty() {
             continue;
         }
 
-        // Parse the record, but we need to calculate the CIGAR virtual position properly
-        // We can't just add byte offsets to a virtual position!
+        // Parse to get byte offset to CIGAR within the line
         let mut record = PartialPafRecord::parse(line, 0, seq_index)?;
-
-        // Now fix the cigar offset: calculate byte offset within the line,
-        // then seek forward by that many bytes to get the correct virtual position
         let cigar_byte_offset = record.strand_and_cigar_offset & !PartialPafRecord::STRAND_BIT;
 
-        // Seek back to line start
-        reader.seek(line_start_vpos).map_err(ParseErr::IoError)?;
+        // Compute CIGAR virtual position by seeking back and advancing by the offset
+        // This correctly handles BGZF block boundaries
+        if cigar_byte_offset > 0 {
+            reader.seek(line_start_vpos).map_err(ParseErr::IoError)?;
+            std::io::copy(
+                &mut reader.by_ref().take(cigar_byte_offset),
+                &mut std::io::sink(),
+            )
+            .map_err(ParseErr::IoError)?;
+        } else {
+            reader.seek(line_start_vpos).map_err(ParseErr::IoError)?;
+        }
 
-        // Read forward by cigar_byte_offset bytes to get the correct virtual position
-        let mut skip_buf = vec![0u8; cigar_byte_offset as usize];
-        reader.read_exact(&mut skip_buf).map_err(ParseErr::IoError)?;
-
-        // Now get the virtual position at the CIGAR start
         let cigar_vpos = reader.virtual_position();
 
-        // Restore reader position to end of line for next iteration
-        reader.seek(line_start_vpos).map_err(ParseErr::IoError)?;
-        let mut restore_buf = String::new();
-        reader.read_line(&mut restore_buf).map_err(ParseErr::IoError)?;
-
-        // Update the record with the correct virtual position
+        // Update record with correct BGZF virtual position
         let strand_bit = record.strand_and_cigar_offset & PartialPafRecord::STRAND_BIT;
         record.strand_and_cigar_offset = u64::from(cigar_vpos) | strand_bit;
 
         records.push(record);
+
+        // Restore reader position to end of line for next iteration
+        reader.seek(line_end_vpos).map_err(ParseErr::IoError)?;
     }
 
     Ok(records)
