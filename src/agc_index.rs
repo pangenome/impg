@@ -50,7 +50,8 @@ impl AgcIndex {
             .enumerate()
             .map(|(agc_idx, agc_path)| -> io::Result<(usize, String, AGCFile, Vec<(String, Vec<String>)>)> {
                 let mut agc = AGCFile::new();
-                if !agc.open(agc_path, true) {
+                // Disable AGC prefetching to avoid materializing entire archives in memory up front.
+                if !agc.open(agc_path, false) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("Failed to open AGC file: {agc_path}"),

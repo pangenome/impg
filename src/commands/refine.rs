@@ -367,6 +367,7 @@ fn query_overlaps(
             config.min_distance_between_ranges,
             false,
             config.min_identity,
+            None,
         )
     } else if config.use_transitive_dfs {
         impg.query_transitive_dfs(
@@ -379,9 +380,17 @@ fn query_overlaps(
             config.min_distance_between_ranges,
             false,
             config.min_identity,
+            None,
         )
     } else {
-        impg.query(target_id, range.0, range.1, false, config.min_identity)
+        impg.query(
+            target_id,
+            range.0,
+            range.1,
+            false,
+            config.min_identity,
+            None,
+        )
     };
 
     buffer.append(&mut results);

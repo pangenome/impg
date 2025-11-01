@@ -1,17 +1,56 @@
+use crate::alignment_record::{AlignmentRecord, Strand};
 use crate::forest_map::ForestMap;
-use crate::paf::{ParseErr, PartialPafRecord, Strand};
+use crate::graph::reverse_complement;
+use crate::onealn::{OneAlnAlignment, OneAlnParser, ParseErr as OneAlnParseErr};
+use crate::paf::read_cigar_data;
 use crate::seqidx::SequenceIndex;
+use crate::sequence_index::SequenceIndex as _; // The as _ syntax imports the trait so its methods are available, but doesn't bring the name into scope (avoiding the naming conflict)
+use crate::sequence_index::UnifiedSequenceIndex;
 use coitrees::{BasicCOITree, Interval, IntervalTree};
-use log::debug;
-use noodles::bgzf;
+use lib_tracepoints::tracepoints_to_cigar_fastga_with_aligner;
+use lib_wfa2::affine_wavefront::{AffineWavefronts, Distance};
+use log::{debug, warn};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::cmp::{max, min};
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::io::{self, BufReader, Seek, SeekFrom};
+use std::sync::{Arc, RwLock};
+
+// use libc;
+// fn log_memory_usage(label: &str) {
+//     let mut usage = MaybeUninit::<libc::rusage>::uninit();
+//     let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+//     if result == 0 {
+//         let usage = unsafe { usage.assume_init() };
+//         debug!(
+//             "mem[{label}] max_rss_kb={} ixrss_kb={} idrss_kb={}",
+//             usage.ru_maxrss, usage.ru_ixrss, usage.ru_idrss
+//         );
+//     } else {
+//         debug!("mem[{label}] getrusage_failed code={}", result);
+//     }
+// }
+
+thread_local! {
+    static EDIT_ALIGNER: RefCell<Option<AffineWavefronts>> = const { RefCell::new(None) };
+}
+
+/// Execute a closure with a thread-local edit distance mode aligner
+fn with_edit_aligner<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut AffineWavefronts) -> R,
+{
+    EDIT_ALIGNER.with(|aligner_cell| {
+        let mut aligner_opt = aligner_cell.borrow_mut();
+        if aligner_opt.is_none() {
+            *aligner_opt = Some(Distance::Edit.create_aligner(None));
+        }
+        f(aligner_opt.as_mut().unwrap())
+    })
+}
 
 /// Parse a CIGAR string into a vector of CigarOp
 // Note that the query_delta is negative for reverse strand alignments
@@ -89,9 +128,9 @@ pub struct QueryMetadata {
     target_end: i32,
     query_start: i32,
     query_end: i32,
-    paf_file_index: u16,
-    strand_and_cigar_offset: u64, // Track strand and cigar offset
-    cigar_bytes: usize,
+    alignment_file_index: u16,
+    strand_and_data_offset: u64, // Track strand and cigar/tracepoints offset
+    data_bytes: usize,
 }
 
 impl QueryMetadata {
@@ -99,46 +138,82 @@ impl QueryMetadata {
     const STRAND_BIT: u64 = 0x8000000000000000; // Most significant bit for u64
 
     fn strand(&self) -> Strand {
-        if (self.strand_and_cigar_offset & Self::STRAND_BIT) != 0 {
+        if (self.strand_and_data_offset & Self::STRAND_BIT) != 0 {
             Strand::Reverse
         } else {
             Strand::Forward
         }
     }
 
-    fn cigar_offset(&self) -> u64 {
-        self.strand_and_cigar_offset & !Self::STRAND_BIT
+    fn data_offset(&self) -> u64 {
+        self.strand_and_data_offset & !Self::STRAND_BIT
     }
 
-    fn get_cigar_ops(&self, paf_files: &[String]) -> Vec<CigarOp> {
-        // Allocate space for cigar
-        let mut cigar_buffer = vec![0; self.cigar_bytes];
-
-        // Get the correct PAF file
-        let paf_file_index = self.paf_file_index as usize;
-        let paf_file = &paf_files[paf_file_index];
-
-        // Get reader and seek start of cigar str
-        if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-            // For compressed files, use virtual position directly
-            let mut reader = bgzf::io::Reader::new(File::open(paf_file).unwrap());
-            let virtual_position = bgzf::VirtualPosition::from(self.cigar_offset());
-            reader.seek(virtual_position).unwrap();
-            reader.read_exact(&mut cigar_buffer).unwrap();
+    /// Determine file type based on extension
+    fn get_file_type(alignment_file: &str) -> FileType {
+        if alignment_file.ends_with(".1aln") {
+            FileType::OneAln
         } else {
-            // For uncompressed files, use byte offset
-            let mut reader = File::open(paf_file).unwrap();
-            reader.seek(SeekFrom::Start(self.cigar_offset())).unwrap();
-            reader.read_exact(&mut cigar_buffer).unwrap();
-        };
+            FileType::Paf
+        }
+    }
 
-        let cigar_str: &str = std::str::from_utf8(&cigar_buffer).unwrap();
-        parse_cigar_to_delta(cigar_str).ok().unwrap_or_default()
+    /// Get alignment data bytes (CIGAR)
+    fn get_data_bytes(&self, alignment_files: &[String]) -> Result<Vec<u8>, String> {
+        // Get the correct file and type
+        let alignment_file = &alignment_files[self.alignment_file_index as usize];
+        let file_type = Self::get_file_type(alignment_file);
+
+        // Check if data is available
+        if self.data_bytes == 0 {
+            let expected_data = match file_type {
+                FileType::Paf => "CIGAR strings ('cg:Z' tag)",
+                FileType::OneAln => "tracepoints",
+            };
+            return Err(format!(
+                "The alignment file '{}' does not contain {}.",
+                alignment_file, expected_data
+            ));
+        }
+
+        match file_type {
+            FileType::OneAln => Err(format!(
+                "Tracepoint data for '{}' must be accessed via get_onealn_alignment",
+                alignment_file
+            )),
+            FileType::Paf => {
+                // For PAF files, use byte-level seeking to read CIGAR string
+
+                // Allocate space for cigar
+                let mut data_buffer = vec![0; self.data_bytes];
+
+                read_cigar_data(alignment_file, self.data_offset(), &mut data_buffer)?;
+
+                Ok(data_buffer)
+            }
+        }
+    }
+
+    fn get_cigar_ops_from_bytes(&self, data_bytes: Vec<u8>) -> Vec<CigarOp> {
+        let cigar_str = std::str::from_utf8(&data_bytes).unwrap();
+        match parse_cigar_to_delta(cigar_str) {
+            Ok(ops) => ops,
+            Err(e) => panic!(
+                "Failed to parse CIGAR string '{cigar_str}' in QueryMetadata: {:?}",
+                e
+            ),
+        }
     }
 }
 
 pub type AdjustedInterval = (Interval<u32>, Vec<CigarOp>, Interval<u32>);
 type TreeMap = FxHashMap<u32, Arc<BasicCOITree<QueryMetadata, u32>>>;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FileType {
+    Paf,
+    OneAln,
+}
 
 #[derive(Serialize, Deserialize)]
 struct SerializableInterval {
@@ -279,20 +354,223 @@ impl SortedRanges {
 pub struct Impg {
     pub trees: RwLock<TreeMap>,
     pub seq_index: SequenceIndex,
-    paf_files: Vec<String>,    // List of all PAF files
-    pub forest_map: ForestMap, // Forest map for lazy loading
-    index_file_path: String,   // Path to the index file for lazy loading
+    alignment_files: Vec<String>,
+    pub forest_map: ForestMap,
+    index_file_path: String,
+    sequence_files: Vec<String>,
 }
 
 impl Impg {
-    pub fn from_multi_paf_records(
-        records_by_file: &[(Vec<PartialPafRecord>, String)],
+    /// Get a OneAlnAlignment from metadata (opens parser fresh each time)
+    fn get_onealn_alignment(&self, metadata: &QueryMetadata) -> Result<OneAlnAlignment, String> {
+        let file_index = metadata.alignment_file_index as usize;
+        let alignment_file = &self.alignment_files[file_index];
+
+        if !alignment_file.ends_with(".1aln") {
+            return Err(format!(
+                "Alignment '{}' is not a .1aln file; tracepoints unavailable",
+                alignment_file
+            ));
+        }
+
+        let parser = OneAlnParser::new(
+            alignment_file.clone(),
+            if self.sequence_files.is_empty() {
+                None
+            } else {
+                Some(self.sequence_files.as_slice())
+            },
+        )
+        .map_err(|e| {
+            format!(
+                "Failed to initialize parser for '{}': {:?}",
+                alignment_file, e
+            )
+        })?;
+
+        let alignment_index = metadata.data_offset();
+        parser.seek_alignment(alignment_index).map_err(|e| {
+            format!(
+                "Failed to seek to alignment {} in '{}': {:?}",
+                alignment_index, alignment_file, e
+            )
+        })
+    }
+
+    fn process_tracepoints_data(
+        &self,
+        alignment: &OneAlnAlignment,
+        metadata: &QueryMetadata,
+        target_id: u32,
+        sequence_index: &UnifiedSequenceIndex,
+    ) -> (i32, i32, i32, i32, Vec<CigarOp>) {
+        let (query_start, query_end) = (metadata.query_start, metadata.query_end);
+        let (target_start, target_end) = (metadata.target_start, metadata.target_end);
+
+        // if there are no differences, we can shortcut to a perfect match CIGAR
+        if alignment.differences == 0 {
+            let match_len = query_end - query_start;
+            let cigar_ops = vec![CigarOp::new(match_len, '=')];
+            return (target_start, target_end, query_start, query_end, cigar_ops);
+        }
+
+        let tracepoints: Vec<(usize, usize)> = alignment
+            .trace_diffs
+            .iter()
+            .zip(alignment.tracepoints.iter())
+            .map(|(&diff, &tp)| (diff as usize, tp as usize))
+            .collect();
+        let trace_spacing = alignment.trace_spacing as usize;
+
+        // Fetch only the relevant portions of the sequences from scaffold coordinates
+        let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
+        let query_seq = sequence_index
+            .fetch_sequence(query_name, query_start, query_end)
+            .unwrap_or_else(|e| panic!("Failed to fetch query sequence: {e}"));
+
+        let target_name = self.seq_index.get_name(target_id).unwrap();
+        let target_seq = if metadata.strand() == Strand::Forward {
+            sequence_index.fetch_sequence(target_name, target_start, target_end)
+        } else {
+            match sequence_index.fetch_sequence(target_name, target_start, target_end) {
+                Ok(seq) => Ok(reverse_complement(&seq)),
+                Err(e) => Err(e),
+            }
+        }
+        .unwrap_or_else(|e| panic!("Failed to fetch target sequence: {e}"));
+
+        let cigar_str = with_edit_aligner(|aligner| {
+            tracepoints_to_cigar_fastga_with_aligner(
+                &tracepoints,
+                trace_spacing,
+                &query_seq,
+                &target_seq,
+                alignment.query_contig_start.try_into().unwrap(),
+                alignment.target_contig_start.try_into().unwrap(),
+                metadata.strand() == Strand::Reverse,
+                aligner,
+            )
+        });
+
+        (
+            target_start,
+            target_end,
+            query_start,
+            query_end,
+            match parse_cigar_to_delta(&cigar_str) {
+                Ok(ops) => ops,
+                Err(e) => panic!(
+                    "Failed to parse CIGAR string '{cigar_str}' during tracepoint processing: {:?}",
+                    e
+                ),
+            },
+        )
+    }
+
+    fn project_overlapping_interval(
+        &self,
+        metadata: &QueryMetadata,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32,
+        sequence_index: Option<&UnifiedSequenceIndex>,
+        min_gap_compressed_identity: Option<f64>,
+    ) -> Option<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
+        let file_index = metadata.alignment_file_index as usize;
+        let alignment_file = &self.alignment_files[file_index];
+
+        let (adj_target_start, adj_target_end, adj_query_start, adj_query_end, mut cigar_ops) =
+            match QueryMetadata::get_file_type(alignment_file) {
+                FileType::OneAln => {
+                    let alignment = self
+                        .get_onealn_alignment(metadata)
+                        .unwrap_or_else(|e| panic!("{}", e));
+
+                    self.process_tracepoints_data(
+                        &alignment,
+                        metadata,
+                        target_id,
+                        sequence_index.expect(
+                            "Sequence index is required when processing tracepoints for .1aln data",
+                        ),
+                    )
+                }
+                FileType::Paf => {
+                    let data_buffer = metadata
+                        .get_data_bytes(&self.alignment_files)
+                        .unwrap_or_else(|e| panic!("{}", e));
+
+                    (
+                        metadata.target_start,
+                        metadata.target_end,
+                        metadata.query_start,
+                        metadata.query_end,
+                        metadata.get_cigar_ops_from_bytes(data_buffer),
+                    )
+                }
+            };
+
+        let projection = project_target_range_through_alignment(
+            (range_start, range_end),
+            (
+                adj_target_start,
+                adj_target_end,
+                adj_query_start,
+                adj_query_end,
+                metadata.strand(),
+            ),
+            &cigar_ops,
+        );
+
+        if let Some((
+            adjusted_query_start,
+            adjusted_query_end,
+            adjusted_cigar,
+            adjusted_target_start,
+            adjusted_target_end,
+        )) = projection
+        {
+            if let Some(threshold) = min_gap_compressed_identity {
+                if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
+                    return None;
+                }
+            }
+
+            let query_interval = Interval {
+                first: adjusted_query_start,
+                last: adjusted_query_end,
+                metadata: metadata.query_id,
+            };
+
+            let target_interval = Interval {
+                first: adjusted_target_start,
+                last: adjusted_target_end,
+                metadata: target_id,
+            };
+
+            cigar_ops = adjusted_cigar;
+
+            Some((query_interval, cigar_ops, target_interval))
+        } else {
+            warn!(
+                "Projection failed for alignment (target_id={target_id}, file_index={}, range={}-{})",
+                metadata.alignment_file_index,
+                range_start,
+                range_end
+            );
+            None
+        }
+    }
+
+    pub fn from_multi_alignment_records(
+        records_by_file: &[(Vec<AlignmentRecord>, String)],
         seq_index: SequenceIndex,
-    ) -> Result<Self, ParseErr> {
-        // Extract just the PAF file paths
-        let paf_files: Vec<String> = records_by_file
+        sequence_files: Option<&[String]>,
+    ) -> io::Result<Self> {
+        // Extract just the alignment file paths
+        let alignment_files: Vec<String> = records_by_file
             .par_iter()
-            .map(|(_, paf_file)| paf_file.clone())
+            .map(|(_, alignment_file)| alignment_file.clone())
             .collect();
 
         let intervals: FxHashMap<u32, Vec<Interval<QueryMetadata>>> = records_by_file
@@ -308,9 +586,9 @@ impl Impg {
                             target_end: record.target_end as i32,
                             query_start: record.query_start as i32,
                             query_end: record.query_end as i32,
-                            paf_file_index: file_index as u16,
-                            strand_and_cigar_offset: record.strand_and_cigar_offset, // Already includes strand bit
-                            cigar_bytes: record.cigar_bytes,
+                            alignment_file_index: file_index as u16,
+                            strand_and_data_offset: record.strand_and_data_offset, // Already includes strand bit
+                            data_bytes: record.data_bytes,
                         };
 
                         Some((
@@ -348,12 +626,20 @@ impl Impg {
             })
             .collect();
 
+        // Populate forest map with placeholder offsets for in-memory trees
+        // This allows stats and other operations to work before serialization
+        let mut forest_map = ForestMap::new();
+        for &target_id in trees.keys() {
+            forest_map.add_entry(target_id, 0); // Offset 0 = in-memory tree
+        }
+
         Ok(Self {
             trees: RwLock::new(trees),
             seq_index,
-            paf_files,
-            forest_map: ForestMap::new(), // All trees are in memory, no need for forest map
-            index_file_path: String::new(), // All trees are in memory, no need for index file path
+            alignment_files,
+            forest_map,
+            index_file_path: String::new(),
+            sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
         })
     }
 
@@ -376,7 +662,7 @@ impl Impg {
         // Serialize sequence index
         let seq_index_data =
             bincode::serde::encode_to_vec(&self.seq_index, bincode::config::standard()).map_err(
-                |e| std::io::Error::other(format!("Failed to encode sequence index: {e:?}")),
+                |e| std::io::Error::other(format!("Failed to encode sequence index: {e}")),
             )?;
 
         writer.write_all(&seq_index_data)?;
@@ -403,7 +689,7 @@ impl Impg {
                 bincode::serde::encode_to_vec(&(target_id, intervals), bincode::config::standard())
                     .map_err(|e| {
                         std::io::Error::other(format!(
-                            "Failed to encode tree for target {target_id}: {e:?}"
+                            "Failed to encode tree for target {target_id}: {e}"
                         ))
                     })?;
 
@@ -414,9 +700,8 @@ impl Impg {
         // Now write the forest map at the end
         let forest_map_offset = current_offset;
         let forest_map_data =
-            bincode::serde::encode_to_vec(&forest_map, bincode::config::standard()).map_err(
-                |e| std::io::Error::other(format!("Failed to encode forest map: {e:?}")),
-            )?;
+            bincode::serde::encode_to_vec(&forest_map, bincode::config::standard())
+                .map_err(|e| std::io::Error::other(format!("Failed to encode forest map: {e}")))?;
 
         writer.write_all(&forest_map_data)?;
 
@@ -493,8 +778,9 @@ impl Impg {
     /// Load IMPG index from the format with embedded forest map at the end
     pub fn load_from_file<R: std::io::Read + std::io::Seek>(
         mut reader: R,
-        paf_files: &[String],
+        alignment_files: &[String],
         index_file_path: String,
+        sequence_files: Option<&[String]>,
     ) -> std::io::Result<Self> {
         const MAGIC: &[u8] = b"IMPGIDX1";
 
@@ -519,7 +805,7 @@ impl Impg {
                 .map_err(|e| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        format!("Failed to load sequence index: {e:?}"),
+                        format!("Failed to load sequence index: {e}"),
                     )
                 })?;
 
@@ -530,16 +816,17 @@ impl Impg {
                 .map_err(|e| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        format!("Failed to load forest map: {e:?}"),
+                        format!("Failed to load forest map: {e}"),
                     )
                 })?;
 
         Ok(Self {
-            trees: RwLock::new(FxHashMap::default()), // Start with empty trees - load on demand
+            trees: RwLock::new(FxHashMap::default()),
             seq_index,
-            paf_files: paf_files.to_vec(),
+            alignment_files: alignment_files.to_vec(),
             forest_map,
             index_file_path,
+            sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
         })
     }
 
@@ -550,6 +837,7 @@ impl Impg {
         range_end: i32,
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
+        sequence_index: Option<&UnifiedSequenceIndex>,
     ) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
         // Add the input range to the results
@@ -583,50 +871,18 @@ impl Impg {
         if let Some(tree) = self.get_or_load_tree(target_id) {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
-                let result = project_target_range_through_alignment(
-                    (range_start, range_end),
-                    (
-                        metadata.target_start,
-                        metadata.target_end,
-                        metadata.query_start,
-                        metadata.query_end,
-                        metadata.strand(),
-                    ),
-                    &metadata.get_cigar_ops(&self.paf_files),
-                );
-                if let Some((
-                    adjusted_query_start,
-                    adjusted_query_end,
-                    adjusted_cigar,
-                    adjusted_target_start,
-                    adjusted_target_end,
-                )) = result
+                if let Some((query_interval, cigar_ops, target_interval)) = self
+                    .project_overlapping_interval(
+                        metadata,
+                        target_id,
+                        range_start,
+                        range_end,
+                        sequence_index,
+                        min_gap_compressed_identity,
+                    )
                 {
-                    // Check gap-compressed identity if threshold is provided
-                    if let Some(threshold) = min_gap_compressed_identity {
-                        if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
-                            return; // Skip this result
-                        }
-                    }
-
-                    let adjusted_interval = (
-                        Interval {
-                            first: adjusted_query_start,
-                            last: adjusted_query_end,
-                            metadata: metadata.query_id,
-                        },
-                        if store_cigar {
-                            adjusted_cigar
-                        } else {
-                            Vec::new()
-                        },
-                        Interval {
-                            first: adjusted_target_start,
-                            last: adjusted_target_end,
-                            metadata: target_id,
-                        },
-                    );
-                    results.push(adjusted_interval);
+                    let cigar_vec = if store_cigar { cigar_ops } else { Vec::new() };
+                    results.push((query_interval, cigar_vec, target_interval));
                 }
             });
         }
@@ -645,6 +901,7 @@ impl Impg {
         min_distance_between_ranges: i32,
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
+        sequence_index: Option<&UnifiedSequenceIndex>,
     ) -> Vec<AdjustedInterval> {
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
@@ -718,67 +975,43 @@ impl Impg {
 
             // Get or load the tree - if None, no overlaps exist for this target
             if let Some(tree) = self.get_or_load_tree(current_target_id) {
-                // Collect intervals first to process them in parallel
-                let mut intervals = Vec::new();
-
+                let mut intervals: Vec<(QueryMetadata, (i32, i32))> = Vec::new();
                 tree.query(current_target_start, current_target_end, |interval| {
-                    intervals.push(interval.metadata.clone());
+                    let overlap_start = current_target_start.max(interval.first);
+                    let overlap_end = current_target_end.min(interval.last);
+                    if overlap_start < overlap_end {
+                        intervals.push((interval.metadata.clone(), (overlap_start, overlap_end)));
+                    }
                 });
 
-                // Process the intervals in parallel
                 let processed_results: Vec<_> = intervals
                     .into_par_iter()
-                    .filter_map(|metadata| {
-                        let result = project_target_range_through_alignment(
-                            (current_target_start, current_target_end),
-                            (
-                                metadata.target_start,
-                                metadata.target_end,
-                                metadata.query_start,
-                                metadata.query_end,
-                                metadata.strand(),
-                            ),
-                            &metadata.get_cigar_ops(&self.paf_files),
-                        );
+                    .filter_map(|(metadata, overlap_range)| {
+                        self.project_overlapping_interval(
+                            &metadata,
+                            current_target_id,
+                            overlap_range.0,
+                            overlap_range.1,
+                            sequence_index,
+                            min_gap_compressed_identity,
+                        )
+                        .map(
+                            |(query_interval, cigar_ops, target_interval)| {
+                                let query_id = query_interval.metadata;
+                                let adjusted_query_start = query_interval.first;
+                                let adjusted_query_end = query_interval.last;
+                                let cigar_vec = if store_cigar { cigar_ops } else { Vec::new() };
 
-                        if let Some((
-                            adjusted_query_start,
-                            adjusted_query_end,
-                            adjusted_cigar,
-                            adjusted_target_start,
-                            adjusted_target_end,
-                        )) = result
-                        {
-                            // Check gap-compressed identity if threshold is provided
-                            if let Some(threshold) = min_gap_compressed_identity {
-                                if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
-                                    return None; // Skip this result
-                                }
-                            }
-
-                            Some((
-                                Interval {
-                                    first: adjusted_query_start,
-                                    last: adjusted_query_end,
-                                    metadata: metadata.query_id,
-                                },
-                                if store_cigar {
-                                    adjusted_cigar
-                                } else {
-                                    Vec::new()
-                                },
-                                Interval {
-                                    first: adjusted_target_start,
-                                    last: adjusted_target_end,
-                                    metadata: current_target_id,
-                                },
-                                metadata.query_id,
-                                adjusted_query_start,
-                                adjusted_query_end,
-                            ))
-                        } else {
-                            None
-                        }
+                                (
+                                    query_interval,
+                                    cigar_vec,
+                                    target_interval,
+                                    query_id,
+                                    adjusted_query_start,
+                                    adjusted_query_end,
+                                )
+                            },
+                        )
                     })
                     .collect();
 
@@ -886,6 +1119,7 @@ impl Impg {
         min_distance_between_ranges: i32,
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
+        sequence_index: Option<&UnifiedSequenceIndex>,
     ) -> Vec<AdjustedInterval> {
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
@@ -962,47 +1196,33 @@ impl Impg {
                                     *current_target_end,
                                     |interval| {
                                         let metadata = &interval.metadata;
-                                        let result = project_target_range_through_alignment(
-                                            (*current_target_start, *current_target_end),
-                                            (
-                                                metadata.target_start,
-                                                metadata.target_end,
-                                                metadata.query_start,
-                                                metadata.query_end,
-                                                metadata.strand(),
-                                            ),
-                                            &metadata.get_cigar_ops(&self.paf_files),
-                                        );
+                                        let overlap_start =
+                                            (*current_target_start).max(interval.first);
+                                        let overlap_end = (*current_target_end).min(interval.last);
+                                        if overlap_start >= overlap_end {
+                                            return;
+                                        }
 
-                                        if let Some((
-                                            adjusted_query_start,
-                                            adjusted_query_end,
-                                            adjusted_cigar,
-                                            adjusted_target_start,
-                                            adjusted_target_end,
-                                        )) = result
+                                        if let Some((query_interval, cigar_ops, target_interval)) =
+                                            self.project_overlapping_interval(
+                                                metadata,
+                                                *current_target_id,
+                                                overlap_start,
+                                                overlap_end,
+                                                sequence_index,
+                                                min_gap_compressed_identity,
+                                            )
                                         {
-                                            // Check gap-compressed identity if threshold is provided
-                                            if let Some(threshold) = min_gap_compressed_identity {
-                                                if calculate_gap_compressed_identity(
-                                                    &adjusted_cigar,
-                                                ) < threshold
-                                                {
-                                                    return; // Skip this result
-                                                }
-                                            }
+                                            let cigar_vec =
+                                                if store_cigar { cigar_ops } else { Vec::new() };
 
                                             local_results.push((
-                                                metadata.query_id,
-                                                adjusted_query_start,
-                                                adjusted_query_end,
-                                                if store_cigar {
-                                                    adjusted_cigar
-                                                } else {
-                                                    Vec::new()
-                                                },
-                                                adjusted_target_start,
-                                                adjusted_target_end,
+                                                query_interval.metadata,
+                                                query_interval.first,
+                                                query_interval.last,
+                                                cigar_vec,
+                                                target_interval.first,
+                                                target_interval.last,
                                                 *current_target_id,
                                             ));
                                         }
@@ -1044,7 +1264,6 @@ impl Impg {
                             metadata: current_target_id,
                         },
                     ));
-
                     // Only consider for next depth if it's a different sequence
                     if query_id != current_target_id {
                         let ranges = visited_ranges.entry(query_id).or_default();
@@ -1145,6 +1364,16 @@ fn project_target_range_through_alignment(
     cigar_ops: &[CigarOp],
 ) -> Option<(i32, i32, Vec<CigarOp>, i32, i32)> {
     let (target_start, target_end, query_start, query_end, strand) = record;
+    debug!(
+        "Projecting target range {}-{} through alignment with target {}-{}, query {}-{}, strand {:?}",
+        requested_target_range.0,
+        requested_target_range.1,
+        target_start,
+        target_end,
+        query_start,
+        query_end,
+        strand
+    );
 
     let dir = if strand == Strand::Forward { 1 } else { -1 };
     let mut query_pos = if strand == Strand::Forward {
@@ -1269,7 +1498,7 @@ fn project_target_range_through_alignment(
     }
 }
 
-fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, ParseErr> {
+fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, OneAlnParseErr> {
     let mut ops = Vec::new();
     let mut len: i32 = 0;
 
@@ -1518,15 +1747,15 @@ mod tests {
         let target_id = seq_index.get_or_insert_id("t1", Some(200));
         let reader = BufReader::new(&paf_data[..]);
         let expected_records = vec![
-            PartialPafRecord {
+            AlignmentRecord {
                 query_id,
                 query_start: 10,
                 query_end: 20,
                 target_id,
                 target_start: 30,
                 target_end: 40,
-                strand_and_cigar_offset: 45, // Forward strand
-                cigar_bytes: 3,
+                strand_and_data_offset: 45, // Forward strand
+                data_bytes: 3,
             },
             // Add more test records as needed
         ];
