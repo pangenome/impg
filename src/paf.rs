@@ -201,8 +201,8 @@ pub fn parse_paf_bgzf<R: std::io::Read + std::io::Seek>(
         }
 
         // Parse to get byte offset to CIGAR within the line
-        let mut record = PartialPafRecord::parse(line, 0, seq_index)?;
-        let cigar_byte_offset = record.strand_and_cigar_offset & !PartialPafRecord::STRAND_BIT;
+        let mut record = parse_paf_line(line, 0, seq_index)?;
+        let cigar_byte_offset = record.strand_and_data_offset & !AlignmentRecord::STRAND_BIT;
 
         // Compute CIGAR virtual position by seeking back and advancing
         // This correctly handles BGZF block boundaries
@@ -219,8 +219,8 @@ pub fn parse_paf_bgzf<R: std::io::Read + std::io::Seek>(
         let cigar_vpos = reader.virtual_position();
 
         // Update record with correct BGZF virtual position
-        let strand_bit = record.strand_and_cigar_offset & PartialPafRecord::STRAND_BIT;
-        record.strand_and_cigar_offset = u64::from(cigar_vpos) | strand_bit;
+        let strand_bit = record.strand_and_data_offset & AlignmentRecord::STRAND_BIT;
+        record.strand_and_data_offset = u64::from(cigar_vpos) | strand_bit;
 
         records.push(record);
 

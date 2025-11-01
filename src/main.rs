@@ -1,7 +1,6 @@
 use clap::Parser;
 use coitrees::{Interval, IntervalTree};
 use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
-use impg::commands::{lace, partition, similarity};
 use impg::commands::{lace, partition, refine, similarity};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::onealn::OneAlnParser;
@@ -65,6 +64,48 @@ struct AlignmentOpts {
     #[arg(help_heading = "Alignment options")]
     #[clap(long, value_parser, default_value = "100")]
     trace_spacing: u32,
+}
+
+/// Alignment options tailored for the refine command (PAF-focused CLI)
+#[derive(Parser, Debug)]
+#[command(next_help_heading = "Refine alignment input")]
+struct PafOpts {
+    /// Path to the PAF alignment files
+    #[arg(help_heading = "Alignment input")]
+    #[clap(short = 'p', long, value_parser, required = false, num_args = 1.., conflicts_with = "paf_list")]
+    paf_files: Vec<String>,
+
+    /// Path to a text file containing paths to PAF alignment files (one per line)
+    #[arg(help_heading = "Alignment input")]
+    #[clap(long, value_parser, required = false, conflicts_with = "paf_files")]
+    paf_list: Option<String>,
+
+    /// Path to the IMPG index file.
+    #[arg(help_heading = "Index options")]
+    #[clap(short = 'i', long, value_parser)]
+    index: Option<String>,
+
+    /// Force the regeneration of the index, even if it already exists.
+    #[arg(help_heading = "Index options")]
+    #[clap(short = 'f', long, action)]
+    force_reindex: bool,
+
+    /// Trace spacing for .1aln alignment files (used when converting tracepoints to CIGAR)
+    #[arg(help_heading = "Alignment options")]
+    #[clap(long, value_parser, default_value = "100")]
+    trace_spacing: u32,
+}
+
+impl PafOpts {
+    fn into_alignment_opts(self) -> AlignmentOpts {
+        AlignmentOpts {
+            alignment_files: self.paf_files,
+            alignment_list: self.paf_list,
+            index: self.index,
+            force_reindex: self.force_reindex,
+            trace_spacing: self.trace_spacing,
+        }
+    }
 }
 
 /// Sequence file options for commands that need FASTA/AGC files
@@ -1200,7 +1241,14 @@ fn run() -> io::Result<()> {
             initialize_threads_and_log(&common);
             refine.validate()?;
 
-            let impg = initialize_impg(&common, &paf)?;
+            let alignment_opts = paf.into_alignment_opts();
+            let alignment_files = resolve_alignment_files(&alignment_opts)?;
+            let impg = initialize_impg(
+                &common,
+                &alignment_opts,
+                alignment_files.as_slice(),
+                Vec::new(),
+            )?;
             let subset_filter = load_subset_filter_if_provided(&refine.query.subset_sequence_list)?;
 
             let target_ranges = if let Some(target_range_str) = &refine.query.target_range {
