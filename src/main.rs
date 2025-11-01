@@ -394,7 +394,7 @@ struct RefineOpts {
     /// Maximum per-side extension explored when maximizing boundary support.
     /// Values <= 1 are treated as fractions of the locus length; values > 1 as absolute bp.
     #[arg(help_heading = "Refinement options")]
-    #[clap(long, value_parser, default_value_t = 0.4)]
+    #[clap(long, value_parser, default_value_t = 0.5)]
     max_extension: f64,
 
     /// PanSN aggregation mode when counting support (sample/haplotype)
@@ -1330,15 +1330,16 @@ fn run() -> io::Result<()> {
                     name_field = original_range.clone();
                 }
 
-                // Emit an informative BED-like row: chrom start end name support left_extension right_extension.
+                // Emit an informative BED-like row: chrom start end name new_support old_support left_extension right_extension.
                 // Maximizing the sample count while minimizing the expansion helps avoid loci that start or end inside SVs.
                 writeln!(
                     writer,
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                     record.chrom,
                     record.refined_start,
                     record.refined_end,
                     name_field,
+                    record.original_support_count,
                     record.support_count,
                     record.applied_left_extension,
                     record.applied_right_extension
@@ -2322,7 +2323,7 @@ fn output_results_bedpe(
 ) -> io::Result<()> {
     merge_adjusted_intervals(results, merge_distance);
 
-    for (overlap_query, cigar, overlap_target) in results {
+    for (overlap_query, _cigar, overlap_target) in results {
         let query_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
         let target_name = impg.seq_index.get_name(overlap_target.metadata).unwrap();
         let (first, last, strand) = if overlap_query.first <= overlap_query.last {
@@ -2347,51 +2348,17 @@ fn output_results_bedpe(
                 original_coordinates,
             );
 
-        // Calculate gap-compressed-identity and block-identity from CIGAR
-        let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, _block_len) =
-            cigar.iter().fold(
-                (0, 0, 0, 0, 0, 0, 0),
-                |(m, mm, i, i_bp, d, d_bp, bl), op| {
-                    let len = op.len();
-                    match op.op() {
-                        'M' => (m + len, mm, i, i_bp, d, d_bp, bl + len), // We overestimate num. of matches by assuming 'M' represents matches for simplicity
-                        '=' => (m + len, mm, i, i_bp, d, d_bp, bl + len),
-                        'X' => (m, mm + len, i, i_bp, d, d_bp, bl + len),
-                        'I' => (m, mm, i + 1, i_bp + len, d, d_bp, bl + len),
-                        'D' => (m, mm, i, i_bp, d + 1, d_bp + len, bl + len),
-                        _ => (m, mm, i, i_bp, d, d_bp, bl),
-                    }
-                },
-            );
-        let gap_compressed_identity =
-            (matches as f64) / (matches + mismatches + insertions + deletions) as f64;
-
-        let edit_distance = mismatches + inserted_bp + deleted_bp;
-        let block_identity = (matches as f64) / (matches + edit_distance) as f64;
-
-        // Format gi and bi fields without trailing zeros
-        let gi_str = format!("{gap_compressed_identity:.6}")
-            .trim_end_matches('0')
-            .trim_end_matches('.')
-            .to_string();
-        let bi_str = format!("{block_identity:.6}")
-            .trim_end_matches('0')
-            .trim_end_matches('.')
-            .to_string();
-
         writeln!(
             out,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t0\t{}\t+\tgi:f:{}\tbi:f:{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t0\t{}\t+",
             transformed_query_name,
             transformed_first,
             transformed_last,
             transformed_target_name,
             transformed_target_first,
             transformed_target_last,
-            name,
-            strand,
-            gi_str,
-            bi_str
+            name.as_deref().unwrap_or("."),
+            strand
         )?;
     }
 

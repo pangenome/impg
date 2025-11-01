@@ -38,6 +38,7 @@ pub struct RefineRecord {
     pub applied_left_extension: i32,
     pub applied_right_extension: i32,
     pub support_count: usize,
+    pub original_support_count: usize,
     pub support_entities: Vec<SupportEntity>,
 }
 
@@ -61,6 +62,14 @@ pub enum SupportMode {
 pub enum RefineSupportArg {
     Sample,
     Haplotype,
+}
+
+fn support_mode_label(mode: SupportMode) -> &'static str {
+    match mode {
+        SupportMode::Sequence => "sequences",
+        SupportMode::Sample => "samples",
+        SupportMode::Haplotype => "haplotypes",
+    }
 }
 
 impl From<RefineSupportArg> for SupportMode {
@@ -96,6 +105,15 @@ pub fn run_refine(
     ranges: &[(String, (i32, i32), String)],
     config: RefineConfig<'_>,
 ) -> io::Result<Vec<RefineRecord>> {
+    info!(
+        "Refining {} range(s) with support aggregated by {} (span_bp={}, max_extension={}, extension_step={})",
+        ranges.len(),
+        support_mode_label(config.support_mode),
+        config.span_bp,
+        config.max_extension,
+        config.extension_step
+    );
+
     let intermediate: Vec<Result<(usize, RefineRecord), io::Error>> = ranges
         .par_iter()
         .enumerate()
@@ -174,13 +192,22 @@ fn refine_single_range(
         orig_end
     );
 
-    let mut best_candidate: Option<CandidateResult> = None;
-
     let evaluate = |left: i32, right: i32| -> Option<CandidateResult> {
         evaluate_candidate(
             impg, target_id, chrom, orig_start, orig_end, seq_len, left, right, config,
         )
     };
+
+    let mut best_candidate: Option<CandidateResult> = None;
+    let baseline_candidate = evaluate(0, 0);
+    let original_support_count = baseline_candidate
+        .as_ref()
+        .map(|candidate| candidate.support_count)
+        .unwrap_or(0);
+
+    if let Some(candidate) = baseline_candidate {
+        best_candidate = update_best_candidate(best_candidate, candidate);
+    }
 
     // First, search for the minimal left extension that still satisfies the span requirement on the left boundary.
     if let Some(candidate) = flanks
@@ -229,13 +256,15 @@ fn refine_single_range(
         ));
     };
 
-    info!(
-        "Selected flanks left={}bp right={}bp for region {}:{}-{} ({} supporting samples)",
+    debug!(
+        "Selected flanks left={}bp right={}bp for region {}:{}-{} (supporting {}: {} -> {})",
         best_candidate.left_extension,
         best_candidate.right_extension,
         chrom,
         best_candidate.start,
         best_candidate.end,
+        support_mode_label(config.support_mode),
+        original_support_count,
         best_candidate.support_count
     );
 
@@ -249,6 +278,7 @@ fn refine_single_range(
         applied_left_extension: best_candidate.left_extension,
         applied_right_extension: best_candidate.right_extension,
         support_count: best_candidate.support_count,
+        original_support_count,
         support_entities: best_candidate.support_entities,
     })
 }

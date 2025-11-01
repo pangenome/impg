@@ -239,8 +239,8 @@ impg refine -p alignments.paf -b loci.bed
 # Allow merging within 200 kb and require at least 2 kb coverage near each end
 impg refine -p alignments.paf -r chr1:1000-2000 -d 200000 --span-bp 2000
 
-# Expand up to 60% of the locus length on each side (default: 0.25)
-impg refine -p alignments.paf -r chr1:1000-2000 --max-extension 0.60
+# Expand up to 90% of the locus length on each side (default: 0.5)
+impg refine -p alignments.paf -r chr1:1000-2000 --max-extension 0.90
 
 # Or cap the search to an absolute flank size
 impg refine -p alignments.paf -r chr1:1000-2000 --max-extension 50000
