@@ -1182,6 +1182,12 @@ fn main() -> io::Result<()> {
                 None
             };
 
+            // Write header
+            writeln!(
+                writer,
+                "#chrom\tstart\tend\tname\toriginal.support\tnew.support\tleft.extension.bp\tright.extension.bp"
+            )?;
+
             for record in records.drain(..) {
                 let original_range = format!(
                     "{}:{}-{}",
