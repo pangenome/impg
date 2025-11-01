@@ -136,14 +136,14 @@ pub fn parse_paf_bgzf<R: std::io::Read + std::io::Seek>(
     mut reader: noodles::bgzf::io::Reader<R>,
     seq_index: &mut SequenceIndex,
 ) -> Result<Vec<PartialPafRecord>, ParseErr> {
-    use std::io::BufRead;
+    use std::io::{BufRead, Read};
 
     let mut records = Vec::new();
     let mut line_buf = String::new();
 
     loop {
         // Get virtual position BEFORE reading the line
-        let virtual_pos = reader.virtual_position();
+        let line_start_vpos = reader.virtual_position();
         line_buf.clear();
 
         let bytes_read = reader.read_line(&mut line_buf).map_err(ParseErr::IoError)?;
@@ -157,8 +157,33 @@ pub fn parse_paf_bgzf<R: std::io::Read + std::io::Seek>(
             continue;
         }
 
-        // Parse the record using the virtual position
-        let record = PartialPafRecord::parse(line, virtual_pos.into(), seq_index)?;
+        // Parse the record, but we need to calculate the CIGAR virtual position properly
+        // We can't just add byte offsets to a virtual position!
+        let mut record = PartialPafRecord::parse(line, 0, seq_index)?;
+
+        // Now fix the cigar offset: calculate byte offset within the line,
+        // then seek forward by that many bytes to get the correct virtual position
+        let cigar_byte_offset = record.strand_and_cigar_offset & !PartialPafRecord::STRAND_BIT;
+
+        // Seek back to line start
+        reader.seek(line_start_vpos).map_err(ParseErr::IoError)?;
+
+        // Read forward by cigar_byte_offset bytes to get the correct virtual position
+        let mut skip_buf = vec![0u8; cigar_byte_offset as usize];
+        reader.read_exact(&mut skip_buf).map_err(ParseErr::IoError)?;
+
+        // Now get the virtual position at the CIGAR start
+        let cigar_vpos = reader.virtual_position();
+
+        // Restore reader position to end of line for next iteration
+        reader.seek(line_start_vpos).map_err(ParseErr::IoError)?;
+        let mut restore_buf = String::new();
+        reader.read_line(&mut restore_buf).map_err(ParseErr::IoError)?;
+
+        // Update the record with the correct virtual position
+        let strand_bit = record.strand_and_cigar_offset & PartialPafRecord::STRAND_BIT;
+        record.strand_and_cigar_offset = u64::from(cigar_vpos) | strand_bit;
+
         records.push(record);
     }
 
