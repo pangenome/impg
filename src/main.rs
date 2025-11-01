@@ -2357,7 +2357,7 @@ fn output_results_bedpe(
             transformed_target_name,
             transformed_target_first,
             transformed_target_last,
-            name.as_deref().unwrap_or("."),
+            name,
             strand
         )?;
     }
