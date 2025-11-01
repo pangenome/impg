@@ -1702,14 +1702,14 @@ fn resolve_paf_files(paf: &PafOpts) -> io::Result<Vec<String>> {
         ));
     };
 
-    // Check if the number of PAF files exceeds u16::MAX
-    if paf_files.len() > u16::MAX as usize {
+    // Check if the number of PAF files exceeds u32::MAX
+    if paf_files.len() > u32::MAX as usize {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
                 "Too many PAF files specified: {} (maximum allowed: {})",
                 paf_files.len(),
-                u16::MAX
+                u32::MAX
             ),
         ));
     }
