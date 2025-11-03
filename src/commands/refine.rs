@@ -1,12 +1,16 @@
 use crate::impg::{AdjustedInterval, Impg};
 use crate::subset_filter::SubsetFilter;
 use clap::ValueEnum;
-use coitrees::IntervalTree;
+use coitrees::{COITree, Interval, IntervalTree};
 use log::{debug, info, warn};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cmp::Ordering;
-use std::io;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader};
+
+/// Blacklist data structure: sequence name -> interval tree of blacklisted ranges
+pub type Blacklist = FxHashMap<String, COITree<(), u32>>;
 
 /// Configuration parameters for the refinement routine.
 /// Mirrors CLI flags and constrains how aggressively flanks can be explored while
@@ -26,6 +30,7 @@ pub struct RefineConfig<'a> {
     pub min_transitive_len: i32,
     pub min_distance_between_ranges: i32,
     pub subset_filter: Option<&'a SubsetFilter>,
+    pub blacklist: Option<&'a Blacklist>,
 }
 
 /// Summary for each refined interval produced by [`run_refine`].
@@ -402,6 +407,7 @@ fn evaluate_candidate(
         config.span_bp,
         config.merge_distance,
         max_entities,
+        config.blacklist,
     );
 
     let left_extension = orig_start.saturating_sub(start);
@@ -548,7 +554,12 @@ struct SupportStats {
 }
 
 /// Compute the maximum number of unique entities (samples/haplotypes) that align to the target.
-fn compute_max_entities(impg: &Impg, target_id: u32, mode: SupportMode) -> usize {
+/// This counts all entities without applying the blacklist filter.
+fn compute_max_entities(
+    impg: &Impg,
+    target_id: u32,
+    mode: SupportMode,
+) -> usize {
     let mut unique_entities = FxHashSet::default();
 
     // Get the target's entity key to exclude it from the list
@@ -589,6 +600,7 @@ fn compute_supporting_stats(
     span_bp: i32,
     merge_distance: i32,
     max_entities: Option<usize>,
+    blacklist: Option<&Blacklist>,
 ) -> SupportStats {
     let (aggregated, survivors) = compute_support_sets(
         impg,
@@ -600,6 +612,7 @@ fn compute_supporting_stats(
         span_bp,
         merge_distance,
         max_entities,
+        blacklist,
     );
 
     SupportStats {
@@ -618,6 +631,7 @@ fn compute_support_sets(
     span_bp: i32,
     merge_distance: i32,
     max_possible: Option<usize>,
+    blacklist: Option<&Blacklist>,
 ) -> (FxHashSet<String>, Vec<SupportEntity>) {
     let mut aggregated = FxHashSet::default();
     let mut sequence_ranges: FxHashMap<String, (i32, i32)> = FxHashMap::default();
@@ -678,6 +692,20 @@ fn compute_support_sets(
         if let (Some((q_start, q_end)), Some(name)) =
             (query_range, impg.seq_index.get_name(sample_id))
         {
+            // Check if this query range overlaps with any blacklisted region
+            if let Some(bl) = blacklist {
+                if let Some(tree) = bl.get(name) {
+                    let mut has_overlap = false;
+                    tree.query(q_start, q_end, |_| {
+                        has_overlap = true;
+                    });
+                    if has_overlap {
+                        // This interval overlaps with a blacklisted range, skip it
+                        continue;
+                    }
+                }
+            }
+
             let seq_name = name.to_string();
             let entry = sequence_ranges
                 .entry(seq_name.clone())
@@ -830,4 +858,71 @@ fn pansn_key(name: &str, mode: SupportMode) -> Option<String> {
             }
         }
     }
+}
+
+/// Parse a BED file to build a blacklist of ranges.
+/// Returns a HashMap where keys are sequence names and values are interval trees.
+pub fn parse_blacklist_bed(path: &str) -> io::Result<Blacklist> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+
+    // Collect intervals per sequence
+    let mut intervals_by_seq: FxHashMap<String, Vec<Interval<()>>> = FxHashMap::default();
+
+    for (line_num, line_result) in reader.lines().enumerate() {
+        let line = line_result?;
+        let line = line.trim();
+
+        // Skip empty lines and comments
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() < 3 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Line {} has fewer than 3 fields in BED file: {}", line_num + 1, path),
+            ));
+        }
+
+        let chrom = fields[0].to_string();
+        let start: i32 = fields[1].parse().map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Invalid start position on line {}: {}", line_num + 1, e),
+            )
+        })?;
+        let end: i32 = fields[2].parse().map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Invalid end position on line {}: {}", line_num + 1, e),
+            )
+        })?;
+
+        if end <= start {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Invalid range on line {}: end ({}) <= start ({})", line_num + 1, end, start),
+            ));
+        }
+
+        intervals_by_seq
+            .entry(chrom)
+            .or_insert_with(Vec::new)
+            .push(Interval {
+                first: start,
+                last: end,
+                metadata: (),
+            });
+    }
+
+    // Build interval trees for each sequence
+    let mut blacklist = Blacklist::default();
+    for (chrom, intervals) in intervals_by_seq {
+        let tree = COITree::new(&intervals);
+        blacklist.insert(chrom, tree);
+    }
+
+    Ok(blacklist)
 }

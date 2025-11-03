@@ -102,6 +102,14 @@ impl QueryMetadata {
         self.query_id
     }
 
+    pub fn query_start(&self) -> i32 {
+        self.query_start
+    }
+
+    pub fn query_end(&self) -> i32 {
+        self.query_end
+    }
+
     fn strand(&self) -> Strand {
         if (self.strand_and_cigar_offset & Self::STRAND_BIT) != 0 {
             Strand::Reverse

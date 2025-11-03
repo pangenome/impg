@@ -350,6 +350,11 @@ struct RefineOpts {
     #[arg(help_heading = "Output options")]
     #[clap(long, value_parser)]
     support_output: Option<String>,
+
+    /// BED file with ranges to blacklist when counting maximum possible entities
+    #[arg(help_heading = "Refinement options")]
+    #[clap(long, value_parser)]
+    blacklist_bed: Option<String>,
 }
 
 impl RefineOpts {
@@ -1138,6 +1143,13 @@ fn main() -> io::Result<()> {
                 ));
             };
 
+            // Parse blacklist BED file if provided
+            let blacklist = if let Some(ref blacklist_path) = refine.blacklist_bed {
+                Some(refine::parse_blacklist_bed(blacklist_path)?)
+            } else {
+                None
+            };
+
             let config = refine::RefineConfig {
                 span_bp: refine.span_bp,
                 max_extension: refine.max_extension,
@@ -1157,6 +1169,7 @@ fn main() -> io::Result<()> {
                     .transitive_opts
                     .min_distance_between_ranges,
                 subset_filter: subset_filter.as_ref(),
+                blacklist: blacklist.as_ref(),
             };
 
             let mut records = refine::run_refine(&impg, &target_ranges, config)?;
