@@ -98,6 +98,10 @@ impl QueryMetadata {
     // Constants for bit manipulation
     const STRAND_BIT: u64 = 0x8000000000000000; // Most significant bit for u64
 
+    pub fn query_id(&self) -> u32 {
+        self.query_id
+    }
+
     fn strand(&self) -> Strand {
         if (self.strand_and_cigar_offset & Self::STRAND_BIT) != 0 {
             Strand::Reverse

@@ -1,6 +1,7 @@
 use crate::impg::{AdjustedInterval, Impg};
 use crate::subset_filter::SubsetFilter;
 use clap::ValueEnum;
+use coitrees::IntervalTree;
 use log::{debug, info, warn};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -114,6 +115,13 @@ pub fn run_refine(
         config.extension_step
     );
 
+    if matches!(config.support_mode, SupportMode::Sample | SupportMode::Haplotype) {
+        info!(
+            "Early termination enabled for {} aggregation",
+            support_mode_label(config.support_mode)
+        );
+    }
+
     let intermediate: Vec<Result<(usize, RefineRecord), io::Error>> = ranges
         .par_iter()
         .enumerate()
@@ -176,6 +184,20 @@ fn refine_single_range(
     };
     let max_extension_bp = max_extension_bp.max(0);
 
+    // Compute max possible entities once for pansn-mode
+    let max_entities = if matches!(config.support_mode, SupportMode::Sample | SupportMode::Haplotype) {
+        let max = compute_max_entities(impg, target_id, config.support_mode);
+        debug!(
+            "Maximum possible {} for target {}: {}",
+            support_mode_label(config.support_mode),
+            chrom,
+            max
+        );
+        Some(max)
+    } else {
+        None
+    };
+
     // Build the grid of candidate flank sizes based on dynamic constraints.
     let flanks = build_flanks(max_extension_bp, config.extension_step);
     debug!(
@@ -194,56 +216,104 @@ fn refine_single_range(
 
     let evaluate = |left: i32, right: i32| -> Option<CandidateResult> {
         evaluate_candidate(
-            impg, target_id, chrom, orig_start, orig_end, seq_len, left, right, config,
+            impg, target_id, chrom, orig_start, orig_end, seq_len, left, right, config, max_entities,
         )
     };
 
+    // Helper to check if candidate has reached maximum support
+    let check_max = |candidate: &Option<CandidateResult>| -> bool {
+        if let (Some(max), Some(c)) = (max_entities, candidate.as_ref()) {
+            c.support_count >= max
+        } else {
+            false
+        }
+    };
+
     let mut best_candidate: Option<CandidateResult> = None;
+
+    // Evaluate baseline (0,0) first
     let baseline_candidate = evaluate(0, 0);
     let original_support_count = baseline_candidate
         .as_ref()
-        .map(|candidate| candidate.support_count)
+        .map(|c| c.support_count)
         .unwrap_or(0);
 
     if let Some(candidate) = baseline_candidate {
-        best_candidate = update_best_candidate(best_candidate, candidate);
+        best_candidate = Some(candidate);
     }
 
-    // First, search for the minimal left extension that still satisfies the span requirement on the left boundary.
-    if let Some(candidate) = flanks
-        .par_iter()
-        .filter_map(|&left| evaluate(left, 0))
-        .reduce_with(better_candidate)
-    {
-        best_candidate = update_best_candidate(best_candidate, candidate);
+    // If baseline already at max, skip all exploration
+    if check_max(&best_candidate) {
+        debug!(
+            "Baseline already has maximum support ({}/{}), skipping flank exploration for {}:{}-{}",
+            original_support_count,
+            max_entities.unwrap(),
+            chrom,
+            orig_start,
+            orig_end
+        );
+    } else {
+        // Search for minimal left extension, excluding 0 (already evaluated as baseline)
+        if let Some(candidate) = flanks
+            .par_iter()
+            .filter(|&&left| left > 0)
+            .filter_map(|&left| evaluate(left, 0))
+            .reduce_with(better_candidate)
+        {
+            best_candidate = update_best_candidate(best_candidate, candidate);
+        }
+
+        // Early exit if we've reached maximum support
+        if check_max(&best_candidate) {
+        debug!(
+            "Reached maximum support ({}/{}) after left extension, skipping further exploration for {}:{}-{}",
+            best_candidate.as_ref().unwrap().support_count,
+            max_entities.unwrap(),
+            chrom,
+            orig_start,
+            orig_end
+        );
+    } else {
+        let left_fixed = best_candidate
+            .as_ref()
+            .map(|c| c.left_extension)
+            .unwrap_or(0);
+
+        // Next, keep the chosen left flank fixed and look for the best right expansion.
+        if let Some(candidate) = flanks
+            .par_iter()
+            .filter_map(|&right| evaluate(left_fixed, right))
+            .reduce_with(better_candidate)
+        {
+            best_candidate = update_best_candidate(best_candidate, candidate);
+        }
+
+        // Early exit if we've reached maximum support
+        if check_max(&best_candidate) {
+            debug!(
+                "Reached maximum support ({}/{}) after right extension, skipping re-optimization for {}:{}-{}",
+                best_candidate.as_ref().unwrap().support_count,
+                max_entities.unwrap(),
+                chrom,
+                orig_start,
+                orig_end
+            );
+        } else {
+            let right_fixed = best_candidate
+                .as_ref()
+                .map(|c| c.right_extension)
+                .unwrap_or(0);
+
+            // Finally, re-optimise the left flank while holding the right flank steady to capture asymmetric trade-offs.
+            if let Some(candidate) = flanks
+                .par_iter()
+                .filter_map(|&left| evaluate(left, right_fixed))
+                .reduce_with(better_candidate)
+            {
+                best_candidate = update_best_candidate(best_candidate, candidate);
+            }
+        }
     }
-
-    let left_fixed = best_candidate
-        .as_ref()
-        .map(|c| c.left_extension)
-        .unwrap_or(0);
-
-    // Next, keep the chosen left flank fixed and look for the best right expansion.
-    if let Some(candidate) = flanks
-        .par_iter()
-        .filter_map(|&right| evaluate(left_fixed, right))
-        .reduce_with(better_candidate)
-    {
-        best_candidate = update_best_candidate(best_candidate, candidate);
-    }
-
-    let right_fixed = best_candidate
-        .as_ref()
-        .map(|c| c.right_extension)
-        .unwrap_or(0);
-
-    // Finally, re-optimise the left flank while holding the right flank steady to capture asymmetric trade-offs.
-    if let Some(candidate) = flanks
-        .par_iter()
-        .filter_map(|&left| evaluate(left, right_fixed))
-        .reduce_with(better_candidate)
-    {
-        best_candidate = update_best_candidate(best_candidate, candidate);
     }
 
     let Some(best_candidate) = best_candidate else {
@@ -294,6 +364,7 @@ fn evaluate_candidate(
     left_flank: i32,
     right_flank: i32,
     config: &RefineConfig<'_>,
+    max_entities: Option<usize>,
 ) -> Option<CandidateResult> {
     let tentative_start = orig_start.saturating_sub(left_flank);
     let tentative_end = orig_end.saturating_add(right_flank);
@@ -330,6 +401,7 @@ fn evaluate_candidate(
         end,
         config.span_bp,
         config.merge_distance,
+        max_entities,
     );
 
     let left_extension = orig_start.saturating_sub(start);
@@ -475,6 +547,38 @@ struct SupportStats {
     survivors: Vec<SupportEntity>,
 }
 
+/// Compute the maximum number of unique entities (samples/haplotypes) that align to the target.
+fn compute_max_entities(impg: &Impg, target_id: u32, mode: SupportMode) -> usize {
+    let mut unique_entities = FxHashSet::default();
+
+    // Get the target's entity key to exclude it from the list
+    let target_key = impg
+        .seq_index
+        .get_name(target_id)
+        .and_then(|name| pansn_key(name, mode));
+
+    // Get or load the interval tree for this target (handles lazy loading)
+    if let Some(tree) = impg.get_or_load_tree(target_id) {
+        // Iterate through all intervals that align to this target
+        for interval in tree.iter() {
+            let query_id = interval.metadata.query_id();
+            if query_id == target_id {
+                continue; // Skip self-alignments
+            }
+            if let Some(name) = impg.seq_index.get_name(query_id) {
+                if let Some(key) = pansn_key(name, mode) {
+                    // Exclude the target's entity key
+                    if Some(&key) != target_key.as_ref() {
+                        unique_entities.insert(key);
+                    }
+                }
+            }
+        }
+    }
+
+    unique_entities.len()
+}
+
 fn compute_supporting_stats(
     impg: &Impg,
     mode: SupportMode,
@@ -484,6 +588,7 @@ fn compute_supporting_stats(
     region_end: i32,
     span_bp: i32,
     merge_distance: i32,
+    max_entities: Option<usize>,
 ) -> SupportStats {
     let (aggregated, survivors) = compute_support_sets(
         impg,
@@ -494,6 +599,7 @@ fn compute_supporting_stats(
         region_end,
         span_bp,
         merge_distance,
+        max_entities,
     );
 
     SupportStats {
@@ -511,6 +617,7 @@ fn compute_support_sets(
     region_end: i32,
     span_bp: i32,
     merge_distance: i32,
+    max_possible: Option<usize>,
 ) -> (FxHashSet<String>, Vec<SupportEntity>) {
     let mut aggregated = FxHashSet::default();
     let mut sequence_ranges: FxHashMap<String, (i32, i32)> = FxHashMap::default();
@@ -579,6 +686,12 @@ fn compute_support_sets(
             entry.1 = entry.1.max(q_end);
             if let Some(key) = pansn_key(name, mode) {
                 aggregated.insert(key);
+                // Early termination: if we've reached the maximum possible entities, stop
+                if let Some(max) = max_possible {
+                    if aggregated.len() >= max {
+                        break;
+                    }
+                }
             }
         }
     }
