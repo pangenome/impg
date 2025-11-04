@@ -977,7 +977,7 @@ pub fn parse_blacklist_bed(path: &str) -> io::Result<Blacklist> {
 
         intervals_by_seq
             .entry(chrom)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(Interval {
                 first: start,
                 last: end,

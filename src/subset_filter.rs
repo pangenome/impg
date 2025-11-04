@@ -1,3 +1,5 @@
+use crate::impg::{AdjustedInterval, Impg};
+use log::{debug, warn};
 use std::collections::HashSet;
 use std::io;
 

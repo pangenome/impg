@@ -658,9 +658,7 @@ impl Impg {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
                 let cache_key = (metadata.paf_file_index, metadata.cigar_offset());
-                if !cache.contains_key(&cache_key) {
-                    cache.insert(cache_key, metadata.get_cigar_ops(&self.paf_files));
-                }
+                cache.entry(cache_key).or_insert_with(|| metadata.get_cigar_ops(&self.paf_files));
             });
         }
     }
@@ -698,8 +696,7 @@ impl Impg {
                 let metadata = &interval.metadata;
                 let cache_key = (metadata.paf_file_index, metadata.cigar_offset());
                 let cigar_ops = cigar_cache
-                    .get(&cache_key)
-                    .map(|v| v.clone())
+                    .get(&cache_key).cloned()
                     .unwrap_or_else(|| metadata.get_cigar_ops(&self.paf_files));
 
                 let result = project_target_range_through_alignment(
