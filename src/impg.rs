@@ -966,7 +966,7 @@ impl Impg {
                 }
             }
 
-            debug!("Collected {} results", results.len() - prec_num_results);
+            //debug!("Collected {} results", results.len() - prec_num_results);
 
             // Merge contiguous/overlapping ranges with same sequence_id
             let stack_size = stack.len();
@@ -986,7 +986,7 @@ impl Impg {
                 }
             }
             stack.truncate(write + 1);
-            debug!("Merged stack size from {} to {}", stack_size, stack.len());
+            //debug!("Merged stack size from {} to {}", stack_size, stack.len());
         }
 
         results
@@ -1058,11 +1058,11 @@ impl Impg {
 
         // Process by depth until max_depth or no more ranges
         while !current_ranges.is_empty() && (max_depth == 0 || current_depth < max_depth) {
-            debug!(
-                "Processing depth {} with {} ranges",
-                current_depth,
-                current_ranges.len()
-            );
+            // debug!(
+            //     "Processing depth {} with {} ranges",
+            //     current_depth,
+            //     current_ranges.len()
+            // );
 
             // Process current depth ranges in parallel
             let query_results: Vec<Vec<(u32, i32, i32, Vec<CigarOp>, i32, i32, u32)>> =
@@ -1242,10 +1242,10 @@ impl Impg {
                 }
                 next_depth_ranges.truncate(write + 1);
 
-                debug!(
-                    "Next depth will process {} ranges after merging",
-                    next_depth_ranges.len()
-                );
+                // debug!(
+                //     "Next depth will process {} ranges after merging",
+                //     next_depth_ranges.len()
+                // );
             }
 
             // Set up for next iteration
