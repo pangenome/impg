@@ -646,6 +646,111 @@ impl Impg {
         results
     }
 
+    pub fn populate_cigar_cache(
+        &self,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32,
+        _min_gap_compressed_identity: Option<f64>,
+        cache: &mut FxHashMap<(u32, u64), Vec<CigarOp>>,
+    ) {
+        if let Some(tree) = self.get_or_load_tree(target_id) {
+            tree.query(range_start, range_end, |interval| {
+                let metadata = &interval.metadata;
+                let cache_key = (metadata.paf_file_index, metadata.cigar_offset());
+                if !cache.contains_key(&cache_key) {
+                    cache.insert(cache_key, metadata.get_cigar_ops(&self.paf_files));
+                }
+            });
+        }
+    }
+
+    pub fn query_with_cache(
+        &self,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32,
+        store_cigar: bool,
+        min_gap_compressed_identity: Option<f64>,
+        cigar_cache: &FxHashMap<(u32, u64), Vec<CigarOp>>,
+    ) -> Vec<AdjustedInterval> {
+        let mut results = Vec::new();
+        results.push((
+            Interval {
+                first: range_start,
+                last: range_end,
+                metadata: target_id,
+            },
+            if store_cigar {
+                vec![CigarOp::new(range_end - range_start, '=')]
+            } else {
+                Vec::new()
+            },
+            Interval {
+                first: range_start,
+                last: range_end,
+                metadata: target_id,
+            },
+        ));
+
+        if let Some(tree) = self.get_or_load_tree(target_id) {
+            tree.query(range_start, range_end, |interval| {
+                let metadata = &interval.metadata;
+                let cache_key = (metadata.paf_file_index, metadata.cigar_offset());
+                let cigar_ops = cigar_cache
+                    .get(&cache_key)
+                    .map(|v| v.clone())
+                    .unwrap_or_else(|| metadata.get_cigar_ops(&self.paf_files));
+
+                let result = project_target_range_through_alignment(
+                    (range_start, range_end),
+                    (
+                        metadata.target_start,
+                        metadata.target_end,
+                        metadata.query_start,
+                        metadata.query_end,
+                        metadata.strand(),
+                    ),
+                    &cigar_ops,
+                );
+                if let Some((
+                    adjusted_query_start,
+                    adjusted_query_end,
+                    adjusted_cigar,
+                    adjusted_target_start,
+                    adjusted_target_end,
+                )) = result
+                {
+                    if let Some(threshold) = min_gap_compressed_identity {
+                        if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
+                            return;
+                        }
+                    }
+
+                    results.push((
+                        Interval {
+                            first: adjusted_query_start,
+                            last: adjusted_query_end,
+                            metadata: metadata.query_id,
+                        },
+                        if store_cigar {
+                            adjusted_cigar
+                        } else {
+                            Vec::new()
+                        },
+                        Interval {
+                            first: adjusted_target_start,
+                            last: adjusted_target_end,
+                            metadata: target_id,
+                        },
+                    ));
+                }
+            });
+        }
+
+        results
+    }
+
     pub fn query_transitive_dfs(
         &self,
         target_id: u32,
@@ -983,8 +1088,7 @@ impl Impg {
                                                 metadata.query_end,
                                                 metadata.strand(),
                                             ),
-                                            &metadata
-                                                .get_cigar_ops(&self.paf_files),
+                                            &metadata.get_cigar_ops(&self.paf_files),
                                         );
 
                                         if let Some((

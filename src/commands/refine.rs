@@ -120,7 +120,10 @@ pub fn run_refine(
         config.extension_step
     );
 
-    if matches!(config.support_mode, SupportMode::Sample | SupportMode::Haplotype) {
+    if matches!(
+        config.support_mode,
+        SupportMode::Sample | SupportMode::Haplotype
+    ) {
         info!(
             "Early termination enabled for {} aggregation",
             support_mode_label(config.support_mode)
@@ -190,7 +193,10 @@ fn refine_single_range(
     let max_extension_bp = max_extension_bp.max(0);
 
     // Compute max possible entities once for pansn-mode
-    let max_entities = if matches!(config.support_mode, SupportMode::Sample | SupportMode::Haplotype) {
+    let max_entities = if matches!(
+        config.support_mode,
+        SupportMode::Sample | SupportMode::Haplotype
+    ) {
         let max = compute_max_entities(impg, target_id, config.support_mode);
         debug!(
             "Maximum possible {} for target {}: {}",
@@ -202,6 +208,25 @@ fn refine_single_range(
     } else {
         None
     };
+
+    // Pre-populate CIGAR cache for max interval (if not using transitive queries)
+    let mut cigar_cache: FxHashMap<(u32, u64), Vec<crate::impg::CigarOp>> = FxHashMap::default();
+    if !config.use_transitive_bfs && !config.use_transitive_dfs {
+        let max_start = orig_start.saturating_sub(max_extension_bp).max(0);
+        let max_end = orig_end.saturating_add(max_extension_bp).min(seq_len);
+        debug!(
+            "Pre-loading CIGARs for max interval {}:{}-{} to cache",
+            chrom, max_start, max_end
+        );
+        impg.populate_cigar_cache(
+            target_id,
+            max_start,
+            max_end,
+            config.min_identity,
+            &mut cigar_cache,
+        );
+        debug!("Cached {} CIGARs for this region", cigar_cache.len());
+    }
 
     // Build the grid of candidate flank sizes based on dynamic constraints.
     let flanks = build_flanks(max_extension_bp, config.extension_step);
@@ -221,7 +246,17 @@ fn refine_single_range(
 
     let evaluate = |left: i32, right: i32| -> Option<CandidateResult> {
         evaluate_candidate(
-            impg, target_id, chrom, orig_start, orig_end, seq_len, left, right, config, max_entities,
+            impg,
+            target_id,
+            chrom,
+            orig_start,
+            orig_end,
+            seq_len,
+            left,
+            right,
+            config,
+            max_entities,
+            &cigar_cache,
         )
     };
 
@@ -270,7 +305,7 @@ fn refine_single_range(
 
         // Early exit if we've reached maximum support
         if check_max(&best_candidate) {
-        debug!(
+            debug!(
             "Reached maximum support ({}/{}) after left extension, skipping further exploration for {}:{}-{}",
             best_candidate.as_ref().unwrap().support_count,
             max_entities.unwrap(),
@@ -278,24 +313,24 @@ fn refine_single_range(
             orig_start,
             orig_end
         );
-    } else {
-        let left_fixed = best_candidate
-            .as_ref()
-            .map(|c| c.left_extension)
-            .unwrap_or(0);
+        } else {
+            let left_fixed = best_candidate
+                .as_ref()
+                .map(|c| c.left_extension)
+                .unwrap_or(0);
 
-        // Next, keep the chosen left flank fixed and look for the best right expansion.
-        if let Some(candidate) = flanks
-            .par_iter()
-            .filter_map(|&right| evaluate(left_fixed, right))
-            .reduce_with(better_candidate)
-        {
-            best_candidate = update_best_candidate(best_candidate, candidate);
-        }
+            // Next, keep the chosen left flank fixed and look for the best right expansion.
+            if let Some(candidate) = flanks
+                .par_iter()
+                .filter_map(|&right| evaluate(left_fixed, right))
+                .reduce_with(better_candidate)
+            {
+                best_candidate = update_best_candidate(best_candidate, candidate);
+            }
 
-        // Early exit if we've reached maximum support
-        if check_max(&best_candidate) {
-            debug!(
+            // Early exit if we've reached maximum support
+            if check_max(&best_candidate) {
+                debug!(
                 "Reached maximum support ({}/{}) after right extension, skipping re-optimization for {}:{}-{}",
                 best_candidate.as_ref().unwrap().support_count,
                 max_entities.unwrap(),
@@ -303,22 +338,22 @@ fn refine_single_range(
                 orig_start,
                 orig_end
             );
-        } else {
-            let right_fixed = best_candidate
-                .as_ref()
-                .map(|c| c.right_extension)
-                .unwrap_or(0);
+            } else {
+                let right_fixed = best_candidate
+                    .as_ref()
+                    .map(|c| c.right_extension)
+                    .unwrap_or(0);
 
-            // Finally, re-optimise the left flank while holding the right flank steady to capture asymmetric trade-offs.
-            if let Some(candidate) = flanks
-                .par_iter()
-                .filter_map(|&left| evaluate(left, right_fixed))
-                .reduce_with(better_candidate)
-            {
-                best_candidate = update_best_candidate(best_candidate, candidate);
+                // Finally, re-optimise the left flank while holding the right flank steady to capture asymmetric trade-offs.
+                if let Some(candidate) = flanks
+                    .par_iter()
+                    .filter_map(|&left| evaluate(left, right_fixed))
+                    .reduce_with(better_candidate)
+                {
+                    best_candidate = update_best_candidate(best_candidate, candidate);
+                }
             }
         }
-    }
     }
 
     let Some(best_candidate) = best_candidate else {
@@ -370,6 +405,7 @@ fn evaluate_candidate(
     right_flank: i32,
     config: &RefineConfig<'_>,
     max_entities: Option<usize>,
+    cigar_cache: &FxHashMap<(u32, u64), Vec<crate::impg::CigarOp>>,
 ) -> Option<CandidateResult> {
     let tentative_start = orig_start.saturating_sub(left_flank);
     let tentative_end = orig_end.saturating_add(right_flank);
@@ -386,7 +422,14 @@ fn evaluate_candidate(
     }
 
     let mut overlaps = Vec::new();
-    query_overlaps(impg, target_id, (start, end), config, &mut overlaps);
+    query_overlaps(
+        impg,
+        target_id,
+        (start, end),
+        config,
+        &mut overlaps,
+        cigar_cache,
+    );
 
     apply_subset_filter(
         impg,
@@ -431,6 +474,7 @@ fn query_overlaps(
     range: (i32, i32),
     config: &RefineConfig<'_>,
     buffer: &mut Vec<AdjustedInterval>,
+    cigar_cache: &FxHashMap<(u32, u64), Vec<crate::impg::CigarOp>>,
 ) {
     buffer.clear();
 
@@ -459,7 +503,14 @@ fn query_overlaps(
             config.min_identity,
         )
     } else {
-        impg.query(target_id, range.0, range.1, false, config.min_identity)
+        impg.query_with_cache(
+            target_id,
+            range.0,
+            range.1,
+            false,
+            config.min_identity,
+            cigar_cache,
+        )
     };
 
     buffer.append(&mut results);
@@ -555,11 +606,7 @@ struct SupportStats {
 
 /// Compute the maximum number of unique entities (samples/haplotypes) that align to the target.
 /// This counts all entities without applying the blacklist filter.
-fn compute_max_entities(
-    impg: &Impg,
-    target_id: u32,
-    mode: SupportMode,
-) -> usize {
+fn compute_max_entities(impg: &Impg, target_id: u32, mode: SupportMode) -> usize {
     let mut unique_entities = FxHashSet::default();
 
     // Get the target's entity key to exclude it from the list
@@ -882,7 +929,11 @@ pub fn parse_blacklist_bed(path: &str) -> io::Result<Blacklist> {
         if fields.len() < 3 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Line {} has fewer than 3 fields in BED file: {}", line_num + 1, path),
+                format!(
+                    "Line {} has fewer than 3 fields in BED file: {}",
+                    line_num + 1,
+                    path
+                ),
             ));
         }
 
@@ -903,7 +954,12 @@ pub fn parse_blacklist_bed(path: &str) -> io::Result<Blacklist> {
         if end <= start {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Invalid range on line {}: end ({}) <= start ({})", line_num + 1, end, start),
+                format!(
+                    "Invalid range on line {}: end ({}) <= start ({})",
+                    line_num + 1,
+                    end,
+                    start
+                ),
             ));
         }
 
