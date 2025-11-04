@@ -1,5 +1,5 @@
 use crate::impg::{AdjustedInterval, Impg};
-use crate::subset_filter::SubsetFilter;
+use crate::subset_filter::{apply_subset_filter, SubsetFilter};
 use clap::ValueEnum;
 use coitrees::{COITree, Interval, IntervalTree};
 use log::{debug, info, warn};
@@ -431,14 +431,7 @@ fn evaluate_candidate(
         cigar_cache,
     );
 
-    apply_subset_filter(
-        impg,
-        target_id,
-        &mut overlaps,
-        chrom,
-        (start, end),
-        config.subset_filter,
-    );
+    apply_subset_filter(impg, target_id, &mut overlaps, config.subset_filter);
 
     let stats = compute_supporting_stats(
         impg,
@@ -514,43 +507,6 @@ fn query_overlaps(
     };
 
     buffer.append(&mut results);
-}
-
-fn apply_subset_filter(
-    impg: &Impg,
-    target_id: u32,
-    overlaps: &mut Vec<AdjustedInterval>,
-    chrom: &str,
-    range: (i32, i32),
-    subset_filter: Option<&SubsetFilter>,
-) {
-    if let Some(filter) = subset_filter {
-        let before = overlaps.len();
-        overlaps.retain(|(query_interval, _, _)| {
-            if query_interval.metadata == target_id {
-                return true;
-            }
-            impg.seq_index
-                .get_name(query_interval.metadata)
-                .map(|name| filter.matches(name))
-                .unwrap_or(false)
-        });
-
-        let filtered_out = before.saturating_sub(overlaps.len());
-        if filtered_out > 0 {
-            debug!(
-                "Filtered out {} sequences outside subset for region {}:{}-{}",
-                filtered_out, chrom, range.0, range.1
-            );
-        }
-
-        if overlaps.len() <= 1 {
-            warn!(
-                "Subset filtering left no comparison sequences for region {}:{}-{}",
-                chrom, range.0, range.1
-            );
-        }
-    }
 }
 
 /// Return whichever candidate ranks higher according to `compare_candidates`.

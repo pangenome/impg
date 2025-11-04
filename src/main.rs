@@ -5,7 +5,7 @@ use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::paf::{PartialPafRecord, Strand};
 use impg::seqidx::SequenceIndex;
 use impg::sequence_index::{SequenceIndex as SeqIndexTrait, UnifiedSequenceIndex};
-use impg::subset_filter::{load_subset_filter, SubsetFilter};
+use impg::subset_filter::{apply_subset_filter, load_subset_filter, SubsetFilter};
 use log::{debug, info, warn};
 use noodles::bgzf;
 use rayon::prelude::*;
@@ -984,13 +984,15 @@ fn main() -> io::Result<()> {
                 )?;
 
                 // Apply subset filter if provided
-                apply_subset_filter_if_provided(
-                    &impg,
-                    &mut results,
-                    &target_name,
-                    target_range,
-                    subset_filter.as_ref(),
-                )?;
+                if let Some(filter) = subset_filter.as_ref() {
+                    let target_id = impg.seq_index.get_id(&target_name).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Target sequence '{}' not found in index", target_name),
+                        )
+                    })?;
+                    apply_subset_filter(&impg, target_id, &mut results, Some(filter));
+                }
 
                 // TODO: Why is name an Option for all the output functions?
                 let name_opt = Some(name);
@@ -1368,16 +1370,18 @@ fn main() -> io::Result<()> {
                     &query.transitive_opts,
                 )?;
 
-                let region_label = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
-
                 // Apply subset filter if provided
-                apply_subset_filter_if_provided(
-                    &impg,
-                    &mut results,
-                    &target_name,
-                    target_range,
-                    subset_filter.as_ref(),
-                )?;
+                if let Some(filter) = subset_filter.as_ref() {
+                    let target_id = impg.seq_index.get_id(&target_name).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Target sequence '{}' not found in index", target_name),
+                        )
+                    })?;
+                    apply_subset_filter(&impg, target_id, &mut results, Some(filter));
+                }
+
+                let region_label = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
 
                 // Merge intervals if needed
                 merge_query_adjusted_intervals(
@@ -2022,54 +2026,6 @@ fn load_subset_filter_if_provided(path: &Option<String>) -> io::Result<Option<Su
     } else {
         Ok(None)
     }
-}
-
-/// Apply subset filter to query results if filter is provided
-/// Keeps the target sequence, filters others, and logs/warns as appropriate
-fn apply_subset_filter_if_provided(
-    impg: &Impg,
-    results: &mut Vec<AdjustedInterval>,
-    target_name: &str,
-    target_range: (i32, i32),
-    subset_filter: Option<&SubsetFilter>,
-) -> io::Result<()> {
-    if let Some(filter) = subset_filter {
-        let target_id = impg.seq_index.get_id(target_name).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("Target sequence '{target_name}' not found in index"),
-            )
-        })?;
-
-        let region_label = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
-        let before = results.len();
-
-        results.retain(|(query_interval, _, _)| {
-            if query_interval.metadata == target_id {
-                return true;
-            }
-            let Some(name) = impg.seq_index.get_name(query_interval.metadata) else {
-                return false;
-            };
-            filter.matches(name)
-        });
-
-        let filtered_out = before.saturating_sub(results.len());
-        if filtered_out > 0 {
-            debug!(
-                "Filtered out {} sequences outside subset for region {}",
-                filtered_out, region_label
-            );
-        }
-
-        if results.len() <= 1 {
-            warn!(
-                "Subset filtering left no comparison sequences for region {}",
-                region_label
-            );
-        }
-    }
-    Ok(())
 }
 
 fn output_results_bed(
