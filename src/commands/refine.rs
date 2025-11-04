@@ -197,7 +197,7 @@ fn refine_single_range(
         config.support_mode,
         SupportMode::Sample | SupportMode::Haplotype
     ) {
-        let max = compute_max_entities(impg, target_id, config.support_mode);
+        let max = compute_max_entities(impg, target_id, config.support_mode, config.subset_filter);
         debug!(
             "Maximum possible {} for target {}: {}",
             support_mode_label(config.support_mode),
@@ -605,8 +605,13 @@ struct SupportStats {
 }
 
 /// Compute the maximum number of unique entities (samples/haplotypes) that align to the target.
-/// This counts all entities without applying the blacklist filter.
-fn compute_max_entities(impg: &Impg, target_id: u32, mode: SupportMode) -> usize {
+/// This counts all entities without applying the blacklist filter, but respects the subset filter.
+fn compute_max_entities(
+    impg: &Impg,
+    target_id: u32,
+    mode: SupportMode,
+    subset_filter: Option<&SubsetFilter>,
+) -> usize {
     let mut unique_entities = FxHashSet::default();
 
     // Get the target's entity key to exclude it from the list
@@ -624,6 +629,13 @@ fn compute_max_entities(impg: &Impg, target_id: u32, mode: SupportMode) -> usize
                 continue; // Skip self-alignments
             }
             if let Some(name) = impg.seq_index.get_name(query_id) {
+                // Apply subset filter if provided
+                if let Some(filter) = subset_filter {
+                    if !filter.matches(name) {
+                        continue;
+                    }
+                }
+
                 if let Some(key) = pansn_key(name, mode) {
                     // Exclude the target's entity key
                     if Some(&key) != target_key.as_ref() {
