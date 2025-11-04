@@ -122,36 +122,11 @@ impl QueryMetadata {
         self.strand_and_cigar_offset & !Self::STRAND_BIT
     }
 
-    fn get_cigar_ops(
-        &self,
-        paf_files: &[String],
-        cigar_cache: &RwLock<FxHashMap<(u32, u64), Arc<Vec<CigarOp>>>>,
-    ) -> Arc<Vec<CigarOp>> {
-        let cache_key = (self.paf_file_index, self.cigar_offset());
-
-        // Fast path: read lock
-        {
-            let cache = cigar_cache.read().unwrap();
-            if let Some(cached) = cache.get(&cache_key) {
-                return Arc::clone(cached);
-            }
-        }
-
-        // Slow path: write lock and load
-        let mut cache = cigar_cache.write().unwrap();
-
-        // Double-check (another thread might have loaded it)
-        if let Some(cached) = cache.get(&cache_key) {
-            return Arc::clone(cached);
-        }
-
-        // Check cache size limit and clear if exceeded
-        if cache.len() >= MAX_CIGAR_CACHE_ENTRIES {
-            cache.clear();
-        }
-
-        // Load CIGAR from file
+    fn get_cigar_ops(&self, paf_files: &[String]) -> Vec<CigarOp> {
+        // Allocate space for cigar
         let mut cigar_buffer = vec![0; self.cigar_bytes];
+
+        // Get the correct PAF file
         let paf_file_index = self.paf_file_index as usize;
         let paf_file = &paf_files[paf_file_index];
 
@@ -159,9 +134,8 @@ impl QueryMetadata {
         if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
             // For compressed files, use virtual position directly
             let mut reader = bgzf::io::Reader::new(File::open(paf_file).unwrap());
-            reader
-                .seek(bgzf::VirtualPosition::from(self.cigar_offset()))
-                .unwrap();
+            let virtual_position = bgzf::VirtualPosition::from(self.cigar_offset());
+            reader.seek(virtual_position).unwrap();
             reader.read_exact(&mut cigar_buffer).unwrap();
         } else {
             // For uncompressed files, use byte offset
@@ -170,11 +144,8 @@ impl QueryMetadata {
             reader.read_exact(&mut cigar_buffer).unwrap();
         };
 
-        let cigar_str = std::str::from_utf8(&cigar_buffer).unwrap();
-        let arc_cigar = Arc::new(parse_cigar_to_delta(cigar_str).ok().unwrap_or_default());
-
-        cache.insert(cache_key, Arc::clone(&arc_cigar));
-        arc_cigar
+        let cigar_str: &str = std::str::from_utf8(&cigar_buffer).unwrap();
+        parse_cigar_to_delta(cigar_str).ok().unwrap_or_default()
     }
 }
 
@@ -323,10 +294,7 @@ pub struct Impg {
     paf_files: Vec<String>,    // List of all PAF files
     pub forest_map: ForestMap, // Forest map for lazy loading
     index_file_path: String,   // Path to the index file for lazy loading
-    cigar_cache: RwLock<FxHashMap<(u32, u64), Arc<Vec<CigarOp>>>>,
 }
-
-const MAX_CIGAR_CACHE_ENTRIES: usize = 50_000;
 
 impl Impg {
     pub fn from_multi_paf_records(
@@ -398,7 +366,6 @@ impl Impg {
             paf_files,
             forest_map: ForestMap::new(), // All trees are in memory, no need for forest map
             index_file_path: String::new(), // All trees are in memory, no need for index file path
-            cigar_cache: RwLock::new(FxHashMap::default()),
         })
     }
 
@@ -585,7 +552,6 @@ impl Impg {
             paf_files: paf_files.to_vec(),
             forest_map,
             index_file_path,
-            cigar_cache: RwLock::new(FxHashMap::default()),
         })
     }
 
@@ -638,7 +604,7 @@ impl Impg {
                         metadata.query_end,
                         metadata.strand(),
                     ),
-                    &metadata.get_cigar_ops(&self.paf_files, &self.cigar_cache),
+                    &metadata.get_cigar_ops(&self.paf_files),
                 );
                 if let Some((
                     adjusted_query_start,
@@ -784,7 +750,7 @@ impl Impg {
                                 metadata.query_end,
                                 metadata.strand(),
                             ),
-                            &metadata.get_cigar_ops(&self.paf_files, &self.cigar_cache),
+                            &metadata.get_cigar_ops(&self.paf_files),
                         );
 
                         if let Some((
@@ -1018,7 +984,7 @@ impl Impg {
                                                 metadata.strand(),
                                             ),
                                             &metadata
-                                                .get_cigar_ops(&self.paf_files, &self.cigar_cache),
+                                                .get_cigar_ops(&self.paf_files),
                                         );
 
                                         if let Some((
