@@ -128,7 +128,7 @@ pub struct QueryMetadata {
     target_end: i32,
     query_start: i32,
     query_end: i32,
-    alignment_file_index: u16,
+    alignment_file_index: u32,
     strand_and_data_offset: u64, // Track strand and cigar/tracepoints offset
     data_bytes: usize,
 }
