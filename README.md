@@ -231,26 +231,29 @@ Refine loci to maximize sample support:
 
 ```bash
 # Refine a single region to maximize the number of sequences spanning both ends
-impg refine -p alignments.paf -r chr1:1000-2000
+impg refine -a alignments.paf -r chr1:1000-2000
 
 # Refine many regions from a BED file
-impg refine -p alignments.paf -b loci.bed
+impg refine -a alignments.paf -b loci.bed
 
 # Allow merging within 200 kb and require at least 2 kb coverage near each end
-impg refine -p alignments.paf -r chr1:1000-2000 -d 200000 --span-bp 2000
+impg refine -a alignments.paf -r chr1:1000-2000 -d 200000 --span-bp 2000
 
 # Expand up to 90% of the locus length on each side (default: 0.5)
-impg refine -p alignments.paf -r chr1:1000-2000 --max-extension 0.90
+impg refine -a alignments.paf -r chr1:1000-2000 --max-extension 0.90
 
 # Or cap the search to an absolute flank size
-impg refine -p alignments.paf -r chr1:1000-2000 --max-extension 50000
+impg refine -a alignments.paf -r chr1:1000-2000 --max-extension 50000
 
 # Maximize PanSN sample or haplotype counts instead of sequence counts
-impg refine -p alignments.paf -r chr1:1000-2000 --pansn-mode sample
-impg refine -p alignments.paf -r chr1:1000-2000 --pansn-mode haplotype
+impg refine -a alignments.paf -r chr1:1000-2000 --pansn-mode sample
+impg refine -a alignments.paf -r chr1:1000-2000 --pansn-mode haplotype
 
 # Capture the supporting entities in a separate BED file
-impg refine -p alignments.paf -r chr1:1000-2000 --support-output refine_support.bed
+impg refine -a alignments.paf -r chr1:1000-2000 --support-output refine_support.bed
+
+# Works with .1aln files too (requires --sequence-files)
+impg refine -a alignments.1aln --sequence-files sequences.fa -r chr1:1000-2000
 ```
 
 When `--support-output` is provided, the tool emits a BED file listing every sequence/sample/haplotype that spans the refined region: `sequence	start	end	region-name`.

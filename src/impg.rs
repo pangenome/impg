@@ -169,53 +169,6 @@ impl QueryMetadata {
             FileType::Paf
         }
     }
-
-    /// Get alignment data bytes (CIGAR)
-    fn get_data_bytes(&self, alignment_files: &[String]) -> Result<Vec<u8>, String> {
-        // Get the correct file and type
-        let alignment_file = &alignment_files[self.alignment_file_index as usize];
-        let file_type = Self::get_file_type(alignment_file);
-
-        // Check if data is available
-        if self.data_bytes == 0 {
-            let expected_data = match file_type {
-                FileType::Paf => "CIGAR strings ('cg:Z' tag)",
-                FileType::OneAln => "tracepoints",
-            };
-            return Err(format!(
-                "The alignment file '{}' does not contain {}.",
-                alignment_file, expected_data
-            ));
-        }
-
-        match file_type {
-            FileType::OneAln => Err(format!(
-                "Tracepoint data for '{}' must be accessed via get_onealn_alignment",
-                alignment_file
-            )),
-            FileType::Paf => {
-                // For PAF files, use byte-level seeking to read CIGAR string
-
-                // Allocate space for cigar
-                let mut data_buffer = vec![0; self.data_bytes];
-
-                read_cigar_data(alignment_file, self.data_offset(), &mut data_buffer)?;
-
-                Ok(data_buffer)
-            }
-        }
-    }
-
-    fn get_cigar_ops_from_bytes(&self, data_bytes: Vec<u8>) -> Vec<CigarOp> {
-        let cigar_str = std::str::from_utf8(&data_bytes).unwrap();
-        match parse_cigar_to_delta(cigar_str) {
-            Ok(ops) => ops,
-            Err(e) => panic!(
-                "Failed to parse CIGAR string '{cigar_str}' in QueryMetadata: {:?}",
-                e
-            ),
-        }
-    }
 }
 
 pub type AdjustedInterval = (Interval<u32>, Vec<CigarOp>, Interval<u32>);
@@ -369,14 +322,62 @@ pub struct Impg {
     alignment_files: Vec<String>,
     pub forest_map: ForestMap,
     index_file_path: String,
-    sequence_files: Vec<String>,
+    pub sequence_files: Vec<String>,
 }
 
 impl Impg {
+    /// Get CIGAR operations for an alignment (handles both PAF and 1aln files)
+    fn get_cigar_ops(
+        &self,
+        metadata: &QueryMetadata,
+        target_id: u32,
+        sequence_index: Option<&UnifiedSequenceIndex>,
+    ) -> Vec<CigarOp> {
+        let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
+
+        match QueryMetadata::get_file_type(alignment_file) {
+            FileType::Paf => {
+                // For PAF files, read CIGAR directly from file
+                if metadata.data_bytes == 0 {
+                    panic!(
+                        "The alignment file '{}' does not contain CIGAR strings ('cg:Z' tag).",
+                        alignment_file
+                    );
+                }
+
+                let mut data_buffer = vec![0; metadata.data_bytes];
+                read_cigar_data(alignment_file, metadata.data_offset(), &mut data_buffer)
+                    .unwrap_or_else(|e| panic!("{}", e));
+
+                // get_cigar_ops_from_bytes
+                let cigar_str = std::str::from_utf8(&data_buffer)
+                    .expect("Failed to parse CIGAR data as UTF-8");
+                parse_cigar_to_delta(cigar_str).unwrap_or_else(|e| {
+                    panic!(
+                        "Failed to parse CIGAR string '{}' in QueryMetadata: {:?}",
+                        cigar_str, e
+                    )
+                })
+            }
+            FileType::OneAln => {
+                // For 1aln files, convert tracepoints to CIGAR
+                let alignment = self
+                    .get_onealn_alignment(metadata)
+                    .unwrap_or_else(|e| panic!("{}", e));
+
+                self.process_tracepoints_data(
+                    &alignment,
+                    metadata,
+                    target_id,
+                    sequence_index.expect("Sequence index required for .1aln files"),
+                )
+            }
+        }
+    }
+
     /// Get a OneAlnAlignment from metadata (opens parser fresh each time)
     fn get_onealn_alignment(&self, metadata: &QueryMetadata) -> Result<OneAlnAlignment, String> {
-        let file_index = metadata.alignment_file_index as usize;
-        let alignment_file = &self.alignment_files[file_index];
+        let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
 
         if !alignment_file.ends_with(".1aln") {
             return Err(format!(
@@ -415,15 +416,14 @@ impl Impg {
         metadata: &QueryMetadata,
         target_id: u32,
         sequence_index: &UnifiedSequenceIndex,
-    ) -> (i32, i32, i32, i32, Vec<CigarOp>) {
+    ) -> Vec<CigarOp> {
         let (query_start, query_end) = (metadata.query_start, metadata.query_end);
         let (target_start, target_end) = (metadata.target_start, metadata.target_end);
 
         // if there are no differences, we can shortcut to a perfect match CIGAR
         if alignment.differences == 0 {
             let match_len = query_end - query_start;
-            let cigar_ops = vec![CigarOp::new(match_len, '=')];
-            return (target_start, target_end, query_start, query_end, cigar_ops);
+            return vec![CigarOp::new(match_len, '=')];
         }
 
         let tracepoints: Vec<(usize, usize)> = alignment
@@ -464,19 +464,13 @@ impl Impg {
             )
         });
 
-        (
-            target_start,
-            target_end,
-            query_start,
-            query_end,
-            match parse_cigar_to_delta(&cigar_str) {
-                Ok(ops) => ops,
-                Err(e) => panic!(
-                    "Failed to parse CIGAR string '{cigar_str}' during tracepoint processing: {:?}",
-                    e
-                ),
-            },
-        )
+        match parse_cigar_to_delta(&cigar_str) {
+            Ok(ops) => ops,
+            Err(e) => panic!(
+                "Failed to parse CIGAR string '{cigar_str}' during tracepoint processing: {:?}",
+                e
+            ),
+        }
     }
 
     fn project_overlapping_interval(
@@ -488,47 +482,16 @@ impl Impg {
         sequence_index: Option<&UnifiedSequenceIndex>,
         min_gap_compressed_identity: Option<f64>,
     ) -> Option<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
-        let file_index = metadata.alignment_file_index as usize;
-        let alignment_file = &self.alignment_files[file_index];
-
-        let (adj_target_start, adj_target_end, adj_query_start, adj_query_end, mut cigar_ops) =
-            match QueryMetadata::get_file_type(alignment_file) {
-                FileType::OneAln => {
-                    let alignment = self
-                        .get_onealn_alignment(metadata)
-                        .unwrap_or_else(|e| panic!("{}", e));
-
-                    self.process_tracepoints_data(
-                        &alignment,
-                        metadata,
-                        target_id,
-                        sequence_index.expect(
-                            "Sequence index is required when processing tracepoints for .1aln data",
-                        ),
-                    )
-                }
-                FileType::Paf => {
-                    let data_buffer = metadata
-                        .get_data_bytes(&self.alignment_files)
-                        .unwrap_or_else(|e| panic!("{}", e));
-
-                    (
-                        metadata.target_start,
-                        metadata.target_end,
-                        metadata.query_start,
-                        metadata.query_end,
-                        metadata.get_cigar_ops_from_bytes(data_buffer),
-                    )
-                }
-            };
+        // Get CIGAR ops for this alignment
+        let mut cigar_ops = self.get_cigar_ops(metadata, target_id, sequence_index);
 
         let projection = project_target_range_through_alignment(
             (range_start, range_end),
             (
-                adj_target_start,
-                adj_target_end,
-                adj_query_start,
-                adj_query_end,
+                metadata.target_start,
+                metadata.target_end,
+                metadata.query_start,
+                metadata.query_end,
                 metadata.strand(),
             ),
             &cigar_ops,
@@ -598,7 +561,7 @@ impl Impg {
                             target_end: record.target_end as i32,
                             query_start: record.query_start as i32,
                             query_end: record.query_end as i32,
-                            alignment_file_index: file_index as u16,
+                            alignment_file_index: file_index as u32,
                             strand_and_data_offset: record.strand_and_data_offset, // Already includes strand bit
                             data_bytes: record.data_bytes,
                         };
@@ -908,13 +871,16 @@ impl Impg {
         range_start: i32,
         range_end: i32,
         _min_gap_compressed_identity: Option<f64>,
+        sequence_index: Option<&UnifiedSequenceIndex>,
         cache: &mut FxHashMap<(u32, u64), Vec<CigarOp>>,
     ) {
         if let Some(tree) = self.get_or_load_tree(target_id) {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
-                let cache_key = (metadata.paf_file_index, metadata.cigar_offset());
-                cache.entry(cache_key).or_insert_with(|| metadata.get_cigar_ops(&self.paf_files));
+                let cache_key = (metadata.alignment_file_index, metadata.data_offset());
+                cache.entry(cache_key).or_insert_with(|| {
+                    self.get_cigar_ops(metadata, target_id, sequence_index)
+                });
             });
         }
     }
@@ -926,6 +892,7 @@ impl Impg {
         range_end: i32,
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
+        sequence_index: Option<&UnifiedSequenceIndex>,
         cigar_cache: &FxHashMap<(u32, u64), Vec<CigarOp>>,
     ) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
@@ -950,10 +917,10 @@ impl Impg {
         if let Some(tree) = self.get_or_load_tree(target_id) {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
-                let cache_key = (metadata.paf_file_index, metadata.cigar_offset());
-                let cigar_ops = cigar_cache
-                    .get(&cache_key).cloned()
-                    .unwrap_or_else(|| metadata.get_cigar_ops(&self.paf_files));
+                let cache_key = (metadata.alignment_file_index, metadata.data_offset());
+                let cigar_ops = cigar_cache.get(&cache_key).cloned().unwrap_or_else(|| {
+                    self.get_cigar_ops(metadata, target_id, sequence_index)
+                });
 
                 let result = project_target_range_through_alignment(
                     (range_start, range_end),

@@ -6,10 +6,8 @@ use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::onealn::OneAlnParser;
 use impg::seqidx::SequenceIndex;
 use impg::sequence_index::{SequenceIndex as SeqIndexTrait, UnifiedSequenceIndex};
+use impg::subset_filter::{apply_subset_filter, load_subset_filter, SubsetFilter};
 use log::{debug, error, info, warn};
-use impg::subset_filter::{load_subset_filter, apply_subset_filter, load_subset_filter, SubsetFilter};
-use log::{debug, info, warn};
-use noodles::bgzf;
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use rustc_hash::FxHashMap;
@@ -66,48 +64,6 @@ struct AlignmentOpts {
     #[arg(help_heading = "Alignment options")]
     #[clap(long, value_parser, default_value = "100")]
     trace_spacing: u32,
-}
-
-/// Alignment options tailored for the refine command (PAF-focused CLI)
-#[derive(Parser, Debug)]
-#[command(next_help_heading = "Refine alignment input")]
-struct PafOpts {
-    /// Path to the PAF alignment files
-    #[arg(help_heading = "Alignment input")]
-    #[clap(short = 'p', long, value_parser, required = false, num_args = 1.., conflicts_with = "paf_list")]
-    paf_files: Vec<String>,
-
-    /// Path to a text file containing paths to PAF alignment files (one per line)
-    #[arg(help_heading = "Alignment input")]
-    #[clap(long, value_parser, required = false, conflicts_with = "paf_files")]
-    paf_list: Option<String>,
-
-    /// Path to the IMPG index file.
-    #[arg(help_heading = "Index options")]
-    #[clap(short = 'i', long, value_parser)]
-    index: Option<String>,
-
-    /// Force the regeneration of the index, even if it already exists.
-    #[arg(help_heading = "Index options")]
-    #[clap(short = 'f', long, action)]
-    force_reindex: bool,
-
-    /// Trace spacing for .1aln alignment files (used when converting tracepoints to CIGAR)
-    #[arg(help_heading = "Alignment options")]
-    #[clap(long, value_parser, default_value = "100")]
-    trace_spacing: u32,
-}
-
-impl PafOpts {
-    fn into_alignment_opts(self) -> AlignmentOpts {
-        AlignmentOpts {
-            alignment_files: self.paf_files,
-            alignment_list: self.paf_list,
-            index: self.index,
-            force_reindex: self.force_reindex,
-            trace_spacing: self.trace_spacing,
-        }
-    }
 }
 
 /// Sequence file options for commands that need FASTA/AGC files
@@ -387,6 +343,9 @@ impl QueryOpts {
 struct RefineOpts {
     #[clap(flatten)]
     query: QueryOpts,
+
+    #[clap(flatten)]
+    sequence: SequenceOpts,
 
     /// Minimum number of bases that supporting samples must span at each region boundary
     #[arg(help_heading = "Refinement options")]
@@ -672,7 +631,7 @@ enum Args {
     /// Refine loci to maximize the number of samples that span both ends of the region
     Refine {
         #[clap(flatten)]
-        paf: PafOpts,
+        alignment: AlignmentOpts,
 
         #[clap(flatten)]
         refine: RefineOpts,
@@ -1243,20 +1202,21 @@ fn run() -> io::Result<()> {
             }
         }
         Args::Refine {
-            paf,
+            alignment,
             refine,
             common,
         } => {
             initialize_threads_and_log(&common);
             refine.validate()?;
 
-            let alignment_opts = paf.into_alignment_opts();
-            let alignment_files = resolve_alignment_files(&alignment_opts)?;
+            let alignment_files = resolve_alignment_files(&alignment)?;
+            let sequence_files = refine.sequence.resolve_sequence_files()?;
+
             let impg = initialize_impg(
                 &common,
-                &alignment_opts,
+                &alignment,
                 alignment_files.as_slice(),
-                Vec::new(),
+                sequence_files,
             )?;
             let subset_filter = load_subset_filter_if_provided(&refine.query.subset_sequence_list)?;
 
@@ -1941,7 +1901,7 @@ fn resolve_alignment_files(alignment: &AlignmentOpts) -> io::Result<Vec<String>>
     };
 
     // Check if the number of PAF files exceeds u32::MAX
-    if paf_files.len() > u32::MAX as usize {
+    if alignment_files.len() > u32::MAX as usize {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
