@@ -1,3 +1,5 @@
+use crate::impg::{AdjustedInterval, Impg};
+use log::{debug, warn};
 use std::collections::HashSet;
 use std::io;
 
@@ -73,6 +75,42 @@ pub fn load_subset_filter(path: &str) -> io::Result<SubsetFilter> {
     }
 
     Ok(filter)
+}
+
+/// Apply subset filter to overlapping intervals.
+/// Retains target sequence and filters others based on the subset filter.
+/// Logs statistics and warns if no comparison sequences remain.
+pub fn apply_subset_filter(
+    impg: &Impg,
+    target_id: u32,
+    overlaps: &mut Vec<AdjustedInterval>,
+    filter: Option<&SubsetFilter>,
+) {
+    let Some(filter) = filter else { return };
+
+    let before = overlaps.len();
+    overlaps.retain(|(query_interval, _, _)| {
+        query_interval.metadata == target_id
+            || impg
+                .seq_index
+                .get_name(query_interval.metadata)
+                .is_some_and(|name| filter.matches(name))
+    });
+
+    let filtered_out = before.saturating_sub(overlaps.len());
+    if filtered_out > 0 {
+        debug!(
+            "Filtered out {} sequences outside subset (target_id: {})",
+            filtered_out, target_id
+        );
+    }
+
+    if overlaps.len() <= 1 {
+        warn!(
+            "Subset filtering left no comparison sequences (target_id: {})",
+            target_id
+        );
+    }
 }
 
 fn parse_subset_filter(contents: &str) -> SubsetFilter {

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 /// Forest map structure containing mappings from target_id to tree offsets
 #[derive(Serialize, Deserialize)]
 pub struct ForestMap {
-    pub entries: FxHashMap<u32, u64>,
+    pub entries: FxHashMap<u32, u64>, // target_id -> tree_offset in the serialized IMPG index
 }
 
 impl Default for ForestMap {

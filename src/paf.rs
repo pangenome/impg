@@ -188,7 +188,7 @@ pub fn parse_paf_bgzf<R: std::io::Read + std::io::Seek>(
         }
 
         // Convert to string for parsing (excluding newline)
-        let line_len = if line_bytes.ends_with(&[b'\n']) {
+        let line_len = if line_bytes.ends_with(b"\n") {
             line_bytes.len() - 1
         } else {
             line_bytes.len()

@@ -656,23 +656,23 @@ fn sort_and_filter_ranges(ranges: &mut Vec<RangeInfo>) {
         if curr_start == prev_start && curr_end == prev_end {
             // Skip duplicate range
             // Current range is a duplicate of the previous range, skip it
-            debug!(
-                "    Duplicate range detected: Range [start={curr_start}, end={curr_end}] is identical to previous range and will be removed."
-            );
+            // debug!(
+            //     "    Duplicate range detected: Range [start={curr_start}, end={curr_end}] is identical to previous range and will be removed."
+            // );
 
             continue;
         } else if curr_start >= prev_start && curr_end <= prev_end {
             // Skip range that is fully contained within previous range
-            debug!(
-                "    Contained range detected: Range [start={curr_start}, end={curr_end}] is fully contained within previous range [start={prev_start}, end={prev_end}] and will be removed."
-            );
+            // debug!(
+            //     "    Contained range detected: Range [start={curr_start}, end={curr_end}] is fully contained within previous range [start={prev_start}, end={prev_end}] and will be removed."
+            // );
 
             continue;
         } else if prev_start >= curr_start && prev_end <= curr_end {
             // Previous range is fully contained within current range
-            debug!(
-                "    Containing range detected: Previous range [start={prev_start}, end={prev_end}] is fully contained within current range [start={curr_start}, end={curr_end}] and will be removed."
-            );
+            // debug!(
+            //     "    Containing range detected: Previous range [start={prev_start}, end={prev_end}] is fully contained within current range [start={curr_start}, end={curr_end}] and will be removed."
+            // );
 
             ranges.swap(write_idx, read_idx);
         } else if curr_start < prev_end {
@@ -812,9 +812,9 @@ fn trim_range_overlaps(ranges: &mut [RangeInfo], graph_mutex: &Arc<Mutex<Compact
                         idx, step_start, step_end, step_end - step_start, overlap_within_step_start, overlap_within_step_end, overlap_start_offset, overlap_end_offset);
 
                     if step_start < overlap_start {
-                        debug!(
-                            "      Adding left part of step [start={step_start}, end={overlap_within_step_start}]"
-                        );
+                        // debug!(
+                        //     "      Adding left part of step [start={step_start}, end={overlap_within_step_start}]"
+                        // );
                         assert!(overlap_start_offset > 0);
 
                         // Keep left part
@@ -834,9 +834,9 @@ fn trim_range_overlaps(ranges: &mut [RangeInfo], graph_mutex: &Arc<Mutex<Compact
                             current_pos = Some(step_start);
                         }
                     } else if step_end > overlap_end {
-                        debug!(
-                            "      Adding right part of step [start={overlap_within_step_end}, end={step_end}]"
-                        );
+                        // debug!(
+                        //     "      Adding right part of step [start={overlap_within_step_end}, end={step_end}]"
+                        // );
                         assert!(overlap_end_offset < node_len);
 
                         // Keep right part
@@ -911,10 +911,10 @@ fn trim_range_overlaps(ranges: &mut [RangeInfo], graph_mutex: &Arc<Mutex<Compact
                 r2.end = overlap_end;
             }
 
-            debug!(
-                "      Updated overlaps: Range2 [start={}, end={}]",
-                r2.start, r2.end
-            );
+            // debug!(
+            //     "      Updated overlaps: Range2 [start={}, end={}]",
+            //     r2.start, r2.end
+            // );
         }
     }
 }

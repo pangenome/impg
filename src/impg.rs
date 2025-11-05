@@ -137,6 +137,18 @@ impl QueryMetadata {
     // Constants for bit manipulation
     const STRAND_BIT: u64 = 0x8000000000000000; // Most significant bit for u64
 
+    pub fn query_id(&self) -> u32 {
+        self.query_id
+    }
+
+    pub fn query_start(&self) -> i32 {
+        self.query_start
+    }
+
+    pub fn query_end(&self) -> i32 {
+        self.query_end
+    }
+
     fn strand(&self) -> Strand {
         if (self.strand_and_data_offset & Self::STRAND_BIT) != 0 {
             Strand::Reverse
@@ -890,6 +902,108 @@ impl Impg {
         results
     }
 
+    pub fn populate_cigar_cache(
+        &self,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32,
+        _min_gap_compressed_identity: Option<f64>,
+        cache: &mut FxHashMap<(u32, u64), Vec<CigarOp>>,
+    ) {
+        if let Some(tree) = self.get_or_load_tree(target_id) {
+            tree.query(range_start, range_end, |interval| {
+                let metadata = &interval.metadata;
+                let cache_key = (metadata.paf_file_index, metadata.cigar_offset());
+                cache.entry(cache_key).or_insert_with(|| metadata.get_cigar_ops(&self.paf_files));
+            });
+        }
+    }
+
+    pub fn query_with_cache(
+        &self,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32,
+        store_cigar: bool,
+        min_gap_compressed_identity: Option<f64>,
+        cigar_cache: &FxHashMap<(u32, u64), Vec<CigarOp>>,
+    ) -> Vec<AdjustedInterval> {
+        let mut results = Vec::new();
+        results.push((
+            Interval {
+                first: range_start,
+                last: range_end,
+                metadata: target_id,
+            },
+            if store_cigar {
+                vec![CigarOp::new(range_end - range_start, '=')]
+            } else {
+                Vec::new()
+            },
+            Interval {
+                first: range_start,
+                last: range_end,
+                metadata: target_id,
+            },
+        ));
+
+        if let Some(tree) = self.get_or_load_tree(target_id) {
+            tree.query(range_start, range_end, |interval| {
+                let metadata = &interval.metadata;
+                let cache_key = (metadata.paf_file_index, metadata.cigar_offset());
+                let cigar_ops = cigar_cache
+                    .get(&cache_key).cloned()
+                    .unwrap_or_else(|| metadata.get_cigar_ops(&self.paf_files));
+
+                let result = project_target_range_through_alignment(
+                    (range_start, range_end),
+                    (
+                        metadata.target_start,
+                        metadata.target_end,
+                        metadata.query_start,
+                        metadata.query_end,
+                        metadata.strand(),
+                    ),
+                    &cigar_ops,
+                );
+                if let Some((
+                    adjusted_query_start,
+                    adjusted_query_end,
+                    adjusted_cigar,
+                    adjusted_target_start,
+                    adjusted_target_end,
+                )) = result
+                {
+                    if let Some(threshold) = min_gap_compressed_identity {
+                        if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
+                            return;
+                        }
+                    }
+
+                    results.push((
+                        Interval {
+                            first: adjusted_query_start,
+                            last: adjusted_query_end,
+                            metadata: metadata.query_id,
+                        },
+                        if store_cigar {
+                            adjusted_cigar
+                        } else {
+                            Vec::new()
+                        },
+                        Interval {
+                            first: adjusted_target_start,
+                            last: adjusted_target_end,
+                            metadata: target_id,
+                        },
+                    ));
+                }
+            });
+        }
+
+        results
+    }
+
     pub fn query_transitive_dfs(
         &self,
         target_id: u32,
@@ -971,7 +1085,7 @@ impl Impg {
                 current_target_end - current_target_start
             );
 
-            let prec_num_results = results.len();
+            //let prec_num_results = results.len();
 
             // Get or load the tree - if None, no overlaps exist for this target
             if let Some(tree) = self.get_or_load_tree(current_target_id) {
@@ -1082,10 +1196,10 @@ impl Impg {
                 }
             }
 
-            debug!("Collected {} results", results.len() - prec_num_results);
+            //debug!("Collected {} results", results.len() - prec_num_results);
 
             // Merge contiguous/overlapping ranges with same sequence_id
-            let stack_size = stack.len();
+            //let stack_size = stack.len();
             stack.par_sort_by_key(|(id, start, _, _)| (*id, *start));
 
             let mut write = 0;
@@ -1102,7 +1216,7 @@ impl Impg {
                 }
             }
             stack.truncate(write + 1);
-            debug!("Merged stack size from {} to {}", stack_size, stack.len());
+            //debug!("Merged stack size from {} to {}", stack_size, stack.len());
         }
 
         results
@@ -1175,11 +1289,11 @@ impl Impg {
 
         // Process by depth until max_depth or no more ranges
         while !current_ranges.is_empty() && (max_depth == 0 || current_depth < max_depth) {
-            debug!(
-                "Processing depth {} with {} ranges",
-                current_depth,
-                current_ranges.len()
-            );
+            // debug!(
+            //     "Processing depth {} with {} ranges",
+            //     current_depth,
+            //     current_ranges.len()
+            // );
 
             // Process current depth ranges in parallel
             let query_results: Vec<Vec<(u32, i32, i32, Vec<CigarOp>, i32, i32, u32)>> =
@@ -1344,10 +1458,10 @@ impl Impg {
                 }
                 next_depth_ranges.truncate(write + 1);
 
-                debug!(
-                    "Next depth will process {} ranges after merging",
-                    next_depth_ranges.len()
-                );
+                // debug!(
+                //     "Next depth will process {} ranges after merging",
+                //     next_depth_ranges.len()
+                // );
             }
 
             // Set up for next iteration
