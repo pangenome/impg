@@ -1946,7 +1946,7 @@ fn resolve_alignment_files(alignment: &AlignmentOpts) -> io::Result<Vec<String>>
             io::ErrorKind::InvalidInput,
             format!(
                 "Too many PAF files specified: {} (maximum allowed: {})",
-                paf_files.len(),
+                alignment_files.len(),
                 u32::MAX
             ),
         ));
