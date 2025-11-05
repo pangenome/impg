@@ -106,6 +106,9 @@ impg query -a alignments.paf -r chr1:1000-2000 -o bed
 impg query -a alignments.1aln -r chr1:1000-2000 -o bedpe
 impg query -a file1.paf file2.1aln -b chr1:1000-2000 -o paf
 
+# Write output to file instead of stdout (using -O / --output-prefix)
+impg query -p alignments.paf -r chr1:1000-2000 -o bed -O results       # creates results.bed
+
 # gfa/maf/fasta output requires sequence files (--sequence-files or --sequence-list)
 impg query -a alignments.paf -r chr1:1000-2000 -o gfa --sequence-files ref.fa genomes.fa
 impg query -a alignments.1aln -r chr1:1000-2000 -o maf --sequence-list fastas.txt
