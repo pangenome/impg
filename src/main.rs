@@ -595,9 +595,9 @@ enum Args {
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
 
-        /// Destination file basename, or nothing for standard output
+        /// Prefix for output file (automatically appends the extension based on format)
         #[clap(short = 'O', long, value_parser, default_value = None)]
-        output_basename: Option<String>,
+        output_prefix: Option<String>,
 
         #[clap(flatten)]
         gfa_maf_fasta: GfaMafFastaOpts,
@@ -884,7 +884,7 @@ fn main() -> io::Result<()> {
             paf,
             query,
             output_format,
-            output_basename,
+            output_prefix,
             gfa_maf_fasta,
         } => {
             initialize_threads_and_log(&common);
@@ -1004,7 +1004,7 @@ fn main() -> io::Result<()> {
                         output_results_bed(
                             &impg,
                             &mut results,
-                            &mut find_output_stream(&output_basename, "bed")?,
+                            &mut find_output_stream(&output_prefix, "bed")?,
                             &name_opt,
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
@@ -1016,7 +1016,7 @@ fn main() -> io::Result<()> {
                         output_results_bedpe(
                             &impg,
                             &mut results,
-                            &mut find_output_stream(&output_basename, "bed")?,
+                            &mut find_output_stream(&output_prefix, "bed")?,
                             &name_opt,
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
@@ -1028,7 +1028,7 @@ fn main() -> io::Result<()> {
                         output_results_paf(
                             &impg,
                             &mut results,
-                            &mut find_output_stream(&output_basename, "paf")?,
+                            &mut find_output_stream(&output_prefix, "paf")?,
                             &name_opt,
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
@@ -1039,7 +1039,7 @@ fn main() -> io::Result<()> {
                         output_results_gfa(
                             &impg,
                             &mut results,
-                            &mut find_output_stream(&output_basename, "gfa")?,
+                            &mut find_output_stream(&output_prefix, "gfa")?,
                             sequence_index.as_ref().unwrap(),
                             &name_opt,
                             query.effective_merge_distance(),
@@ -1050,7 +1050,7 @@ fn main() -> io::Result<()> {
                         output_results_maf(
                             &impg,
                             &mut results,
-                            &mut find_output_stream(&output_basename, "maf")?,
+                            &mut find_output_stream(&output_prefix, "maf")?,
                             sequence_index.as_ref().unwrap(),
                             &name_opt,
                             query.effective_merge_distance(),
@@ -1061,7 +1061,7 @@ fn main() -> io::Result<()> {
                         output_results_fasta(
                             &impg,
                             &mut results,
-                            &mut find_output_stream(&output_basename, "fa")?,
+                            &mut find_output_stream(&output_prefix, "fa")?,
                             sequence_index.as_ref().unwrap(),
                             &name_opt,
                             query.effective_merge_distance(),
@@ -1072,7 +1072,7 @@ fn main() -> io::Result<()> {
                         output_results_fasta(
                             &impg,
                             &mut results,
-                            &mut find_output_stream(&output_basename, "fa")?,
+                            &mut find_output_stream(&output_prefix, "fa")?,
                             sequence_index.as_ref().unwrap(),
                             &name_opt,
                             query.effective_merge_distance(),
@@ -1083,7 +1083,7 @@ fn main() -> io::Result<()> {
                         output_results_paf(
                             &impg,
                             &mut results,
-                            &mut find_output_stream(&output_basename, "paf")?,
+                            &mut find_output_stream(&output_prefix, "paf")?,
                             &name_opt,
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
