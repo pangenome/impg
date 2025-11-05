@@ -828,7 +828,7 @@ impl Impg {
                 current_target_end - current_target_start
             );
 
-            let prec_num_results = results.len();
+            //let prec_num_results = results.len();
 
             // Get or load the tree - if None, no overlaps exist for this target
             if let Some(tree) = self.get_or_load_tree(current_target_id) {
@@ -966,7 +966,7 @@ impl Impg {
             //debug!("Collected {} results", results.len() - prec_num_results);
 
             // Merge contiguous/overlapping ranges with same sequence_id
-            let stack_size = stack.len();
+            //let stack_size = stack.len();
             stack.par_sort_by_key(|(id, start, _, _)| (*id, *start));
 
             let mut write = 0;
