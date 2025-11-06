@@ -34,6 +34,10 @@ use std::sync::{Arc, RwLock};
 //     }
 // }
 
+// Type alias for target sequence cache to avoid repeated file access
+// Cache key: (target_id, start, end, is_reverse) -> sequence bytes
+type SequenceCache = FxHashMap<(u32, i32, i32, bool), Vec<u8>>;
+
 thread_local! {
     static EDIT_ALIGNER: RefCell<Option<AffineWavefronts>> = const { RefCell::new(None) };
 }
@@ -332,6 +336,7 @@ impl Impg {
         metadata: &QueryMetadata,
         target_id: u32,
         sequence_index: Option<&UnifiedSequenceIndex>,
+        seq_cache: Option<&mut SequenceCache>,
     ) -> Vec<CigarOp> {
         let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
 
@@ -370,6 +375,7 @@ impl Impg {
                     metadata,
                     target_id,
                     sequence_index.expect("Sequence index required for .1aln files"),
+                    seq_cache,
                 )
             }
         }
@@ -416,6 +422,7 @@ impl Impg {
         metadata: &QueryMetadata,
         target_id: u32,
         sequence_index: &UnifiedSequenceIndex,
+        seq_cache: Option<&mut SequenceCache>,
     ) -> Vec<CigarOp> {
         let (query_start, query_end) = (metadata.query_start, metadata.query_end);
         let (target_start, target_end) = (metadata.target_start, metadata.target_end);
@@ -434,22 +441,42 @@ impl Impg {
             .collect();
         let trace_spacing = alignment.trace_spacing as usize;
 
-        // Fetch only the relevant portions of the sequences from scaffold coordinates
+        // Fetch query sequence (not cached)
         let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
         let query_seq = sequence_index
             .fetch_sequence(query_name, query_start, query_end)
             .unwrap_or_else(|e| panic!("Failed to fetch query sequence: {e}"));
 
         let target_name = self.seq_index.get_name(target_id).unwrap();
-        let target_seq = if metadata.strand() == Strand::Forward {
-            sequence_index.fetch_sequence(target_name, target_start, target_end)
+
+        // Use cache for target sequence if provided
+        // Cache includes orientation to avoid repeated reverse complement operations
+        let is_reverse = metadata.strand() == Strand::Reverse;
+        let cache_key = (target_id, target_start, target_end, is_reverse);
+        let target_seq = if let Some(cache) = seq_cache {
+            cache
+                .entry(cache_key)
+                .or_insert_with(|| {
+                    let forward_seq = sequence_index
+                        .fetch_sequence(target_name, target_start, target_end)
+                        .unwrap_or_else(|e| panic!("Failed to fetch target sequence: {e}"));
+                    if is_reverse {
+                        reverse_complement(&forward_seq)
+                    } else {
+                        forward_seq
+                    }
+                })
+                .clone()
         } else {
-            match sequence_index.fetch_sequence(target_name, target_start, target_end) {
-                Ok(seq) => Ok(reverse_complement(&seq)),
-                Err(e) => Err(e),
+            let forward_seq = sequence_index
+                .fetch_sequence(target_name, target_start, target_end)
+                .unwrap_or_else(|e| panic!("Failed to fetch target sequence: {e}"));
+            if is_reverse {
+                reverse_complement(&forward_seq)
+            } else {
+                forward_seq
             }
-        }
-        .unwrap_or_else(|e| panic!("Failed to fetch target sequence: {e}"));
+        };
 
         let cigar_str = with_edit_aligner(|aligner| {
             tracepoints_to_cigar_fastga_with_aligner(
@@ -481,9 +508,10 @@ impl Impg {
         range_end: i32,
         sequence_index: Option<&UnifiedSequenceIndex>,
         min_gap_compressed_identity: Option<f64>,
+        seq_cache: Option<&mut SequenceCache>,
     ) -> Option<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
         // Get CIGAR ops for this alignment
-        let mut cigar_ops = self.get_cigar_ops(metadata, target_id, sequence_index);
+        let mut cigar_ops = self.get_cigar_ops(metadata, target_id, sequence_index, seq_cache);
 
         let projection = project_target_range_through_alignment(
             (range_start, range_end),
@@ -842,6 +870,10 @@ impl Impg {
             range_end - range_start
         );
 
+        // Create cache for target sequences (only beneficial for 1aln format)
+        // Pre-allocate with reasonable capacity to avoid resizing during queries
+        let mut seq_cache = SequenceCache::with_capacity_and_hasher(64, Default::default());
+
         // Get or load the tree - if None, no overlaps exist for this target
         if let Some(tree) = self.get_or_load_tree(target_id) {
             tree.query(range_start, range_end, |interval| {
@@ -854,6 +886,7 @@ impl Impg {
                         range_end,
                         sequence_index,
                         min_gap_compressed_identity,
+                        Some(&mut seq_cache),
                     )
                 {
                     let cigar_vec = if store_cigar { cigar_ops } else { Vec::new() };
@@ -874,12 +907,15 @@ impl Impg {
         sequence_index: Option<&UnifiedSequenceIndex>,
         cache: &mut FxHashMap<(u32, u64), Vec<CigarOp>>,
     ) {
+        // Create cache for target sequences (only beneficial for 1aln format)
+        let mut seq_cache = SequenceCache::with_capacity_and_hasher(64, Default::default());
+
         if let Some(tree) = self.get_or_load_tree(target_id) {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
                 let cache_key = (metadata.alignment_file_index, metadata.data_offset());
                 cache.entry(cache_key).or_insert_with(|| {
-                    self.get_cigar_ops(metadata, target_id, sequence_index)
+                    self.get_cigar_ops(metadata, target_id, sequence_index, Some(&mut seq_cache))
                 });
             });
         }
@@ -914,12 +950,15 @@ impl Impg {
             },
         ));
 
+        // Create cache for target sequences (only beneficial for 1aln format)
+        let mut seq_cache = SequenceCache::with_capacity_and_hasher(64, Default::default());
+
         if let Some(tree) = self.get_or_load_tree(target_id) {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
                 let cache_key = (metadata.alignment_file_index, metadata.data_offset());
                 let cigar_ops = cigar_cache.get(&cache_key).cloned().unwrap_or_else(|| {
-                    self.get_cigar_ops(metadata, target_id, sequence_index)
+                    self.get_cigar_ops(metadata, target_id, sequence_index, Some(&mut seq_cache))
                 });
 
                 let result = project_target_range_through_alignment(
@@ -1075,6 +1114,7 @@ impl Impg {
                             overlap_range.1,
                             sequence_index,
                             min_gap_compressed_identity,
+                            None, // No caching in parallel context
                         )
                         .map(
                             |(query_interval, cigar_ops, target_interval)| {
@@ -1292,6 +1332,7 @@ impl Impg {
                                                 overlap_end,
                                                 sequence_index,
                                                 min_gap_compressed_identity,
+                                                None, // No caching in parallel context
                                             )
                                         {
                                             let cigar_vec =
