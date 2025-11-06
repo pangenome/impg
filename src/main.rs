@@ -2136,6 +2136,7 @@ fn output_results_bedpe(
             .trim_end_matches('.')
             .to_string();
 
+        // BEDPE supports any number of additional, fields after the standard 10 fields.
         writeln!(
             out,
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t0\t{}\t+\tgi:f:{}\tbi:f:{}",
