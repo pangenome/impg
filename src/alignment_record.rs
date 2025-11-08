@@ -6,7 +6,7 @@
 ///   - `data_bytes`: length of CIGAR string in bytes
 ///
 /// - **1aln format**:
-///   - `strand_and_data_offset`: MSB=strand; remaining bits=alignment index for O(1) seeking
+///   - `strand_and_data_offset`: MSB=strand; remaining bits=byte offset to 'A' line for direct seeking
 ///   - `data_bytes`: number of tracepoints
 #[derive(Debug, PartialEq)]
 pub struct AlignmentRecord {

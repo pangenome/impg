@@ -327,6 +327,7 @@ pub struct Impg {
     pub forest_map: ForestMap,
     index_file_path: String,
     pub sequence_files: Vec<String>,
+    parser_cache: RwLock<FxHashMap<String, Arc<OneAlnParser>>>,
 }
 
 impl Impg {
@@ -381,19 +382,19 @@ impl Impg {
         }
     }
 
-    /// Get a OneAlnAlignment from metadata (opens parser fresh each time)
-    fn get_onealn_alignment(&self, metadata: &QueryMetadata) -> Result<OneAlnAlignment, String> {
-        let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
-
-        if !alignment_file.ends_with(".1aln") {
-            return Err(format!(
-                "Alignment '{}' is not a .1aln file; tracepoints unavailable",
-                alignment_file
-            ));
+    /// Get or create a cached OneAlnParser for a file
+    fn get_or_create_parser(&self, alignment_file: &str) -> Result<Arc<OneAlnParser>, String> {
+        // Try read lock first
+        {
+            let cache = self.parser_cache.read().unwrap();
+            if let Some(parser) = cache.get(alignment_file) {
+                return Ok(Arc::clone(parser));
+            }
         }
 
+        // Create new parser (outside read lock)
         let parser = OneAlnParser::new(
-            alignment_file.clone(),
+            alignment_file.to_string(),
             if self.sequence_files.is_empty() {
                 None
             } else {
@@ -406,6 +407,30 @@ impl Impg {
                 alignment_file, e
             )
         })?;
+
+        let parser_arc = Arc::new(parser);
+
+        // Insert into cache with write lock
+        {
+            let mut cache = self.parser_cache.write().unwrap();
+            cache.insert(alignment_file.to_string(), Arc::clone(&parser_arc));
+        }
+
+        Ok(parser_arc)
+    }
+
+    /// Get a OneAlnAlignment from metadata (uses cached parser)
+    fn get_onealn_alignment(&self, metadata: &QueryMetadata) -> Result<OneAlnAlignment, String> {
+        let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
+
+        if !alignment_file.ends_with(".1aln") {
+            return Err(format!(
+                "Alignment '{}' is not a .1aln file; tracepoints unavailable",
+                alignment_file
+            ));
+        }
+
+        let parser = self.get_or_create_parser(alignment_file)?;
 
         let alignment_index = metadata.data_offset();
         parser.seek_alignment(alignment_index).map_err(|e| {
@@ -643,6 +668,7 @@ impl Impg {
             forest_map,
             index_file_path: String::new(),
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
+            parser_cache: RwLock::new(FxHashMap::default()),
         })
     }
 
@@ -830,6 +856,7 @@ impl Impg {
             forest_map,
             index_file_path,
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
+            parser_cache: RwLock::new(FxHashMap::default()),
         })
     }
 
@@ -870,12 +897,11 @@ impl Impg {
             range_end - range_start
         );
 
-        // Create cache for target sequences (only beneficial for 1aln format)
-        // Pre-allocate with reasonable capacity to avoid resizing during queries
-        let mut seq_cache = SequenceCache::with_capacity_and_hasher(64, Default::default());
-
         // Get or load the tree - if None, no overlaps exist for this target
         if let Some(tree) = self.get_or_load_tree(target_id) {
+            // Create cache for target sequences (only beneficial for 1aln format)
+            let mut seq_cache = SequenceCache::with_capacity_and_hasher(64, Default::default());
+
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
                 if let Some((query_interval, cigar_ops, target_interval)) = self
@@ -1107,7 +1133,7 @@ impl Impg {
                 let processed_results: Vec<_> = intervals
                     .into_par_iter()
                     .filter_map(|(metadata, overlap_range)| {
-                        self.project_overlapping_interval(
+                        let projection_result = self.project_overlapping_interval(
                             &metadata,
                             current_target_id,
                             overlap_range.0,
@@ -1115,7 +1141,8 @@ impl Impg {
                             sequence_index,
                             min_gap_compressed_identity,
                             None, // No caching in parallel context
-                        )
+                        );
+                        projection_result
                         .map(
                             |(query_interval, cigar_ops, target_interval)| {
                                 let query_id = query_interval.metadata;
@@ -1324,16 +1351,18 @@ impl Impg {
                                             return;
                                         }
 
+                                        let projection_result = self.project_overlapping_interval(
+                                            metadata,
+                                            *current_target_id,
+                                            overlap_start,
+                                            overlap_end,
+                                            sequence_index,
+                                            min_gap_compressed_identity,
+                                            None, // No caching in parallel context
+                                        );
+
                                         if let Some((query_interval, cigar_ops, target_interval)) =
-                                            self.project_overlapping_interval(
-                                                metadata,
-                                                *current_target_id,
-                                                overlap_start,
-                                                overlap_end,
-                                                sequence_index,
-                                                min_gap_compressed_identity,
-                                                None, // No caching in parallel context
-                                            )
+                                            projection_result
                                         {
                                             let cigar_vec =
                                                 if store_cigar { cigar_ops } else { Vec::new() };
