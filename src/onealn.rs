@@ -68,25 +68,86 @@ impl OneAlnParser {
         let mut target_seq_lengths = HashMap::new();
         let mut target_contig_offsets = HashMap::new();
 
-        // The embedded GDB skeleton (if present) is the target genome (gdb2)
-        let embedded_names = file.get_all_sequence_names();
-        let embedded_lengths = file.get_all_sequence_lengths();
-        let embedded_offsets = file.get_all_contig_offsets();
+        // Read all embedded GDB skeleton metadata in a single pass
+        // Each element is (names, lengths, offsets) for one 'g' group
+        let embedded_groups = file.get_all_groups_metadata();
+        let num_groups = embedded_groups.len();
 
-        // Process references:
-        // - First reference (count=1) is the QUERY genome (gdb1/A-read)
-        // - Second reference (count=2) is the TARGET genome (gdb2/B-read)
-        // - If there's an embedded skeleton, it's for the TARGET (gdb2/B-read)
+        // First group = query, Second group (if present) = target
+        let num_gdb_refs = references.iter()
+            .filter(|(path, count)| !path.is_empty() && *count <= 2)
+            .count();
+
+        // Determine which genomes we need to load from external GDB files
+        let need_external_query = num_gdb_refs >= 1 && num_groups == 0;
+        let need_external_target = num_gdb_refs >= 2 && num_groups < 2;
+
+        if num_gdb_refs == 0 {
+            warn!("No external GDB references - using embedded metadata (skipping GDB search)");
+        } else if num_groups >= num_gdb_refs {
+            debug!(
+                "Embedded metadata is complete ({} groups >= {} GDB refs). Skipping GDB search",
+                num_groups, num_gdb_refs
+            );
+        } else if need_external_query && !need_external_target {
+            warn!(
+                "Partial metadata: will load external query GDB, use embedded group for target",
+            );
+        } else if !need_external_query && need_external_target {
+            warn!(
+                "Partial metadata: will load external target GDB, use embedded group for query",
+            );
+        } else {
+            warn!(
+                "Embedded metadata is incomplete ({} groups < {} GDB refs). Will load external GDB files.",
+                num_groups, num_gdb_refs
+            );
+        }
 
         let mut has_external_query = false;
         let mut has_external_target = false;
 
-        for (ref_idx, (ref_path, ref_count)) in references.iter().enumerate() {
+        // Helper function to strip fasta and AGC extensions
+        let strip_seq_ext = |p: &str| -> String {
+            let path_str = p.to_string();
+            // Try to remove common sequence file extensions (FASTA and AGC)
+            for ext in &[
+                ".fasta.gz",
+                ".fa.gz",
+                ".fna.gz",
+                ".fasta",
+                ".fa",
+                ".fna",
+                ".agc",
+            ] {
+                if path_str.ends_with(ext) {
+                    return path_str[..path_str.len() - ext.len()].to_string();
+                }
+            }
+            path_str
+        };
+
+        // Helper to check a path and return it if valid
+        let try_path = |path: std::path::PathBuf| -> Option<String> {
+            if path.exists() {
+                Some(path.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        };
+
+        // Get alignment file directory for relative path resolution
+        let aln_dir = std::path::Path::new(&file_path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+
+        // Only load what's missing
+        for (_ref_idx, (ref_path, ref_count)) in references.iter().enumerate() {
             if ref_path.is_empty() {
                 continue;
             }
 
-            // Skip if this is not a genome reference (count > 2 might be other metadata)
+            // We don't support more than 2 references (query + target)
             if *ref_count > 2 {
                 continue;
             }
@@ -94,57 +155,13 @@ impl OneAlnParser {
             let is_query = *ref_count == 1; // First reference is query (A-read)
             let is_target = *ref_count == 2; // Second reference is target (B-read)
 
-            debug!(
-                "Processing reference {}: {} (count: {}, type: {})",
-                ref_idx + 1,
-                ref_path,
-                ref_count,
-                if is_query {
-                    "query"
-                } else if is_target {
-                    "target"
-                } else {
-                    "unknown"
-                }
-            );
+            // Skip loading if we already have this genome from embedded metadata
+            if (is_query && !need_external_query) || (is_target && !need_external_target) {
+                continue;
+            }
 
-            // Helper function to strip fasta and AGC extensions
-            let strip_seq_ext = |p: &str| -> String {
-                let path_str = p.to_string();
-                // Try to remove common sequence file extensions (FASTA and AGC)
-                for ext in &[
-                    ".fasta.gz",
-                    ".fa.gz",
-                    ".fna.gz",
-                    ".fasta",
-                    ".fa",
-                    ".fna",
-                    ".agc",
-                ] {
-                    if path_str.ends_with(ext) {
-                        return path_str[..path_str.len() - ext.len()].to_string();
-                    }
-                }
-                path_str
-            };
-
-            // Get alignment file directory for relative path resolution
-            let aln_dir = std::path::Path::new(&file_path)
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("."));
-
-            // OPTIMIZED: Simplified GDB search with early exit
-            // Only try 4 focused strategies instead of 8
+            // GDB search with early exit
             let mut gdb_path: Option<String> = None;
-
-            // Helper to check a path and return it if valid
-            let try_path = |path: std::path::PathBuf| -> Option<String> {
-                if path.exists() {
-                    Some(path.to_string_lossy().to_string())
-                } else {
-                    None
-                }
-            };
 
             // Strategy 1: Try as-is if already a .gdb/.1gdb file
             if ref_path.ends_with(".1gdb") || ref_path.ends_with(".gdb") {
@@ -268,23 +285,40 @@ impl OneAlnParser {
             }
         }
 
-        // If we didn't load external target, use embedded skeleton
-        if !has_external_target && !embedded_names.is_empty() {
-            target_seq_names = embedded_names;
-            target_seq_lengths = embedded_lengths;
-            target_contig_offsets = embedded_offsets;
+        // If we didn't load external metadata, use embedded skeleton
+        let mut groups_iter = embedded_groups.into_iter(); // Convert to iterator to take ownership and avoid clones
+
+        // Assign query metadata
+        if !has_external_query && num_groups >= 1 {
+            let (q_names, q_lengths, q_offsets) = groups_iter.next().unwrap();
             debug!(
-                "Using embedded skeleton for target genome ({} sequences)",
-                target_seq_names.len()
+                "Using embedded skeleton for query genome ({} sequences) from group 1",
+                q_names.len()
             );
+            query_seq_names = q_names;
+            query_seq_lengths = q_lengths;
+            query_contig_offsets = q_offsets;
         }
 
-        // If this is a self-alignment (no external query), use target for query too
-        if !has_external_query && !target_seq_names.is_empty() {
-            query_seq_names = target_seq_names.clone();
-            query_seq_lengths = target_seq_lengths.clone();
-            query_contig_offsets = target_contig_offsets.clone();
-            warn!("Self-alignment detected: using target genome for query");
+        // Assign target metadata
+        if !has_external_target {
+            if num_groups >= 2 {
+                // Use second group for target
+                let (t_names, t_lengths, t_offsets) = groups_iter.next().unwrap();
+                debug!(
+                    "Using embedded skeleton for target genome ({} sequences) from group 2",
+                    t_names.len()
+                );
+                target_seq_names = t_names;
+                target_seq_lengths = t_lengths;
+                target_contig_offsets = t_offsets;
+            } else if num_groups == 1 && !query_seq_names.is_empty() {
+                // Only 1 group: target = query (self-alignment)
+                debug!("Self-alignment detected: using query genome for target (1 embedded group)");
+                target_seq_names = query_seq_names.clone();
+                target_seq_lengths = query_seq_lengths.clone();
+                target_contig_offsets = query_contig_offsets.clone();
+            }
         }
 
         if query_seq_names.is_empty() && target_seq_names.is_empty() {
@@ -299,6 +333,27 @@ impl OneAlnParser {
             target_seq_lengths,
             target_contig_offsets,
         };
+
+        // // Log metadata source summary
+        // if skip_gdb_search {
+        //     info!(
+        //         "Parser created using EMBEDDED metadata (query: {} seqs, target: {} seqs) - GDB search skipped ⚡",
+        //         metadata.query_seq_names.len(),
+        //         metadata.target_seq_names.len()
+        //     );
+        // } else if has_external_query || has_external_target {
+        //     info!(
+        //         "Parser created using EXTERNAL GDB metadata (query: {}, target: {}) - {} seqs total",
+        //         if has_external_query { "external" } else { "embedded" },
+        //         if has_external_target { "external" } else { "embedded" },
+        //         metadata.query_seq_names.len() + metadata.target_seq_names.len()
+        //     );
+        // } else {
+        //     info!(
+        //         "Parser created using EMBEDDED metadata only ({} seqs total)",
+        //         metadata.query_seq_names.len() + metadata.target_seq_names.len()
+        //     );
+        // }
 
         // Get trace spacing
         let mut trace_spacing = 100; // default
@@ -476,6 +531,7 @@ impl OneAlnParser {
         };
 
         if strand == Strand::Reverse {
+            // Reverse complement: flip coordinates within contig
             let contig_len = target_contig_len as usize;
             let orig_start = target_contig_start;
             let orig_end = target_contig_end;
