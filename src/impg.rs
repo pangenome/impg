@@ -391,23 +391,17 @@ impl Impg {
             ));
         }
 
-        let parser = OneAlnParser::new(
-            alignment_file.clone(),
-            if self.sequence_files.is_empty() {
-                None
-            } else {
-                Some(self.sequence_files.as_slice())
-            },
-        )
+        // Use shallow mode - reads trace_spacing from header, skips all metadata loading
+        let parser = OneAlnParser::new_shallow(alignment_file.clone())
         .map_err(|e| {
             format!(
-                "Failed to initialize parser for '{}': {:?}",
+                "Failed to initialize shallow parser for '{}': {:?}",
                 alignment_file, e
             )
         })?;
 
         let alignment_index = metadata.data_offset();
-        parser.seek_alignment(alignment_index).map_err(|e| {
+        parser.seek_alignment_shallow(alignment_index).map_err(|e| {
             format!(
                 "Failed to seek to alignment {} in '{}': {:?}",
                 alignment_index, alignment_file, e

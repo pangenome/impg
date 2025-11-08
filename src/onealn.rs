@@ -28,6 +28,19 @@ struct OneAlnMetadata {
     target_contig_offsets: HashMap<i64, (i64, i64)>,
 }
 
+impl Default for OneAlnMetadata {
+    fn default() -> Self {
+        Self {
+            query_seq_names: HashMap::new(),
+            query_seq_lengths: HashMap::new(),
+            query_contig_offsets: HashMap::new(),
+            target_seq_names: HashMap::new(),
+            target_seq_lengths: HashMap::new(),
+            target_contig_offsets: HashMap::new(),
+        }
+    }
+}
+
 /// Error type for 1aln parsing
 #[derive(Debug)]
 pub enum ParseErr {
@@ -380,6 +393,41 @@ impl OneAlnParser {
             file_path,
             trace_spacing,
             metadata,
+        })
+    }
+
+    /// Create a shallow parser that skips metadata loading
+    ///
+    /// This is much faster than `new()` because it doesn't search for or load GDB files.
+    /// Use this when you only need to fetch tracepoints using `seek_alignment_shallow()`,
+    /// and you already have all sequence metadata from the index.
+    ///
+    /// The trace_spacing is read quickly from the file header (just a few lines, no metadata).
+    ///
+    /// # Arguments
+    /// * `file_path` - Path to the .1aln file
+    pub fn new_shallow(file_path: String) -> Result<Self, ParseErr> {
+        // Read trace_spacing from file header (very fast - just a few lines)
+        let mut file = OneFile::open_read(&file_path, None, None, 1)
+            .map_err(|e| ParseErr::InvalidFormat(format!("Failed to open 1aln file: {}", e)))?;
+
+        // Read header lines until we find 't' or reach first alignment 'A'
+        let mut trace_spacing = 100; // default
+        loop {
+            match file.read_line() {
+                't' => {
+                    trace_spacing = file.int(0);
+                    break;
+                }
+                'A' | '\0' => break, // Reached alignment or EOF without 't' line
+                _ => {} // Skip other header lines
+            }
+        }
+
+        Ok(OneAlnParser {
+            file_path,
+            trace_spacing,
+            metadata: OneAlnMetadata::default(),
         })
     }
 
@@ -821,6 +869,82 @@ impl OneAlnParser {
                     "Zero-difference alignment but mismatched lengths: query {} (len {}), target {} (len {})",
                     alignment.query_name, query_len, alignment.target_name, target_len
                 )));
+            }
+        }
+
+        Ok(alignment)
+    }
+
+    /// Seek to a specific alignment using alignment index (shallow mode - no metadata lookups)
+    ///
+    /// This is much faster than `seek_alignment()` because it doesn't look up sequence names,
+    /// lengths, or offsets from metadata. It only reads the minimal fields needed for
+    /// tracepoint-to-CIGAR conversion.
+    ///
+    /// # Arguments
+    /// * `alignment_index` - The index of the alignment to seek to (from AlignmentRecord)
+    ///
+    /// # Returns
+    /// A minimal `OneAlnAlignment` with only the fields needed for tracepoint conversion:
+    /// - `query_contig_start`, `target_contig_start`
+    /// - `strand`, `differences`
+    /// - `tracepoints`, `trace_diffs`, `trace_spacing`
+    ///
+    /// Other fields are set to empty/default values and should not be used.
+    pub fn seek_alignment_shallow(&self, alignment_index: u64) -> Result<OneAlnAlignment, ParseErr> {
+        let mut file = OneFile::open_read(&self.file_path, None, None, 1).map_err(|e| {
+            ParseErr::InvalidFormat(format!(
+                "Failed to open 1aln file '{}': {}",
+                self.file_path, e
+            ))
+        })?;
+
+        file.goto('A', (alignment_index + 1) as i64).map_err(|e| {
+            ParseErr::InvalidFormat(format!(
+                "Failed to seek to alignment {}: {}.",
+                alignment_index, e
+            ))
+        })?;
+
+        file.read_line(); // Read the 'A' line we jumped to
+
+        // Read only the minimal coordinates needed for tracepoint conversion
+        let query_contig_start = file.int(1);
+        let target_contig_start = file.int(4);
+
+        // Create minimal alignment with only required fields
+        let mut alignment = OneAlnAlignment {
+            query_name: String::new(),
+            query_length: 0,
+            query_contig_start,
+            query_contig_end: 0,
+            query_contig_offset: 0,
+            target_name: String::new(),
+            target_length: 0,
+            target_contig_start,
+            target_contig_end: 0,
+            target_contig_offset: 0,
+            target_contig_len: 0,
+            strand: '+',
+            differences: 0,
+            tracepoints: Vec::new(),
+            trace_diffs: Vec::new(),
+            trace_spacing: self.trace_spacing,
+        };
+
+        // Read associated lines to get tracepoints and strand
+        loop {
+            match file.read_line() {
+                'R' => alignment.strand = '-',
+                'D' => alignment.differences = file.int(0),
+                'T' => {
+                    alignment.tracepoints = file.int_list().map(|v| v.to_vec()).unwrap_or_default()
+                }
+                'X' => {
+                    alignment.trace_diffs = file.int_list().map(|v| v.to_vec()).unwrap_or_default()
+                }
+                'A' | 'a' | 'g' | '^' | '\0' => break,
+                _ => {}
             }
         }
 

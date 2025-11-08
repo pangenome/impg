@@ -2015,14 +2015,14 @@ fn generate_multi_index(
                         })?
                     }
                     AlignmentFormat::OneAln => {
-                        let file =
+                        let parser =
                             OneAlnParser::new(aln_file.clone(), sequence_files).map_err(|e| {
                                 io::Error::new(
                                     io::ErrorKind::InvalidData,
                                     format!("Failed to create 1aln parser: {}", e),
                                 )
                             })?;
-                    file.parse_alignments(&mut local_seq_index).map_err(|e| {
+                        parser.parse_alignments(&mut local_seq_index).map_err(|e| {
                             io::Error::new(
                                 io::ErrorKind::InvalidData,
                                 format!("Failed to parse 1aln records: {}", e),
