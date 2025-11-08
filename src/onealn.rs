@@ -392,25 +392,13 @@ impl OneAlnParser {
                 'A' => {
                     // We're positioned AFTER the 'A' line type character
                     // Need to get the byte position of where this 'A' started
-                    // We'll use ONEcode's internal index for this
-
-                    // For now, use the alignment_index to compute byte offset via goto
-                    // Actually, this won't work because we need to capture the actual byte offset
-                    // Let me rewind and capture it properly
-
-                    // Get byte offset from ONEcode's internal 'A' line index
-                    let byte_offset = file.get_alignment_byte_offset(alignment_index as i64)
-                        .ok_or_else(|| ParseErr::InvalidFormat(format!(
-                            "Failed to get byte offset for alignment {}",
-                            alignment_index
-                        )))?;
-
+                    // Store alignment index directly (not byte offset)
+                    // We'll use goto() to seek to this index later
                     let (record, next_line) = self.parse_single_alignment(
                         &mut file,
                         &query_contig_to_seq_id,
                         &target_contig_to_seq_id,
                         alignment_index,
-                        byte_offset,
                     )?;
                     records.push(record);
                     alignment_index += 1;
@@ -432,8 +420,7 @@ impl OneAlnParser {
         file: &mut OneFile,
         query_contig_to_seq_id: &HashMap<i64, u32>,
         target_contig_to_seq_id: &HashMap<i64, u32>,
-        _alignment_index: u64,
-        alignment_byte_offset: i64,
+        alignment_index: u64,
     ) -> Result<(AlignmentRecord, char), ParseErr> {
         // Read alignment coordinates from current 'A' line
         let query_contig_id = file.int(0);
@@ -580,8 +567,8 @@ impl OneAlnParser {
             target_id, // Scaffold ID from SequenceIndex
             target_start: target_scaffold_start,
             target_end: target_scaffold_end,
-            strand_and_data_offset: alignment_byte_offset as u64, // Store 'A' line byte offset
-            data_bytes: num_tracepoints,                          // Store number of tracepoints
+            strand_and_data_offset: alignment_index, // Store alignment index for goto()
+            data_bytes: num_tracepoints,             // Store number of tracepoints
         };
         record.set_strand(strand);
 
@@ -657,31 +644,21 @@ impl OneAlnParser {
         &self.metadata.target_contig_offsets
     }
 
-    /// Seek to a specific alignment using byte offset
-    pub fn seek_alignment(&self, alignment_byte_offset: u64) -> Result<OneAlnAlignment, ParseErr> {
-        let mut file = OneFile::open_read(&self.file_path, None, None, 1).map_err(|e| {
+    /// Read alignment from already-open file handle (for batching)
+    pub fn read_with_handle(
+        &self,
+        file: &mut OneFile,
+        alignment_index: u64,
+    ) -> Result<OneAlnAlignment, ParseErr> {
+        file.goto('A', (alignment_index + 1) as i64).map_err(|e| {
             ParseErr::InvalidFormat(format!(
-                "Failed to open 1aln file '{}': {}",
-                self.file_path, e
+                "Failed to seek to alignment {}: {}.",
+                alignment_index, e
             ))
         })?;
 
-        // Seek to the 'A' line byte offset
-        file.seek_to_byte_offset(alignment_byte_offset as i64).map_err(|e| {
-            ParseErr::InvalidFormat(format!(
-                "Failed to seek to byte offset {}: {}.",
-                alignment_byte_offset, e
-            ))
-        })?;
-
-        // Read the 'A' line we seeked to
-        let line_type = file.read_line();
-        if line_type != 'A' {
-            return Err(ParseErr::InvalidFormat(format!(
-                "Expected 'A' line at byte offset {}, found '{}'",
-                alignment_byte_offset, line_type
-            )));
-        }
+        // Read the 'A' line we jumped to
+        file.read_line();
 
         // Read alignment coordinates
         let query_contig_id = file.int(0);
@@ -777,7 +754,18 @@ impl OneAlnParser {
         };
 
         // Read associated lines to get tracepoints
-        self.read_alignment_details(&mut file, alignment)
+        self.read_alignment_details(file, alignment)
+    }
+
+    /// Seek to a specific alignment using alignment index (convenience wrapper)
+    pub fn seek_alignment(&self, alignment_index: u64) -> Result<OneAlnAlignment, ParseErr> {
+        let mut file = OneFile::open_read(&self.file_path, None, None, 1).map_err(|e| {
+            ParseErr::InvalidFormat(format!(
+                "Failed to open 1aln file '{}': {}",
+                self.file_path, e
+            ))
+        })?;
+        self.read_with_handle(&mut file, alignment_index)
     }
 
     fn read_alignment_details(
