@@ -133,144 +133,95 @@ impl OneAlnParser {
                 .parent()
                 .unwrap_or_else(|| std::path::Path::new("."));
 
-            // Try multiple strategies to find the GDB file
+            // OPTIMIZED: Simplified GDB search with early exit
+            // Only try 4 focused strategies instead of 8
             let mut gdb_path: Option<String> = None;
 
-            // Strategy 1: Check in directories of sequence files provided via command-line hints
+            // Helper to check a path and return it if valid
+            let try_path = |path: std::path::PathBuf| -> Option<String> {
+                if path.exists() {
+                    Some(path.to_string_lossy().to_string())
+                } else {
+                    None
+                }
+            };
+
+            // Strategy 1: Try as-is if already a .gdb/.1gdb file
+            if ref_path.ends_with(".1gdb") || ref_path.ends_with(".gdb") {
+                // Try absolute path first
+                if let Some(found) = try_path(std::path::PathBuf::from(ref_path)) {
+                    gdb_path = Some(found);
+                }
+                // Try relative to alignment file
+                if gdb_path.is_none() {
+                    if let Some(found) = try_path(aln_dir.join(ref_path)) {
+                        gdb_path = Some(found);
+                    }
+                }
+            }
+
+            // Strategy 2: Try adding .1gdb extension to the path
+            if gdb_path.is_none() {
+                // Try absolute path with .1gdb
+                if let Some(found) = try_path(std::path::PathBuf::from(format!("{}.1gdb", ref_path))) {
+                    gdb_path = Some(found);
+                }
+                // Try relative path with .1gdb
+                if gdb_path.is_none() {
+                    if let Some(found) = try_path(aln_dir.join(format!("{}.1gdb", ref_path))) {
+                        gdb_path = Some(found);
+                    }
+                }
+            }
+
+            // Strategy 3: Strip sequence file extension and replace with .1gdb
+            if gdb_path.is_none() {
+                let base_path = strip_seq_ext(ref_path);
+                if base_path != *ref_path {
+                    // Try absolute path
+                    if let Some(found) = try_path(std::path::PathBuf::from(format!("{}.1gdb", base_path))) {
+                        gdb_path = Some(found);
+                    }
+                    // Try relative path
+                    if gdb_path.is_none() {
+                        if let Some(found) = try_path(aln_dir.join(format!("{}.1gdb", base_path))) {
+                            gdb_path = Some(found);
+                        }
+                    }
+                }
+            }
+
+            // Strategy 4: Check in sequence file hints directories
             if gdb_path.is_none() {
                 if let Some(seq_files) = sequence_file_hints {
                     let ref_path_obj = std::path::Path::new(ref_path);
 
+                    // Build candidate base names (original and stripped)
                     let mut candidate_bases: HashSet<String> = HashSet::new();
-                    let mut add_candidate = |value: &str| {
-                        if value.is_empty() || value.ends_with(".1gdb") || value.ends_with(".gdb") {
-                            return;
-                        }
-                        candidate_bases.insert(value.to_string());
-                        if let Some(no_prefix) = value.strip_prefix("./") {
-                            if !no_prefix.is_empty() {
-                                candidate_bases.insert(no_prefix.to_string());
-                            }
-                        }
-                    };
-
                     let stripped_full = strip_seq_ext(ref_path);
-                    add_candidate(&stripped_full);
+                    if !stripped_full.is_empty() && !stripped_full.ends_with(".1gdb") && !stripped_full.ends_with(".gdb") {
+                        candidate_bases.insert(stripped_full);
+                    }
 
                     if let Some(ref_base_name) = ref_path_obj.file_name().and_then(|n| n.to_str()) {
                         let stripped_name = strip_seq_ext(ref_base_name);
-                        add_candidate(&stripped_name);
+                        if !stripped_name.is_empty() && !stripped_name.ends_with(".1gdb") && !stripped_name.ends_with(".gdb") {
+                            candidate_bases.insert(stripped_name);
+                        }
                     }
 
-                    for seq_file in seq_files {
-                        let seq_path = std::path::Path::new(seq_file);
-                        if let Some(seq_dir) = seq_path.parent() {
+                    // Search in sequence file directories
+                    'seq_search: for seq_file in seq_files {
+                        if let Some(seq_dir) = std::path::Path::new(seq_file).parent() {
                             for stem in &candidate_bases {
-                                for ext in &[".1gdb", ".gdb"] {
-                                    let candidate = seq_dir.join(format!("{}{}", stem, ext));
-                                    if candidate.exists() {
-                                        gdb_path = Some(candidate.to_string_lossy().to_string());
-                                        debug!(
-                                            "Found GDB via sequence file hint directory: {}",
-                                            gdb_path.as_ref().unwrap()
-                                        );
-                                        break;
-                                    }
-                                }
-                                if gdb_path.is_some() {
-                                    break;
+                                if let Some(found) = try_path(seq_dir.join(format!("{}.1gdb", stem))) {
+                                    gdb_path = Some(found);
+                                    debug!("Found GDB via sequence file hint directory: {}", gdb_path.as_ref().unwrap());
+                                    break 'seq_search;
                                 }
                             }
                         }
-                        if gdb_path.is_some() {
-                            break;
-                        }
                     }
-                }
-            }
-
-            // Strategy 2: Try as absolute path (as-is) - but only if it's a GDB file
-            if gdb_path.is_none()
-                && std::path::Path::new(ref_path).exists()
-                && (ref_path.ends_with(".1gdb") || ref_path.ends_with(".gdb"))
-            {
-                gdb_path = Some(ref_path.clone());
-            }
-
-            // Strategy 3: Try adding .1gdb or .gdb extension to the original path
-            if gdb_path.is_none() {
-                for ext in &[".1gdb", ".gdb"] {
-                    let with_ext = format!("{}{}", ref_path, ext);
-                    if std::path::Path::new(&with_ext).exists() {
-                        gdb_path = Some(with_ext);
-                        break;
-                    }
-                }
-            }
-
-            // Strategy 4: Strip sequence file extension and try with GDB extensions (absolute path)
-            if gdb_path.is_none() {
-                let base_path = strip_seq_ext(ref_path);
-                if base_path != *ref_path {
-                    for ext in &[".1gdb", ".gdb"] {
-                        let with_ext = format!("{}{}", base_path, ext);
-                        if std::path::Path::new(&with_ext).exists() {
-                            gdb_path = Some(with_ext);
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // Strategy 5: Try in the same directory as the reference sequence file
-            if gdb_path.is_none() {
-                let ref_path_obj = std::path::Path::new(ref_path);
-                if let Some(ref_dir) = ref_path_obj.parent() {
-                    if let Some(file_name) = ref_path_obj.file_name().and_then(|n| n.to_str()) {
-                        let base_name = strip_seq_ext(file_name);
-                        for ext in &[".1gdb", ".gdb"] {
-                            let with_ext = ref_dir.join(format!("{}{}", base_name, ext));
-                            if with_ext.exists() {
-                                gdb_path = Some(with_ext.to_string_lossy().to_string());
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Strategy 6: Try relative path with sequence file extension stripped and GDB extension added
-            if gdb_path.is_none() {
-                let base_path = strip_seq_ext(ref_path);
-                if base_path != *ref_path {
-                    for ext in &[".1gdb", ".gdb"] {
-                        let relative_with_ext = aln_dir.join(format!("{}{}", base_path, ext));
-                        if relative_with_ext.exists() {
-                            gdb_path = Some(relative_with_ext.to_string_lossy().to_string());
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // Strategy 7: Try relative path with .1gdb or .gdb extension
-            if gdb_path.is_none() {
-                for ext in &[".1gdb", ".gdb"] {
-                    let relative_with_ext = aln_dir.join(format!("{}{}", ref_path, ext));
-                    if relative_with_ext.exists() {
-                        gdb_path = Some(relative_with_ext.to_string_lossy().to_string());
-                        break;
-                    }
-                }
-            }
-
-            // Strategy 8: Try relative to alignment file directory (as-is) - but only if it's a GDB file
-            if gdb_path.is_none() {
-                let relative_path = aln_dir.join(ref_path);
-                if relative_path.exists()
-                    && (ref_path.ends_with(".1gdb") || ref_path.ends_with(".gdb"))
-                {
-                    gdb_path = Some(relative_path.to_string_lossy().to_string());
                 }
             }
 
