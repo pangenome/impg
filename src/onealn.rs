@@ -83,24 +83,26 @@ impl OneAlnParser {
         let need_external_target = num_gdb_refs >= 2 && num_groups < 2;
 
         if num_gdb_refs == 0 {
-            warn!("No external GDB references - using embedded metadata (skipping GDB search)");
+            warn!("{}: No external GDB references - using embedded metadata (skipping GDB search)", file_path);
         } else if num_groups >= num_gdb_refs {
             debug!(
-                "Embedded metadata is complete ({} groups >= {} GDB refs). Skipping GDB search",
-                num_groups, num_gdb_refs
+            "{}: Embedded metadata is complete ({} groups >= {} GDB refs). Skipping GDB search",
+            file_path, num_groups, num_gdb_refs
             );
         } else if need_external_query && !need_external_target {
             warn!(
-                "Partial metadata: will load external query GDB, use embedded group for target",
+            "{}: Partial metadata: will load external query GDB, use embedded group for target",
+            file_path
             );
         } else if !need_external_query && need_external_target {
             warn!(
-                "Partial metadata: will load external target GDB, use embedded group for query",
+            "{}: Partial metadata: will load external target GDB, use embedded group for query",
+            file_path
             );
         } else {
             warn!(
-                "Embedded metadata is incomplete ({} groups < {} GDB refs). Will load external GDB files.",
-                num_groups, num_gdb_refs
+            "{}: Embedded metadata is incomplete ({} groups < {} GDB refs). Will load external GDB files.",
+            file_path, num_groups, num_gdb_refs
             );
         }
 
@@ -245,9 +247,14 @@ impl OneAlnParser {
             let gdb_path = if let Some(found_path) = gdb_path {
                 found_path
             } else {
+                let hint = if sequence_file_hints.is_none() {
+                    " If the GDB file exists in a different location, specify --sequence-files or --sequence-list to locate it."
+                } else {
+                    ""
+                };
                 return Err(ParseErr::InvalidFormat(format!(
-                    "GDB file not found for '{}'. Run: FAtoGDB {}",
-                    ref_path, ref_path
+                    "GDB file not found for '{}'. Run: FAtoGDB {}.{}",
+                    ref_path, ref_path, hint
                 )));
             };
 

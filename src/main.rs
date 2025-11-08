@@ -1212,6 +1212,23 @@ fn run() -> io::Result<()> {
             let alignment_files = resolve_alignment_files(&alignment)?;
             let sequence_files = refine.sequence.resolve_sequence_files()?;
 
+            // Check if we have .1aln files and validate sequence files are provided
+            let has_onealn_files = alignment_files.iter().any(|f| f.ends_with(".1aln"));
+            if has_onealn_files && sequence_files.is_empty() {
+                #[cfg(feature = "agc")]
+                let file_types = "FASTA or AGC";
+                #[cfg(not(feature = "agc"))]
+                let file_types = "FASTA";
+
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Sequence files ({}) are required for the 'refine' command with .1aln alignment files to convert tracepoints to CIGAR strings. Use --sequence-files or --sequence-list",
+                        file_types
+                    ),
+                ));
+            }
+
             let impg = initialize_impg(
                 &common,
                 &alignment,
@@ -1822,23 +1839,6 @@ fn initialize_impg(
 ) -> io::Result<Impg> {
     // The list of alignment files (PAF or .1aln) is pre-resolved
     info!("Found {} alignment file(s)", alignment_files.len());
-
-    // Check if we have .1aln files and validate sequence files are provided
-    let has_onealn_files = alignment_files.iter().any(|f| f.ends_with(".1aln"));
-    if has_onealn_files && sequence_files.is_empty() {
-        #[cfg(feature = "agc")]
-        let file_types = "FASTA or AGC";
-        #[cfg(not(feature = "agc"))]
-        let file_types = "FASTA";
-
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "Sequence files ({}) are required when working with .1aln alignment files to locate GDB files. Use --sequence-files or --sequence-list",
-                file_types
-            ),
-        ));
-    }
 
     // Load or generate index
     if alignment.force_reindex {
