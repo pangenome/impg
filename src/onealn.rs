@@ -83,28 +83,29 @@ impl OneAlnParser {
         let need_external_target = num_gdb_refs >= 2 && num_groups < 2;
 
         if num_gdb_refs == 0 {
-            warn!("{}: No external GDB references - using embedded metadata (skipping GDB search)", file_path);
+            warn!("No external GDB references - using embedded metadata for {}", file_path);
         } else if num_groups >= num_gdb_refs {
             debug!(
-            "{}: Embedded metadata is complete ({} groups >= {} GDB refs). Skipping GDB search",
-            file_path, num_groups, num_gdb_refs
+            "Embedded metadata is complete ({} groups >= {} GDB refs) for {}",
+            num_groups, num_gdb_refs, file_path
             );
         } else if need_external_query && !need_external_target {
             warn!(
-            "{}: Partial metadata: will load external query GDB, use embedded group for target",
+            "Partial metadata: will load external query GDB for {}",
             file_path
             );
         } else if !need_external_query && need_external_target {
             warn!(
-            "{}: Partial metadata: will load external target GDB, use embedded group for query",
+            "Partial metadata: will load external target GDB for {}",
             file_path
             );
         } else {
             warn!(
-            "{}: Embedded metadata is incomplete ({} groups < {} GDB refs). Will load external GDB files.",
-            file_path, num_groups, num_gdb_refs
+            "Embedded metadata is incomplete ({} groups < {} GDB refs). Will load external GDB files for {}",
+            num_groups, num_gdb_refs, file_path
             );
         }
+
 
         let mut has_external_query = false;
         let mut has_external_target = false;
