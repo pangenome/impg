@@ -10,7 +10,6 @@ use coitrees::{BasicCOITree, Interval, IntervalTree};
 use lib_tracepoints::tracepoints_to_cigar_fastga_with_aligner;
 use lib_wfa2::affine_wavefront::{AffineWavefronts, Distance};
 use log::{debug, warn};
-use lru::LruCache;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -18,7 +17,6 @@ use std::cell::RefCell;
 use std::cmp::{max, min};
 use std::fs::File;
 use std::io::{self, BufReader, Seek, SeekFrom};
-use std::num::NonZeroUsize;
 use std::sync::{Arc, RwLock};
 
 // use libc;
@@ -329,7 +327,6 @@ pub struct Impg {
     pub forest_map: ForestMap,
     index_file_path: String,
     pub sequence_files: Vec<String>,
-    parser_cache: RwLock<LruCache<String, Arc<OneAlnParser>>>,
 }
 
 impl Impg {
@@ -340,7 +337,6 @@ impl Impg {
         target_id: u32,
         sequence_index: Option<&UnifiedSequenceIndex>,
         seq_cache: Option<&mut SequenceCache>,
-        preloaded_alignment: Option<&OneAlnAlignment>,
     ) -> Vec<CigarOp> {
         let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
 
@@ -370,19 +366,12 @@ impl Impg {
             }
             FileType::OneAln => {
                 // For 1aln files, convert tracepoints to CIGAR
-                // Use preloaded alignment if provided (batching), otherwise fetch it
-                let alignment;
-                let alignment_ref = if let Some(preloaded) = preloaded_alignment {
-                    preloaded
-                } else {
-                    alignment = self
-                        .get_onealn_alignment(metadata)
-                        .unwrap_or_else(|e| panic!("{}", e));
-                    &alignment
-                };
+                let alignment = self
+                    .get_onealn_alignment(metadata)
+                    .unwrap_or_else(|e| panic!("{}", e));
 
                 self.process_tracepoints_data(
-                    alignment_ref,
+                    &alignment,
                     metadata,
                     target_id,
                     sequence_index.expect("Sequence index required for .1aln files"),
@@ -392,28 +381,18 @@ impl Impg {
         }
     }
 
-    /// Get or create a cached OneAlnParser for a file
-    /// Uses double-check locking to prevent race conditions
-    fn get_or_create_parser(&self, alignment_file: &str) -> Result<Arc<OneAlnParser>, String> {
-        // Fast path: try read lock first
-        {
-            let cache = self.parser_cache.read().unwrap();
-            if let Some(parser) = cache.peek(alignment_file) {
-                return Ok(Arc::clone(parser));
-            }
+    fn get_onealn_alignment(&self, metadata: &QueryMetadata) -> Result<OneAlnAlignment, String> {
+        let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
+
+        if !alignment_file.ends_with(".1aln") {
+            return Err(format!(
+                "Alignment '{}' is not a .1aln file; tracepoints unavailable",
+                alignment_file
+            ));
         }
 
-        // Slow path: acquire write lock to create parser
-        let mut cache = self.parser_cache.write().unwrap();
-
-        // CRITICAL: Double-check! Another thread may have inserted while we waited for write lock
-        if let Some(parser) = cache.get(alignment_file) {
-            return Ok(Arc::clone(parser));
-        }
-
-        // Only now create parser (write lock held, prevents duplicate creation)
         let parser = OneAlnParser::new(
-            alignment_file.to_string(),
+            alignment_file.clone(),
             if self.sequence_files.is_empty() {
                 None
             } else {
@@ -426,25 +405,6 @@ impl Impg {
                 alignment_file, e
             )
         })?;
-
-        let parser_arc = Arc::new(parser);
-        cache.put(alignment_file.to_string(), Arc::clone(&parser_arc));
-
-        Ok(parser_arc)
-    }
-
-    /// Get a OneAlnAlignment from metadata (uses cached parser)
-    fn get_onealn_alignment(&self, metadata: &QueryMetadata) -> Result<OneAlnAlignment, String> {
-        let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
-
-        if !alignment_file.ends_with(".1aln") {
-            return Err(format!(
-                "Alignment '{}' is not a .1aln file; tracepoints unavailable",
-                alignment_file
-            ));
-        }
-
-        let parser = self.get_or_create_parser(alignment_file)?;
 
         let alignment_index = metadata.data_offset();
         parser.seek_alignment(alignment_index).map_err(|e| {
@@ -548,10 +508,9 @@ impl Impg {
         sequence_index: Option<&UnifiedSequenceIndex>,
         min_gap_compressed_identity: Option<f64>,
         seq_cache: Option<&mut SequenceCache>,
-        preloaded_alignment: Option<&OneAlnAlignment>,
     ) -> Option<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
         // Get CIGAR ops for this alignment
-        let mut cigar_ops = self.get_cigar_ops(metadata, target_id, sequence_index, seq_cache, preloaded_alignment);
+        let mut cigar_ops = self.get_cigar_ops(metadata, target_id, sequence_index, seq_cache);
 
         let projection = project_target_range_through_alignment(
             (range_start, range_end),
@@ -683,7 +642,6 @@ impl Impg {
             forest_map,
             index_file_path: String::new(),
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
-            parser_cache: RwLock::new(LruCache::new(NonZeroUsize::new(512).unwrap())),
         })
     }
 
@@ -871,7 +829,6 @@ impl Impg {
             forest_map,
             index_file_path,
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
-            parser_cache: RwLock::new(LruCache::new(NonZeroUsize::new(512).unwrap())),
         })
     }
 
@@ -912,52 +869,29 @@ impl Impg {
             range_end - range_start
         );
 
+        // Create cache for target sequences (only beneficial for 1aln format)
+        // Pre-allocate with reasonable capacity to avoid resizing during queries
+        let mut seq_cache = SequenceCache::with_capacity_and_hasher(64, Default::default());
+
         // Get or load the tree - if None, no overlaps exist for this target
         if let Some(tree) = self.get_or_load_tree(target_id) {
-            // Collect intervals and group by file for batching
-            let mut by_file: FxHashMap<u32, Vec<QueryMetadata>> = FxHashMap::default();
             tree.query(range_start, range_end, |interval| {
-                by_file.entry(interval.metadata.alignment_file_index).or_default().push(interval.metadata.clone());
-            });
-
-            // Process each file's intervals in a batch
-            let mut seq_cache = SequenceCache::with_capacity_and_hasher(64, Default::default());
-            for (file_idx, metadatas) in by_file {
-                let alignment_file = &self.alignment_files[file_idx as usize];
-
-                if alignment_file.ends_with(".1aln") {
-                    // Batch process 1aln file - open once, read all alignments with goto()
-                    if let Ok(parser) = self.get_or_create_parser(alignment_file) {
-                        if let Ok(mut file) = onecode::OneFile::open_read(alignment_file, None, None, 1) {
-                            for metadata in metadatas {
-                                // Read alignment using shared file handle with goto()
-                                if let Ok(alignment) = parser.read_with_handle(&mut file, metadata.data_offset()) {
-                                    if let Some(result) = self.project_overlapping_interval(
-                                        &metadata, target_id, range_start, range_end,
-                                        sequence_index, min_gap_compressed_identity, Some(&mut seq_cache),
-                                        Some(&alignment),
-                                    ) {
-                                        let cigar_vec = if store_cigar { result.1 } else { Vec::new() };
-                                        results.push((result.0, cigar_vec, result.2));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // Process PAF files individually (already efficient)
-                    for metadata in metadatas {
-                        if let Some(result) = self.project_overlapping_interval(
-                            &metadata, target_id, range_start, range_end,
-                            sequence_index, min_gap_compressed_identity, Some(&mut seq_cache),
-                            None,
-                        ) {
-                            let cigar_vec = if store_cigar { result.1 } else { Vec::new() };
-                            results.push((result.0, cigar_vec, result.2));
-                        }
-                    }
+                let metadata = &interval.metadata;
+                if let Some((query_interval, cigar_ops, target_interval)) = self
+                    .project_overlapping_interval(
+                        metadata,
+                        target_id,
+                        range_start,
+                        range_end,
+                        sequence_index,
+                        min_gap_compressed_identity,
+                        Some(&mut seq_cache),
+                    )
+                {
+                    let cigar_vec = if store_cigar { cigar_ops } else { Vec::new() };
+                    results.push((query_interval, cigar_vec, target_interval));
                 }
-            }
+            });
         }
 
         results
@@ -980,7 +914,7 @@ impl Impg {
                 let metadata = &interval.metadata;
                 let cache_key = (metadata.alignment_file_index, metadata.data_offset());
                 cache.entry(cache_key).or_insert_with(|| {
-                    self.get_cigar_ops(metadata, target_id, sequence_index, Some(&mut seq_cache), None)
+                    self.get_cigar_ops(metadata, target_id, sequence_index, Some(&mut seq_cache))
                 });
             });
         }
@@ -1023,7 +957,7 @@ impl Impg {
                 let metadata = &interval.metadata;
                 let cache_key = (metadata.alignment_file_index, metadata.data_offset());
                 let cigar_ops = cigar_cache.get(&cache_key).cloned().unwrap_or_else(|| {
-                    self.get_cigar_ops(metadata, target_id, sequence_index, Some(&mut seq_cache), None)
+                    self.get_cigar_ops(metadata, target_id, sequence_index, Some(&mut seq_cache))
                 });
 
                 let result = project_target_range_through_alignment(
@@ -1180,7 +1114,6 @@ impl Impg {
                             sequence_index,
                             min_gap_compressed_identity,
                             None, // No caching in parallel context
-                            None, // No preloaded alignment
                         );
                         projection_result
                         .map(
@@ -1399,7 +1332,6 @@ impl Impg {
                                             sequence_index,
                                             min_gap_compressed_identity,
                                             None, // No caching in parallel context
-                                            None, // No preloaded alignment
                                         );
 
                                         if let Some((query_interval, cigar_ops, target_interval)) =

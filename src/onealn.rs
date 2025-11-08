@@ -644,12 +644,15 @@ impl OneAlnParser {
         &self.metadata.target_contig_offsets
     }
 
-    /// Read alignment from already-open file handle (for batching)
-    pub fn read_with_handle(
-        &self,
-        file: &mut OneFile,
-        alignment_index: u64,
-    ) -> Result<OneAlnAlignment, ParseErr> {
+    /// Seek to a specific alignment using alignment index
+    pub fn seek_alignment(&self, alignment_index: u64) -> Result<OneAlnAlignment, ParseErr> {
+        let mut file = OneFile::open_read(&self.file_path, None, None, 1).map_err(|e| {
+            ParseErr::InvalidFormat(format!(
+                "Failed to open 1aln file '{}': {}",
+                self.file_path, e
+            ))
+        })?;
+
         file.goto('A', (alignment_index + 1) as i64).map_err(|e| {
             ParseErr::InvalidFormat(format!(
                 "Failed to seek to alignment {}: {}.",
@@ -657,8 +660,7 @@ impl OneAlnParser {
             ))
         })?;
 
-        // Read the 'A' line we jumped to
-        file.read_line();
+        file.read_line(); // Read the 'A' line we jumped to
 
         // Read alignment coordinates
         let query_contig_id = file.int(0);
@@ -754,18 +756,7 @@ impl OneAlnParser {
         };
 
         // Read associated lines to get tracepoints
-        self.read_alignment_details(file, alignment)
-    }
-
-    /// Seek to a specific alignment using alignment index (convenience wrapper)
-    pub fn seek_alignment(&self, alignment_index: u64) -> Result<OneAlnAlignment, ParseErr> {
-        let mut file = OneFile::open_read(&self.file_path, None, None, 1).map_err(|e| {
-            ParseErr::InvalidFormat(format!(
-                "Failed to open 1aln file '{}': {}",
-                self.file_path, e
-            ))
-        })?;
-        self.read_with_handle(&mut file, alignment_index)
+        self.read_alignment_details(&mut file, alignment)
     }
 
     fn read_alignment_details(
