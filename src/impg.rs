@@ -10,6 +10,7 @@ use coitrees::{BasicCOITree, Interval, IntervalTree};
 use lib_tracepoints::tracepoints_to_cigar_fastga_with_aligner;
 use lib_wfa2::affine_wavefront::{AffineWavefronts, Distance};
 use log::{debug, warn};
+use lru::LruCache;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,7 @@ use std::cell::RefCell;
 use std::cmp::{max, min};
 use std::fs::File;
 use std::io::{self, BufReader, Seek, SeekFrom};
+use std::num::NonZeroUsize;
 use std::sync::{Arc, RwLock};
 
 // use libc;
@@ -327,7 +329,7 @@ pub struct Impg {
     pub forest_map: ForestMap,
     index_file_path: String,
     pub sequence_files: Vec<String>,
-    parser_cache: RwLock<FxHashMap<String, Arc<OneAlnParser>>>,
+    parser_cache: RwLock<LruCache<String, Arc<OneAlnParser>>>,
 }
 
 impl Impg {
@@ -383,16 +385,25 @@ impl Impg {
     }
 
     /// Get or create a cached OneAlnParser for a file
+    /// Uses double-check locking to prevent race conditions
     fn get_or_create_parser(&self, alignment_file: &str) -> Result<Arc<OneAlnParser>, String> {
-        // Try read lock first
+        // Fast path: try read lock first
         {
             let cache = self.parser_cache.read().unwrap();
-            if let Some(parser) = cache.get(alignment_file) {
+            if let Some(parser) = cache.peek(alignment_file) {
                 return Ok(Arc::clone(parser));
             }
         }
 
-        // Create new parser (outside read lock)
+        // Slow path: acquire write lock to create parser
+        let mut cache = self.parser_cache.write().unwrap();
+
+        // CRITICAL: Double-check! Another thread may have inserted while we waited for write lock
+        if let Some(parser) = cache.get(alignment_file) {
+            return Ok(Arc::clone(parser));
+        }
+
+        // Only now create parser (write lock held, prevents duplicate creation)
         let parser = OneAlnParser::new(
             alignment_file.to_string(),
             if self.sequence_files.is_empty() {
@@ -409,12 +420,7 @@ impl Impg {
         })?;
 
         let parser_arc = Arc::new(parser);
-
-        // Insert into cache with write lock
-        {
-            let mut cache = self.parser_cache.write().unwrap();
-            cache.insert(alignment_file.to_string(), Arc::clone(&parser_arc));
-        }
+        cache.put(alignment_file.to_string(), Arc::clone(&parser_arc));
 
         Ok(parser_arc)
     }
@@ -668,7 +674,7 @@ impl Impg {
             forest_map,
             index_file_path: String::new(),
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
-            parser_cache: RwLock::new(FxHashMap::default()),
+            parser_cache: RwLock::new(LruCache::new(NonZeroUsize::new(512).unwrap())),
         })
     }
 
@@ -856,7 +862,7 @@ impl Impg {
             forest_map,
             index_file_path,
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
-            parser_cache: RwLock::new(FxHashMap::default()),
+            parser_cache: RwLock::new(LruCache::new(NonZeroUsize::new(512).unwrap())),
         })
     }
 
