@@ -324,6 +324,11 @@ struct QueryOpts {
     #[arg(help_heading = "Coordinate options")]
     #[clap(long, action)]
     original_sequence_coordinates: bool,
+
+    /// Use approximate mode for faster queries (1aln files only, bed/bedpe output): scans tracepoints without CIGAR computation or sequence fetching
+    #[arg(help_heading = "Performance")]
+    #[clap(long, action)]
+    approximate: bool,
 }
 
 impl QueryOpts {
@@ -602,6 +607,11 @@ enum Args {
         #[clap(long, action)]
         separate_files: bool,
 
+        /// Use approximate mode for faster partitioning (1aln files only): scans tracepoints without CIGAR computation or sequence fetching
+        #[arg(help_heading = "Performance")]
+        #[clap(long, action)]
+        approximate: bool,
+
         #[clap(flatten)]
         common: CommonOpts,
     },
@@ -867,6 +877,7 @@ fn run() -> io::Result<()> {
             min_missing_size,
             min_boundary_distance,
             separate_files,
+            approximate,
         } => {
             initialize_threads_and_log(&common);
 
@@ -934,6 +945,7 @@ fn run() -> io::Result<()> {
                 reverse_complement,
                 common.verbose > 1,
                 separate_files,
+                approximate,
             )?;
         }
         Args::Query {
@@ -1054,6 +1066,19 @@ fn run() -> io::Result<()> {
                 output_format.as_str()
             };
 
+            // Validate --approximate mode compatibility
+            if query.approximate {
+                if resolved_output_format != "bed" && resolved_output_format != "bedpe" {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "--approximate mode is only compatible with 'bed' and 'bedpe' output formats, not '{}'",
+                            resolved_output_format
+                        ),
+                    ));
+                }
+            }
+
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
 
@@ -1076,6 +1101,7 @@ fn run() -> io::Result<()> {
                     query.transitive_opts.transitive_dfs,
                     &query.transitive_opts,
                     sequence_index.as_ref(),
+                    query.approximate,
                 )?;
 
                 // Apply subset filter if provided
@@ -1289,6 +1315,7 @@ fn run() -> io::Result<()> {
                     .min_distance_between_ranges,
                 subset_filter: subset_filter.as_ref(),
                 blacklist: blacklist.as_ref(),
+                approximate_mode: refine.query.approximate,
             };
 
             let mut records = refine::run_refine(&impg, &target_ranges, config)?;
@@ -1517,6 +1544,7 @@ fn run() -> io::Result<()> {
                     query.transitive_opts.transitive_dfs,
                     &query.transitive_opts,
                     Some(&sequence_index),
+                    query.approximate,
                 )?;
 
                 // Apply subset filter if provided
@@ -2130,6 +2158,7 @@ fn perform_query(
     transitive_dfs: bool,
     transitive_opts: &TransitiveOpts,
     sequence_index: Option<&UnifiedSequenceIndex>,
+    approximate_mode: bool,
 ) -> io::Result<Vec<AdjustedInterval>> {
     let (target_start, target_end) = target_range;
     let target_id = impg.seq_index.get_id(target_name).ok_or_else(|| {
@@ -2165,6 +2194,7 @@ fn perform_query(
             store_cigar,
             min_identity,
             sequence_index,
+            approximate_mode,
         )
     } else if transitive_dfs {
         impg.query_transitive_dfs(
@@ -2178,6 +2208,7 @@ fn perform_query(
             store_cigar,
             min_identity,
             sequence_index,
+            approximate_mode,
         )
     } else {
         impg.query(
@@ -2187,6 +2218,7 @@ fn perform_query(
             store_cigar,
             min_identity,
             sequence_index,
+            approximate_mode,
         )
     };
 

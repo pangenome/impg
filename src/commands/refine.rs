@@ -14,8 +14,6 @@ use std::io::{self, BufRead, BufReader};
 pub type Blacklist = FxHashMap<String, COITree<(), u32>>;
 
 /// Configuration parameters for the refinement routine.
-/// Mirrors CLI flags and constrains how aggressively flanks can be explored while
-/// searching for loci that remain well supported at both boundaries.
 pub struct RefineConfig<'a> {
     pub span_bp: i32,
     /// Maximum per-side expansion; <=1 interpreted as fraction of the locus, >1 as absolute bp.
@@ -32,6 +30,7 @@ pub struct RefineConfig<'a> {
     pub min_distance_between_ranges: i32,
     pub subset_filter: Option<&'a SubsetFilter>,
     pub blacklist: Option<&'a Blacklist>,
+    pub approximate_mode: bool,
 }
 
 /// Summary for each refined interval produced by [`run_refine`].
@@ -509,6 +508,7 @@ fn query_overlaps(
             false,
             config.min_identity,
             sequence_index,
+            config.approximate_mode,
         )
     } else if config.use_transitive_dfs {
         impg.query_transitive_dfs(
@@ -522,6 +522,7 @@ fn query_overlaps(
             false,
             config.min_identity,
             sequence_index,
+            config.approximate_mode,
         )
     } else {
         impg.query_with_cache(

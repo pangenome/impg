@@ -581,6 +581,153 @@ impl Impg {
         }
     }
 
+    /// Fast approximate projection by scanning tracepoints (1aln only)
+    ///
+    /// Leverages optimized get_onealn_alignment() which uses:
+    /// - Vec-based O(1) trace_spacing cache
+    /// - Single file open on cache hit
+    /// - Direct tracepoint fetch without CIGAR computation
+    ///
+    /// No sequence fetching, no CIGAR computation - much faster but approximate
+    fn project_overlapping_interval_fast(
+        &self,
+        metadata: &QueryMetadata,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32,
+    ) -> Option<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
+        let (query_start, query_end) = (metadata.query_start, metadata.query_end);
+        let (target_start, target_end) = (metadata.target_start, metadata.target_end);
+
+        // Check if range overlaps with alignment
+        let overlap_start = range_start.max(target_start);
+        let overlap_end = range_end.min(target_end);
+
+        if overlap_start >= overlap_end {
+            return None;
+        }
+
+        // Get the 1aln alignment to access tracepoints (uses optimized fetch_alignment_direct)
+        let alignment = match self.get_onealn_alignment(metadata) {
+            Ok(aln) => aln,
+            Err(_) => return None,
+        };
+
+        // If there are no differences, it's a perfect match (query == target)
+        if alignment.differences == 0 {
+            return Some((
+                Interval {
+                    first: query_start,
+                    last: query_end,
+                    metadata: metadata.query_id,
+                },
+                Vec::new(),
+                Interval {
+                    first: overlap_start,
+                    last: overlap_end,
+                    metadata: target_id,
+                },
+            ));
+        }
+
+        // Scan tracepoints to find the overlapping subset
+        // In 1aln: trace_spacing is the regular interval on query
+        //          tracepoints[i] is the actual consumed length on target at that interval
+        let trace_spacing = alignment.trace_spacing as i32;
+
+        let mut query_pos = if metadata.strand() == Strand::Forward {
+            query_start
+        } else {
+            query_end
+        };
+        let mut target_pos = target_start;
+
+        let mut subset_query_start = if metadata.strand() == Strand::Forward {
+            query_start
+        } else {
+            query_end
+        };
+        let mut subset_target_start = target_start;
+        let mut subset_query_end = if metadata.strand() == Strand::Forward {
+            query_end
+        } else {
+            query_start
+        };
+        let mut subset_target_end = target_end;
+        let mut found_start = false;
+
+        // Walk through the tracepoints
+        for &tp in alignment.tracepoints.iter() {
+            let tp = tp as i32;
+
+            // Query advances by trace_spacing (regular intervals)
+            let query_delta = if metadata.strand() == Strand::Forward {
+                trace_spacing
+            } else {
+                -trace_spacing
+            };
+
+            // Target advances by the tracepoint value (may vary due to indels)
+            let target_delta = tp;
+
+            let next_query_pos = query_pos + query_delta;
+            let next_target_pos = target_pos + target_delta;
+
+            // Check if this segment overlaps with the requested range
+            let overlaps = target_pos < range_end && next_target_pos >= range_start;
+
+            if overlaps && !found_start {
+                // Found the start of the relevant region
+                subset_query_start = query_pos;
+                subset_target_start = target_pos;
+                found_start = true;
+            }
+
+            if found_start {
+                // Update the end of the relevant region as we go
+                subset_query_end = next_query_pos;
+                subset_target_end = next_target_pos;
+
+                // Break if we've passed the requested range
+                if target_pos >= range_end {
+                    break;
+                }
+            }
+
+            query_pos = next_query_pos;
+            target_pos = next_target_pos;
+        }
+
+        // For reverse strand, ensure start < end
+        let (final_query_start, final_query_end) = if metadata.strand() == Strand::Reverse {
+            if subset_query_end < subset_query_start {
+                (subset_query_end, subset_query_start)
+            } else {
+                (subset_query_start, subset_query_end)
+            }
+        } else {
+            (subset_query_start, subset_query_end)
+        };
+
+        if final_query_start >= final_query_end || subset_target_start >= subset_target_end {
+            return None;
+        }
+
+        Some((
+            Interval {
+                first: final_query_start,
+                last: final_query_end,
+                metadata: metadata.query_id,
+            },
+            Vec::new(), // Empty CIGAR in approximate mode
+            Interval {
+                first: subset_target_start,
+                last: subset_target_end,
+                metadata: target_id,
+            },
+        ))
+    }
+
     pub fn from_multi_alignment_records(
         records_by_file: &[(Vec<AlignmentRecord>, String)],
         seq_index: SequenceIndex,
@@ -861,6 +1008,7 @@ impl Impg {
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
+        approximate_mode: bool,
     ) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
         // Add the input range to the results
@@ -883,36 +1031,55 @@ impl Impg {
         ));
 
         debug!(
-            "Querying region: {}:{}-{}, len: {}",
+            "Querying region: {}:{}-{}, len: {}{}",
             self.seq_index.get_name(target_id).unwrap(),
             range_start,
             range_end,
-            range_end - range_start
+            range_end - range_start,
+            if approximate_mode { " (approximate mode)" } else { "" }
         );
-
-        // Create cache for target sequences (only beneficial for 1aln format)
-        // Pre-allocate with reasonable capacity to avoid resizing during queries
-        let mut seq_cache = SequenceCache::with_capacity_and_hasher(64, Default::default());
 
         // Get or load the tree - if None, no overlaps exist for this target
         if let Some(tree) = self.get_or_load_tree(target_id) {
-            tree.query(range_start, range_end, |interval| {
-                let metadata = &interval.metadata;
-                if let Some((query_interval, cigar_ops, target_interval)) = self
-                    .project_overlapping_interval(
-                        metadata,
-                        target_id,
-                        range_start,
-                        range_end,
-                        sequence_index,
-                        min_gap_compressed_identity,
-                        Some(&mut seq_cache),
-                    )
-                {
-                    let cigar_vec = if store_cigar { cigar_ops } else { Vec::new() };
-                    results.push((query_interval, cigar_vec, target_interval));
-                }
-            });
+            if approximate_mode {
+                // Approximate mode: use tracepoint scanning without CIGAR computation
+                tree.query(range_start, range_end, |interval| {
+                    let metadata = &interval.metadata;
+                    if let Some((query_interval, cigar_ops, target_interval)) = self
+                        .project_overlapping_interval_fast(
+                            metadata,
+                            target_id,
+                            range_start,
+                            range_end,
+                        )
+                    {
+                        results.push((query_interval, cigar_ops, target_interval));
+                    }
+                });
+            } else {
+                // Normal mode: compute CIGAR with sequence caching
+                // Create cache for target sequences (only beneficial for 1aln format)
+                // Pre-allocate with reasonable capacity to avoid resizing during queries
+                let mut seq_cache = SequenceCache::with_capacity_and_hasher(64, Default::default());
+
+                tree.query(range_start, range_end, |interval| {
+                    let metadata = &interval.metadata;
+                    if let Some((query_interval, cigar_ops, target_interval)) = self
+                        .project_overlapping_interval(
+                            metadata,
+                            target_id,
+                            range_start,
+                            range_end,
+                            sequence_index,
+                            min_gap_compressed_identity,
+                            Some(&mut seq_cache),
+                        )
+                    {
+                        let cigar_vec = if store_cigar { cigar_ops } else { Vec::new() };
+                        results.push((query_interval, cigar_vec, target_interval));
+                    }
+                });
+            }
         }
 
         results
@@ -1042,6 +1209,7 @@ impl Impg {
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
+        approximate_mode: bool,
     ) -> Vec<AdjustedInterval> {
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
@@ -1127,15 +1295,24 @@ impl Impg {
                 let processed_results: Vec<_> = intervals
                     .into_par_iter()
                     .filter_map(|(metadata, overlap_range)| {
-                        let projection_result = self.project_overlapping_interval(
-                            &metadata,
-                            current_target_id,
-                            overlap_range.0,
-                            overlap_range.1,
-                            sequence_index,
-                            min_gap_compressed_identity,
-                            None, // No caching in parallel context
-                        );
+                        let projection_result = if approximate_mode {
+                            self.project_overlapping_interval_fast(
+                                &metadata,
+                                current_target_id,
+                                overlap_range.0,
+                                overlap_range.1,
+                            )
+                        } else {
+                            self.project_overlapping_interval(
+                                &metadata,
+                                current_target_id,
+                                overlap_range.0,
+                                overlap_range.1,
+                                sequence_index,
+                                min_gap_compressed_identity,
+                                None, // No caching in parallel context
+                            )
+                        };
                         projection_result
                         .map(
                             |(query_interval, cigar_ops, target_interval)| {
@@ -1262,6 +1439,7 @@ impl Impg {
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
+        approximate_mode: bool,
     ) -> Vec<AdjustedInterval> {
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
@@ -1345,15 +1523,24 @@ impl Impg {
                                             return;
                                         }
 
-                                        let projection_result = self.project_overlapping_interval(
-                                            metadata,
-                                            *current_target_id,
-                                            overlap_start,
-                                            overlap_end,
-                                            sequence_index,
-                                            min_gap_compressed_identity,
-                                            None, // No caching in parallel context
-                                        );
+                                        let projection_result = if approximate_mode {
+                                            self.project_overlapping_interval_fast(
+                                                metadata,
+                                                *current_target_id,
+                                                overlap_start,
+                                                overlap_end,
+                                            )
+                                        } else {
+                                            self.project_overlapping_interval(
+                                                metadata,
+                                                *current_target_id,
+                                                overlap_start,
+                                                overlap_end,
+                                                sequence_index,
+                                                min_gap_compressed_identity,
+                                                None, // No caching in parallel context
+                                            )
+                                        };
 
                                         if let Some((query_interval, cigar_ops, target_interval)) =
                                             projection_result
