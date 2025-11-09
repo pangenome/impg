@@ -346,7 +346,7 @@ impl Impg {
         }
 
         // Slow path: read from file and cache
-        let spacing = OneAlnParser::read_trace_spacing_quick(file_path)
+        let spacing = OneAlnParser::read_trace_spacing(file_path)
             .map_err(|e| format!("Failed to read trace_spacing from '{}': {:?}", file_path, e))?;
 
         // Cache it

@@ -57,10 +57,8 @@ impl std::fmt::Display for ParseErr {
 impl std::error::Error for ParseErr {}
 
 impl OneAlnParser {
-    /// Read just the trace spacing from a .1aln file header (very fast, no metadata loading)
-    ///
-    /// This is a lightweight operation that only reads the file header.
-    pub fn read_trace_spacing_quick(file_path: &str) -> Result<i64, ParseErr> {
+    /// Read just the trace spacing from a .1aln file header (no metadata loading)
+    pub fn read_trace_spacing(file_path: &str) -> Result<i64, ParseErr> {
         let mut file = OneFile::open_read(file_path, None, None, 1)
             .map_err(|e| ParseErr::InvalidFormat(format!("Failed to open 1aln file: {}", e)))?;
 
