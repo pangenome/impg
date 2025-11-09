@@ -131,9 +131,6 @@ impg query -a file1.paf file2.1aln -r chr1:1000-2000 -d 1000
 
 # Use DFS for transitive search (slower but fewer overlapping results)
 impg query -a alignments.paf -r chr1:1000-2000 --transitive-dfs
-
-# Use approximate mode for faster queries (1aln files only, bed/bedpe output)
-impg query -a alignments.1aln -r chr1:1000-2000 -o bed --approximate
 ```
 
 #### Alignment visualizations
@@ -178,10 +175,6 @@ impg partition -a alignments.1aln -w 1000000 --selection-mode haplotype      # b
 
 # Control transitive search depth and minimum sizes
 impg partition -a file1.paf file2.1aln -w 1000000 -m 2 -l 10000
-
-# Use approximate mode for faster partitioning (1aln files only)
-impg partition -a alignments.1aln -w 1000000 --approximate
-
 # Output as GFA, MAF or FASTA requires sequence files and --separate-files flag
 impg partition -a alignments.paf -w 1000000 -o gfa --sequence-files *.fa --separate-files --output-folder gfa_partitions
 impg partition -a alignments.1aln -w 1000000 -o maf --sequence-list fastas.txt --separate-files --output-folder maf_partitions

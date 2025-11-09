@@ -46,7 +46,6 @@ pub fn partition_alignments(
     reverse_complement: bool,
     debug: bool,
     separate_files: bool,
-    approximate_mode: bool,
 ) -> io::Result<()> {
     // Initialize windows from starting sequences if provided
     let mut windows = Vec::<(u32, i32, i32)>::new();
@@ -237,7 +236,6 @@ pub fn partition_alignments(
                     false, // Don't store CIGAR strings during partitioning
                     min_identity,
                     sequence_index,
-                    approximate_mode,
                 )
             } else {
                 impg.query_transitive_bfs(
@@ -251,7 +249,6 @@ pub fn partition_alignments(
                     false, // Don't store CIGAR strings during partitioning
                     min_identity,
                     sequence_index,
-                    approximate_mode,
                 )
             };
             //let query_time = query_start.elapsed();
