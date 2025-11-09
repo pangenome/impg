@@ -127,16 +127,16 @@ impl SequenceOpts {
         if seq_files.is_empty() {
             Ok(None)
         } else {
+            let file_type = if seq_files.iter().any(|f| f.ends_with(".agc")) {
+                "AGC"
+            } else {
+                "FASTA"
+            };
+            let num_files = seq_files.len();
+            info!("Building {file_type} index for {num_files} file{}", if num_files == 1 { "" } else { "s" });
+
             match UnifiedSequenceIndex::from_files(&seq_files) {
                 Ok(index) => {
-                    let (file_type, num_files) = match &index {
-                        UnifiedSequenceIndex::Fasta(fasta_index) => {
-                            ("FASTA", fasta_index.fasta_paths.len())
-                        }
-                        #[cfg(feature = "agc")]
-                        UnifiedSequenceIndex::Agc(agc_index) => ("AGC", agc_index.agc_paths.len()),
-                    };
-                    info!("Built {file_type} index for {num_files} files");
                     Ok(Some(index))
                 }
                 Err(e) => Err(io::Error::new(
@@ -1065,6 +1065,7 @@ fn run() -> io::Result<()> {
             )?;
 
             // Process all target ranges in a unified loop
+            info!("Querying target ranges");
             for (target_name, target_range, name) in target_ranges {
                 let mut results = perform_query(
                     &impg,
