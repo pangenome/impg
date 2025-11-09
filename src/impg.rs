@@ -327,9 +327,35 @@ pub struct Impg {
     pub forest_map: ForestMap,
     index_file_path: String,
     pub sequence_files: Vec<String>,
+    /// Cache for trace_spacing values per .1aln file (indexed by alignment_file_index)
+    /// Uses Vec for O(1) direct indexing. None = not yet loaded or not a .1aln file.
+    trace_spacing_cache: RwLock<Vec<Option<i64>>>,
 }
 
 impl Impg {
+    /// Get cached trace_spacing for a .1aln file (lazy-loaded on first access)
+    fn get_trace_spacing(&self, file_index: usize) -> Result<i64, String> {
+        let file_path = &self.alignment_files[file_index];
+
+        // Fast path: check if already cached (just array indexing - extremely fast!)
+        {
+            let cache = self.trace_spacing_cache.read().unwrap();
+            if let Some(spacing) = cache[file_index] {
+                return Ok(spacing);
+            }
+        }
+
+        // Slow path: read from file and cache
+        let spacing = OneAlnParser::read_trace_spacing_quick(file_path)
+            .map_err(|e| format!("Failed to read trace_spacing from '{}': {:?}", file_path, e))?;
+
+        // Cache it
+        let mut cache = self.trace_spacing_cache.write().unwrap();
+        cache[file_index] = Some(spacing);
+
+        Ok(spacing)
+    }
+
     /// Get CIGAR operations for an alignment (handles both PAF and 1aln files)
     fn get_cigar_ops(
         &self,
@@ -382,7 +408,8 @@ impl Impg {
     }
 
     fn get_onealn_alignment(&self, metadata: &QueryMetadata) -> Result<OneAlnAlignment, String> {
-        let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
+        let file_index = metadata.alignment_file_index as usize;
+        let alignment_file = &self.alignment_files[file_index];
 
         if !alignment_file.ends_with(".1aln") {
             return Err(format!(
@@ -391,22 +418,18 @@ impl Impg {
             ));
         }
 
-        // Use shallow mode - reads trace_spacing from header, skips all metadata loading
-        let parser = OneAlnParser::new_shallow(alignment_file.clone())
-        .map_err(|e| {
-            format!(
-                "Failed to initialize shallow parser for '{}': {:?}",
-                alignment_file, e
-            )
-        })?;
+        // Get cached trace_spacing (O(1) array access after first load!)
+        let trace_spacing = self.get_trace_spacing(file_index)?;
 
+        // Fetch alignment directly (opens file once, seeks, reads tracepoints)
         let alignment_index = metadata.data_offset();
-        parser.seek_alignment_shallow(alignment_index).map_err(|e| {
-            format!(
-                "Failed to seek to alignment {} in '{}': {:?}",
-                alignment_index, alignment_file, e
-            )
-        })
+        OneAlnParser::fetch_alignment_direct(alignment_file, trace_spacing, alignment_index)
+            .map_err(|e| {
+                format!(
+                    "Failed to fetch alignment {} from '{}': {:?}",
+                    alignment_index, alignment_file, e
+                )
+            })
     }
 
     fn process_tracepoints_data(
@@ -629,6 +652,7 @@ impl Impg {
             forest_map.add_entry(target_id, 0); // Offset 0 = in-memory tree
         }
 
+        let num_files = alignment_files.len();
         Ok(Self {
             trees: RwLock::new(trees),
             seq_index,
@@ -636,6 +660,7 @@ impl Impg {
             forest_map,
             index_file_path: String::new(),
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
+            trace_spacing_cache: RwLock::new(vec![None; num_files]),
         })
     }
 
@@ -816,6 +841,7 @@ impl Impg {
                     )
                 })?;
 
+        let num_files = alignment_files.len();
         Ok(Self {
             trees: RwLock::new(FxHashMap::default()),
             seq_index,
@@ -823,6 +849,7 @@ impl Impg {
             forest_map,
             index_file_path,
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
+            trace_spacing_cache: RwLock::new(vec![None; num_files]),
         })
     }
 

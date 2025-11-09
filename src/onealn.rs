@@ -12,7 +12,6 @@ use std::convert::TryFrom;
 /// 1aln file parser with metadata and O(1) seeking support
 pub struct OneAlnParser {
     file_path: String,
-    trace_spacing: i64,
     metadata: OneAlnMetadata,
 }
 
@@ -58,6 +57,103 @@ impl std::fmt::Display for ParseErr {
 impl std::error::Error for ParseErr {}
 
 impl OneAlnParser {
+    /// Read just the trace spacing from a .1aln file header (very fast, no metadata loading)
+    ///
+    /// This is a lightweight operation that only reads the file header.
+    pub fn read_trace_spacing_quick(file_path: &str) -> Result<i64, ParseErr> {
+        let mut file = OneFile::open_read(file_path, None, None, 1)
+            .map_err(|e| ParseErr::InvalidFormat(format!("Failed to open 1aln file: {}", e)))?;
+
+        // Read header lines until we find 't' or reach first alignment 'A'
+        let mut trace_spacing = 100; // default
+        loop {
+            match file.read_line() {
+                't' => {
+                    trace_spacing = file.int(0);
+                    break;
+                }
+                'A' | '\0' => break, // Reached alignment or EOF without 't' line
+                _ => {} // Skip other header lines
+            }
+        }
+        Ok(trace_spacing)
+    }
+
+    /// Fetch a single alignment directly from a .1aln file (optimized for speed)
+    ///
+    /// This is faster than creating a parser object because it:
+    /// - Opens the file once
+    /// - Seeks directly to the alignment
+    /// - Returns only the tracepoint data needed for CIGAR conversion
+    ///
+    /// # Arguments
+    /// * `file_path` - Path to the .1aln file
+    /// * `trace_spacing` - Trace spacing value (use cached value to avoid re-reading header)
+    /// * `alignment_index` - Index of the alignment to fetch
+    pub fn fetch_alignment_direct(
+        file_path: &str,
+        trace_spacing: i64,
+        alignment_index: u64,
+    ) -> Result<OneAlnAlignment, ParseErr> {
+        let mut file = OneFile::open_read(file_path, None, None, 1).map_err(|e| {
+            ParseErr::InvalidFormat(format!(
+                "Failed to open 1aln file '{}': {}",
+                file_path, e
+            ))
+        })?;
+
+        file.goto('A', (alignment_index + 1) as i64).map_err(|e| {
+            ParseErr::InvalidFormat(format!(
+                "Failed to seek to alignment {}: {}.",
+                alignment_index, e
+            ))
+        })?;
+
+        file.read_line(); // Read the 'A' line we jumped to
+
+        // Read only the minimal coordinates needed for tracepoint conversion
+        let query_contig_start = file.int(1);
+        let target_contig_start = file.int(4);
+
+        // Create minimal alignment with only required fields
+        let mut alignment = OneAlnAlignment {
+            query_name: String::new(),
+            query_length: 0,
+            query_contig_start,
+            query_contig_end: 0,
+            query_contig_offset: 0,
+            target_name: String::new(),
+            target_length: 0,
+            target_contig_start,
+            target_contig_end: 0,
+            target_contig_offset: 0,
+            target_contig_len: 0,
+            strand: '+',
+            differences: 0,
+            tracepoints: Vec::new(),
+            trace_diffs: Vec::new(),
+            trace_spacing,
+        };
+
+        // Read associated lines to get tracepoints and strand
+        loop {
+            match file.read_line() {
+                'R' => alignment.strand = '-',
+                'D' => alignment.differences = file.int(0),
+                'T' => {
+                    alignment.tracepoints = file.int_list().map(|v| v.to_vec()).unwrap_or_default()
+                }
+                'X' => {
+                    alignment.trace_diffs = file.int_list().map(|v| v.to_vec()).unwrap_or_default()
+                }
+                'A' | 'a' | 'g' | '^' | '\0' => break,
+                _ => {}
+            }
+        }
+
+        Ok(alignment)
+    }
+
     /// Open a 1aln file and read its metadata
     ///
     /// # Arguments
@@ -376,58 +472,9 @@ impl OneAlnParser {
         //     );
         // }
 
-        // Get trace spacing
-        let mut trace_spacing = 100; // default
-        loop {
-            match file.read_line() {
-                't' => {
-                    trace_spacing = file.int(0);
-                    break;
-                }
-                'A' | '\0' => break,
-                _ => {}
-            }
-        }
-
         Ok(OneAlnParser {
             file_path,
-            trace_spacing,
             metadata,
-        })
-    }
-
-    /// Create a shallow parser that skips metadata loading
-    ///
-    /// This is much faster than `new()` because it doesn't search for or load GDB files.
-    /// Use this when you only need to fetch tracepoints using `seek_alignment_shallow()`,
-    /// and you already have all sequence metadata from the index.
-    ///
-    /// The trace_spacing is read quickly from the file header (just a few lines, no metadata).
-    ///
-    /// # Arguments
-    /// * `file_path` - Path to the .1aln file
-    pub fn new_shallow(file_path: String) -> Result<Self, ParseErr> {
-        // Read trace_spacing from file header (very fast - just a few lines)
-        let mut file = OneFile::open_read(&file_path, None, None, 1)
-            .map_err(|e| ParseErr::InvalidFormat(format!("Failed to open 1aln file: {}", e)))?;
-
-        // Read header lines until we find 't' or reach first alignment 'A'
-        let mut trace_spacing = 100; // default
-        loop {
-            match file.read_line() {
-                't' => {
-                    trace_spacing = file.int(0);
-                    break;
-                }
-                'A' | '\0' => break, // Reached alignment or EOF without 't' line
-                _ => {} // Skip other header lines
-            }
-        }
-
-        Ok(OneAlnParser {
-            file_path,
-            trace_spacing,
-            metadata: OneAlnMetadata::default(),
         })
     }
 
@@ -682,11 +729,6 @@ impl OneAlnParser {
         Ok((query_contig_to_seq_id, target_contig_to_seq_id))
     }
 
-    /// Get trace spacing from the .1aln file
-    pub fn get_trace_spacing(&self) -> u32 {
-        self.trace_spacing as u32
-    }
-
     /// Get query sequence names mapping (contig_id -> name)
     pub fn get_query_sequence_names(&self) -> &HashMap<i64, String> {
         &self.metadata.query_seq_names
@@ -707,249 +749,6 @@ impl OneAlnParser {
         &self.metadata.target_contig_offsets
     }
 
-    /// Seek to a specific alignment using alignment index
-    pub fn seek_alignment(&self, alignment_index: u64) -> Result<OneAlnAlignment, ParseErr> {
-        let mut file = OneFile::open_read(&self.file_path, None, None, 1).map_err(|e| {
-            ParseErr::InvalidFormat(format!(
-                "Failed to open 1aln file '{}': {}",
-                self.file_path, e
-            ))
-        })?;
-
-        file.goto('A', (alignment_index + 1) as i64).map_err(|e| {
-            ParseErr::InvalidFormat(format!(
-                "Failed to seek to alignment {}: {}.",
-                alignment_index, e
-            ))
-        })?;
-
-        file.read_line(); // Read the 'A' line we jumped to
-
-        // Read alignment coordinates
-        let query_contig_id = file.int(0);
-        let target_contig_id = file.int(3);
-
-        let query_name = self
-            .metadata
-            .query_seq_names
-            .get(&query_contig_id)
-            .cloned()
-            .ok_or_else(|| {
-                ParseErr::InvalidFormat(format!(
-                    "Query sequence with contig ID {} not found in metadata",
-                    query_contig_id
-                ))
-            })?;
-        let query_length = self
-            .metadata
-            .query_seq_lengths
-            .get(&query_contig_id)
-            .copied()
-            .ok_or_else(|| {
-                ParseErr::InvalidFormat(format!(
-                    "Query sequence length for contig ID {} not found in metadata",
-                    query_contig_id
-                ))
-            })?;
-
-        let target_name = self
-            .metadata
-            .target_seq_names
-            .get(&target_contig_id)
-            .cloned()
-            .ok_or_else(|| {
-                ParseErr::InvalidFormat(format!(
-                    "Target sequence with contig ID {} not found in metadata",
-                    target_contig_id
-                ))
-            })?;
-        let target_length = self
-            .metadata
-            .target_seq_lengths
-            .get(&target_contig_id)
-            .copied()
-            .ok_or_else(|| {
-                ParseErr::InvalidFormat(format!(
-                    "Target sequence length for contig ID {} not found in metadata",
-                    target_contig_id
-                ))
-            })?;
-
-        let (query_contig_offset, _) = self
-            .metadata
-            .query_contig_offsets
-            .get(&query_contig_id)
-            .copied()
-            .ok_or_else(|| {
-                ParseErr::InvalidFormat(format!(
-                    "Contig offset for query contig {} missing from metadata",
-                    query_contig_id
-                ))
-            })?;
-
-        let (target_contig_offset, target_contig_len) = self
-            .metadata
-            .target_contig_offsets
-            .get(&target_contig_id)
-            .copied()
-            .ok_or_else(|| {
-                ParseErr::InvalidFormat(format!(
-                    "Contig offset for target contig {} missing from metadata",
-                    target_contig_id
-                ))
-            })?;
-
-        let alignment = OneAlnAlignment {
-            query_name,
-            query_length,
-            query_contig_start: file.int(1),
-            query_contig_end: file.int(2),
-            query_contig_offset,
-            target_name,
-            target_length,
-            target_contig_start: file.int(4),
-            target_contig_end: file.int(5),
-            target_contig_offset,
-            target_contig_len,
-            strand: '+',
-            differences: 0,
-            tracepoints: Vec::new(),
-            trace_diffs: Vec::new(),
-            trace_spacing: self.trace_spacing,
-        };
-
-        // Read associated lines to get tracepoints
-        self.read_alignment_details(&mut file, alignment)
-    }
-
-    fn read_alignment_details(
-        &self,
-        file: &mut OneFile,
-        mut alignment: OneAlnAlignment,
-    ) -> Result<OneAlnAlignment, ParseErr> {
-        loop {
-            match file.read_line() {
-                'R' => alignment.strand = '-',
-                'D' => alignment.differences = file.int(0),
-                'T' => {
-                    alignment.tracepoints = file.int_list().map(|v| v.to_vec()).unwrap_or_default()
-                }
-                'X' => {
-                    alignment.trace_diffs = file.int_list().map(|v| v.to_vec()).unwrap_or_default()
-                }
-                'A' | 'a' | 'g' | '^' | '\0' => break,
-                _ => {}
-            }
-        }
-
-        // PAFtoALN can produce zero-length self-alignments with:
-        // - query_start == query_end, target_start == target_end,
-        // - no differences, and one tracepoint.
-        // This causes bugs in ALNtoPAF and needs fixing.
-        if alignment.query_contig_start == alignment.query_contig_end && alignment.target_contig_start == alignment.target_contig_end
-            && alignment.differences == 0
-            && alignment.tracepoints.len() == 1 && alignment.trace_diffs.len() == 1
-            // Check it's the same sequence
-            && alignment.query_contig_end == alignment.target_contig_end && alignment.query_name == alignment.target_name
-        {
-            warn!(
-                "Zero-length self-alignment at {}:{} (PAFtoALN artifact) - fixing coordinates",
-                alignment.query_name, alignment.query_contig_start
-            );
-
-            alignment.query_contig_start = 0;
-            alignment.target_contig_start = 0;
-        }
-
-        if alignment.differences == 0 {
-            let query_len = alignment.query_contig_end - alignment.query_contig_start;
-            let target_len = alignment.target_contig_end - alignment.target_contig_start;
-            if query_len != target_len {
-                return Err(ParseErr::InvalidFormat(format!(
-                    "Zero-difference alignment but mismatched lengths: query {} (len {}), target {} (len {})",
-                    alignment.query_name, query_len, alignment.target_name, target_len
-                )));
-            }
-        }
-
-        Ok(alignment)
-    }
-
-    /// Seek to a specific alignment using alignment index (shallow mode - no metadata lookups)
-    ///
-    /// This is much faster than `seek_alignment()` because it doesn't look up sequence names,
-    /// lengths, or offsets from metadata. It only reads the minimal fields needed for
-    /// tracepoint-to-CIGAR conversion.
-    ///
-    /// # Arguments
-    /// * `alignment_index` - The index of the alignment to seek to (from AlignmentRecord)
-    ///
-    /// # Returns
-    /// A minimal `OneAlnAlignment` with only the fields needed for tracepoint conversion:
-    /// - `query_contig_start`, `target_contig_start`
-    /// - `strand`, `differences`
-    /// - `tracepoints`, `trace_diffs`, `trace_spacing`
-    ///
-    /// Other fields are set to empty/default values and should not be used.
-    pub fn seek_alignment_shallow(&self, alignment_index: u64) -> Result<OneAlnAlignment, ParseErr> {
-        let mut file = OneFile::open_read(&self.file_path, None, None, 1).map_err(|e| {
-            ParseErr::InvalidFormat(format!(
-                "Failed to open 1aln file '{}': {}",
-                self.file_path, e
-            ))
-        })?;
-
-        file.goto('A', (alignment_index + 1) as i64).map_err(|e| {
-            ParseErr::InvalidFormat(format!(
-                "Failed to seek to alignment {}: {}.",
-                alignment_index, e
-            ))
-        })?;
-
-        file.read_line(); // Read the 'A' line we jumped to
-
-        // Read only the minimal coordinates needed for tracepoint conversion
-        let query_contig_start = file.int(1);
-        let target_contig_start = file.int(4);
-
-        // Create minimal alignment with only required fields
-        let mut alignment = OneAlnAlignment {
-            query_name: String::new(),
-            query_length: 0,
-            query_contig_start,
-            query_contig_end: 0,
-            query_contig_offset: 0,
-            target_name: String::new(),
-            target_length: 0,
-            target_contig_start,
-            target_contig_end: 0,
-            target_contig_offset: 0,
-            target_contig_len: 0,
-            strand: '+',
-            differences: 0,
-            tracepoints: Vec::new(),
-            trace_diffs: Vec::new(),
-            trace_spacing: self.trace_spacing,
-        };
-
-        // Read associated lines to get tracepoints and strand
-        loop {
-            match file.read_line() {
-                'R' => alignment.strand = '-',
-                'D' => alignment.differences = file.int(0),
-                'T' => {
-                    alignment.tracepoints = file.int_list().map(|v| v.to_vec()).unwrap_or_default()
-                }
-                'X' => {
-                    alignment.trace_diffs = file.int_list().map(|v| v.to_vec()).unwrap_or_default()
-                }
-                'A' | 'a' | 'g' | '^' | '\0' => break,
-                _ => {}
-            }
-        }
-
-        Ok(alignment)
-    }
 }
 
 /// Represents a complete 1aln alignment with tracepoints for CIGAR reconstruction
