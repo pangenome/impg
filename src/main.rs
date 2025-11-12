@@ -2303,10 +2303,10 @@ fn output_results_bedpe(
                 },
             );
         let gap_compressed_identity =
-            (matches as f64) / (matches + mismatches + insertions + deletions) as f64;
+            (matches as f32) / (matches + mismatches + insertions + deletions) as f32;
 
         let edit_distance = mismatches + inserted_bp + deleted_bp;
-        let block_identity = (matches as f64) / (matches + edit_distance) as f64;
+        let block_identity = (matches as f32) / (matches + edit_distance) as f32;
 
         // Format gi and bi fields without trailing zeros
         let gi_str = format!("{gap_compressed_identity:.6}")
@@ -2407,10 +2407,10 @@ fn output_results_paf(
                 },
             );
         let gap_compressed_identity =
-            (matches as f64) / (matches + mismatches + insertions + deletions) as f64;
+            (matches as f32) / (matches + mismatches + insertions + deletions) as f32;
 
         let edit_distance = mismatches + inserted_bp + deleted_bp;
-        let block_identity = (matches as f64) / (matches + edit_distance) as f64;
+        let block_identity = (matches as f32) / (matches + edit_distance) as f32;
 
         // Format bi and gi fields without trailing zeros
         let gi_str = format!("{gap_compressed_identity:.6}")
