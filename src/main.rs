@@ -133,12 +133,13 @@ impl SequenceOpts {
                 "FASTA"
             };
             let num_files = seq_files.len();
-            info!("Building {file_type} index for {num_files} file{}", if num_files == 1 { "" } else { "s" });
+            info!(
+                "Building {file_type} index for {num_files} file{}",
+                if num_files == 1 { "" } else { "s" }
+            );
 
             match UnifiedSequenceIndex::from_files(&seq_files) {
-                Ok(index) => {
-                    Ok(Some(index))
-                }
+                Ok(index) => Ok(Some(index)),
                 Err(e) => Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("Failed to build sequence index: {e}"),

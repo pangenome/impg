@@ -71,7 +71,7 @@ impl OneAlnParser {
                     break;
                 }
                 'A' | '\0' => break, // Reached alignment or EOF without 't' line
-                _ => {} // Skip other header lines
+                _ => {}              // Skip other header lines
             }
         }
         Ok(trace_spacing)
@@ -94,12 +94,18 @@ impl OneAlnParser {
         alignment_index: u64,
     ) -> Result<OneAlnAlignment, ParseErr> {
         let mut file = OneFile::open_read(file_path, None, None, 1).map_err(|e| {
-            ParseErr::InvalidFormat(format!(
-                "Failed to open 1aln file '{}': {}",
-                file_path, e
-            ))
+            ParseErr::InvalidFormat(format!("Failed to open 1aln file '{}': {}", file_path, e))
         })?;
 
+        Self::fetch_alignment_from_reader(&mut file, trace_spacing, alignment_index)
+    }
+
+    /// Fetch a single alignment using an existing `OneFile` handle.
+    pub fn fetch_alignment_from_reader(
+        file: &mut OneFile,
+        trace_spacing: i64,
+        alignment_index: u64,
+    ) -> Result<OneAlnAlignment, ParseErr> {
         file.goto('A', (alignment_index + 1) as i64).map_err(|e| {
             ParseErr::InvalidFormat(format!(
                 "Failed to seek to alignment {}: {}.",
@@ -181,7 +187,8 @@ impl OneAlnParser {
         let num_groups = embedded_groups.len();
 
         // First group = query, Second group (if present) = target
-        let num_gdb_refs = references.iter()
+        let num_gdb_refs = references
+            .iter()
             .filter(|(path, count)| !path.is_empty() && *count <= 2)
             .count();
 
@@ -190,21 +197,24 @@ impl OneAlnParser {
         let need_external_target = num_gdb_refs >= 2 && num_groups < 2;
 
         if num_gdb_refs == 0 {
-            warn!("No external GDB references - using embedded metadata for {}", file_path);
+            warn!(
+                "No external GDB references - using embedded metadata for {}",
+                file_path
+            );
         } else if num_groups >= num_gdb_refs {
             debug!(
-            "Embedded metadata is complete ({} groups >= {} GDB refs) for {}",
-            num_groups, num_gdb_refs, file_path
+                "Embedded metadata is complete ({} groups >= {} GDB refs) for {}",
+                num_groups, num_gdb_refs, file_path
             );
         } else if need_external_query && !need_external_target {
             warn!(
-            "Partial metadata: will load external query GDB for {}",
-            file_path
+                "Partial metadata: will load external query GDB for {}",
+                file_path
             );
         } else if !need_external_query && need_external_target {
             warn!(
-            "Partial metadata: will load external target GDB for {}",
-            file_path
+                "Partial metadata: will load external target GDB for {}",
+                file_path
             );
         } else {
             warn!(
@@ -212,7 +222,6 @@ impl OneAlnParser {
             num_groups, num_gdb_refs, file_path
             );
         }
-
 
         let mut has_external_query = false;
         let mut has_external_target = false;
@@ -290,7 +299,9 @@ impl OneAlnParser {
             // Strategy 2: Try adding .1gdb extension to the path
             if gdb_path.is_none() {
                 // Try absolute path with .1gdb
-                if let Some(found) = try_path(std::path::PathBuf::from(format!("{}.1gdb", ref_path))) {
+                if let Some(found) =
+                    try_path(std::path::PathBuf::from(format!("{}.1gdb", ref_path)))
+                {
                     gdb_path = Some(found);
                 }
                 // Try relative path with .1gdb
@@ -306,7 +317,9 @@ impl OneAlnParser {
                 let base_path = strip_seq_ext(ref_path);
                 if base_path != *ref_path {
                     // Try absolute path
-                    if let Some(found) = try_path(std::path::PathBuf::from(format!("{}.1gdb", base_path))) {
+                    if let Some(found) =
+                        try_path(std::path::PathBuf::from(format!("{}.1gdb", base_path)))
+                    {
                         gdb_path = Some(found);
                     }
                     // Try relative path
@@ -326,13 +339,19 @@ impl OneAlnParser {
                     // Build candidate base names (original and stripped)
                     let mut candidate_bases: HashSet<String> = HashSet::new();
                     let stripped_full = strip_seq_ext(ref_path);
-                    if !stripped_full.is_empty() && !stripped_full.ends_with(".1gdb") && !stripped_full.ends_with(".gdb") {
+                    if !stripped_full.is_empty()
+                        && !stripped_full.ends_with(".1gdb")
+                        && !stripped_full.ends_with(".gdb")
+                    {
                         candidate_bases.insert(stripped_full);
                     }
 
                     if let Some(ref_base_name) = ref_path_obj.file_name().and_then(|n| n.to_str()) {
                         let stripped_name = strip_seq_ext(ref_base_name);
-                        if !stripped_name.is_empty() && !stripped_name.ends_with(".1gdb") && !stripped_name.ends_with(".gdb") {
+                        if !stripped_name.is_empty()
+                            && !stripped_name.ends_with(".1gdb")
+                            && !stripped_name.ends_with(".gdb")
+                        {
                             candidate_bases.insert(stripped_name);
                         }
                     }
@@ -341,9 +360,14 @@ impl OneAlnParser {
                     'seq_search: for seq_file in seq_files {
                         if let Some(seq_dir) = std::path::Path::new(seq_file).parent() {
                             for stem in &candidate_bases {
-                                if let Some(found) = try_path(seq_dir.join(format!("{}.1gdb", stem))) {
+                                if let Some(found) =
+                                    try_path(seq_dir.join(format!("{}.1gdb", stem)))
+                                {
                                     gdb_path = Some(found);
-                                    debug!("Found GDB via sequence file hint directory: {}", gdb_path.as_ref().unwrap());
+                                    debug!(
+                                        "Found GDB via sequence file hint directory: {}",
+                                        gdb_path.as_ref().unwrap()
+                                    );
                                     break 'seq_search;
                                 }
                             }
@@ -746,7 +770,6 @@ impl OneAlnParser {
     pub fn get_target_contig_offsets(&self) -> &HashMap<i64, (i64, i64)> {
         &self.metadata.target_contig_offsets
     }
-
 }
 
 /// Represents a complete 1aln alignment with tracepoints for CIGAR reconstruction
