@@ -677,53 +677,40 @@ impl Impg {
 
         // Scan tracepoints and collect those that overlap the requested range
         for (idx, &tracepoint) in alignment.tracepoints.iter().enumerate() {
+            // Calculate deltas for this segment
+            let query_delta = if idx == 0 { first_boundary } else { trace_spacing };
             let target_delta = (tracepoint as i32) * target_dir;
+            let abs_target_delta = tracepoint.abs() as i32;
 
-            // First segment has special length (to next trace boundary), others use trace_spacing
-            let query_delta = if idx == 0 {
-                first_boundary
-            } else {
-                trace_spacing
-            };
+            // Segment boundaries (forward coordinate space)
+            let seg_start = target_pos.min(target_pos + target_delta);
+            let seg_end = target_pos.max(target_pos + target_delta);
 
-            // Calculate segment boundaries in forward coordinate space
-            let segment_target_start = target_pos.min(target_pos + target_delta);
-            let segment_target_end = target_pos.max(target_pos + target_delta);
-
-            // Check if this segment overlaps the requested range [range_start, range_end]
-            if segment_target_start < range_end && segment_target_end > range_start {
-                // This tracepoint overlaps
+            // Check overlap with requested range
+            if seg_start < range_end && seg_end > range_start {
                 num_overlapping_segments += 1;
-
-                let abs_target_delta = tracepoint.abs() as i32;
                 let num_diffs = alignment.trace_diffs[idx] as i32;
+                let seg_info = (query_pos, query_delta, seg_start, seg_end, abs_target_delta, num_diffs);
 
-                // Record full segment boundaries (not refined yet)
+                // Track first and last overlapping segments
                 if first_query_pos.is_none() {
                     first_query_pos = Some(query_pos);
-                    // Save info about first overlapping segment for later refinement
-                    first_segment_info = Some((query_pos, query_delta, segment_target_start, segment_target_end, abs_target_delta, num_diffs));
+                    first_segment_info = Some(seg_info);
                 }
-
-                // Always update last position
                 last_query_pos = Some(query_pos + query_delta);
-                last_segment_info = Some((query_pos, query_delta, segment_target_start, segment_target_end, abs_target_delta, num_diffs));
+                last_segment_info = Some(seg_info);
 
-                // Accumulate statistics for identity calculation
-                let aligned_length = query_delta.min(abs_target_delta) as f64;
-                total_matches += (aligned_length - num_diffs as f64).max(0.0);
+                // Accumulate identity statistics
+                let aligned_len = (query_delta.min(abs_target_delta) as f64).max(0.0);
+                total_matches += (aligned_len - num_diffs as f64).max(0.0);
                 total_mismatches += num_diffs as f64;
             }
 
-            // Advance positions by full tracepoint
-            // Target: forward or backward depending on strand
-            // Query: always forward in working space
+            // Advance to next segment
             target_pos += target_delta;
             query_pos += query_delta;
 
-            // Early exit if we're past the requested range
-            // For forward: stop when we've passed range_end
-            // For reverse: stop when we've passed range_start (going backward)
+            // Early exit when past requested range
             if (is_reverse && target_pos <= range_start) || (!is_reverse && target_pos >= range_end) {
                 break;
             }
