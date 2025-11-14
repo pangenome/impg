@@ -319,6 +319,29 @@ impl SortedRanges {
     }
 }
 
+/// Results from scanning tracepoints to find segments overlapping a target range
+#[derive(Debug)]
+struct SubsettingResult {
+    /// Index of first overlapping tracepoint
+    first_idx: usize,
+    /// Index of last overlapping tracepoint (inclusive)
+    last_idx: usize,
+    /// Query position at start of first overlapping segment (before refinement)
+    first_query_pos: i32,
+    /// Query position at end of last overlapping segment (before refinement)
+    last_query_pos: i32,
+    /// Number of overlapping segments
+    num_overlapping_segments: usize,
+    /// Total matches accumulated across overlapping segments
+    total_matches: f64,
+    /// Total mismatches accumulated across overlapping segments
+    total_mismatches: f64,
+    /// Info about first overlapping segment: (query_pos, query_delta, seg_start, seg_end, abs_target_delta, trace_diffs)
+    first_segment_info: (i32, i32, i32, i32, i32, i32),
+    /// Info about last overlapping segment: (query_pos, query_delta, seg_start, seg_end, abs_target_delta, trace_diffs)
+    last_segment_info: (i32, i32, i32, i32, i32, i32),
+}
+
 pub struct Impg {
     pub trees: RwLock<TreeMap>,
     pub seq_index: SequenceIndex,
@@ -488,6 +511,107 @@ impl Impg {
         })
     }
 
+    /// Scan tracepoints to find segments overlapping the requested target range.
+    fn scan_overlapping_tracepoints(
+        &self,
+        alignment: &OneAlnAlignment,
+        metadata: &QueryMetadata,
+        range_start: i32,
+        range_end: i32,
+    ) -> Option<SubsettingResult> {
+        let trace_spacing = alignment.trace_spacing as i32;
+        let is_reverse = metadata.strand() == Strand::Reverse;
+
+        // Calculate first boundary: FASTGA-style first segment length
+        let query_start_in_contig = alignment.query_contig_start as i32;
+        let first_boundary = ((query_start_in_contig / trace_spacing) + 1) * trace_spacing - query_start_in_contig;
+
+        // Metadata stores query coords in FORWARD order for both strands
+        let working_query_start = metadata.query_start;
+
+        // Initialize scanning positions
+        let mut target_pos = if is_reverse {
+            metadata.target_end  // Start from target end, scan backward
+        } else {
+            metadata.target_start
+        };
+        let mut query_pos = working_query_start;  // Always start from working start
+        let target_dir = if is_reverse { -1 } else { 1 };
+
+        // Track overlapping segments
+        let mut first_idx: Option<usize> = None;
+        let mut last_idx: usize = 0;
+        let mut first_query_pos: Option<i32> = None;
+        let mut last_query_pos: Option<i32> = None;
+        let mut first_segment_info: Option<(i32, i32, i32, i32, i32, i32)> = None;
+        let mut last_segment_info: Option<(i32, i32, i32, i32, i32, i32)> = None;
+        let mut num_overlapping_segments = 0;
+
+        // Statistics for identity calculation
+        let mut total_matches = 0.0;
+        let mut total_mismatches = 0.0;
+
+        // Scan tracepoints and collect those that overlap the requested range
+        for (idx, &tracepoint) in alignment.tracepoints.iter().enumerate() {
+            // Calculate deltas for this segment
+            let query_delta = if idx == 0 { first_boundary } else { trace_spacing };
+            let target_delta = (tracepoint as i32) * target_dir;
+            let abs_target_delta = tracepoint.abs() as i32;
+
+            // Segment boundaries (forward coordinate space)
+            let seg_start = target_pos.min(target_pos + target_delta);
+            let seg_end = target_pos.max(target_pos + target_delta);
+
+            // Check overlap with requested range
+            if seg_start < range_end && seg_end > range_start {
+                num_overlapping_segments += 1;
+                let num_diffs = alignment.trace_diffs[idx] as i32;
+                let seg_info = (query_pos, query_delta, seg_start, seg_end, abs_target_delta, num_diffs);
+
+                // Track first and last overlapping segments
+                if first_query_pos.is_none() {
+                    first_idx = Some(idx);
+                    first_query_pos = Some(query_pos);
+                    first_segment_info = Some(seg_info);
+                }
+                last_idx = idx;
+                last_query_pos = Some(query_pos + query_delta);
+                last_segment_info = Some(seg_info);
+
+                // Accumulate identity statistics
+                let aligned_len = (query_delta.min(abs_target_delta) as f64).max(0.0);
+                total_matches += (aligned_len - num_diffs as f64).max(0.0);
+                total_mismatches += num_diffs as f64;
+            }
+
+            // Advance to next segment
+            target_pos += target_delta;
+            query_pos += query_delta;
+
+            // Early exit when past requested range
+            if (is_reverse && target_pos <= range_start) || (!is_reverse && target_pos >= range_end) {
+                break;
+            }
+        }
+
+        // Return None if no overlapping segments found
+        if first_idx.is_none() {
+            return None;
+        }
+
+        Some(SubsettingResult {
+            first_idx: first_idx.unwrap(),
+            last_idx,
+            first_query_pos: first_query_pos.unwrap(),
+            last_query_pos: last_query_pos.unwrap(),
+            num_overlapping_segments,
+            total_matches,
+            total_mismatches,
+            first_segment_info: first_segment_info.unwrap(),
+            last_segment_info: last_segment_info.unwrap(),
+        })
+    }
+
     fn process_tracepoints_data(
         &self,
         alignment: &OneAlnAlignment,
@@ -552,6 +676,93 @@ impl Impg {
         }
     }
 
+    /// Reconstruct CIGAR only for the subset of tracepoints that overlap the requested range.
+    fn process_subset_tracepoints(
+        &self,
+        alignment: &OneAlnAlignment,
+        metadata: &QueryMetadata,
+        target_id: u32,
+        subset: &SubsettingResult,
+        sequence_index: &UnifiedSequenceIndex,
+    ) -> Vec<CigarOp> {
+        let is_reverse = metadata.strand() == Strand::Reverse;
+
+        // Extract subset tracepoints [first_idx..=last_idx]
+        let subset_tracepoints: Vec<(usize, usize)> = alignment.trace_diffs[subset.first_idx..=subset.last_idx]
+            .iter()
+            .zip(alignment.tracepoints[subset.first_idx..=subset.last_idx].iter())
+            .map(|(&diff, &tp)| (diff as usize, tp as usize))
+            .collect();
+
+        // Calculate subset sequence ranges (use RAW boundaries from subsetting scan, no refinement)
+        let subset_query_start = subset.first_query_pos;
+
+        // If last_idx is the actual last tracepoint of the alignment, the last
+        // segment may be shorter than trace_spacing. Use metadata boundary.
+        let subset_query_end = if subset.last_idx == alignment.tracepoints.len() - 1 {
+            metadata.query_end  // Last segment of alignment - use exact boundary
+        } else {
+            subset.last_query_pos  // Middle segment - use calculated position
+        };
+
+        // For target: extract from first/last segment info (seg_start, seg_end already in forward space)
+        let (_, _, first_seg_start, first_seg_end, _, _) = subset.first_segment_info;
+        let (_, _, last_seg_start, last_seg_end, _, _) = subset.last_segment_info;
+        let subset_target_start = first_seg_start.min(first_seg_end).min(last_seg_start.min(last_seg_end));
+
+        // If last_idx is the actual last tracepoint, use metadata target boundary
+        let subset_target_end = if subset.last_idx == alignment.tracepoints.len() - 1 {
+            metadata.target_end  // Last segment of alignment - use exact boundary
+        } else {
+            first_seg_start.max(first_seg_end).max(last_seg_start.max(last_seg_end))  // Middle segment - use calculated
+        };
+
+        // Fetch only subset sequences
+        let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
+        let query_seq = sequence_index
+            .fetch_sequence(query_name, subset_query_start, subset_query_end)
+            .unwrap_or_else(|e| panic!("Failed to fetch subset query sequence: {e}"));
+
+        let target_name = self.seq_index.get_name(target_id).unwrap();
+        let target_seq = self.get_target_sequence_cached(
+            sequence_index,
+            target_name,
+            target_id,
+            subset_target_start,
+            subset_target_end,
+            is_reverse,
+        );
+
+        // Adjust contig offsets for the subset
+        let adjusted_query_offset = alignment.query_contig_start as usize +
+            (subset_query_start - metadata.query_start) as usize;
+        let adjusted_target_offset = alignment.target_contig_start as usize +
+            (subset_target_start - metadata.target_start) as usize;
+
+        // Reconstruct CIGAR for subset only
+        let trace_spacing = alignment.trace_spacing as usize;
+        let cigar_str = with_edit_aligner(|aligner| {
+            tracepoints_to_cigar_fastga_with_aligner(
+                &subset_tracepoints,
+                trace_spacing,
+                &query_seq,
+                &target_seq,
+                adjusted_query_offset,
+                adjusted_target_offset,
+                is_reverse,
+                aligner,
+            )
+        });
+
+        match parse_cigar_to_delta(&cigar_str) {
+            Ok(ops) => ops,
+            Err(e) => panic!(
+                "Failed to parse CIGAR string '{cigar_str}' during subset tracepoint processing: {:?}",
+                e
+            ),
+        }
+    }
+
     fn project_overlapping_interval(
         &self,
         metadata: &QueryMetadata,
@@ -561,7 +772,106 @@ impl Impg {
         sequence_index: Option<&UnifiedSequenceIndex>,
         min_gap_compressed_identity: Option<f64>,
     ) -> Option<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
-        // Get CIGAR ops for this alignment
+        // Check if this is a .1aln file that supports tracepoint subsetting
+        let file_index = metadata.alignment_file_index as usize;
+        let alignment_file = &self.alignment_files[file_index];
+        let is_onealn = alignment_file.ends_with(".1aln");
+
+        // Try subsetting approach for .1aln files
+        if is_onealn && sequence_index.is_some() {
+            let sequence_index = sequence_index.unwrap();
+
+            // Fetch alignment with tracepoints
+            let alignment = self.get_onealn_alignment(metadata)
+                .unwrap_or_else(|e| panic!("Subsetting failed: cannot fetch .1aln alignment: {}", e));
+
+            // Scan tracepoints to find overlapping segments
+            let subset = self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end)
+                .unwrap_or_else(|| panic!(
+                    "Subsetting failed: no overlapping segments found for range {}-{} (target_id={}, file_index={})",
+                    range_start, range_end, target_id, metadata.alignment_file_index
+                ));
+
+            // Reconstruct CIGAR from subset tracepoints
+            // Note: When last_idx is the actual last tracepoint, process_subset_tracepoints
+            // uses metadata boundaries to handle the potentially shorter last segment correctly
+            let cigar_ops = self.process_subset_tracepoints(
+                &alignment,
+                metadata,
+                target_id,
+                &subset,
+                sequence_index,
+            );
+
+            // Check identity threshold if specified
+            if let Some(threshold) = min_gap_compressed_identity {
+                if calculate_gap_compressed_identity(&cigar_ops) < threshold {
+                    return None;
+                }
+            }
+
+            // Project the CIGAR through the alignment to get exact coordinates
+            // Use same boundary logic as in process_subset_tracepoints
+            let subset_query_start = subset.first_query_pos;
+            let subset_query_end = if subset.last_idx == alignment.tracepoints.len() - 1 {
+                metadata.query_end
+            } else {
+                subset.last_query_pos
+            };
+
+            let (_, _, first_seg_start, first_seg_end, _, _) = subset.first_segment_info;
+            let (_, _, last_seg_start, last_seg_end, _, _) = subset.last_segment_info;
+            let subset_target_start = first_seg_start.min(first_seg_end).min(last_seg_start.min(last_seg_end));
+            let subset_target_end = if subset.last_idx == alignment.tracepoints.len() - 1 {
+                metadata.target_end
+            } else {
+                first_seg_start.max(first_seg_end).max(last_seg_start.max(last_seg_end))
+            };
+
+            let (alignment_query_start, alignment_query_end, alignment_target_start, alignment_target_end) =
+                (subset_query_start, subset_query_end, subset_target_start, subset_target_end);
+
+            // Project the requested range through the CIGAR
+            let projection = project_target_range_through_alignment(
+                (range_start, range_end),
+                (
+                    alignment_target_start,
+                    alignment_target_end,
+                    alignment_query_start,
+                    alignment_query_end,
+                    metadata.strand(),
+                ),
+                &cigar_ops,
+            )
+            .unwrap_or_else(|| panic!(
+                "Subsetting failed: projection failed for CIGAR (range={}-{}, query={}-{}, target={}-{})",
+                range_start, range_end, alignment_query_start, alignment_query_end, alignment_target_start, alignment_target_end
+            ));
+
+            let (
+                adjusted_query_start,
+                adjusted_query_end,
+                adjusted_cigar,
+                adjusted_target_start,
+                adjusted_target_end,
+            ) = projection;
+
+            let query_interval = Interval {
+                first: adjusted_query_start,
+                last: adjusted_query_end,
+                metadata: metadata.query_id,
+            };
+
+            let target_interval = Interval {
+                first: adjusted_target_start,
+                last: adjusted_target_end,
+                metadata: target_id,
+            };
+
+            return Some((query_interval, adjusted_cigar, target_interval));
+        }
+
+        // Fallback: Full CIGAR reconstruction + projection (for non-.1aln files or if subsetting failed)
         let mut cigar_ops = self.get_cigar_ops(metadata, target_id, sequence_index);
 
         let projection = project_target_range_through_alignment(
@@ -635,93 +945,18 @@ impl Impg {
             }
         };
 
-        let trace_spacing = alignment.trace_spacing as i32;
+        // Scan tracepoints to find overlapping segments
+        let subset = self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end)?;
+
         let is_reverse = metadata.strand() == Strand::Reverse;
-
-        // Calculate first boundary: FASTGA-style first segment length
-        // First segment goes from alignment query start to the next trace boundary
-        // anext = ((query_start / trace_spacing) + 1) * trace_spacing
-        // first_boundary = anext - query_start
-        let query_start_in_contig = alignment.query_contig_start as i32;
-        let first_boundary = ((query_start_in_contig / trace_spacing) + 1) * trace_spacing - query_start_in_contig;
-
-        // Metadata stores query coords in FORWARD order for both strands
-        // (only target coords are flipped for reverse alignments)
         let working_query_start = metadata.query_start;
         let working_query_end = metadata.query_end;
 
-        // Initialize scanning positions
-        // For reverse: scan target from end (backward), query from start (forward in working space)
-        // For forward: scan both from start
-        let mut target_pos = if is_reverse {
-            metadata.target_end  // Start from target end, scan backward
-        } else {
-            metadata.target_start
-        };
-        let mut query_pos = working_query_start;  // Always start from working start
-        let target_dir = if is_reverse { -1 } else { 1 };
-
-        // Track query positions from overlapping tracepoints
-        let mut first_query_pos: Option<i32> = None;
-        let mut last_query_pos: Option<i32> = None;
-
-        // Statistics for identity calculation (gap-compressed: only matches/mismatches)
-        let mut total_matches = 0.0;
-        let mut total_mismatches = 0.0;
-
-        // Track info about first and last overlapping segments for refinement
-        // Format: (query_pos, query_delta, segment_target_start, segment_target_end, abs_target_delta, trace_diffs)
-        let mut first_segment_info: Option<(i32, i32, i32, i32, i32, i32)> = None;
-        let mut last_segment_info: Option<(i32, i32, i32, i32, i32, i32)> = None;
-        let mut num_overlapping_segments = 0;
-
-        // Scan tracepoints and collect those that overlap the requested range
-        for (idx, &tracepoint) in alignment.tracepoints.iter().enumerate() {
-            // Calculate deltas for this segment
-            let query_delta = if idx == 0 { first_boundary } else { trace_spacing };
-            let target_delta = (tracepoint as i32) * target_dir;
-            let abs_target_delta = tracepoint.abs() as i32;
-
-            // Segment boundaries (forward coordinate space)
-            let seg_start = target_pos.min(target_pos + target_delta);
-            let seg_end = target_pos.max(target_pos + target_delta);
-
-            // Check overlap with requested range
-            if seg_start < range_end && seg_end > range_start {
-                num_overlapping_segments += 1;
-                let num_diffs = alignment.trace_diffs[idx] as i32;
-                let seg_info = (query_pos, query_delta, seg_start, seg_end, abs_target_delta, num_diffs);
-
-                // Track first and last overlapping segments
-                if first_query_pos.is_none() {
-                    first_query_pos = Some(query_pos);
-                    first_segment_info = Some(seg_info);
-                }
-                last_query_pos = Some(query_pos + query_delta);
-                last_segment_info = Some(seg_info);
-
-                // Accumulate identity statistics
-                let aligned_len = (query_delta.min(abs_target_delta) as f64).max(0.0);
-                total_matches += (aligned_len - num_diffs as f64).max(0.0);
-                total_mismatches += num_diffs as f64;
-            }
-
-            // Advance to next segment
-            target_pos += target_delta;
-            query_pos += query_delta;
-
-            // Early exit when past requested range
-            if (is_reverse && target_pos <= range_start) || (!is_reverse && target_pos >= range_end) {
-                break;
-            }
-        }
-
         // Store pre-refinement values for debugging
-        let pre_refinement_query = (first_query_pos.unwrap(), last_query_pos.unwrap());
+        let pre_refinement_query = (subset.first_query_pos, subset.last_query_pos);
         let pre_refinement_target = (range_start, range_end);
 
         // Refine query coordinates using indel-aware heuristic
-        // Helper closure to refine a single boundary position
         let refine_boundary = |query_pos: i32, query_delta: i32, segment_target_start: i32,
                               overlap_pos: i32, abs_target_delta: i32, trace_diffs: i32,
                               boundary_name: &str| -> i32 {
@@ -735,7 +970,7 @@ impl Impg {
             if abs_target_delta == 0 {
                 panic!(
                     "Cannot refine {} position with zero target delta: num_segs={}, identity={:.3}, trace_diffs={}",
-                    boundary_name, num_overlapping_segments, segment_identity, trace_diffs
+                    boundary_name, subset.num_overlapping_segments, segment_identity, trace_diffs
                 );
             }
 
@@ -753,23 +988,21 @@ impl Impg {
         };
 
         // Refine first and last query positions
-        if let Some((query_pos, query_delta, segment_target_start, _, abs_target_delta, trace_diffs)) = first_segment_info {
-            let overlap_start = segment_target_start.max(range_start);
-            first_query_pos = Some(refine_boundary(query_pos, query_delta, segment_target_start,
-                                                   overlap_start, abs_target_delta, trace_diffs, "First"));
-        }
+        let (query_pos, query_delta, segment_target_start, _, abs_target_delta, trace_diffs) = subset.first_segment_info;
+        let overlap_start = segment_target_start.max(range_start);
+        let refined_first = refine_boundary(query_pos, query_delta, segment_target_start,
+                                           overlap_start, abs_target_delta, trace_diffs, "First");
 
-        if let Some((query_pos, query_delta, segment_target_start, segment_target_end, abs_target_delta, trace_diffs)) = last_segment_info {
-            let overlap_end = segment_target_end.min(range_end);
-            last_query_pos = Some(refine_boundary(query_pos, query_delta, segment_target_start,
-                                                 overlap_end, abs_target_delta, trace_diffs, "Last"));
-        }
+        let (query_pos, query_delta, segment_target_start, segment_target_end, abs_target_delta, trace_diffs) = subset.last_segment_info;
+        let overlap_end = segment_target_end.min(range_end);
+        let refined_last = refine_boundary(query_pos, query_delta, segment_target_start,
+                                          overlap_end, abs_target_delta, trace_diffs, "Last");
 
         // Debug: show before/after refinement
-        let post_refinement_query = (first_query_pos.unwrap(), last_query_pos.unwrap());
+        let post_refinement_query = (refined_first, refined_last);
         let post_refinement_target = (range_start, range_end);
-        let overall_identity = if total_matches + total_mismatches > 0.0 {
-            total_matches / (total_matches + total_mismatches)
+        let overall_identity = if subset.total_matches + subset.total_mismatches > 0.0 {
+            subset.total_matches / (subset.total_matches + subset.total_mismatches)
         } else {
             0.0
         };
@@ -788,18 +1021,18 @@ impl Impg {
             pre_refinement_target.1 - pre_refinement_target.0,
             post_refinement_target.0, post_refinement_target.1,
             post_refinement_target.1 - post_refinement_target.0,
-            num_overlapping_segments,
+            subset.num_overlapping_segments,
             overall_identity,
-            total_mismatches
+            subset.total_mismatches
         );
 
         // Create approximate CIGAR from accumulated statistics (for identity calculation only)
         let mut approx_cigar = Vec::new();
-        if total_matches > 0.0 {
-            approx_cigar.push(CigarOp::new(total_matches.round() as i32, '='));
+        if subset.total_matches > 0.0 {
+            approx_cigar.push(CigarOp::new(subset.total_matches.round() as i32, '='));
         }
-        if total_mismatches > 0.0 {
-            approx_cigar.push(CigarOp::new(total_mismatches.round() as i32, 'X'));
+        if subset.total_mismatches > 0.0 {
+            approx_cigar.push(CigarOp::new(subset.total_mismatches.round() as i32, 'X'));
         }
 
         // Check identity threshold if specified
@@ -810,12 +1043,11 @@ impl Impg {
             }
         }
 
-        // Get projected query coordinates in working space
-        let working_query_start = first_query_pos.unwrap();
-        let working_query_end = last_query_pos.unwrap();
+        // Get refined query coordinates
+        let working_query_start = refined_first;
+        let working_query_end = refined_last;
 
         // For reverse alignments: swap projected query coordinates to match normal mode output
-        // Normal mode returns query_start > query_end for reverse alignments
         let (query_start, query_end) = if is_reverse {
             (working_query_end, working_query_start)  // Swap: first=end, last=start
         } else {
