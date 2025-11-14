@@ -63,46 +63,106 @@ Target: |----95bp-----|----102bp----|----98bp-----|
 Instead of fetching sequences and computing CIGAR:
 
 1. Get alignment metadata (already in memory from interval tree)
-2. Fetch tracepoints using optimized `fetch_alignment_direct()`
-3. Scan tracepoints to find subset overlapping requested range
-4. Track positions:
-   - Query: advances by `trace_spacing` (regular)
-   - Target: advances by `tracepoints[i]` (irregular)
+2. Fetch tracepoints using optimized `fetch_alignment_direct()` with `read_trace_diffs=true`
+3. **Scan phase**: Collect all tracepoints overlapping requested range
+   - Track first/last overlapping tracepoint info for refinement
+   - Accumulate identity statistics (matches/mismatches from trace_diffs)
+   - Use FULL tracepoint segments during scan
+4. **Refinement phase**: Apply overlap heuristic AFTER scan completes
+   - Refine first query position based on partial overlap of first segment
+   - Refine last query position based on partial overlap of last segment
+   - Refine min/max target positions to actual overlap boundaries
 5. Return intervals with approximate CIGAR encoding
 
 ```rust
+// Phase 1: Scan and collect
 for each tracepoint:
-    query_pos += trace_spacing          // Regular
-    target_pos += tracepoint            // Irregular
+    query_delta = (idx == 0) ? first_boundary : trace_spacing
+    target_delta = tracepoint * direction
 
-    if target_pos overlaps requested_range:
-        update overlap boundaries
-        accumulate identity statistics  // NEW: calculate identity from trace_diffs
+    if segment overlaps requested_range:
+        record full segment boundaries
+        save first/last segment info for refinement
+        accumulate identity statistics from trace_diffs
+
+// Phase 2: Refine (CRITICAL - do this AFTER collecting all segments)
+if first_segment overlaps partially:
+    fraction = (range_start - segment_start) / target_delta
+    first_query_pos += fraction * query_delta  // Refine!
+
+if last_segment overlaps partially:
+    fraction = (range_end - segment_start) / target_delta
+    last_query_pos = segment_query_start + fraction * query_delta  // Refine!
 ```
+
+### Refined Overlap Heuristic
+
+**Key insight**: When a tracepoint segment partially overlaps the requested range, we can estimate the corresponding query position using fractional projection.
+
+**Example**:
+```
+Requested:  |----------[range: 10-90]----------|
+Tracepoint: |----[0-100 target, 0-100 query]----|
+Overlap:         [10-90 target, ?-? query]
+
+Heuristic:
+  - First overlap: fraction_start = (10-0)/100 = 0.1
+    → query_start ≈ 0 + 0.1*100 = 10
+  - Last overlap: fraction_end = (90-0)/100 = 0.9
+    → query_end ≈ 0 + 0.9*100 = 90
+```
+
+**Benefits**:
+- ✅ Tighter intervals (±10bp typical vs ±100bp without refinement)
+- ✅ More accurate identity filtering
+- ✅ Better transitivity (fewer spurious connections)
+- ✅ No performance penalty (uses data already scanned)
+
+**CRITICAL**: Apply refinement AFTER collecting all overlapping segments, not during the scan. This ensures we work with the complete overlapping region.
+
+### Coordinate Storage Details
+
+**Query coordinates** (metadata):
+- Stored in FORWARD order for BOTH strands
+- `query_start < query_end` always in metadata
+- For reverse alignments: swap after projection to match normal mode output
+  - Normal mode returns: `query_start > query_end` (negative length)
+  - Approximate mode must match this behavior
+
+**Target coordinates** (metadata):
+- Forward: stored forward
+- Reverse: stored REVERSED (flipped within contig)
+
+**Tracepoints**:
+- Refer to original target coordinates in .1aln file
+- For reverse: target reversed, query NOT reversed
+
+**First boundary calculation**:
+```rust
+first_boundary = ((query_start / trace_spacing) + 1) * trace_spacing - query_start
+```
+Only the first segment uses `first_boundary`; all others use `trace_spacing`.
 
 ### Identity Estimation in Approximate Mode
 
-**New feature**: Approximate mode now calculates gap-compressed identity and block-identity metrics without sequence I/O or full CIGAR reconstruction.
-
 **How it works**:
-1. While scanning overlapping tracepoints, accumulate statistics:
-   - If `query_len == target_len`: No indels, diffs are mismatches
-   - If `query_len > target_len`: Deletion (query has more bases)
-   - If `target_len > query_len`: Insertion (target has more bases)
-2. Create approximate CIGAR encoding with accumulated statistics (`=`, `X`, `I`, `D` operations)
-3. Use this CIGAR for identity calculation in bedpe output
+1. Scan overlapping tracepoints and accumulate:
+   - `aligned_length = min(query_delta, abs(target_delta))`
+   - `matches = aligned_length - trace_diffs[i]`
+   - `mismatches = trace_diffs[i]`
+2. Create approximate CIGAR: `[=matches, Xmismatches]`
+3. Calculate gap-compressed identity: `matches / (matches + mismatches)`
+4. Filter empty CIGARs (too small to produce meaningful statistics)
 
 **Benefits**:
-- ✅ No more NaN values in bedpe output for approximate mode
 - ✅ Accurate identity metrics without sequence fetching
-- ✅ No performance penalty (data already being scanned)
-- ✅ Replaces empty CIGAR with statistically accurate approximate CIGAR
+- ✅ No NaN values in bedpe output
+- ✅ No performance penalty (trace_diffs already being read)
+- ✅ Sequence files not required for bed/bedpe output
 
-**Implementation details**:
-- `fetch_alignment_direct()` now has `read_trace_diffs` parameter
-- Normal mode: skips reading trace_diffs (full CIGAR reconstructed anyway)
-- Approximate mode: reads trace_diffs for identity calculation
-- Sequence files not required for approximate mode with bed/bedpe output
+**Implementation**:
+- `fetch_alignment_direct(read_trace_diffs=true)` for approximate mode
+- Normal mode: `read_trace_diffs=false` (full CIGAR reconstructed anyway)
 
 ## Implementation Steps
 
@@ -423,9 +483,42 @@ time ./target/release/impg refine \
 
 ### Results differ between normal and approximate mode
 
-**Cause**: Approximate mode provides tracepoint-resolution approximations (~100bp)
+**Cause**: Approximate mode provides refined approximations (±10-20bp typical)
 
-**Solution**: Expected behavior. Use normal mode if base-level precision required.
+**Solution**: Expected behavior. Differences should be minimal with refined heuristic. Use normal mode only if base-level precision required.
+
+### Reverse alignments show positive query lengths in approximate mode
+
+**Cause**: Missing coordinate swap for reverse alignments. Metadata stores query coords in forward order always.
+
+**Solution**:
+```rust
+// For reverse: swap query coordinates after projection
+let (query_start, query_end) = if is_reverse {
+    (working_query_end, working_query_start)  // Swap to match normal mode
+} else {
+    (working_query_start, working_query_end)
+};
+```
+
+### Empty CIGAR panic at high transitive depths
+
+**Cause**: Very small overlaps produce empty CIGARs after refinement.
+
+**Solution**: Filter them out instead of panicking:
+```rust
+if approx_cigar.is_empty() {
+    return None;  // Skip intervals too small for meaningful statistics
+}
+```
+
+### Approximate mode not saturating (exploding result counts)
+
+**Cause**: Applying refinement heuristic PER segment instead of AFTER collecting all segments.
+
+**Solution**: Two-phase approach:
+1. Scan: collect all overlapping segments (use full boundaries)
+2. Refine: adjust first/last positions based on partial overlaps
 
 ### Approximate mode not much faster
 
@@ -467,10 +560,12 @@ time ./target/release/impg refine \
 - Normal mode: O(n × S) - stores sequences and CIGARs
 - Approximate mode: O(n) - only intervals and approximate CIGARs
 
-**Accuracy**:
-- Coordinates accurate to within trace_spacing (typically ~100bp)
+**Accuracy** (with refined overlap heuristic):
+- Coordinates accurate to ±10-20bp typical (0.1-0.2% error)
+- Without refinement: ±100bp (trace_spacing resolution)
 - Identity metrics accurate (calculated from tracepoint statistics)
-- Acceptable for most exploratory and bulk analysis tasks
+- Reverse strand handling: matches normal mode output exactly
+- Suitable for exploratory analysis, transitivity, and bulk operations
 
 ---
 
@@ -485,12 +580,11 @@ time ./target/release/impg refine \
 - Resulted in NaN identity values in bedpe output
 
 **New behavior** (with identity estimation):
-- Returns approximate CIGAR: `[=N, XM, II, DD]` where:
-  - `N` = total matches
-  - `M` = total mismatches
-  - `I` = total inserted base pairs
-  - `D` = total deleted base pairs
-- Provides accurate gap-compressed identity and block-identity metrics
+- Returns approximate CIGAR: `[=N, XM]` where:
+  - `N` = total matches (accumulated from overlapping segments)
+  - `M` = total mismatches (from trace_diffs)
+- Provides accurate gap-compressed identity: `N / (N + M)`
+- Indels not tracked (gap-compressed identity ignores them anyway)
 - No sequence fetching or WFA alignment required
 
 This approach avoids:
@@ -525,29 +619,56 @@ Lazy loading reads only what you actually query, which is much more efficient fo
 Approximate mode provides substantial speedup for .1aln queries by:
 - ✅ Skipping sequence I/O (major bottleneck)
 - ✅ Skipping CIGAR computation (CPU intensive)
-- ✅ Providing approximate intervals (sufficient for most use cases)
-- ✅ **NEW**: Accurate identity metrics from tracepoint statistics (no more NaN values)
-- ✅ **NEW**: No sequence files required for approximate mode with bed/bedpe output
-- ✅ Maintaining compatibility with bed/bedpe formats
+- ✅ Refined overlap heuristic: ±10-20bp accuracy (10x better than trace_spacing)
+- ✅ Accurate identity metrics from tracepoint statistics (no NaN values)
+- ✅ Correct reverse strand handling (matches normal mode output)
+- ✅ No sequence files required for bed/bedpe output
+- ✅ Proper saturation at high transitive depths
+
+**Key innovation**: Two-phase projection with fractional refinement provides near-exact intervals while maintaining full speed benefits.
 
 The implementation threads approximate_mode through all query paths (regular, transitive BFS, transitive DFS) and all relevant commands (query, partition, refine), making it widely applicable.
 
 ## Recent Enhancements (Latest Version)
 
+### Refined Overlap Heuristic (Nov 2025)
+
+**What changed**:
+- Two-phase projection: scan all overlapping segments, then refine boundaries
+- Fractional projection for partial overlaps of first/last segments
+- Fixed reverse strand coordinate handling (metadata stores query in forward order)
+- Filter empty CIGARs from very small overlaps
+
+**Impact**:
+- ✅ Intervals accurate to ±10bp (vs ±100bp before)
+- ✅ Reverse alignments now return negative query lengths (matches normal mode)
+- ✅ More accurate identity filtering
+- ✅ Saturation behavior matches expectations
+
+**Key fix**: Apply refinement AFTER collecting all overlapping segments, not during scan.
+
+**Typical accuracy**:
+```
+Target range: 2753-10000 (7247bp)
+Normal mode:  query 111317811-111325058 (7247bp)
+Approximate:  query 111317800-111325058 (7258bp)
+Difference: 11bp (0.15%)
+```
+
 ### Identity Estimation (Nov 2025)
 
 **What changed**:
-- `project_overlapping_interval_fast()` now calculates identity metrics from tracepoints
-- `fetch_alignment_direct()` has `read_trace_diffs` parameter for selective I/O
-- Approximate mode no longer requires sequence files for bed/bedpe output
-- Gap-compressed identity and block-identity now calculated accurately
+- `project_overlapping_interval_fast()` calculates identity from tracepoints
+- `fetch_alignment_direct()` has `read_trace_diffs` parameter
+- No sequence files required for bed/bedpe output
+- Gap-compressed identity calculated accurately
 
-**Performance impact**:
+**Performance**:
 - Same ~10-100x speedup as before
-- Plus: No sequence file requirement for bed/bedpe
-- Plus: Accurate identity metrics instead of NaN
+- No sequence file requirement for bed/bedpe
+- Accurate identity metrics (no NaN values)
 
 **Files modified**:
-- [src/impg.rs](src/impg.rs): Added identity calculation in `project_overlapping_interval_fast()`
-- [src/onealn.rs](src/onealn.rs): Added `read_trace_diffs` parameter to `fetch_alignment_direct()`
-- [src/main.rs](src/main.rs): Updated sequence requirement logic for approximate mode
+- [src/impg.rs](src/impg.rs): Two-phase projection with refinement heuristic
+- [src/onealn.rs](src/onealn.rs): `read_trace_diffs` parameter in `fetch_alignment_direct()`
+- [src/main.rs](src/main.rs): Updated sequence requirement logic

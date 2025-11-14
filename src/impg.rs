@@ -616,6 +616,219 @@ impl Impg {
         }
     }
 
+    /// Fast approximate projection using tracepoints without CIGAR computation or sequence fetching.
+    /// Returns approximate intervals with identity metrics calculated from tracepoint statistics.
+    fn project_overlapping_interval_fast(
+        &self,
+        metadata: &QueryMetadata,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32,
+        min_gap_compressed_identity: Option<f64>,
+    ) -> Option<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
+        // Fetch tracepoints without sequence I/O
+        let alignment = match self.get_onealn_alignment(metadata) {
+            Ok(aln) => aln,
+            Err(e) => {
+                warn!("Failed to fetch alignment for fast projection: {}", e);
+                return None;
+            }
+        };
+
+        let trace_spacing = alignment.trace_spacing as i32;
+        let is_reverse = metadata.strand() == Strand::Reverse;
+
+        // Calculate first boundary: FASTGA-style first segment length
+        // First segment goes from alignment query start to the next trace boundary
+        // anext = ((query_start / trace_spacing) + 1) * trace_spacing
+        // first_boundary = anext - query_start
+        let query_start_in_contig = alignment.query_contig_start as i32;
+        let first_boundary = ((query_start_in_contig / trace_spacing) + 1) * trace_spacing - query_start_in_contig;
+
+        // Metadata stores query coords in FORWARD order for both strands
+        // (only target coords are flipped for reverse alignments)
+        let working_query_start = metadata.query_start;
+        let working_query_end = metadata.query_end;
+
+        // Initialize scanning positions
+        // For reverse: scan target from end (backward), query from start (forward in working space)
+        // For forward: scan both from start
+        let mut target_pos = if is_reverse {
+            metadata.target_end  // Start from target end, scan backward
+        } else {
+            metadata.target_start
+        };
+        let mut query_pos = working_query_start;  // Always start from working start
+        let target_dir = if is_reverse { -1 } else { 1 };
+
+        // Track min/max positions for overlapping tracepoints
+        // For query: track first/last in scan order (may go backward for reverse strand)
+        // For target: track min/max to ensure forward order in output
+        let mut first_query_pos: Option<i32> = None;
+        let mut last_query_pos: Option<i32> = None;
+        let mut min_target_pos: Option<i32> = None;
+        let mut max_target_pos: Option<i32> = None;
+
+        // Statistics for identity calculation (gap-compressed: only matches/mismatches)
+        let mut total_matches = 0.0;
+        let mut total_mismatches = 0.0;
+
+        // Track info about first and last overlapping segments for refinement
+        let mut first_segment_info: Option<(i32, i32, i32, i32, i32)> = None; // (query_pos, query_delta, segment_target_start, segment_target_end, abs_target_delta)
+        let mut last_segment_info: Option<(i32, i32, i32, i32, i32)> = None;
+
+        // Scan tracepoints and collect those that overlap the requested range
+        for (idx, &tracepoint) in alignment.tracepoints.iter().enumerate() {
+            let target_delta = (tracepoint as i32) * target_dir;
+
+            // First segment has special length (to next trace boundary), others use trace_spacing
+            let query_delta = if idx == 0 {
+                first_boundary
+            } else {
+                trace_spacing
+            };
+
+            // Calculate segment boundaries in forward coordinate space
+            let segment_target_start = target_pos.min(target_pos + target_delta);
+            let segment_target_end = target_pos.max(target_pos + target_delta);
+
+            // Check if this segment overlaps the requested range [range_start, range_end]
+            if segment_target_start < range_end && segment_target_end > range_start {
+                // This tracepoint overlaps
+
+                // Record full segment boundaries (not refined yet)
+                if first_query_pos.is_none() {
+                    first_query_pos = Some(query_pos);
+                    // Save info about first overlapping segment for later refinement
+                    let abs_target_delta = tracepoint.abs() as i32;
+                    first_segment_info = Some((query_pos, query_delta, segment_target_start, segment_target_end, abs_target_delta));
+                }
+
+                // Always update last position
+                last_query_pos = Some(query_pos + query_delta);
+                let abs_target_delta = tracepoint.abs() as i32;
+                last_segment_info = Some((query_pos, query_delta, segment_target_start, segment_target_end, abs_target_delta));
+
+                // Update min/max target positions
+                min_target_pos = Some(min_target_pos.map_or(segment_target_start, |m| m.min(segment_target_start)));
+                max_target_pos = Some(max_target_pos.map_or(segment_target_end, |m| m.max(segment_target_end)));
+
+                // Accumulate statistics for identity calculation
+                let abs_target_delta = tracepoint.abs() as i32;
+                let num_diffs = if idx < alignment.trace_diffs.len() {
+                    alignment.trace_diffs[idx] as f64
+                } else {
+                    0.0
+                };
+
+                let aligned_length = query_delta.min(abs_target_delta) as f64;
+                total_matches += (aligned_length - num_diffs).max(0.0);
+                total_mismatches += num_diffs;
+            }
+
+            // Advance positions by full tracepoint
+            // Target: forward or backward depending on strand
+            // Query: always forward in working space
+            target_pos += target_delta;
+            query_pos += query_delta;
+
+            // Early exit if we're past the requested range
+            // For forward: stop when we've passed range_end
+            // For reverse: stop when we've passed range_start (going backward)
+            if (is_reverse && target_pos <= range_start) || (!is_reverse && target_pos >= range_end) {
+                break;
+            }
+        }
+
+        // Check if we found any overlapping tracepoints
+        if first_query_pos.is_none() {
+            panic!(
+                "No overlapping tracepoints found during fast projection for range {}-{}",
+                range_start, range_end
+            );
+        }
+
+        // Apply refinement heuristic to first and last query positions
+        // Refine first position based on partial overlap of first segment
+        if let Some((query_pos, query_delta, segment_target_start, _segment_target_end, abs_target_delta)) = first_segment_info {
+            let overlap_target_start = segment_target_start.max(range_start);
+            if abs_target_delta > 0 {
+                let fraction_start = (overlap_target_start - segment_target_start) as f64 / abs_target_delta as f64;
+                let refined_first = query_pos + (fraction_start * query_delta as f64).round() as i32;
+                first_query_pos = Some(refined_first.max(working_query_start).min(working_query_end));
+            }
+            // Also refine min_target_pos
+            min_target_pos = Some(overlap_target_start);
+        }
+
+        // Refine last position based on partial overlap of last segment
+        if let Some((query_pos, query_delta, segment_target_start, segment_target_end, abs_target_delta)) = last_segment_info {
+            let overlap_target_end = segment_target_end.min(range_end);
+            if abs_target_delta > 0 {
+                let fraction_end = (overlap_target_end - segment_target_start) as f64 / abs_target_delta as f64;
+                let refined_last = query_pos + (fraction_end * query_delta as f64).round() as i32;
+                last_query_pos = Some(refined_last.max(working_query_start).min(working_query_end));
+            }
+            // Also refine max_target_pos
+            max_target_pos = Some(overlap_target_end);
+        }
+
+        // Create approximate CIGAR from accumulated statistics (for identity calculation only)
+        let mut approx_cigar = Vec::new();
+        if total_matches > 0.0 {
+            approx_cigar.push(CigarOp::new(total_matches.round() as i32, '='));
+        }
+        if total_mismatches > 0.0 {
+            approx_cigar.push(CigarOp::new(total_mismatches.round() as i32, 'X'));
+        }
+
+        // Check identity threshold if specified
+        if let Some(threshold) = min_gap_compressed_identity {
+            let identity = calculate_gap_compressed_identity(&approx_cigar);
+            if identity < threshold {
+                return None;
+            }
+        }
+
+        // Get projected query coordinates in working space
+        let working_query_start = first_query_pos.unwrap();
+        let working_query_end = last_query_pos.unwrap();
+
+        // For reverse alignments: swap projected query coordinates to match normal mode output
+        // Normal mode returns query_start > query_end for reverse alignments
+        let (query_start, query_end) = if is_reverse {
+            (working_query_end, working_query_start)  // Swap: first=end, last=start
+        } else {
+            (working_query_start, working_query_end)
+        };
+
+        // Target coordinates: use min as first, max as last (always forward order)
+        let target_start = min_target_pos.unwrap();
+        let target_end = max_target_pos.unwrap();
+
+        // Validate coordinates are non-negative (projection errors should never happen)
+        if working_query_start < 0 || working_query_end < 0 || target_start < 0 || target_end < 0 {
+            panic!(
+                "Projection resulted in negative coordinates (working query: {}-{}, target: {}-{})",
+                working_query_start, working_query_end, target_start, target_end
+            );
+        }
+
+        let query_interval = Interval {
+            first: query_start,
+            last: query_end,
+            metadata: metadata.query_id,
+        };
+
+        let target_interval = Interval {
+            first: target_start,
+            last: target_end,
+            metadata: target_id,
+        };
+
+        Some((query_interval, approx_cigar, target_interval))
+    }
+
     pub fn from_multi_alignment_records(
         records_by_file: &[(Vec<AlignmentRecord>, String)],
         seq_index: SequenceIndex,
@@ -896,6 +1109,7 @@ impl Impg {
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
+        approximate_mode: bool,
     ) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
         // Add the input range to the results
@@ -918,7 +1132,8 @@ impl Impg {
         ));
 
         debug!(
-            "Querying region: {}:{}-{}, len: {}",
+            "Querying region{}: {}:{}-{}, len: {}",
+            if approximate_mode { " (approximate)" } else { "" },
             self.seq_index.get_name(target_id).unwrap(),
             range_start,
             range_end,
@@ -929,8 +1144,18 @@ impl Impg {
         if let Some(tree) = self.get_or_load_tree(target_id) {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
-                if let Some((query_interval, cigar_ops, target_interval)) = self
-                    .project_overlapping_interval(
+                let projection = if approximate_mode {
+                    // Approximate mode: fast projection without sequence I/O
+                    self.project_overlapping_interval_fast(
+                        metadata,
+                        target_id,
+                        range_start,
+                        range_end,
+                        min_gap_compressed_identity,
+                    )
+                } else {
+                    // Normal mode: full CIGAR computation with sequences
+                    self.project_overlapping_interval(
                         metadata,
                         target_id,
                         range_start,
@@ -938,7 +1163,9 @@ impl Impg {
                         sequence_index,
                         min_gap_compressed_identity,
                     )
-                {
+                };
+
+                if let Some((query_interval, cigar_ops, target_interval)) = projection {
                     let cigar_vec = if store_cigar { cigar_ops } else { Vec::new() };
                     results.push((query_interval, cigar_vec, target_interval));
                 }
@@ -1067,6 +1294,7 @@ impl Impg {
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
+        approximate_mode: bool,
     ) -> Vec<AdjustedInterval> {
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
@@ -1152,14 +1380,24 @@ impl Impg {
                 let processed_results: Vec<_> = intervals
                     .into_par_iter()
                     .filter_map(|(metadata, overlap_range)| {
-                        let projection_result = self.project_overlapping_interval(
-                            &metadata,
-                            current_target_id,
-                            overlap_range.0,
-                            overlap_range.1,
-                            sequence_index,
-                            min_gap_compressed_identity,
-                        );
+                        let projection_result = if approximate_mode {
+                            self.project_overlapping_interval_fast(
+                                &metadata,
+                                current_target_id,
+                                overlap_range.0,
+                                overlap_range.1,
+                                min_gap_compressed_identity,
+                            )
+                        } else {
+                            self.project_overlapping_interval(
+                                &metadata,
+                                current_target_id,
+                                overlap_range.0,
+                                overlap_range.1,
+                                sequence_index,
+                                min_gap_compressed_identity,
+                            )
+                        };
                         projection_result.map(|(query_interval, cigar_ops, target_interval)| {
                             let query_id = query_interval.metadata;
                             let adjusted_query_start = query_interval.first;
@@ -1283,6 +1521,7 @@ impl Impg {
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
+        approximate_mode: bool,
     ) -> Vec<AdjustedInterval> {
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
@@ -1366,14 +1605,24 @@ impl Impg {
                                             return;
                                         }
 
-                                        let projection_result = self.project_overlapping_interval(
-                                            metadata,
-                                            *current_target_id,
-                                            overlap_start,
-                                            overlap_end,
-                                            sequence_index,
-                                            min_gap_compressed_identity,
-                                        );
+                                        let projection_result = if approximate_mode {
+                                            self.project_overlapping_interval_fast(
+                                                metadata,
+                                                *current_target_id,
+                                                overlap_start,
+                                                overlap_end,
+                                                min_gap_compressed_identity,
+                                            )
+                                        } else {
+                                            self.project_overlapping_interval(
+                                                metadata,
+                                                *current_target_id,
+                                                overlap_start,
+                                                overlap_end,
+                                                sequence_index,
+                                                min_gap_compressed_identity,
+                                            )
+                                        };
 
                                         if let Some((query_interval, cigar_ops, target_interval)) =
                                             projection_result

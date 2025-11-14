@@ -131,6 +131,9 @@ impg query -a file1.paf file2.1aln -r chr1:1000-2000 -d 1000
 
 # Use DFS for transitive search (slower but fewer overlapping results)
 impg query -a alignments.paf -r chr1:1000-2000 --transitive-dfs
+
+# Fast approximate mode for .1aln files (bed/bedpe only)
+impg query -a alignments.1aln -r chr1:1000-2000 --approximate
 ```
 
 #### Alignment visualizations
@@ -257,6 +260,9 @@ impg refine -a alignments.paf -r chr1:1000-2000 --support-output refine_support.
 
 # Works with .1aln files too (requires --sequence-files)
 impg refine -a alignments.1aln --sequence-files sequences.fa -r chr1:1000-2000
+
+# Fast approximate mode for .1aln files
+impg refine -a alignments.1aln -r chr1:1000-2000 --approximate
 ```
 
 When `--support-output` is provided, the tool emits a BED file listing every sequence/sample/haplotype that spans the refined region: `sequence	start	end	region-name`.

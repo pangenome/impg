@@ -204,6 +204,7 @@ impl GfaMafFastaOpts {
         output_format: &str,
         original_sequence_coordinates: bool,
         alignment_files: &[String],
+        approximate_mode: bool,
     ) -> io::Result<(
         Option<UnifiedSequenceIndex>,
         Option<(u8, u8, u8, u8, u8, u8)>,
@@ -211,10 +212,14 @@ impl GfaMafFastaOpts {
         // Check if any of the alignment files are .1aln files (which require sequence data for tracepoint conversion)
         let has_onealn_files = alignment_files.iter().any(|f| f.ends_with(".1aln"));
 
+        // In approximate mode with bed/bedpe output, .1aln files don't need sequences
+        let onealn_needs_sequences = has_onealn_files
+            && !(approximate_mode && (output_format == "bed" || output_format == "bedpe"));
+
         let needs_sequence_mandatory = matches!(
             output_format,
             "gfa" | "maf" | "fasta" | "fasta-aln" | "fasta+paf"
-        ) || has_onealn_files; // .1aln files require sequence data for tracepoint conversion
+        ) || onealn_needs_sequences;
         let needs_sequence_optional = output_format == "paf" && original_sequence_coordinates;
         let needs_poa = matches!(output_format, "gfa" | "maf" | "fasta-aln");
 
@@ -325,6 +330,11 @@ struct QueryOpts {
     #[arg(help_heading = "Coordinate options")]
     #[clap(long, action)]
     original_sequence_coordinates: bool,
+
+    /// Use approximate mode for faster queries with 1aln files (only bed/bedpe output)
+    #[arg(help_heading = "Performance")]
+    #[clap(long, action)]
+    approximate: bool,
 }
 
 impl QueryOpts {
@@ -603,6 +613,11 @@ enum Args {
         #[clap(long, action)]
         separate_files: bool,
 
+        /// Use approximate mode for faster queries with 1aln files (only bed/bedpe output)
+        #[arg(help_heading = "Performance")]
+        #[clap(long, action)]
+        approximate: bool,
+
         #[clap(flatten)]
         common: CommonOpts,
     },
@@ -868,11 +883,23 @@ fn run() -> io::Result<()> {
             min_missing_size,
             min_boundary_distance,
             separate_files,
+            approximate,
         } => {
             initialize_threads_and_log(&common);
 
             validate_selection_mode(&selection_mode)?;
             validate_output_format(&output_format, &["bed", "gfa", "maf", "fasta", "fasta-aln"])?;
+
+            // Validate --approximate mode compatibility
+            if approximate && output_format != "bed" {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "--approximate mode is only compatible with 'bed' output format for partition, not '{}'",
+                        output_format
+                    ),
+                ));
+            }
 
             validate_region_size(
                 0,
@@ -905,6 +932,7 @@ fn run() -> io::Result<()> {
                 &output_format,
                 false,
                 alignment_files.as_slice(),
+                approximate,
             )?;
 
             // Initialize impg after validation
@@ -935,6 +963,7 @@ fn run() -> io::Result<()> {
                 reverse_complement,
                 common.verbose > 1,
                 separate_files,
+                approximate,
             )?;
         }
         Args::Query {
@@ -1055,6 +1084,35 @@ fn run() -> io::Result<()> {
                 output_format.as_str()
             };
 
+            // Validate --approximate mode compatibility
+            if query.approximate {
+                if resolved_output_format != "bed" && resolved_output_format != "bedpe" {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "--approximate mode is only compatible with 'bed' and 'bedpe' output formats, not '{}'",
+                            resolved_output_format
+                        ),
+                    ));
+                }
+
+                // Check that all alignment files are .1aln files
+                let non_onealn_files: Vec<&String> = alignment_files
+                    .iter()
+                    .filter(|f| !f.ends_with(".1aln"))
+                    .collect();
+
+                if !non_onealn_files.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "--approximate mode only works with .1aln alignment files (found {} non-.1aln files).",
+                            non_onealn_files.len()
+                        ),
+                    ));
+                }
+            }
+
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
 
@@ -1063,6 +1121,7 @@ fn run() -> io::Result<()> {
                 resolved_output_format,
                 query.original_sequence_coordinates,
                 alignment_files.as_slice(),
+                query.approximate,
             )?;
 
             // Process all target ranges in a unified loop
@@ -1078,6 +1137,7 @@ fn run() -> io::Result<()> {
                     query.transitive_opts.transitive_dfs,
                     &query.transitive_opts,
                     sequence_index.as_ref(),
+                    query.approximate,
                 )?;
 
                 // Apply subset filter if provided
@@ -1291,6 +1351,7 @@ fn run() -> io::Result<()> {
                     .min_distance_between_ranges,
                 subset_filter: subset_filter.as_ref(),
                 blacklist: blacklist.as_ref(),
+                approximate_mode: refine.query.approximate,
             };
 
             let mut records = refine::run_refine(&impg, &target_ranges, config)?;
@@ -1425,7 +1486,7 @@ fn run() -> io::Result<()> {
 
             // Setup POA/sequence resources (always required for similarity)
             let (sequence_index, scoring_params) =
-                gfa_maf_fasta.setup_output_resources("gfa", false, alignment_files.as_slice())?;
+                gfa_maf_fasta.setup_output_resources("gfa", false, alignment_files.as_slice(), false)?;
             let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
             let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA
 
@@ -1519,6 +1580,7 @@ fn run() -> io::Result<()> {
                     query.transitive_opts.transitive_dfs,
                     &query.transitive_opts,
                     Some(&sequence_index),
+                    query.approximate,
                 )?;
 
                 // Apply subset filter if provided
@@ -2132,6 +2194,7 @@ fn perform_query(
     transitive_dfs: bool,
     transitive_opts: &TransitiveOpts,
     sequence_index: Option<&UnifiedSequenceIndex>,
+    approximate_mode: bool,
 ) -> io::Result<Vec<AdjustedInterval>> {
     let (target_start, target_end) = target_range;
     let target_id = impg.seq_index.get_id(target_name).ok_or_else(|| {
@@ -2167,6 +2230,7 @@ fn perform_query(
             store_cigar,
             min_identity,
             sequence_index,
+            approximate_mode,
         )
     } else if transitive_dfs {
         impg.query_transitive_dfs(
@@ -2180,6 +2244,7 @@ fn perform_query(
             store_cigar,
             min_identity,
             sequence_index,
+            approximate_mode,
         )
     } else {
         impg.query(
@@ -2189,6 +2254,7 @@ fn perform_query(
             store_cigar,
             min_identity,
             sequence_index,
+            approximate_mode,
         )
     };
 
