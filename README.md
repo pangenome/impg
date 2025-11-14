@@ -2,9 +2,9 @@
 
 [![install with bioconda](https://img.shields.io/badge/install%20with-bioconda-brightgreen.svg?style=flat)](http://bioconda.github.io/recipes/impg/README.html)
 
-Pangenome graphs and whole genome multiple alignments are powerful tools, but they are expensive to build and manipulate.
-Often, we would like to be able to break a small piece out of a pangenome without constructing the whole thing.
-`impg` lets us do this by projecting sequence ranges through many-way (e.g. all-vs-all) pairwise alignments in PAF or .1aln format.
+## Why impg?
+
+Studying genomic variation at specific loci—disease genes, regulatory elements, structural variants—across populations or species traditionally requires either building expensive whole-genome graphs or using reference-based methods that miss variation. `impg` solves this by treating all-vs-all pairwise alignments as an *implicit pangenome graph*, rapidly projecting target ranges through the alignment network to extract only the homologous sequences you need. Query regions across many genomes in seconds. Perform transitive searches to discover connected sequences. Partition genomes into comparable loci. Refine regions to maximize sample coverage—all without constructing explicit graph structure. This makes pangenome-scale comparative genomics fast and practical.
 
 ## Usage
 
