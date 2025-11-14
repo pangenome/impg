@@ -734,16 +734,10 @@ impl Impg {
         let pre_refinement_target = (range_start, range_end);
 
         // Refine query coordinates using indel-aware heuristic
-        // - Use indel ratio (query_delta / abs_target_delta) to adjust fractions
-        // - Calculate segment identity from trace_diffs for metrics
-        // - Target coordinates use exact requested range
-
-        // Apply refinement heuristic to first and last query positions
-        // Refine first position based on partial overlap of first segment
-        if let Some((query_pos, query_delta, segment_target_start, _segment_target_end, abs_target_delta, trace_diffs)) = first_segment_info {
-            let overlap_target_start = segment_target_start.max(range_start);
-
-            // Calculate segment quality metrics
+        // Helper closure to refine a single boundary position
+        let refine_boundary = |query_pos: i32, query_delta: i32, segment_target_start: i32,
+                              overlap_pos: i32, abs_target_delta: i32, trace_diffs: i32,
+                              boundary_name: &str| -> i32 {
             let aligned_len = query_delta.min(abs_target_delta);
             let segment_identity = if aligned_len > 0 {
                 ((aligned_len - trace_diffs) as f64 / aligned_len as f64).max(0.0)
@@ -751,56 +745,37 @@ impl Impg {
                 0.0
             };
 
-            if abs_target_delta > 0 {
-                // Use indel-aware fraction calculation
-                let target_fraction = (overlap_target_start - segment_target_start) as f64 / abs_target_delta as f64;
-                let indel_ratio = query_delta as f64 / abs_target_delta as f64;
-                let query_advance = target_fraction * abs_target_delta as f64 * indel_ratio;
-                let refined_first = query_pos + query_advance.round() as i32;
-                first_query_pos = Some(refined_first.max(working_query_start).min(working_query_end));
-
-                debug!(
-                    "First segment refinement: identity={:.3}, indel_ratio={:.3}, trace_diffs={}, target_frac={:.3}",
-                    segment_identity, indel_ratio, trace_diffs, target_fraction
-                );
-            } else {
+            if abs_target_delta == 0 {
                 panic!(
-                    "Cannot refine first position with zero target delta: num_segs={}, identity={:.3}, trace_diffs={}",
-                    num_overlapping_segments, segment_identity, trace_diffs
+                    "Cannot refine {} position with zero target delta: num_segs={}, identity={:.3}, trace_diffs={}",
+                    boundary_name, num_overlapping_segments, segment_identity, trace_diffs
                 );
             }
+
+            let target_fraction = (overlap_pos - segment_target_start) as f64 / abs_target_delta as f64;
+            let indel_ratio = query_delta as f64 / abs_target_delta as f64;
+            let query_advance = target_fraction * abs_target_delta as f64 * indel_ratio;
+            let refined_pos = query_pos + query_advance.round() as i32;
+
+            debug!(
+                "{} segment refinement: identity={:.3}, indel_ratio={:.3}, trace_diffs={}, target_frac={:.3}",
+                boundary_name, segment_identity, indel_ratio, trace_diffs, target_fraction
+            );
+
+            refined_pos.max(working_query_start).min(working_query_end)
+        };
+
+        // Refine first and last query positions
+        if let Some((query_pos, query_delta, segment_target_start, _, abs_target_delta, trace_diffs)) = first_segment_info {
+            let overlap_start = segment_target_start.max(range_start);
+            first_query_pos = Some(refine_boundary(query_pos, query_delta, segment_target_start,
+                                                   overlap_start, abs_target_delta, trace_diffs, "First"));
         }
 
-        // Refine last position based on partial overlap of last segment
         if let Some((query_pos, query_delta, segment_target_start, segment_target_end, abs_target_delta, trace_diffs)) = last_segment_info {
-            let overlap_target_end = segment_target_end.min(range_end);
-
-            // Calculate segment quality metrics
-            let aligned_len = query_delta.min(abs_target_delta);
-            let segment_identity = if aligned_len > 0 {
-                ((aligned_len - trace_diffs) as f64 / aligned_len as f64).max(0.0)
-            } else {
-                0.0
-            };
-
-            if abs_target_delta > 0 {
-                // Use indel-aware fraction calculation
-                let target_fraction = (overlap_target_end - segment_target_start) as f64 / abs_target_delta as f64;
-                let indel_ratio = query_delta as f64 / abs_target_delta as f64;
-                let query_advance = target_fraction * abs_target_delta as f64 * indel_ratio;
-                let refined_last = query_pos + query_advance.round() as i32;
-                last_query_pos = Some(refined_last.max(working_query_start).min(working_query_end));
-
-                debug!(
-                    "Last segment refinement: identity={:.3}, indel_ratio={:.3}, trace_diffs={}, target_frac={:.3}",
-                    segment_identity, indel_ratio, trace_diffs, target_fraction
-                );
-            } else {
-                panic!(
-                    "Cannot refine last position with zero target delta: num_segs={}, identity={:.3}, trace_diffs={}",
-                    num_overlapping_segments, segment_identity, trace_diffs
-                );
-            }
+            let overlap_end = segment_target_end.min(range_end);
+            last_query_pos = Some(refine_boundary(query_pos, query_delta, segment_target_start,
+                                                 overlap_end, abs_target_delta, trace_diffs, "Last"));
         }
 
         // Debug: show before/after refinement
