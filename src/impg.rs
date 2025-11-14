@@ -661,21 +661,19 @@ impl Impg {
         let mut query_pos = working_query_start;  // Always start from working start
         let target_dir = if is_reverse { -1 } else { 1 };
 
-        // Track min/max positions for overlapping tracepoints
-        // For query: track first/last in scan order (may go backward for reverse strand)
-        // For target: track min/max to ensure forward order in output
+        // Track query positions from overlapping tracepoints
         let mut first_query_pos: Option<i32> = None;
         let mut last_query_pos: Option<i32> = None;
-        let mut min_target_pos: Option<i32> = None;
-        let mut max_target_pos: Option<i32> = None;
 
         // Statistics for identity calculation (gap-compressed: only matches/mismatches)
         let mut total_matches = 0.0;
         let mut total_mismatches = 0.0;
 
         // Track info about first and last overlapping segments for refinement
-        let mut first_segment_info: Option<(i32, i32, i32, i32, i32)> = None; // (query_pos, query_delta, segment_target_start, segment_target_end, abs_target_delta)
-        let mut last_segment_info: Option<(i32, i32, i32, i32, i32)> = None;
+        // Format: (query_pos, query_delta, segment_target_start, segment_target_end, abs_target_delta, trace_diffs)
+        let mut first_segment_info: Option<(i32, i32, i32, i32, i32, i32)> = None;
+        let mut last_segment_info: Option<(i32, i32, i32, i32, i32, i32)> = None;
+        let mut num_overlapping_segments = 0;
 
         // Scan tracepoints and collect those that overlap the requested range
         for (idx, &tracepoint) in alignment.tracepoints.iter().enumerate() {
@@ -695,35 +693,26 @@ impl Impg {
             // Check if this segment overlaps the requested range [range_start, range_end]
             if segment_target_start < range_end && segment_target_end > range_start {
                 // This tracepoint overlaps
+                num_overlapping_segments += 1;
+
+                let abs_target_delta = tracepoint.abs() as i32;
+                let num_diffs = alignment.trace_diffs[idx] as i32;
 
                 // Record full segment boundaries (not refined yet)
                 if first_query_pos.is_none() {
                     first_query_pos = Some(query_pos);
                     // Save info about first overlapping segment for later refinement
-                    let abs_target_delta = tracepoint.abs() as i32;
-                    first_segment_info = Some((query_pos, query_delta, segment_target_start, segment_target_end, abs_target_delta));
+                    first_segment_info = Some((query_pos, query_delta, segment_target_start, segment_target_end, abs_target_delta, num_diffs));
                 }
 
                 // Always update last position
                 last_query_pos = Some(query_pos + query_delta);
-                let abs_target_delta = tracepoint.abs() as i32;
-                last_segment_info = Some((query_pos, query_delta, segment_target_start, segment_target_end, abs_target_delta));
-
-                // Update min/max target positions
-                min_target_pos = Some(min_target_pos.map_or(segment_target_start, |m| m.min(segment_target_start)));
-                max_target_pos = Some(max_target_pos.map_or(segment_target_end, |m| m.max(segment_target_end)));
+                last_segment_info = Some((query_pos, query_delta, segment_target_start, segment_target_end, abs_target_delta, num_diffs));
 
                 // Accumulate statistics for identity calculation
-                let abs_target_delta = tracepoint.abs() as i32;
-                let num_diffs = if idx < alignment.trace_diffs.len() {
-                    alignment.trace_diffs[idx] as f64
-                } else {
-                    0.0
-                };
-
                 let aligned_length = query_delta.min(abs_target_delta) as f64;
-                total_matches += (aligned_length - num_diffs).max(0.0);
-                total_mismatches += num_diffs;
+                total_matches += (aligned_length - num_diffs as f64).max(0.0);
+                total_mismatches += num_diffs as f64;
             }
 
             // Advance positions by full tracepoint
@@ -740,38 +729,107 @@ impl Impg {
             }
         }
 
-        // Check if we found any overlapping tracepoints
-        if first_query_pos.is_none() {
-            panic!(
-                "No overlapping tracepoints found during fast projection for range {}-{}",
-                range_start, range_end
-            );
-        }
+        // Store pre-refinement values for debugging
+        let pre_refinement_query = (first_query_pos.unwrap(), last_query_pos.unwrap());
+        let pre_refinement_target = (range_start, range_end);
+
+        // Refine query coordinates using indel-aware heuristic
+        // - Use indel ratio (query_delta / abs_target_delta) to adjust fractions
+        // - Calculate segment identity from trace_diffs for metrics
+        // - Target coordinates use exact requested range
 
         // Apply refinement heuristic to first and last query positions
         // Refine first position based on partial overlap of first segment
-        if let Some((query_pos, query_delta, segment_target_start, _segment_target_end, abs_target_delta)) = first_segment_info {
+        if let Some((query_pos, query_delta, segment_target_start, _segment_target_end, abs_target_delta, trace_diffs)) = first_segment_info {
             let overlap_target_start = segment_target_start.max(range_start);
+
+            // Calculate segment quality metrics
+            let aligned_len = query_delta.min(abs_target_delta);
+            let segment_identity = if aligned_len > 0 {
+                ((aligned_len - trace_diffs) as f64 / aligned_len as f64).max(0.0)
+            } else {
+                0.0
+            };
+
             if abs_target_delta > 0 {
-                let fraction_start = (overlap_target_start - segment_target_start) as f64 / abs_target_delta as f64;
-                let refined_first = query_pos + (fraction_start * query_delta as f64).round() as i32;
+                // Use indel-aware fraction calculation
+                let target_fraction = (overlap_target_start - segment_target_start) as f64 / abs_target_delta as f64;
+                let indel_ratio = query_delta as f64 / abs_target_delta as f64;
+                let query_advance = target_fraction * abs_target_delta as f64 * indel_ratio;
+                let refined_first = query_pos + query_advance.round() as i32;
                 first_query_pos = Some(refined_first.max(working_query_start).min(working_query_end));
+
+                debug!(
+                    "First segment refinement: identity={:.3}, indel_ratio={:.3}, trace_diffs={}, target_frac={:.3}",
+                    segment_identity, indel_ratio, trace_diffs, target_fraction
+                );
+            } else {
+                panic!(
+                    "Cannot refine first position with zero target delta: num_segs={}, identity={:.3}, trace_diffs={}",
+                    num_overlapping_segments, segment_identity, trace_diffs
+                );
             }
-            // Also refine min_target_pos
-            min_target_pos = Some(overlap_target_start);
         }
 
         // Refine last position based on partial overlap of last segment
-        if let Some((query_pos, query_delta, segment_target_start, segment_target_end, abs_target_delta)) = last_segment_info {
+        if let Some((query_pos, query_delta, segment_target_start, segment_target_end, abs_target_delta, trace_diffs)) = last_segment_info {
             let overlap_target_end = segment_target_end.min(range_end);
+
+            // Calculate segment quality metrics
+            let aligned_len = query_delta.min(abs_target_delta);
+            let segment_identity = if aligned_len > 0 {
+                ((aligned_len - trace_diffs) as f64 / aligned_len as f64).max(0.0)
+            } else {
+                0.0
+            };
+
             if abs_target_delta > 0 {
-                let fraction_end = (overlap_target_end - segment_target_start) as f64 / abs_target_delta as f64;
-                let refined_last = query_pos + (fraction_end * query_delta as f64).round() as i32;
+                // Use indel-aware fraction calculation
+                let target_fraction = (overlap_target_end - segment_target_start) as f64 / abs_target_delta as f64;
+                let indel_ratio = query_delta as f64 / abs_target_delta as f64;
+                let query_advance = target_fraction * abs_target_delta as f64 * indel_ratio;
+                let refined_last = query_pos + query_advance.round() as i32;
                 last_query_pos = Some(refined_last.max(working_query_start).min(working_query_end));
+
+                debug!(
+                    "Last segment refinement: identity={:.3}, indel_ratio={:.3}, trace_diffs={}, target_frac={:.3}",
+                    segment_identity, indel_ratio, trace_diffs, target_fraction
+                );
+            } else {
+                panic!(
+                    "Cannot refine last position with zero target delta: num_segs={}, identity={:.3}, trace_diffs={}",
+                    num_overlapping_segments, segment_identity, trace_diffs
+                );
             }
-            // Also refine max_target_pos
-            max_target_pos = Some(overlap_target_end);
         }
+
+        // Debug: show before/after refinement
+        let post_refinement_query = (first_query_pos.unwrap(), last_query_pos.unwrap());
+        let post_refinement_target = (range_start, range_end);
+        let overall_identity = if total_matches + total_mismatches > 0.0 {
+            total_matches / (total_matches + total_mismatches)
+        } else {
+            0.0
+        };
+        let requested_range_len = range_end - range_start;
+        let strand_char = if is_reverse { '-' } else { '+' };
+
+        debug!(
+            "Refinement [{}]: req_len={}, query {}-{} (Δ{}) -> {}-{} (Δ{}), target {}-{} (Δ{}) -> {}-{} (Δ{}), segs={}, id={:.3}, diffs={:.0}",
+            strand_char,
+            requested_range_len,
+            pre_refinement_query.0, pre_refinement_query.1,
+            (pre_refinement_query.1 - pre_refinement_query.0).abs(),
+            post_refinement_query.0, post_refinement_query.1,
+            (post_refinement_query.1 - post_refinement_query.0).abs(),
+            pre_refinement_target.0, pre_refinement_target.1,
+            pre_refinement_target.1 - pre_refinement_target.0,
+            post_refinement_target.0, post_refinement_target.1,
+            post_refinement_target.1 - post_refinement_target.0,
+            num_overlapping_segments,
+            overall_identity,
+            total_mismatches
+        );
 
         // Create approximate CIGAR from accumulated statistics (for identity calculation only)
         let mut approx_cigar = Vec::new();
@@ -802,15 +860,15 @@ impl Impg {
             (working_query_start, working_query_end)
         };
 
-        // Target coordinates: use min as first, max as last (always forward order)
-        let target_start = min_target_pos.unwrap();
-        let target_end = max_target_pos.unwrap();
+        // Target coordinates: use exact requested range
+        let target_start = range_start;
+        let target_end = range_end;
 
-        // Validate coordinates are non-negative (projection errors should never happen)
-        if working_query_start < 0 || working_query_end < 0 || target_start < 0 || target_end < 0 {
+        // Validate coordinates are non-negative
+        if working_query_start < 0 || working_query_end < 0 {
             panic!(
-                "Projection resulted in negative coordinates (working query: {}-{}, target: {}-{})",
-                working_query_start, working_query_end, target_start, target_end
+                "Projection resulted in negative query coordinates: {}-{}",
+                working_query_start, working_query_end
             );
         }
 
