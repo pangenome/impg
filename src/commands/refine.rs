@@ -1,4 +1,5 @@
 use crate::impg::{AdjustedInterval, Impg};
+use crate::sequence_index::UnifiedSequenceIndex;
 use crate::subset_filter::{apply_subset_filter, SubsetFilter};
 use clap::ValueEnum;
 use coitrees::{COITree, Interval, IntervalTree};
@@ -31,6 +32,7 @@ pub struct RefineConfig<'a> {
     pub min_distance_between_ranges: i32,
     pub subset_filter: Option<&'a SubsetFilter>,
     pub blacklist: Option<&'a Blacklist>,
+    pub approximate_mode: bool,
 }
 
 /// Summary for each refined interval produced by [`run_refine`].
@@ -130,12 +132,31 @@ pub fn run_refine(
         );
     }
 
+    // Build sequence index if impg has sequence files (needed for 1aln support)
+    let sequence_index = if !impg.sequence_files.is_empty() {
+        info!(
+            "Building sequence index from {} file(s) for 1aln support",
+            impg.sequence_files.len()
+        );
+        Some(UnifiedSequenceIndex::from_files(&impg.sequence_files)?)
+    } else {
+        None
+    };
+
     let intermediate: Vec<Result<(usize, RefineRecord), io::Error>> = ranges
         .par_iter()
         .enumerate()
         .map(|(idx, (chrom, (orig_start, orig_end), label))| {
-            refine_single_range(impg, chrom, *orig_start, *orig_end, label, &config)
-                .map(|record| (idx, record))
+            refine_single_range(
+                impg,
+                chrom,
+                *orig_start,
+                *orig_end,
+                label,
+                &config,
+                sequence_index.as_ref(),
+            )
+            .map(|record| (idx, record))
         })
         .collect();
 
@@ -157,6 +178,7 @@ fn refine_single_range(
     orig_end: i32,
     label: &str,
     config: &RefineConfig<'_>,
+    sequence_index: Option<&UnifiedSequenceIndex>,
 ) -> io::Result<RefineRecord> {
     if orig_end <= orig_start {
         return Err(io::Error::new(
@@ -223,6 +245,7 @@ fn refine_single_range(
             max_start,
             max_end,
             config.min_identity,
+            sequence_index,
             &mut cigar_cache,
         );
         debug!("Cached {} CIGARs for this region", cigar_cache.len());
@@ -255,6 +278,7 @@ fn refine_single_range(
             left,
             right,
             config,
+            sequence_index,
             max_entities,
             &cigar_cache,
         )
@@ -404,6 +428,7 @@ fn evaluate_candidate(
     left_flank: i32,
     right_flank: i32,
     config: &RefineConfig<'_>,
+    sequence_index: Option<&UnifiedSequenceIndex>,
     max_entities: Option<usize>,
     cigar_cache: &FxHashMap<(u32, u64), Vec<crate::impg::CigarOp>>,
 ) -> Option<CandidateResult> {
@@ -427,6 +452,7 @@ fn evaluate_candidate(
         target_id,
         (start, end),
         config,
+        sequence_index,
         &mut overlaps,
         cigar_cache,
     );
@@ -466,6 +492,7 @@ fn query_overlaps(
     target_id: u32,
     range: (i32, i32),
     config: &RefineConfig<'_>,
+    sequence_index: Option<&UnifiedSequenceIndex>,
     buffer: &mut Vec<AdjustedInterval>,
     cigar_cache: &FxHashMap<(u32, u64), Vec<crate::impg::CigarOp>>,
 ) {
@@ -480,8 +507,11 @@ fn query_overlaps(
             config.max_transitive_depth,
             config.min_transitive_len,
             config.min_distance_between_ranges,
+            None, // No min_output_length for refine
             false,
             config.min_identity,
+            sequence_index,
+            config.approximate_mode,
         )
     } else if config.use_transitive_dfs {
         impg.query_transitive_dfs(
@@ -492,8 +522,11 @@ fn query_overlaps(
             config.max_transitive_depth,
             config.min_transitive_len,
             config.min_distance_between_ranges,
+            None, // No min_output_length for refine
             false,
             config.min_identity,
+            sequence_index,
+            config.approximate_mode,
         )
     } else {
         impg.query_with_cache(
@@ -502,6 +535,7 @@ fn query_overlaps(
             range.1,
             false,
             config.min_identity,
+            sequence_index,
             cigar_cache,
         )
     };
@@ -931,14 +965,11 @@ pub fn parse_blacklist_bed(path: &str) -> io::Result<Blacklist> {
             ));
         }
 
-        intervals_by_seq
-            .entry(chrom)
-            .or_default()
-            .push(Interval {
-                first: start,
-                last: end,
-                metadata: (),
-            });
+        intervals_by_seq.entry(chrom).or_default().push(Interval {
+            first: start,
+            last: end,
+            metadata: (),
+        });
     }
 
     // Build interval trees for each sequence

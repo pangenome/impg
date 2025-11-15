@@ -1,17 +1,59 @@
+use crate::alignment_record::{AlignmentRecord, Strand};
 use crate::forest_map::ForestMap;
-use crate::paf::{ParseErr, PartialPafRecord, Strand};
+use crate::graph::reverse_complement;
+use crate::onealn::{OneAlnAlignment, OneAlnParser, ParseErr as OneAlnParseErr};
+use crate::paf::read_cigar_data;
 use crate::seqidx::SequenceIndex;
+use crate::sequence_index::SequenceIndex as _; // The as _ syntax imports the trait so its methods are available, but doesn't bring the name into scope (avoiding the naming conflict)
+use crate::sequence_index::UnifiedSequenceIndex;
 use coitrees::{BasicCOITree, Interval, IntervalTree};
-use log::debug;
-use noodles::bgzf;
+use lib_tracepoints::tracepoints_to_cigar_fastga_with_aligner;
+use lib_wfa2::affine_wavefront::{AffineWavefronts, Distance};
+use log::{debug, warn};
+use onecode::OneFile;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::cmp::{max, min};
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::io::{self, BufReader, Seek, SeekFrom};
+use std::sync::{Arc, RwLock};
+
+// use libc;
+// fn log_memory_usage(label: &str) {
+//     let mut usage = MaybeUninit::<libc::rusage>::uninit();
+//     let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+//     if result == 0 {
+//         let usage = unsafe { usage.assume_init() };
+//         debug!(
+//             "mem[{label}] max_rss_kb={} ixrss_kb={} idrss_kb={}",
+//             usage.ru_maxrss, usage.ru_ixrss, usage.ru_idrss
+//         );
+//     } else {
+//         debug!("mem[{label}] getrusage_failed code={}", result);
+//     }
+// }
+
+thread_local! {
+    static EDIT_ALIGNER: RefCell<Option<AffineWavefronts>> = const { RefCell::new(None) };
+    static ONEALN_HANDLE: RefCell<Option<(usize, OneFile)>> = RefCell::new(None);
+    static TARGET_SEQ_CACHE: RefCell<Option<((u32, i32, i32, bool), Vec<u8>)>> = RefCell::new(None);
+}
+
+/// Execute a closure with a thread-local edit distance mode aligner
+fn with_edit_aligner<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut AffineWavefronts) -> R,
+{
+    EDIT_ALIGNER.with(|aligner_cell| {
+        let mut aligner_opt = aligner_cell.borrow_mut();
+        if aligner_opt.is_none() {
+            *aligner_opt = Some(Distance::Edit.create_aligner(None));
+        }
+        f(aligner_opt.as_mut().unwrap())
+    })
+}
 
 /// Parse a CIGAR string into a vector of CigarOp
 // Note that the query_delta is negative for reverse strand alignments
@@ -89,9 +131,9 @@ pub struct QueryMetadata {
     target_end: i32,
     query_start: i32,
     query_end: i32,
-    paf_file_index: u32,
-    strand_and_cigar_offset: u64, // Track strand and cigar offset
-    cigar_bytes: usize,
+    alignment_file_index: u32,
+    strand_and_data_offset: u64, // Track strand and cigar/tracepoints offset
+    data_bytes: usize,
 }
 
 impl QueryMetadata {
@@ -111,46 +153,35 @@ impl QueryMetadata {
     }
 
     fn strand(&self) -> Strand {
-        if (self.strand_and_cigar_offset & Self::STRAND_BIT) != 0 {
+        if (self.strand_and_data_offset & Self::STRAND_BIT) != 0 {
             Strand::Reverse
         } else {
             Strand::Forward
         }
     }
 
-    fn cigar_offset(&self) -> u64 {
-        self.strand_and_cigar_offset & !Self::STRAND_BIT
+    fn data_offset(&self) -> u64 {
+        self.strand_and_data_offset & !Self::STRAND_BIT
     }
 
-    fn get_cigar_ops(&self, paf_files: &[String]) -> Vec<CigarOp> {
-        // Allocate space for cigar
-        let mut cigar_buffer = vec![0; self.cigar_bytes];
-
-        // Get the correct PAF file
-        let paf_file_index = self.paf_file_index as usize;
-        let paf_file = &paf_files[paf_file_index];
-
-        // Get reader and seek start of cigar str
-        if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
-            // For compressed files, use virtual position directly
-            let mut reader = bgzf::io::Reader::new(File::open(paf_file).unwrap());
-            let virtual_position = bgzf::VirtualPosition::from(self.cigar_offset());
-            reader.seek(virtual_position).unwrap();
-            reader.read_exact(&mut cigar_buffer).unwrap();
+    /// Determine file type based on extension
+    fn get_file_type(alignment_file: &str) -> FileType {
+        if alignment_file.ends_with(".1aln") {
+            FileType::OneAln
         } else {
-            // For uncompressed files, use byte offset
-            let mut reader = File::open(paf_file).unwrap();
-            reader.seek(SeekFrom::Start(self.cigar_offset())).unwrap();
-            reader.read_exact(&mut cigar_buffer).unwrap();
-        };
-
-        let cigar_str: &str = std::str::from_utf8(&cigar_buffer).unwrap();
-        parse_cigar_to_delta(cigar_str).ok().unwrap_or_default()
+            FileType::Paf
+        }
     }
 }
 
 pub type AdjustedInterval = (Interval<u32>, Vec<CigarOp>, Interval<u32>);
 type TreeMap = FxHashMap<u32, Arc<BasicCOITree<QueryMetadata, u32>>>;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FileType {
+    Paf,
+    OneAln,
+}
 
 #[derive(Serialize, Deserialize)]
 struct SerializableInterval {
@@ -288,23 +319,777 @@ impl SortedRanges {
     }
 }
 
+/// Results from scanning tracepoints to find segments overlapping a target range
+#[derive(Debug)]
+struct SubsettingResult {
+    /// Index of first overlapping tracepoint
+    first_idx: usize,
+    /// Index of last overlapping tracepoint (inclusive)
+    last_idx: usize,
+    /// Query position at start of first overlapping segment (before refinement)
+    first_query_pos: i32,
+    /// Query position at end of last overlapping segment (before refinement)
+    last_query_pos: i32,
+    /// Number of overlapping segments
+    num_overlapping_segments: usize,
+    /// Total matches accumulated across overlapping segments
+    total_matches: f64,
+    /// Total mismatches accumulated across overlapping segments
+    total_mismatches: f64,
+    /// Info about first overlapping segment: (query_pos, query_delta, seg_start, seg_end, abs_target_delta, trace_diffs)
+    first_segment_info: (i32, i32, i32, i32, i32, i32),
+    /// Info about last overlapping segment: (query_pos, query_delta, seg_start, seg_end, abs_target_delta, trace_diffs)
+    last_segment_info: (i32, i32, i32, i32, i32, i32),
+}
+
 pub struct Impg {
     pub trees: RwLock<TreeMap>,
     pub seq_index: SequenceIndex,
-    paf_files: Vec<String>,    // List of all PAF files
-    pub forest_map: ForestMap, // Forest map for lazy loading
-    index_file_path: String,   // Path to the index file for lazy loading
+    alignment_files: Vec<String>,
+    pub forest_map: ForestMap,
+    index_file_path: String,
+    pub sequence_files: Vec<String>,
+    /// Cache for trace_spacing values per .1aln file (indexed by alignment_file_index)
+    /// Uses Vec for O(1) direct indexing. None = not yet loaded or not a .1aln file.
+    trace_spacing_cache: RwLock<Vec<Option<i64>>>,
 }
 
 impl Impg {
-    pub fn from_multi_paf_records(
-        records_by_file: &[(Vec<PartialPafRecord>, String)],
+    /// Get cached trace_spacing for a .1aln file (lazy-loaded on first access)
+    fn get_trace_spacing(&self, file_index: usize) -> Result<i64, String> {
+        let file_path = &self.alignment_files[file_index];
+
+        // Fast path: check if already cached (just array indexing - extremely fast!)
+        {
+            let cache = self.trace_spacing_cache.read().unwrap();
+            if let Some(spacing) = cache[file_index] {
+                return Ok(spacing);
+            }
+        }
+
+        // Slow path: read from file and cache
+        let spacing = OneAlnParser::read_trace_spacing(file_path)
+            .map_err(|e| format!("Failed to read trace_spacing from '{}': {:?}", file_path, e))?;
+
+        // Cache it
+        let mut cache = self.trace_spacing_cache.write().unwrap();
+        cache[file_index] = Some(spacing);
+
+        Ok(spacing)
+    }
+
+    fn with_onealn_reader<F, R>(&self, file_index: usize, f: F) -> Result<R, String>
+    where
+        F: FnOnce(&mut OneFile) -> Result<R, OneAlnParseErr>,
+    {
+        let file_path = &self.alignment_files[file_index];
+        ONEALN_HANDLE.with(|handle_cell| {
+            let mut slot = handle_cell.borrow_mut();
+            let needs_open = match slot.as_ref() {
+                Some((idx, _)) => *idx != file_index,
+                None => true,
+            };
+
+            if needs_open {
+                *slot = None;
+                let file = OneFile::open_read(file_path, None, None, 1)
+                    .map_err(|e| format!("Failed to open 1aln file '{}': {}", file_path, e))?;
+                *slot = Some((file_index, file));
+            }
+
+            let (_, handle) = slot
+                .as_mut()
+                .expect("ONEALN_HANDLE must contain a handle after opening");
+            f(handle).map_err(|e| e.to_string())
+        })
+    }
+
+    fn get_target_sequence_cached(
+        &self,
+        sequence_index: &UnifiedSequenceIndex,
+        target_name: &str,
+        target_id: u32,
+        start: i32,
+        end: i32,
+        is_reverse: bool,
+    ) -> Vec<u8> {
+        let key = (target_id, start, end, is_reverse);
+        TARGET_SEQ_CACHE.with(|cache_cell| {
+            let mut slot = cache_cell.borrow_mut();
+            if let Some((cached_key, cached_seq)) = slot.as_mut() {
+                if *cached_key == key {
+                    return cached_seq.clone();
+                }
+            }
+
+            let seq = sequence_index
+                .fetch_sequence(target_name, start, end)
+                .unwrap_or_else(|e| panic!("Failed to fetch target sequence: {e}"));
+            let seq = if is_reverse {
+                reverse_complement(&seq)
+            } else {
+                seq
+            };
+
+            *slot = Some((key, seq.clone()));
+            seq
+        })
+    }
+
+    /// Get CIGAR operations for an alignment (handles both PAF and 1aln files)
+    fn get_cigar_ops(
+        &self,
+        metadata: &QueryMetadata,
+        target_id: u32,
+        sequence_index: Option<&UnifiedSequenceIndex>,
+    ) -> Vec<CigarOp> {
+        let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
+
+        match QueryMetadata::get_file_type(alignment_file) {
+            FileType::Paf => {
+                // For PAF files, read CIGAR directly from file
+                if metadata.data_bytes == 0 {
+                    panic!(
+                        "The alignment file '{}' does not contain CIGAR strings ('cg:Z' tag).",
+                        alignment_file
+                    );
+                }
+
+                let mut data_buffer = vec![0; metadata.data_bytes];
+                read_cigar_data(alignment_file, metadata.data_offset(), &mut data_buffer)
+                    .unwrap_or_else(|e| panic!("{}", e));
+
+                // get_cigar_ops_from_bytes
+                let cigar_str =
+                    std::str::from_utf8(&data_buffer).expect("Failed to parse CIGAR data as UTF-8");
+                parse_cigar_to_delta(cigar_str).unwrap_or_else(|e| {
+                    panic!(
+                        "Failed to parse CIGAR string '{}' in QueryMetadata: {:?}",
+                        cigar_str, e
+                    )
+                })
+            }
+            FileType::OneAln => {
+                // For 1aln files, convert tracepoints to CIGAR
+                let alignment = self
+                    .get_onealn_alignment(metadata)
+                    .unwrap_or_else(|e| panic!("{}", e));
+
+                self.process_tracepoints_data(
+                    &alignment,
+                    metadata,
+                    target_id,
+                    sequence_index.expect("Sequence index required for .1aln files"),
+                )
+            }
+        }
+    }
+
+    fn get_onealn_alignment(&self, metadata: &QueryMetadata) -> Result<OneAlnAlignment, String> {
+        let file_index = metadata.alignment_file_index as usize;
+        let alignment_file = &self.alignment_files[file_index];
+
+        if !alignment_file.ends_with(".1aln") {
+            return Err(format!(
+                "Alignment '{}' is not a .1aln file; tracepoints unavailable",
+                alignment_file
+            ));
+        }
+
+        // Get cached trace_spacing (O(1) array access after first load!)
+        let trace_spacing = self.get_trace_spacing(file_index)?;
+
+        let alignment_index = metadata.data_offset();
+        self.with_onealn_reader(file_index, |file| {
+            OneAlnParser::fetch_alignment_from_reader(file, trace_spacing, alignment_index)
+        })
+        .map_err(|e| {
+            format!(
+                "Failed to fetch alignment {} from '{}': {}",
+                alignment_index, alignment_file, e
+            )
+        })
+    }
+
+    /// Scan tracepoints to find segments overlapping the requested target range.
+    fn scan_overlapping_tracepoints(
+        &self,
+        alignment: &OneAlnAlignment,
+        metadata: &QueryMetadata,
+        range_start: i32,
+        range_end: i32,
+    ) -> Option<SubsettingResult> {
+        let trace_spacing = alignment.trace_spacing as i32;
+        let is_reverse = metadata.strand() == Strand::Reverse;
+
+        // Calculate first boundary: FASTGA-style first segment length
+        let query_start_in_contig = alignment.query_contig_start as i32;
+        let first_boundary = ((query_start_in_contig / trace_spacing) + 1) * trace_spacing - query_start_in_contig;
+
+        // Metadata stores query coords in FORWARD order for both strands
+        let working_query_start = metadata.query_start;
+
+        // Initialize scanning positions
+        let mut target_pos = if is_reverse {
+            metadata.target_end  // Start from target end, scan backward
+        } else {
+            metadata.target_start
+        };
+        let mut query_pos = working_query_start;  // Always start from working start
+        let target_dir = if is_reverse { -1 } else { 1 };
+
+        // Track overlapping segments
+        let mut first_idx: Option<usize> = None;
+        let mut last_idx: usize = 0;
+        let mut first_query_pos: Option<i32> = None;
+        let mut last_query_pos: Option<i32> = None;
+        let mut first_segment_info: Option<(i32, i32, i32, i32, i32, i32)> = None;
+        let mut last_segment_info: Option<(i32, i32, i32, i32, i32, i32)> = None;
+        let mut num_overlapping_segments = 0;
+
+        // Statistics for identity calculation
+        let mut total_matches = 0.0;
+        let mut total_mismatches = 0.0;
+
+        // Scan tracepoints and collect those that overlap the requested range
+        for (idx, &tracepoint) in alignment.tracepoints.iter().enumerate() {
+            // Calculate deltas for this segment
+            let query_delta = if idx == 0 { first_boundary } else { trace_spacing };
+            let target_delta = (tracepoint as i32) * target_dir;
+            let abs_target_delta = tracepoint.abs() as i32;
+
+            // Segment boundaries (forward coordinate space)
+            let seg_start = target_pos.min(target_pos + target_delta);
+            let seg_end = target_pos.max(target_pos + target_delta);
+
+            // Check overlap with requested range
+            if seg_start < range_end && seg_end > range_start {
+                num_overlapping_segments += 1;
+                let num_diffs = alignment.trace_diffs[idx] as i32;
+                let seg_info = (query_pos, query_delta, seg_start, seg_end, abs_target_delta, num_diffs);
+
+                // Track first and last overlapping segments
+                if first_query_pos.is_none() {
+                    first_idx = Some(idx);
+                    first_query_pos = Some(query_pos);
+                    first_segment_info = Some(seg_info);
+                }
+                last_idx = idx;
+                last_query_pos = Some(query_pos + query_delta);
+                last_segment_info = Some(seg_info);
+
+                // Accumulate identity statistics
+                let aligned_len = (query_delta.min(abs_target_delta) as f64).max(0.0);
+                total_matches += (aligned_len - num_diffs as f64).max(0.0);
+                total_mismatches += num_diffs as f64;
+            }
+
+            // Advance to next segment
+            target_pos += target_delta;
+            query_pos += query_delta;
+
+            // Early exit when past requested range
+            if (is_reverse && target_pos <= range_start) || (!is_reverse && target_pos >= range_end) {
+                break;
+            }
+        }
+
+        // Return None if no overlapping segments found
+        if first_idx.is_none() {
+            return None;
+        }
+
+        Some(SubsettingResult {
+            first_idx: first_idx.unwrap(),
+            last_idx,
+            first_query_pos: first_query_pos.unwrap(),
+            last_query_pos: last_query_pos.unwrap(),
+            num_overlapping_segments,
+            total_matches,
+            total_mismatches,
+            first_segment_info: first_segment_info.unwrap(),
+            last_segment_info: last_segment_info.unwrap(),
+        })
+    }
+
+    fn process_tracepoints_data(
+        &self,
+        alignment: &OneAlnAlignment,
+        metadata: &QueryMetadata,
+        target_id: u32,
+        sequence_index: &UnifiedSequenceIndex,
+    ) -> Vec<CigarOp> {
+        let (query_start, query_end) = (metadata.query_start, metadata.query_end);
+        let (target_start, target_end) = (metadata.target_start, metadata.target_end);
+
+        // if there are no differences, we can shortcut to a perfect match CIGAR
+        if alignment.differences == 0 {
+            let match_len = query_end - query_start;
+            return vec![CigarOp::new(match_len, '=')];
+        }
+
+        let tracepoints: Vec<(usize, usize)> = alignment
+            .trace_diffs
+            .iter()
+            .zip(alignment.tracepoints.iter())
+            .map(|(&diff, &tp)| (diff as usize, tp as usize))
+            .collect();
+        let trace_spacing = alignment.trace_spacing as usize;
+
+        // Fetch query sequence (not cached)
+        let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
+        let query_seq = sequence_index
+            .fetch_sequence(query_name, query_start, query_end)
+            .unwrap_or_else(|e| panic!("Failed to fetch query sequence: {e}"));
+
+        let target_name = self.seq_index.get_name(target_id).unwrap();
+
+        let is_reverse = metadata.strand() == Strand::Reverse;
+        let target_seq = self.get_target_sequence_cached(
+            sequence_index,
+            target_name,
+            target_id,
+            target_start,
+            target_end,
+            is_reverse,
+        );
+
+        let cigar_str = with_edit_aligner(|aligner| {
+            tracepoints_to_cigar_fastga_with_aligner(
+                &tracepoints,
+                trace_spacing,
+                &query_seq,
+                &target_seq,
+                alignment.query_contig_start.try_into().unwrap(),
+                alignment.target_contig_start.try_into().unwrap(),
+                metadata.strand() == Strand::Reverse,
+                aligner,
+            )
+        });
+
+        match parse_cigar_to_delta(&cigar_str) {
+            Ok(ops) => ops,
+            Err(e) => panic!(
+                "Failed to parse CIGAR string '{cigar_str}' during tracepoint processing: {:?}",
+                e
+            ),
+        }
+    }
+
+    /// Reconstruct CIGAR only for the subset of tracepoints that overlap the requested range.
+    fn process_subset_tracepoints(
+        &self,
+        alignment: &OneAlnAlignment,
+        metadata: &QueryMetadata,
+        target_id: u32,
+        subset: &SubsettingResult,
+        sequence_index: &UnifiedSequenceIndex,
+    ) -> Vec<CigarOp> {
+        let is_reverse = metadata.strand() == Strand::Reverse;
+
+        // Extract subset tracepoints [first_idx..=last_idx]
+        let subset_tracepoints: Vec<(usize, usize)> = alignment.trace_diffs[subset.first_idx..=subset.last_idx]
+            .iter()
+            .zip(alignment.tracepoints[subset.first_idx..=subset.last_idx].iter())
+            .map(|(&diff, &tp)| (diff as usize, tp as usize))
+            .collect();
+
+        // Calculate subset sequence ranges (use RAW boundaries from subsetting scan, no refinement)
+        let subset_query_start = subset.first_query_pos;
+
+        // If last_idx is the actual last tracepoint of the alignment, the last
+        // segment may be shorter than trace_spacing. Use metadata boundary.
+        let subset_query_end = if subset.last_idx == alignment.tracepoints.len() - 1 {
+            metadata.query_end  // Last segment of alignment - use exact boundary
+        } else {
+            subset.last_query_pos  // Middle segment - use calculated position
+        };
+
+        // For target: extract from first/last segment info (seg_start, seg_end already in forward space)
+        let (_, _, first_seg_start, first_seg_end, _, _) = subset.first_segment_info;
+        let (_, _, last_seg_start, last_seg_end, _, _) = subset.last_segment_info;
+        let subset_target_start = first_seg_start.min(first_seg_end).min(last_seg_start.min(last_seg_end));
+
+        // If last_idx is the actual last tracepoint, use metadata target boundary
+        let subset_target_end = if subset.last_idx == alignment.tracepoints.len() - 1 {
+            metadata.target_end  // Last segment of alignment - use exact boundary
+        } else {
+            first_seg_start.max(first_seg_end).max(last_seg_start.max(last_seg_end))  // Middle segment - use calculated
+        };
+
+        // Fetch only subset sequences
+        let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
+        let query_seq = sequence_index
+            .fetch_sequence(query_name, subset_query_start, subset_query_end)
+            .unwrap_or_else(|e| panic!("Failed to fetch subset query sequence: {e}"));
+
+        let target_name = self.seq_index.get_name(target_id).unwrap();
+        let target_seq = self.get_target_sequence_cached(
+            sequence_index,
+            target_name,
+            target_id,
+            subset_target_start,
+            subset_target_end,
+            is_reverse,
+        );
+
+        // Adjust contig offsets for the subset
+        let adjusted_query_offset = alignment.query_contig_start as usize +
+            (subset_query_start - metadata.query_start) as usize;
+        let adjusted_target_offset = alignment.target_contig_start as usize +
+            (subset_target_start - metadata.target_start) as usize;
+
+        // Reconstruct CIGAR for subset only
+        let trace_spacing = alignment.trace_spacing as usize;
+        let cigar_str = with_edit_aligner(|aligner| {
+            tracepoints_to_cigar_fastga_with_aligner(
+                &subset_tracepoints,
+                trace_spacing,
+                &query_seq,
+                &target_seq,
+                adjusted_query_offset,
+                adjusted_target_offset,
+                is_reverse,
+                aligner,
+            )
+        });
+
+        match parse_cigar_to_delta(&cigar_str) {
+            Ok(ops) => ops,
+            Err(e) => panic!(
+                "Failed to parse CIGAR string '{cigar_str}' during subset tracepoint processing: {:?}",
+                e
+            ),
+        }
+    }
+
+    fn project_overlapping_interval(
+        &self,
+        metadata: &QueryMetadata,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32,
+        sequence_index: Option<&UnifiedSequenceIndex>,
+        min_gap_compressed_identity: Option<f64>,
+    ) -> Option<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
+        // Check if this is a .1aln file that supports tracepoint subsetting
+        let file_index = metadata.alignment_file_index as usize;
+        let alignment_file = &self.alignment_files[file_index];
+        let is_onealn = alignment_file.ends_with(".1aln");
+
+        // Try subsetting approach for .1aln files
+        if is_onealn && sequence_index.is_some() {
+            let sequence_index = sequence_index.unwrap();
+
+            // Fetch alignment with tracepoints
+            let alignment = self.get_onealn_alignment(metadata)
+                .unwrap_or_else(|e| panic!("Subsetting failed: cannot fetch .1aln alignment: {}", e));
+
+            // Scan tracepoints to find overlapping segments
+            let subset = self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end)
+                .unwrap_or_else(|| panic!(
+                    "Subsetting failed: no overlapping segments found for range {}-{} (target_id={}, file_index={})",
+                    range_start, range_end, target_id, metadata.alignment_file_index
+                ));
+
+            // Reconstruct CIGAR from subset tracepoints
+            // Note: When last_idx is the actual last tracepoint, process_subset_tracepoints
+            // uses metadata boundaries to handle the potentially shorter last segment correctly
+            let cigar_ops = self.process_subset_tracepoints(
+                &alignment,
+                metadata,
+                target_id,
+                &subset,
+                sequence_index,
+            );
+
+            // Check identity threshold if specified
+            if let Some(threshold) = min_gap_compressed_identity {
+                if calculate_gap_compressed_identity(&cigar_ops) < threshold {
+                    return None;
+                }
+            }
+
+            // Project the CIGAR through the alignment to get exact coordinates
+            // Use same boundary logic as in process_subset_tracepoints
+            let subset_query_start = subset.first_query_pos;
+            let subset_query_end = if subset.last_idx == alignment.tracepoints.len() - 1 {
+                metadata.query_end
+            } else {
+                subset.last_query_pos
+            };
+
+            let (_, _, first_seg_start, first_seg_end, _, _) = subset.first_segment_info;
+            let (_, _, last_seg_start, last_seg_end, _, _) = subset.last_segment_info;
+            let subset_target_start = first_seg_start.min(first_seg_end).min(last_seg_start.min(last_seg_end));
+            let subset_target_end = if subset.last_idx == alignment.tracepoints.len() - 1 {
+                metadata.target_end
+            } else {
+                first_seg_start.max(first_seg_end).max(last_seg_start.max(last_seg_end))
+            };
+
+            let (alignment_query_start, alignment_query_end, alignment_target_start, alignment_target_end) =
+                (subset_query_start, subset_query_end, subset_target_start, subset_target_end);
+
+            // Project the requested range through the CIGAR
+            let projection = project_target_range_through_alignment(
+                (range_start, range_end),
+                (
+                    alignment_target_start,
+                    alignment_target_end,
+                    alignment_query_start,
+                    alignment_query_end,
+                    metadata.strand(),
+                ),
+                &cigar_ops,
+            )
+            .unwrap_or_else(|| panic!(
+                "Subsetting failed: projection failed for CIGAR (range={}-{}, query={}-{}, target={}-{})",
+                range_start, range_end, alignment_query_start, alignment_query_end, alignment_target_start, alignment_target_end
+            ));
+
+            let (
+                adjusted_query_start,
+                adjusted_query_end,
+                adjusted_cigar,
+                adjusted_target_start,
+                adjusted_target_end,
+            ) = projection;
+
+            let query_interval = Interval {
+                first: adjusted_query_start,
+                last: adjusted_query_end,
+                metadata: metadata.query_id,
+            };
+
+            let target_interval = Interval {
+                first: adjusted_target_start,
+                last: adjusted_target_end,
+                metadata: target_id,
+            };
+
+            return Some((query_interval, adjusted_cigar, target_interval));
+        }
+
+        // Fallback: Full CIGAR reconstruction + projection (for non-.1aln files or if subsetting failed)
+        let mut cigar_ops = self.get_cigar_ops(metadata, target_id, sequence_index);
+
+        let projection = project_target_range_through_alignment(
+            (range_start, range_end),
+            (
+                metadata.target_start,
+                metadata.target_end,
+                metadata.query_start,
+                metadata.query_end,
+                metadata.strand(),
+            ),
+            &cigar_ops,
+        );
+
+        if let Some((
+            adjusted_query_start,
+            adjusted_query_end,
+            adjusted_cigar,
+            adjusted_target_start,
+            adjusted_target_end,
+        )) = projection
+        {
+            if let Some(threshold) = min_gap_compressed_identity {
+                if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
+                    return None;
+                }
+            }
+
+            let query_interval = Interval {
+                first: adjusted_query_start,
+                last: adjusted_query_end,
+                metadata: metadata.query_id,
+            };
+
+            let target_interval = Interval {
+                first: adjusted_target_start,
+                last: adjusted_target_end,
+                metadata: target_id,
+            };
+
+            cigar_ops = adjusted_cigar;
+
+            Some((query_interval, cigar_ops, target_interval))
+        } else {
+            warn!(
+                "Projection failed for alignment (target_id={target_id}, file_index={}, range={}-{})",
+                metadata.alignment_file_index,
+                range_start,
+                range_end
+            );
+            None
+        }
+    }
+
+    /// Fast approximate projection using tracepoints without CIGAR computation or sequence fetching.
+    /// Returns approximate intervals with identity metrics calculated from tracepoint statistics.
+    fn project_overlapping_interval_fast(
+        &self,
+        metadata: &QueryMetadata,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32,
+        min_gap_compressed_identity: Option<f64>,
+    ) -> Option<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
+        // Fetch tracepoints without sequence I/O
+        let alignment = match self.get_onealn_alignment(metadata) {
+            Ok(aln) => aln,
+            Err(e) => {
+                warn!("Failed to fetch alignment for fast projection: {}", e);
+                return None;
+            }
+        };
+
+        // Scan tracepoints to find overlapping segments
+        let subset = self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end)?;
+
+        let is_reverse = metadata.strand() == Strand::Reverse;
+        let working_query_start = metadata.query_start;
+        let working_query_end = metadata.query_end;
+
+        // Store pre-refinement values for debugging
+        let pre_refinement_query = (subset.first_query_pos, subset.last_query_pos);
+        let pre_refinement_target = (range_start, range_end);
+
+        // Refine query coordinates using indel-aware heuristic
+        let refine_boundary = |query_pos: i32, query_delta: i32, segment_target_start: i32,
+                              overlap_pos: i32, abs_target_delta: i32, trace_diffs: i32,
+                              boundary_name: &str| -> i32 {
+            let aligned_len = query_delta.min(abs_target_delta);
+            let segment_identity = if aligned_len > 0 {
+                ((aligned_len - trace_diffs) as f64 / aligned_len as f64).max(0.0)
+            } else {
+                0.0
+            };
+
+            if abs_target_delta == 0 {
+                panic!(
+                    "Cannot refine {} position with zero target delta: num_segs={}, identity={:.3}, trace_diffs={}",
+                    boundary_name, subset.num_overlapping_segments, segment_identity, trace_diffs
+                );
+            }
+
+            let target_fraction = (overlap_pos - segment_target_start) as f64 / abs_target_delta as f64;
+            let indel_ratio = query_delta as f64 / abs_target_delta as f64;
+            let query_advance = target_fraction * abs_target_delta as f64 * indel_ratio;
+            let refined_pos = query_pos + query_advance.round() as i32;
+
+            debug!(
+                "{} segment refinement: identity={:.3}, indel_ratio={:.3}, trace_diffs={}, target_frac={:.3}",
+                boundary_name, segment_identity, indel_ratio, trace_diffs, target_fraction
+            );
+
+            refined_pos.max(working_query_start).min(working_query_end)
+        };
+
+        // Refine first and last query positions
+        let (query_pos, query_delta, segment_target_start, _, abs_target_delta, trace_diffs) = subset.first_segment_info;
+        let overlap_start = segment_target_start.max(range_start);
+        let refined_first = refine_boundary(query_pos, query_delta, segment_target_start,
+                                           overlap_start, abs_target_delta, trace_diffs, "First");
+
+        let (query_pos, query_delta, segment_target_start, segment_target_end, abs_target_delta, trace_diffs) = subset.last_segment_info;
+        let overlap_end = segment_target_end.min(range_end);
+        let refined_last = refine_boundary(query_pos, query_delta, segment_target_start,
+                                          overlap_end, abs_target_delta, trace_diffs, "Last");
+
+        // Debug: show before/after refinement
+        let post_refinement_query = (refined_first, refined_last);
+        let post_refinement_target = (range_start, range_end);
+        let overall_identity = if subset.total_matches + subset.total_mismatches > 0.0 {
+            subset.total_matches / (subset.total_matches + subset.total_mismatches)
+        } else {
+            0.0
+        };
+        let requested_range_len = range_end - range_start;
+        let strand_char = if is_reverse { '-' } else { '+' };
+
+        debug!(
+            "Refinement [{}]: req_len={}, query {}-{} (Δ{}) -> {}-{} (Δ{}), target {}-{} (Δ{}) -> {}-{} (Δ{}), segs={}, id={:.3}, diffs={:.0}",
+            strand_char,
+            requested_range_len,
+            pre_refinement_query.0, pre_refinement_query.1,
+            (pre_refinement_query.1 - pre_refinement_query.0).abs(),
+            post_refinement_query.0, post_refinement_query.1,
+            (post_refinement_query.1 - post_refinement_query.0).abs(),
+            pre_refinement_target.0, pre_refinement_target.1,
+            pre_refinement_target.1 - pre_refinement_target.0,
+            post_refinement_target.0, post_refinement_target.1,
+            post_refinement_target.1 - post_refinement_target.0,
+            subset.num_overlapping_segments,
+            overall_identity,
+            subset.total_mismatches
+        );
+
+        // Create approximate CIGAR from accumulated statistics (for identity calculation only)
+        let mut approx_cigar = Vec::new();
+        if subset.total_matches > 0.0 {
+            approx_cigar.push(CigarOp::new(subset.total_matches.round() as i32, '='));
+        }
+        if subset.total_mismatches > 0.0 {
+            approx_cigar.push(CigarOp::new(subset.total_mismatches.round() as i32, 'X'));
+        }
+
+        // Check identity threshold if specified
+        if let Some(threshold) = min_gap_compressed_identity {
+            let identity = calculate_gap_compressed_identity(&approx_cigar);
+            if identity < threshold {
+                return None;
+            }
+        }
+
+        // Get refined query coordinates
+        let working_query_start = refined_first;
+        let working_query_end = refined_last;
+
+        // For reverse alignments: swap projected query coordinates to match normal mode output
+        let (query_start, query_end) = if is_reverse {
+            (working_query_end, working_query_start)  // Swap: first=end, last=start
+        } else {
+            (working_query_start, working_query_end)
+        };
+
+        // Target coordinates: use exact requested range
+        let target_start = range_start;
+        let target_end = range_end;
+
+        // Validate coordinates are non-negative
+        if working_query_start < 0 || working_query_end < 0 {
+            panic!(
+                "Projection resulted in negative query coordinates: {}-{}",
+                working_query_start, working_query_end
+            );
+        }
+
+        let query_interval = Interval {
+            first: query_start,
+            last: query_end,
+            metadata: metadata.query_id,
+        };
+
+        let target_interval = Interval {
+            first: target_start,
+            last: target_end,
+            metadata: target_id,
+        };
+
+        Some((query_interval, approx_cigar, target_interval))
+    }
+
+    pub fn from_multi_alignment_records(
+        records_by_file: &[(Vec<AlignmentRecord>, String)],
         seq_index: SequenceIndex,
-    ) -> Result<Self, ParseErr> {
-        // Extract just the PAF file paths
-        let paf_files: Vec<String> = records_by_file
+        sequence_files: Option<&[String]>,
+    ) -> io::Result<Self> {
+        // Extract just the alignment file paths
+        let alignment_files: Vec<String> = records_by_file
             .par_iter()
-            .map(|(_, paf_file)| paf_file.clone())
+            .map(|(_, alignment_file)| alignment_file.clone())
             .collect();
 
         let intervals: FxHashMap<u32, Vec<Interval<QueryMetadata>>> = records_by_file
@@ -320,9 +1105,9 @@ impl Impg {
                             target_end: record.target_end as i32,
                             query_start: record.query_start as i32,
                             query_end: record.query_end as i32,
-                            paf_file_index: file_index as u32,
-                            strand_and_cigar_offset: record.strand_and_cigar_offset, // Already includes strand bit
-                            cigar_bytes: record.cigar_bytes,
+                            alignment_file_index: file_index as u32,
+                            strand_and_data_offset: record.strand_and_data_offset, // Already includes strand bit
+                            data_bytes: record.data_bytes,
                         };
 
                         Some((
@@ -360,12 +1145,22 @@ impl Impg {
             })
             .collect();
 
+        // Populate forest map with placeholder offsets for in-memory trees
+        // This allows stats and other operations to work before serialization
+        let mut forest_map = ForestMap::new();
+        for &target_id in trees.keys() {
+            forest_map.add_entry(target_id, 0); // Offset 0 = in-memory tree
+        }
+
+        let num_files = alignment_files.len();
         Ok(Self {
             trees: RwLock::new(trees),
             seq_index,
-            paf_files,
-            forest_map: ForestMap::new(), // All trees are in memory, no need for forest map
-            index_file_path: String::new(), // All trees are in memory, no need for index file path
+            alignment_files,
+            forest_map,
+            index_file_path: String::new(),
+            sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
+            trace_spacing_cache: RwLock::new(vec![None; num_files]),
         })
     }
 
@@ -388,7 +1183,7 @@ impl Impg {
         // Serialize sequence index
         let seq_index_data =
             bincode::serde::encode_to_vec(&self.seq_index, bincode::config::standard()).map_err(
-                |e| std::io::Error::other(format!("Failed to encode sequence index: {e:?}")),
+                |e| std::io::Error::other(format!("Failed to encode sequence index: {e}")),
             )?;
 
         writer.write_all(&seq_index_data)?;
@@ -415,7 +1210,7 @@ impl Impg {
                 bincode::serde::encode_to_vec(&(target_id, intervals), bincode::config::standard())
                     .map_err(|e| {
                         std::io::Error::other(format!(
-                            "Failed to encode tree for target {target_id}: {e:?}"
+                            "Failed to encode tree for target {target_id}: {e}"
                         ))
                     })?;
 
@@ -426,9 +1221,8 @@ impl Impg {
         // Now write the forest map at the end
         let forest_map_offset = current_offset;
         let forest_map_data =
-            bincode::serde::encode_to_vec(&forest_map, bincode::config::standard()).map_err(
-                |e| std::io::Error::other(format!("Failed to encode forest map: {e:?}")),
-            )?;
+            bincode::serde::encode_to_vec(&forest_map, bincode::config::standard())
+                .map_err(|e| std::io::Error::other(format!("Failed to encode forest map: {e}")))?;
 
         writer.write_all(&forest_map_data)?;
 
@@ -505,8 +1299,9 @@ impl Impg {
     /// Load IMPG index from the format with embedded forest map at the end
     pub fn load_from_file<R: std::io::Read + std::io::Seek>(
         mut reader: R,
-        paf_files: &[String],
+        alignment_files: &[String],
         index_file_path: String,
+        sequence_files: Option<&[String]>,
     ) -> std::io::Result<Self> {
         const MAGIC: &[u8] = b"IMPGIDX1";
 
@@ -531,7 +1326,7 @@ impl Impg {
                 .map_err(|e| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        format!("Failed to load sequence index: {e:?}"),
+                        format!("Failed to load sequence index: {e}"),
                     )
                 })?;
 
@@ -542,16 +1337,19 @@ impl Impg {
                 .map_err(|e| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        format!("Failed to load forest map: {e:?}"),
+                        format!("Failed to load forest map: {e}"),
                     )
                 })?;
 
+        let num_files = alignment_files.len();
         Ok(Self {
-            trees: RwLock::new(FxHashMap::default()), // Start with empty trees - load on demand
+            trees: RwLock::new(FxHashMap::default()),
             seq_index,
-            paf_files: paf_files.to_vec(),
+            alignment_files: alignment_files.to_vec(),
             forest_map,
             index_file_path,
+            sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
+            trace_spacing_cache: RwLock::new(vec![None; num_files]),
         })
     }
 
@@ -562,6 +1360,8 @@ impl Impg {
         range_end: i32,
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
+        sequence_index: Option<&UnifiedSequenceIndex>,
+        approximate_mode: bool,
     ) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
         // Add the input range to the results
@@ -584,7 +1384,8 @@ impl Impg {
         ));
 
         debug!(
-            "Querying region: {}:{}-{}, len: {}",
+            "Querying region{}: {}:{}-{}, len: {}",
+            if approximate_mode { " (approximate)" } else { "" },
             self.seq_index.get_name(target_id).unwrap(),
             range_start,
             range_end,
@@ -595,50 +1396,30 @@ impl Impg {
         if let Some(tree) = self.get_or_load_tree(target_id) {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
-                let result = project_target_range_through_alignment(
-                    (range_start, range_end),
-                    (
-                        metadata.target_start,
-                        metadata.target_end,
-                        metadata.query_start,
-                        metadata.query_end,
-                        metadata.strand(),
-                    ),
-                    &metadata.get_cigar_ops(&self.paf_files),
-                );
-                if let Some((
-                    adjusted_query_start,
-                    adjusted_query_end,
-                    adjusted_cigar,
-                    adjusted_target_start,
-                    adjusted_target_end,
-                )) = result
-                {
-                    // Check gap-compressed identity if threshold is provided
-                    if let Some(threshold) = min_gap_compressed_identity {
-                        if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
-                            return; // Skip this result
-                        }
-                    }
+                let projection = if approximate_mode {
+                    // Approximate mode: fast projection without sequence I/O
+                    self.project_overlapping_interval_fast(
+                        metadata,
+                        target_id,
+                        range_start,
+                        range_end,
+                        min_gap_compressed_identity,
+                    )
+                } else {
+                    // Normal mode: full CIGAR computation with sequences
+                    self.project_overlapping_interval(
+                        metadata,
+                        target_id,
+                        range_start,
+                        range_end,
+                        sequence_index,
+                        min_gap_compressed_identity,
+                    )
+                };
 
-                    let adjusted_interval = (
-                        Interval {
-                            first: adjusted_query_start,
-                            last: adjusted_query_end,
-                            metadata: metadata.query_id,
-                        },
-                        if store_cigar {
-                            adjusted_cigar
-                        } else {
-                            Vec::new()
-                        },
-                        Interval {
-                            first: adjusted_target_start,
-                            last: adjusted_target_end,
-                            metadata: target_id,
-                        },
-                    );
-                    results.push(adjusted_interval);
+                if let Some((query_interval, cigar_ops, target_interval)) = projection {
+                    let cigar_vec = if store_cigar { cigar_ops } else { Vec::new() };
+                    results.push((query_interval, cigar_vec, target_interval));
                 }
             });
         }
@@ -652,13 +1433,16 @@ impl Impg {
         range_start: i32,
         range_end: i32,
         _min_gap_compressed_identity: Option<f64>,
+        sequence_index: Option<&UnifiedSequenceIndex>,
         cache: &mut FxHashMap<(u32, u64), Vec<CigarOp>>,
     ) {
         if let Some(tree) = self.get_or_load_tree(target_id) {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
-                let cache_key = (metadata.paf_file_index, metadata.cigar_offset());
-                cache.entry(cache_key).or_insert_with(|| metadata.get_cigar_ops(&self.paf_files));
+                let cache_key = (metadata.alignment_file_index, metadata.data_offset());
+                cache
+                    .entry(cache_key)
+                    .or_insert_with(|| self.get_cigar_ops(metadata, target_id, sequence_index));
             });
         }
     }
@@ -670,6 +1454,7 @@ impl Impg {
         range_end: i32,
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
+        sequence_index: Option<&UnifiedSequenceIndex>,
         cigar_cache: &FxHashMap<(u32, u64), Vec<CigarOp>>,
     ) -> Vec<AdjustedInterval> {
         let mut results = Vec::new();
@@ -694,10 +1479,11 @@ impl Impg {
         if let Some(tree) = self.get_or_load_tree(target_id) {
             tree.query(range_start, range_end, |interval| {
                 let metadata = &interval.metadata;
-                let cache_key = (metadata.paf_file_index, metadata.cigar_offset());
+                let cache_key = (metadata.alignment_file_index, metadata.data_offset());
                 let cigar_ops = cigar_cache
-                    .get(&cache_key).cloned()
-                    .unwrap_or_else(|| metadata.get_cigar_ops(&self.paf_files));
+                    .get(&cache_key)
+                    .cloned()
+                    .unwrap_or_else(|| self.get_cigar_ops(metadata, target_id, sequence_index));
 
                 let result = project_target_range_through_alignment(
                     (range_start, range_end),
@@ -757,8 +1543,11 @@ impl Impg {
         max_depth: u16,
         min_transitive_len: i32,
         min_distance_between_ranges: i32,
+        min_output_length: Option<i32>,
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
+        sequence_index: Option<&UnifiedSequenceIndex>,
+        approximate_mode: bool,
     ) -> Vec<AdjustedInterval> {
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
@@ -832,67 +1621,51 @@ impl Impg {
 
             // Get or load the tree - if None, no overlaps exist for this target
             if let Some(tree) = self.get_or_load_tree(current_target_id) {
-                // Collect intervals first to process them in parallel
-                let mut intervals = Vec::new();
-
+                let mut intervals: Vec<(QueryMetadata, (i32, i32))> = Vec::new();
                 tree.query(current_target_start, current_target_end, |interval| {
-                    intervals.push(interval.metadata.clone());
+                    let overlap_start = current_target_start.max(interval.first);
+                    let overlap_end = current_target_end.min(interval.last);
+                    if overlap_start < overlap_end {
+                        intervals.push((interval.metadata.clone(), (overlap_start, overlap_end)));
+                    }
                 });
 
-                // Process the intervals in parallel
                 let processed_results: Vec<_> = intervals
                     .into_par_iter()
-                    .filter_map(|metadata| {
-                        let result = project_target_range_through_alignment(
-                            (current_target_start, current_target_end),
+                    .filter_map(|(metadata, overlap_range)| {
+                        let projection_result = if approximate_mode {
+                            self.project_overlapping_interval_fast(
+                                &metadata,
+                                current_target_id,
+                                overlap_range.0,
+                                overlap_range.1,
+                                min_gap_compressed_identity,
+                            )
+                        } else {
+                            self.project_overlapping_interval(
+                                &metadata,
+                                current_target_id,
+                                overlap_range.0,
+                                overlap_range.1,
+                                sequence_index,
+                                min_gap_compressed_identity,
+                            )
+                        };
+                        projection_result.map(|(query_interval, cigar_ops, target_interval)| {
+                            let query_id = query_interval.metadata;
+                            let adjusted_query_start = query_interval.first;
+                            let adjusted_query_end = query_interval.last;
+                            let cigar_vec = if store_cigar { cigar_ops } else { Vec::new() };
+
                             (
-                                metadata.target_start,
-                                metadata.target_end,
-                                metadata.query_start,
-                                metadata.query_end,
-                                metadata.strand(),
-                            ),
-                            &metadata.get_cigar_ops(&self.paf_files),
-                        );
-
-                        if let Some((
-                            adjusted_query_start,
-                            adjusted_query_end,
-                            adjusted_cigar,
-                            adjusted_target_start,
-                            adjusted_target_end,
-                        )) = result
-                        {
-                            // Check gap-compressed identity if threshold is provided
-                            if let Some(threshold) = min_gap_compressed_identity {
-                                if calculate_gap_compressed_identity(&adjusted_cigar) < threshold {
-                                    return None; // Skip this result
-                                }
-                            }
-
-                            Some((
-                                Interval {
-                                    first: adjusted_query_start,
-                                    last: adjusted_query_end,
-                                    metadata: metadata.query_id,
-                                },
-                                if store_cigar {
-                                    adjusted_cigar
-                                } else {
-                                    Vec::new()
-                                },
-                                Interval {
-                                    first: adjusted_target_start,
-                                    last: adjusted_target_end,
-                                    metadata: current_target_id,
-                                },
-                                metadata.query_id,
+                                query_interval,
+                                cigar_vec,
+                                target_interval,
+                                query_id,
                                 adjusted_query_start,
                                 adjusted_query_end,
-                            ))
-                        } else {
-                            None
-                        }
+                            )
+                        })
                     })
                     .collect();
 
@@ -906,7 +1679,17 @@ impl Impg {
                     adjusted_query_end,
                 ) in processed_results
                 {
-                    results.push((query_interval, cigar, target_interval));
+                    let length = (query_interval.last - query_interval.first).abs();
+
+                    // Add to results only if it passes min_output_length filter
+                    let should_add_to_output = if let Some(min_len) = min_output_length {
+                        length >= min_len
+                    } else {
+                        true
+                    };
+                    if should_add_to_output {
+                        results.push((query_interval, cigar.clone(), target_interval));
+                    }
 
                     // Only add non-overlapping portions to the stack for further exploration
                     if query_id != current_target_id {
@@ -998,8 +1781,11 @@ impl Impg {
         max_depth: u16,
         min_transitive_len: i32,
         min_distance_between_ranges: i32,
+        min_output_length: Option<i32>,
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
+        sequence_index: Option<&UnifiedSequenceIndex>,
+        approximate_mode: bool,
     ) -> Vec<AdjustedInterval> {
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
@@ -1076,47 +1862,45 @@ impl Impg {
                                     *current_target_end,
                                     |interval| {
                                         let metadata = &interval.metadata;
-                                        let result = project_target_range_through_alignment(
-                                            (*current_target_start, *current_target_end),
-                                            (
-                                                metadata.target_start,
-                                                metadata.target_end,
-                                                metadata.query_start,
-                                                metadata.query_end,
-                                                metadata.strand(),
-                                            ),
-                                            &metadata.get_cigar_ops(&self.paf_files),
-                                        );
+                                        let overlap_start =
+                                            (*current_target_start).max(interval.first);
+                                        let overlap_end = (*current_target_end).min(interval.last);
+                                        if overlap_start >= overlap_end {
+                                            return;
+                                        }
 
-                                        if let Some((
-                                            adjusted_query_start,
-                                            adjusted_query_end,
-                                            adjusted_cigar,
-                                            adjusted_target_start,
-                                            adjusted_target_end,
-                                        )) = result
+                                        let projection_result = if approximate_mode {
+                                            self.project_overlapping_interval_fast(
+                                                metadata,
+                                                *current_target_id,
+                                                overlap_start,
+                                                overlap_end,
+                                                min_gap_compressed_identity,
+                                            )
+                                        } else {
+                                            self.project_overlapping_interval(
+                                                metadata,
+                                                *current_target_id,
+                                                overlap_start,
+                                                overlap_end,
+                                                sequence_index,
+                                                min_gap_compressed_identity,
+                                            )
+                                        };
+
+                                        if let Some((query_interval, cigar_ops, target_interval)) =
+                                            projection_result
                                         {
-                                            // Check gap-compressed identity if threshold is provided
-                                            if let Some(threshold) = min_gap_compressed_identity {
-                                                if calculate_gap_compressed_identity(
-                                                    &adjusted_cigar,
-                                                ) < threshold
-                                                {
-                                                    return; // Skip this result
-                                                }
-                                            }
+                                            let cigar_vec =
+                                                if store_cigar { cigar_ops } else { Vec::new() };
 
                                             local_results.push((
-                                                metadata.query_id,
-                                                adjusted_query_start,
-                                                adjusted_query_end,
-                                                if store_cigar {
-                                                    adjusted_cigar
-                                                } else {
-                                                    Vec::new()
-                                                },
-                                                adjusted_target_start,
-                                                adjusted_target_end,
+                                                query_interval.metadata,
+                                                query_interval.first,
+                                                query_interval.last,
+                                                cigar_vec,
+                                                target_interval.first,
+                                                target_interval.last,
                                                 *current_target_id,
                                             ));
                                         }
@@ -1144,20 +1928,29 @@ impl Impg {
                     current_target_id,
                 ) in query_result
                 {
-                    // Add to results
-                    results.push((
-                        Interval {
-                            first: adjusted_query_start,
-                            last: adjusted_query_end,
-                            metadata: query_id,
-                        },
-                        adjusted_cigar,
-                        Interval {
-                            first: adjusted_target_start,
-                            last: adjusted_target_end,
-                            metadata: current_target_id,
-                        },
-                    ));
+                    let length = (adjusted_query_end - adjusted_query_start).abs();
+
+                    // Add to results only if it passes min_output_length filter
+                    let should_add_to_output = if let Some(min_len) = min_output_length {
+                        length >= min_len
+                    } else {
+                        true
+                    };
+                    if should_add_to_output {
+                        results.push((
+                            Interval {
+                                first: adjusted_query_start,
+                                last: adjusted_query_end,
+                                metadata: query_id,
+                            },
+                            adjusted_cigar.clone(),
+                            Interval {
+                                first: adjusted_target_start,
+                                last: adjusted_target_end,
+                                metadata: current_target_id,
+                            },
+                        ));
+                    }
 
                     // Only consider for next depth if it's a different sequence
                     if query_id != current_target_id {
@@ -1259,6 +2052,16 @@ fn project_target_range_through_alignment(
     cigar_ops: &[CigarOp],
 ) -> Option<(i32, i32, Vec<CigarOp>, i32, i32)> {
     let (target_start, target_end, query_start, query_end, strand) = record;
+    debug!(
+        "Projecting target range {}-{} through alignment with target {}-{}, query {}-{}, strand {:?}",
+        requested_target_range.0,
+        requested_target_range.1,
+        target_start,
+        target_end,
+        query_start,
+        query_end,
+        strand
+    );
 
     let dir = if strand == Strand::Forward { 1 } else { -1 };
     let mut query_pos = if strand == Strand::Forward {
@@ -1383,7 +2186,7 @@ fn project_target_range_through_alignment(
     }
 }
 
-fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, ParseErr> {
+fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, OneAlnParseErr> {
     let mut ops = Vec::new();
     let mut len: i32 = 0;
 
@@ -1632,15 +2435,15 @@ mod tests {
         let target_id = seq_index.get_or_insert_id("t1", Some(200));
         let reader = BufReader::new(&paf_data[..]);
         let expected_records = vec![
-            PartialPafRecord {
+            AlignmentRecord {
                 query_id,
                 query_start: 10,
                 query_end: 20,
                 target_id,
                 target_start: 30,
                 target_end: 40,
-                strand_and_cigar_offset: 45, // Forward strand
-                cigar_bytes: 3,
+                strand_and_data_offset: 45, // Forward strand
+                data_bytes: 3,
             },
             // Add more test records as needed
         ];
