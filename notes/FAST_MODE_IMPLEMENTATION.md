@@ -477,44 +477,44 @@ cargo build --release
 
 ## Testing
 
-### Important: Explicit -l Requirement
+### Important: --min-transitive-len Requirement
 
-**Approximate mode requires explicitly setting `-l/--min-transitive-len`** to ensure users consider the appropriate minimum length for their data's trace_spacing.
+**Approximate mode with transitive queries** requires explicitly setting `--min-transitive-len` to ensure proper alignment querying at trace_spacing intervals.
 
-**Recommendation**: Set `-l` to at least 1.5× your trace_spacing:
-- For trace_spacing=100bp (typical): use `-l 150` or higher
-- For trace_spacing=50bp: use `-l 75` or higher
-- For trace_spacing=200bp: use `-l 300` or higher
+**Requirement**: Set `--min-transitive-len` to **greater than** your trace_spacing:
+- For trace_spacing=100bp (typical): use `--min-transitive-len 101` or higher
+- For trace_spacing=50bp: use `--min-transitive-len 51` or higher
+- For trace_spacing=200bp: use `--min-transitive-len 201` or higher
 
 **Example**:
 ```bash
-# This will fail - no explicit -l
+# Non-transitive approximate query - no --min-transitive-len needed
 ./target/release/impg query -a alignments.1aln -r chr1:0-100000 --approximate -o bed
-# Error: --approximate mode requires explicitly setting -l/--min-transitive-len
 
-# This will work
-./target/release/impg query -a alignments.1aln -r chr1:0-100000 --approximate -l 150 -o bed
+# Transitive approximate query - requires --min-transitive-len
+./target/release/impg query -a alignments.1aln -r chr1:0-100000 --approximate -x --min-transitive-len 101 -o bed
 ```
 
-The requirement applies to all commands that use approximate mode:
-- `query --approximate`: requires explicit `-l`
-- `partition --approximate`: requires explicit `-l`
-- `refine --approximate`: requires explicit `-l`
+The requirement applies to transitive queries:
+- `query --approximate` (without `-x`): no `--min-transitive-len` required
+- `query --approximate -x`: requires `--min-transitive-len > trace_spacing`
+- `partition --approximate`: requires `--min-transitive-len > trace_spacing` (always transitive)
+- `refine --approximate`: requires `--min-transitive-len > trace_spacing` (always transitive)
 
 ### Test 1: Basic Approximate Query (bed output)
 
 ```bash
-# Normal mode (uses default -l 100)
+# Normal mode (uses default --min-transitive-len 100)
 time ./target/release/impg query \
   -a alignments.1aln \
   -r chr1:1000000-2000000 \
   -o bed > normal.bed
 
-# Approximate mode (requires explicit -l, recommended: 1.5× trace_spacing)
+# Approximate mode (no --min-transitive-len needed for non-transitive)
 time ./target/release/impg query \
   -a alignments.1aln \
   -r chr1:1000000-2000000 \
-  -o bed --approximate -l 150 > fast.bed
+  -o bed --approximate > fast.bed
 
 # Compare
 wc -l normal.bed fast.bed
@@ -530,7 +530,7 @@ wc -l normal.bed fast.bed
 ./target/release/impg query \
   -a alignments.1aln \
   -r chr1:1000000-1001000 \
-  -o bedpe --approximate -l 150 > output.bedpe
+  -o bedpe --approximate > output.bedpe
 ```
 
 **Expected**:
@@ -544,7 +544,7 @@ wc -l normal.bed fast.bed
 ./target/release/impg query \
   -a alignments.1aln \
   -r chr1:1000-2000 \
-  -o paf --approximate -l 150
+  -o paf --approximate
 ```
 
 **Expected**: Error message: "--approximate mode is only compatible with 'bed' and 'bedpe' output formats, not 'paf'"
@@ -556,7 +556,7 @@ time ./target/release/impg query \
   -a alignments.1aln \
   -r chr1:1000000-1001000 \
   -x --max-depth 3 \
-  --approximate -l 150 -o bed
+  --approximate --min-transitive-len 101 -o bed
 ```
 
 **Expected**: Much faster than without --approximate, especially with higher max-depth
@@ -567,7 +567,7 @@ time ./target/release/impg query \
 time ./target/release/impg partition \
   -a alignments.1aln \
   -w 100000 \
-  -o bed --approximate -l 150 --separate-files
+  -o bed --approximate --min-transitive-len 101 --separate-files
 ```
 
 **Expected**: Faster partitioning while producing valid partition files
@@ -578,7 +578,7 @@ time ./target/release/impg partition \
 time ./target/release/impg refine \
   -a alignments.1aln \
   -b regions.bed \
-  --approximate -l 150 > refined.bed
+  --approximate --min-transitive-len 101 > refined.bed
 ```
 
 **Expected**: Faster refinement with approximate but valid intervals
@@ -599,27 +599,27 @@ time ./target/release/impg refine \
 
 ## Troubleshooting
 
-### "Approximate mode requires explicitly setting -l"
+### "Approximate mode with transitive queries requires explicitly setting --min-transitive-len"
 
-**Cause**: Using `--approximate` without specifying `-l` parameter.
+**Cause**: Using `--approximate` with transitive queries (`-x` or `--transitive-dfs`) without specifying `--min-transitive-len`.
 
-**Why**: Forces users to consciously choose an appropriate minimum length based on their data's trace_spacing.
+**Why**: Ensures proper alignment querying at trace_spacing intervals for transitive exploration.
 
-**Solution**: Set `-l` to at least 1.5× your trace_spacing (typically 150 for trace_spacing=100bp).
+**Solution**: Set `--min-transitive-len` to **greater than** your trace_spacing (typically > 100).
 
 **Example**:
 ```bash
-# Wrong - will fail (no -l specified)
+# Non-transitive - works without --min-transitive-len
 ./target/release/impg query -a file.1aln -r chr1:0-100000 --approximate -o bed
 
-# Correct - explicit -l based on your trace_spacing
-./target/release/impg query -a file.1aln -r chr1:0-100000 --approximate -l 150 -o bed
+# Transitive - requires --min-transitive-len > trace_spacing
+./target/release/impg query -a file.1aln -r chr1:0-100000 --approximate -x --min-transitive-len 101 -o bed
 ```
 
 **For different trace_spacing values**:
-- trace_spacing=50: use `-l 75` or higher
-- trace_spacing=100: use `-l 150` or higher (default)
-- trace_spacing=200: use `-l 300` or higher
+- trace_spacing=50: use `--min-transitive-len 51` or higher
+- trace_spacing=100: use `--min-transitive-len 101` or higher (typical)
+- trace_spacing=200: use `--min-transitive-len 201` or higher
 
 ### "Approximate mode is only compatible with 'bed' and 'bedpe'"
 

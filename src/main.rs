@@ -268,9 +268,9 @@ struct TransitiveOpts {
     #[clap(short = 'm', long, value_parser, default_value_t = 2)]
     max_depth: u16,
 
-    /// Minimum region size to consider for transitive queries (required when using --approximate)
+    /// Minimum region size to consider for transitive queries (required > trace_spacing when using --approximate )
     #[arg(help_heading = "Transitive query options")]
-    #[clap(short = 'l', long, value_parser)]
+    #[clap(long, value_parser)]
     min_transitive_len: Option<i32>,
 
     /// Minimum distance between transitive ranges to consider on the same sequence
@@ -319,6 +319,11 @@ struct QueryOpts {
     #[arg(help_heading = "Filtering and merging")]
     #[clap(long, value_parser)]
     min_identity: Option<f64>,
+
+    /// Minimum output length: filter results shorter than this (bp)
+    #[arg(help_heading = "Filtering and merging")]
+    #[clap(short = 'l', long, value_parser)]
+    min_output_length: Option<i32>,
 
     /// Path to a file listing sequence names to include (one per line)
     #[arg(help_heading = "Filtering and merging")]
@@ -419,7 +424,10 @@ impl RefineOpts {
         }
 
         if self.query.approximate {
-            validate_approximate_mode_min_length(self.query.transitive_opts.min_transitive_len)?;
+            validate_approximate_mode_min_length(
+                self.query.transitive_opts.min_transitive_len,
+                self.query.transitive || self.query.transitive_opts.transitive_dfs,
+            )?;
         }
 
         Ok(())
@@ -913,7 +921,7 @@ fn run() -> io::Result<()> {
                         ),
                     ));
                 }
-                validate_approximate_mode_min_length(transitive_opts.min_transitive_len)?;
+                validate_approximate_mode_min_length(transitive_opts.min_transitive_len, true)?; // Partition always uses transitive queries
             }
 
             validate_region_size(
@@ -1035,7 +1043,10 @@ fn run() -> io::Result<()> {
                     ));
                 }
 
-                validate_approximate_mode_min_length(query.transitive_opts.min_transitive_len)?;
+                validate_approximate_mode_min_length(
+                    query.transitive_opts.min_transitive_len,
+                    query.transitive || query.transitive_opts.transitive_dfs,
+                )?;
             }
 
             // Extract sequence files before consuming gfa_maf_fasta
@@ -1153,6 +1164,7 @@ fn run() -> io::Result<()> {
                     target_range,
                     resolved_output_format == "paf" || resolved_output_format == "bedpe", // Store CIGAR for PAF/BEDPE output
                     query.min_identity,
+                    query.min_output_length,
                     query.transitive,
                     query.transitive_opts.transitive_dfs,
                     &query.transitive_opts,
@@ -1598,6 +1610,7 @@ fn run() -> io::Result<()> {
                     target_range,
                     false, // Don't need CIGAR for similarity
                     query.min_identity,
+                    query.min_output_length,
                     query.transitive,
                     query.transitive_opts.transitive_dfs,
                     &query.transitive_opts,
@@ -1674,13 +1687,13 @@ fn run() -> io::Result<()> {
     Ok(())
 }
 
-fn validate_approximate_mode_min_length(min_transitive_len_opt: Option<i32>) -> io::Result<()> {
-    // Require explicit -l when using --approximate
-    if min_transitive_len_opt.is_none() {
+fn validate_approximate_mode_min_length(min_transitive_len_opt: Option<i32>, is_transitive: bool) -> io::Result<()> {
+    // Only require explicit --min-transitive-len for transitive queries in approximate mode
+    if is_transitive && min_transitive_len_opt.is_none() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "--approximate mode requires explicitly setting -l/--min-transitive-len. \
-            Set -l to at least 1.5× your trace_spacing (typically 150 for trace_spacing=100).",
+            "--approximate mode with transitive queries requires explicitly setting --min-transitive-len. \
+            Set it to greater than your trace_spacing (e.g., 101 for trace_spacing=100).",
         ));
     }
 
@@ -1694,7 +1707,7 @@ fn validate_range_min_length(start: i32, end: i32, range_name: &str, min_transit
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "Range '{range_name}' ({length} bp) is below minimum of {min_transitive_len} bp. Lower -l/--min-transitive-len or use a longer range"
+                "Range '{range_name}' ({length} bp) is below minimum of {min_transitive_len} bp. Lower --min-transitive-len or use a longer range"
             ),
         ));
     }
@@ -2239,6 +2252,7 @@ fn perform_query(
     target_range: (i32, i32),
     store_cigar: bool,
     min_identity: Option<f64>,
+    min_output_length: Option<i32>,
     transitive: bool,
     transitive_dfs: bool,
     transitive_opts: &TransitiveOpts,
@@ -2276,6 +2290,7 @@ fn perform_query(
             transitive_opts.max_depth,
             transitive_opts.effective_min_transitive_len(),
             transitive_opts.min_distance_between_ranges,
+            min_output_length,
             store_cigar,
             min_identity,
             sequence_index,
@@ -2290,13 +2305,14 @@ fn perform_query(
             transitive_opts.max_depth,
             transitive_opts.effective_min_transitive_len(),
             transitive_opts.min_distance_between_ranges,
+            min_output_length,
             store_cigar,
             min_identity,
             sequence_index,
             approximate_mode,
         )
     } else {
-        impg.query(
+        let mut res = impg.query(
             target_id,
             target_start,
             target_end,
@@ -2304,7 +2320,15 @@ fn perform_query(
             min_identity,
             sequence_index,
             approximate_mode,
-        )
+        );
+        // Filter by minimum output length for regular queries only
+        if let Some(min_len) = min_output_length {
+            res.retain(|(query_interval, _, _)| {
+                let length = (query_interval.last - query_interval.first).abs();
+                length >= min_len
+            });
+        }
+        res
     };
 
     info!(

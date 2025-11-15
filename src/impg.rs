@@ -1543,6 +1543,7 @@ impl Impg {
         max_depth: u16,
         min_transitive_len: i32,
         min_distance_between_ranges: i32,
+        min_output_length: Option<i32>,
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
@@ -1678,7 +1679,17 @@ impl Impg {
                     adjusted_query_end,
                 ) in processed_results
                 {
-                    results.push((query_interval, cigar, target_interval));
+                    let length = (query_interval.last - query_interval.first).abs();
+
+                    // Add to results only if it passes min_output_length filter
+                    let should_add_to_output = if let Some(min_len) = min_output_length {
+                        length >= min_len
+                    } else {
+                        true
+                    };
+                    if should_add_to_output {
+                        results.push((query_interval, cigar.clone(), target_interval));
+                    }
 
                     // Only add non-overlapping portions to the stack for further exploration
                     if query_id != current_target_id {
@@ -1770,6 +1781,7 @@ impl Impg {
         max_depth: u16,
         min_transitive_len: i32,
         min_distance_between_ranges: i32,
+        min_output_length: Option<i32>,
         store_cigar: bool,
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
@@ -1916,20 +1928,30 @@ impl Impg {
                     current_target_id,
                 ) in query_result
                 {
-                    // Add to results
-                    results.push((
-                        Interval {
-                            first: adjusted_query_start,
-                            last: adjusted_query_end,
-                            metadata: query_id,
-                        },
-                        adjusted_cigar,
-                        Interval {
-                            first: adjusted_target_start,
-                            last: adjusted_target_end,
-                            metadata: current_target_id,
-                        },
-                    ));
+                    let length = (adjusted_query_end - adjusted_query_start).abs();
+
+                    // Add to results only if it passes min_output_length filter
+                    let should_add_to_output = if let Some(min_len) = min_output_length {
+                        length >= min_len
+                    } else {
+                        true
+                    };
+                    if should_add_to_output {
+                        results.push((
+                            Interval {
+                                first: adjusted_query_start,
+                                last: adjusted_query_end,
+                                metadata: query_id,
+                            },
+                            adjusted_cigar.clone(),
+                            Interval {
+                                first: adjusted_target_start,
+                                last: adjusted_target_end,
+                                metadata: current_target_id,
+                            },
+                        ));
+                    }
+
                     // Only consider for next depth if it's a different sequence
                     if query_id != current_target_id {
                         let ranges = visited_ranges.entry(query_id).or_default();

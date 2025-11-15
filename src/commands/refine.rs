@@ -507,6 +507,7 @@ fn query_overlaps(
             config.max_transitive_depth,
             config.min_transitive_len,
             config.min_distance_between_ranges,
+            None, // No min_output_length for refine
             false,
             config.min_identity,
             sequence_index,
@@ -521,6 +522,7 @@ fn query_overlaps(
             config.max_transitive_depth,
             config.min_transitive_len,
             config.min_distance_between_ranges,
+            None, // No min_output_length for refine
             false,
             config.min_identity,
             sequence_index,

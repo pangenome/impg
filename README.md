@@ -129,11 +129,17 @@ impg query -a alignments.1aln -r chr1:1000-2000 -o fasta --sequence-files *.fa -
 # Merge nearby regions (default: 0)
 impg query -a file1.paf file2.1aln -r chr1:1000-2000 -d 1000
 
+# Filter results by minimum length
+impg query -a alignments.paf -r chr1:1000-2000 -l 5000
+
 # Use DFS for transitive search (slower but fewer overlapping results)
 impg query -a alignments.paf -r chr1:1000-2000 --transitive-dfs
 
-# Fast approximate mode for .1aln files (bed/bedpe only, requires explicit -l)
-impg query -a alignments.1aln -r chr1:1000-2000 --approximate -l 150
+# Fast approximate mode for .1aln files (bed/bedpe only)
+impg query -a alignments.1aln -r chr1:1000-2000 --approximate
+
+# Fast approximate mode with transitive queries (requires --min-transitive-len > trace_spacing)
+impg query -a alignments.1aln -r chr1:1000-2000 --approximate -x --min-transitive-len 101
 ```
 
 #### Alignment visualizations
@@ -176,8 +182,11 @@ impg partition -a alignments.1aln -w 1000000 --selection-mode total          # m
 impg partition -a alignments.paf -w 1000000 --selection-mode sample         # by sample (PanSN)
 impg partition -a alignments.1aln -w 1000000 --selection-mode haplotype      # by haplotype (PanSN)
 
-# Control transitive search depth and minimum region size (default -l: 100)
-impg partition -a file1.paf file2.1aln -w 1000000 -m 2 -l 10000
+# Control transitive search depth and minimum region size
+impg partition -a file1.paf file2.1aln -w 1000000 -m 2 --min-transitive-len 10000
+
+# Approximate mode with partition (requires --min-transitive-len > trace_spacing)
+impg partition -a alignments.1aln -w 1000000 --approximate --min-transitive-len 101 -o bed
 # Output as GFA, MAF or FASTA requires sequence files and --separate-files flag
 impg partition -a alignments.paf -w 1000000 -o gfa --sequence-files *.fa --separate-files --output-folder gfa_partitions
 impg partition -a alignments.1aln -w 1000000 -o maf --sequence-list fastas.txt --separate-files --output-folder maf_partitions
@@ -261,8 +270,8 @@ impg refine -a alignments.paf -r chr1:1000-2000 --support-output refine_support.
 # Works with .1aln files too (requires --sequence-files)
 impg refine -a alignments.1aln --sequence-files sequences.fa -r chr1:1000-2000
 
-# Fast approximate mode for .1aln files (requires explicit -l)
-impg refine -a alignments.1aln -r chr1:1000-2000 --approximate -l 150
+# Fast approximate mode for .1aln files (requires --min-transitive-len > trace_spacing)
+impg refine -a alignments.1aln -r chr1:1000-2000 --approximate --min-transitive-len 101
 ```
 
 When `--support-output` is provided, the tool emits a BED file listing every sequence/sample/haplotype that spans the refined region: `sequence	start	end	region-name`.
