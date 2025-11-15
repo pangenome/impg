@@ -268,15 +268,22 @@ struct TransitiveOpts {
     #[clap(short = 'm', long, value_parser, default_value_t = 2)]
     max_depth: u16,
 
-    /// Minimum region size to consider for transitive queries
+    /// Minimum region size to consider for transitive queries (required when using --approximate)
     #[arg(help_heading = "Transitive query options")]
-    #[clap(short = 'l', long, value_parser, default_value_t = 10)]
-    min_transitive_len: i32,
+    #[clap(short = 'l', long, value_parser)]
+    min_transitive_len: Option<i32>,
 
     /// Minimum distance between transitive ranges to consider on the same sequence
     #[arg(help_heading = "Transitive query options")]
     #[clap(long, value_parser, default_value_t = 10)]
     min_distance_between_ranges: i32,
+}
+
+impl TransitiveOpts {
+    /// Get the effective min_transitive_len value (default: 100 for non-approximate mode)
+    fn effective_min_transitive_len(&self) -> i32 {
+        self.min_transitive_len.unwrap_or(100)
+    }
 }
 
 /// Common query and filtering options
@@ -410,6 +417,11 @@ impl RefineOpts {
                 "--extension-step must be > 0",
             ));
         }
+
+        if self.query.approximate {
+            validate_approximate_mode_min_length(self.query.transitive_opts.min_transitive_len)?;
+        }
+
         Ok(())
     }
 }
@@ -891,14 +903,17 @@ fn run() -> io::Result<()> {
             validate_output_format(&output_format, &["bed", "gfa", "maf", "fasta", "fasta-aln"])?;
 
             // Validate --approximate mode compatibility
-            if approximate && output_format != "bed" {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "--approximate mode is only compatible with 'bed' output format for partition, not '{}'",
-                        output_format
-                    ),
-                ));
+            if approximate {
+                if output_format != "bed" {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "--approximate mode is only compatible with 'bed' output format for partition, not '{}'",
+                            output_format
+                        ),
+                    ));
+                }
+                validate_approximate_mode_min_length(transitive_opts.min_transitive_len)?;
             }
 
             validate_region_size(
@@ -954,7 +969,7 @@ fn run() -> io::Result<()> {
                 min_boundary_distance,
                 transitive_opts.transitive_dfs,
                 transitive_opts.max_depth,
-                transitive_opts.min_transitive_len,
+                transitive_opts.effective_min_transitive_len(),
                 transitive_opts.min_distance_between_ranges,
                 &output_format,
                 output_folder.as_deref(),
@@ -1002,6 +1017,27 @@ fn run() -> io::Result<()> {
             // Resolve alignment files once (handles process substitution inputs)
             let alignment_files = resolve_alignment_files(&alignment)?;
 
+            // Early validation for approximate mode (before expensive operations)
+            if query.approximate {
+                // Check that all alignment files are .1aln files
+                let non_onealn_files: Vec<&String> = alignment_files
+                    .iter()
+                    .filter(|f| !f.ends_with(".1aln"))
+                    .collect();
+
+                if !non_onealn_files.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "--approximate mode only works with .1aln alignment files (found {} non-.1aln files).",
+                            non_onealn_files.len()
+                        ),
+                    ));
+                }
+
+                validate_approximate_mode_min_length(query.transitive_opts.min_transitive_len)?;
+            }
+
             // Extract sequence files before consuming gfa_maf_fasta
             let sequence_files_for_impg = gfa_maf_fasta.sequence.resolve_sequence_files()?;
 
@@ -1047,6 +1083,7 @@ fn run() -> io::Result<()> {
                     target_range.1,
                     &impg.seq_index,
                 )?;
+                validate_range_min_length(target_range.0, target_range.1, &name, query.transitive_opts.effective_min_transitive_len())?;
                 validate_region_size(
                     target_range.0,
                     target_range.1,
@@ -1058,8 +1095,9 @@ fn run() -> io::Result<()> {
             } else if let Some(target_bed) = &query.target_bed {
                 let targets = partition::parse_bed_file(target_bed)?;
                 // Validate all entries in the BED file
-                for (seq_name, (start, end), _) in &targets {
+                for (seq_name, (start, end), name) in &targets {
                     validate_sequence_range(seq_name, *start, *end, &impg.seq_index)?;
+                    validate_range_min_length(*start, *end, name, query.transitive_opts.effective_min_transitive_len())?;
                     validate_region_size(
                         *start,
                         *end,
@@ -1084,33 +1122,15 @@ fn run() -> io::Result<()> {
                 output_format.as_str()
             };
 
-            // Validate --approximate mode compatibility
-            if query.approximate {
-                if resolved_output_format != "bed" && resolved_output_format != "bedpe" {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "--approximate mode is only compatible with 'bed' and 'bedpe' output formats, not '{}'",
-                            resolved_output_format
-                        ),
-                    ));
-                }
-
-                // Check that all alignment files are .1aln files
-                let non_onealn_files: Vec<&String> = alignment_files
-                    .iter()
-                    .filter(|f| !f.ends_with(".1aln"))
-                    .collect();
-
-                if !non_onealn_files.is_empty() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "--approximate mode only works with .1aln alignment files (found {} non-.1aln files).",
-                            non_onealn_files.len()
-                        ),
-                    ));
-                }
+            // Validate --approximate mode output format compatibility
+            if query.approximate && resolved_output_format != "bed" && resolved_output_format != "bedpe" {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "--approximate mode is only compatible with 'bed' and 'bedpe' output formats, not '{}'",
+                        resolved_output_format
+                    ),
+                ));
             }
 
             // Extract reverse_complement before moving gfa_maf_fasta
@@ -1308,12 +1328,14 @@ fn run() -> io::Result<()> {
                     target_range.1,
                     &impg.seq_index,
                 )?;
+                validate_range_min_length(target_range.0, target_range.1, &name, refine.query.transitive_opts.effective_min_transitive_len())?;
                 vec![(target_name, target_range, name)]
             } else if let Some(target_bed) = &refine.query.target_bed {
                 let targets = partition::parse_bed_file(target_bed)?;
                 let mut validated = Vec::with_capacity(targets.len());
                 for (seq_name, (start, end), name) in targets {
                     validate_sequence_range(&seq_name, start, end, &impg.seq_index)?;
+                    validate_range_min_length(start, end, &name, refine.query.transitive_opts.effective_min_transitive_len())?;
                     validated.push((seq_name, (start, end), name));
                 }
                 validated
@@ -1344,7 +1366,7 @@ fn run() -> io::Result<()> {
                 use_transitive_bfs: refine.query.transitive,
                 use_transitive_dfs: refine.query.transitive_opts.transitive_dfs,
                 max_transitive_depth: refine.query.transitive_opts.max_depth,
-                min_transitive_len: refine.query.transitive_opts.min_transitive_len,
+                min_transitive_len: refine.query.transitive_opts.effective_min_transitive_len(),
                 min_distance_between_ranges: refine
                     .query
                     .transitive_opts
@@ -1649,6 +1671,33 @@ fn run() -> io::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn validate_approximate_mode_min_length(min_transitive_len_opt: Option<i32>) -> io::Result<()> {
+    // Require explicit -l when using --approximate
+    if min_transitive_len_opt.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--approximate mode requires explicitly setting -l/--min-transitive-len. \
+            Set -l to at least 1.5× your trace_spacing (typically 150 for trace_spacing=100).",
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate that a range meets the minimum length requirement
+fn validate_range_min_length(start: i32, end: i32, range_name: &str, min_transitive_len: i32) -> io::Result<()> {
+    let length = end - start;
+    if length < min_transitive_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Range '{range_name}' ({length} bp) is below minimum of {min_transitive_len} bp. Lower -l/--min-transitive-len or use a longer range"
+            ),
+        ));
+    }
     Ok(())
 }
 
@@ -2225,7 +2274,7 @@ fn perform_query(
             target_end,
             None,
             transitive_opts.max_depth,
-            transitive_opts.min_transitive_len,
+            transitive_opts.effective_min_transitive_len(),
             transitive_opts.min_distance_between_ranges,
             store_cigar,
             min_identity,
@@ -2239,7 +2288,7 @@ fn perform_query(
             target_end,
             None,
             transitive_opts.max_depth,
-            transitive_opts.min_transitive_len,
+            transitive_opts.effective_min_transitive_len(),
             transitive_opts.min_distance_between_ranges,
             store_cigar,
             min_identity,

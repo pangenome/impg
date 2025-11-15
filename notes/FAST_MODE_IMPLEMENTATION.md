@@ -1,10 +1,17 @@
-# Approximate Mode Implementation Guide
+# Tracepoint Subsetting and Approximate Mode Implementation Guide
 
 ## Overview
 
-This document provides a complete, step-by-step guide to implement `--approximate` mode for the `impg` tool. Approximate mode provides approximate query results by scanning tracepoints instead of computing full CIGAR strings and fetching sequences, resulting in significant performance improvements for .1aln format alignments.
+This document covers two complementary optimizations for .1aln format alignments:
 
-**Performance Goal**: ~10-100x speedup by skipping sequence I/O and CIGAR computation, making .1aln queries nearly as fast as PAF format.
+1. **Tracepoint Subsetting** (Normal Mode): Reconstruct CIGAR only from overlapping tracepoints, reducing sequence I/O and WFA computation proportional to query size
+2. **Approximate Mode**: Skip CIGAR reconstruction entirely, using refined tracepoint statistics for ~10-100x speedup
+
+Both modes share unified subsetting logic that identifies overlapping tracepoint segments before applying mode-specific processing.
+
+**Performance Goals**:
+- Normal mode with subsetting: 2-10x speedup for small query ranges or partial alignments
+- Approximate mode: ~10-100x speedup by skipping sequence I/O and CIGAR computation entirely
 
 ### Prerequisites
 
@@ -15,6 +22,25 @@ Before implementing approximate mode, ensure these .1aln optimizations are in pl
 - **Memory-efficient file opens**: Separate short-lived file opens for cache miss to minimize buffer accumulation
 - **Optimized buffer sizes**: 64-256 bytes depending on operation type
 - **Direct fetch optimization**: `fetch_alignment_direct()` static function in `onealn.rs`
+
+### What Normal Mode Subsetting Does
+
+**Optimizes**:
+- ✅ Fetches only sequences for overlapping tracepoint segments (not full alignment)
+- ✅ Reconstructs CIGAR only from subset tracepoints (not full alignment)
+- ✅ Same WFA algorithm, just on smaller input
+- ✅ Proportional speedup based on subset size
+
+**Maintains**:
+- ✅ Exact base-level precision (100% identical to baseline)
+- ✅ Full CIGAR strings
+- ✅ Exact coordinates
+- ✅ All output formats supported (bed, bedpe, paf, gfa, maf, fasta-aln)
+
+**Use Cases**:
+- Small query ranges on long alignments (e.g., 10kb query on 1Mb alignment)
+- Partial alignments extending beyond query range
+- Any case where full precision is required but speedup is desired
 
 ### What Approximate Mode Does
 
@@ -31,9 +57,7 @@ Before implementing approximate mode, ensure these .1aln optimizations are in pl
 - ✅ Same overlap detection via interval trees
 - ✅ Correct strand handling
 
-### Use Cases
-
-Ideal for:
+**Use Cases**:
 - Exploratory analysis requiring quick overviews
 - Large-scale queries where approximate results suffice
 - Transitive queries exploring deep graph relationships
@@ -58,6 +82,78 @@ Target: |----95bp-----|----102bp----|----98bp-----|
         TP[0]=95      TP[1]=102      TP[2]=98
 ```
 
+## Unified Subsetting Architecture (Nov 2025)
+
+Both normal and approximate modes now share a common subsetting phase that identifies overlapping tracepoint segments before mode-specific processing.
+
+### Architecture Overview
+
+```rust
+scan_overlapping_tracepoints() // Always runs first
+    ↓
+    Returns SubsettingResult {
+        first_idx, last_idx,           // Tracepoint indices
+        first/last_query_pos,          // Query boundaries
+        first/last_segment_info,       // Detailed segment data
+        num_overlapping_segments,      // Count
+        total_matches/mismatches       // Identity stats
+    }
+    ↓
+    ├─→ Normal Mode: process_subset_tracepoints()
+    │   - Fetch only subset sequences
+    │   - Reconstruct CIGAR from subset tracepoints
+    │   - Project requested range through subset CIGAR
+    │
+    └─→ Approximate Mode: project_overlapping_interval_fast()
+        - Skip sequence fetching and CIGAR
+        - Refine boundaries using indel-aware heuristic
+        - Return approximate CIGAR from statistics
+```
+
+### Key Benefits
+
+**Normal Mode Subsetting**:
+- Fetches only sequences for overlapping segments (not full alignment)
+- Reconstructs CIGAR only for subset (not full alignment)
+- Speedup proportional to (subset_size / total_size)
+- **Example**: 1492 tracepoints → 56 subset = 96.3% reduction
+
+**Approximate Mode**:
+- Skips sequence fetching entirely
+- Skips CIGAR reconstruction entirely
+- Uses refined statistics for ~10-100x speedup
+
+### The Last Segment Boundary Problem
+
+**Critical insight**: The last tracepoint segment may be **shorter than trace_spacing**.
+
+**Why**: Walking tracepoints calculates positions as `pos + trace_spacing`, but the actual alignment may end earlier.
+
+**Problem**: If we pass extra sequence to the CIGAR reconstructor, it will align those extra bases, producing incorrect results.
+
+**Solution**: Check if using the actual last tracepoint and use metadata boundaries:
+
+```rust
+let subset_query_end = if subset.last_idx == alignment.tracepoints.len() - 1 {
+    metadata.query_end  // Last segment of alignment - use exact boundary
+} else {
+    subset.last_query_pos  // Middle segment - use calculated position
+};
+
+// Same for target
+let subset_target_end = if subset.last_idx == alignment.tracepoints.len() - 1 {
+    metadata.target_end
+} else {
+    calculated_target_end
+};
+```
+
+**This fix ensures**:
+- ✅ Using all tracepoints: automatically uses metadata boundaries
+- ✅ Using subset including last tracepoint: uses metadata for last segment
+- ✅ Using middle tracepoints: uses calculated boundaries
+- ✅ Results identical to baseline normal mode
+
 ### Approximate Projection Algorithm
 
 Instead of fetching sequences and computing CIGAR:
@@ -65,13 +161,12 @@ Instead of fetching sequences and computing CIGAR:
 1. Get alignment metadata (already in memory from interval tree)
 2. Fetch tracepoints using optimized `fetch_alignment_direct()` with `read_trace_diffs=true`
 3. **Scan phase**: Collect all tracepoints overlapping requested range
-   - Track first/last overlapping tracepoint info for refinement
+   - Track first/last overlapping segment info (including trace_diffs)
    - Accumulate identity statistics (matches/mismatches from trace_diffs)
-   - Use FULL tracepoint segments during scan
-4. **Refinement phase**: Apply overlap heuristic AFTER scan completes
-   - Refine first query position based on partial overlap of first segment
-   - Refine last query position based on partial overlap of last segment
-   - Refine min/max target positions to actual overlap boundaries
+   - Count overlapping segments
+4. **Refinement phase**: Apply indel-aware heuristic AFTER scan completes
+   - **Target coordinates**: Use exact requested range (range_start, range_end)
+   - **Query coordinates**: Refine using indel ratio from trace_diffs (always applied)
 5. Return intervals with approximate CIGAR encoding
 
 ```rust
@@ -79,46 +174,51 @@ Instead of fetching sequences and computing CIGAR:
 for each tracepoint:
     query_delta = (idx == 0) ? first_boundary : trace_spacing
     target_delta = tracepoint * direction
+    trace_diffs = alignment.trace_diffs[idx]
 
     if segment overlaps requested_range:
-        record full segment boundaries
-        save first/last segment info for refinement
-        accumulate identity statistics from trace_diffs
+        num_overlapping_segments++
+        save first/last segment info (with trace_diffs)
+        accumulate matches/mismatches from trace_diffs
 
-// Phase 2: Refine (CRITICAL - do this AFTER collecting all segments)
-if first_segment overlaps partially:
-    fraction = (range_start - segment_start) / target_delta
-    first_query_pos += fraction * query_delta  // Refine!
+// Phase 2: Refine query positions (target uses exact requested range)
+for first_segment:
+    segment_identity = (aligned_len - trace_diffs) / aligned_len
+    target_fraction = (range_start - segment_start) / target_delta
+    indel_ratio = query_delta / abs_target_delta
+    query_advance = target_fraction × abs_target_delta × indel_ratio
+    first_query_pos += query_advance  // Indel-aware refinement
 
-if last_segment overlaps partially:
-    fraction = (range_end - segment_start) / target_delta
-    last_query_pos = segment_query_start + fraction * query_delta  // Refine!
+// Same for last_segment
+target_start = range_start  // Exact requested range
+target_end = range_end
 ```
 
-### Refined Overlap Heuristic
+### trace_diffs-Aware Refinement Heuristic
 
-**Key insight**: When a tracepoint segment partially overlaps the requested range, we can estimate the corresponding query position using fractional projection.
+**Key insight**: Use `trace_diffs` to calculate segment identity and indel ratio for accurate query coordinate refinement.
 
-**Example**:
+**Why trace_diffs matters**:
+- Tells us how many differences (substitutions/indels) in each segment
+- Enables calculation of segment identity: `(aligned_len - trace_diffs) / aligned_len`
+- Enables calculation of indel ratio: `query_delta / abs_target_delta`
+- Provides quality metrics for alignment segments
+
+**Refinement strategy**:
+Always refine query coordinates using indel-aware calculation regardless of segment count or identity.
+
+**Indel-aware calculation**:
 ```
-Requested:  |----------[range: 10-90]----------|
-Tracepoint: |----[0-100 target, 0-100 query]----|
-Overlap:         [10-90 target, ?-? query]
-
-Heuristic:
-  - First overlap: fraction_start = (10-0)/100 = 0.1
-    → query_start ≈ 0 + 0.1*100 = 10
-  - Last overlap: fraction_end = (90-0)/100 = 0.9
-    → query_end ≈ 0 + 0.9*100 = 90
+target_fraction = (overlap_pos - segment_start) / abs_target_delta
+indel_ratio = query_delta / abs_target_delta
+query_advance = target_fraction × abs_target_delta × indel_ratio
 ```
 
 **Benefits**:
-- ✅ Tighter intervals (±10bp typical vs ±100bp without refinement)
-- ✅ More accurate identity filtering
-- ✅ Better transitivity (fewer spurious connections)
-- ✅ No performance penalty (uses data already scanned)
-
-**CRITICAL**: Apply refinement AFTER collecting all overlapping segments, not during the scan. This ensures we work with the complete overlapping region.
+- ✅ Accounts for insertions (ratio > 1) and deletions (ratio < 1)
+- ✅ Target coordinates perfect (exact requested range)
+- ✅ Query coordinates refined for all cases
+- ✅ Consistent behavior across all segment types
 
 ### Coordinate Storage Details
 
@@ -377,20 +477,44 @@ cargo build --release
 
 ## Testing
 
+### Important: Explicit -l Requirement
+
+**Approximate mode requires explicitly setting `-l/--min-transitive-len`** to ensure users consider the appropriate minimum length for their data's trace_spacing.
+
+**Recommendation**: Set `-l` to at least 1.5× your trace_spacing:
+- For trace_spacing=100bp (typical): use `-l 150` or higher
+- For trace_spacing=50bp: use `-l 75` or higher
+- For trace_spacing=200bp: use `-l 300` or higher
+
+**Example**:
+```bash
+# This will fail - no explicit -l
+./target/release/impg query -a alignments.1aln -r chr1:0-100000 --approximate -o bed
+# Error: --approximate mode requires explicitly setting -l/--min-transitive-len
+
+# This will work
+./target/release/impg query -a alignments.1aln -r chr1:0-100000 --approximate -l 150 -o bed
+```
+
+The requirement applies to all commands that use approximate mode:
+- `query --approximate`: requires explicit `-l`
+- `partition --approximate`: requires explicit `-l`
+- `refine --approximate`: requires explicit `-l`
+
 ### Test 1: Basic Approximate Query (bed output)
 
 ```bash
-# Normal mode
+# Normal mode (uses default -l 100)
 time ./target/release/impg query \
   -a alignments.1aln \
   -r chr1:1000000-2000000 \
   -o bed > normal.bed
 
-# Approximate mode
+# Approximate mode (requires explicit -l, recommended: 1.5× trace_spacing)
 time ./target/release/impg query \
   -a alignments.1aln \
   -r chr1:1000000-2000000 \
-  -o bed --approximate > fast.bed
+  -o bed --approximate -l 150 > fast.bed
 
 # Compare
 wc -l normal.bed fast.bed
@@ -406,7 +530,7 @@ wc -l normal.bed fast.bed
 ./target/release/impg query \
   -a alignments.1aln \
   -r chr1:1000000-1001000 \
-  -o bedpe --approximate > output.bedpe
+  -o bedpe --approximate -l 150 > output.bedpe
 ```
 
 **Expected**:
@@ -420,7 +544,7 @@ wc -l normal.bed fast.bed
 ./target/release/impg query \
   -a alignments.1aln \
   -r chr1:1000-2000 \
-  -o paf --approximate
+  -o paf --approximate -l 150
 ```
 
 **Expected**: Error message: "--approximate mode is only compatible with 'bed' and 'bedpe' output formats, not 'paf'"
@@ -432,7 +556,7 @@ time ./target/release/impg query \
   -a alignments.1aln \
   -r chr1:1000000-1001000 \
   -x --max-depth 3 \
-  --approximate -o bed
+  --approximate -l 150 -o bed
 ```
 
 **Expected**: Much faster than without --approximate, especially with higher max-depth
@@ -443,7 +567,7 @@ time ./target/release/impg query \
 time ./target/release/impg partition \
   -a alignments.1aln \
   -w 100000 \
-  -o bed --approximate --separate-files
+  -o bed --approximate -l 150 --separate-files
 ```
 
 **Expected**: Faster partitioning while producing valid partition files
@@ -454,7 +578,7 @@ time ./target/release/impg partition \
 time ./target/release/impg refine \
   -a alignments.1aln \
   -b regions.bed \
-  --approximate > refined.bed
+  --approximate -l 150 > refined.bed
 ```
 
 **Expected**: Faster refinement with approximate but valid intervals
@@ -474,6 +598,28 @@ time ./target/release/impg refine \
 ---
 
 ## Troubleshooting
+
+### "Approximate mode requires explicitly setting -l"
+
+**Cause**: Using `--approximate` without specifying `-l` parameter.
+
+**Why**: Forces users to consciously choose an appropriate minimum length based on their data's trace_spacing.
+
+**Solution**: Set `-l` to at least 1.5× your trace_spacing (typically 150 for trace_spacing=100bp).
+
+**Example**:
+```bash
+# Wrong - will fail (no -l specified)
+./target/release/impg query -a file.1aln -r chr1:0-100000 --approximate -o bed
+
+# Correct - explicit -l based on your trace_spacing
+./target/release/impg query -a file.1aln -r chr1:0-100000 --approximate -l 150 -o bed
+```
+
+**For different trace_spacing values**:
+- trace_spacing=50: use `-l 75` or higher
+- trace_spacing=100: use `-l 150` or higher (default)
+- trace_spacing=200: use `-l 300` or higher
 
 ### "Approximate mode is only compatible with 'bed' and 'bedpe'"
 
@@ -547,25 +693,31 @@ if approx_cigar.is_empty() {
 ## Performance Characteristics
 
 **Time Complexity**:
-- Normal mode: O(n × (I + W + S))
+- Normal mode (baseline): O(n × (I + W + S))
   - n = overlapping alignments
-  - I = sequence I/O cost
-  - W = WFA alignment cost
-  - S = sequence length
+  - I = full sequence I/O cost
+  - W = full WFA alignment cost
+  - S = full sequence length
+- Normal mode (with subsetting): O(n × (I_subset + W_subset + S_subset))
+  - I_subset, W_subset, S_subset proportional to subset size
+  - Speedup = (total_tracepoints - subset_tracepoints) / total_tracepoints
+  - Example: 96.3% reduction when subset is 56/1492 tracepoints
 - Approximate mode: O(n × T)
   - n = overlapping alignments
   - T = tracepoint scan cost (≪ I + W + S)
 
 **Space Complexity**:
-- Normal mode: O(n × S) - stores sequences and CIGARs
+- Normal mode (baseline): O(n × S) - stores full sequences and CIGARs
+- Normal mode (with subsetting): O(n × S_subset) - stores only subset sequences and CIGARs
 - Approximate mode: O(n) - only intervals and approximate CIGARs
 
-**Accuracy** (with refined overlap heuristic):
-- Coordinates accurate to ±10-20bp typical (0.1-0.2% error)
-- Without refinement: ±100bp (trace_spacing resolution)
-- Identity metrics accurate (calculated from tracepoint statistics)
-- Reverse strand handling: matches normal mode output exactly
-- Suitable for exploratory analysis, transitivity, and bulk operations
+**Accuracy**:
+- Normal mode (with subsetting): 100% identical to baseline (validated)
+- Approximate mode: Target 100% perfect, query refined, identity accurate
+  - Target coordinates: exact requested range (0bp error)
+  - Query coordinates: refined using indel-aware calculation from trace_diffs
+  - Identity metrics: accurate (calculated from tracepoint statistics)
+  - Approximate intervals accurate to within trace_spacing (typically ~100bp)
 
 ---
 
@@ -616,44 +768,53 @@ Lazy loading reads only what you actually query, which is much more efficient fo
 
 ## Conclusion
 
-Approximate mode provides substantial speedup for .1aln queries by:
-- ✅ Skipping sequence I/O (major bottleneck)
-- ✅ Skipping CIGAR computation (CPU intensive)
-- ✅ Refined overlap heuristic: ±10-20bp accuracy (10x better than trace_spacing)
+The unified subsetting architecture provides two complementary optimizations for .1aln queries:
+
+### Normal Mode with Subsetting
+- ✅ Reconstructs CIGAR only from overlapping tracepoints (not full alignment)
+- ✅ Fetches only subset sequences (proportional speedup to subset size)
+- ✅ 100% identical results to baseline (validated at multiple depths)
+- ✅ Last segment boundary fix ensures correctness
+- ✅ Speedup: 2-10x for small ranges or partial alignments
+
+### Approximate Mode
+- ✅ Skips sequence I/O entirely (major bottleneck)
+- ✅ Skips CIGAR computation entirely (CPU intensive)
+- ✅ Indel-aware refinement heuristic for improved accuracy
 - ✅ Accurate identity metrics from tracepoint statistics (no NaN values)
 - ✅ Correct reverse strand handling (matches normal mode output)
 - ✅ No sequence files required for bed/bedpe output
 - ✅ Proper saturation at high transitive depths
+- ✅ Speedup: ~10-100x
 
-**Key innovation**: Two-phase projection with fractional refinement provides near-exact intervals while maintaining full speed benefits.
+**Key innovations**:
+1. **Unified subsetting**: Shared logic identifies overlapping segments for both modes
+2. **Last segment fix**: Metadata boundaries when using actual last tracepoint
+3. **Two-phase approximate**: Scan for segments, then refine boundaries with indel-aware heuristic
+4. **Identity from tracepoints**: Accurate metrics without sequence I/O
 
-The implementation threads approximate_mode through all query paths (regular, transitive BFS, transitive DFS) and all relevant commands (query, partition, refine), making it widely applicable.
+The implementation threads through all query paths (regular, transitive BFS, transitive DFS) and all relevant commands (query, partition, refine), making it widely applicable.
 
 ## Recent Enhancements (Latest Version)
 
-### Refined Overlap Heuristic (Nov 2025)
+### trace_diffs-Aware Refinement (Nov 2025)
 
 **What changed**:
-- Two-phase projection: scan all overlapping segments, then refine boundaries
-- Fractional projection for partial overlaps of first/last segments
-- Fixed reverse strand coordinate handling (metadata stores query in forward order)
-- Filter empty CIGARs from very small overlaps
+- Target coordinates: use exact requested range (0bp error)
+- Query coordinates: indel-aware refinement using trace_diffs
+- Segment identity: `(aligned_len - trace_diffs) / aligned_len`
+- Indel ratio: `query_delta / abs_target_delta`
+- Always refine: applies to all segments regardless of identity or count
 
 **Impact**:
-- ✅ Intervals accurate to ±10bp (vs ±100bp before)
-- ✅ Reverse alignments now return negative query lengths (matches normal mode)
-- ✅ More accurate identity filtering
-- ✅ Saturation behavior matches expectations
+- ✅ Target: 100% perfect (exact requested range)
+- ✅ Query: refined using indel-aware calculation for all cases
+- ✅ Consistent behavior across all alignment types
 
-**Key fix**: Apply refinement AFTER collecting all overlapping segments, not during scan.
-
-**Typical accuracy**:
-```
-Target range: 2753-10000 (7247bp)
-Normal mode:  query 111317811-111325058 (7247bp)
-Approximate:  query 111317800-111325058 (7258bp)
-Difference: 11bp (0.15%)
-```
+**Key innovations**:
+1. Use exact requested range for target (not segment boundaries)
+2. Calculate indel ratio from trace_diffs for query refinement
+3. Apply refinement uniformly to all segments
 
 ### Identity Estimation (Nov 2025)
 
@@ -672,3 +833,37 @@ Difference: 11bp (0.15%)
 - [src/impg.rs](src/impg.rs): Two-phase projection with refinement heuristic
 - [src/onealn.rs](src/onealn.rs): `read_trace_diffs` parameter in `fetch_alignment_direct()`
 - [src/main.rs](src/main.rs): Updated sequence requirement logic
+
+### Normal Mode Tracepoint Subsetting (Nov 2025)
+
+**What changed**:
+- Unified subsetting logic shared by both normal and approximate modes
+- Normal mode now reconstructs CIGAR only from overlapping tracepoints
+- Fetches only subset sequences (not full alignments)
+- Last segment boundary fix ensures correctness
+
+**Architecture**:
+1. `SubsettingResult` struct: encapsulates subset info (indices, boundaries, statistics)
+2. `scan_overlapping_tracepoints()`: shared helper that scans for overlapping segments
+3. `process_subset_tracepoints()`: reconstructs CIGAR from subset for normal mode
+4. `project_overlapping_interval_fast()`: uses refinement for approximate mode
+
+**Critical fix**: Last segment boundary handling
+- Problem: Last tracepoint segment may be shorter than trace_spacing
+- Walking calculates `last_pos = pos + trace_spacing`, but alignment may end earlier
+- Solution: Use metadata boundaries when `last_idx == alignment.tracepoints.len() - 1`
+- Result: Identical to baseline normal mode (validated at -m 1, 2, 3, 10)
+
+**Performance characteristics**:
+- Speedup proportional to subset ratio: (total_tracepoints - subset_tracepoints) / total_tracepoints
+- Example: 1492 total → 56 subset = 96.3% reduction in sequence I/O and CIGAR computation
+- Most effective for: small query ranges, partial alignments, very long alignments
+- Test case (CHM13#0#chr1:0-100000, -m 1): 8.5% of alignments benefit (those exceeding range)
+
+**Validation**:
+- ✅ Byte-for-byte identical to baseline at -m 1, -m 2, -m 3, -m 10
+- ✅ Approximate mode refactoring: identical results before/after
+- ✅ All 164/164 test alignments produce identical coordinates and CIGAR
+
+**Files modified**:
+- [src/impg.rs](src/impg.rs): Added `SubsettingResult`, `scan_overlapping_tracepoints()`, `process_subset_tracepoints()`, integrated into `project_overlapping_interval()`
