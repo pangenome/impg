@@ -13,7 +13,7 @@ coitrees = "0.4.0"
 num_cpus = "1.17.0"
 rayon = "1.11.0"
 noodles = { version = "0.100.0", features = ["bgzf"] }
-regex = "1.11.2"
+regex = "1.12.2"
 log = "0.4.28"
 env_logger = "0.11.8"
 natord = "1.0.9"
@@ -21,12 +21,21 @@ rustc-hash = "2.1.1"
 libc = "0.2.177"
 nalgebra = "0.33.2"
 indicatif = "0.18.2"
-
-agc-rs = { git = "https://github.com/pangenome/agc-rs.git", optional = true }
 spoa_rs = { git = "https://github.com/AndreaGuarracino/spoa-rs.git" }
 rust-htslib = { version = "0.46.0", default-features = false } # Don't update it, see https://github.com/rust-bio/rust-htslib/issues/434
 
-# Additional dependencies for lace functionality
+# Dependencies for AGC format (for sequences) support
+agc-rs = { git = "https://github.com/pangenome/agc-rs.git", optional = true }
+
+# Dependencies for 1aln format (for alignments) support
+lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2"}
+#lib_wfa2 = { path = "/home/guarracino/Dropbox/git//lib_wfa2"}
+lib_tracepoints = { git = "https://github.com/AndreaGuarracino/lib_tracepoints"}
+#lib_tracepoints = { path = "/home/guarracino/Dropbox/git/lib_tracepoints"}
+#onecode = { path = "/home/guarracino/git/onecode-rs" }
+onecode = { git = "https://github.com/pangenome/onecode-rs", rev = "38182c7acf7cccc53509176b1d11001ae6ff2642"}
+
+# Dependencies for lace functionality
 handlegraph = { git = "https://github.com/chfi/rs-handlegraph", rev = "3ac575e4216ce16a16667503a8875e469a40a97a" }
 bitvec = "1.0.1"
 niffler = "3.0.0"

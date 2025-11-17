@@ -19,21 +19,6 @@ use std::sync::{Arc, Mutex};
 use tempfile::NamedTempFile;
 use zstd::stream::Encoder as ZstdEncoder;
 
-// use std::process::Command;
-// #[cfg(not(debug_assertions))]
-// fn log_memory_usage(stage: &str) {
-//     let output = Command::new("ps")
-//         .args(&["-o", "rss=", "-p", &std::process::id().to_string()])
-//         .output()
-//         .expect("Failed to execute ps command");
-//     let memory_kb = String::from_utf8_lossy(&output.stdout)
-//         .trim()
-//         .parse::<u64>()
-//         .unwrap_or(0);
-//     let memory_mb = memory_kb as f64 / 1024.0;
-//     info!("Memory usage at {}: {:.2} MB", stage, memory_mb);
-// }
-
 fn get_compression_format(compress_arg: &str, output_path: &str) -> Format {
     match compress_arg.to_lowercase().as_str() {
         "none" => Format::No,
@@ -263,14 +248,10 @@ pub fn run_gfa_lace(
         }
     }
 
-    // log_memory_usage("start");
-
     // Create a single combined graph without paths and a map of path key to ranges
     info!("Collecting metadata from {} GFA files", gfa_files.len());
     let (combined_graph, mut path_key_ranges) =
         read_gfa_files(&gfa_files, temp_dir.as_deref(), skip_validation)?;
-
-    // log_memory_usage("after_reading_files");
 
     // Sort and deduplicate path ranges in parallel
     info!(
@@ -317,8 +298,6 @@ pub fn run_gfa_lace(
         combined_graph.edges.len()
     );
 
-    // log_memory_usage("before_writing");
-
     // Write the combined graph to output
     match write_graph_to_gfa(
         &mut combined_graph,
@@ -334,8 +313,6 @@ pub fn run_gfa_lace(
         ),
         Err(e) => error!("Error writing the GFA file: {e}"),
     }
-
-    // log_memory_usage("end");
 
     Ok(())
 }
@@ -1046,9 +1023,7 @@ fn write_graph_to_gfa(
                     // Use parallel gzip compression
                     let parz: ParCompress<Gzip> = ParCompressBuilder::new()
                         .num_threads(rayon::current_num_threads())
-                        .map_err(|e| {
-                            std::io::Error::other(format!("Failed to set threads: {e:?}"))
-                        })?
+                        .map_err(|e| std::io::Error::other(format!("Failed to set threads: {e}")))?
                         .compression_level(Compression::new(6))
                         .from_writer(output_file);
                     Box::new(parz)
@@ -1057,9 +1032,7 @@ fn write_graph_to_gfa(
                     // Use parallel BGZF compression
                     let parz: ParCompress<Bgzf> = ParCompressBuilder::new()
                         .num_threads(rayon::current_num_threads())
-                        .map_err(|e| {
-                            std::io::Error::other(format!("Failed to set threads: {e:?}"))
-                        })?
+                        .map_err(|e| std::io::Error::other(format!("Failed to set threads: {e}")))?
                         .compression_level(Compression::new(6))
                         .from_writer(output_file);
                     Box::new(parz)
@@ -1774,9 +1747,7 @@ fn write_merged_vcf(
                 Format::Gzip => {
                     let parz: ParCompress<Gzip> = ParCompressBuilder::new()
                         .num_threads(rayon::current_num_threads())
-                        .map_err(|e| {
-                            std::io::Error::other(format!("Failed to set threads: {e:?}"))
-                        })?
+                        .map_err(|e| std::io::Error::other(format!("Failed to set threads: {e}")))?
                         .compression_level(Compression::new(6))
                         .from_writer(output_file);
                     Box::new(parz)
