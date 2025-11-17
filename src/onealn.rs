@@ -15,6 +15,7 @@ pub struct OneAlnParser {
     metadata: OneAlnMetadata,
 }
 
+#[derive(Default)]
 struct OneAlnMetadata {
     // Query genome (gdb1 - first reference, or embedded if self-alignment)
     query_seq_names: HashMap<i64, String>,
@@ -27,18 +28,6 @@ struct OneAlnMetadata {
     target_contig_offsets: HashMap<i64, (i64, i64)>,
 }
 
-impl Default for OneAlnMetadata {
-    fn default() -> Self {
-        Self {
-            query_seq_names: HashMap::new(),
-            query_seq_lengths: HashMap::new(),
-            query_contig_offsets: HashMap::new(),
-            target_seq_names: HashMap::new(),
-            target_seq_lengths: HashMap::new(),
-            target_contig_offsets: HashMap::new(),
-        }
-    }
-}
 
 /// Error type for 1aln parsing
 #[derive(Debug)]
@@ -261,7 +250,7 @@ impl OneAlnParser {
             .unwrap_or_else(|| std::path::Path::new("."));
 
         // Only load what's missing
-        for (_ref_idx, (ref_path, ref_count)) in references.iter().enumerate() {
+        for (ref_path, ref_count) in references.iter() {
             if ref_path.is_empty() {
                 continue;
             }

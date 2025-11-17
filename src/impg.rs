@@ -37,8 +37,8 @@ use std::sync::{Arc, RwLock};
 
 thread_local! {
     static EDIT_ALIGNER: RefCell<Option<AffineWavefronts>> = const { RefCell::new(None) };
-    static ONEALN_HANDLE: RefCell<Option<(usize, OneFile)>> = RefCell::new(None);
-    static TARGET_SEQ_CACHE: RefCell<Option<((u32, i32, i32, bool), Vec<u8>)>> = RefCell::new(None);
+    static ONEALN_HANDLE: RefCell<Option<(usize, OneFile)>> = const { RefCell::new(None) };
+    static TARGET_SEQ_CACHE: RefCell<Option<((u32, i32, i32, bool), Vec<u8>)>> = const { RefCell::new(None) };
 }
 
 /// Execute a closure with a thread-local edit distance mode aligner
@@ -595,9 +595,7 @@ impl Impg {
         }
 
         // Return None if no overlapping segments found
-        if first_idx.is_none() {
-            return None;
-        }
+        first_idx?;
 
         Some(SubsettingResult {
             first_idx: first_idx.unwrap(),
