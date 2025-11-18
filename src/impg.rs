@@ -524,18 +524,19 @@ impl Impg {
 
         // Calculate first boundary: FASTGA-style first segment length
         let query_start_in_contig = alignment.query_contig_start as i32;
-        let first_boundary = ((query_start_in_contig / trace_spacing) + 1) * trace_spacing - query_start_in_contig;
+        let first_boundary =
+            ((query_start_in_contig / trace_spacing) + 1) * trace_spacing - query_start_in_contig;
 
         // Metadata stores query coords in FORWARD order for both strands
         let working_query_start = metadata.query_start;
 
         // Initialize scanning positions
         let mut target_pos = if is_reverse {
-            metadata.target_end  // Start from target end, scan backward
+            metadata.target_end // Start from target end, scan backward
         } else {
             metadata.target_start
         };
-        let mut query_pos = working_query_start;  // Always start from working start
+        let mut query_pos = working_query_start; // Always start from working start
         let target_dir = if is_reverse { -1 } else { 1 };
 
         // Track overlapping segments
@@ -554,7 +555,11 @@ impl Impg {
         // Scan tracepoints and collect those that overlap the requested range
         for (idx, &tracepoint) in alignment.tracepoints.iter().enumerate() {
             // Calculate deltas for this segment
-            let query_delta = if idx == 0 { first_boundary } else { trace_spacing };
+            let query_delta = if idx == 0 {
+                first_boundary
+            } else {
+                trace_spacing
+            };
             let target_delta = (tracepoint as i32) * target_dir;
             let abs_target_delta = tracepoint.abs() as i32;
 
@@ -566,7 +571,14 @@ impl Impg {
             if seg_start < range_end && seg_end > range_start {
                 num_overlapping_segments += 1;
                 let num_diffs = alignment.trace_diffs[idx] as i32;
-                let seg_info = (query_pos, query_delta, seg_start, seg_end, abs_target_delta, num_diffs);
+                let seg_info = (
+                    query_pos,
+                    query_delta,
+                    seg_start,
+                    seg_end,
+                    abs_target_delta,
+                    num_diffs,
+                );
 
                 // Track first and last overlapping segments
                 if first_query_pos.is_none() {
@@ -589,7 +601,8 @@ impl Impg {
             query_pos += query_delta;
 
             // Early exit when past requested range
-            if (is_reverse && target_pos <= range_start) || (!is_reverse && target_pos >= range_end) {
+            if (is_reverse && target_pos <= range_start) || (!is_reverse && target_pos >= range_end)
+            {
                 break;
             }
         }
@@ -686,7 +699,8 @@ impl Impg {
         let is_reverse = metadata.strand() == Strand::Reverse;
 
         // Extract subset tracepoints [first_idx..=last_idx]
-        let subset_tracepoints: Vec<(usize, usize)> = alignment.trace_diffs[subset.first_idx..=subset.last_idx]
+        let subset_tracepoints: Vec<(usize, usize)> = alignment.trace_diffs
+            [subset.first_idx..=subset.last_idx]
             .iter()
             .zip(alignment.tracepoints[subset.first_idx..=subset.last_idx].iter())
             .map(|(&diff, &tp)| (diff as usize, tp as usize))
@@ -698,21 +712,25 @@ impl Impg {
         // If last_idx is the actual last tracepoint of the alignment, the last
         // segment may be shorter than trace_spacing. Use metadata boundary.
         let subset_query_end = if subset.last_idx == alignment.tracepoints.len() - 1 {
-            metadata.query_end  // Last segment of alignment - use exact boundary
+            metadata.query_end // Last segment of alignment - use exact boundary
         } else {
-            subset.last_query_pos  // Middle segment - use calculated position
+            subset.last_query_pos // Middle segment - use calculated position
         };
 
         // For target: extract from first/last segment info (seg_start, seg_end already in forward space)
         let (_, _, first_seg_start, first_seg_end, _, _) = subset.first_segment_info;
         let (_, _, last_seg_start, last_seg_end, _, _) = subset.last_segment_info;
-        let subset_target_start = first_seg_start.min(first_seg_end).min(last_seg_start.min(last_seg_end));
+        let subset_target_start = first_seg_start
+            .min(first_seg_end)
+            .min(last_seg_start.min(last_seg_end));
 
         // If last_idx is the actual last tracepoint, use metadata target boundary
         let subset_target_end = if subset.last_idx == alignment.tracepoints.len() - 1 {
-            metadata.target_end  // Last segment of alignment - use exact boundary
+            metadata.target_end // Last segment of alignment - use exact boundary
         } else {
-            first_seg_start.max(first_seg_end).max(last_seg_start.max(last_seg_end))  // Middle segment - use calculated
+            first_seg_start
+                .max(first_seg_end)
+                .max(last_seg_start.max(last_seg_end)) // Middle segment - use calculated
         };
 
         // Fetch only subset sequences
@@ -732,10 +750,10 @@ impl Impg {
         );
 
         // Adjust contig offsets for the subset
-        let adjusted_query_offset = alignment.query_contig_start as usize +
-            (subset_query_start - metadata.query_start) as usize;
-        let adjusted_target_offset = alignment.target_contig_start as usize +
-            (subset_target_start - metadata.target_start) as usize;
+        let adjusted_query_offset = alignment.query_contig_start as usize
+            + (subset_query_start - metadata.query_start) as usize;
+        let adjusted_target_offset = alignment.target_contig_start as usize
+            + (subset_target_start - metadata.target_start) as usize;
 
         // Reconstruct CIGAR for subset only
         let trace_spacing = alignment.trace_spacing as usize;
@@ -780,8 +798,9 @@ impl Impg {
             let sequence_index = sequence_index.unwrap();
 
             // Fetch alignment with tracepoints
-            let alignment = self.get_onealn_alignment(metadata)
-                .unwrap_or_else(|e| panic!("Subsetting failed: cannot fetch .1aln alignment: {}", e));
+            let alignment = self.get_onealn_alignment(metadata).unwrap_or_else(|e| {
+                panic!("Subsetting failed: cannot fetch .1aln alignment: {}", e)
+            });
 
             // Scan tracepoints to find overlapping segments
             let subset = self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end)
@@ -819,15 +838,28 @@ impl Impg {
 
             let (_, _, first_seg_start, first_seg_end, _, _) = subset.first_segment_info;
             let (_, _, last_seg_start, last_seg_end, _, _) = subset.last_segment_info;
-            let subset_target_start = first_seg_start.min(first_seg_end).min(last_seg_start.min(last_seg_end));
+            let subset_target_start = first_seg_start
+                .min(first_seg_end)
+                .min(last_seg_start.min(last_seg_end));
             let subset_target_end = if subset.last_idx == alignment.tracepoints.len() - 1 {
                 metadata.target_end
             } else {
-                first_seg_start.max(first_seg_end).max(last_seg_start.max(last_seg_end))
+                first_seg_start
+                    .max(first_seg_end)
+                    .max(last_seg_start.max(last_seg_end))
             };
 
-            let (alignment_query_start, alignment_query_end, alignment_target_start, alignment_target_end) =
-                (subset_query_start, subset_query_end, subset_target_start, subset_target_end);
+            let (
+                alignment_query_start,
+                alignment_query_end,
+                alignment_target_start,
+                alignment_target_end,
+            ) = (
+                subset_query_start,
+                subset_query_end,
+                subset_target_start,
+                subset_target_end,
+            );
 
             // Project the requested range through the CIGAR
             let projection = project_target_range_through_alignment(
@@ -944,7 +976,8 @@ impl Impg {
         };
 
         // Scan tracepoints to find overlapping segments
-        let subset = self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end)?;
+        let subset =
+            self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end)?;
 
         let is_reverse = metadata.strand() == Strand::Reverse;
         let working_query_start = metadata.query_start;
@@ -955,9 +988,14 @@ impl Impg {
         let pre_refinement_target = (range_start, range_end);
 
         // Refine query coordinates using indel-aware heuristic
-        let refine_boundary = |query_pos: i32, query_delta: i32, segment_target_start: i32,
-                              overlap_pos: i32, abs_target_delta: i32, trace_diffs: i32,
-                              boundary_name: &str| -> i32 {
+        let refine_boundary = |query_pos: i32,
+                               query_delta: i32,
+                               segment_target_start: i32,
+                               overlap_pos: i32,
+                               abs_target_delta: i32,
+                               trace_diffs: i32,
+                               boundary_name: &str|
+         -> i32 {
             let aligned_len = query_delta.min(abs_target_delta);
             let segment_identity = if aligned_len > 0 {
                 ((aligned_len - trace_diffs) as f64 / aligned_len as f64).max(0.0)
@@ -972,7 +1010,8 @@ impl Impg {
                 );
             }
 
-            let target_fraction = (overlap_pos - segment_target_start) as f64 / abs_target_delta as f64;
+            let target_fraction =
+                (overlap_pos - segment_target_start) as f64 / abs_target_delta as f64;
             let indel_ratio = query_delta as f64 / abs_target_delta as f64;
             let query_advance = target_fraction * abs_target_delta as f64 * indel_ratio;
             let refined_pos = query_pos + query_advance.round() as i32;
@@ -986,15 +1025,37 @@ impl Impg {
         };
 
         // Refine first and last query positions
-        let (query_pos, query_delta, segment_target_start, _, abs_target_delta, trace_diffs) = subset.first_segment_info;
+        let (query_pos, query_delta, segment_target_start, _, abs_target_delta, trace_diffs) =
+            subset.first_segment_info;
         let overlap_start = segment_target_start.max(range_start);
-        let refined_first = refine_boundary(query_pos, query_delta, segment_target_start,
-                                           overlap_start, abs_target_delta, trace_diffs, "First");
+        let refined_first = refine_boundary(
+            query_pos,
+            query_delta,
+            segment_target_start,
+            overlap_start,
+            abs_target_delta,
+            trace_diffs,
+            "First",
+        );
 
-        let (query_pos, query_delta, segment_target_start, segment_target_end, abs_target_delta, trace_diffs) = subset.last_segment_info;
+        let (
+            query_pos,
+            query_delta,
+            segment_target_start,
+            segment_target_end,
+            abs_target_delta,
+            trace_diffs,
+        ) = subset.last_segment_info;
         let overlap_end = segment_target_end.min(range_end);
-        let refined_last = refine_boundary(query_pos, query_delta, segment_target_start,
-                                          overlap_end, abs_target_delta, trace_diffs, "Last");
+        let refined_last = refine_boundary(
+            query_pos,
+            query_delta,
+            segment_target_start,
+            overlap_end,
+            abs_target_delta,
+            trace_diffs,
+            "Last",
+        );
 
         // Debug: show before/after refinement
         let post_refinement_query = (refined_first, refined_last);
@@ -1047,7 +1108,7 @@ impl Impg {
 
         // For reverse alignments: swap projected query coordinates to match normal mode output
         let (query_start, query_end) = if is_reverse {
-            (working_query_end, working_query_start)  // Swap: first=end, last=start
+            (working_query_end, working_query_start) // Swap: first=end, last=start
         } else {
             (working_query_start, working_query_end)
         };
@@ -1383,7 +1444,11 @@ impl Impg {
 
         debug!(
             "Querying region{}: {}:{}-{}, len: {}",
-            if approximate_mode { " (approximate)" } else { "" },
+            if approximate_mode {
+                " (approximate)"
+            } else {
+                ""
+            },
             self.seq_index.get_name(target_id).unwrap(),
             range_start,
             range_end,

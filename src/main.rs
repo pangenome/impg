@@ -347,6 +347,11 @@ struct QueryOpts {
     #[arg(help_heading = "Performance")]
     #[clap(long, action)]
     approximate: bool,
+
+    /// Consider strandness when merging output intervals (defaults: merge strands for bed/gfa/maf; keep separate for fasta/fasta-aln)
+    #[arg(help_heading = "Filtering and merging")]
+    #[clap(long, action)]
+    consider_strandness: bool,
 }
 
 impl QueryOpts {
@@ -356,6 +361,23 @@ impl QueryOpts {
             -1
         } else {
             self.merge_distance
+        }
+    }
+
+    /// Whether merged intervals should collapse opposite strands for a given output format
+    fn merge_strands_for_output(&self, output_format: &str) -> bool {
+        // Default behavior per output format
+        let default = match output_format {
+            "fasta" | "fasta-aln" => false,
+            "maf" | "gfa" | "bed" => true,
+            _ => true,
+        };
+
+        if self.consider_strandness {
+            // When considering strandness, keep strands separate
+            false
+        } else {
+            default
         }
     }
 }
@@ -921,7 +943,8 @@ fn run() -> io::Result<()> {
                         ),
                     ));
                 }
-                validate_approximate_mode_min_length(transitive_opts.min_transitive_len, true)?; // Partition always uses transitive queries
+                validate_approximate_mode_min_length(transitive_opts.min_transitive_len, true)?;
+                // Partition always uses transitive queries
             }
 
             validate_region_size(
@@ -1094,7 +1117,12 @@ fn run() -> io::Result<()> {
                     target_range.1,
                     &impg.seq_index,
                 )?;
-                validate_range_min_length(target_range.0, target_range.1, &name, query.transitive_opts.effective_min_transitive_len())?;
+                validate_range_min_length(
+                    target_range.0,
+                    target_range.1,
+                    &name,
+                    query.transitive_opts.effective_min_transitive_len(),
+                )?;
                 validate_region_size(
                     target_range.0,
                     target_range.1,
@@ -1108,7 +1136,12 @@ fn run() -> io::Result<()> {
                 // Validate all entries in the BED file
                 for (seq_name, (start, end), name) in &targets {
                     validate_sequence_range(seq_name, *start, *end, &impg.seq_index)?;
-                    validate_range_min_length(*start, *end, name, query.transitive_opts.effective_min_transitive_len())?;
+                    validate_range_min_length(
+                        *start,
+                        *end,
+                        name,
+                        query.transitive_opts.effective_min_transitive_len(),
+                    )?;
                     validate_region_size(
                         *start,
                         *end,
@@ -1134,7 +1167,10 @@ fn run() -> io::Result<()> {
             };
 
             // Validate --approximate mode output format compatibility
-            if query.approximate && resolved_output_format != "bed" && resolved_output_format != "bedpe" {
+            if query.approximate
+                && resolved_output_format != "bed"
+                && resolved_output_format != "bedpe"
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
@@ -1193,6 +1229,7 @@ fn run() -> io::Result<()> {
                             &mut find_output_stream(&output_prefix, "bed")?,
                             &name,
                             query.effective_merge_distance(),
+                            query.merge_strands_for_output("bed"),
                             query.original_sequence_coordinates,
                         )?;
                     }
@@ -1229,6 +1266,7 @@ fn run() -> io::Result<()> {
                             sequence_index.as_ref().unwrap(),
                             &name,
                             query.effective_merge_distance(),
+                            query.merge_strands_for_output("gfa"),
                             scoring_params.unwrap(),
                         )?;
                     }
@@ -1240,6 +1278,7 @@ fn run() -> io::Result<()> {
                             sequence_index.as_ref().unwrap(),
                             &name,
                             query.effective_merge_distance(),
+                            query.merge_strands_for_output("maf"),
                             scoring_params.unwrap(),
                         )?;
                     }
@@ -1251,6 +1290,7 @@ fn run() -> io::Result<()> {
                             sequence_index.as_ref().unwrap(),
                             &name,
                             query.effective_merge_distance(),
+                            query.merge_strands_for_output("fasta"),
                             reverse_complement,
                         )?;
                     }
@@ -1262,6 +1302,7 @@ fn run() -> io::Result<()> {
                             sequence_index.as_ref().unwrap(),
                             &name,
                             query.effective_merge_distance(),
+                            query.merge_strands_for_output("fasta"),
                             reverse_complement,
                         )?;
                         // Skip the first element (the input range) for PAF output
@@ -1283,6 +1324,7 @@ fn run() -> io::Result<()> {
                             sequence_index.as_ref().unwrap(),
                             name.clone(),
                             query.effective_merge_distance(),
+                            query.merge_strands_for_output("fasta-aln"),
                             scoring_params.unwrap(),
                         )?;
                     }
@@ -1340,14 +1382,24 @@ fn run() -> io::Result<()> {
                     target_range.1,
                     &impg.seq_index,
                 )?;
-                validate_range_min_length(target_range.0, target_range.1, &name, refine.query.transitive_opts.effective_min_transitive_len())?;
+                validate_range_min_length(
+                    target_range.0,
+                    target_range.1,
+                    &name,
+                    refine.query.transitive_opts.effective_min_transitive_len(),
+                )?;
                 vec![(target_name, target_range, name)]
             } else if let Some(target_bed) = &refine.query.target_bed {
                 let targets = partition::parse_bed_file(target_bed)?;
                 let mut validated = Vec::with_capacity(targets.len());
                 for (seq_name, (start, end), name) in targets {
                     validate_sequence_range(&seq_name, start, end, &impg.seq_index)?;
-                    validate_range_min_length(start, end, &name, refine.query.transitive_opts.effective_min_transitive_len())?;
+                    validate_range_min_length(
+                        start,
+                        end,
+                        &name,
+                        refine.query.transitive_opts.effective_min_transitive_len(),
+                    )?;
                     validated.push((seq_name, (start, end), name));
                 }
                 validated
@@ -1519,8 +1571,12 @@ fn run() -> io::Result<()> {
             let sequence_files_for_impg = gfa_maf_fasta.sequence.resolve_sequence_files()?;
 
             // Setup POA/sequence resources (always required for similarity)
-            let (sequence_index, scoring_params) =
-                gfa_maf_fasta.setup_output_resources("gfa", false, alignment_files.as_slice(), false)?;
+            let (sequence_index, scoring_params) = gfa_maf_fasta.setup_output_resources(
+                "gfa",
+                false,
+                alignment_files.as_slice(),
+                false,
+            )?;
             let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
             let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA
 
@@ -1635,7 +1691,7 @@ fn run() -> io::Result<()> {
                 merge_query_adjusted_intervals(
                     &mut results,
                     query.effective_merge_distance(),
-                    true,
+                    query.merge_strands_for_output("similarity"),
                 );
 
                 // Extract query intervals
@@ -1687,7 +1743,10 @@ fn run() -> io::Result<()> {
     Ok(())
 }
 
-fn validate_approximate_mode_min_length(min_transitive_len_opt: Option<i32>, is_transitive: bool) -> io::Result<()> {
+fn validate_approximate_mode_min_length(
+    min_transitive_len_opt: Option<i32>,
+    is_transitive: bool,
+) -> io::Result<()> {
     // Only require explicit --min-transitive-len for transitive queries in approximate mode
     if is_transitive && min_transitive_len_opt.is_none() {
         return Err(io::Error::new(
@@ -1701,7 +1760,12 @@ fn validate_approximate_mode_min_length(min_transitive_len_opt: Option<i32>, is_
 }
 
 /// Validate that a range meets the minimum length requirement
-fn validate_range_min_length(start: i32, end: i32, range_name: &str, min_transitive_len: i32) -> io::Result<()> {
+fn validate_range_min_length(
+    start: i32,
+    end: i32,
+    range_name: &str,
+    min_transitive_len: i32,
+) -> io::Result<()> {
     let length = end - start;
     if length < min_transitive_len {
         return Err(io::Error::new(
@@ -2360,9 +2424,10 @@ fn output_results_bed(
     out: &mut dyn Write,
     name: &str,
     merge_distance: i32,
+    merge_strands: bool,
     original_coordinates: bool,
 ) -> io::Result<()> {
-    merge_query_adjusted_intervals(results, merge_distance, false);
+    merge_query_adjusted_intervals(results, merge_distance, merge_strands);
 
     for (query_interval, _, _) in results {
         let query_name = impg.seq_index.get_name(query_interval.metadata).unwrap();
@@ -2599,10 +2664,11 @@ fn output_results_gfa(
     sequence_index: &UnifiedSequenceIndex,
     _name: &str,
     merge_distance: i32,
+    merge_strands: bool,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<()> {
     // Merge intervals if needed
-    merge_query_adjusted_intervals(results, merge_distance, true);
+    merge_query_adjusted_intervals(results, merge_distance, merge_strands);
 
     // Extract query intervals by consuming results - no cloning
     let query_intervals: Vec<Interval<u32>> = results
@@ -2627,10 +2693,11 @@ fn output_results_fasta(
     sequence_index: &UnifiedSequenceIndex,
     _name: &str,
     merge_distance: i32,
+    merge_strands: bool,
     reverse_complement: bool,
 ) -> io::Result<()> {
     // Merge intervals if needed
-    merge_query_adjusted_intervals(results, merge_distance, false);
+    merge_query_adjusted_intervals(results, merge_distance, merge_strands);
 
     // Parallelize sequence fetching and processing
     let sequence_data: Vec<(String, String)> = results
@@ -2692,10 +2759,11 @@ fn output_results_maf(
     sequence_index: &UnifiedSequenceIndex,
     _name: &str,
     merge_distance: i32,
+    merge_strands: bool,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<()> {
     // Merge intervals if needed
-    merge_query_adjusted_intervals(results, merge_distance, true);
+    merge_query_adjusted_intervals(results, merge_distance, merge_strands);
 
     let query_intervals: Vec<Interval<u32>> = results
         .drain(..)
@@ -2719,10 +2787,11 @@ fn output_results_fasta_aln(
     sequence_index: &UnifiedSequenceIndex,
     _name: String,
     merge_distance: i32,
+    merge_strands: bool,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<()> {
     // Merge intervals as for MAF/GFA (collapse per-query coords, merge strands)
-    merge_query_adjusted_intervals(results, merge_distance, true);
+    merge_query_adjusted_intervals(results, merge_distance, merge_strands);
 
     // Drain query intervals
     let query_intervals: Vec<coitrees::Interval<u32>> =
