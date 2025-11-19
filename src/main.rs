@@ -2815,7 +2815,7 @@ fn merge_query_adjusted_intervals(
     merge_strands: bool,
 ) {
     if results.len() > 1 && (merge_distance >= 0 || merge_strands) {
-        // Sort by sequence ID, strand orientation, and start position
+        // Sort by sequence ID, start position, and strand (forward first)
         results.par_sort_by_key(|(query_interval, _, _)| {
             let is_forward = query_interval.first <= query_interval.last;
             let start = if is_forward {
@@ -2836,7 +2836,7 @@ fn merge_query_adjusted_intervals(
             let (curr_interval, _, _) = &results[write_idx];
             let (next_interval, _, _) = &results[read_idx];
 
-            // Check if both intervals are on the same sequence and have same orientation
+            // Orientation flags
             let curr_is_forward = curr_interval.first <= curr_interval.last;
             let next_is_forward = next_interval.first <= next_interval.last;
 
@@ -2853,20 +2853,11 @@ fn merge_query_adjusted_intervals(
                 (next_interval.last, next_interval.first)
             };
 
-            // Check if they represent the same region (different strands)
-            if merge_strands
-                && curr_interval.metadata == next_interval.metadata
-                && curr_start == next_start
-                && curr_end == next_end
-            {
-                // Keep the forward strand version by skipping the reversed one (don't increment write_idx)
-                continue;
-            }
-
-            // Only merge if same sequence, same orientation, and within merge distance (if merge_distance >= 0)
+            // Only merge if same sequence and within merge distance (if merge_distance >= 0),
+            // and orientation is compatible with merge_strands choice.
             if merge_distance < 0
                 || curr_interval.metadata != next_interval.metadata
-                || curr_is_forward != next_is_forward
+                || (!merge_strands && curr_is_forward != next_is_forward)
                 || next_start > curr_end + merge_distance
             {
                 write_idx += 1;
@@ -2874,15 +2865,23 @@ fn merge_query_adjusted_intervals(
                     results.swap(write_idx, read_idx);
                 }
             } else {
-                // Merge while preserving orientation
-                if curr_is_forward {
-                    // Forward orientation
-                    results[write_idx].0.first = curr_start.min(next_start);
-                    results[write_idx].0.last = curr_end.max(next_end);
+                // Merge intervals, possibly across strands.
+                let merged_start = curr_start.min(next_start);
+                let merged_end = curr_end.max(next_end);
+
+                // When merging across strands, prefer forward orientation if present; otherwise keep reverse.
+                let merged_is_forward = if merge_strands {
+                    curr_is_forward || next_is_forward
                 } else {
-                    // Reverse orientation
-                    results[write_idx].0.first = curr_end.max(next_end);
-                    results[write_idx].0.last = curr_start.min(next_start);
+                    curr_is_forward
+                };
+
+                if merged_is_forward {
+                    results[write_idx].0.first = merged_start;
+                    results[write_idx].0.last = merged_end;
+                } else {
+                    results[write_idx].0.first = merged_end;
+                    results[write_idx].0.last = merged_start;
                 }
             }
         }
