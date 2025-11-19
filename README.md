@@ -416,6 +416,11 @@ For GFA/MAF/FASTA output and similarity computation:
 
 *AGC files are only supported in the full installation (default features). For FASTA-only support, install with `--no-default-features`.
 
+### Merging behaviour
+
+- `-d, --merge-distance <INT>`: Merge nearby hits within this distance (bp). Use `--no-merge` to disable.
+- `--consider-strandness`: Keep forward and reverse strands separate when merging. By default, strands are merged for BED/GFA/MAF outputs and kept separate for FASTA/FASTA-ALN.
+
 ## What does `impg` do?
 
 At its core, `impg` lifts over ranges from a target sequence (used as reference) into the queries (the other sequences aligned to the sequence used as reference) described in alignments.

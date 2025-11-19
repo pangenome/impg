@@ -28,7 +28,6 @@ struct OneAlnMetadata {
     target_contig_offsets: HashMap<i64, (i64, i64)>,
 }
 
-
 /// Error type for 1aln parsing
 #[derive(Debug)]
 pub enum ParseErr {

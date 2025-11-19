@@ -234,7 +234,7 @@ pub fn partition_alignments(
                     max_depth,
                     min_transitive_len,
                     min_distance_between_ranges,
-                    None, // No min_output_length for partition
+                    None,  // No min_output_length for partition
                     false, // Don't store CIGAR strings during partitioning
                     min_identity,
                     sequence_index,
@@ -249,7 +249,7 @@ pub fn partition_alignments(
                     max_depth,
                     min_transitive_len,
                     min_distance_between_ranges,
-                    None, // No min_output_length for partition
+                    None,  // No min_output_length for partition
                     false, // Don't store CIGAR strings during partitioning
                     min_identity,
                     sequence_index,
