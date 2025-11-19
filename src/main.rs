@@ -2869,9 +2869,17 @@ fn merge_query_adjusted_intervals(
                 let merged_start = curr_start.min(next_start);
                 let merged_end = curr_end.max(next_end);
 
-                // When merging across strands, prefer forward orientation if present; otherwise keep reverse.
-                let merged_is_forward = if merge_strands {
-                    curr_is_forward || next_is_forward
+                // When merging across strands, choose the orientation with the larger span; on ties, keep existing.
+                let merged_is_forward = if merge_strands && curr_is_forward != next_is_forward {
+                    let curr_len = curr_end.saturating_sub(curr_start);
+                    let next_len = next_end.saturating_sub(next_start);
+                    if curr_len == next_len {
+                        curr_is_forward
+                    } else if curr_len > next_len {
+                        curr_is_forward
+                    } else {
+                        next_is_forward
+                    }
                 } else {
                     curr_is_forward
                 };
