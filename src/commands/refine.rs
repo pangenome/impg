@@ -512,6 +512,7 @@ fn query_overlaps(
             config.min_identity,
             sequence_index,
             config.approximate_mode,
+            config.subset_filter,
         )
     } else if config.use_transitive_dfs {
         impg.query_transitive_dfs(
@@ -527,9 +528,10 @@ fn query_overlaps(
             config.min_identity,
             sequence_index,
             config.approximate_mode,
+            config.subset_filter,
         )
     } else {
-        impg.query_with_cache(
+        let mut res = impg.query_with_cache(
             target_id,
             range.0,
             range.1,
@@ -537,7 +539,14 @@ fn query_overlaps(
             config.min_identity,
             sequence_index,
             cigar_cache,
-        )
+        );
+
+        // Apply subset filter for non-transitive queries (transitive queries filter during exploration)
+        if let Some(filter) = config.subset_filter {
+            crate::subset_filter::apply_subset_filter(impg, target_id, &mut res, Some(filter));
+        }
+
+        res
     };
 
     buffer.append(&mut results);
