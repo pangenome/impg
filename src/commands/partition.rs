@@ -239,6 +239,7 @@ pub fn partition_alignments(
                     min_identity,
                     sequence_index,
                     approximate_mode,
+                    None,  // No subset filter for partition
                 )
             } else {
                 impg.query_transitive_bfs(
@@ -254,6 +255,7 @@ pub fn partition_alignments(
                     min_identity,
                     sequence_index,
                     approximate_mode,
+                    None,  // No subset filter for partition
                 )
             };
             //let query_time = query_start.elapsed();

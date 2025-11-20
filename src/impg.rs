@@ -1611,6 +1611,7 @@ impl Impg {
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
+        subset_filter: Option<&crate::subset_filter::SubsetFilter>,
     ) -> Vec<AdjustedInterval> {
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
@@ -1714,20 +1715,35 @@ impl Impg {
                                 min_gap_compressed_identity,
                             )
                         };
-                        projection_result.map(|(query_interval, cigar_ops, target_interval)| {
+                        projection_result.and_then(|(query_interval, cigar_ops, target_interval)| {
                             let query_id = query_interval.metadata;
-                            let adjusted_query_start = query_interval.first;
-                            let adjusted_query_end = query_interval.last;
-                            let cigar_vec = if store_cigar { cigar_ops } else { Vec::new() };
 
-                            (
-                                query_interval,
-                                cigar_vec,
-                                target_interval,
-                                query_id,
-                                adjusted_query_start,
-                                adjusted_query_end,
-                            )
+                            // Apply subset filter: keep if it's the target or matches the filter
+                            let should_keep = if let Some(filter) = subset_filter {
+                                query_id == target_id ||
+                                self.seq_index
+                                    .get_name(query_id)
+                                    .is_some_and(|name| filter.matches(name))
+                            } else {
+                                true
+                            };
+
+                            if should_keep {
+                                let adjusted_query_start = query_interval.first;
+                                let adjusted_query_end = query_interval.last;
+                                let cigar_vec = if store_cigar { cigar_ops } else { Vec::new() };
+
+                                Some((
+                                    query_interval,
+                                    cigar_vec,
+                                    target_interval,
+                                    query_id,
+                                    adjusted_query_start,
+                                    adjusted_query_end,
+                                ))
+                            } else {
+                                None
+                            }
                         })
                     })
                     .collect();
@@ -1849,6 +1865,7 @@ impl Impg {
         min_gap_compressed_identity: Option<f64>,
         sequence_index: Option<&UnifiedSequenceIndex>,
         approximate_mode: bool,
+        subset_filter: Option<&crate::subset_filter::SubsetFilter>,
     ) -> Vec<AdjustedInterval> {
         // Initialize visited ranges from masked regions if provided
         let mut visited_ranges: FxHashMap<u32, SortedRanges> = if let Some(m) = masked_regions {
@@ -1954,18 +1971,32 @@ impl Impg {
                                         if let Some((query_interval, cigar_ops, target_interval)) =
                                             projection_result
                                         {
-                                            let cigar_vec =
-                                                if store_cigar { cigar_ops } else { Vec::new() };
+                                            let query_id = query_interval.metadata;
 
-                                            local_results.push((
-                                                query_interval.metadata,
-                                                query_interval.first,
-                                                query_interval.last,
-                                                cigar_vec,
-                                                target_interval.first,
-                                                target_interval.last,
-                                                *current_target_id,
-                                            ));
+                                            // Apply subset filter: keep if it's the target or matches the filter
+                                            let should_keep = if let Some(filter) = subset_filter {
+                                                query_id == target_id ||
+                                                self.seq_index
+                                                    .get_name(query_id)
+                                                    .is_some_and(|name| filter.matches(name))
+                                            } else {
+                                                true
+                                            };
+
+                                            if should_keep {
+                                                let cigar_vec =
+                                                    if store_cigar { cigar_ops } else { Vec::new() };
+
+                                                local_results.push((
+                                                    query_id,
+                                                    query_interval.first,
+                                                    query_interval.last,
+                                                    cigar_vec,
+                                                    target_interval.first,
+                                                    target_interval.last,
+                                                    *current_target_id,
+                                                ));
+                                            }
                                         }
                                     },
                                 );

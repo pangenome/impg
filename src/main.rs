@@ -1206,18 +1206,8 @@ fn run() -> io::Result<()> {
                     &query.transitive_opts,
                     sequence_index.as_ref(),
                     query.approximate,
+                    subset_filter.as_ref(),
                 )?;
-
-                // Apply subset filter if provided
-                if let Some(filter) = subset_filter.as_ref() {
-                    let target_id = impg.seq_index.get_id(&target_name).ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("Target sequence '{}' not found in index", target_name),
-                        )
-                    })?;
-                    apply_subset_filter(&impg, target_id, &mut results, Some(filter));
-                }
 
                 // Output results based on the resolved format
                 match resolved_output_format {
@@ -1672,18 +1662,8 @@ fn run() -> io::Result<()> {
                     &query.transitive_opts,
                     Some(&sequence_index),
                     query.approximate,
+                    subset_filter.as_ref(),
                 )?;
-
-                // Apply subset filter if provided
-                if let Some(filter) = subset_filter.as_ref() {
-                    let target_id = impg.seq_index.get_id(&target_name).ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("Target sequence '{}' not found in index", target_name),
-                        )
-                    })?;
-                    apply_subset_filter(&impg, target_id, &mut results, Some(filter));
-                }
 
                 let region_label = format!("{}:{}-{}", target_name, target_range.0, target_range.1);
 
@@ -2322,6 +2302,7 @@ fn perform_query(
     transitive_opts: &TransitiveOpts,
     sequence_index: Option<&UnifiedSequenceIndex>,
     approximate_mode: bool,
+    subset_filter: Option<&SubsetFilter>,
 ) -> io::Result<Vec<AdjustedInterval>> {
     let (target_start, target_end) = target_range;
     let target_id = impg.seq_index.get_id(target_name).ok_or_else(|| {
@@ -2359,6 +2340,7 @@ fn perform_query(
             min_identity,
             sequence_index,
             approximate_mode,
+            subset_filter,
         )
     } else if transitive_dfs {
         impg.query_transitive_dfs(
@@ -2374,6 +2356,7 @@ fn perform_query(
             min_identity,
             sequence_index,
             approximate_mode,
+            subset_filter,
         )
     } else {
         let mut res = impg.query(
@@ -2385,13 +2368,19 @@ fn perform_query(
             sequence_index,
             approximate_mode,
         );
-        // Filter by minimum output length for regular queries only
+        // Filter by minimum output length for regular queries
         if let Some(min_len) = min_output_length {
             res.retain(|(query_interval, _, _)| {
                 let length = (query_interval.last - query_interval.first).abs();
                 length >= min_len
             });
         }
+
+        // Apply subset filter for non-transitive queries (transitive queries filter during exploration)
+        if let Some(filter) = subset_filter {
+            apply_subset_filter(impg, target_id, &mut res, Some(filter));
+        }
+
         res
     };
 
