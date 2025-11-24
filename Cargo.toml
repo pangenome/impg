@@ -6,21 +6,21 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bincode = { version = "2.0.1", features = ["serde"] }
-serde = { version = "1.0.228", features = ["derive"] }
-clap = { version = "4.5.51", features = ["derive"] }
-coitrees = "0.4.0"
-num_cpus = "1.17.0"
-rayon = "1.11.0"
+bincode = { version = "2.0", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"] }
+coitrees = "0.4"
+num_cpus = "1.17"
+rayon = "1.11"
 noodles = { version = "0.100.0", features = ["bgzf"] }
-regex = "1.12.2"
-log = "0.4.28"
-env_logger = "0.11.8"
-natord = "1.0.9"
-rustc-hash = "2.1.1"
-libc = "0.2.177"
-nalgebra = "0.33.2"
-indicatif = "0.18.2"
+regex = "1.12"
+log = "0.4"
+env_logger = "0.11"
+natord = "1.0"
+rustc-hash = "2.1"
+libc = "0.2"
+nalgebra = "0.33"
+indicatif = "0.18"
 spoa_rs = { git = "https://github.com/AndreaGuarracino/spoa-rs.git" }
 rust-htslib = { version = "0.46.0", default-features = false } # Don't update it, see https://github.com/rust-bio/rust-htslib/issues/434
 

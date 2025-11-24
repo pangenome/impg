@@ -1989,14 +1989,13 @@ fn get_auto_reader(path: &str) -> io::Result<Box<dyn BufRead>> {
 /// Helper function to return a Write implementer that is either standard output or a file with the
 /// appropriate basename and extension. When no basename is provided, uses standard output.
 fn find_output_stream(basename: &Option<String>, extension: &str) -> io::Result<Box<dyn Write>> {
-    // Anthropic's Claude came up with this.
     match basename {
         Some(name) => {
             let filename = format!("{}.{}", name, extension);
             let file = File::create(filename)?;
-            Ok(Box::new(file))
+            Ok(Box::new(BufWriter::new(file)))
         }
-        None => Ok(Box::new(io::stdout())),
+        None => Ok(Box::new(BufWriter::new(io::stdout()))),
     }
 }
 
