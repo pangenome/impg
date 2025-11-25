@@ -9,63 +9,37 @@ use std::io;
 fn test_agc_vs_fasta_same_content() -> io::Result<()> {
     // Test data paths
     let test_data_dir = "tests/test_data";
-    let fasta_files = vec![
-        format!("{}/ref.fa", test_data_dir),
-        format!("{}/a.fa", test_data_dir),
-        format!("{}/b.fa", test_data_dir),
-        format!("{}/c.fa", test_data_dir),
-    ];
     let agc_file = format!("{test_data_dir}/test.agc");
 
-    // Build both indices
-    let fasta_index = FastaIndex::build_from_files(&fasta_files)?;
+    // Build AGC index
     let agc_index = AgcIndex::build_from_files(&[agc_file])?;
 
-    // Test sequences to check
+    // Test sequences with unambiguous names (using sample@contig format)
+    // to avoid depending on library-specific ordering when contig names are duplicated
     let test_cases = vec![
-        ("chr1", 0, 10), // First 10 bp of chr1
-        ("chr1", 5, 15), // Middle section
-        ("chr1a", 0, 5), // chr1a from sample a
-        ("1", 0, 10),    // sequence "1" from sample c
+        // (agc_query, fasta_file, fasta_contig, start, end)
+        ("chr1@ref", "ref.fa", "chr1", 0, 10),      // First 10 bp of chr1 from ref
+        ("chr1@ref", "ref.fa", "chr1", 5, 15),      // Middle section of chr1 from ref
+        ("chr1@b", "b.fa", "chr1", 0, 9),           // chr1 from sample b (9 bp)
+        ("chr1a", "a.fa", "chr1a", 0, 5),           // chr1a from sample a (unique)
+        ("1", "c.fa", "1", 0, 10),                  // sequence "1" from sample c (unique)
     ];
 
-    for (seq_name, start, end) in test_cases {
+    for (agc_query, fasta_file, fasta_contig, start, end) in test_cases {
+        // Build a FASTA index for just this file
+        let fasta_path = format!("{}/{}", test_data_dir, fasta_file);
+        let fasta_index = FastaIndex::build_from_files(&[fasta_path])?;
+
         // Fetch from FASTA
-        let fasta_seq = fasta_index.fetch_sequence(seq_name, start, end)?;
+        let fasta_seq = fasta_index.fetch_sequence(fasta_contig, start, end)?;
 
-        // Fetch from AGC - try with just contig name first
-        let agc_seq = match agc_index.fetch_sequence(seq_name, start, end) {
-            Ok(seq) => seq,
-            Err(_) => {
-                // If contig name alone doesn't work, try different sample@contig combinations
-                // This might happen if contig names are not unique across samples
-                let samples = ["ref", "a", "b", "c"];
-                let mut found = false;
-                let mut result = Vec::new();
-
-                for sample in &samples {
-                    let query = format!("{seq_name}@{sample}");
-                    if let Ok(seq) = agc_index.fetch_sequence(&query, start, end) {
-                        result = seq;
-                        found = true;
-                        break;
-                    }
-                }
-
-                if !found {
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("Sequence {seq_name} not found in AGC"),
-                    ));
-                }
-                result
-            }
-        };
+        // Fetch from AGC
+        let agc_seq = agc_index.fetch_sequence(agc_query, start, end)?;
 
         // Compare sequences
         assert_eq!(
             fasta_seq, agc_seq,
-            "Sequences differ for {seq_name}:{start}-{end}"
+            "Sequences differ for AGC:{agc_query} vs FASTA:{fasta_file}/{fasta_contig}:{start}-{end}"
         );
 
         // Also check that content is uppercase ASCII

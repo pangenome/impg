@@ -1,31 +1,32 @@
-use agc_rs::AGCFile;
+use ragc_core::{Decompressor, DecompressorConfig};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+use std::fmt;
 use std::io::{self};
 use std::sync::{Arc, Mutex};
 
-// Wrapper to make AGC operations thread-safe
-#[derive(Clone, Debug)]
-struct ThreadSafeAgc {
-    agc_files: Arc<Mutex<Vec<AGCFile>>>,
-}
-
-// Structure to manage AGC archives
-#[derive(Debug)]
+// Structure to manage AGC archives using ragc-core
 pub struct AgcIndex {
-    agc_wrapper: ThreadSafeAgc,
+    decompressors: Arc<Mutex<Vec<Decompressor>>>,
     pub agc_paths: Vec<String>,
     sample_contig_to_agc: FxHashMap<String, usize>,
     // Precomputed mapping from contig name to (sample, full_contig_name, agc_idx)
     contig_to_sample_info: FxHashMap<String, (String, String, usize)>,
 }
 
+impl fmt::Debug for AgcIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AgcIndex")
+            .field("agc_paths", &self.agc_paths)
+            .field("num_decompressors", &self.decompressors.lock().unwrap().len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl AgcIndex {
     fn new() -> Self {
         AgcIndex {
-            agc_wrapper: ThreadSafeAgc {
-                agc_files: Arc::new(Mutex::new(Vec::new())),
-            },
+            decompressors: Arc::new(Mutex::new(Vec::new())),
             agc_paths: Vec::new(),
             sample_contig_to_agc: FxHashMap::default(),
             contig_to_sample_info: FxHashMap::default(),
@@ -48,32 +49,34 @@ impl AgcIndex {
         let metadata_results: Vec<_> = agc_files
             .par_iter()
             .enumerate()
-            .map(|(agc_idx, agc_path)| -> io::Result<(usize, String, AGCFile, Vec<(String, Vec<String>)>)> {
-                let mut agc = AGCFile::new();
-                // Disable AGC prefetching to avoid materializing entire archives in memory up front.
-                if !agc.open(agc_path, false) {
-                    return Err(io::Error::new(
+            .map(|(agc_idx, agc_path)| -> io::Result<(usize, String, Decompressor, Vec<(String, Vec<String>)>)> {
+                let config = DecompressorConfig {
+                    verbosity: 0,
+                    ..Default::default()
+                };
+                let mut decompressor = Decompressor::open(agc_path, config).map_err(|e| {
+                    io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("Failed to open AGC file: {agc_path}"),
-                    ));
-                }
+                        format!("Failed to open AGC file: {agc_path}: {e}"),
+                    )
+                })?;
 
                 // Get all samples and their contigs
-                let samples = agc.list_samples();
+                let samples = decompressor.list_samples();
                 let sample_contigs: Vec<_> = samples
                     .into_iter()
                     .map(|sample| {
-                        let contigs = agc.list_contigs(&sample);
+                        let contigs = decompressor.list_contigs(&sample).unwrap_or_default();
                         (sample, contigs)
                     })
                     .collect();
 
-                Ok((agc_idx, agc_path.clone(), agc, sample_contigs))
+                Ok((agc_idx, agc_path.clone(), decompressor, sample_contigs))
             })
             .collect::<io::Result<Vec<_>>>()?;
 
         // Sequential assembly phase to maintain order and avoid shared mutable state issues
-        for (agc_idx, agc_path, agc, sample_contigs) in metadata_results {
+        for (agc_idx, agc_path, decompressor, sample_contigs) in metadata_results {
             index.agc_paths.push(agc_path);
 
             for (sample, contigs) in sample_contigs {
@@ -124,7 +127,7 @@ impl AgcIndex {
                 }
             }
 
-            index.agc_wrapper.agc_files.lock().unwrap().push(agc);
+            index.decompressors.lock().unwrap().push(decompressor);
         }
 
         Ok(index)
@@ -159,17 +162,17 @@ impl AgcIndex {
             )
         })?;
 
-        // AGC uses 0-based coordinates with inclusive end
-        let mut agc_files = self.agc_wrapper.agc_files.lock().unwrap();
-        let sequence = agc_files[agc_idx]
-            .get_contig_sequence(&sample, &contig, start, end - 1)
+        // ragc uses 0-based coordinates with exclusive end
+        let mut decompressors = self.decompressors.lock().unwrap();
+        let sequence = decompressors[agc_idx]
+            .get_contig_range(&sample, &contig, start as usize, end as usize)
             .map_err(|e| {
                 io::Error::other(format!(
                     "Failed to fetch sequence '{contig}@{sample}:{start}:{end}': {e}"
                 ))
             })?;
 
-        Ok(sequence.into_bytes())
+        Ok(sequence)
     }
 
     pub fn get_sequence_length(&self, seq_name: &str) -> io::Result<usize> {
@@ -182,11 +185,16 @@ impl AgcIndex {
             )
         })?;
 
-        // Get the full sequence to determine its length
-        // This is not the most efficient approach, but AGC doesn't provide a direct length query
-        let agc_files = self.agc_wrapper.agc_files.lock().unwrap();
+        let mut decompressors = self.decompressors.lock().unwrap();
+        let length = decompressors[agc_idx]
+            .get_contig_length(&sample, &contig)
+            .map_err(|e| {
+                io::Error::other(format!(
+                    "Failed to get length for '{contig}@{sample}': {e}"
+                ))
+            })?;
 
-        Ok(agc_files[agc_idx].get_contig_length(&sample, &contig) as usize)
+        Ok(length)
     }
 }
 
