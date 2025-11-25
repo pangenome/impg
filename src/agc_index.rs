@@ -62,7 +62,7 @@ impl AgcIndex {
             .map(|(agc_idx, agc_path)| -> io::Result<(usize, String, Decompressor, Vec<(String, Vec<String>)>)> {
                 let config = DecompressorConfig {
                     verbosity: 0,
-                    ..Default::default()
+                    max_segment_cache_entries: 1, // ~1MB cache (16 × 60KB segments)
                 };
                 let mut decompressor = Decompressor::open(agc_path, config).map_err(|e| {
                     io::Error::new(
