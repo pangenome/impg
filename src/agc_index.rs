@@ -9,9 +9,12 @@ use std::sync::{Arc, Mutex};
 pub struct AgcIndex {
     decompressors: Arc<Mutex<Vec<Decompressor>>>,
     pub agc_paths: Vec<String>,
+    // Interned strings - each unique string stored once
+    interned_strings: FxHashMap<String, Arc<str>>,
+    // Maps use Arc<str> for zero-cost sharing (String key for efficient lookup)
     sample_contig_to_agc: FxHashMap<String, usize>,
     // Precomputed mapping from contig name to (sample, full_contig_name, agc_idx)
-    contig_to_sample_info: FxHashMap<String, (String, String, usize)>,
+    contig_to_sample_info: FxHashMap<String, (Arc<str>, Arc<str>, usize)>,
 }
 
 impl fmt::Debug for AgcIndex {
@@ -28,18 +31,25 @@ impl AgcIndex {
         AgcIndex {
             decompressors: Arc::new(Mutex::new(Vec::new())),
             agc_paths: Vec::new(),
+            interned_strings: FxHashMap::default(),
             sample_contig_to_agc: FxHashMap::default(),
             contig_to_sample_info: FxHashMap::default(),
         }
     }
 
-    // Helper function to extract the short contig name (before first whitespace)
+    /// Intern a string, returning an Arc<str> that can be shared
+    fn intern(&mut self, s: &str) -> Arc<str> {
+        if let Some(arc) = self.interned_strings.get(s) {
+            Arc::clone(arc)
+        } else {
+            let arc: Arc<str> = s.into();
+            self.interned_strings.insert(s.to_string(), Arc::clone(&arc));
+            arc
+        }
+    }
+
     fn extract_short_contig_name(full_name: &str) -> &str {
-        // Split on any whitespace character and take the first part
-        full_name
-            .split([' ', '\n', '\r', '\t'])
-            .next()
-            .unwrap_or(full_name)
+        full_name.split_whitespace().next().unwrap_or(full_name)
     }
 
     pub fn build_from_files(agc_files: &[String]) -> io::Result<Self> {
@@ -80,55 +90,47 @@ impl AgcIndex {
             index.agc_paths.push(agc_path);
 
             for (sample, contigs) in sample_contigs {
-                for contig in contigs {
-                    // Create a key that combines full contig name and sample name
-                    let key = format!("{contig}@{sample}");
-                    index.sample_contig_to_agc.insert(key.clone(), agc_idx);
+                let sample_arc = index.intern(&sample);
 
-                    // Also insert just the full contig name if it's unique
-                    index
-                        .sample_contig_to_agc
+                for contig in contigs {
+                    let contig_arc = index.intern(&contig);
+
+                    // Key: contig@sample
+                    let key = format!("{contig}@{sample}");
+                    index.sample_contig_to_agc.insert(key, agc_idx);
+
+                    // Key: contig alone (if unique)
+                    index.sample_contig_to_agc
                         .entry(contig.clone())
                         .or_insert(agc_idx);
 
-                    // Precompute contig-to-sample mappings for fast lookup
-                    let sample_info = (sample.clone(), contig.clone(), agc_idx);
-
-                    // Map full contig name to sample info
-                    index
-                        .contig_to_sample_info
+                    // Contig -> (sample, contig, agc_idx) - values use Arc<str>
+                    index.contig_to_sample_info
                         .entry(contig.clone())
-                        .or_insert(sample_info.clone());
+                        .or_insert((Arc::clone(&sample_arc), Arc::clone(&contig_arc), agc_idx));
 
-                    // Extract short contig name and create mappings
+                    // Handle short contig name if different
                     let short_contig = Self::extract_short_contig_name(&contig);
-
-                    // If short name differs from full name, also create mappings for short name
                     if short_contig != contig {
-                        // Create key with short contig name and sample
                         let short_key = format!("{short_contig}@{sample}");
-                        index
-                            .sample_contig_to_agc
-                            .entry(short_key)
-                            .or_insert(agc_idx);
-
-                        // Also insert just the short contig name if it's unique
-                        index
-                            .sample_contig_to_agc
+                        index.sample_contig_to_agc.entry(short_key).or_insert(agc_idx);
+                        index.sample_contig_to_agc.entry(short_contig.to_string()).or_insert(agc_idx);
+                        index.contig_to_sample_info
                             .entry(short_contig.to_string())
-                            .or_insert(agc_idx);
-
-                        // Map short contig name to sample info
-                        index
-                            .contig_to_sample_info
-                            .entry(short_contig.to_string())
-                            .or_insert(sample_info);
+                            .or_insert((Arc::clone(&sample_arc), Arc::clone(&contig_arc), agc_idx));
                     }
                 }
             }
 
             index.decompressors.lock().unwrap().push(decompressor);
         }
+
+        // Shrink to fit after building
+        index.sample_contig_to_agc.shrink_to_fit();
+        index.contig_to_sample_info.shrink_to_fit();
+
+        // Clear the interner - we no longer need it after building
+        index.interned_strings = FxHashMap::default();
 
         Ok(index)
     }
@@ -139,16 +141,12 @@ impl AgcIndex {
         // - "contig" -> (sample, contig, agc_idx) if contig is unique
 
         if let Some((contig, sample)) = seq_name.split_once('@') {
-            // Format: contig@sample
-            let key = seq_name;
-            let agc_idx = self.sample_contig_to_agc.get(key).copied();
+            let agc_idx = self.sample_contig_to_agc.get(seq_name).copied();
             (sample.to_string(), contig.to_string(), agc_idx)
+        } else if let Some((sample, full_contig, agc_idx)) = self.contig_to_sample_info.get(seq_name) {
+            (sample.to_string(), full_contig.to_string(), Some(*agc_idx))
         } else {
-            // Format: just contig name
-            if let Some((sample, full_contig, agc_idx)) = self.contig_to_sample_info.get(seq_name) {
-                return (sample.clone(), full_contig.clone(), Some(*agc_idx));
-            }
-            ("".to_string(), seq_name.to_string(), None)
+            (String::new(), seq_name.to_string(), None)
         }
     }
 
@@ -172,7 +170,17 @@ impl AgcIndex {
                 ))
             })?;
 
-        Ok(sequence)
+        // Convert from numeric encoding (0-3) to ASCII (A,C,G,T)
+        Ok(sequence
+            .into_iter()
+            .map(|b| match b {
+                0 => b'A',
+                1 => b'C',
+                2 => b'G',
+                3 => b'T',
+                _ => b'N',
+            })
+            .collect())
     }
 
     pub fn get_sequence_length(&self, seq_name: &str) -> io::Result<usize> {
