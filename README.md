@@ -48,6 +48,14 @@ cd impg
 cargo install --force --path . --no-default-features
 ```
 
+### Troubleshooting
+
+If you encounter issues related to `libclang` during the build process, you may need to set specific environment variables to point to your LLVM installation. 
+
+```shell
+env -i HOME="$HOME" PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.cargo/bin" LIBCLANG_PATH="/usr/lib/llvm-7/lib" BINDGEN_EXTRA_CLANG_ARGS="-I/usr/lib/llvm-7/lib/clang/7.0.1/include" bash -c 'cargo build --release'
+```
+
 Alternatively, install from Bioconda:
 
 ```bash
