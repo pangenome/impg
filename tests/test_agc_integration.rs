@@ -1,5 +1,3 @@
-#![cfg(feature = "agc")]
-
 use impg::agc_index::AgcIndex;
 use impg::faidx::FastaIndex;
 use impg::sequence_index::{SequenceIndex, UnifiedSequenceIndex};

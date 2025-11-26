@@ -1,4 +1,4 @@
-use ragc_core::{Decompressor, DecompressorConfig};
+use ragc_reader::{Decompressor, DecompressorConfig};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::fmt;

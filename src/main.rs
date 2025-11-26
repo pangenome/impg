@@ -71,22 +71,10 @@ struct AlignmentOpts {
 #[command(next_help_heading = "Sequence input")]
 struct SequenceOpts {
     /// List of sequence file paths (FASTA or AGC) (required for 'gfa', 'maf', and 'fasta')
-    #[cfg(feature = "agc")]
-    #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["sequence_list"])]
-    sequence_files: Option<Vec<String>>,
-
-    /// List of sequence file paths (FASTA) (required for 'gfa', 'maf', and 'fasta')
-    #[cfg(not(feature = "agc"))]
     #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with_all = &["sequence_list"])]
     sequence_files: Option<Vec<String>>,
 
     /// Path to a text file containing paths to sequence files (FASTA or AGC) (required for 'gfa', 'maf', and 'fasta')
-    #[cfg(feature = "agc")]
-    #[clap(long, value_parser, conflicts_with_all = &["sequence_files"])]
-    sequence_list: Option<String>,
-
-    /// Path to a text file containing paths to sequence files (FASTA) (required for 'gfa', 'maf', and 'fasta')
-    #[cfg(not(feature = "agc"))]
     #[clap(long, value_parser, conflicts_with_all = &["sequence_files"])]
     sequence_list: Option<String>,
 }
@@ -232,11 +220,7 @@ impl GfaMafFastaOpts {
         let sequence_index = if needs_sequence_mandatory || needs_sequence_optional {
             let index = self.sequence.build_sequence_index()?;
             if index.is_none() && needs_sequence_mandatory {
-                let file_types = if cfg!(feature = "agc") {
-                    "FASTA/AGC"
-                } else {
-                    "FASTA"
-                };
+                let file_types = "FASTA/AGC";
 
                 let msg = if has_onealn_files {
                     format!("Sequence files ({file_types}) are required for .1aln alignment files to convert tracepoints to CIGAR strings. Use --sequence-files or --sequence-list")
@@ -573,12 +557,6 @@ enum Args {
         temp_dir: Option<String>,
 
         /// Reference (FASTA or AGC) file for validating contig lengths in VCF files
-        #[cfg(feature = "agc")]
-        #[clap(long, value_parser)]
-        reference: Option<String>,
-
-        /// Reference FASTA file for validating contig lengths in VCF files
-        #[cfg(not(feature = "agc"))]
         #[clap(long, value_parser)]
         reference: Option<String>,
 
@@ -1341,17 +1319,9 @@ fn run() -> io::Result<()> {
             // Check if we have .1aln files and validate sequence files are provided
             let has_onealn_files = alignment_files.iter().any(|f| f.ends_with(".1aln"));
             if has_onealn_files && sequence_files.is_empty() {
-                #[cfg(feature = "agc")]
-                let file_types = "FASTA or AGC";
-                #[cfg(not(feature = "agc"))]
-                let file_types = "FASTA";
-
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!(
-                        "Sequence files ({}) are required for the 'refine' command with .1aln alignment files to convert tracepoints to CIGAR strings. Use --sequence-files or --sequence-list",
-                        file_types
-                    ),
+                    "Sequence files (FASTA or AGC) are required for the 'refine' command with .1aln alignment files to convert tracepoints to CIGAR strings. Use --sequence-files or --sequence-list".to_string(),
                 ));
             }
 
