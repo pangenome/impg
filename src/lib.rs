@@ -1,5 +1,4 @@
 // lib.rs
-#[cfg(feature = "agc")]
 pub mod agc_index;
 pub mod alignment_record;
 pub mod commands;

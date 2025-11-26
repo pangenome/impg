@@ -25,7 +25,7 @@ spoa_rs = { git = "https://github.com/AndreaGuarracino/spoa-rs.git" }
 rust-htslib = { version = "0.46.0", default-features = false } # Don't update it, see https://github.com/rust-bio/rust-htslib/issues/434
 
 # Dependencies for AGC format (for sequences) support
-agc-rs = { git = "https://github.com/pangenome/agc-rs.git", optional = true }
+ragc-reader = { git = "https://github.com/AndreaGuarracino/ragc", branch = "tweaks" }
 
 # Dependencies for 1aln format (for alignments) support
 lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2"}
@@ -44,5 +44,4 @@ zstd = { version = "0.13.3", features = ["zstdmt"] }
 gzp = "1.0.1"
 
 [features]
-default = ["agc"]
-agc = ["agc-rs"]
+default = []

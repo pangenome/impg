@@ -9,13 +9,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "agc-rs"
-version = "0.1.0"
-source = "git+https://github.com/pangenome/agc-rs.git#aba33a36a5001dfac764749aacf6af0a770eb69b"
+name = "ahash"
+version = "0.8.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
 dependencies = [
- "cmake",
- "cxx",
- "cxx-build",
+ "cfg-if",
+ "getrandom 0.3.4",
+ "once_cell",
+ "version_check",
+ "zerocopy",
 ]
 
 [[package]]
@@ -909,7 +912,6 @@ checksum = "9007da9cacbd3e6343da136e98b0d2df013f553d35bdec8b518f07bea768e19c"
 name = "impg"
 version = "0.3.4"
 dependencies = [
- "agc-rs",
  "bincode",
  "bitvec",
  "clap",
@@ -928,6 +930,7 @@ dependencies = [
  "noodles",
  "num_cpus",
  "onecode",
+ "ragc-reader",
  "rayon",
  "regex",
  "rust-htslib",
@@ -1496,6 +1499,26 @@ name = "radium"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
+
+[[package]]
+name = "ragc-core"
+version = "0.1.0"
+source = "git+https://github.com/AndreaGuarracino/ragc?branch=tweaks#db29a8e0a7581f9ddfd2b8484633dbddeaad7904"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "zstd",
+]
+
+[[package]]
+name = "ragc-reader"
+version = "0.1.0"
+source = "git+https://github.com/AndreaGuarracino/ragc?branch=tweaks#db29a8e0a7581f9ddfd2b8484633dbddeaad7904"
+dependencies = [
+ "anyhow",
+ "ragc-core",
+ "zstd",
+]
 
 [[package]]
 name = "rand_core"
@@ -2140,6 +2163,26 @@ dependencies = [
  "quote",
  "syn 2.0.111",
  "synstructure",
+]
+
+[[package]]
+name = "zerocopy"
+version = "0.8.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ea879c944afe8a2b25fef16bb4ba234f47c694565e97383b36f3a878219065c"
+dependencies = [
+ "zerocopy-derive",
+]
+
+[[package]]
+name = "zerocopy-derive"
+version = "0.8.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf955aa904d6040f70dc8e9384444cb1030aed272ba3cb09bbc4ab9e7c1f34f5"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.111",
 ]
 
 [[package]]

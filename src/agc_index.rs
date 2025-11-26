@@ -1,44 +1,55 @@
-use agc_rs::AGCFile;
+use ragc_reader::{Decompressor, DecompressorConfig};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+use std::fmt;
 use std::io::{self};
 use std::sync::{Arc, Mutex};
 
-// Wrapper to make AGC operations thread-safe
-#[derive(Clone, Debug)]
-struct ThreadSafeAgc {
-    agc_files: Arc<Mutex<Vec<AGCFile>>>,
-}
-
-// Structure to manage AGC archives
-#[derive(Debug)]
+// Structure to manage AGC archives using ragc-core
 pub struct AgcIndex {
-    agc_wrapper: ThreadSafeAgc,
+    decompressors: Arc<Mutex<Vec<Decompressor>>>,
     pub agc_paths: Vec<String>,
+    // Interned strings - each unique string stored once
+    interned_strings: FxHashMap<String, Arc<str>>,
+    // Maps use Arc<str> for zero-cost sharing (String key for efficient lookup)
     sample_contig_to_agc: FxHashMap<String, usize>,
     // Precomputed mapping from contig name to (sample, full_contig_name, agc_idx)
-    contig_to_sample_info: FxHashMap<String, (String, String, usize)>,
+    contig_to_sample_info: FxHashMap<String, (Arc<str>, Arc<str>, usize)>,
+}
+
+impl fmt::Debug for AgcIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AgcIndex")
+            .field("agc_paths", &self.agc_paths)
+            .field("num_decompressors", &self.decompressors.lock().unwrap().len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl AgcIndex {
     fn new() -> Self {
         AgcIndex {
-            agc_wrapper: ThreadSafeAgc {
-                agc_files: Arc::new(Mutex::new(Vec::new())),
-            },
+            decompressors: Arc::new(Mutex::new(Vec::new())),
             agc_paths: Vec::new(),
+            interned_strings: FxHashMap::default(),
             sample_contig_to_agc: FxHashMap::default(),
             contig_to_sample_info: FxHashMap::default(),
         }
     }
 
-    // Helper function to extract the short contig name (before first whitespace)
+    /// Intern a string, returning an Arc<str> that can be shared
+    fn intern(&mut self, s: &str) -> Arc<str> {
+        if let Some(arc) = self.interned_strings.get(s) {
+            Arc::clone(arc)
+        } else {
+            let arc: Arc<str> = s.into();
+            self.interned_strings.insert(s.to_string(), Arc::clone(&arc));
+            arc
+        }
+    }
+
     fn extract_short_contig_name(full_name: &str) -> &str {
-        // Split on any whitespace character and take the first part
-        full_name
-            .split([' ', '\n', '\r', '\t'])
-            .next()
-            .unwrap_or(full_name)
+        full_name.split_whitespace().next().unwrap_or(full_name)
     }
 
     pub fn build_from_files(agc_files: &[String]) -> io::Result<Self> {
@@ -48,84 +59,78 @@ impl AgcIndex {
         let metadata_results: Vec<_> = agc_files
             .par_iter()
             .enumerate()
-            .map(|(agc_idx, agc_path)| -> io::Result<(usize, String, AGCFile, Vec<(String, Vec<String>)>)> {
-                let mut agc = AGCFile::new();
-                // Disable AGC prefetching to avoid materializing entire archives in memory up front.
-                if !agc.open(agc_path, false) {
-                    return Err(io::Error::new(
+            .map(|(agc_idx, agc_path)| -> io::Result<(usize, String, Decompressor, Vec<(String, Vec<String>)>)> {
+                let config = DecompressorConfig {
+                    verbosity: 0,
+                    max_segment_cache_entries: 1, // ~1MB cache (16 × 60KB segments)
+                };
+                let mut decompressor = Decompressor::open(agc_path, config).map_err(|e| {
+                    io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("Failed to open AGC file: {agc_path}"),
-                    ));
-                }
+                        format!("Failed to open AGC file: {agc_path}: {e}"),
+                    )
+                })?;
 
                 // Get all samples and their contigs
-                let samples = agc.list_samples();
+                let samples = decompressor.list_samples();
                 let sample_contigs: Vec<_> = samples
                     .into_iter()
                     .map(|sample| {
-                        let contigs = agc.list_contigs(&sample);
+                        let contigs = decompressor.list_contigs(&sample).unwrap_or_default();
                         (sample, contigs)
                     })
                     .collect();
 
-                Ok((agc_idx, agc_path.clone(), agc, sample_contigs))
+                Ok((agc_idx, agc_path.clone(), decompressor, sample_contigs))
             })
             .collect::<io::Result<Vec<_>>>()?;
 
         // Sequential assembly phase to maintain order and avoid shared mutable state issues
-        for (agc_idx, agc_path, agc, sample_contigs) in metadata_results {
+        for (agc_idx, agc_path, decompressor, sample_contigs) in metadata_results {
             index.agc_paths.push(agc_path);
 
             for (sample, contigs) in sample_contigs {
-                for contig in contigs {
-                    // Create a key that combines full contig name and sample name
-                    let key = format!("{contig}@{sample}");
-                    index.sample_contig_to_agc.insert(key.clone(), agc_idx);
+                let sample_arc = index.intern(&sample);
 
-                    // Also insert just the full contig name if it's unique
-                    index
-                        .sample_contig_to_agc
+                for contig in contigs {
+                    let contig_arc = index.intern(&contig);
+
+                    // Key: contig@sample
+                    let key = format!("{contig}@{sample}");
+                    index.sample_contig_to_agc.insert(key, agc_idx);
+
+                    // Key: contig alone (if unique)
+                    index.sample_contig_to_agc
                         .entry(contig.clone())
                         .or_insert(agc_idx);
 
-                    // Precompute contig-to-sample mappings for fast lookup
-                    let sample_info = (sample.clone(), contig.clone(), agc_idx);
-
-                    // Map full contig name to sample info
-                    index
-                        .contig_to_sample_info
+                    // Contig -> (sample, contig, agc_idx) - values use Arc<str>
+                    index.contig_to_sample_info
                         .entry(contig.clone())
-                        .or_insert(sample_info.clone());
+                        .or_insert((Arc::clone(&sample_arc), Arc::clone(&contig_arc), agc_idx));
 
-                    // Extract short contig name and create mappings
+                    // Handle short contig name if different
                     let short_contig = Self::extract_short_contig_name(&contig);
-
-                    // If short name differs from full name, also create mappings for short name
                     if short_contig != contig {
-                        // Create key with short contig name and sample
                         let short_key = format!("{short_contig}@{sample}");
-                        index
-                            .sample_contig_to_agc
-                            .entry(short_key)
-                            .or_insert(agc_idx);
-
-                        // Also insert just the short contig name if it's unique
-                        index
-                            .sample_contig_to_agc
+                        index.sample_contig_to_agc.entry(short_key).or_insert(agc_idx);
+                        index.sample_contig_to_agc.entry(short_contig.to_string()).or_insert(agc_idx);
+                        index.contig_to_sample_info
                             .entry(short_contig.to_string())
-                            .or_insert(agc_idx);
-
-                        // Map short contig name to sample info
-                        index
-                            .contig_to_sample_info
-                            .entry(short_contig.to_string())
-                            .or_insert(sample_info);
+                            .or_insert((Arc::clone(&sample_arc), Arc::clone(&contig_arc), agc_idx));
                     }
                 }
             }
 
-            index.agc_wrapper.agc_files.lock().unwrap().push(agc);
+            index.decompressors.lock().unwrap().push(decompressor);
         }
+
+        // Shrink to fit after building
+        index.sample_contig_to_agc.shrink_to_fit();
+        index.contig_to_sample_info.shrink_to_fit();
+
+        // Clear the interner - we no longer need it after building
+        index.interned_strings = FxHashMap::default();
 
         Ok(index)
     }
@@ -136,16 +141,12 @@ impl AgcIndex {
         // - "contig" -> (sample, contig, agc_idx) if contig is unique
 
         if let Some((contig, sample)) = seq_name.split_once('@') {
-            // Format: contig@sample
-            let key = seq_name;
-            let agc_idx = self.sample_contig_to_agc.get(key).copied();
+            let agc_idx = self.sample_contig_to_agc.get(seq_name).copied();
             (sample.to_string(), contig.to_string(), agc_idx)
+        } else if let Some((sample, full_contig, agc_idx)) = self.contig_to_sample_info.get(seq_name) {
+            (sample.to_string(), full_contig.to_string(), Some(*agc_idx))
         } else {
-            // Format: just contig name
-            if let Some((sample, full_contig, agc_idx)) = self.contig_to_sample_info.get(seq_name) {
-                return (sample.clone(), full_contig.clone(), Some(*agc_idx));
-            }
-            ("".to_string(), seq_name.to_string(), None)
+            (String::new(), seq_name.to_string(), None)
         }
     }
 
@@ -159,17 +160,27 @@ impl AgcIndex {
             )
         })?;
 
-        // AGC uses 0-based coordinates with inclusive end
-        let mut agc_files = self.agc_wrapper.agc_files.lock().unwrap();
-        let sequence = agc_files[agc_idx]
-            .get_contig_sequence(&sample, &contig, start, end - 1)
+        // ragc uses 0-based coordinates with exclusive end
+        let mut decompressors = self.decompressors.lock().unwrap();
+        let sequence = decompressors[agc_idx]
+            .get_contig_range(&sample, &contig, start as usize, end as usize)
             .map_err(|e| {
                 io::Error::other(format!(
                     "Failed to fetch sequence '{contig}@{sample}:{start}:{end}': {e}"
                 ))
             })?;
 
-        Ok(sequence.into_bytes())
+        // Convert from numeric encoding (0-3) to ASCII (A,C,G,T)
+        Ok(sequence
+            .into_iter()
+            .map(|b| match b {
+                0 => b'A',
+                1 => b'C',
+                2 => b'G',
+                3 => b'T',
+                _ => b'N',
+            })
+            .collect())
     }
 
     pub fn get_sequence_length(&self, seq_name: &str) -> io::Result<usize> {
@@ -182,11 +193,16 @@ impl AgcIndex {
             )
         })?;
 
-        // Get the full sequence to determine its length
-        // This is not the most efficient approach, but AGC doesn't provide a direct length query
-        let agc_files = self.agc_wrapper.agc_files.lock().unwrap();
+        let mut decompressors = self.decompressors.lock().unwrap();
+        let length = decompressors[agc_idx]
+            .get_contig_length(&sample, &contig)
+            .map_err(|e| {
+                io::Error::other(format!(
+                    "Failed to get length for '{contig}@{sample}': {e}"
+                ))
+            })?;
 
-        Ok(agc_files[agc_idx].get_contig_length(&sample, &contig) as usize)
+        Ok(length)
     }
 }
 

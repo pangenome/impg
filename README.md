@@ -48,6 +48,14 @@ cd impg
 cargo install --force --path . --no-default-features
 ```
 
+### Troubleshooting
+
+If you encounter issues related to `libclang` during the build process, you may need to set specific environment variables to point to your LLVM installation. 
+
+```shell
+env -i HOME="$HOME" PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.cargo/bin" LIBCLANG_PATH="/usr/lib/llvm-7/lib" BINDGEN_EXTRA_CLANG_ARGS="-I/usr/lib/llvm-7/lib/clang/7.0.1/include" bash -c 'cargo build --release'
+```
+
 Alternatively, install from Bioconda:
 
 ```bash
@@ -140,6 +148,19 @@ impg query -a alignments.1aln -r chr1:1000-2000 --approximate
 
 # Fast approximate mode with transitive queries (requires --min-transitive-len > trace_spacing)
 impg query -a alignments.1aln -r chr1:1000-2000 --approximate -x --min-transitive-len 101
+
+# Restrict results to sequences listed in a file (one name per line)
+# Also filters intermediate steps during transitive queries
+impg query -a alignments.paf -r chr1:1000-2000 -x --subset-sequence-list sequences.txt
+
+# Transform coordinates back to original sequences when using subsequence inputs (seq_name:start-end)
+impg query -a alignments.paf -r chr1:1000-2000 -o paf --original-sequence-coordinates
+
+# Disable merging entirely
+impg query -a alignments.paf -r chr1:1000-2000 --no-merge
+
+# Force processing large regions (>10kbp) with gfa/maf output
+impg query -a alignments.paf -r chr1:1000-50000 -o gfa --sequence-files *.fa --force-large-region
 ```
 
 #### Alignment visualizations
@@ -266,6 +287,15 @@ impg refine -a alignments.paf -r chr1:1000-2000 --pansn-mode haplotype
 
 # Capture the supporting entities in a separate BED file
 impg refine -a alignments.paf -r chr1:1000-2000 --support-output refine_support.bed
+
+# Control extension step size (default: 1000 bp)
+impg refine -a alignments.paf -r chr1:1000-2000 --extension-step 500
+
+# Exclude regions from entity counting via blacklist
+impg refine -a alignments.paf -r chr1:1000-2000 --blacklist-bed excluded.bed
+
+# Restrict to specific sequences (filters transitive steps too)
+impg refine -a alignments.paf -r chr1:1000-2000 --subset-sequence-list samples.txt
 
 # Works with .1aln files too (requires --sequence-files)
 impg refine -a alignments.1aln --sequence-files sequences.fa -r chr1:1000-2000
@@ -418,7 +448,8 @@ For GFA/MAF/FASTA output and similarity computation:
 
 ### Merging behaviour
 
-- `-d, --merge-distance <INT>`: Merge nearby hits within this distance (bp). Use `--no-merge` to disable.
+- `-d, --merge-distance <INT>`: Merge nearby hits within this distance (bp).
+- `--no-merge`: Disable merging entirely for all output formats.
 - `--consider-strandness`: Keep forward and reverse strands separate when merging. By default, strands are merged for BED/GFA/MAF outputs and kept separate for FASTA/FASTA-ALN.
 
 ## What does `impg` do?
