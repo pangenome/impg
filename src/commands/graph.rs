@@ -12,6 +12,9 @@ use std::time::Instant;
 
 use bitvec::prelude::*;
 
+// Import gfasort for graph sorting
+use crate::graph::sort_gfa;
+
 // Import from sweepga
 use sweepga::fastga_integration::FastGAIntegration;
 
@@ -199,7 +202,7 @@ pub fn build_graph<W: Write>(
     // Run all-vs-all alignment (query = target = combined FASTA)
     let paf_temp = fastga
         .align_to_temp_paf(combined_fasta.path(), combined_fasta.path())
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("FastGA alignment failed: {}", e)))?;
+        .map_err(|e| io::Error::other(format!("FastGA alignment failed: {}", e)))?;
 
     if config.show_progress {
         info!(
@@ -219,7 +222,7 @@ pub fn build_graph<W: Write>(
     let mut seqidx = SeqIndex::new();
     seqidx
         .build_index(combined_fasta.path().to_str().unwrap())
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(io::Error::other)?;
     let seqidx = Arc::new(seqidx);
 
     if config.show_progress {
@@ -268,7 +271,7 @@ pub fn build_graph<W: Write>(
     // Unwrap Mutex - alignment tree is read-only during graph construction
     let aln_iitree_readonly = Arc::new(
         Arc::try_unwrap(aln_iitree)
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to unwrap alignment tree Arc"))?
+            .map_err(|_| io::Error::other("Failed to unwrap alignment tree Arc"))?
             .into_inner()
             .unwrap(),
     );
@@ -379,25 +382,45 @@ pub fn build_graph<W: Write>(
         );
     }
 
-    // 9) Emit GFA output
+    // 9) Emit GFA output to buffer
     if config.show_progress {
         info!(
-            "[graph::gfa] {:.3}s Writing GFA output",
+            "[graph::gfa] {:.3}s Generating GFA output",
             start_time.elapsed().as_secs_f64()
         );
     }
 
-    emit_gfa(
-        output,
-        graph_length,
-        seq_v_file.to_str().unwrap(),
-        Arc::clone(&node_iitree),
-        Arc::clone(&path_iitree),
-        &seq_id_cbv,
-        Arc::clone(&seqidx),
-        link_set.links(),
-        config.num_threads,
-    )?;
+    let mut gfa_buffer = Vec::new();
+    {
+        let mut buffer_writer = BufWriter::new(&mut gfa_buffer);
+        emit_gfa(
+            &mut buffer_writer,
+            graph_length,
+            seq_v_file.to_str().unwrap(),
+            Arc::clone(&node_iitree),
+            Arc::clone(&path_iitree),
+            &seq_id_cbv,
+            Arc::clone(&seqidx),
+            link_set.links(),
+            config.num_threads,
+        )?;
+    }
+
+    let gfa_string = String::from_utf8(gfa_buffer)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UTF-8 in GFA: {}", e)))?;
+
+    // 10) Sort GFA using gfasort's Ygs pipeline (path-guided SGD + grooming + topological sort)
+    if config.show_progress {
+        info!(
+            "[graph::sort] {:.3}s Sorting graph with gfasort (Ygs pipeline)",
+            start_time.elapsed().as_secs_f64()
+        );
+    }
+
+    let sorted_gfa = sort_gfa(&gfa_string, config.num_threads)?;
+
+    // Write sorted GFA to output
+    output.write_all(sorted_gfa.as_bytes())?;
 
     if config.show_progress {
         info!(
