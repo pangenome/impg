@@ -2,7 +2,19 @@ use crate::impg_index::ImpgIndex;
 use crate::sequence_index::{SequenceIndex, UnifiedSequenceIndex};
 use coitrees::Interval;
 use spoa_rs::{AlignmentEngine, AlignmentType as SpoaAlignmentType, Graph as SpoaGraph};
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
+use std::sync::{Arc, Mutex, RwLock};
+
+// Seqwish imports for graph induction
+use bitvec::prelude::*;
+use seqwish::alignments::unpack_paf_alignments;
+use seqwish::compact::compact_nodes;
+use seqwish::gfa::emit_gfa;
+use seqwish::intervaltree::{AdaptiveTree, IntervalTree};
+use seqwish::links::{derive_links, RankSelectBitVector};
+use seqwish::seqindex::SeqIndex;
+use seqwish::transclosure::compute_transitive_closures;
+use sweepga::fastga_integration::FastGAIntegration;
 
 pub struct SequenceMetadata {
     pub name: String,
@@ -646,4 +658,187 @@ pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
         });
     }
     result
+}
+
+/// Configuration for seqwish-based GFA generation
+pub struct SeqwishConfig {
+    /// Number of threads for parallel processing
+    pub num_threads: usize,
+    /// K-mer frequency multiplier (frequency = num_sequences * multiplier)
+    pub frequency_multiplier: usize,
+    /// Minimum alignment length for FastGA
+    pub min_alignment_length: u64,
+}
+
+impl Default for SeqwishConfig {
+    fn default() -> Self {
+        SeqwishConfig {
+            num_threads: 4,
+            frequency_multiplier: 10,
+            min_alignment_length: 100,
+        }
+    }
+}
+
+/// Generate GFA from intervals using sweepga+seqwish (variation graph induction)
+///
+/// This produces a proper variation graph where shared sequence is collapsed into
+/// single nodes, unlike POA which creates a partial order alignment graph.
+pub fn generate_gfa_seqwish_from_intervals(
+    impg: &Impg,
+    results: &[Interval<u32>],
+    sequence_index: &UnifiedSequenceIndex,
+    config: &SeqwishConfig,
+) -> io::Result<String> {
+    if results.is_empty() {
+        return Ok(String::from("H\tVN:Z:1.0\n"));
+    }
+
+    // 1) Extract sequences from intervals
+    let sequences = prepare_sequences(impg, results, sequence_index)?;
+
+    if sequences.is_empty() {
+        return Ok(String::from("H\tVN:Z:1.0\n"));
+    }
+
+    let num_sequences = sequences.len();
+    let kmer_frequency = num_sequences * config.frequency_multiplier;
+
+    // 2) Write sequences to a temp FASTA file
+    let combined_fasta = tempfile::Builder::new()
+        .suffix(".fa")
+        .tempfile()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to create temp file: {}", e)))?;
+
+    {
+        let mut writer = BufWriter::new(&combined_fasta);
+        for (seq, meta) in &sequences {
+            // Use a unique name for each sequence that includes coordinates
+            let header = format!(
+                ">{}:{}-{}({})",
+                meta.name,
+                meta.start,
+                meta.start + meta.size,
+                meta.strand
+            );
+            writeln!(writer, "{}", header)?;
+            writeln!(writer, "{}", seq)?;
+        }
+        writer.flush()?;
+    }
+
+    // 3) Run sweepga/FastGA alignment
+    let fastga = FastGAIntegration::new(
+        Some(kmer_frequency),
+        config.num_threads,
+        config.min_alignment_length,
+    );
+
+    let paf_temp = fastga
+        .align_to_temp_paf(combined_fasta.path(), combined_fasta.path())
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("FastGA alignment failed: {}", e)))?;
+
+    // 4) Build seqwish sequence index
+    let mut seqidx = SeqIndex::new();
+    seqidx
+        .build_index(combined_fasta.path().to_str().unwrap())
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let seqidx = Arc::new(seqidx);
+
+    // 5) Index alignments into interval tree (in-memory for small datasets)
+    let _aln_iitree_idx = seqwish::tempfile::create("seqwish-", ".sqa")?;
+    let mut aln_iitree_obj = AdaptiveTree::new_memory()?;
+    aln_iitree_obj.open_writer()?;
+    let aln_iitree = Arc::new(Mutex::new(aln_iitree_obj));
+
+    unpack_paf_alignments(
+        paf_temp.path().to_str().unwrap(),
+        Arc::clone(&aln_iitree),
+        Arc::clone(&seqidx),
+        0,   // min_match_len
+        0.0, // sparse_factor
+        config.num_threads,
+    )?;
+
+    aln_iitree.lock().unwrap().index()?;
+
+    // Unwrap Mutex - alignment tree is read-only during graph construction
+    let aln_iitree_readonly = Arc::new(
+        Arc::try_unwrap(aln_iitree)
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to unwrap alignment tree Arc"))?
+            .into_inner()
+            .unwrap(),
+    );
+
+    // 6) Compute transitive closures
+    let seq_v_file = seqwish::tempfile::create("seqwish-", ".sqs")?;
+    let _node_iitree_idx = seqwish::tempfile::create("seqwish-", ".sqn")?;
+    let _path_iitree_idx = seqwish::tempfile::create("seqwish-", ".sqp")?;
+
+    let mut node_iitree_obj = AdaptiveTree::new_memory()?;
+    node_iitree_obj.open_writer()?;
+    let node_iitree = Arc::new(RwLock::new(node_iitree_obj));
+
+    let mut path_iitree_obj = AdaptiveTree::new_memory()?;
+    path_iitree_obj.open_writer()?;
+    let path_iitree = Arc::new(RwLock::new(path_iitree_obj));
+
+    let graph_length = compute_transitive_closures(
+        Arc::clone(&seqidx),
+        Arc::clone(&aln_iitree_readonly),
+        seq_v_file.to_str().unwrap(),
+        Arc::clone(&node_iitree),
+        Arc::clone(&path_iitree),
+        0,         // repeat_max
+        0,         // min_repeat_dist
+        1_000_000, // transclose_batch
+        false,     // show_progress
+        config.num_threads,
+    )?;
+
+    // 7) Compact nodes
+    let mut seq_id_bv = BitVec::<u64, Lsb0>::repeat(false, graph_length + 1);
+
+    compact_nodes(
+        Arc::clone(&seqidx),
+        graph_length,
+        Arc::clone(&node_iitree),
+        Arc::clone(&path_iitree),
+        &mut seq_id_bv,
+        config.num_threads,
+    )?;
+
+    // Build rank/select structure
+    let seq_id_cbv =
+        RankSelectBitVector::from_bitvec(&seq_id_bv.iter().by_vals().collect::<Vec<bool>>());
+    drop(seq_id_bv);
+
+    // 8) Derive links between nodes
+    let link_set = derive_links(
+        Arc::clone(&seqidx),
+        Arc::clone(&node_iitree),
+        Arc::clone(&path_iitree),
+        &seq_id_cbv,
+        config.num_threads,
+    )?;
+
+    // 9) Emit GFA output to string
+    let mut gfa_output = Vec::new();
+    {
+        let mut writer = BufWriter::new(&mut gfa_output);
+        emit_gfa(
+            &mut writer,
+            graph_length,
+            seq_v_file.to_str().unwrap(),
+            Arc::clone(&node_iitree),
+            Arc::clone(&path_iitree),
+            &seq_id_cbv,
+            Arc::clone(&seqidx),
+            link_set.links(),
+            config.num_threads,
+        )?;
+    }
+
+    String::from_utf8(gfa_output)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UTF-8 in GFA: {}", e)))
 }
