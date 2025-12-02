@@ -5,6 +5,10 @@ use spoa_rs::{AlignmentEngine, AlignmentType as SpoaAlignmentType, Graph as Spoa
 use std::io::{self, BufWriter, Write};
 use std::sync::{Arc, Mutex, RwLock};
 
+// Gfasort imports for graph sorting
+use gfasort::gfa_parser::load_gfa;
+use gfasort::ygs::{ygs_sort, YgsParams};
+
 // Seqwish imports for graph induction
 use bitvec::prelude::*;
 use seqwish::alignments::unpack_paf_alignments;
@@ -660,6 +664,44 @@ pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
     result
 }
 
+/// Sort a GFA string using gfasort's Ygs pipeline (path-guided SGD + grooming + topological sort)
+///
+/// This is equivalent to running `gfasort -p Ygs` on the command line.
+/// It produces a well-ordered graph with nodes arranged to minimize path distances.
+pub fn sort_gfa(gfa_content: &str, num_threads: usize) -> io::Result<String> {
+    // Write GFA to temp file (gfasort's load_gfa requires a file path)
+    let temp_gfa = tempfile::Builder::new()
+        .suffix(".gfa")
+        .tempfile()
+        .map_err(|e| io::Error::other(format!("Failed to create temp GFA file: {}", e)))?;
+
+    std::fs::write(temp_gfa.path(), gfa_content)
+        .map_err(|e| io::Error::other(format!("Failed to write temp GFA: {}", e)))?;
+
+    // Load GFA into gfasort's graph structure
+    let mut graph = load_gfa(temp_gfa.path())
+        .map_err(|e| io::Error::other(format!("Failed to load GFA for sorting: {}", e)))?;
+
+    // Skip sorting for trivial graphs (0 or 1 node)
+    if graph.nodes.iter().filter(|n| n.is_some()).count() <= 1 {
+        return Ok(gfa_content.to_string());
+    }
+
+    // Create Ygs parameters from the graph
+    let params = YgsParams::from_graph(&graph, 0, num_threads);
+
+    // Sort the graph using Ygs pipeline (path-guided SGD + grooming + topological sort)
+    ygs_sort(&mut graph, &params);
+
+    // Write sorted GFA to string
+    let mut sorted_output = Vec::new();
+    graph.write_gfa(&mut sorted_output)
+        .map_err(|e| io::Error::other(format!("Failed to write sorted GFA: {}", e)))?;
+
+    String::from_utf8(sorted_output)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UTF-8 in sorted GFA: {}", e)))
+}
+
 /// Configuration for seqwish-based GFA generation
 pub struct SeqwishConfig {
     /// Number of threads for parallel processing
@@ -708,7 +750,7 @@ pub fn generate_gfa_seqwish_from_intervals(
     let combined_fasta = tempfile::Builder::new()
         .suffix(".fa")
         .tempfile()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to create temp file: {}", e)))?;
+        .map_err(|e| io::Error::other(format!("Failed to create temp file: {}", e)))?;
 
     {
         let mut writer = BufWriter::new(&combined_fasta);
@@ -736,13 +778,13 @@ pub fn generate_gfa_seqwish_from_intervals(
 
     let paf_temp = fastga
         .align_to_temp_paf(combined_fasta.path(), combined_fasta.path())
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("FastGA alignment failed: {}", e)))?;
+        .map_err(|e| io::Error::other(format!("FastGA alignment failed: {}", e)))?;
 
     // 4) Build seqwish sequence index
     let mut seqidx = SeqIndex::new();
     seqidx
         .build_index(combined_fasta.path().to_str().unwrap())
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(io::Error::other)?;
     let seqidx = Arc::new(seqidx);
 
     // 5) Index alignments into interval tree (in-memory for small datasets)
@@ -765,7 +807,7 @@ pub fn generate_gfa_seqwish_from_intervals(
     // Unwrap Mutex - alignment tree is read-only during graph construction
     let aln_iitree_readonly = Arc::new(
         Arc::try_unwrap(aln_iitree)
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to unwrap alignment tree Arc"))?
+            .map_err(|_| io::Error::other("Failed to unwrap alignment tree Arc"))?
             .into_inner()
             .unwrap(),
     );
@@ -839,6 +881,9 @@ pub fn generate_gfa_seqwish_from_intervals(
         )?;
     }
 
-    String::from_utf8(gfa_output)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UTF-8 in GFA: {}", e)))
+    let gfa_string = String::from_utf8(gfa_output)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UTF-8 in GFA: {}", e)))?;
+
+    // Sort the GFA using gfasort's Ygs pipeline (path-guided SGD + grooming + topological sort)
+    sort_gfa(&gfa_string, config.num_threads)
 }
