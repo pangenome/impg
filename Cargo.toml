@@ -43,5 +43,9 @@ tempfile = "3.23.0"
 zstd = { version = "0.13.3", features = ["zstdmt"] }
 gzp = "1.0.1"
 
+# Dependencies for graph building (sweepga + seqwish integration)
+sweepga = { git = "https://github.com/pangenome/sweepga", rev = "63ed05d52c4ac282b94f4e6c67510d3c0d4f73d2" }
+seqwish = { git = "https://github.com/pangenome/seqwish", rev = "a3369b07370cd7406e00c64224152eef11bcc665" }
+
 [features]
 default = []
