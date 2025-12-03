@@ -220,6 +220,7 @@ fn query_overlaps_for_ref(
                 None,
                 sequence_index,
                 config.approximate_mode,
+                None, // subset_filter
             )
         } else {
             impg.query_transitive_bfs(
@@ -235,6 +236,7 @@ fn query_overlaps_for_ref(
                 None,
                 sequence_index,
                 config.approximate_mode,
+                None, // subset_filter
             )
         }
     } else {
