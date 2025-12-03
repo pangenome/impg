@@ -1,7 +1,7 @@
 use clap::Parser;
 use coitrees::{Interval, IntervalTree};
 use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
-use impg::commands::{lace, partition, refine, similarity};
+use impg::commands::{depth, lace, partition, refine, similarity};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::onealn::OneAlnParser;
 use impg::seqidx::SequenceIndex;
@@ -758,6 +758,53 @@ enum Args {
 
         #[clap(flatten)]
         sequence: SequenceOpts,
+
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+
+    /// Compute coverage depth across sequences, partitioning by unique haplotype count
+    Depth {
+        #[clap(flatten)]
+        alignment: AlignmentOpts,
+
+        /// Enable transitive queries (with Breadth-First Search)
+        #[arg(help_heading = "Transitive queries")]
+        #[clap(short = 'x', long, action, conflicts_with = "transitive_dfs")]
+        transitive: bool,
+
+        #[clap(flatten)]
+        transitive_opts: TransitiveOpts,
+
+        /// File containing reference sequence names in processing order (one per line)
+        #[arg(help_heading = "Reference order")]
+        #[clap(long, value_parser, conflicts_with = "ref_order")]
+        ref_order_file: Option<String>,
+
+        /// Comma-separated list of reference sequence names in processing order
+        #[arg(help_heading = "Reference order")]
+        #[clap(long, value_parser, value_delimiter = ',', conflicts_with = "ref_order_file")]
+        ref_order: Option<Vec<String>>,
+
+        /// Merge adjacent windows with the same depth and haplotype set
+        #[arg(help_heading = "Output options")]
+        #[clap(long, action)]
+        merge_adjacent: bool,
+
+        /// Use approximate mode for faster queries with 1aln files
+        #[arg(help_heading = "Performance")]
+        #[clap(long, action)]
+        approximate: bool,
+
+        /// Separator for PanSN format (default: #)
+        #[arg(help_heading = "Output options")]
+        #[clap(long, value_parser, default_value = "#")]
+        separator: String,
+
+        /// Prefix for output file (outputs to stdout if not specified)
+        #[arg(help_heading = "Output options")]
+        #[clap(short = 'O', long, value_parser)]
+        output_prefix: Option<String>,
 
         #[clap(flatten)]
         common: CommonOpts,
@@ -1687,6 +1734,64 @@ fn run() -> io::Result<()> {
             )?;
 
             print_stats(&impg);
+        }
+        Args::Depth {
+            common,
+            alignment,
+            transitive,
+            transitive_opts,
+            ref_order_file,
+            ref_order,
+            merge_adjacent,
+            approximate,
+            separator,
+            output_prefix,
+        } => {
+            initialize_threads_and_log(&common);
+
+            // Validate approximate mode
+            if approximate {
+                validate_approximate_mode_min_length(
+                    transitive_opts.min_transitive_len,
+                    transitive || transitive_opts.transitive_dfs,
+                )?;
+            }
+
+            let alignment_files = resolve_alignment_files(&alignment)?;
+
+            let impg = initialize_impg(
+                &common,
+                &alignment,
+                alignment_files.as_slice(),
+                Vec::new(), // depth doesn't need sequence files
+            )?;
+
+            // Load reference order
+            let ref_order_list = if let Some(file) = ref_order_file {
+                Some(depth::load_ref_order_file(&file)?)
+            } else {
+                ref_order
+            };
+
+            // Build depth config
+            let config = depth::DepthConfig {
+                transitive,
+                transitive_dfs: transitive_opts.transitive_dfs,
+                max_depth: transitive_opts.max_depth,
+                min_transitive_len: transitive_opts.effective_min_transitive_len(),
+                min_distance_between_ranges: transitive_opts.min_distance_between_ranges,
+                merge_adjacent,
+                approximate_mode: approximate,
+            };
+
+            depth::compute_depth(
+                &impg,
+                &config,
+                ref_order_list,
+                None, // depth doesn't need sequence index
+                &separator,
+                output_prefix.as_deref(),
+            )?;
         }
     }
 
