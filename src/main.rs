@@ -1,7 +1,7 @@
 use clap::Parser;
 use coitrees::{Interval, IntervalTree};
 use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
-use impg::commands::{graph, lace, partition, refine, similarity};
+use impg::commands::{align, graph, lace, partition, refine, similarity};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::impg_index::{ImpgIndex, ImpgWrapper};
 use impg::multi_impg::MultiImpg;
@@ -818,6 +818,44 @@ enum Args {
         /// Directory for temporary files
         #[clap(long, value_parser)]
         temp_dir: Option<String>,
+
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+
+    /// Generate alignment pairs with sparsification strategies
+    Align {
+        /// List of FASTA file paths (space-separated)
+        #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with = "fasta_list")]
+        fasta_files: Vec<String>,
+
+        /// Text file containing FASTA file paths (one per line)
+        #[clap(long, value_parser, conflicts_with = "fasta_files")]
+        fasta_list: Option<String>,
+
+        /// Output directory for alignments
+        #[clap(short = 'o', long, value_parser, default_value = "alignments")]
+        output_dir: String,
+
+        /// Sparsification strategy: none, random:<frac>, giant:<prob>, tree:<k_near>:<k_far>:<rand>[:<kmer>]
+        #[clap(short = 'p', long, value_parser, default_value = "giant:0.99")]
+        sparsification: String,
+
+        /// K-mer frequency multiplier (frequency = num_sequences * multiplier)
+        #[clap(short = 'f', long, value_parser, default_value_t = 10)]
+        frequency_multiplier: usize,
+
+        /// Explicit k-mer frequency (overrides --frequency-multiplier)
+        #[clap(long, value_parser)]
+        frequency: Option<usize>,
+
+        /// Minimum alignment length for FastGA
+        #[clap(short = 'l', long, value_parser, default_value_t = 100)]
+        min_alignment_length: u64,
+
+        /// Output format: paf, 1aln, or joblist
+        #[clap(long, value_parser, default_value = "joblist")]
+        format: String,
 
         #[clap(flatten)]
         common: CommonOpts,
@@ -1808,6 +1846,55 @@ fn run() -> io::Result<()> {
             };
 
             graph::run_graph_build(fasta_files, fasta_list, &output, config)?;
+        }
+        Args::Align {
+            fasta_files,
+            fasta_list,
+            output_dir,
+            sparsification,
+            frequency_multiplier,
+            frequency,
+            min_alignment_length,
+            format,
+            common,
+        } => {
+            initialize_threads_and_log(&common);
+
+            // Check that at least one input is provided
+            if fasta_files.is_empty() && fasta_list.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Either --fasta-files or --fasta-list must be provided",
+                ));
+            }
+
+            // Parse sparsification strategy
+            let strategy = align::SparsificationStrategy::parse(&sparsification)?;
+
+            // Parse output format
+            let output_format = match format.to_lowercase().as_str() {
+                "paf" => align::AlignOutputFormat::Paf,
+                "1aln" | "onealn" => align::AlignOutputFormat::OneAln,
+                "joblist" | "jobs" => align::AlignOutputFormat::JobList,
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("Unknown output format: {}. Valid: paf, 1aln, joblist", format),
+                    ));
+                }
+            };
+
+            let config = align::AlignConfig {
+                num_threads: common.threads.get(),
+                sparsification: strategy,
+                frequency_multiplier,
+                frequency,
+                min_alignment_length,
+                output_format,
+                show_progress: common.verbose > 0,
+            };
+
+            align::run_align(fasta_files, fasta_list, &output_dir, config)?;
         }
     }
 
