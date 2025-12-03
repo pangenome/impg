@@ -819,6 +819,35 @@ enum Args {
         #[clap(long, value_parser)]
         temp_dir: Option<String>,
 
+        // Sweepga filtering options
+        /// Disable all alignment filtering
+        #[clap(short = 'N', long, action)]
+        no_filter: bool,
+
+        /// n:m-best mappings kept in query:target dimensions (e.g., "1:1", "many:many")
+        #[clap(short = 'n', long, value_parser, default_value = "1:1")]
+        num_mappings: String,
+
+        /// Scaffold jump/gap distance in bp (0 = disable scaffolding). Accepts k/m/g suffixes.
+        #[clap(short = 'j', long, value_parser, default_value_t = 50000)]
+        scaffold_jump: u64,
+
+        /// Minimum scaffold chain length in bp. Accepts k/m/g suffixes.
+        #[clap(short = 's', long, value_parser, default_value_t = 10000)]
+        scaffold_mass: u64,
+
+        /// Scaffold filter mode (e.g., "1:1", "many:many")
+        #[clap(short = 'm', long, value_parser, default_value = "1:1")]
+        scaffold_filter: String,
+
+        /// Maximum overlap ratio for plane sweep filtering (0.0-1.0)
+        #[clap(short = 'o', long, value_parser, default_value_t = 0.95)]
+        overlap: f64,
+
+        /// Minimum identity threshold (0.0-1.0)
+        #[clap(short = 'i', long, value_parser, default_value_t = 0.0)]
+        min_identity: f64,
+
         #[clap(flatten)]
         common: CommonOpts,
     },
@@ -1818,6 +1847,13 @@ fn run() -> io::Result<()> {
             transclose_batch,
             disk_backed,
             temp_dir,
+            no_filter,
+            num_mappings,
+            scaffold_jump,
+            scaffold_mass,
+            scaffold_filter,
+            overlap,
+            min_identity,
             common,
         } => {
             initialize_threads_and_log(&common);
@@ -1843,6 +1879,13 @@ fn run() -> io::Result<()> {
                 use_in_memory: !disk_backed,
                 show_progress: common.verbose > 0,
                 temp_dir,
+                no_filter,
+                num_mappings,
+                scaffold_jump,
+                scaffold_mass,
+                scaffold_filter,
+                overlap,
+                min_identity,
             };
 
             graph::run_graph_build(fasta_files, fasta_list, &output, config)?;

@@ -884,6 +884,9 @@ pub fn generate_gfa_seqwish_from_intervals(
     let gfa_string = String::from_utf8(gfa_output)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UTF-8 in GFA: {}", e)))?;
 
+    // Clean up seqwish temp files before returning
+    seqwish::tempfile::cleanup();
+
     // Sort the GFA using gfasort's Ygs pipeline (path-guided SGD + grooming + topological sort)
     sort_gfa(&gfa_string, config.num_threads)
 }

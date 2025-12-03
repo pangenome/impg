@@ -17,6 +17,7 @@ use crate::graph::sort_gfa;
 
 // Import from sweepga
 use sweepga::fastga_integration::FastGAIntegration;
+use sweepga::paf_filter::{FilterConfig, FilterMode, PafFilter, ScoringFunction};
 
 // Import from seqwish
 use seqwish::alignments::unpack_paf_alignments;
@@ -53,6 +54,22 @@ pub struct GraphBuildConfig {
     pub show_progress: bool,
     /// Directory for temporary files
     pub temp_dir: Option<String>,
+
+    // Sweepga filtering options
+    /// Disable all filtering (default: filtering enabled)
+    pub no_filter: bool,
+    /// n:m-best mappings kept in query:target dimensions (e.g., "1:1", "many:many")
+    pub num_mappings: String,
+    /// Scaffold jump/gap distance (0 = disable scaffolding)
+    pub scaffold_jump: u64,
+    /// Minimum scaffold chain length
+    pub scaffold_mass: u64,
+    /// Scaffold filter mode (e.g., "1:1", "many:many")
+    pub scaffold_filter: String,
+    /// Maximum overlap ratio for plane sweep filtering
+    pub overlap: f64,
+    /// Minimum identity threshold (0.0-1.0)
+    pub min_identity: f64,
 }
 
 impl Default for GraphBuildConfig {
@@ -70,13 +87,26 @@ impl Default for GraphBuildConfig {
             use_in_memory: true,
             show_progress: true,
             temp_dir: None,
+            // Filtering options with sensible defaults
+            no_filter: false,
+            num_mappings: "1:1".to_string(),
+            scaffold_jump: 50_000,       // 50kb default scaffold gap
+            scaffold_mass: 10_000,        // 10kb minimum scaffold length
+            scaffold_filter: "1:1".to_string(),
+            overlap: 0.95,
+            min_identity: 0.0,
         }
     }
 }
 
-/// Count the number of unique sequences (genomes/haplotypes) in FASTA files
-fn count_sequences_in_fasta(fasta_paths: &[String]) -> io::Result<usize> {
-    let mut count = 0;
+/// Count sequences and genomes in FASTA files
+/// Returns (num_sequences, num_genomes)
+/// For PanSN-spec names like SAMPLE#HAPLOTYPE#CONTIG, genomes are unique SAMPLE#HAPLOTYPE prefixes
+fn count_sequences_and_genomes_in_fasta(fasta_paths: &[String]) -> io::Result<(usize, usize)> {
+    use std::collections::HashSet;
+    let mut seq_count = 0;
+    let mut genome_prefixes: HashSet<String> = HashSet::new();
+
     for path in fasta_paths {
         let file = File::open(path)?;
         // Use niffler to auto-detect compression
@@ -87,11 +117,67 @@ fn count_sequences_in_fasta(fasta_paths: &[String]) -> io::Result<usize> {
         for line in reader.lines() {
             let line: String = line?;
             if line.starts_with('>') {
-                count += 1;
+                seq_count += 1;
+                // Extract genome prefix: everything before the last # for PanSN names
+                // For ">SAMPLE#HAPLOTYPE#CONTIG", prefix is "SAMPLE#HAPLOTYPE"
+                let name = line[1..].split_whitespace().next().unwrap_or("");
+                let parts: Vec<&str> = name.split('#').collect();
+                let prefix = if parts.len() >= 2 {
+                    // PanSN format: use SAMPLE#HAPLOTYPE (first two parts)
+                    format!("{}#{}", parts[0], parts[1])
+                } else {
+                    // Not PanSN: use whole name as prefix
+                    name.to_string()
+                };
+                genome_prefixes.insert(prefix);
             }
         }
     }
-    Ok(count)
+
+    let genome_count = genome_prefixes.len().max(1); // At least 1 genome
+    Ok((seq_count, genome_count))
+}
+
+/// Parse filter mode string (e.g., "1:1", "many:many", "5:3") into FilterMode and limits
+fn parse_filter_mode(s: &str) -> (FilterMode, Option<usize>, Option<usize>) {
+    let s_lower = s.to_lowercase();
+    if s_lower == "many:many" || s_lower == "n:n" {
+        return (FilterMode::ManyToMany, None, None);
+    }
+
+    // Parse M:N format
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 2 {
+        // Default to 1:1 if invalid format
+        return (FilterMode::OneToOne, Some(1), Some(1));
+    }
+
+    let query_max = if parts[0] == "many" || parts[0] == "n" {
+        None
+    } else {
+        parts[0].parse().ok()
+    };
+
+    let target_max = if parts[1] == "many" || parts[1] == "n" {
+        None
+    } else {
+        parts[1].parse().ok()
+    };
+
+    // FilterMode determines the filtering strategy:
+    // - OneToOne: enforces strict 1:1 mapping
+    // - OneToMany: 1:N (one per query, N per target)
+    // - ManyToMany: N:N (no strict filtering, uses overlap-based plane sweep)
+    // The actual limits are controlled by max_per_query/max_per_target
+    match (query_max, target_max) {
+        (Some(1), Some(1)) => (FilterMode::OneToOne, Some(1), Some(1)),
+        (Some(1), _) => (FilterMode::OneToMany, Some(1), target_max),
+        (_, Some(1)) => (FilterMode::OneToMany, query_max, Some(1)),
+        (Some(q), Some(t)) => (FilterMode::ManyToMany, Some(q), Some(t)),
+        (Some(q), None) => (FilterMode::ManyToMany, Some(q), None),
+        (None, Some(t)) => (FilterMode::ManyToMany, None, Some(t)),
+        (None, None) => (FilterMode::ManyToMany, None, None),
+    }
 }
 
 /// Build a pangenome graph from FASTA sequences
@@ -132,7 +218,7 @@ pub fn build_graph<W: Write>(
         seqwish::tempfile::set_dir(temp_dir);
     }
 
-    // 1) Count sequences and determine k-mer frequency
+    // 1) Count sequences and genomes, determine k-mer frequency
     if config.show_progress {
         info!(
             "[graph::count] {:.3}s Counting sequences in {} FASTA file(s)",
@@ -141,16 +227,18 @@ pub fn build_graph<W: Write>(
         );
     }
 
-    let num_sequences = count_sequences_in_fasta(fasta_files)?;
+    let (num_sequences, num_genomes) = count_sequences_and_genomes_in_fasta(fasta_files)?;
+    // Use num_genomes (not num_sequences) for frequency - matches sweepga behavior
     let kmer_frequency = config
         .frequency
-        .unwrap_or(num_sequences * config.frequency_multiplier);
+        .unwrap_or(num_genomes * config.frequency_multiplier);
 
     if config.show_progress {
         info!(
-            "[graph::count] {:.3}s Found {} sequences, using k-mer frequency {}",
+            "[graph::count] {:.3}s Found {} sequences in {} genomes, using k-mer frequency {}",
             start_time.elapsed().as_secs_f64(),
             num_sequences,
+            num_genomes,
             kmer_frequency
         );
     }
@@ -211,6 +299,79 @@ pub fn build_graph<W: Write>(
         );
     }
 
+    // 3.5) Apply sweepga filtering to alignments (unless --no-filter)
+    let filtered_paf = if config.no_filter {
+        if config.show_progress {
+            info!(
+                "[graph::filter] {:.3}s Filtering disabled (--no-filter)",
+                start_time.elapsed().as_secs_f64()
+            );
+        }
+        paf_temp
+    } else {
+        if config.show_progress {
+            info!(
+                "[graph::filter] {:.3}s Filtering alignments with sweepga (n={}, scaffold_jump={}, scaffold_mass={}, scaffold_filter={})",
+                start_time.elapsed().as_secs_f64(),
+                config.num_mappings,
+                config.scaffold_jump,
+                config.scaffold_mass,
+                config.scaffold_filter
+            );
+        }
+
+        // Parse filter modes
+        let (mapping_mode, mapping_per_query, mapping_per_target) =
+            parse_filter_mode(&config.num_mappings);
+        let (scaffold_mode, scaffold_per_query, scaffold_per_target) =
+            parse_filter_mode(&config.scaffold_filter);
+
+        // Create filter configuration
+        let filter_config = FilterConfig {
+            chain_gap: 0,
+            min_block_length: 0,
+            mapping_filter_mode: mapping_mode,
+            mapping_max_per_query: mapping_per_query,
+            mapping_max_per_target: mapping_per_target,
+            plane_sweep_secondaries: 0,
+            scaffold_filter_mode: scaffold_mode,
+            scaffold_max_per_query: scaffold_per_query,
+            scaffold_max_per_target: scaffold_per_target,
+            overlap_threshold: config.overlap,
+            sparsity: 1.0,
+            no_merge: true,
+            scaffold_gap: config.scaffold_jump,
+            min_scaffold_length: config.scaffold_mass,
+            scaffold_overlap_threshold: 0.5,
+            scaffold_max_deviation: 0,
+            prefix_delimiter: '#',
+            skip_prefix: false,
+            scoring_function: ScoringFunction::LogLengthIdentity,
+            min_identity: config.min_identity,
+            min_scaffold_identity: config.min_identity,
+        };
+
+        // Create filtered PAF temp file
+        let filtered_paf_file = tempfile::Builder::new()
+            .suffix(".filtered.paf")
+            .tempfile()?;
+
+        // Apply filtering
+        let filter = PafFilter::new(filter_config).with_keep_self(false);
+        filter
+            .filter_paf(paf_temp.path(), filtered_paf_file.path())
+            .map_err(|e| io::Error::other(format!("Filtering failed: {}", e)))?;
+
+        if config.show_progress {
+            info!(
+                "[graph::filter] {:.3}s Filtering complete",
+                start_time.elapsed().as_secs_f64()
+            );
+        }
+
+        filtered_paf_file
+    };
+
     // 4) Build sequence index for seqwish
     if config.show_progress {
         info!(
@@ -251,7 +412,7 @@ pub fn build_graph<W: Write>(
     let aln_iitree = Arc::new(Mutex::new(aln_iitree_obj));
 
     unpack_paf_alignments(
-        paf_temp.path().to_str().unwrap(),
+        filtered_paf.path().to_str().unwrap(),
         Arc::clone(&aln_iitree),
         Arc::clone(&seqidx),
         config.min_match_len,
@@ -428,6 +589,10 @@ pub fn build_graph<W: Write>(
             start_time.elapsed().as_secs_f64()
         );
     }
+
+    // Clean up seqwish temp files before returning
+    // This is critical when building multiple graphs in the same process
+    seqwish::tempfile::cleanup();
 
     Ok(node_count)
 }
