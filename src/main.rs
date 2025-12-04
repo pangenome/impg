@@ -1,7 +1,7 @@
 use clap::Parser;
 use coitrees::{Interval, IntervalTree};
 use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
-use impg::commands::{lace, partition, refine, similarity};
+use impg::commands::{align, graph, lace, partition, refine, similarity};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::onealn::OneAlnParser;
 use impg::seqidx::SequenceIndex;
@@ -206,10 +206,11 @@ impl GfaMafFastaOpts {
 
         let needs_sequence_mandatory = matches!(
             output_format,
-            "gfa" | "maf" | "fasta" | "fasta-aln" | "fasta+paf"
+            "gfa" | "gfa-seqwish" | "gfa-poa" | "maf" | "fasta" | "fasta-aln" | "fasta+paf"
         ) || onealn_needs_sequences;
         let needs_sequence_optional = output_format == "paf" && original_sequence_coordinates;
-        let needs_poa = matches!(output_format, "gfa" | "maf" | "fasta-aln");
+        // POA is only needed for gfa-poa, maf, and fasta-aln (not for gfa/gfa-seqwish which use seqwish)
+        let needs_poa = matches!(output_format, "gfa-poa" | "maf" | "fasta-aln");
 
         let scoring_params = if needs_poa {
             Some(self.parse_poa_scoring()?)
@@ -762,6 +763,131 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
     },
+
+    /// Build a pangenome graph from FASTA sequences using sweepga+seqwish
+    Graph {
+        /// List of FASTA file paths (space-separated)
+        #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with = "fasta_list")]
+        fasta_files: Vec<String>,
+
+        /// Text file containing FASTA file paths (one per line)
+        #[clap(long, value_parser, conflicts_with = "fasta_files")]
+        fasta_list: Option<String>,
+
+        /// Output GFA file path (use "-" for stdout)
+        #[clap(short = 'g', long, value_parser, default_value = "-")]
+        output: String,
+
+        /// K-mer frequency multiplier (frequency = num_sequences * multiplier)
+        #[clap(short = 'f', long, value_parser, default_value_t = 10)]
+        frequency_multiplier: usize,
+
+        /// Explicit k-mer frequency (overrides --frequency-multiplier)
+        #[clap(long, value_parser)]
+        frequency: Option<usize>,
+
+        /// Minimum alignment length for FastGA
+        #[clap(long, value_parser, default_value_t = 100)]
+        min_alignment_length: u64,
+
+        /// Maximum repeat count for transitive closure (0 = no limit)
+        #[clap(short = 'r', long, value_parser, default_value_t = 0)]
+        repeat_max: u64,
+
+        /// Minimum distance between repeats
+        #[clap(short = 'l', long, value_parser, default_value_t = 0)]
+        min_repeat_dist: u64,
+
+        /// Minimum match length filter for alignments
+        #[clap(short = 'k', long, value_parser, default_value_t = 0)]
+        min_match_len: u64,
+
+        /// Sparse factor for input matches (0.0 = keep all)
+        #[clap(long, value_parser, default_value_t = 0.0)]
+        sparse_factor: f32,
+
+        /// Batch size for transitive closure computation
+        #[clap(short = 'B', long, value_parser, default_value_t = 1_000_000)]
+        transclose_batch: u64,
+
+        /// Use disk-backed interval trees (slower but lower memory)
+        #[clap(long, action)]
+        disk_backed: bool,
+
+        /// Directory for temporary files
+        #[clap(long, value_parser)]
+        temp_dir: Option<String>,
+
+        // Sweepga filtering options
+        /// Disable all alignment filtering
+        #[clap(short = 'N', long, action)]
+        no_filter: bool,
+
+        /// n:m-best mappings kept in query:target dimensions (e.g., "1:1", "many:many")
+        #[clap(short = 'n', long, value_parser, default_value = "1:1")]
+        num_mappings: String,
+
+        /// Scaffold jump/gap distance in bp (0 = disable scaffolding). Accepts k/m/g suffixes.
+        #[clap(short = 'j', long, value_parser, default_value_t = 50000)]
+        scaffold_jump: u64,
+
+        /// Minimum scaffold chain length in bp. Accepts k/m/g suffixes.
+        #[clap(short = 's', long, value_parser, default_value_t = 10000)]
+        scaffold_mass: u64,
+
+        /// Scaffold filter mode (e.g., "1:1", "many:many")
+        #[clap(short = 'm', long, value_parser, default_value = "1:1")]
+        scaffold_filter: String,
+
+        /// Maximum overlap ratio for plane sweep filtering (0.0-1.0)
+        #[clap(short = 'o', long, value_parser, default_value_t = 0.95)]
+        overlap: f64,
+
+        /// Minimum identity threshold (0.0-1.0)
+        #[clap(short = 'i', long, value_parser, default_value_t = 0.0)]
+        min_identity: f64,
+
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+
+    /// Generate alignment pairs with sparsification strategies
+    Align {
+        /// List of FASTA file paths (space-separated)
+        #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with = "fasta_list")]
+        fasta_files: Vec<String>,
+
+        /// Text file containing FASTA file paths (one per line)
+        #[clap(long, value_parser, conflicts_with = "fasta_files")]
+        fasta_list: Option<String>,
+
+        /// Output directory for alignments
+        #[clap(short = 'o', long, value_parser, default_value = "alignments")]
+        output_dir: String,
+
+        /// Sparsification strategy: none, random:<frac>, giant:<prob>, tree:<k_near>:<k_far>:<rand>[:<kmer>]
+        #[clap(short = 'p', long, value_parser, default_value = "giant:0.99")]
+        sparsification: String,
+
+        /// K-mer frequency multiplier (frequency = num_sequences * multiplier)
+        #[clap(short = 'f', long, value_parser, default_value_t = 10)]
+        frequency_multiplier: usize,
+
+        /// Explicit k-mer frequency (overrides --frequency-multiplier)
+        #[clap(long, value_parser)]
+        frequency: Option<usize>,
+
+        /// Minimum alignment length for FastGA
+        #[clap(short = 'l', long, value_parser, default_value_t = 100)]
+        min_alignment_length: u64,
+
+        /// Output format: paf, 1aln, or joblist
+        #[clap(long, value_parser, default_value = "joblist")]
+        format: String,
+
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
 }
 
 fn main() {
@@ -1008,6 +1134,8 @@ fn run() -> io::Result<()> {
                     "bedpe",
                     "paf",
                     "gfa",
+                    "gfa-seqwish",
+                    "gfa-poa",
                     "maf",
                     "fasta",
                     "fasta+paf",
@@ -1226,7 +1354,8 @@ fn run() -> io::Result<()> {
                             sequence_index.as_ref(),
                         )?;
                     }
-                    "gfa" => {
+                    "gfa" | "gfa-seqwish" => {
+                        // Default GFA mode is seqwish (variation graph)
                         output_results_gfa(
                             &impg,
                             &mut results,
@@ -1235,7 +1364,24 @@ fn run() -> io::Result<()> {
                             &name,
                             query.effective_merge_distance(),
                             query.merge_strands_for_output("gfa"),
-                            scoring_params.unwrap(),
+                            scoring_params,
+                            GfaMode::Seqwish,
+                            common.threads.get(),
+                        )?;
+                    }
+                    "gfa-poa" => {
+                        // POA-based GFA (partial order alignment graph)
+                        output_results_gfa(
+                            &impg,
+                            &mut results,
+                            &mut find_output_stream(&output_prefix, "gfa")?,
+                            sequence_index.as_ref().unwrap(),
+                            &name,
+                            query.effective_merge_distance(),
+                            query.merge_strands_for_output("gfa"),
+                            scoring_params,
+                            GfaMode::Poa,
+                            common.threads.get(),
                         )?;
                     }
                     "maf" => {
@@ -1688,6 +1834,112 @@ fn run() -> io::Result<()> {
 
             print_stats(&impg);
         }
+        Args::Graph {
+            fasta_files,
+            fasta_list,
+            output,
+            frequency_multiplier,
+            frequency,
+            min_alignment_length,
+            repeat_max,
+            min_repeat_dist,
+            min_match_len,
+            sparse_factor,
+            transclose_batch,
+            disk_backed,
+            temp_dir,
+            no_filter,
+            num_mappings,
+            scaffold_jump,
+            scaffold_mass,
+            scaffold_filter,
+            overlap,
+            min_identity,
+            common,
+        } => {
+            initialize_threads_and_log(&common);
+
+            // Check that at least one input is provided
+            if fasta_files.is_empty() && fasta_list.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Either --fasta-files or --fasta-list must be provided",
+                ));
+            }
+
+            let config = graph::GraphBuildConfig {
+                num_threads: common.threads.get(),
+                frequency_multiplier,
+                frequency,
+                min_alignment_length,
+                repeat_max,
+                min_repeat_dist,
+                min_match_len,
+                sparse_factor,
+                transclose_batch,
+                use_in_memory: !disk_backed,
+                show_progress: common.verbose > 0,
+                temp_dir,
+                no_filter,
+                num_mappings,
+                scaffold_jump,
+                scaffold_mass,
+                scaffold_filter,
+                overlap,
+                min_identity,
+            };
+
+            graph::run_graph_build(fasta_files, fasta_list, &output, config)?;
+        }
+        Args::Align {
+            fasta_files,
+            fasta_list,
+            output_dir,
+            sparsification,
+            frequency_multiplier,
+            frequency,
+            min_alignment_length,
+            format,
+            common,
+        } => {
+            initialize_threads_and_log(&common);
+
+            // Check that at least one input is provided
+            if fasta_files.is_empty() && fasta_list.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Either --fasta-files or --fasta-list must be provided",
+                ));
+            }
+
+            // Parse sparsification strategy
+            let strategy = align::SparsificationStrategy::parse(&sparsification)?;
+
+            // Parse output format
+            let output_format = match format.to_lowercase().as_str() {
+                "paf" => align::AlignOutputFormat::Paf,
+                "1aln" | "onealn" => align::AlignOutputFormat::OneAln,
+                "joblist" | "jobs" => align::AlignOutputFormat::JobList,
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("Unknown output format: {}. Valid: paf, 1aln, joblist", format),
+                    ));
+                }
+            };
+
+            let config = align::AlignConfig {
+                num_threads: common.threads.get(),
+                sparsification: strategy,
+                frequency_multiplier,
+                frequency,
+                min_alignment_length,
+                output_format,
+                show_progress: common.verbose > 0,
+            };
+
+            align::run_align(fasta_files, fasta_list, &output_dir, config)?;
+        }
     }
 
     Ok(())
@@ -1824,8 +2076,8 @@ fn validate_region_size(
     const SIZE_LIMIT: u64 = 10_000; // 10kbp limit
     const MERGE_DISTANCE_LIMIT: i32 = 1000; // 1k limit
 
-    // Check if this is a maf/gfa output format that uses SPOA
-    let uses_spoa = matches!(output_format, "maf" | "gfa" | "fasta-aln");
+    // Check if this is a maf/gfa-poa output format that uses SPOA (not gfa/gfa-seqwish which use seqwish)
+    let uses_spoa = matches!(output_format, "maf" | "gfa-poa" | "fasta-aln");
 
     if uses_spoa && !force_large_region {
         if region_size > SIZE_LIMIT {
@@ -2615,6 +2867,15 @@ fn output_results_paf(
     Ok(())
 }
 
+/// GFA generation mode
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum GfaMode {
+    /// POA-based GFA (partial order alignment graph)
+    Poa,
+    /// Seqwish-based GFA (variation graph via graph induction)
+    Seqwish,
+}
+
 fn output_results_gfa(
     impg: &Impg,
     results: &mut Vec<AdjustedInterval>,
@@ -2623,7 +2884,9 @@ fn output_results_gfa(
     _name: &str,
     merge_distance: i32,
     merge_strands: bool,
-    scoring_params: (u8, u8, u8, u8, u8, u8),
+    scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
+    gfa_mode: GfaMode,
+    num_threads: usize,
 ) -> io::Result<()> {
     // Merge intervals if needed
     merge_query_adjusted_intervals(results, merge_distance, merge_strands);
@@ -2633,12 +2896,31 @@ fn output_results_gfa(
         .drain(..)
         .map(|(query_interval, _, _)| query_interval)
         .collect();
-    let gfa_output = impg::graph::generate_gfa_from_intervals(
-        impg,
-        &query_intervals,
-        sequence_index,
-        scoring_params,
-    );
+
+    let gfa_output = match gfa_mode {
+        GfaMode::Poa => {
+            let params = scoring_params.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "POA scoring parameters required for gfa-poa mode",
+                )
+            })?;
+            impg::graph::generate_gfa_from_intervals(impg, &query_intervals, sequence_index, params)
+        }
+        GfaMode::Seqwish => {
+            let config = impg::graph::SeqwishConfig {
+                num_threads,
+                frequency_multiplier: 10,
+                min_alignment_length: 100,
+            };
+            impg::graph::generate_gfa_seqwish_from_intervals(
+                impg,
+                &query_intervals,
+                sequence_index,
+                &config,
+            )?
+        }
+    };
     writeln!(out, "{gfa_output}")?;
 
     Ok(())
