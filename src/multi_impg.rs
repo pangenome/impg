@@ -10,15 +10,17 @@ use crate::impg_index::ImpgIndex;
 use crate::seqidx::SequenceIndex;
 use crate::sequence_index::UnifiedSequenceIndex;
 use crate::subset_filter::SubsetFilter;
+use serde::{Deserialize, Serialize};
 use coitrees::{BasicCOITree, Interval};
 use log::{debug, info, warn};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
-use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
 use std::collections::VecDeque;
+use std::fs::{self, File};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use std::time::SystemTime;
 
 /// Location of a tree within a specific sub-index.
 #[derive(Debug, Clone)]
@@ -28,6 +30,68 @@ struct TreeLocation {
     /// Local target_id within that sub-index
     local_target_id: u32,
 }
+
+/// Serializable version of TreeLocation for cache.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TreeLocationSer {
+    index_idx: u32,
+    local_target_id: u32,
+}
+
+impl From<&TreeLocation> for TreeLocationSer {
+    fn from(loc: &TreeLocation) -> Self {
+        TreeLocationSer {
+            index_idx: loc.index_idx as u32,
+            local_target_id: loc.local_target_id,
+        }
+    }
+}
+
+impl From<TreeLocationSer> for TreeLocation {
+    fn from(ser: TreeLocationSer) -> Self {
+        TreeLocation {
+            index_idx: ser.index_idx as usize,
+            local_target_id: ser.local_target_id,
+        }
+    }
+}
+
+/// File entry for staleness detection in the cache manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FileEntry {
+    /// Path to the index file (relative or absolute as stored in list)
+    path: String,
+    /// File size in bytes
+    size: u64,
+    /// Modification time as duration since UNIX_EPOCH
+    mtime_secs: u64,
+}
+
+/// Cache for MultiImpg unified data.
+///
+/// This cache stores precomputed unified sequence index, forest map, and
+/// local-to-unified translation tables to speed up repeated queries with
+/// the same set of per-file indices.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MultiImpgCache {
+    /// Magic bytes for identification
+    magic: [u8; 10],
+    /// Version for format evolution
+    version: u32,
+    /// Manifest of index files for staleness detection
+    manifest: Vec<FileEntry>,
+    /// The alignment list file path (for auto-detection)
+    list_file_path: String,
+    /// Unified sequence index
+    unified_seq_index: SequenceIndex,
+    /// Unified forest map: target_id → list of tree locations
+    unified_forest_map: Vec<(u32, Vec<TreeLocationSer>)>,
+    /// Local-to-unified translation tables per index
+    local_to_unified: Vec<Vec<u32>>,
+}
+
+const CACHE_MAGIC: &[u8; 10] = b"MIMPGCACH1";
+const CACHE_VERSION: u32 = 1;
 
 /// Metadata loaded from a per-file index header (seq_index + forest_map only).
 struct IndexHeader {
@@ -161,6 +225,136 @@ impl MultiImpg {
             local_to_unified,
             sub_indices: RwLock::new(vec![None; num_indices]),
         })
+    }
+
+    /// Load MultiImpg from a cache file if valid, or build from scratch.
+    ///
+    /// Auto-detects cache file as `{list_file}.multi_impg` and validates
+    /// staleness before using. If cache is stale or missing, builds from
+    /// scratch and saves a new cache.
+    pub fn load_with_cache(
+        index_paths: &[PathBuf],
+        alignment_files: &[String],
+        sequence_files: Option<&[String]>,
+        list_file: &Path,
+    ) -> std::io::Result<Self> {
+        let cache_path = list_file.with_extension("multi_impg");
+
+        // Try to load from cache
+        if cache_path.exists() {
+            match MultiImpgCache::load(&cache_path) {
+                Ok(cache) => {
+                    if cache.is_valid(index_paths, list_file)? {
+                        info!("Loading unified index from cache: {:?}", cache_path);
+                        return Self::from_cache(cache, index_paths, alignment_files, sequence_files);
+                    } else {
+                        info!("Cache stale, rebuilding unified index...");
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to load cache {:?}: {}, rebuilding...", cache_path, e);
+                }
+            }
+        }
+
+        // Build from scratch
+        let multi = Self::load_from_files(index_paths, alignment_files, sequence_files)?;
+
+        // Save cache for next time
+        if let Err(e) = multi.save_cache(&cache_path, list_file) {
+            warn!("Failed to save cache {:?}: {}", cache_path, e);
+        } else {
+            info!("Saved unified index cache: {:?}", cache_path);
+        }
+
+        Ok(multi)
+    }
+
+    /// Create MultiImpg from a validated cache.
+    fn from_cache(
+        cache: MultiImpgCache,
+        index_paths: &[PathBuf],
+        alignment_files: &[String],
+        sequence_files: Option<&[String]>,
+    ) -> std::io::Result<Self> {
+        let num_indices = index_paths.len();
+
+        // Convert serialized forest map back to FxHashMap<u32, Vec<TreeLocation>>
+        let forest_map: FxHashMap<u32, Vec<TreeLocation>> = cache
+            .unified_forest_map
+            .into_iter()
+            .map(|(target_id, locs)| {
+                (target_id, locs.into_iter().map(TreeLocation::from).collect())
+            })
+            .collect();
+
+        info!(
+            "Loaded unified sequence index with {} sequences from cache",
+            cache.unified_seq_index.len()
+        );
+        info!(
+            "Loaded unified forest map with {} target sequences from cache",
+            forest_map.len()
+        );
+
+        Ok(Self {
+            seq_index: cache.unified_seq_index,
+            forest_map,
+            index_paths: index_paths.to_vec(),
+            alignment_files: alignment_files.to_vec(),
+            sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
+            local_to_unified: cache.local_to_unified,
+            sub_indices: RwLock::new(vec![None; num_indices]),
+        })
+    }
+
+    /// Save the unified index data to a cache file.
+    pub fn save_cache(&self, cache_path: &Path, list_file: &Path) -> std::io::Result<()> {
+        // Build manifest from index files
+        let manifest: Vec<FileEntry> = self
+            .index_paths
+            .iter()
+            .map(|path| {
+                let metadata = fs::metadata(path)?;
+                let mtime = metadata
+                    .modified()?
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                Ok(FileEntry {
+                    path: path.to_string_lossy().to_string(),
+                    size: metadata.len(),
+                    mtime_secs: mtime.as_secs(),
+                })
+            })
+            .collect::<std::io::Result<Vec<_>>>()?;
+
+        // Convert forest_map to serializable format
+        let unified_forest_map: Vec<(u32, Vec<TreeLocationSer>)> = self
+            .forest_map
+            .iter()
+            .map(|(&target_id, locs)| {
+                (target_id, locs.iter().map(TreeLocationSer::from).collect())
+            })
+            .collect();
+
+        let cache = MultiImpgCache {
+            magic: *CACHE_MAGIC,
+            version: CACHE_VERSION,
+            manifest,
+            list_file_path: list_file.to_string_lossy().to_string(),
+            unified_seq_index: self.seq_index.clone(),
+            unified_forest_map,
+            local_to_unified: self.local_to_unified.clone(),
+        };
+
+        let file = File::create(cache_path)?;
+        let mut writer = BufWriter::new(file);
+
+        bincode::serde::encode_into_std_write(&cache, &mut writer, bincode::config::standard())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+        writer.flush()?;
+        Ok(())
     }
 
     /// Load only the header (seq_index + forest_map) from a single index file.
@@ -763,5 +957,103 @@ impl MultiImpg {
         }
 
         results
+    }
+}
+
+impl MultiImpgCache {
+    /// Load a cache from disk.
+    pub fn load(path: &Path) -> std::io::Result<Self> {
+        let file = File::open(path)?;
+        let mut reader = BufReader::new(file);
+
+        let cache: MultiImpgCache =
+            bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
+                .map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Failed to decode cache: {e}"),
+                    )
+                })?;
+
+        // Verify magic and version
+        if &cache.magic != CACHE_MAGIC {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid cache magic bytes",
+            ));
+        }
+        if cache.version != CACHE_VERSION {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Unsupported cache version: {} (expected {})",
+                    cache.version, CACHE_VERSION
+                ),
+            ));
+        }
+
+        Ok(cache)
+    }
+
+    /// Check if the cache is still valid (not stale).
+    ///
+    /// The cache is valid if:
+    /// 1. All listed index files still exist
+    /// 2. No index file has been modified (mtime + size check)
+    /// 3. The list of files matches exactly
+    pub fn is_valid(&self, index_paths: &[PathBuf], _list_file: &Path) -> std::io::Result<bool> {
+        // Check file list length matches
+        if self.manifest.len() != index_paths.len() {
+            debug!(
+                "Cache invalid: manifest has {} files, but {} index paths provided",
+                self.manifest.len(),
+                index_paths.len()
+            );
+            return Ok(false);
+        }
+
+        // Check each file's path, mtime, and size
+        for (entry, path) in self.manifest.iter().zip(index_paths) {
+            let path_str = path.to_string_lossy().to_string();
+            if entry.path != path_str {
+                debug!("Cache invalid: path mismatch '{}' vs '{}'", entry.path, path_str);
+                return Ok(false);
+            }
+
+            let metadata = match fs::metadata(path) {
+                Ok(m) => m,
+                Err(_) => {
+                    debug!("Cache invalid: file not found '{}'", path_str);
+                    return Ok(false);
+                }
+            };
+
+            if metadata.len() != entry.size {
+                debug!(
+                    "Cache invalid: size mismatch for '{}' ({} vs {})",
+                    path_str,
+                    metadata.len(),
+                    entry.size
+                );
+                return Ok(false);
+            }
+
+            let mtime = metadata
+                .modified()?
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+            if mtime.as_secs() != entry.mtime_secs {
+                debug!(
+                    "Cache invalid: mtime mismatch for '{}' ({} vs {})",
+                    path_str,
+                    mtime.as_secs(),
+                    entry.mtime_secs
+                );
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
     }
 }

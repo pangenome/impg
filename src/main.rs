@@ -2001,6 +2001,7 @@ fn initialize_impg(
             common.threads,
             alignment.force_reindex,
             seq_files_opt,
+            alignment.alignment_list.as_deref(),
         );
     }
 
@@ -2030,8 +2031,9 @@ fn initialize_multi_impg(
     threads: NonZeroUsize,
     force_reindex: bool,
     sequence_files: Option<&[String]>,
+    alignment_list: Option<&str>,
 ) -> io::Result<ImpgWrapper> {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     info!("Using per-file indexing mode with {} alignment files", alignment_files.len());
 
@@ -2094,7 +2096,13 @@ fn initialize_multi_impg(
 
     // Load MultiImpg from all per-file indices
     info!("Loading per-file indices into MultiImpg...");
-    let multi = MultiImpg::load_from_files(&index_paths, alignment_files, sequence_files)?;
+    let multi = if let Some(list_path) = alignment_list {
+        // Use cache when alignment list file is available
+        MultiImpg::load_with_cache(&index_paths, alignment_files, sequence_files, Path::new(list_path))?
+    } else {
+        // No list file, can't use cache (e.g., --alignment-files mode)
+        MultiImpg::load_from_files(&index_paths, alignment_files, sequence_files)?
+    };
 
     Ok(ImpgWrapper::from_multi(multi))
 }

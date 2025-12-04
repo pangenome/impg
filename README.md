@@ -417,6 +417,31 @@ impg index -a alignments.paf -i custom.impg
 impg index --alignment-list alignment_files.txt
 ```
 
+#### Indexing Modes
+
+**Combined index** (default): Creates a single `.impg` file for all alignments.
+```bash
+impg index -a file1.paf file2.1aln -i combined.impg
+impg query -i combined.impg -r chr1:0-1000
+```
+
+**Per-file index** (`--per-file-index`): Creates one `.impg` per alignment file (e.g., `data.paf.impg`).
+```bash
+impg index --alignment-list files.txt --per-file-index -t 32
+impg query --alignment-list files.txt --per-file-index -r chr1:0-1000
+```
+
+Both modes work with PAF and .1aln files (can be mixed in `--alignment-list`).
+
+**When to use per-file indexing:**
+- Incremental updates (only rebuild changed alignment files)
+- Distributed/parallel index building
+- Many alignment files (>100)
+
+**Stale index detection:** impg warns if alignment files are modified after index creation. Use `-f/--force-reindex` to rebuild.
+
+**Backward compatibility:** Index format (`IMPGIDX1`) is backward compatible with previous impg versions. Per-file indices use the same format.
+
 **Note on compressed files**: `impg` works directly with bgzip-compressed alignment files (`.paf.gz`, `.paf.bgz`, `.1aln.gz`). For large files, creating a GZI index can speed up initial index creation:
 
 ```bash
