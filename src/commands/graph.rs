@@ -213,9 +213,28 @@ pub fn build_graph<W: Write>(
         }
     }
 
-    // Set up temp directory for seqwish
-    if let Some(ref temp_dir) = config.temp_dir {
+    // Set up temp directory for all temp file operations (seqwish, sweepga, tempfile crate)
+    // Default to /dev/shm if available for better performance
+    let effective_temp_dir = config.temp_dir.clone().or_else(|| {
+        let shm_path = std::path::Path::new("/dev/shm");
+        if shm_path.exists() && shm_path.is_dir() {
+            Some("/dev/shm".to_string())
+        } else {
+            None
+        }
+    });
+
+    if let Some(ref temp_dir) = effective_temp_dir {
+        // Set TMPDIR environment variable so Rust's tempfile crate uses it
+        std::env::set_var("TMPDIR", temp_dir);
+        // Also configure seqwish's internal temp file handling
         seqwish::tempfile::set_dir(temp_dir);
+        if config.show_progress {
+            info!(
+                "[graph::temp] Using temp directory: {}",
+                temp_dir
+            );
+        }
     }
 
     // 1) Count sequences and genomes, determine k-mer frequency

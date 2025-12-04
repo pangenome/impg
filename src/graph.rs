@@ -732,6 +732,14 @@ pub fn generate_gfa_seqwish_from_intervals(
     sequence_index: &UnifiedSequenceIndex,
     config: &SeqwishConfig,
 ) -> io::Result<String> {
+    // Set up temp directory for all temp file operations
+    // Default to /dev/shm if available for better performance
+    let shm_path = std::path::Path::new("/dev/shm");
+    if shm_path.exists() && shm_path.is_dir() && std::env::var("TMPDIR").is_err() {
+        std::env::set_var("TMPDIR", "/dev/shm");
+        seqwish::tempfile::set_dir("/dev/shm");
+    }
+
     if results.is_empty() {
         return Ok(String::from("H\tVN:Z:1.0\n"));
     }
