@@ -2263,7 +2263,7 @@ checksum = "d4f410fedcf71af0345d7607d246e7ad15faaadd49d240ee3b24e5dc21a820ac"
 [[package]]
 name = "seqwish"
 version = "0.1.3"
-source = "git+https://github.com/pangenome/seqwish?rev=b94ba0f#b94ba0f747132c7d8483cbef875d011eeab3d732"
+source = "git+https://github.com/pangenome/seqwish?rev=0448c4d#0448c4da2eb5df5f5b8aebf5e2b7f40f1a0dff51"
 dependencies = [
  "bitvec",
  "cbindgen",
