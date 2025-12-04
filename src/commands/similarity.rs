@@ -1,5 +1,5 @@
 use crate::graph::prepare_poa_graph_and_sequences;
-use crate::impg::Impg;
+use crate::impg_index::ImpgIndex;
 use crate::sequence_index::UnifiedSequenceIndex;
 use coitrees::Interval;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -80,7 +80,7 @@ impl SimilarityMetrics {
 }
 
 pub fn compute_and_output_similarities(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     query_data: Vec<(Vec<Interval<u32>>, String)>,
     sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
@@ -233,7 +233,7 @@ pub fn compute_and_output_similarities(
 
 // Helper function for computing similarities for a single region
 fn compute_similarities_for_region(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
@@ -314,7 +314,7 @@ fn compute_similarities_for_region(
 
 // Helper function for computing PCA for a single region
 fn compute_pca_for_region(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
@@ -387,7 +387,7 @@ fn compute_pca_for_region(
 
 // Helper to prepare groups and MSA characters
 fn prepare_groups_and_msa(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),

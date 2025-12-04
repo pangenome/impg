@@ -1,4 +1,4 @@
-use crate::impg::Impg;
+use crate::impg_index::ImpgIndex;
 use crate::sequence_index::{SequenceIndex, UnifiedSequenceIndex};
 use coitrees::Interval;
 use spoa_rs::{AlignmentEngine, AlignmentType as SpoaAlignmentType, Graph as SpoaGraph};
@@ -13,7 +13,7 @@ pub struct SequenceMetadata {
 }
 
 pub fn generate_gfa_from_intervals(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
@@ -124,7 +124,7 @@ fn post_process_gfa_for_strands(gfa: String, sequence_metadata: &[SequenceMetada
 }
 
 pub fn generate_maf_from_intervals(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
@@ -200,7 +200,7 @@ fn format_maf_from_msa(
 }
 
 pub fn generate_fasta_alignment_from_intervals(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
@@ -304,7 +304,7 @@ fn format_fasta_alignment_from_msa(
 }
 
 pub fn prepare_poa_graph_and_sequences(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
@@ -318,7 +318,7 @@ pub fn prepare_poa_graph_and_sequences(
     let mut processed_sequences: Vec<(String, SequenceMetadata)> = results
         .par_iter()
         .map(|interval| -> io::Result<(String, SequenceMetadata)> {
-            let seq_name = impg.seq_index.get_name(interval.metadata).ok_or_else(|| {
+            let seq_name = impg.seq_index().get_name(interval.metadata).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,
                     format!("Sequence name not found for ID {}", interval.metadata),
@@ -327,7 +327,7 @@ pub fn prepare_poa_graph_and_sequences(
 
             // Get total sequence length
             let total_length = impg
-                .seq_index
+                .seq_index()
                 .get_len_from_id(interval.metadata)
                 .ok_or_else(|| {
                     io::Error::new(
@@ -405,7 +405,7 @@ pub fn prepare_poa_graph_and_sequences(
 }
 
 pub fn prepare_sequences(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
 ) -> std::io::Result<Vec<(String, SequenceMetadata)>> {
@@ -416,7 +416,7 @@ pub fn prepare_sequences(
         .par_iter()
         .map(|interval| -> std::io::Result<(String, SequenceMetadata)> {
             // Resolve sequence name
-            let seq_name = impg.seq_index.get_name(interval.metadata).ok_or_else(|| {
+            let seq_name = impg.seq_index().get_name(interval.metadata).ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     format!("Sequence name not found for ID {}", interval.metadata),
@@ -425,7 +425,7 @@ pub fn prepare_sequences(
 
             // Resolve total contig length
             let total_length = impg
-                .seq_index
+                .seq_index()
                 .get_len_from_id(interval.metadata)
                 .ok_or_else(|| {
                     std::io::Error::new(

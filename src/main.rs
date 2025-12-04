@@ -3,6 +3,8 @@ use coitrees::{Interval, IntervalTree};
 use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
 use impg::commands::{lace, partition, refine, similarity};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
+use impg::impg_index::{ImpgIndex, ImpgWrapper};
+use impg::multi_impg::MultiImpg;
 use impg::onealn::OneAlnParser;
 use impg::seqidx::SequenceIndex;
 use impg::sequence_index::{SequenceIndex as SeqIndexTrait, UnifiedSequenceIndex};
@@ -59,6 +61,12 @@ struct AlignmentOpts {
     #[arg(help_heading = "Index options")]
     #[clap(short = 'f', long, action)]
     force_reindex: bool,
+
+    /// Use per-file indexing (one .impg file per alignment file).
+    /// Enables incremental updates and parallel index building.
+    #[arg(help_heading = "Index options")]
+    #[clap(long, action)]
+    per_file_index: bool,
 
     /// Trace spacing for .1aln alignment files (used when converting tracepoints to CIGAR)
     #[arg(help_heading = "Alignment options")]
@@ -1073,13 +1081,13 @@ fn run() -> io::Result<()> {
                 } else {
                     // No interval specified: use the whole sequence [0, len)
                     let seq_name = target_range_str;
-                    let seq_id = impg.seq_index.get_id(seq_name).ok_or_else(|| {
+                    let seq_id = impg.seq_index().get_id(seq_name).ok_or_else(|| {
                         io::Error::new(
                             io::ErrorKind::NotFound,
                             format!("Sequence '{seq_name}' not found in index"),
                         )
                     })?;
-                    let seq_len = impg.seq_index.get_len_from_id(seq_id).ok_or_else(|| {
+                    let seq_len = impg.seq_index().get_len_from_id(seq_id).ok_or_else(|| {
                         io::Error::new(
                             io::ErrorKind::InvalidData,
                             format!("Could not get length for sequence '{seq_name}'"),
@@ -1093,7 +1101,7 @@ fn run() -> io::Result<()> {
                     &target_name,
                     target_range.0,
                     target_range.1,
-                    &impg.seq_index,
+                    impg.seq_index(),
                 )?;
                 validate_range_min_length(
                     target_range.0,
@@ -1113,7 +1121,7 @@ fn run() -> io::Result<()> {
                 let targets = partition::parse_bed_file(target_bed)?;
                 // Validate all entries in the BED file
                 for (seq_name, (start, end), name) in &targets {
-                    validate_sequence_range(seq_name, *start, *end, &impg.seq_index)?;
+                    validate_sequence_range(seq_name, *start, *end, impg.seq_index())?;
                     validate_range_min_length(
                         *start,
                         *end,
@@ -1340,7 +1348,7 @@ fn run() -> io::Result<()> {
                     &target_name,
                     target_range.0,
                     target_range.1,
-                    &impg.seq_index,
+                    impg.seq_index(),
                 )?;
                 validate_range_min_length(
                     target_range.0,
@@ -1353,7 +1361,7 @@ fn run() -> io::Result<()> {
                 let targets = partition::parse_bed_file(target_bed)?;
                 let mut validated = Vec::with_capacity(targets.len());
                 for (seq_name, (start, end), name) in targets {
-                    validate_sequence_range(&seq_name, start, end, &impg.seq_index)?;
+                    validate_sequence_range(&seq_name, start, end, impg.seq_index())?;
                     validate_range_min_length(
                         start,
                         end,
@@ -1560,13 +1568,13 @@ fn run() -> io::Result<()> {
                     } else {
                         // No interval specified: use the whole sequence [0, len)
                         let seq_name = target_range_str;
-                        let seq_id = impg.seq_index.get_id(seq_name).ok_or_else(|| {
+                        let seq_id = impg.seq_index().get_id(seq_name).ok_or_else(|| {
                             io::Error::new(
                                 io::ErrorKind::NotFound,
                                 format!("Sequence '{seq_name}' not found in index"),
                             )
                         })?;
-                        let seq_len = impg.seq_index.get_len_from_id(seq_id).ok_or_else(|| {
+                        let seq_len = impg.seq_index().get_len_from_id(seq_id).ok_or_else(|| {
                             io::Error::new(
                                 io::ErrorKind::InvalidData,
                                 format!("Could not get length for sequence '{seq_name}'"),
@@ -1579,7 +1587,7 @@ fn run() -> io::Result<()> {
                         &target_name,
                         target_range.0,
                         target_range.1,
-                        &impg.seq_index,
+                        impg.seq_index(),
                     )?;
                     validate_region_size(
                         target_range.0,
@@ -1598,7 +1606,7 @@ fn run() -> io::Result<()> {
                             &target_name,
                             target_range.0,
                             target_range.1,
-                            &impg.seq_index,
+                            impg.seq_index(),
                         )?;
                         validate_region_size(
                             target_range.0,
@@ -1975,34 +1983,120 @@ fn initialize_impg(
     alignment: &AlignmentOpts,
     alignment_files: &[String],
     sequence_files: Vec<String>,
-) -> io::Result<Impg> {
+) -> io::Result<ImpgWrapper> {
     // The list of alignment files (PAF or .1aln) is pre-resolved
     info!("Found {} alignment file(s)", alignment_files.len());
 
-    // Load or generate index
-    if alignment.force_reindex {
+    let seq_files_opt = if sequence_files.is_empty() {
+        None
+    } else {
+        Some(sequence_files.as_slice())
+    };
+
+    // Check if per-file indexing is requested
+    if alignment.per_file_index {
+        // Per-file indexing mode: each alignment file gets its own .impg index
+        return initialize_multi_impg(
+            alignment_files,
+            common.threads,
+            alignment.force_reindex,
+            seq_files_opt,
+        );
+    }
+
+    // Load or generate combined index (original behavior)
+    let impg = if alignment.force_reindex {
         generate_multi_index(
             alignment_files,
             common.threads,
             alignment.index.as_deref(),
-            if sequence_files.is_empty() {
-                None
-            } else {
-                Some(&sequence_files)
-            },
+            seq_files_opt,
         )
     } else {
         load_or_generate_multi_index(
             alignment_files,
             common.threads,
             alignment.index.as_deref(),
-            if sequence_files.is_empty() {
-                None
-            } else {
-                Some(&sequence_files)
-            },
+            seq_files_opt,
         )
+    }?;
+
+    Ok(ImpgWrapper::from_single(impg))
+}
+
+/// Initialize MultiImpg from per-file indices
+fn initialize_multi_impg(
+    alignment_files: &[String],
+    threads: NonZeroUsize,
+    force_reindex: bool,
+    sequence_files: Option<&[String]>,
+) -> io::Result<ImpgWrapper> {
+    use std::path::PathBuf;
+
+    info!("Using per-file indexing mode with {} alignment files", alignment_files.len());
+
+    // Generate per-file index paths
+    let index_paths: Vec<PathBuf> = alignment_files
+        .iter()
+        .map(|f| PathBuf::from(format!("{}.impg", f)))
+        .collect();
+
+    // Check which indices need to be built
+    let indices_to_build: Vec<usize> = if force_reindex {
+        (0..alignment_files.len()).collect()
+    } else {
+        index_paths
+            .iter()
+            .enumerate()
+            .filter(|(_, path)| !path.exists())
+            .map(|(i, _)| i)
+            .collect()
+    };
+
+    if !indices_to_build.is_empty() {
+        info!("Building {} per-file indices...", indices_to_build.len());
+
+        // Build indices in parallel
+        let build_results: Vec<io::Result<()>> = indices_to_build
+            .par_iter()
+            .map(|&i| {
+                let aln_file = &alignment_files[i];
+                let index_path = &index_paths[i];
+
+                debug!("Building index for {}", aln_file);
+
+                // Build single-file index
+                let single_file = vec![aln_file.clone()];
+                let impg = generate_multi_index(
+                    &single_file,
+                    threads,
+                    Some(index_path.to_string_lossy().as_ref()),
+                    sequence_files,
+                )?;
+
+                // Save the index
+                let file = File::create(index_path)?;
+                let mut writer = BufWriter::new(file);
+                impg.serialize_with_forest_map(&mut writer)?;
+
+                debug!("Built index: {:?}", index_path);
+                Ok(())
+            })
+            .collect();
+
+        // Check for errors
+        for result in build_results {
+            result?;
+        }
+
+        info!("Finished building {} per-file indices", indices_to_build.len());
     }
+
+    // Load MultiImpg from all per-file indices
+    info!("Loading per-file indices into MultiImpg...");
+    let multi = MultiImpg::load_from_files(&index_paths, alignment_files, sequence_files)?;
+
+    Ok(ImpgWrapper::from_multi(multi))
 }
 
 /// Resolve the list of alignment files (PAF or .1aln) from either --alignment-files or --alignment-list
@@ -2260,7 +2354,7 @@ fn get_combined_index_filename(alignment_files: &[String], custom_index: Option<
 }
 
 fn perform_query(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     target_name: &str,
     target_range: (i32, i32),
     store_cigar: bool,
@@ -2274,13 +2368,13 @@ fn perform_query(
     subset_filter: Option<&SubsetFilter>,
 ) -> io::Result<Vec<AdjustedInterval>> {
     let (target_start, target_end) = target_range;
-    let target_id = impg.seq_index.get_id(target_name).ok_or_else(|| {
+    let target_id = impg.seq_index().get_id(target_name).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("Target sequence '{target_name}' not found in index"),
         )
     })?;
-    let target_length = impg.seq_index.get_len_from_id(target_id).ok_or_else(|| {
+    let target_length = impg.seq_index().get_len_from_id(target_id).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("Target sequence '{target_name}' length not found in index"),
@@ -2377,7 +2471,7 @@ fn load_subset_filter_if_provided(path: &Option<String>) -> io::Result<Option<Su
 }
 
 fn output_results_bed(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     results: &mut Vec<AdjustedInterval>,
     out: &mut dyn Write,
     name: &str,
@@ -2388,7 +2482,7 @@ fn output_results_bed(
     merge_query_adjusted_intervals(results, merge_distance, merge_strands);
 
     for (query_interval, _, _) in results {
-        let query_name = impg.seq_index.get_name(query_interval.metadata).unwrap();
+        let query_name = impg.seq_index().get_name(query_interval.metadata).unwrap();
         let (first, last, strand) = if query_interval.first <= query_interval.last {
             (query_interval.first, query_interval.last, '+')
         } else {
@@ -2415,7 +2509,7 @@ fn output_results_bed(
 }
 
 fn output_results_bedpe(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     results: &mut Vec<AdjustedInterval>,
     out: &mut dyn Write,
     name: &str,
@@ -2425,8 +2519,8 @@ fn output_results_bedpe(
     merge_adjusted_intervals(results, merge_distance);
 
     for (overlap_query, cigar, overlap_target) in results {
-        let query_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
-        let target_name = impg.seq_index.get_name(overlap_target.metadata).unwrap();
+        let query_name = impg.seq_index().get_name(overlap_query.metadata).unwrap();
+        let target_name = impg.seq_index().get_name(overlap_target.metadata).unwrap();
         let (first, last, strand) = if overlap_query.first <= overlap_query.last {
             (overlap_query.first, overlap_query.last, '+')
         } else {
@@ -2502,7 +2596,7 @@ fn output_results_bedpe(
 }
 
 fn output_results_paf(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     results: &mut Vec<AdjustedInterval>,
     out: &mut dyn Write,
     name: &str,
@@ -2513,8 +2607,8 @@ fn output_results_paf(
     merge_adjusted_intervals(results, merge_distance);
 
     for (overlap_query, cigar, overlap_target) in results {
-        let query_name = impg.seq_index.get_name(overlap_query.metadata).unwrap();
-        let target_name = impg.seq_index.get_name(overlap_target.metadata).unwrap();
+        let query_name = impg.seq_index().get_name(overlap_query.metadata).unwrap();
+        let target_name = impg.seq_index().get_name(overlap_target.metadata).unwrap();
         let (first, last, strand) = if overlap_query.first <= overlap_query.last {
             (overlap_query.first, overlap_query.last, '+')
         } else {
@@ -2541,7 +2635,7 @@ fn output_results_paf(
         let query_length = if original_coordinates {
             get_original_sequence_length(&transformed_query_name, sequence_index)
         } else {
-            impg.seq_index
+            impg.seq_index()
                 .get_len_from_id(overlap_query.metadata)
                 .unwrap()
         };
@@ -2549,7 +2643,7 @@ fn output_results_paf(
         let target_length = if original_coordinates {
             get_original_sequence_length(&transformed_target_name, sequence_index)
         } else {
-            impg.seq_index
+            impg.seq_index()
                 .get_len_from_id(overlap_target.metadata)
                 .unwrap()
         };
@@ -2616,7 +2710,7 @@ fn output_results_paf(
 }
 
 fn output_results_gfa(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     results: &mut Vec<AdjustedInterval>,
     out: &mut dyn Write,
     sequence_index: &UnifiedSequenceIndex,
@@ -2645,7 +2739,7 @@ fn output_results_gfa(
 }
 
 fn output_results_fasta(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     results: &mut Vec<AdjustedInterval>,
     out: &mut dyn Write,
     sequence_index: &UnifiedSequenceIndex,
@@ -2661,7 +2755,7 @@ fn output_results_fasta(
     let sequence_data: Vec<(String, String)> = results
         .par_iter()
         .map(|(query_interval, _, _)| -> io::Result<(String, String)> {
-            let query_name = impg.seq_index.get_name(query_interval.metadata).unwrap();
+            let query_name = impg.seq_index().get_name(query_interval.metadata).unwrap();
 
             // Determine actual start and end based on orientation
             let (start, end, strand) = if query_interval.first <= query_interval.last {
@@ -2711,7 +2805,7 @@ fn output_results_fasta(
 }
 
 fn output_results_maf(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     results: &mut Vec<AdjustedInterval>,
     out: &mut dyn Write,
     sequence_index: &UnifiedSequenceIndex,
@@ -2740,7 +2834,7 @@ fn output_results_maf(
 }
 
 fn output_results_fasta_aln(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     results: &mut Vec<AdjustedInterval>,
     sequence_index: &UnifiedSequenceIndex,
     _name: String,
@@ -3311,24 +3405,21 @@ fn trim_cigar_prefix(cigar: &[CigarOp], query_len: i32, target_len: i32) -> Vec<
     result
 }
 
-fn print_stats(impg: &Impg) {
+fn print_stats(impg: &impl ImpgIndex) {
     // Basic stats
-    let num_sequences = impg.seq_index.len();
+    let num_sequences = impg.seq_index().len();
     let total_sequence_length: usize = (0..num_sequences as u32)
         .into_par_iter()
-        .filter_map(|id| impg.seq_index.get_len_from_id(id))
+        .filter_map(|id| impg.seq_index().get_len_from_id(id))
         .sum();
 
-    // Compute overlap stats - forest map is mandatory in IMPG index
-    let forest_map = &impg.forest_map;
+    // Compute overlap stats
+    let num_targets = impg.num_targets();
 
-    info!(
-        "Computing statistics for {} trees...",
-        forest_map.entries.len()
-    );
+    info!("Computing statistics for {} trees...", num_targets);
 
     // Collect target IDs to process
-    let target_ids: Vec<u32> = forest_map.entries.keys().copied().collect();
+    let target_ids: Vec<u32> = impg.target_ids();
 
     // Process trees in parallel, computing stats without keeping them in memory
     let results: Vec<(u32, usize)> = target_ids
@@ -3337,7 +3428,7 @@ fn print_stats(impg: &Impg) {
             // Get tree and count, removing it from memory for efficiency
             let count = if let Some(tree) = impg.get_or_load_tree(target_id) {
                 let len = tree.len();
-                impg.trees.write().unwrap().remove(&target_id);
+                impg.remove_cached_tree(target_id);
                 len
             } else {
                 0
@@ -3387,7 +3478,7 @@ fn print_stats(impg: &Impg) {
 
         println!("\nTop target sequences by number of overlaps:");
         for (idx, (seq_id, count)) in entries.iter().take(5).enumerate() {
-            if let Some(name) = impg.seq_index.get_name(*seq_id) {
+            if let Some(name) = impg.seq_index().get_name(*seq_id) {
                 println!("{}. {}: {} overlaps", idx + 1, name, count);
             }
         }

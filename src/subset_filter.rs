@@ -1,4 +1,5 @@
-use crate::impg::{AdjustedInterval, Impg};
+use crate::impg::AdjustedInterval;
+use crate::impg_index::ImpgIndex;
 use log::{debug, warn};
 use std::collections::HashSet;
 use std::io;
@@ -81,7 +82,7 @@ pub fn load_subset_filter(path: &str) -> io::Result<SubsetFilter> {
 /// Retains target sequence and filters others based on the subset filter.
 /// Logs statistics and warns if no comparison sequences remain.
 pub fn apply_subset_filter(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     target_id: u32,
     overlaps: &mut Vec<AdjustedInterval>,
     filter: Option<&SubsetFilter>,
@@ -92,7 +93,7 @@ pub fn apply_subset_filter(
     overlaps.retain(|(query_interval, _, _)| {
         query_interval.metadata == target_id
             || impg
-                .seq_index
+                .seq_index()
                 .get_name(query_interval.metadata)
                 .is_some_and(|name| filter.matches(name))
     });
