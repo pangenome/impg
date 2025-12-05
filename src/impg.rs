@@ -7,7 +7,7 @@ use crate::seqidx::SequenceIndex;
 use crate::sequence_index::SequenceIndex as _; // The as _ syntax imports the trait so its methods are available, but doesn't bring the name into scope (avoiding the naming conflict)
 use crate::sequence_index::UnifiedSequenceIndex;
 use coitrees::{BasicCOITree, Interval, IntervalTree};
-use lib_tracepoints::tracepoints_to_cigar_fastga_with_aligner;
+use tracepoints::tracepoints_to_cigar_fastga_with_aligner;
 use lib_wfa2::affine_wavefront::{AffineWavefronts, Distance};
 use log::{debug, warn};
 use onecode::OneFile;
@@ -668,7 +668,7 @@ impl Impg {
         let cigar_str = with_edit_aligner(|aligner| {
             tracepoints_to_cigar_fastga_with_aligner(
                 &tracepoints,
-                trace_spacing,
+                trace_spacing.try_into().unwrap(),
                 &query_seq,
                 &target_seq,
                 alignment.query_contig_start.try_into().unwrap(),
@@ -760,7 +760,7 @@ impl Impg {
         let cigar_str = with_edit_aligner(|aligner| {
             tracepoints_to_cigar_fastga_with_aligner(
                 &subset_tracepoints,
-                trace_spacing,
+                trace_spacing.try_into().unwrap(),
                 &query_seq,
                 &target_seq,
                 adjusted_query_offset,
