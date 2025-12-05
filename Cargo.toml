@@ -30,8 +30,8 @@ ragc-reader = { git = "https://github.com/AndreaGuarracino/ragc", branch = "twea
 # Dependencies for 1aln format (for alignments) support
 lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2"}
 #lib_wfa2 = { path = "/home/guarracino/Dropbox/git//lib_wfa2"}
-lib_tracepoints = { git = "https://github.com/AndreaGuarracino/lib_tracepoints"}
-#lib_tracepoints = { path = "/home/guarracino/Dropbox/git/lib_tracepoints"}
+tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints"}
+#tracepoints = { path = "/home/guarracino/Dropbox/git/tracepoints"}
 #onecode = { path = "/home/guarracino/git/onecode-rs" }
 onecode = { git = "https://github.com/pangenome/onecode-rs", rev = "38182c7acf7cccc53509176b1d11001ae6ff2642"}
 
