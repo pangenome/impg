@@ -1,11 +1,13 @@
 use crate::alignment_record::{AlignmentRecord, Strand};
 use crate::forest_map::ForestMap;
 use crate::graph::reverse_complement;
+use crate::impg_index::ImpgIndex;
 use crate::onealn::{OneAlnAlignment, OneAlnParser, ParseErr as OneAlnParseErr};
 use crate::paf::read_cigar_data;
 use crate::seqidx::SequenceIndex;
 use crate::sequence_index::SequenceIndex as _; // The as _ syntax imports the trait so its methods are available, but doesn't bring the name into scope (avoiding the naming conflict)
 use crate::sequence_index::UnifiedSequenceIndex;
+use crate::subset_filter::SubsetFilter;
 use coitrees::{BasicCOITree, Interval, IntervalTree};
 use tracepoints::tracepoints_to_cigar_fastga_with_aligner;
 use lib_wfa2::affine_wavefront::{AffineWavefronts, Distance};
@@ -794,8 +796,7 @@ impl Impg {
         let is_onealn = alignment_file.ends_with(".1aln");
 
         // Try subsetting approach for .1aln files
-        if is_onealn && sequence_index.is_some() {
-            let sequence_index = sequence_index.unwrap();
+        if let (true, Some(sequence_index)) = (is_onealn, sequence_index) {
 
             // Fetch alignment with tracepoints
             let alignment = self.get_onealn_alignment(metadata).unwrap_or_else(|e| {
@@ -946,7 +947,7 @@ impl Impg {
 
             Some((query_interval, cigar_ops, target_interval))
         } else {
-            warn!(
+            debug!(
                 "Projection failed for alignment (target_id={target_id}, file_index={}, range={}-{})",
                 metadata.alignment_file_index,
                 range_start,
@@ -2137,6 +2138,169 @@ impl Impg {
         }
 
         results
+    }
+}
+
+// Implement ImpgIndex trait for Impg
+impl ImpgIndex for Impg {
+    fn seq_index(&self) -> &SequenceIndex {
+        &self.seq_index
+    }
+
+    fn query(
+        &self,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32,
+        store_cigar: bool,
+        min_gap_compressed_identity: Option<f64>,
+        sequence_index: Option<&UnifiedSequenceIndex>,
+        approximate_mode: bool,
+    ) -> Vec<AdjustedInterval> {
+        // Delegate to the existing method
+        Impg::query(
+            self,
+            target_id,
+            range_start,
+            range_end,
+            store_cigar,
+            min_gap_compressed_identity,
+            sequence_index,
+            approximate_mode,
+        )
+    }
+
+    fn query_with_cache(
+        &self,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32,
+        store_cigar: bool,
+        min_gap_compressed_identity: Option<f64>,
+        sequence_index: Option<&UnifiedSequenceIndex>,
+        cigar_cache: &FxHashMap<(u32, u64), Vec<CigarOp>>,
+    ) -> Vec<AdjustedInterval> {
+        Impg::query_with_cache(
+            self,
+            target_id,
+            range_start,
+            range_end,
+            store_cigar,
+            min_gap_compressed_identity,
+            sequence_index,
+            cigar_cache,
+        )
+    }
+
+    fn populate_cigar_cache(
+        &self,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32,
+        min_gap_compressed_identity: Option<f64>,
+        sequence_index: Option<&UnifiedSequenceIndex>,
+        cache: &mut FxHashMap<(u32, u64), Vec<CigarOp>>,
+    ) {
+        Impg::populate_cigar_cache(
+            self,
+            target_id,
+            range_start,
+            range_end,
+            min_gap_compressed_identity,
+            sequence_index,
+            cache,
+        )
+    }
+
+    fn query_transitive_dfs(
+        &self,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32,
+        masked_regions: Option<&FxHashMap<u32, SortedRanges>>,
+        max_depth: u16,
+        min_transitive_len: i32,
+        min_distance_between_ranges: i32,
+        min_output_length: Option<i32>,
+        store_cigar: bool,
+        min_gap_compressed_identity: Option<f64>,
+        sequence_index: Option<&UnifiedSequenceIndex>,
+        approximate_mode: bool,
+        subset_filter: Option<&SubsetFilter>,
+    ) -> Vec<AdjustedInterval> {
+        Impg::query_transitive_dfs(
+            self,
+            target_id,
+            range_start,
+            range_end,
+            masked_regions,
+            max_depth,
+            min_transitive_len,
+            min_distance_between_ranges,
+            min_output_length,
+            store_cigar,
+            min_gap_compressed_identity,
+            sequence_index,
+            approximate_mode,
+            subset_filter,
+        )
+    }
+
+    fn query_transitive_bfs(
+        &self,
+        target_id: u32,
+        range_start: i32,
+        range_end: i32,
+        masked_regions: Option<&FxHashMap<u32, SortedRanges>>,
+        max_depth: u16,
+        min_transitive_len: i32,
+        min_distance_between_ranges: i32,
+        min_output_length: Option<i32>,
+        store_cigar: bool,
+        min_gap_compressed_identity: Option<f64>,
+        sequence_index: Option<&UnifiedSequenceIndex>,
+        approximate_mode: bool,
+        subset_filter: Option<&SubsetFilter>,
+    ) -> Vec<AdjustedInterval> {
+        Impg::query_transitive_bfs(
+            self,
+            target_id,
+            range_start,
+            range_end,
+            masked_regions,
+            max_depth,
+            min_transitive_len,
+            min_distance_between_ranges,
+            min_output_length,
+            store_cigar,
+            min_gap_compressed_identity,
+            sequence_index,
+            approximate_mode,
+            subset_filter,
+        )
+    }
+
+    fn get_or_load_tree(
+        &self,
+        target_id: u32,
+    ) -> Option<Arc<BasicCOITree<QueryMetadata, u32>>> {
+        Impg::get_or_load_tree(self, target_id)
+    }
+
+    fn target_ids(&self) -> Vec<u32> {
+        self.forest_map.entries.keys().copied().collect()
+    }
+
+    fn remove_cached_tree(&self, target_id: u32) {
+        self.trees.write().unwrap().remove(&target_id);
+    }
+
+    fn num_targets(&self) -> usize {
+        self.forest_map.entries.len()
+    }
+
+    fn sequence_files(&self) -> &[String] {
+        &self.sequence_files
     }
 }
 

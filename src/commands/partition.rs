@@ -1,6 +1,6 @@
 use crate::impg::CigarOp;
-use crate::impg::Impg;
 use crate::impg::SortedRanges;
+use crate::impg_index::ImpgIndex;
 use crate::sequence_index::{SequenceIndex, UnifiedSequenceIndex};
 use coitrees::Interval;
 use log::{debug, info};
@@ -27,7 +27,7 @@ fn create_output_path(output_folder: Option<&str>, filename: &str) -> io::Result
 }
 
 pub fn partition_alignments(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     window_size: usize,
     starting_sequences_file: Option<&str>,
     selection_mode: &str,
@@ -71,8 +71,8 @@ pub fn partition_alignments(
                     continue; // Skip empty lines and comments
                 }
 
-                if let Some(seq_id) = impg.seq_index.get_id(trimmed_name) {
-                    let seq_length = impg.seq_index.get_len_from_id(seq_id).unwrap() as i32;
+                if let Some(seq_id) = impg.seq_index().get_id(trimmed_name) {
+                    let seq_length = impg.seq_index().get_len_from_id(seq_id).unwrap() as i32;
                     starting_sequences.push((seq_id, 0, seq_length));
                 } else if debug {
                     debug!("Sequence {trimmed_name} from starting file not found in index");
@@ -88,7 +88,7 @@ pub fn partition_alignments(
 
         // Create windows from starting sequences
         for (seq_id, start, end) in starting_sequences {
-            let seq_name = impg.seq_index.get_name(seq_id).unwrap();
+            let seq_name = impg.seq_index().get_name(seq_id).unwrap();
             debug!(
                 "Creating windows for sequence {} ({}bp)",
                 seq_name,
@@ -116,19 +116,19 @@ pub fn partition_alignments(
     }
 
     // Initialize masked regions
-    let mut masked_regions: FxHashMap<u32, SortedRanges> = (0..impg.seq_index.len() as u32)
+    let mut masked_regions: FxHashMap<u32, SortedRanges> = (0..impg.seq_index().len() as u32)
         .into_par_iter()
         .map(|id| {
-            let len = impg.seq_index.get_len_from_id(id).unwrap();
+            let len = impg.seq_index().get_len_from_id(id).unwrap();
             (id, SortedRanges::new(len as i32, 0))
         })
         .collect();
 
     // Initialize missing regions from sequence index
-    let mut missing_regions: FxHashMap<u32, SortedRanges> = (0..impg.seq_index.len() as u32)
+    let mut missing_regions: FxHashMap<u32, SortedRanges> = (0..impg.seq_index().len() as u32)
         .into_par_iter()
         .map(|id| {
-            let len = impg.seq_index.get_len_from_id(id).unwrap();
+            let len = impg.seq_index().get_len_from_id(id).unwrap();
             let mut ranges = SortedRanges::new(len as i32, 0);
             ranges.insert((0, len as i32));
             (id, ranges)
@@ -137,9 +137,9 @@ pub fn partition_alignments(
 
     let mut partition_num = 0;
     let mut total_partitioned_length = 0;
-    let total_sequence_length: u64 = (0..impg.seq_index.len() as u32)
+    let total_sequence_length: u64 = (0..impg.seq_index().len() as u32)
         .into_par_iter()
-        .filter_map(|id| impg.seq_index.get_len_from_id(id))
+        .filter_map(|id| impg.seq_index().get_len_from_id(id))
         .sum::<usize>() as u64;
 
     info!("Partitioning");
@@ -165,7 +165,7 @@ pub fn partition_alignments(
         if debug {
             debug!("Processing new set of {} windows", windows.len());
             for (seq_id, start, end) in &windows {
-                let chrom = impg.seq_index.get_name(*seq_id).unwrap();
+                let chrom = impg.seq_index().get_name(*seq_id).unwrap();
                 debug!(
                     "  Window: {}:{}-{}, len: {}",
                     chrom,
@@ -177,7 +177,7 @@ pub fn partition_alignments(
         }
 
         for (seq_id, start, end) in windows.drain(..) {
-            let chrom = impg.seq_index.get_name(seq_id).unwrap();
+            let chrom = impg.seq_index().get_name(seq_id).unwrap();
 
             if debug {
                 debug!(
@@ -189,7 +189,7 @@ pub fn partition_alignments(
                     missing_regions.len()
                 );
                 for (chrom, ranges) in &missing_regions {
-                    let chrom = impg.seq_index.get_name(*chrom).unwrap();
+                    let chrom = impg.seq_index().get_name(*chrom).unwrap();
                     for &(start, end) in ranges.iter() {
                         debug!(
                             "    Region: {}:{}-{}, len: {}",
@@ -210,7 +210,7 @@ pub fn partition_alignments(
                     masked_regions.len()
                 );
                 for (chrom, ranges) in &masked_regions {
-                    let chrom = impg.seq_index.get_name(*chrom).unwrap();
+                    let chrom = impg.seq_index().get_name(*chrom).unwrap();
                     for &(start, end) in ranges.iter() {
                         debug!(
                             "    Region: {}:{}-{}, len: {}",
@@ -468,7 +468,7 @@ pub fn partition_alignments(
                 let query_intervals: Vec<Interval<u32>> = bed_entries
                     .into_iter()
                     .filter_map(|(seq_name, (start, end), _)| {
-                        impg.seq_index.get_id(&seq_name).map(|seq_id| Interval {
+                        impg.seq_index().get_id(&seq_name).map(|seq_id| Interval {
                             first: start,
                             last: end,
                             metadata: seq_id,
@@ -524,7 +524,7 @@ pub fn partition_alignments(
 // Helper function to select and window sequences based on selection_mode
 fn select_and_window_sequences(
     windows: &mut Vec<(u32, i32, i32)>,
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     missing_regions: &FxHashMap<u32, SortedRanges>,
     selection_mode: &str,
     window_size: usize,
@@ -555,7 +555,7 @@ fn select_and_window_sequences(
                 .map(|(seq_id, start, end, _)| (seq_id, start, end));
 
             if let Some((seq_id, start, end)) = longest_region {
-                let seq_name = impg.seq_index.get_name(seq_id).unwrap();
+                let seq_name = impg.seq_index().get_name(seq_id).unwrap();
 
                 debug!(
                     "Selected longest missing region {}:{}-{} ({}bp)",
@@ -589,8 +589,8 @@ fn select_and_window_sequences(
                 });
 
             if let Some((seq_id, max_total_missing)) = seq_with_most_missing {
-                let seq_length = impg.seq_index.get_len_from_id(seq_id).unwrap() as i32;
-                let seq_name = impg.seq_index.get_name(seq_id).unwrap();
+                let seq_length = impg.seq_index().get_len_from_id(seq_id).unwrap() as i32;
+                let seq_name = impg.seq_index().get_name(seq_id).unwrap();
 
                 debug!(
                     "Selected sequence {seq_name} with most missing sequence ({max_total_missing}bp)"
@@ -622,7 +622,7 @@ fn select_and_window_sequences(
                     || FxHashMap::with_capacity_and_hasher(0, Default::default()),
                     |mut map: FxHashMap<String, Vec<u32>>, seq_id: &u32| {
                         let seq_id = *seq_id; // Dereference to get u32
-                        if let Some(name) = impg.seq_index.get_name(seq_id) {
+                        if let Some(name) = impg.seq_index().get_name(seq_id) {
                             let mut split = name.split(separator);
                             let prefix = match field_count {
                                 1 => split.next().unwrap_or(name).to_string(),
@@ -687,7 +687,7 @@ fn select_and_window_sequences(
                             let mut seqs_with_len: Vec<(u32, usize)> = best_seqs
                                 .par_iter()
                                 .filter_map(|&id| {
-                                    impg.seq_index.get_len_from_id(id).map(|l| (id, l))
+                                    impg.seq_index().get_len_from_id(id).map(|l| (id, l))
                                 })
                                 .collect();
 
@@ -1178,12 +1178,12 @@ fn mask_and_update_regions(
 // Function to extend intervals that are close to sequence boundaries
 fn extend_to_close_boundaries(
     overlaps: &mut [(Interval<u32>, Vec<CigarOp>, Interval<u32>)],
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     min_boundary_distance: i32,
 ) {
     for (query_interval, _, target_interval) in overlaps.iter_mut() {
         let seq_len = impg
-            .seq_index
+            .seq_index()
             .get_len_from_id(query_interval.metadata)
             .unwrap() as i32;
         let is_forward = query_interval.first <= query_interval.last;
@@ -1220,7 +1220,7 @@ fn extend_to_close_boundaries(
 fn write_partition(
     partition_num: usize,
     query_intervals: &[Interval<u32>],
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     output_format: &str,
     output_folder: Option<&str>,
     sequence_index: Option<&UnifiedSequenceIndex>,
@@ -1306,7 +1306,7 @@ fn write_partition(
 fn write_partition_bed(
     partition_num: usize,
     query_intervals: &[Interval<u32>],
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     output_folder: Option<&str>,
     suffix: Option<&str>,
 ) -> io::Result<()> {
@@ -1324,7 +1324,7 @@ fn write_partition_bed(
     let mut writer = BufWriter::new(file);
 
     for query_interval in query_intervals {
-        let name = impg.seq_index.get_name(query_interval.metadata).unwrap();
+        let name = impg.seq_index().get_name(query_interval.metadata).unwrap();
         let (start, end) = if query_interval.first <= query_interval.last {
             (query_interval.first, query_interval.last)
         } else {
@@ -1341,7 +1341,7 @@ fn write_partition_bed(
 fn write_partition_gfa(
     partition_num: usize,
     query_intervals: &[Interval<u32>],
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     output_folder: Option<&str>,
     sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
@@ -1369,7 +1369,7 @@ fn write_partition_gfa(
 fn write_partition_maf(
     partition_num: usize,
     query_intervals: &[Interval<u32>],
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     output_folder: Option<&str>,
     sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
@@ -1398,7 +1398,7 @@ fn write_partition_maf(
 fn write_partition_fasta(
     partition_num: usize,
     query_intervals: &[Interval<u32>],
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     output_folder: Option<&str>,
     sequence_index: &UnifiedSequenceIndex,
     reverse_complement: bool,
@@ -1410,7 +1410,7 @@ fn write_partition_fasta(
     let mut writer = BufWriter::new(file);
 
     for query_interval in query_intervals {
-        let query_name = impg.seq_index.get_name(query_interval.metadata).unwrap();
+        let query_name = impg.seq_index().get_name(query_interval.metadata).unwrap();
 
         // Determine actual start and end based on orientation
         let (start, end, strand) = if query_interval.first <= query_interval.last {
@@ -1449,7 +1449,7 @@ fn write_partition_fasta(
 
 fn write_single_partition_file(
     collected_partitions: &[(usize, Vec<Interval<u32>>)],
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     output_format: &str,
     output_folder: Option<&str>,
 ) -> io::Result<()> {
@@ -1463,7 +1463,7 @@ fn write_single_partition_file(
 
             for (partition_num, query_intervals) in collected_partitions {
                 for query_interval in query_intervals {
-                    let name = impg.seq_index.get_name(query_interval.metadata).unwrap();
+                    let name = impg.seq_index().get_name(query_interval.metadata).unwrap();
                     let (start, end) = if query_interval.first <= query_interval.last {
                         (query_interval.first, query_interval.last)
                     } else {

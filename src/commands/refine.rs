@@ -1,4 +1,5 @@
-use crate::impg::{AdjustedInterval, Impg};
+use crate::impg::AdjustedInterval;
+use crate::impg_index::ImpgIndex;
 use crate::sequence_index::UnifiedSequenceIndex;
 use crate::subset_filter::{apply_subset_filter, SubsetFilter};
 use clap::ValueEnum;
@@ -109,7 +110,7 @@ struct CandidateResult {
 
 /// Run the refinement procedure on the provided ranges
 pub fn run_refine(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     ranges: &[(String, (i32, i32), String)],
     config: RefineConfig<'_>,
 ) -> io::Result<Vec<RefineRecord>> {
@@ -133,12 +134,12 @@ pub fn run_refine(
     }
 
     // Build sequence index if impg has sequence files (needed for 1aln support)
-    let sequence_index = if !impg.sequence_files.is_empty() {
+    let sequence_index = if !impg.sequence_files().is_empty() {
         info!(
             "Building sequence index from {} file(s) for 1aln support",
-            impg.sequence_files.len()
+            impg.sequence_files().len()
         );
-        Some(UnifiedSequenceIndex::from_files(&impg.sequence_files)?)
+        Some(UnifiedSequenceIndex::from_files(impg.sequence_files())?)
     } else {
         None
     };
@@ -172,7 +173,7 @@ pub fn run_refine(
 }
 
 fn refine_single_range(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     chrom: &str,
     orig_start: i32,
     orig_end: i32,
@@ -190,13 +191,13 @@ fn refine_single_range(
         ));
     }
 
-    let Some(target_id) = impg.seq_index.get_id(chrom) else {
+    let Some(target_id) = impg.seq_index().get_id(chrom) else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("Target sequence '{chrom}' not found in index"),
         ));
     };
-    let Some(seq_len) = impg.seq_index.get_len_from_id(target_id) else {
+    let Some(seq_len) = impg.seq_index().get_len_from_id(target_id) else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("Length for sequence '{chrom}' missing from index"),
@@ -419,7 +420,7 @@ fn refine_single_range(
 
 /// Evaluate a single `(left_flank, right_flank)` combination and return its support summary.
 fn evaluate_candidate(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     target_id: u32,
     chrom: &str,
     orig_start: i32,
@@ -488,7 +489,7 @@ fn evaluate_candidate(
 }
 
 fn query_overlaps(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     target_id: u32,
     range: (i32, i32),
     config: &RefineConfig<'_>,
@@ -606,7 +607,7 @@ struct SupportStats {
 /// Compute the maximum number of unique entities (samples/haplotypes) that align to the target.
 /// This counts all entities without applying the blacklist filter, but respects the subset filter.
 fn compute_max_entities(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     target_id: u32,
     mode: SupportMode,
     subset_filter: Option<&SubsetFilter>,
@@ -615,7 +616,7 @@ fn compute_max_entities(
 
     // Get the target's entity key to exclude it from the list
     let target_key = impg
-        .seq_index
+        .seq_index()
         .get_name(target_id)
         .and_then(|name| pansn_key(name, mode));
 
@@ -627,7 +628,7 @@ fn compute_max_entities(
             if query_id == target_id {
                 continue; // Skip self-alignments
             }
-            if let Some(name) = impg.seq_index.get_name(query_id) {
+            if let Some(name) = impg.seq_index().get_name(query_id) {
                 // Apply subset filter if provided
                 if let Some(filter) = subset_filter {
                     if !filter.matches(name) {
@@ -649,7 +650,7 @@ fn compute_max_entities(
 }
 
 fn compute_supporting_stats(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     mode: SupportMode,
     target_id: u32,
     overlaps: &[AdjustedInterval],
@@ -680,7 +681,7 @@ fn compute_supporting_stats(
 }
 
 fn compute_support_sets(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     mode: SupportMode,
     target_id: u32,
     overlaps: &[AdjustedInterval],
@@ -748,7 +749,7 @@ fn compute_support_sets(
         }
 
         if let (Some((q_start, q_end)), Some(name)) =
-            (query_range, impg.seq_index.get_name(sample_id))
+            (query_range, impg.seq_index().get_name(sample_id))
         {
             // Check if this query range overlaps with any blacklisted region
             if let Some(bl) = blacklist {

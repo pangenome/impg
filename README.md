@@ -140,8 +140,8 @@ impg query -a file1.paf file2.1aln -r chr1:1000-2000 -d 1000
 # Filter results by minimum length
 impg query -a alignments.paf -r chr1:1000-2000 -l 5000
 
-# Use DFS for transitive search (slower but fewer overlapping results)
-impg query -a alignments.paf -r chr1:1000-2000 --transitive-dfs
+# Use DFS instead of BFS for transitive search (slower but fewer overlapping results)
+impg query -a alignments.paf -r chr1:1000-2000 -x --transitive-dfs
 
 # Fast approximate mode for .1aln files (bed/bedpe only)
 impg query -a alignments.1aln -r chr1:1000-2000 --approximate
@@ -236,8 +236,6 @@ impg similarity -a alignments.paf -r chr1:1000-2000 --sequence-files *.fa -a
 # Restrict analysis to sequences listed in a file (one name per line)
 # Entries may be full contig names or sample identifiers (e.g., HG00097 or HG00097_hap1)
 impg similarity -a alignments.1aln -r chr1:1000-2000 --sequence-files *.fa --subset-sequence-list sequences.txt
-# Show the progress bar
-impg similarity -a file1.paf file2.1aln -r chr1:1000-2000 --sequence-files *.fa --progress-bar
 
 # Group sequences by delimiter (e.g., for PanSN naming, "sample#haplotype#chr" -> "sample")
 impg similarity -a alignments.paf -r chr1:1000-2000 --sequence-files *.fa --delim '#'
@@ -417,13 +415,33 @@ impg index -a alignments.paf -i custom.impg
 impg index --alignment-list alignment_files.txt
 ```
 
-**Note on compressed files**: `impg` works directly with bgzip-compressed alignment files (`.paf.gz`, `.paf.bgz`, `.1aln.gz`). For large files, creating a GZI index can speed up initial index creation:
+#### Indexing Modes
+
+**Combined index** (default): Creates a single `.impg` file for all alignments.
+```bash
+impg index -a file1.paf file2.1aln -i combined.impg
+impg query -i combined.impg -r chr1:0-1000
+```
+
+**Per-file index** (`--per-file-index`): Creates one `.impg` per alignment file (e.g., `data.paf.impg`).
+```bash
+impg index --alignment-list files.txt --per-file-index -t 32
+impg query --alignment-list files.txt --per-file-index -r chr1:0-1000
+```
+
+Both modes work with PAF and .1aln files (can be mixed in `--alignment-list`).
+
+**When to use per-file indexing:**
+- Incremental updates (only rebuild changed alignment files)
+- Many alignment files
+
+**Stale index detection:** impg warns if alignment files are modified after index creation. Use `-f/--force-reindex` to rebuild.
+
+**Note on compressed files**: `impg` works directly with bgzip-compressed PAF files (`.paf.gz`, `.paf.bgz`). For large files, creating a GZI index can speed up initial index creation:
 
 ```bash
 bgzip -r alignments.paf.gz  # Creates alignments.paf.gz.gzi (optional)
 ```
-
-If a `.gzi` file is present, `impg` will automatically use it for faster multithreaded decompression.
 
 ### Common options
 
@@ -433,7 +451,7 @@ All commands support these options:
 - `-i, --index`: Path to an existing IMPG index file.
 - `-f, --force-reindex`: Always regenerate the IMPG index even if it already exists.
 - `-t, --threads`: Number of threads (default: 4)
-- `-v, --verbose`: Verbosity level (0=error, 1=info, 2=debug)
+- `-v, --verbose`: Verbosity level (0=error/silent, 1=info with progress bar, 2=debug)
 
 ### Sequence file options
 
