@@ -19,7 +19,6 @@ use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::num::NonZeroUsize;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Basic common options shared between all commands
 #[derive(Parser, Debug)]
@@ -692,11 +691,6 @@ enum Args {
 
         #[clap(flatten)]
         gfa_maf_fasta: GfaMafFastaOpts,
-
-        /// Show the progress bar
-        #[arg(help_heading = "Output options")]
-        #[clap(long, action)]
-        progress_bar: bool,
 
         /// Output distances instead of similarities
         #[arg(help_heading = "Output options")]
@@ -1481,7 +1475,6 @@ fn run() -> io::Result<()> {
             alignment,
             query,
             gfa_maf_fasta,
-            progress_bar,
             distances,
             all,
             delim,
@@ -1675,7 +1668,6 @@ fn run() -> io::Result<()> {
                 &pca_measure,
                 polarize_n_prev,
                 polarize_guide_samples.as_deref(),
-                progress_bar,
             )?;
         }
         Args::Stats {
@@ -1992,7 +1984,6 @@ fn initialize_index(
         Some(sequence_files.as_slice())
     };
 
-    // Check indexing mode and load/build index accordingly
     if alignment.per_file_index {
         load_or_build_per_file_index(
             alignment_files,
@@ -2021,9 +2012,16 @@ fn load_or_build_per_file_index(
     sequence_files: Option<&[String]>,
     alignment_list: Option<&str>,
 ) -> io::Result<ImpgWrapper> {
+    use indicatif::{ProgressBar, ProgressStyle};
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    info!("Using per-file indexing mode with {} alignment files", alignment_files.len());
+    if force_reindex {
+        info!("Using per-file indexing mode (force rebuild)");
+    } else {
+        info!("Using per-file indexing mode");
+    }
+    info!("Building {} index file(s) processing {} alignment file(s)...", alignment_files.len(), alignment_files.len());
 
     // Generate per-file index paths
     let index_paths: Vec<PathBuf> = alignment_files
@@ -2044,7 +2042,22 @@ fn load_or_build_per_file_index(
     };
 
     if !indices_to_build.is_empty() {
-        info!("Building {} per-file indices...", indices_to_build.len());
+
+        // Create progress bar at info level (not at error-only or debug level)
+        let pb = if log::log_enabled!(log::Level::Info) && !log::log_enabled!(log::Level::Debug) {
+            let progress_bar = ProgressBar::new(indices_to_build.len() as u64);
+            progress_bar.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})")
+                    .unwrap()
+                    .progress_chars("#>-")
+            );
+            Some(progress_bar)
+        } else {
+            None
+        };
+
+        let completed = AtomicUsize::new(0);
 
         // Build indices in parallel
         let build_results: Vec<io::Result<()>> = indices_to_build
@@ -2055,13 +2068,14 @@ fn load_or_build_per_file_index(
 
                 debug!("Building index for {}", aln_file);
 
-                // Build single-file index
+                // Build index for this single alignment file (no progress bar, tracked at per-file level)
                 let single_file = vec![aln_file.clone()];
                 let impg = build_single_index(
                     &single_file,
                     threads,
                     Some(index_path.to_string_lossy().as_ref()),
                     sequence_files,
+                    false,
                 )?;
 
                 // Save the index
@@ -2070,9 +2084,20 @@ fn load_or_build_per_file_index(
                 impg.serialize_with_forest_map(&mut writer)?;
 
                 debug!("Built index: {:?}", index_path);
+
+                // Update progress
+                completed.fetch_add(1, Ordering::Relaxed);
+                if let Some(ref progress_bar) = pb {
+                    progress_bar.inc(1);
+                }
+
                 Ok(())
             })
             .collect();
+
+        if let Some(progress_bar) = pb {
+            progress_bar.finish_with_message("Completed building indices");
+        }
 
         // Check for errors
         for result in build_results {
@@ -2154,13 +2179,15 @@ fn load_or_build_single_index(
     let index_file = get_combined_index_filename(alignment_files, custom_index);
 
     if force_reindex {
-        info!("Force rebuilding index: {index_file}");
-        return build_single_index(alignment_files, threads, custom_index, sequence_files);
+        info!("Using single indexing mode (force rebuild)");
+        info!("Building 1 index file processing {} alignment file(s)...", alignment_files.len());
+        return build_single_index(alignment_files, threads, custom_index, sequence_files, true);
     }
 
     if !std::path::Path::new(&index_file).exists() {
-        info!("No index found at {index_file}. Creating it now.");
-        return build_single_index(alignment_files, threads, custom_index, sequence_files);
+        info!("Using single indexing mode");
+        info!("Building 1 index file processing {} alignment file(s)...", alignment_files.len());
+        return build_single_index(alignment_files, threads, custom_index, sequence_files, true);
     }
 
     // Load existing index
@@ -2196,13 +2223,28 @@ fn build_single_index(
     threads: NonZeroUsize,
     custom_index: Option<&str>,
     sequence_files: Option<&[String]>,
+    show_progress: bool,
 ) -> io::Result<Impg> {
+    use indicatif::{ProgressBar, ProgressStyle};
+
     let index_file = get_combined_index_filename(alignment_files, custom_index);
     debug!("Creating index: {index_file}");
 
     let num_alignment_files = alignment_files.len();
-    // Thread-safe counter for tracking progress
-    let files_processed = AtomicUsize::new(0);
+
+    // Create progress bar at info level (not at error-only or debug level)
+    let pb = if show_progress && log::log_enabled!(log::Level::Info) && !log::log_enabled!(log::Level::Debug) {
+        let progress_bar = ProgressBar::new(num_alignment_files as u64);
+        progress_bar.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})")
+                .unwrap()
+                .progress_chars("#>-")
+        );
+        Some(progress_bar)
+    } else {
+        None
+    };
 
     // Process alignment files in parallel, using a per-file local SequenceIndex to avoid global locking
     // We will merge names after parsing and remap IDs in a parallel pass.
@@ -2212,9 +2254,7 @@ fn build_single_index(
             .map(|file_index| -> io::Result<(Vec<AlignmentRecord>, String, SequenceIndex)> {
                 let aln_file = &alignment_files[file_index];
 
-                // Increment the counter and get the new value atomically
-                let current_count = files_processed.fetch_add(1, Ordering::SeqCst) + 1;
-                debug!("Processing alignment file ({current_count}/{num_alignment_files}): {aln_file}");
+                debug!("Processing alignment file ({}/{num_alignment_files}): {aln_file}", file_index + 1);
 
                 // Local sequence index for this file only
                 let mut local_seq_index = SequenceIndex::new();
@@ -2263,9 +2303,19 @@ fn build_single_index(
                     "Parsed {} alignment records from file: {aln_file}",
                     records.len()
                 );
+
+                // Update progress bar
+                if let Some(ref progress_bar) = pb {
+                    progress_bar.inc(1);
+                }
+
                 Ok((records, aln_file.clone(), local_seq_index))
             })
         .collect::<Result<Vec<_>, _>>()?; // Propagate any errors
+
+    if let Some(progress_bar) = pb {
+        progress_bar.finish_with_message("Completed parsing alignment files");
+    }
 
     // Build a temporary union of all sequence names and lengths from local indices
     let mut tmp_union_index = SequenceIndex::new();
