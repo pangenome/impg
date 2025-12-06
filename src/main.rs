@@ -790,7 +790,7 @@ fn run() -> io::Result<()> {
             initialize_threads_and_log(&common);
             let alignment_files = resolve_alignment_files(&alignment)?;
             let sequence_files = sequence.resolve_sequence_files()?;
-            let _ = initialize_impg(
+            let _ = initialize_index(
                 &common,
                 &alignment,
                 alignment_files.as_slice(),
@@ -967,7 +967,7 @@ fn run() -> io::Result<()> {
             )?;
 
             // Initialize impg after validation
-            let impg = initialize_impg(
+            let impg = initialize_index(
                 &common,
                 &alignment,
                 alignment_files.as_slice(),
@@ -1064,7 +1064,7 @@ fn run() -> io::Result<()> {
             let subset_filter = load_subset_filter_if_provided(&query.subset_sequence_list)?;
 
             // Initialize impg after validation but before target range validation (which needs seq_index)
-            let impg = initialize_impg(
+            let impg = initialize_index(
                 &common,
                 &alignment,
                 alignment_files.as_slice(),
@@ -1332,7 +1332,7 @@ fn run() -> io::Result<()> {
                 ));
             }
 
-            let impg = initialize_impg(
+            let impg = initialize_index(
                 &common,
                 &alignment,
                 alignment_files.as_slice(),
@@ -1550,7 +1550,7 @@ fn run() -> io::Result<()> {
             let subset_filter = load_subset_filter_if_provided(&query.subset_sequence_list)?;
 
             // Initialize impg after validation but before target range validation (which needs seq_index)
-            let impg = initialize_impg(
+            let impg = initialize_index(
                 &common,
                 &alignment,
                 alignment_files.as_slice(),
@@ -1686,7 +1686,7 @@ fn run() -> io::Result<()> {
             initialize_threads_and_log(&common);
             let alignment_files = resolve_alignment_files(&alignment)?;
             let sequence_files = sequence.resolve_sequence_files()?;
-            let impg = initialize_impg(
+            let impg = initialize_index(
                 &common,
                 &alignment,
                 alignment_files.as_slice(),
@@ -1977,7 +1977,7 @@ fn find_output_stream(basename: &Option<String>, extension: &str) -> io::Result<
 }
 
 /// Load/generate index based on common and alignment options
-fn initialize_impg(
+fn initialize_index(
     common: &CommonOpts,
     alignment: &AlignmentOpts,
     alignment_files: &[String],
@@ -1992,40 +1992,29 @@ fn initialize_impg(
         Some(sequence_files.as_slice())
     };
 
-    // Check if per-file indexing is requested
+    // Check indexing mode and load/build index accordingly
     if alignment.per_file_index {
-        // Per-file indexing mode: each alignment file gets its own .impg index
-        return initialize_multi_impg(
+        load_or_build_per_file_index(
             alignment_files,
             common.threads,
             alignment.force_reindex,
             seq_files_opt,
             alignment.alignment_list.as_deref(),
-        );
-    }
-
-    // Load or generate combined index (original behavior)
-    let impg = if alignment.force_reindex {
-        generate_multi_index(
-            alignment_files,
-            common.threads,
-            alignment.index.as_deref(),
-            seq_files_opt,
         )
     } else {
-        load_or_generate_multi_index(
+        let impg = load_or_build_single_index(
             alignment_files,
             common.threads,
             alignment.index.as_deref(),
             seq_files_opt,
-        )
-    }?;
-
-    Ok(ImpgWrapper::from_single(impg))
+            alignment.force_reindex,
+        )?;
+        Ok(ImpgWrapper::from_single(impg))
+    }
 }
 
 /// Initialize MultiImpg from per-file indices
-fn initialize_multi_impg(
+fn load_or_build_per_file_index(
     alignment_files: &[String],
     threads: NonZeroUsize,
     force_reindex: bool,
@@ -2068,7 +2057,7 @@ fn initialize_multi_impg(
 
                 // Build single-file index
                 let single_file = vec![aln_file.clone()];
-                let impg = generate_multi_index(
+                let impg = build_single_index(
                     &single_file,
                     threads,
                     Some(index_path.to_string_lossy().as_ref()),
@@ -2155,26 +2144,26 @@ fn resolve_alignment_files(alignment: &AlignmentOpts) -> io::Result<Vec<String>>
     Ok(alignment_files)
 }
 
-fn load_or_generate_multi_index(
+fn load_or_build_single_index(
     alignment_files: &[String],
     threads: NonZeroUsize,
     custom_index: Option<&str>,
     sequence_files: Option<&[String]>,
+    force_reindex: bool,
 ) -> io::Result<Impg> {
     let index_file = get_combined_index_filename(alignment_files, custom_index);
-    if std::path::Path::new(&index_file).exists() {
-        load_multi_index(alignment_files, custom_index, sequence_files)
-    } else {
-        generate_multi_index(alignment_files, threads, custom_index, sequence_files)
-    }
-}
 
-fn load_multi_index(
-    alignment_files: &[String],
-    custom_index: Option<&str>,
-    sequence_files: Option<&[String]>,
-) -> io::Result<Impg> {
-    let index_file = get_combined_index_filename(alignment_files, custom_index);
+    if force_reindex {
+        info!("Force rebuilding index: {index_file}");
+        return build_single_index(alignment_files, threads, custom_index, sequence_files);
+    }
+
+    if !std::path::Path::new(&index_file).exists() {
+        info!("No index found at {index_file}. Creating it now.");
+        return build_single_index(alignment_files, threads, custom_index, sequence_files);
+    }
+
+    // Load existing index
     info!("Reading IMPG index from {index_file}");
 
     // Check if all alignment files are newer than the index
@@ -2202,14 +2191,14 @@ fn load_multi_index(
     Impg::load_from_file(reader, alignment_files, index_file, sequence_files)
 }
 
-fn generate_multi_index(
+fn build_single_index(
     alignment_files: &[String],
     threads: NonZeroUsize,
     custom_index: Option<&str>,
     sequence_files: Option<&[String]>,
 ) -> io::Result<Impg> {
     let index_file = get_combined_index_filename(alignment_files, custom_index);
-    info!("No index found at {index_file}. Creating it now.");
+    debug!("Creating index: {index_file}");
 
     let num_alignment_files = alignment_files.len();
     // Thread-safe counter for tracking progress
