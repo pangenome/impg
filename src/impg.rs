@@ -948,7 +948,7 @@ impl Impg {
 
             Some((query_interval, cigar_ops, target_interval))
         } else {
-            warn!(
+            debug!(
                 "Projection failed for alignment (target_id={target_id}, file_index={}, range={}-{})",
                 metadata.alignment_file_index,
                 range_start,
