@@ -2104,11 +2104,9 @@ fn load_or_build_per_file_index(
             result?;
         }
 
-        info!("Finished building {} per-file indices", indices_to_build.len());
     }
 
     // Load MultiImpg from all per-file indices
-    info!("Loading per-file indices into MultiImpg...");
     let multi = if let Some(list_path) = alignment_list {
         // Use cache when alignment list file is available
         MultiImpg::load_with_cache(&index_paths, alignment_files, sequence_files, Path::new(list_path))?

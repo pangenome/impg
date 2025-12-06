@@ -143,11 +143,6 @@ impl MultiImpg {
         sequence_files: Option<&[String]>,
     ) -> std::io::Result<Self> {
         let num_indices = index_paths.len();
-        info!(
-            "Loading {} per-file index headers in parallel...",
-            num_indices
-        );
-
         // Load headers in parallel
         let headers: Vec<IndexHeader> = index_paths
             .par_iter()
@@ -160,8 +155,6 @@ impl MultiImpg {
                 })
             })
             .collect::<std::io::Result<Vec<_>>>()?;
-
-        info!("Building unified sequence index...");
 
         // Build unified sequence index
         let mut unified_seq_index = SequenceIndex::new();
@@ -185,13 +178,7 @@ impl MultiImpg {
             local_to_unified.push(l2u);
         }
 
-        info!(
-            "Unified sequence index has {} sequences",
-            unified_seq_index.len()
-        );
-
         // Build unified forest map
-        info!("Building unified forest map...");
         let mut unified_forest_map: FxHashMap<u32, Vec<TreeLocation>> = FxHashMap::default();
 
         for (index_idx, header) in headers.iter().enumerate() {
@@ -212,7 +199,8 @@ impl MultiImpg {
         }
 
         info!(
-            "Unified forest map has {} target sequences",
+            "Built unified index with {} sequences and {} targets",
+            unified_seq_index.len(),
             unified_forest_map.len()
         );
 
@@ -245,10 +233,9 @@ impl MultiImpg {
             match MultiImpgCache::load(&cache_path) {
                 Ok(cache) => {
                     if cache.is_valid(index_paths, list_file)? {
-                        info!("Loading unified index from cache: {:?}", cache_path);
                         return Self::from_cache(cache, index_paths, alignment_files, sequence_files);
                     } else {
-                        info!("Cache stale, rebuilding unified index...");
+                        info!("Cache stale, rebuilding...");
                     }
                 }
                 Err(e) => {
@@ -263,8 +250,6 @@ impl MultiImpg {
         // Save cache for next time
         if let Err(e) = multi.save_cache(&cache_path, list_file) {
             warn!("Failed to save cache {:?}: {}", cache_path, e);
-        } else {
-            info!("Saved unified index cache: {:?}", cache_path);
         }
 
         Ok(multi)
@@ -289,11 +274,8 @@ impl MultiImpg {
             .collect();
 
         info!(
-            "Loaded unified sequence index with {} sequences from cache",
-            cache.unified_seq_index.len()
-        );
-        info!(
-            "Loaded unified forest map with {} target sequences from cache",
+            "Loaded {} sequences and {} targets from cache",
+            cache.unified_seq_index.len(),
             forest_map.len()
         );
 
