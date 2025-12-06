@@ -54,7 +54,7 @@ struct AlignmentOpts {
 
     /// Path to the IMPG index file.
     #[arg(help_heading = "Index options")]
-    #[clap(short = 'i', long, value_parser)]
+    #[clap(short = 'i', long, value_parser, conflicts_with = "per_file_index")]
     index: Option<String>,
 
     /// Force the regeneration of the index, even if it already exists.
@@ -62,8 +62,7 @@ struct AlignmentOpts {
     #[clap(short = 'f', long, action)]
     force_reindex: bool,
 
-    /// Use per-file indexing (one .impg file per alignment file).
-    /// Enables incremental updates and parallel index building.
+    /// Use one IMPG index file per alignment file (enables incremental index updates).
     #[arg(help_heading = "Index options")]
     #[clap(long, action)]
     per_file_index: bool,

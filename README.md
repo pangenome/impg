@@ -435,20 +435,15 @@ Both modes work with PAF and .1aln files (can be mixed in `--alignment-list`).
 
 **When to use per-file indexing:**
 - Incremental updates (only rebuild changed alignment files)
-- Distributed/parallel index building
-- Many alignment files (>100)
+- Many alignment files
 
 **Stale index detection:** impg warns if alignment files are modified after index creation. Use `-f/--force-reindex` to rebuild.
 
-**Backward compatibility:** Index format (`IMPGIDX1`) is backward compatible with previous impg versions. Per-file indices use the same format.
-
-**Note on compressed files**: `impg` works directly with bgzip-compressed alignment files (`.paf.gz`, `.paf.bgz`, `.1aln.gz`). For large files, creating a GZI index can speed up initial index creation:
+**Note on compressed files**: `impg` works directly with bgzip-compressed PAF files (`.paf.gz`, `.paf.bgz`). For large files, creating a GZI index can speed up initial index creation:
 
 ```bash
 bgzip -r alignments.paf.gz  # Creates alignments.paf.gz.gzi (optional)
 ```
-
-If a `.gzi` file is present, `impg` will automatically use it for faster multithreaded decompression.
 
 ### Common options
 
