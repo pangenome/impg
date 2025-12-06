@@ -248,24 +248,24 @@ impl GfaMafFastaOpts {
 /// Transitive query options
 #[derive(Parser, Debug, Clone)]
 struct TransitiveOpts {
-    /// Enable transitive queries with Depth-First Search (slower, but returns fewer overlapping results)
+    /// Use Depth-First Search instead of BFS for transitive queries (slower, but returns fewer overlapping results)
     #[arg(help_heading = "Transitive query options")]
-    #[clap(long, action, conflicts_with = "transitive")]
+    #[clap(long, action, requires = "transitive")]
     transitive_dfs: bool,
 
     /// Maximum recursion depth for transitive overlaps (0 for no limit)
     #[arg(help_heading = "Transitive query options")]
-    #[clap(short = 'm', long, value_parser, default_value_t = 2)]
+    #[clap(short = 'm', long, value_parser, default_value_t = 2, requires = "transitive")]
     max_depth: u16,
 
     /// Minimum region size to consider for transitive queries (required > trace_spacing when using --approximate )
     #[arg(help_heading = "Transitive query options")]
-    #[clap(long, value_parser)]
+    #[clap(long, value_parser, requires = "transitive")]
     min_transitive_len: Option<i32>,
 
     /// Minimum distance between transitive ranges to consider on the same sequence
     #[arg(help_heading = "Transitive query options")]
-    #[clap(long, value_parser, default_value_t = 10)]
+    #[clap(long, value_parser, default_value_t = 10, requires = "transitive")]
     min_distance_between_ranges: i32,
 }
 
@@ -320,9 +320,9 @@ struct QueryOpts {
     #[clap(long, value_parser)]
     subset_sequence_list: Option<String>,
 
-    /// Enable transitive queries (with Breadth-First Search)
+    /// Enable transitive queries (uses BFS by default, or DFS with --transitive-dfs)
     #[arg(help_heading = "Transitive queries")]
-    #[clap(short = 'x', long, action, conflicts_with = "transitive_dfs")]
+    #[clap(short = 'x', long, action)]
     transitive: bool,
 
     #[clap(flatten)]
@@ -438,7 +438,7 @@ impl RefineOpts {
         if self.query.approximate {
             validate_approximate_mode_min_length(
                 self.query.transitive_opts.min_transitive_len,
-                self.query.transitive || self.query.transitive_opts.transitive_dfs,
+                self.query.transitive,
             )?;
         }
 
@@ -1047,7 +1047,7 @@ fn run() -> io::Result<()> {
 
                 validate_approximate_mode_min_length(
                     query.transitive_opts.min_transitive_len,
-                    query.transitive || query.transitive_opts.transitive_dfs,
+                    query.transitive,
                 )?;
             }
 
@@ -2437,37 +2437,39 @@ fn perform_query(
     }
 
     let results = if transitive {
-        impg.query_transitive_bfs(
-            target_id,
-            target_start,
-            target_end,
-            None,
-            transitive_opts.max_depth,
-            transitive_opts.effective_min_transitive_len(),
-            transitive_opts.min_distance_between_ranges,
-            min_output_length,
-            store_cigar,
-            min_identity,
-            sequence_index,
-            approximate_mode,
-            subset_filter,
-        )
-    } else if transitive_dfs {
-        impg.query_transitive_dfs(
-            target_id,
-            target_start,
-            target_end,
-            None,
-            transitive_opts.max_depth,
-            transitive_opts.effective_min_transitive_len(),
-            transitive_opts.min_distance_between_ranges,
-            min_output_length,
-            store_cigar,
-            min_identity,
-            sequence_index,
-            approximate_mode,
-            subset_filter,
-        )
+        if transitive_dfs {
+            impg.query_transitive_dfs(
+                target_id,
+                target_start,
+                target_end,
+                None,
+                transitive_opts.max_depth,
+                transitive_opts.effective_min_transitive_len(),
+                transitive_opts.min_distance_between_ranges,
+                min_output_length,
+                store_cigar,
+                min_identity,
+                sequence_index,
+                approximate_mode,
+                subset_filter,
+            )
+        } else {
+            impg.query_transitive_bfs(
+                target_id,
+                target_start,
+                target_end,
+                None,
+                transitive_opts.max_depth,
+                transitive_opts.effective_min_transitive_len(),
+                transitive_opts.min_distance_between_ranges,
+                min_output_length,
+                store_cigar,
+                min_identity,
+                sequence_index,
+                approximate_mode,
+                subset_filter,
+            )
+        }
     } else {
         let mut res = impg.query(
             target_id,
