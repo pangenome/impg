@@ -140,8 +140,8 @@ impg query -a file1.paf file2.1aln -r chr1:1000-2000 -d 1000
 # Filter results by minimum length
 impg query -a alignments.paf -r chr1:1000-2000 -l 5000
 
-# Use DFS for transitive search (slower but fewer overlapping results)
-impg query -a alignments.paf -r chr1:1000-2000 --transitive-dfs
+# Use DFS instead of BFS for transitive search (slower but fewer overlapping results)
+impg query -a alignments.paf -r chr1:1000-2000 -x --transitive-dfs
 
 # Fast approximate mode for .1aln files (bed/bedpe only)
 impg query -a alignments.1aln -r chr1:1000-2000 --approximate
@@ -236,8 +236,6 @@ impg similarity -a alignments.paf -r chr1:1000-2000 --sequence-files *.fa -a
 # Restrict analysis to sequences listed in a file (one name per line)
 # Entries may be full contig names or sample identifiers (e.g., HG00097 or HG00097_hap1)
 impg similarity -a alignments.1aln -r chr1:1000-2000 --sequence-files *.fa --subset-sequence-list sequences.txt
-# Show the progress bar
-impg similarity -a file1.paf file2.1aln -r chr1:1000-2000 --sequence-files *.fa --progress-bar
 
 # Group sequences by delimiter (e.g., for PanSN naming, "sample#haplotype#chr" -> "sample")
 impg similarity -a alignments.paf -r chr1:1000-2000 --sequence-files *.fa --delim '#'
@@ -453,7 +451,7 @@ All commands support these options:
 - `-i, --index`: Path to an existing IMPG index file.
 - `-f, --force-reindex`: Always regenerate the IMPG index even if it already exists.
 - `-t, --threads`: Number of threads (default: 4)
-- `-v, --verbose`: Verbosity level (0=error, 1=info, 2=debug)
+- `-v, --verbose`: Verbosity level (0=error/silent, 1=info with progress bar, 2=debug)
 
 ### Sequence file options
 
