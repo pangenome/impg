@@ -301,7 +301,7 @@ impl MultiImpg {
                 let mtime = metadata
                     .modified()?
                     .duration_since(SystemTime::UNIX_EPOCH)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                    .map_err(std::io::Error::other)?;
                 Ok(FileEntry {
                     path: path.to_string_lossy().to_string(),
                     size: metadata.len(),
@@ -333,7 +333,7 @@ impl MultiImpg {
         let mut writer = BufWriter::new(file);
 
         bincode::serde::encode_into_std_write(&cache, &mut writer, bincode::config::standard())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
 
         writer.flush()?;
         Ok(())
@@ -1023,7 +1023,7 @@ impl MultiImpgCache {
             let mtime = metadata
                 .modified()?
                 .duration_since(SystemTime::UNIX_EPOCH)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                .map_err(std::io::Error::other)?;
 
             if mtime.as_secs() != entry.mtime_secs {
                 debug!(

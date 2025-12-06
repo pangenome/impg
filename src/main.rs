@@ -2974,12 +2974,10 @@ fn merge_query_adjusted_intervals(
                 let merged_is_forward = if merge_strands && curr_is_forward != next_is_forward {
                     let curr_len = curr_end.saturating_sub(curr_start);
                     let next_len = next_end.saturating_sub(next_start);
-                    if curr_len == next_len {
-                        curr_is_forward
-                    } else if curr_len > next_len {
-                        curr_is_forward
-                    } else {
+                    if next_len > curr_len {
                         next_is_forward
+                    } else {
+                        curr_is_forward
                     }
                 } else {
                     curr_is_forward

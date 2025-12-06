@@ -139,7 +139,7 @@ pub fn run_refine(
             "Building sequence index from {} file(s) for 1aln support",
             impg.sequence_files().len()
         );
-        Some(UnifiedSequenceIndex::from_files(&impg.sequence_files())?)
+        Some(UnifiedSequenceIndex::from_files(impg.sequence_files())?)
     } else {
         None
     };

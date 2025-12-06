@@ -62,16 +62,16 @@ impl CompactEdge {
         CompactEdge { from, to }
     }
 
-    fn from_id(&self) -> u64 {
+    fn source_id(&self) -> u64 {
         self.from & Self::ID_MASK
     }
-    fn from_rev(&self) -> bool {
+    fn source_rev(&self) -> bool {
         (self.from & Self::ORIENT_MASK) != 0
     }
-    fn to_id(&self) -> u64 {
+    fn target_id(&self) -> u64 {
         self.to & Self::ID_MASK
     }
-    fn to_rev(&self) -> bool {
+    fn target_rev(&self) -> bool {
         (self.to & Self::ORIENT_MASK) != 0
     }
 }
@@ -521,15 +521,15 @@ fn read_gfa_files(
 
                 for edge in temp_edges {
                     if let (Some(&from_id), Some(&to_id)) = (
-                        id_translation.get(&NodeId::from(edge.from_id())),
-                        id_translation.get(&NodeId::from(edge.to_id())),
+                        id_translation.get(&NodeId::from(edge.source_id())),
+                        id_translation.get(&NodeId::from(edge.target_id())),
                     ) {
                         let mut graph = combined_graph.lock().unwrap();
                         graph.add_edge(
                             from_id.into(),
-                            edge.from_rev(),
+                            edge.source_rev(),
                             to_id.into(),
-                            edge.to_rev(),
+                            edge.target_rev(),
                         );
                     }
                 }
@@ -1107,14 +1107,14 @@ fn write_gfa_content<W: Write>(
 
     info!("Writing edges connecting used nodes");
     for edge in &combined_graph.edges {
-        let from_id = edge.from_id() as usize;
-        let to_id = edge.to_id() as usize;
+        let from_id = edge.source_id() as usize;
+        let to_id = edge.target_id() as usize;
 
         if !nodes_to_remove[from_id] && !nodes_to_remove[to_id] {
             let from_mapped = id_mapping[from_id];
             let to_mapped = id_mapping[to_id];
-            let from_orient = if edge.from_rev() { "-" } else { "+" };
-            let to_orient = if edge.to_rev() { "-" } else { "+" };
+            let from_orient = if edge.source_rev() { "-" } else { "+" };
+            let to_orient = if edge.target_rev() { "-" } else { "+" };
             writeln!(
                 file,
                 "L\t{from_mapped}\t{from_orient}\t{to_mapped}\t{to_orient}\t0M"
@@ -1255,9 +1255,9 @@ fn write_gfa_content<W: Write>(
         }
 
         // Handle final gap if it exists and gap filling is enabled
-        if fill_gaps == 2 && sequence_index.is_some() {
+        if let (2, Some(seq_idx)) = (fill_gaps, sequence_index) {
             // Try to get the sequence length for this path_key
-            match sequence_index.unwrap().get_sequence_length(path_key) {
+            match seq_idx.get_sequence_length(path_key) {
                 Ok(total_len) => {
                     if path_end < total_len {
                         end_gaps += 1;

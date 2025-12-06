@@ -796,8 +796,7 @@ impl Impg {
         let is_onealn = alignment_file.ends_with(".1aln");
 
         // Try subsetting approach for .1aln files
-        if is_onealn && sequence_index.is_some() {
-            let sequence_index = sequence_index.unwrap();
+        if let (true, Some(sequence_index)) = (is_onealn, sequence_index) {
 
             // Fetch alignment with tracepoints
             let alignment = self.get_onealn_alignment(metadata).unwrap_or_else(|e| {
