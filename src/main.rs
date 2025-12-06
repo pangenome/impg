@@ -2016,13 +2016,6 @@ fn load_or_build_per_file_index(
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    if force_reindex {
-        info!("Using per-file indexing mode (force rebuild)");
-    } else {
-        info!("Using per-file indexing mode");
-    }
-    info!("Building {} index file(s) processing {} alignment file(s)...", alignment_files.len(), alignment_files.len());
-
     // Generate per-file index paths
     let index_paths: Vec<PathBuf> = alignment_files
         .iter()
@@ -2040,6 +2033,16 @@ fn load_or_build_per_file_index(
             .map(|(i, _)| i)
             .collect()
     };
+
+    if indices_to_build.is_empty() {
+        info!("Using per-file indexing mode");
+    } else if force_reindex {
+        info!("Using per-file indexing mode (force rebuild)");
+        info!("Building {} index file(s) processing {} alignment file(s)...", indices_to_build.len(), indices_to_build.len());
+    } else {
+        info!("Using per-file indexing mode");
+        info!("Building {} index file(s) processing {} alignment file(s)...", indices_to_build.len(), indices_to_build.len());
+    }
 
     if !indices_to_build.is_empty() {
 
