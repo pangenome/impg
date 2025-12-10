@@ -700,6 +700,52 @@ odgi draw -i yeast_pangenome_sorted.og -c yeast_pangenome.lay -p yeast_pangenome
 echo "Done! Check yeast_pangenome_viz.png and yeast_pangenome_draw.png"
 ```
 
+### Exploration: Effect of Partition Size
+
+The partition window size (`-w`) affects the resulting graph structure. Smaller partitions create more alignment subproblems but may fragment complex structural variants, while larger partitions allow better representation of larger variations but increase memory usage per partition.
+
+Here's a comparison using the 7-strain yeast pangenome with different partition sizes:
+
+| Partition Size | Partitions | Non-empty GFAs | Graph Length | Nodes | Edges | Steps |
+|---------------|------------|----------------|--------------|-------|-------|-------|
+| 10kb | 1,537 | 1,533 | 63.0 Mb | 164,582 | 221,966 | 243,526 |
+| 50kb | 368 | 367 | 59.5 Mb | 206,982 | 280,259 | 298,275 |
+| 100kb | 227 | 227 | 59.1 Mb | 221,360 | 299,952 | 325,202 |
+
+**Observations:**
+
+- **Smaller partitions (10kb)** produce graphs with fewer nodes and edges but more total sequence length due to gap filling between many partition boundaries
+- **Larger partitions (50-100kb)** create more complex graphs with better variant representation but require more memory per partition
+- All produce 112 paths (7 strains x 16 chromosomes)
+
+**Recommendations:**
+
+- Use **10kb partitions** for small genomes or when memory is constrained
+- Use **50-100kb partitions** for better structural variant representation
+- For human-scale genomes, consider **100kb-500kb partitions**
+
+To experiment with partition sizes:
+
+```bash
+# Try different window sizes
+for WINDOW in 10000 50000 100000; do
+    mkdir -p partitions_${WINDOW} gfas_${WINDOW}
+
+    impg partition -i index.impg -w $WINDOW \
+        --sequence-files sequences.fa -o fasta \
+        --separate-files --output-folder partitions_${WINDOW}
+
+    ls partitions_${WINDOW}/*.fasta | xargs -P 4 -I {} bash -c '
+        f="{}"; base=$(basename "$f" .fasta)
+        impg graph --fasta-files "$f" -g "gfas_${WINDOW}/${base}.gfa" -t 4
+    '
+
+    find gfas_${WINDOW} -name "*.gfa" -size +0 | sort -V > gfa_list_${WINDOW}.txt
+    impg lace --file-list gfa_list_${WINDOW}.txt --sequence-files sequences.fa \
+        -o pangenome_${WINDOW}.gfa --fill-gaps 2 --skip-validation
+done
+```
+
 ## Authors
 
 Andrea Guarracino <aguarra1@uthsc.edu> \
