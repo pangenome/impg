@@ -45,7 +45,7 @@ gzp = "1.0.1"
 
 # Dependencies for graph building (sweepga + seqwish integration)
 sweepga = { git = "https://github.com/pangenome/sweepga", rev = "67ae1b0" }
-seqwish = { git = "https://github.com/ekg/seqwish", branch = "rust-2" }
+seqwish = { git = "https://github.com/ekg/seqwish", rev = "81ceb66" }
 
 # Dependencies for graph sorting
 gfasort = { git = "https://github.com/pangenome/gfasort", rev = "6596f55" }

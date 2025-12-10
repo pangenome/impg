@@ -617,11 +617,10 @@ impg lace \
     --sequence-files cerevisiae.fa.gz \
     -o yeast_pangenome.gfa \
     --fill-gaps 2 \
-    --skip-validation \
     -t 16
 ```
 
-The `--fill-gaps 2` option fills gaps between partitions with the original sequence, and `--skip-validation` skips strict path length validation (needed when indels cause minor length differences).
+The `--fill-gaps 2` option fills gaps between partitions with the original sequence.
 
 ### Step 5: Post-process and Visualize with ODGI
 
@@ -688,7 +687,7 @@ ls partitions/*.fasta | xargs -P 4 -I {} bash -c '
 # Step 4: Lace
 find gfas -name "*.gfa" -size +0 | sort -V > gfa_list.txt
 impg lace --file-list gfa_list.txt --sequence-files "$FASTA" \
-    -o yeast_pangenome.gfa --fill-gaps 2 --skip-validation -t "$THREADS"
+    -o yeast_pangenome.gfa --fill-gaps 2 -t "$THREADS"
 
 # Step 5: ODGI post-processing
 odgi build -g yeast_pangenome.gfa -o yeast_pangenome.og -t "$THREADS"
@@ -742,7 +741,7 @@ for WINDOW in 10000 50000 100000; do
 
     find gfas_${WINDOW} -name "*.gfa" -size +0 | sort -V > gfa_list_${WINDOW}.txt
     impg lace --file-list gfa_list_${WINDOW}.txt --sequence-files sequences.fa \
-        -o pangenome_${WINDOW}.gfa --fill-gaps 2 --skip-validation
+        -o pangenome_${WINDOW}.gfa --fill-gaps 2
 done
 ```
 
