@@ -3055,6 +3055,7 @@ fn output_results_gfa(
                 num_threads,
                 frequency_multiplier: 10,
                 min_alignment_length: 100,
+                temp_dir: None,
             };
             impg::graph::generate_gfa_seqwish_from_intervals(
                 impg,

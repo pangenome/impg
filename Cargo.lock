@@ -815,13 +815,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "fastga-rs"
 version = "0.1.2"
-source = "git+https://github.com/pangenome/fastga-rs?branch=main#255eb6e6b38fccef15542ce12cb2fb75bd732a5f"
+source = "git+https://github.com/pangenome/fastga-rs?branch=temp-dir#872d95dd211367c45301a53bd970b2ad5d2feb38"
 dependencies = [
  "anyhow",
  "cc",
@@ -1299,7 +1299,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2209,7 +2209,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.11.0",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2263,7 +2263,7 @@ checksum = "d4f410fedcf71af0345d7607d246e7ad15faaadd49d240ee3b24e5dc21a820ac"
 [[package]]
 name = "seqwish"
 version = "0.1.3"
-source = "git+https://github.com/ekg/seqwish?branch=rust-2#0448c4d16eeb9ec09e9784997b8fc2ab6628f29d"
+source = "git+https://github.com/ekg/seqwish?branch=rust-2#81ceb667b2b05eee9e9a9e8378efda987de2e27d"
 dependencies = [
  "bitvec",
  "cbindgen",
@@ -2451,7 +2451,7 @@ dependencies = [
 [[package]]
 name = "sweepga"
 version = "0.1.1"
-source = "git+https://github.com/pangenome/sweepga?rev=7a7a8d2#7a7a8d2c0c5109b17a130a2818541c58e7005595"
+source = "git+https://github.com/pangenome/sweepga?rev=67ae1b0#67ae1b052a7d12017e18d1035ab1fc8370dcdc22"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -2519,7 +2519,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.2",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2890,7 +2890,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

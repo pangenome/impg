@@ -710,6 +710,8 @@ pub struct SeqwishConfig {
     pub frequency_multiplier: usize,
     /// Minimum alignment length for FastGA
     pub min_alignment_length: u64,
+    /// Optional temp directory for intermediate files
+    pub temp_dir: Option<String>,
 }
 
 impl Default for SeqwishConfig {
@@ -718,6 +720,7 @@ impl Default for SeqwishConfig {
             num_threads: 4,
             frequency_multiplier: 10,
             min_alignment_length: 100,
+            temp_dir: None,
         }
     }
 }
@@ -778,6 +781,7 @@ pub fn generate_gfa_seqwish_from_intervals(
         Some(kmer_frequency),
         config.num_threads,
         config.min_alignment_length,
+        config.temp_dir.clone(),
     );
 
     let paf_temp = fastga

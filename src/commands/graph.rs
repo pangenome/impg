@@ -296,6 +296,7 @@ pub fn build_graph<W: Write>(
         Some(kmer_frequency),
         config.num_threads,
         config.min_alignment_length,
+        config.temp_dir.clone(),
     );
 
     // Run all-vs-all alignment (query = target = combined FASTA)
