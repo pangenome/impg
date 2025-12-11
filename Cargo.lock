@@ -1241,6 +1241,7 @@ dependencies = [
  "clap",
  "coitrees",
  "env_logger",
+ "flate2",
  "gfasort",
  "gzp",
  "handlegraph",
@@ -2263,7 +2264,7 @@ checksum = "d4f410fedcf71af0345d7607d246e7ad15faaadd49d240ee3b24e5dc21a820ac"
 [[package]]
 name = "seqwish"
 version = "0.1.3"
-source = "git+https://github.com/ekg/seqwish?branch=rust-2#81ceb667b2b05eee9e9a9e8378efda987de2e27d"
+source = "git+https://github.com/ekg/seqwish?rev=81ceb66#81ceb667b2b05eee9e9a9e8378efda987de2e27d"
 dependencies = [
  "bitvec",
  "cbindgen",

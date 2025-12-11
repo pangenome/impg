@@ -251,22 +251,22 @@ impl GfaMafFastaOpts {
 struct TransitiveOpts {
     /// Use Depth-First Search instead of BFS for transitive queries (slower, but returns fewer overlapping results)
     #[arg(help_heading = "Transitive query options")]
-    #[clap(long, action, requires = "transitive")]
+    #[clap(long, action)]
     transitive_dfs: bool,
 
     /// Maximum recursion depth for transitive overlaps (0 for no limit)
     #[arg(help_heading = "Transitive query options")]
-    #[clap(short = 'm', long, value_parser, default_value_t = 2, requires = "transitive")]
+    #[clap(short = 'm', long, value_parser, default_value_t = 2)]
     max_depth: u16,
 
     /// Minimum region size to consider for transitive queries (required > trace_spacing when using --approximate )
     #[arg(help_heading = "Transitive query options")]
-    #[clap(long, value_parser, requires = "transitive")]
+    #[clap(long, value_parser)]
     min_transitive_len: Option<i32>,
 
     /// Minimum distance between transitive ranges to consider on the same sequence
     #[arg(help_heading = "Transitive query options")]
-    #[clap(long, value_parser, default_value_t = 10, requires = "transitive")]
+    #[clap(long, value_parser, default_value_t = 10)]
     min_distance_between_ranges: i32,
 }
 
@@ -836,8 +836,8 @@ enum Args {
         #[clap(short = 's', long, value_parser, default_value_t = 10000)]
         scaffold_mass: u64,
 
-        /// Scaffold filter mode (e.g., "1:1", "many:many")
-        #[clap(short = 'm', long, value_parser, default_value = "1:1")]
+        /// Scaffold filter mode (e.g., "1:1", "many:many", "inf:inf" for no filtering)
+        #[clap(short = 'm', long, value_parser, default_value = "inf:inf")]
         scaffold_filter: String,
 
         /// Maximum overlap ratio for plane sweep filtering (0.0-1.0)

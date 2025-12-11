@@ -730,7 +730,7 @@ impl Default for SeqwishConfig {
 /// This produces a proper variation graph where shared sequence is collapsed into
 /// single nodes, unlike POA which creates a partial order alignment graph.
 pub fn generate_gfa_seqwish_from_intervals(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
     config: &SeqwishConfig,

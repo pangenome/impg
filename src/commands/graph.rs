@@ -87,12 +87,12 @@ impl Default for GraphBuildConfig {
             use_in_memory: true,
             show_progress: true,
             temp_dir: None,
-            // Filtering options with sensible defaults
+            // Filtering options
             no_filter: false,
             num_mappings: "1:1".to_string(),
             scaffold_jump: 50_000,       // 50kb default scaffold gap
             scaffold_mass: 10_000,        // 10kb minimum scaffold length
-            scaffold_filter: "1:1".to_string(),
+            scaffold_filter: "inf:inf".to_string(),  // Scaffold filtering disabled by default (was too aggressive)
             overlap: 0.95,
             min_identity: 0.0,
         }
