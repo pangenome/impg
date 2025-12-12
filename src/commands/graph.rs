@@ -70,6 +70,10 @@ pub struct GraphBuildConfig {
     pub overlap: f64,
     /// Minimum identity threshold (0.0-1.0)
     pub min_identity: f64,
+    /// Maximum scaffold deviation distance (0 = no limit)
+    pub scaffold_dist: u64,
+    /// Minimum mapping length to include in filtering
+    pub min_mapping_length: u64,
 }
 
 impl Default for GraphBuildConfig {
@@ -95,6 +99,8 @@ impl Default for GraphBuildConfig {
             scaffold_filter: "1:1".to_string(),  // 1:1 scaffold filtering (now fixed in sweepga 608547a)
             overlap: 0.95,
             min_identity: 0.0,
+            scaffold_dist: 0,         // No deviation limit by default
+            min_mapping_length: 0,   // No minimum mapping length by default
         }
     }
 }
@@ -341,7 +347,7 @@ pub fn build_graph<W: Write>(
         // Create filter configuration
         let filter_config = FilterConfig {
             chain_gap: 0,
-            min_block_length: 0,
+            min_block_length: config.min_mapping_length,
             mapping_filter_mode: mapping_mode,
             mapping_max_per_query: mapping_per_query,
             mapping_max_per_target: mapping_per_target,
@@ -355,7 +361,7 @@ pub fn build_graph<W: Write>(
             scaffold_gap: config.scaffold_jump,
             min_scaffold_length: config.scaffold_mass,
             scaffold_overlap_threshold: 0.5,
-            scaffold_max_deviation: 0,
+            scaffold_max_deviation: config.scaffold_dist,
             prefix_delimiter: '#',
             skip_prefix: false,
             scoring_function: ScoringFunction::LogLengthIdentity,
