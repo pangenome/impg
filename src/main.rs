@@ -919,6 +919,43 @@ enum Args {
         #[clap(long, value_parser, default_value = "joblist")]
         format: String,
 
+        // Sweepga filtering options
+        /// Disable all alignment filtering
+        #[clap(short = 'N', long, action)]
+        no_filter: bool,
+
+        /// n:m-best mappings kept in query:target dimensions (e.g., "1:1", "many:many")
+        #[clap(short = 'n', long, value_parser, default_value = "1:1")]
+        num_mappings: String,
+
+        /// Scaffold jump/gap distance in bp (0 = disable scaffolding). Accepts k/m/g suffixes.
+        #[clap(short = 'j', long, value_parser = parse_size, default_value = "50000")]
+        scaffold_jump: u64,
+
+        /// Minimum scaffold chain length in bp. Accepts k/m/g suffixes.
+        #[clap(short = 's', long, value_parser = parse_size, default_value = "10000")]
+        scaffold_mass: u64,
+
+        /// Scaffold filter mode (e.g., "1:1", "many:many", "inf:inf" for no filtering)
+        #[clap(short = 'm', long, value_parser, default_value = "1:1")]
+        scaffold_filter: String,
+
+        /// Maximum overlap ratio for plane sweep filtering (0.0-1.0)
+        #[clap(long, value_parser, default_value_t = 0.95)]
+        overlap: f64,
+
+        /// Minimum identity threshold (0.0-1.0)
+        #[clap(short = 'i', long, value_parser, default_value_t = 0.0)]
+        min_identity: f64,
+
+        /// Maximum scaffold deviation distance (0 = no limit). Accepts k/m/g suffixes.
+        #[clap(short = 'D', long, value_parser = parse_size, default_value = "0")]
+        scaffold_dist: u64,
+
+        /// Minimum mapping length to include in filtering. Accepts k/m/g suffixes.
+        #[clap(short = 'b', long = "min-mapping-length", value_parser = parse_size, default_value = "0")]
+        min_mapping_length: u64,
+
         #[clap(flatten)]
         common: CommonOpts,
     },
@@ -1938,6 +1975,15 @@ fn run() -> io::Result<()> {
             frequency,
             min_alignment_length,
             format,
+            no_filter,
+            num_mappings,
+            scaffold_jump,
+            scaffold_mass,
+            scaffold_filter,
+            overlap,
+            min_identity,
+            scaffold_dist,
+            min_mapping_length,
             common,
         } => {
             initialize_threads_and_log(&common);
@@ -1974,6 +2020,15 @@ fn run() -> io::Result<()> {
                 min_alignment_length,
                 output_format,
                 show_progress: common.verbose > 0,
+                no_filter,
+                num_mappings,
+                scaffold_jump,
+                scaffold_mass,
+                scaffold_filter,
+                overlap,
+                min_identity,
+                scaffold_dist,
+                min_mapping_length,
             };
 
             align::run_align(fasta_files, fasta_list, &output_dir, config)?;

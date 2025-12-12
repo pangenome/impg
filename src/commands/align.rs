@@ -169,6 +169,16 @@ pub struct AlignConfig {
     pub min_alignment_length: u64,
     pub output_format: AlignOutputFormat,
     pub show_progress: bool,
+    // Sweepga filtering options
+    pub no_filter: bool,
+    pub num_mappings: String,
+    pub scaffold_jump: u64,
+    pub scaffold_mass: u64,
+    pub scaffold_filter: String,
+    pub overlap: f64,
+    pub min_identity: f64,
+    pub scaffold_dist: u64,
+    pub min_mapping_length: u64,
 }
 
 impl Default for AlignConfig {
@@ -181,6 +191,16 @@ impl Default for AlignConfig {
             min_alignment_length: 100,
             output_format: AlignOutputFormat::Paf,
             show_progress: true,
+            // Filtering defaults - match graph command
+            no_filter: false,
+            num_mappings: "1:1".to_string(),
+            scaffold_jump: 50_000,
+            scaffold_mass: 10_000,
+            scaffold_filter: "1:1".to_string(),
+            overlap: 0.95,
+            min_identity: 0.0,
+            scaffold_dist: 0,
+            min_mapping_length: 0,
         }
     }
 }
