@@ -20,6 +20,27 @@ use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::num::NonZeroUsize;
 use std::path::Path;
 
+/// Parse a size value with optional k/m/g suffix (case-insensitive)
+/// Examples: "100" -> 100, "10k" -> 10000, "5M" -> 5000000, "1g" -> 1000000000
+fn parse_size(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("empty value".to_string());
+    }
+
+    let (num_str, multiplier) = match s.chars().last() {
+        Some('k') | Some('K') => (&s[..s.len() - 1], 1_000u64),
+        Some('m') | Some('M') => (&s[..s.len() - 1], 1_000_000u64),
+        Some('g') | Some('G') => (&s[..s.len() - 1], 1_000_000_000u64),
+        _ => (s, 1u64),
+    };
+
+    num_str
+        .parse::<u64>()
+        .map(|n| n * multiplier)
+        .map_err(|e| format!("invalid number '{}': {}", num_str, e))
+}
+
 /// Basic common options shared between all commands
 #[derive(Parser, Debug)]
 #[command(next_help_heading = "General options")]
@@ -829,11 +850,11 @@ enum Args {
         num_mappings: String,
 
         /// Scaffold jump/gap distance in bp (0 = disable scaffolding). Accepts k/m/g suffixes.
-        #[clap(short = 'j', long, value_parser, default_value_t = 50000)]
+        #[clap(short = 'j', long, value_parser = parse_size, default_value = "50000")]
         scaffold_jump: u64,
 
         /// Minimum scaffold chain length in bp. Accepts k/m/g suffixes.
-        #[clap(short = 's', long, value_parser, default_value_t = 10000)]
+        #[clap(short = 's', long, value_parser = parse_size, default_value = "10000")]
         scaffold_mass: u64,
 
         /// Scaffold filter mode (e.g., "1:1", "many:many", "inf:inf" for no filtering)
@@ -849,11 +870,11 @@ enum Args {
         min_identity: f64,
 
         /// Maximum scaffold deviation distance (0 = no limit). Accepts k/m/g suffixes.
-        #[clap(short = 'D', long, value_parser, default_value_t = 0)]
+        #[clap(short = 'D', long, value_parser = parse_size, default_value = "0")]
         scaffold_dist: u64,
 
         /// Minimum mapping length to include in filtering. Accepts k/m/g suffixes.
-        #[clap(short = 'b', long = "min-mapping-length", value_parser, default_value_t = 0)]
+        #[clap(short = 'b', long = "min-mapping-length", value_parser = parse_size, default_value = "0")]
         min_mapping_length: u64,
 
         #[clap(flatten)]
