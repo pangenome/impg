@@ -796,6 +796,10 @@ enum Args {
         #[clap(long, value_parser, conflicts_with = "fasta_files")]
         fasta_list: Option<String>,
 
+        /// Input PAF file (skip alignment step if provided)
+        #[clap(short = 'a', long, value_parser)]
+        paf_file: Option<String>,
+
         /// Output GFA file path (use "-" for stdout)
         #[clap(short = 'g', long, value_parser, default_value = "-")]
         output: String,
@@ -1865,6 +1869,7 @@ fn run() -> io::Result<()> {
         Args::Graph {
             fasta_files,
             fasta_list,
+            paf_file,
             output,
             frequency_multiplier,
             frequency,
@@ -1910,6 +1915,7 @@ fn run() -> io::Result<()> {
                 use_in_memory: !disk_backed,
                 show_progress: common.verbose > 0,
                 temp_dir,
+                input_paf: paf_file,
                 no_filter,
                 num_mappings,
                 scaffold_jump,

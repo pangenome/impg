@@ -54,6 +54,8 @@ pub struct GraphBuildConfig {
     pub show_progress: bool,
     /// Directory for temporary files
     pub temp_dir: Option<String>,
+    /// Input PAF file (skip alignment if provided)
+    pub input_paf: Option<String>,
 
     // Sweepga filtering options
     /// Disable all filtering (default: filtering enabled)
@@ -91,6 +93,7 @@ impl Default for GraphBuildConfig {
             use_in_memory: true,
             show_progress: true,
             temp_dir: None,
+            input_paf: None,
             // Filtering options
             no_filter: false,
             num_mappings: "1:1".to_string(),
@@ -289,33 +292,51 @@ pub fn build_graph<W: Write>(
         );
     }
 
-    // 3) Run sweepga/FastGA alignment
-    if config.show_progress {
-        info!(
-            "[graph::align] {:.3}s Running FastGA alignment with -f {}",
-            start_time.elapsed().as_secs_f64(),
-            kmer_frequency
+    // 3) Get PAF alignments - either from input file or run FastGA
+    let paf_temp: tempfile::NamedTempFile = if let Some(ref input_paf) = config.input_paf {
+        // Use provided PAF file - copy to temp file to match expected type
+        if config.show_progress {
+            info!(
+                "[graph::align] {:.3}s Using provided PAF file: {}",
+                start_time.elapsed().as_secs_f64(),
+                input_paf
+            );
+        }
+        let paf_temp = tempfile::Builder::new()
+            .suffix(".paf")
+            .tempfile()?;
+        std::fs::copy(input_paf, paf_temp.path())?;
+        paf_temp
+    } else {
+        // Run sweepga/FastGA alignment
+        if config.show_progress {
+            info!(
+                "[graph::align] {:.3}s Running FastGA alignment with -f {}",
+                start_time.elapsed().as_secs_f64(),
+                kmer_frequency
+            );
+        }
+
+        let fastga = FastGAIntegration::new(
+            Some(kmer_frequency),
+            config.num_threads,
+            config.min_alignment_length,
+            config.temp_dir.clone(),
         );
-    }
 
-    let fastga = FastGAIntegration::new(
-        Some(kmer_frequency),
-        config.num_threads,
-        config.min_alignment_length,
-        config.temp_dir.clone(),
-    );
+        // Run all-vs-all alignment (query = target = combined FASTA)
+        let paf_temp = fastga
+            .align_to_temp_paf(combined_fasta.path(), combined_fasta.path())
+            .map_err(|e| io::Error::other(format!("FastGA alignment failed: {}", e)))?;
 
-    // Run all-vs-all alignment (query = target = combined FASTA)
-    let paf_temp = fastga
-        .align_to_temp_paf(combined_fasta.path(), combined_fasta.path())
-        .map_err(|e| io::Error::other(format!("FastGA alignment failed: {}", e)))?;
-
-    if config.show_progress {
-        info!(
-            "[graph::align] {:.3}s Alignment complete",
-            start_time.elapsed().as_secs_f64()
-        );
-    }
+        if config.show_progress {
+            info!(
+                "[graph::align] {:.3}s Alignment complete",
+                start_time.elapsed().as_secs_f64()
+            );
+        }
+        paf_temp
+    };
 
     // 3.5) Apply sweepga filtering to alignments (unless --no-filter)
     let filtered_paf = if config.no_filter {
