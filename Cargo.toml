@@ -44,14 +44,13 @@ zstd = { version = "0.13.3", features = ["zstdmt"] }
 gzp = "1.0.1"
 
 # Dependencies for graph building (sweepga + seqwish integration)
-sweepga = { git = "https://github.com/pangenome/sweepga", rev = "67ae1b0" }
+sweepga = { git = "https://github.com/pangenome/sweepga", rev = "608547a" }
 seqwish = { git = "https://github.com/ekg/seqwish", rev = "81ceb66" }
 
 # Dependencies for graph sorting
 gfasort = { git = "https://github.com/pangenome/gfasort", rev = "6596f55" }
 
 [dev-dependencies]
-flate2 = "1.0"
 
 [features]
 default = []

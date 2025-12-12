@@ -837,7 +837,7 @@ enum Args {
         scaffold_mass: u64,
 
         /// Scaffold filter mode (e.g., "1:1", "many:many", "inf:inf" for no filtering)
-        #[clap(short = 'm', long, value_parser, default_value = "inf:inf")]
+        #[clap(short = 'm', long, value_parser, default_value = "1:1")]
         scaffold_filter: String,
 
         /// Maximum overlap ratio for plane sweep filtering (0.0-1.0)

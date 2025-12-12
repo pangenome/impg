@@ -1241,7 +1241,6 @@ dependencies = [
  "clap",
  "coitrees",
  "env_logger",
- "flate2",
  "gfasort",
  "gzp",
  "handlegraph",
@@ -2452,7 +2451,7 @@ dependencies = [
 [[package]]
 name = "sweepga"
 version = "0.1.1"
-source = "git+https://github.com/pangenome/sweepga?rev=67ae1b0#67ae1b052a7d12017e18d1035ab1fc8370dcdc22"
+source = "git+https://github.com/pangenome/sweepga?rev=608547a#608547a702e6d3d30eb410f8e29c17f3d1a5d165"
 dependencies = [
  "anyhow",
  "byteorder",

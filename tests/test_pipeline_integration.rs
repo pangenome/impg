@@ -2,9 +2,8 @@
 //! Uses yeast chrV test data (7 strains)
 //! Requires wfmash and samtools to be installed
 
-use flate2::read::GzDecoder;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
@@ -34,12 +33,18 @@ fn get_impg_binary() -> PathBuf {
 }
 
 fn decompress_gz(gz_path: &PathBuf, out_path: &PathBuf) -> std::io::Result<()> {
-    let gz_file = File::open(gz_path)?;
-    let mut decoder = GzDecoder::new(gz_file);
-    let mut contents = Vec::new();
-    decoder.read_to_end(&mut contents)?;
+    // Use zcat which handles both standard gzip and BGZIP
+    let output = Command::new("zcat")
+        .arg(gz_path)
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "zcat failed",
+        ));
+    }
     let mut out_file = File::create(out_path)?;
-    out_file.write_all(&contents)?;
+    out_file.write_all(&output.stdout)?;
     Ok(())
 }
 

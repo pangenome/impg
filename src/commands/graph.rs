@@ -92,7 +92,7 @@ impl Default for GraphBuildConfig {
             num_mappings: "1:1".to_string(),
             scaffold_jump: 50_000,       // 50kb default scaffold gap
             scaffold_mass: 10_000,        // 10kb minimum scaffold length
-            scaffold_filter: "inf:inf".to_string(),  // Scaffold filtering disabled by default (was too aggressive)
+            scaffold_filter: "1:1".to_string(),  // 1:1 scaffold filtering (now fixed in sweepga 608547a)
             overlap: 0.95,
             min_identity: 0.0,
         }
