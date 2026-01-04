@@ -6,6 +6,8 @@ pub mod faidx;
 pub mod forest_map;
 pub mod graph;
 pub mod impg;
+pub mod impg_index;
+pub mod multi_impg;
 pub mod onealn;
 pub mod paf;
 pub mod seqidx;

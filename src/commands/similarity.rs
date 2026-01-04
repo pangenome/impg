@@ -1,5 +1,5 @@
 use crate::graph::prepare_poa_graph_and_sequences;
-use crate::impg::Impg;
+use crate::impg_index::ImpgIndex;
 use crate::sequence_index::UnifiedSequenceIndex;
 use coitrees::Interval;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -80,7 +80,7 @@ impl SimilarityMetrics {
 }
 
 pub fn compute_and_output_similarities(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     query_data: Vec<(Vec<Interval<u32>>, String)>,
     sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
@@ -93,7 +93,6 @@ pub fn compute_and_output_similarities(
     pca_similarity: &str,
     polarize_n_prev: usize,
     guide_samples: Option<&[String]>,
-    show_progress: bool,
 ) -> io::Result<()> {
     if !perform_pca {
         info!("Computing similarities for {} regions", query_data.len());
@@ -110,8 +109,8 @@ pub fn compute_and_output_similarities(
             }
         );
 
-        // Create progress bar only if requested and not in debug mode to avoid interfering with verbose logging
-        let pb = if show_progress && !log::log_enabled!(log::Level::Debug) {
+        // Create progress bar at info level (not at error-only or debug level)
+        let pb = if log::log_enabled!(log::Level::Info) && !log::log_enabled!(log::Level::Debug) {
             let progress_bar = ProgressBar::new(query_data.len() as u64);
             progress_bar.set_style(
                 ProgressStyle::default_bar()
@@ -165,8 +164,8 @@ pub fn compute_and_output_similarities(
     } else {
         info!("Performing PCA for {} regions", query_data.len());
 
-        // Create progress bar for PCA only if requested and not in debug mode
-        let pb = if show_progress && !log::log_enabled!(log::Level::Debug) {
+        // Create progress bar at info level (not at error-only or debug level)
+        let pb = if log::log_enabled!(log::Level::Info) && !log::log_enabled!(log::Level::Debug) {
             let progress_bar = ProgressBar::new(query_data.len() as u64);
             progress_bar.set_style(
                 ProgressStyle::default_bar()
@@ -233,7 +232,7 @@ pub fn compute_and_output_similarities(
 
 // Helper function for computing similarities for a single region
 fn compute_similarities_for_region(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
@@ -314,7 +313,7 @@ fn compute_similarities_for_region(
 
 // Helper function for computing PCA for a single region
 fn compute_pca_for_region(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
@@ -387,7 +386,7 @@ fn compute_pca_for_region(
 
 // Helper to prepare groups and MSA characters
 fn prepare_groups_and_msa(
-    impg: &Impg,
+    impg: &impl ImpgIndex,
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
