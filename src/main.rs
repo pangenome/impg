@@ -782,6 +782,10 @@ enum Args {
         #[clap(flatten)]
         sequence: SequenceOpts,
 
+        /// List sequence names and lengths (skip overlap statistics)
+        #[clap(long)]
+        list_sequences: bool,
+
         #[clap(flatten)]
         common: CommonOpts,
     },
@@ -1890,6 +1894,7 @@ fn run() -> io::Result<()> {
             common,
             alignment,
             sequence,
+            list_sequences,
         } => {
             initialize_threads_and_log(&common);
             let alignment_files = resolve_alignment_files(&alignment)?;
@@ -1901,7 +1906,11 @@ fn run() -> io::Result<()> {
                 sequence_files,
             )?;
 
-            print_stats(&impg);
+            if list_sequences {
+                print_list_sequences(&impg);
+            } else {
+                print_stats(&impg);
+            }
         }
         Args::Graph {
             fasta_files,
@@ -3827,6 +3836,18 @@ fn trim_cigar_prefix(cigar: &[CigarOp], query_len: i32, target_len: i32) -> Vec<
     // Add all remaining operations
     result.extend_from_slice(&cigar[start_idx..]);
     result
+}
+
+fn print_list_sequences(impg: &impl ImpgIndex) {
+    let seq_index = impg.seq_index();
+    let num_sequences = seq_index.len();
+
+    println!("Sequence\tLength");
+    for i in 0..num_sequences as u32 {
+        if let (Some(name), Some(len)) = (seq_index.get_name(i), seq_index.get_len_from_id(i)) {
+            println!("{}\t{}", name, len);
+        }
+    }
 }
 
 fn print_stats(impg: &impl ImpgIndex) {
