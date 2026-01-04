@@ -1431,6 +1431,60 @@ impl Impg {
         self.load_tree_from_disk(target_id)
     }
 
+    /// Load a tree from disk WITHOUT caching it
+    /// This is useful for parallel processing where each thread loads trees independently
+    /// to avoid write lock contention on the shared tree cache
+    pub fn load_tree_no_cache(
+        &self,
+        target_id: u32,
+    ) -> Option<BasicCOITree<QueryMetadata, u32>> {
+        if let Some(tree_offset) = self.forest_map.get_tree_offset(target_id) {
+            let mut file = File::open(&self.index_file_path).ok()?;
+            file.seek(std::io::SeekFrom::Start(tree_offset)).ok()?;
+
+            let mut reader = BufReader::new(file);
+            let (loaded_target_id, intervals): (u32, Vec<SerializableInterval>) =
+                bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
+                    .ok()?;
+
+            // Verify we loaded the correct tree
+            if loaded_target_id != target_id {
+                return None;
+            }
+
+            // Reconstruct the tree (no Arc, no caching)
+            let tree = BasicCOITree::new(
+                intervals
+                    .into_iter()
+                    .map(|interval| Interval {
+                        first: interval.first,
+                        last: interval.last,
+                        metadata: interval.metadata,
+                    })
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            );
+
+            Some(tree)
+        } else {
+            None
+        }
+    }
+
+    /// Clear the tree cache to free memory
+    /// This is useful for memory-constrained scenarios where trees can be reloaded from disk
+    pub fn clear_tree_cache(&self) {
+        let mut trees = self.trees.write().unwrap();
+        let count = trees.len();
+        trees.clear();
+        debug!("Cleared {} trees from cache", count);
+    }
+
+    /// Get the number of trees currently cached in memory
+    pub fn cached_tree_count(&self) -> usize {
+        self.trees.read().unwrap().len()
+    }
+
     /// Load IMPG index from the format with embedded forest map at the end
     pub fn load_from_file<R: std::io::Read + std::io::Seek>(
         mut reader: R,
@@ -1570,6 +1624,100 @@ impl Impg {
                     results.push((query_interval, cigar_vec, target_interval));
                 }
             });
+        }
+
+        results
+    }
+
+    /// Query alignments where the specified sequence is the QUERY (reverse direction).
+    /// This finds alignments where query_id matches, scanning all trees.
+    /// Returns: Vec of (target_interval, query_interval, original_target_id) tuples
+    /// Note: This is O(N) where N is total alignments - use sparingly.
+    pub fn query_reverse_for_depth(
+        &self,
+        query_id: u32,
+    ) -> Vec<(i32, i32, u32)> {
+        let mut results = Vec::new();
+
+        // Iterate through all target_ids in the forest map
+        for &target_id in self.forest_map.entries.keys() {
+            // Skip if querying self (query_id == target_id means self-alignment)
+            if target_id == query_id {
+                continue;
+            }
+
+            if let Some(tree) = self.get_or_load_tree(target_id) {
+                // Iterate all intervals in this tree
+                for interval in tree.iter() {
+                    // Check if this alignment has our sequence as query
+                    if interval.metadata.query_id == query_id {
+                        // Return the query coordinates (which is our ref in reverse direction)
+                        let query_start = interval.metadata.query_start;
+                        let query_end = interval.metadata.query_end;
+                        results.push((query_start, query_end, target_id));
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
+    /// Get all target_ids from the forest map
+    pub fn get_all_target_ids(&self) -> Vec<u32> {
+        self.forest_map.entries.keys().copied().collect()
+    }
+
+    /// Build a lightweight reverse index: query_id -> [target_ids that have alignments with this query]
+    /// This scans all trees once but only stores ID mappings (very low memory).
+    /// After building, the tree cache is cleared to free memory.
+    pub fn build_query_to_targets_map(&self) -> FxHashMap<u32, Vec<u32>> {
+        let mut query_to_targets: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+
+        for &target_id in self.forest_map.entries.keys() {
+            if let Some(tree) = self.get_or_load_tree(target_id) {
+                // Collect unique query_ids from this tree
+                let mut seen_queries: rustc_hash::FxHashSet<u32> = rustc_hash::FxHashSet::default();
+                for interval in tree.iter() {
+                    let query_id = interval.metadata.query_id;
+                    if query_id != target_id && seen_queries.insert(query_id) {
+                        query_to_targets
+                            .entry(query_id)
+                            .or_default()
+                            .push(target_id);
+                    }
+                }
+            }
+        }
+
+        // Clear tree cache after building the map
+        self.clear_tree_cache();
+
+        query_to_targets
+    }
+
+    /// Query reverse alignments using a pre-built query_to_targets map.
+    /// Only loads the necessary trees instead of all trees.
+    pub fn query_reverse_for_depth_with_map(
+        &self,
+        query_id: u32,
+        query_to_targets: &FxHashMap<u32, Vec<u32>>,
+    ) -> Vec<(i32, i32, u32)> {
+        let mut results = Vec::new();
+
+        // Only query trees that we know have alignments with this query_id
+        if let Some(target_ids) = query_to_targets.get(&query_id) {
+            for &target_id in target_ids {
+                if let Some(tree) = self.get_or_load_tree(target_id) {
+                    for interval in tree.iter() {
+                        if interval.metadata.query_id == query_id {
+                            let query_start = interval.metadata.query_start;
+                            let query_end = interval.metadata.query_end;
+                            results.push((query_start, query_end, target_id));
+                        }
+                    }
+                }
+            }
         }
 
         results
