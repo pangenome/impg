@@ -54,6 +54,7 @@ fn run_impg(work_dir: &PathBuf, args: &[&str]) -> std::io::Result<std::process::
 }
 
 #[test]
+#[ignore] // Requires wfmash and samtools - run with: cargo test -- --ignored
 fn test_full_pipeline() -> std::io::Result<()> {
     // Create temp directory
     let temp_dir = TempDir::new()?;
