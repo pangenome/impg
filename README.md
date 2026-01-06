@@ -394,6 +394,68 @@ odgi unchop -i combined.fix.gfa -o - -t 16 | \
     odgi view -i - -g > combined.final.gfa
 ```
 
+### Graph
+
+Build a pangenome graph from FASTA sequences using sweepga + seqwish:
+
+```bash
+# Build graph from FASTA files
+impg graph --fasta-files sequences.fa -g output.gfa -t 16
+
+# Build from multiple FASTA files
+impg graph --fasta-files file1.fa file2.fa file3.fa -g output.gfa
+
+# Use a list file containing FASTA paths
+impg graph --fasta-list fasta_files.txt -g output.gfa
+
+# Adjust k-mer frequency multiplier (default: 10x number of genomes)
+# Genomes are counted as unique SAMPLE#HAPLOTYPE prefixes in PanSN naming
+impg graph --fasta-files sequences.fa -g output.gfa -f 5
+
+# Set explicit k-mer frequency
+impg graph --fasta-files sequences.fa -g output.gfa --frequency 100
+
+# Filter alignments by minimum length
+impg graph --fasta-files sequences.fa -g output.gfa --min-alignment-length 500
+
+# Filter alignments by minimum match length
+impg graph --fasta-files sequences.fa -g output.gfa -k 50
+
+# Use sparse factor to reduce alignment density (0.0 = keep all)
+impg graph --fasta-files sequences.fa -g output.gfa --sparse-factor 0.5
+
+# Use disk-backed mode for very large datasets (slower but lower memory)
+impg graph --fasta-files *.fa -g output.gfa --disk-backed
+
+# Write to stdout
+impg graph --fasta-files sequences.fa -g - | odgi build -g - -o output.og
+```
+
+#### Alignment Filtering Options
+
+By default, `impg graph` applies sweepga's plane-sweep filtering to produce clean 1:1 alignments with scaffold-based chaining. This removes spurious cross-chromosome alignments (e.g., from repetitive elements like TEs, telomeres, or rDNA).
+
+```bash
+# Disable filtering entirely (keep all alignments)
+impg graph --fasta-files sequences.fa -g output.gfa --no-filter
+
+# Control mapping cardinality (default: 1:1 for clean orthology)
+impg graph --fasta-files sequences.fa -g output.gfa --num-mappings 1:1    # 1:1 (strictest)
+impg graph --fasta-files sequences.fa -g output.gfa --num-mappings 1:n    # 1:many
+impg graph --fasta-files sequences.fa -g output.gfa --num-mappings n:n    # many:many (most permissive)
+
+# Scaffold-based filtering (chains alignments along diagonal)
+impg graph --fasta-files sequences.fa -g output.gfa --scaffold-jump 50000   # Max gap between chained alignments
+impg graph --fasta-files sequences.fa -g output.gfa --scaffold-mass 10000   # Min total aligned bases in scaffold
+impg graph --fasta-files sequences.fa -g output.gfa --scaffold-filter 1:1   # Scaffold cardinality (1:1, 1:n, or n:n)
+
+# Overlap and identity thresholds
+impg graph --fasta-files sequences.fa -g output.gfa --overlap 0.95      # Max overlap between alignments (0.0-1.0)
+impg graph --fasta-files sequences.fa -g output.gfa --min-identity 0.9  # Min alignment identity (0.0-1.0)
+```
+
+The `impg graph` command integrates FastGA (via sweepga) for alignment and seqwish for graph induction to build variation graphs from collections of sequences. It handles PanSN-formatted sequence names and automatically adjusts the k-mer frequency based on the number of genomes (unique SAMPLE#HAPLOTYPE prefixes) rather than the total number of sequences.
+
 ### Index
 
 Create an IMPG index from alignment files:
@@ -482,6 +544,206 @@ The output is provided in BED, BEDPE and PAF formats, making it straightforward 
 `impg` uses [`coitrees`](https://github.com/dcjones/coitrees) (Cache Oblivious Interval Trees) to provide efficient range lookup over the input alignments.
 CIGAR strings are converted to a compact delta encoding.
 This approach allows for fast and memory-efficient projection of sequence ranges through alignments.
+
+## Tutorial: Building a Yeast Pangenome Graph
+
+This tutorial walks through building a complete pangenome graph from 7 *S. cerevisiae* strains using `impg`'s partition-based workflow. The approach partitions the pangenome into manageable pieces, builds graphs for each partition using sweepga + seqwish, and laces them together into a final graph.
+
+### Prerequisites
+
+- `impg` compiled with all dependencies
+- `odgi` for visualization
+- Yeast pangenome FASTA (PanSN naming: `SAMPLE#HAPLOTYPE#CONTIG`)
+- Pre-computed alignments in PAF format (e.g., from `wfmash`)
+
+### Step 1: Create the IMPG Index
+
+Build an index from your alignment file:
+
+```bash
+# Create working directory
+mkdir -p yeast_pangenome && cd yeast_pangenome
+
+# Build the index from alignments
+impg index -a cerevisiae.paf -i yeast.impg -t 16
+```
+
+### Step 2: Partition the Pangenome
+
+Divide the pangenome into ~100kb regions:
+
+```bash
+# Partition into FASTA files for graph construction
+impg partition -i yeast.impg \
+    -w 100000 \
+    --sequence-files cerevisiae.fa.gz \
+    -o fasta \
+    --separate-files \
+    --output-folder partitions \
+    -t 16
+```
+
+This creates one FASTA file per partition (e.g., `partitions/partition0.fasta`, `partitions/partition1.fasta`, ...).
+
+### Step 3: Build Graphs for Each Partition
+
+Use `impg graph` to build a GFA for each partition. By default, `impg graph` applies 1:1 alignment filtering with scaffold-based chaining to remove spurious cross-chromosome alignments from repetitive elements:
+
+```bash
+# Create output directory
+mkdir -p gfas
+
+# Build graphs in parallel (default filtering: 1:1 + scaffolding)
+ls partitions/*.fasta | xargs -P 4 -I {} bash -c '
+    f="{}"; base=$(basename "$f" .fasta)
+    impg graph --fasta-files "$f" -g "gfas/${base}.gfa" -t 4
+    echo "Done: $base"
+'
+```
+
+The k-mer frequency is automatically calculated based on the number of genomes (unique SAMPLE#HAPLOTYPE prefixes), not the total number of sequences. For 7 yeast strains, this means `-f 10` results in a frequency of 70 (10 × 7 genomes).
+
+### Step 4: Lace Partition Graphs Together
+
+Combine all partition GFAs into a single pangenome graph:
+
+```bash
+# Create list of valid (non-empty) GFA files
+find gfas -name "*.gfa" -size +0 | sort -V > gfa_list.txt
+
+# Lace together with gap filling
+impg lace \
+    --file-list gfa_list.txt \
+    --sequence-files cerevisiae.fa.gz \
+    -o yeast_pangenome.gfa \
+    --fill-gaps 2 \
+    -t 16
+```
+
+The `--fill-gaps 2` option fills gaps between partitions with the original sequence.
+
+### Step 5: Post-process and Visualize with ODGI
+
+Convert to ODGI format and sort for optimal visualization:
+
+```bash
+# Build ODGI graph
+odgi build -g yeast_pangenome.gfa -o yeast_pangenome.og -t 16
+
+# Sort the graph
+odgi sort -i yeast_pangenome.og -o yeast_pangenome_sorted.og -O -p Ygs -t 16
+
+# Generate 2D layout
+odgi layout -i yeast_pangenome_sorted.og -o yeast_pangenome.lay -t 16 -P
+
+# Create visualizations
+# Linear view (paths as rows, colored by sample)
+odgi viz -i yeast_pangenome_sorted.og -o yeast_pangenome_viz.png -x 4000 -y 1000 -s '#'
+
+# 2D graph drawing
+odgi draw -i yeast_pangenome_sorted.og -c yeast_pangenome.lay -p yeast_pangenome_draw.png -w 4000 -H 2000
+```
+
+### Step 6: Verify the Graph
+
+Check graph statistics:
+
+```bash
+odgi stats -i yeast_pangenome_sorted.og -S
+```
+
+Expected output for 7 yeast strains with 16 chromosomes each:
+- ~35 Mbp total length
+- ~440,000 nodes
+- ~616,000 edges
+- 112 paths (7 strains × 16 chromosomes)
+
+### Complete Pipeline Script
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+FASTA="cerevisiae.fa.gz"
+PAF="cerevisiae.paf"
+THREADS=16
+WINDOW=100000
+
+# Step 1: Index
+impg index -a "$PAF" -i yeast.impg -t "$THREADS"
+
+# Step 2: Partition
+mkdir -p partitions gfas
+impg partition -i yeast.impg -w "$WINDOW" \
+    --sequence-files "$FASTA" -o fasta \
+    --separate-files --output-folder partitions -t "$THREADS"
+
+# Step 3: Build partition graphs
+ls partitions/*.fasta | xargs -P 4 -I {} bash -c '
+    f="{}"; base=$(basename "$f" .fasta)
+    impg graph --fasta-files "$f" -g "gfas/${base}.gfa" -t 4
+'
+
+# Step 4: Lace
+find gfas -name "*.gfa" -size +0 | sort -V > gfa_list.txt
+impg lace --file-list gfa_list.txt --sequence-files "$FASTA" \
+    -o yeast_pangenome.gfa --fill-gaps 2 -t "$THREADS"
+
+# Step 5: ODGI post-processing
+odgi build -g yeast_pangenome.gfa -o yeast_pangenome.og -t "$THREADS"
+odgi sort -i yeast_pangenome.og -o yeast_pangenome_sorted.og -O -p Ygs -t "$THREADS"
+odgi layout -i yeast_pangenome_sorted.og -o yeast_pangenome.lay -t "$THREADS"
+odgi viz -i yeast_pangenome_sorted.og -o yeast_pangenome_viz.png -x 4000 -y 1000 -s '#'
+odgi draw -i yeast_pangenome_sorted.og -c yeast_pangenome.lay -p yeast_pangenome_draw.png
+
+echo "Done! Check yeast_pangenome_viz.png and yeast_pangenome_draw.png"
+```
+
+### Exploration: Effect of Partition Size
+
+The partition window size (`-w`) affects the resulting graph structure. Smaller partitions create more alignment subproblems but may fragment complex structural variants, while larger partitions allow better representation of larger variations but increase memory usage per partition.
+
+Here's a comparison using the 7-strain yeast pangenome with different partition sizes:
+
+| Partition Size | Partitions | Non-empty GFAs | Graph Length | Nodes | Edges | Steps |
+|---------------|------------|----------------|--------------|-------|-------|-------|
+| 10kb | 1,537 | 1,533 | 63.0 Mb | 164,582 | 221,966 | 243,526 |
+| 50kb | 368 | 367 | 59.5 Mb | 206,982 | 280,259 | 298,275 |
+| 100kb | 227 | 227 | 59.1 Mb | 221,360 | 299,952 | 325,202 |
+
+**Observations:**
+
+- **Smaller partitions (10kb)** produce graphs with fewer nodes and edges but more total sequence length due to gap filling between many partition boundaries
+- **Larger partitions (50-100kb)** create more complex graphs with better variant representation but require more memory per partition
+- All produce 112 paths (7 strains x 16 chromosomes)
+
+**Recommendations:**
+
+- Use **10kb partitions** for small genomes or when memory is constrained
+- Use **50-100kb partitions** for better structural variant representation
+- For human-scale genomes, consider **100kb-500kb partitions**
+
+To experiment with partition sizes:
+
+```bash
+# Try different window sizes
+for WINDOW in 10000 50000 100000; do
+    mkdir -p partitions_${WINDOW} gfas_${WINDOW}
+
+    impg partition -i index.impg -w $WINDOW \
+        --sequence-files sequences.fa -o fasta \
+        --separate-files --output-folder partitions_${WINDOW}
+
+    ls partitions_${WINDOW}/*.fasta | xargs -P 4 -I {} bash -c '
+        f="{}"; base=$(basename "$f" .fasta)
+        impg graph --fasta-files "$f" -g "gfas_${WINDOW}/${base}.gfa" -t 4
+    '
+
+    find gfas_${WINDOW} -name "*.gfa" -size +0 | sort -V > gfa_list_${WINDOW}.txt
+    impg lace --file-list gfa_list_${WINDOW}.txt --sequence-files sequences.fa \
+        -o pangenome_${WINDOW}.gfa --fill-gaps 2
+done
+```
 
 ## Authors
 

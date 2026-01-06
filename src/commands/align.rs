@@ -1,0 +1,801 @@
+// Alignment command for setting up pangenome alignments with sweepga
+//
+// This module provides functionality to generate alignment pairs from input sequences,
+// with various sparsification strategies to reduce the number of alignments needed.
+
+use log::info;
+use rayon::prelude::*;
+use std::collections::HashSet;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::path::Path;
+use std::sync::Mutex;
+
+/// Sparsification strategy for pair selection
+#[derive(Clone, Debug)]
+pub enum SparsificationStrategy {
+    /// Align all pairs - O(n²) complexity
+    None,
+    /// Random subsampling with given fraction (0.0-1.0)
+    Random(f64),
+    /// Random subsampling with giant component guarantee (Erdős-Rényi model)
+    /// Parameter is the probability of connectivity (e.g., 0.99)
+    Connectivity(f64),
+    /// Tree-based sampling combining k-nearest, k-farthest (stranger-joining), and random
+    /// Parameters: (k_nearest, k_farthest, random_fraction, kmer_size)
+    TreeSampling {
+        k_nearest: usize,
+        k_farthest: usize,
+        random_fraction: f64,
+        kmer_size: usize,
+    },
+}
+
+impl SparsificationStrategy {
+    /// Parse sparsification strategy from string
+    /// Formats:
+    /// - "none" or "all" - all pairs
+    /// - "random:0.5" - random 50%
+    /// - "giant:0.99" or "connectivity:0.99" - giant component with 99% probability
+    /// - "tree:2:1:0.1" or "tree:2:1:0.1:15" - k-nearest:k-farthest:random_frac[:kmer_size]
+    pub fn parse(s: &str) -> io::Result<Self> {
+        let s = s.to_lowercase();
+        let parts: Vec<&str> = s.split(':').collect();
+
+        match parts[0] {
+            "none" | "all" => Ok(SparsificationStrategy::None),
+            "random" => {
+                if parts.len() != 2 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Random format: random:<fraction> (e.g., random:0.5)",
+                    ));
+                }
+                let fraction: f64 = parts[1].parse().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "Invalid fraction")
+                })?;
+                if !(0.0..=1.0).contains(&fraction) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Fraction must be between 0.0 and 1.0",
+                    ));
+                }
+                Ok(SparsificationStrategy::Random(fraction))
+            }
+            "giant" | "connectivity" => {
+                if parts.len() != 2 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Connectivity format: giant:<probability> (e.g., giant:0.99)",
+                    ));
+                }
+                let prob: f64 = parts[1].parse().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "Invalid probability")
+                })?;
+                if !(0.0..1.0).contains(&prob) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Probability must be between 0.0 and 1.0 (exclusive)",
+                    ));
+                }
+                Ok(SparsificationStrategy::Connectivity(prob))
+            }
+            "tree" | "knn" => {
+                if parts.len() < 4 || parts.len() > 5 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Tree format: tree:<k_nearest>:<k_farthest>:<random_frac>[:<kmer_size>]",
+                    ));
+                }
+                let k_nearest: usize = parts[1].parse().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "Invalid k_nearest")
+                })?;
+                let k_farthest: usize = parts[2].parse().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "Invalid k_farthest")
+                })?;
+                let random_fraction: f64 = parts[3].parse().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "Invalid random_fraction")
+                })?;
+                let kmer_size: usize = if parts.len() == 5 {
+                    parts[4].parse().map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "Invalid kmer_size")
+                    })?
+                } else {
+                    15 // default
+                };
+
+                if !(0.0..=1.0).contains(&random_fraction) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Random fraction must be between 0.0 and 1.0",
+                    ));
+                }
+                if !(3..=31).contains(&kmer_size) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "K-mer size must be between 3 and 31",
+                    ));
+                }
+
+                Ok(SparsificationStrategy::TreeSampling {
+                    k_nearest,
+                    k_farthest,
+                    random_fraction,
+                    kmer_size,
+                })
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Unknown sparsification strategy: '{}'. Valid: none, random:<frac>, giant:<prob>, tree:<k_near>:<k_far>:<rand_frac>",
+                    parts[0]
+                ),
+            )),
+        }
+    }
+
+    /// Get a description of the strategy
+    pub fn description(&self) -> String {
+        match self {
+            SparsificationStrategy::None => "all pairs (no sparsification)".to_string(),
+            SparsificationStrategy::Random(f) => format!("random {:.1}%", f * 100.0),
+            SparsificationStrategy::Connectivity(p) => {
+                format!("giant component (p={:.2})", p)
+            }
+            SparsificationStrategy::TreeSampling {
+                k_nearest,
+                k_farthest,
+                random_fraction,
+                kmer_size,
+            } => {
+                format!(
+                    "tree sampling (k_near={}, k_far={}, rand={:.1}%, k={})",
+                    k_nearest,
+                    k_farthest,
+                    random_fraction * 100.0,
+                    kmer_size
+                )
+            }
+        }
+    }
+}
+
+/// Configuration for alignment command
+pub struct AlignConfig {
+    pub num_threads: usize,
+    pub sparsification: SparsificationStrategy,
+    pub frequency_multiplier: usize,
+    pub frequency: Option<usize>,
+    pub min_alignment_length: u64,
+    pub output_format: AlignOutputFormat,
+    pub show_progress: bool,
+    // Sweepga filtering options
+    pub no_filter: bool,
+    pub num_mappings: String,
+    pub scaffold_jump: u64,
+    pub scaffold_mass: u64,
+    pub scaffold_filter: String,
+    pub overlap: f64,
+    pub min_identity: f64,
+    pub scaffold_dist: u64,
+    pub min_mapping_length: u64,
+}
+
+impl Default for AlignConfig {
+    fn default() -> Self {
+        AlignConfig {
+            num_threads: 4,
+            sparsification: SparsificationStrategy::Connectivity(0.99),
+            frequency_multiplier: 10,
+            frequency: None,
+            min_alignment_length: 100,
+            output_format: AlignOutputFormat::Paf,
+            show_progress: true,
+            // Filtering defaults - match graph command
+            no_filter: false,
+            num_mappings: "1:1".to_string(),
+            scaffold_jump: 50_000,
+            scaffold_mass: 10_000,
+            scaffold_filter: "1:1".to_string(),
+            overlap: 0.95,
+            min_identity: 0.0,
+            scaffold_dist: 0,
+            min_mapping_length: 0,
+        }
+    }
+}
+
+/// Output format for alignments
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AlignOutputFormat {
+    /// PAF format (standard)
+    Paf,
+    /// 1aln format (compact, for impg)
+    OneAln,
+    /// Job list (commands only, for cluster execution)
+    JobList,
+}
+
+/// Sequence info for distance computation
+struct SequenceInfo {
+    name: String,
+    path: String,
+    sketch: Vec<u64>,
+}
+
+/// Compute MinHash sketch for a sequence
+fn sketch_sequence(sequence: &[u8], k: usize, sketch_size: usize) -> Vec<u64> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hashes = Vec::new();
+
+    if sequence.len() < k {
+        return vec![];
+    }
+
+    for i in 0..=(sequence.len() - k) {
+        let kmer = &sequence[i..i + k];
+
+        // Skip k-mers with non-ACGT characters
+        if kmer.iter().any(|&b| !matches!(b, b'A' | b'C' | b'G' | b'T' | b'a' | b'c' | b'g' | b't'))
+        {
+            continue;
+        }
+
+        // Compute canonical k-mer (lexicographically smaller of forward/reverse)
+        let rc_kmer: Vec<u8> = kmer
+            .iter()
+            .rev()
+            .map(|&b| match b {
+                b'A' | b'a' => b'T',
+                b'T' | b't' => b'A',
+                b'C' | b'c' => b'G',
+                b'G' | b'g' => b'C',
+                _ => b'N',
+            })
+            .collect();
+
+        let canonical = if kmer < rc_kmer.as_slice() {
+            kmer
+        } else {
+            &rc_kmer
+        };
+
+        let mut hasher = DefaultHasher::new();
+        canonical.hash(&mut hasher);
+        hashes.push(hasher.finish());
+    }
+
+    // Sort and take smallest (MinHash)
+    hashes.sort_unstable();
+    hashes.truncate(sketch_size);
+    hashes
+}
+
+/// Compute Mash distance between two sketches
+fn mash_distance(sketch1: &[u64], sketch2: &[u64], k: usize) -> f64 {
+    if sketch1.is_empty() || sketch2.is_empty() {
+        return 1.0;
+    }
+
+    // Compute Jaccard index using sorted merge
+    let mut i = 0;
+    let mut j = 0;
+    let mut intersection = 0;
+    let mut union_size = 0;
+
+    while i < sketch1.len() && j < sketch2.len() {
+        if sketch1[i] == sketch2[j] {
+            intersection += 1;
+            union_size += 1;
+            i += 1;
+            j += 1;
+        } else if sketch1[i] < sketch2[j] {
+            union_size += 1;
+            i += 1;
+        } else {
+            union_size += 1;
+            j += 1;
+        }
+    }
+    union_size += sketch1.len() - i;
+    union_size += sketch2.len() - j;
+
+    if union_size == 0 {
+        return 1.0;
+    }
+
+    let jaccard = intersection as f64 / union_size as f64;
+
+    if jaccard == 0.0 {
+        return 1.0;
+    }
+
+    // Mash distance formula
+    let mash = -1.0 / (k as f64) * (2.0 * jaccard / (1.0 + jaccard)).ln();
+    mash.clamp(0.0, 1.0)
+}
+
+/// Compute probability for giant component (Erdős-Rényi model)
+fn compute_connectivity_probability(n: usize, connectivity_prob: f64) -> f64 {
+    if n <= 1 {
+        return 1.0;
+    }
+
+    // Special cases for small n
+    match n {
+        2 => return 1.0,
+        3 => return 0.8,
+        4 => return 0.7,
+        5 => return 0.6,
+        6..=10 => return 0.5,
+        _ => {}
+    }
+
+    // p = (log n + c) / n where c = -log(-log(connectivity_prob))
+    let c = -(-connectivity_prob.ln()).ln();
+    let p = ((n as f64).ln() + c) / (n as f64);
+
+    p.clamp(0.001, 1.0)
+}
+
+/// Generate pairs using specified sparsification strategy
+fn generate_pairs(
+    sequences: &[SequenceInfo],
+    strategy: &SparsificationStrategy,
+) -> Vec<(usize, usize)> {
+    let n = sequences.len();
+    if n <= 1 {
+        return vec![];
+    }
+
+    match strategy {
+        SparsificationStrategy::None => {
+            // All pairs
+            (0..n)
+                .flat_map(|i| ((i + 1)..n).map(move |j| (i, j)))
+                .collect()
+        }
+
+        SparsificationStrategy::Random(fraction) => {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+
+            let mut pairs = Vec::new();
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    // Deterministic hash based on sequence names
+                    let mut hasher = DefaultHasher::new();
+                    format!("{}:{}", sequences[i].name, sequences[j].name).hash(&mut hasher);
+                    let hash = hasher.finish();
+
+                    if (hash as f64 / u64::MAX as f64) < *fraction {
+                        pairs.push((i, j));
+                    }
+                }
+            }
+            pairs
+        }
+
+        SparsificationStrategy::Connectivity(prob) => {
+            let keep_fraction = compute_connectivity_probability(n, *prob);
+            generate_pairs(sequences, &SparsificationStrategy::Random(keep_fraction))
+        }
+
+        SparsificationStrategy::TreeSampling {
+            k_nearest,
+            k_farthest,
+            random_fraction,
+            kmer_size: _,
+        } => {
+            // Compute distance matrix
+            let distances: Vec<Vec<f64>> = (0..n)
+                .into_par_iter()
+                .map(|i| {
+                    (0..n)
+                        .map(|j| {
+                            if i == j {
+                                0.0
+                            } else {
+                                mash_distance(&sequences[i].sketch, &sequences[j].sketch, 15)
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+
+            let mut pairs = HashSet::new();
+
+            // K-nearest neighbors for each sequence
+            if *k_nearest > 0 {
+                for (i, dist_row) in distances.iter().enumerate() {
+                    let mut neighbors: Vec<(usize, f64)> = (0..n)
+                        .filter(|&j| i != j)
+                        .map(|j| (j, dist_row[j]))
+                        .collect();
+                    neighbors.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
+                    for (j, _) in neighbors.iter().take(*k_nearest) {
+                        let pair = if i < *j { (i, *j) } else { (*j, i) };
+                        pairs.insert(pair);
+                    }
+                }
+            }
+
+            // K-farthest neighbors (stranger-joining)
+            if *k_farthest > 0 {
+                for (i, dist_row) in distances.iter().enumerate() {
+                    let mut neighbors: Vec<(usize, f64)> = (0..n)
+                        .filter(|&j| i != j)
+                        .map(|j| (j, dist_row[j]))
+                        .collect();
+                    neighbors.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap()); // Descending
+
+                    for (j, _) in neighbors.iter().take(*k_farthest) {
+                        let pair = if i < *j { (i, *j) } else { (*j, i) };
+                        pairs.insert(pair);
+                    }
+                }
+            }
+
+            // Random pairs
+            if *random_fraction > 0.0 {
+                let random_pairs =
+                    generate_pairs(sequences, &SparsificationStrategy::Random(*random_fraction));
+                for pair in random_pairs {
+                    pairs.insert(pair);
+                }
+            }
+
+            let mut result: Vec<_> = pairs.into_iter().collect();
+            result.sort_unstable();
+            result
+        }
+    }
+}
+
+/// Load sequences from FASTA files and compute sketches
+fn load_sequences(
+    fasta_files: &[String],
+    kmer_size: usize,
+    sketch_size: usize,
+    show_progress: bool,
+) -> io::Result<Vec<SequenceInfo>> {
+    let sequences = Mutex::new(Vec::new());
+
+    fasta_files.par_iter().try_for_each(|path| -> io::Result<()> {
+        let file = File::open(path)?;
+        let (reader, _format) = niffler::get_reader(Box::new(file))
+            .map_err(|e| io::Error::other(format!("Failed to open {}: {}", path, e)))?;
+        let reader = BufReader::new(reader);
+
+        let mut current_name: Option<String> = None;
+        let mut current_seq = Vec::new();
+
+        for line in reader.lines() {
+            let line = line?;
+            if let Some(header) = line.strip_prefix('>') {
+                // Process previous sequence
+                if let Some(name) = current_name.take() {
+                    let sketch = sketch_sequence(&current_seq, kmer_size, sketch_size);
+                    sequences.lock().unwrap().push(SequenceInfo {
+                        name,
+                        path: path.clone(),
+                        sketch,
+                    });
+                }
+                current_name = Some(header.split_whitespace().next().unwrap_or("").to_string());
+                current_seq.clear();
+            } else {
+                current_seq.extend(line.trim().as_bytes());
+            }
+        }
+
+        // Don't forget last sequence
+        if let Some(name) = current_name {
+            let sketch = sketch_sequence(&current_seq, kmer_size, sketch_size);
+            sequences.lock().unwrap().push(SequenceInfo {
+                name,
+                path: path.clone(),
+                sketch,
+            });
+        }
+
+        Ok(())
+    })?;
+
+    let mut result = sequences.into_inner().unwrap();
+
+    if show_progress {
+        info!("Loaded {} sequences from {} files", result.len(), fasta_files.len());
+    }
+
+    // Sort by name for reproducibility
+    result.sort_by(|a, b| a.name.cmp(&b.name));
+
+    Ok(result)
+}
+
+/// Estimate pair count for a given strategy and sequence count
+#[allow(dead_code)]
+fn estimate_pair_count(n: usize, strategy: &SparsificationStrategy) -> usize {
+    if n <= 1 {
+        return 0;
+    }
+
+    let total_pairs = n * (n - 1) / 2;
+
+    match strategy {
+        SparsificationStrategy::None => total_pairs,
+        SparsificationStrategy::Random(fraction) => ((total_pairs as f64) * fraction) as usize,
+        SparsificationStrategy::Connectivity(prob) => {
+            let keep_fraction = compute_connectivity_probability(n, *prob);
+            ((total_pairs as f64) * keep_fraction) as usize
+        }
+        SparsificationStrategy::TreeSampling {
+            k_nearest,
+            k_farthest,
+            random_fraction,
+            ..
+        } => {
+            // Each sequence contributes k_nearest + k_farthest edges (with dedup)
+            let tree_pairs = n * (k_nearest + k_farthest);
+            let random_pairs = ((total_pairs as f64) * random_fraction) as usize;
+            // Rough estimate (edges can overlap)
+            (tree_pairs / 2 + random_pairs).min(total_pairs)
+        }
+    }
+}
+
+/// Write job list for cluster execution
+fn write_job_list<W: Write>(
+    pairs: &[(usize, usize)],
+    sequences: &[SequenceInfo],
+    output_dir: &str,
+    writer: &mut W,
+    config: &AlignConfig,
+) -> io::Result<()> {
+    let freq_arg = if let Some(f) = config.frequency {
+        format!("-f{}", f)
+    } else {
+        format!("-f{}", sequences.len() * config.frequency_multiplier)
+    };
+
+    for (i, j) in pairs {
+        let seq_i = &sequences[*i];
+        let seq_j = &sequences[*j];
+
+        // Create output filename
+        let output_name = format!("{}_vs_{}.paf", seq_i.name, seq_j.name);
+        let output_path = format!("{}/{}", output_dir, output_name);
+
+        // Write command
+        writeln!(
+            writer,
+            "FastGA {} -T{} -l{} {} {} > {}",
+            freq_arg,
+            config.num_threads,
+            config.min_alignment_length,
+            seq_i.path,
+            seq_j.path,
+            output_path
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Run alignment command
+pub fn run_align(
+    fasta_files: Vec<String>,
+    fasta_list: Option<String>,
+    output_dir: &str,
+    config: AlignConfig,
+) -> io::Result<()> {
+    // Resolve FASTA files
+    let fasta_files = resolve_fasta_files(fasta_files, fasta_list)?;
+
+    if fasta_files.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "No FASTA files specified",
+        ));
+    }
+
+    // Create output directory
+    std::fs::create_dir_all(output_dir)?;
+
+    // Determine k-mer size for sketching
+    let kmer_size = match &config.sparsification {
+        SparsificationStrategy::TreeSampling { kmer_size, .. } => *kmer_size,
+        _ => 15, // default
+    };
+
+    // Load sequences and compute sketches
+    if config.show_progress {
+        info!(
+            "Loading sequences and computing sketches (k={})...",
+            kmer_size
+        );
+    }
+    let sequences = load_sequences(&fasta_files, kmer_size, 1000, config.show_progress)?;
+
+    let n = sequences.len();
+    let total_pairs = n * (n - 1) / 2;
+
+    // Generate pairs
+    if config.show_progress {
+        info!(
+            "Generating alignment pairs using {}...",
+            config.sparsification.description()
+        );
+    }
+    let pairs = generate_pairs(&sequences, &config.sparsification);
+
+    if config.show_progress {
+        info!(
+            "Selected {} pairs out of {} total ({:.1}%)",
+            pairs.len(),
+            total_pairs,
+            (pairs.len() as f64 / total_pairs as f64) * 100.0
+        );
+    }
+
+    // Write output based on format
+    match config.output_format {
+        AlignOutputFormat::JobList => {
+            let job_file = format!("{}/align_jobs.txt", output_dir);
+            let mut writer = BufWriter::new(File::create(&job_file)?);
+            write_job_list(&pairs, &sequences, output_dir, &mut writer, &config)?;
+            info!("Wrote {} alignment jobs to {}", pairs.len(), job_file);
+        }
+        AlignOutputFormat::Paf | AlignOutputFormat::OneAln => {
+            // TODO: Actually run alignments using sweepga
+            // For now, just generate the job list
+            info!(
+                "Direct alignment execution not yet implemented. Use --joblist to generate commands."
+            );
+            let job_file = format!("{}/align_jobs.txt", output_dir);
+            let mut writer = BufWriter::new(File::create(&job_file)?);
+            write_job_list(&pairs, &sequences, output_dir, &mut writer, &config)?;
+            info!("Wrote {} alignment jobs to {}", pairs.len(), job_file);
+        }
+    }
+
+    Ok(())
+}
+
+/// Resolve FASTA files from either direct list or file list
+fn resolve_fasta_files(
+    fasta_files: Vec<String>,
+    fasta_list: Option<String>,
+) -> io::Result<Vec<String>> {
+    match (fasta_files.is_empty(), fasta_list) {
+        (false, None) => {
+            // Validate all files exist
+            for file in &fasta_files {
+                if !Path::new(file).exists() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("FASTA file '{}' not found", file),
+                    ));
+                }
+            }
+            Ok(fasta_files)
+        }
+        (true, Some(list_file)) => {
+            let file = File::open(&list_file)?;
+            let reader = BufReader::new(file);
+            let mut files = Vec::new();
+
+            for line in reader.lines() {
+                let line = line?;
+                let trimmed = line.trim();
+                if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                    if !Path::new(trimmed).exists() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::NotFound,
+                            format!("FASTA file '{}' not found", trimmed),
+                        ));
+                    }
+                    files.push(trimmed.to_string());
+                }
+            }
+
+            if files.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("No valid FASTA files found in list file: {}", list_file),
+                ));
+            }
+
+            Ok(files)
+        }
+        (true, None) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Either --fasta-files or --fasta-list must be provided",
+        )),
+        (false, Some(_)) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Cannot specify both --fasta-files and --fasta-list",
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_sparsification() {
+        // None
+        assert!(matches!(
+            SparsificationStrategy::parse("none").unwrap(),
+            SparsificationStrategy::None
+        ));
+
+        // Random
+        if let SparsificationStrategy::Random(f) =
+            SparsificationStrategy::parse("random:0.5").unwrap()
+        {
+            assert!((f - 0.5).abs() < 0.001);
+        } else {
+            panic!("Expected Random");
+        }
+
+        // Connectivity
+        if let SparsificationStrategy::Connectivity(p) =
+            SparsificationStrategy::parse("giant:0.99").unwrap()
+        {
+            assert!((p - 0.99).abs() < 0.001);
+        } else {
+            panic!("Expected Connectivity");
+        }
+
+        // Tree
+        if let SparsificationStrategy::TreeSampling {
+            k_nearest,
+            k_farthest,
+            random_fraction,
+            kmer_size,
+        } = SparsificationStrategy::parse("tree:2:1:0.1:15").unwrap()
+        {
+            assert_eq!(k_nearest, 2);
+            assert_eq!(k_farthest, 1);
+            assert!((random_fraction - 0.1).abs() < 0.001);
+            assert_eq!(kmer_size, 15);
+        } else {
+            panic!("Expected TreeSampling");
+        }
+    }
+
+    #[test]
+    fn test_connectivity_probability() {
+        // Small n should give high probability
+        assert!(compute_connectivity_probability(2, 0.99) >= 0.9);
+        assert!(compute_connectivity_probability(5, 0.99) >= 0.5);
+
+        // Large n should give smaller probability
+        let p_100 = compute_connectivity_probability(100, 0.99);
+        let p_1000 = compute_connectivity_probability(1000, 0.99);
+        assert!(p_1000 < p_100);
+    }
+
+    #[test]
+    fn test_sketch_and_distance() {
+        let seq1 = b"ACGTACGTACGTACGT";
+        let seq2 = b"ACGTACGTACGTACGT";
+        let seq3 = b"GGGGGGGGGGGGGGGG";
+
+        let sketch1 = sketch_sequence(seq1, 5, 100);
+        let sketch2 = sketch_sequence(seq2, 5, 100);
+        let sketch3 = sketch_sequence(seq3, 5, 100);
+
+        // Identical sequences should have distance 0
+        assert!(mash_distance(&sketch1, &sketch2, 5) < 0.01);
+
+        // Different sequences should have higher distance
+        assert!(mash_distance(&sketch1, &sketch3, 5) > 0.5);
+    }
+}
