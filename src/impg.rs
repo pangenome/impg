@@ -126,6 +126,30 @@ impl CigarOp {
     }
 }
 
+/// Invert CIGAR operations for bidirectional alignment interpretation.
+/// - Swap I↔D (insertions become deletions and vice versa)
+/// - Reverse the CIGAR array only if strand is Reverse
+/// - Matches (=), mismatches (X), and ambiguous (M) stay the same
+fn invert_cigar_ops(ops: &[CigarOp], strand: Strand) -> Vec<CigarOp> {
+    let inverted: Vec<CigarOp> = ops
+        .iter()
+        .map(|op| {
+            let new_op = match op.op() {
+                'I' => 'D',
+                'D' => 'I',
+                other => other, // =, X, M unchanged
+            };
+            CigarOp::new(op.len(), new_op)
+        })
+        .collect();
+
+    if strand == Strand::Reverse {
+        inverted.into_iter().rev().collect()
+    } else {
+        inverted
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct QueryMetadata {
     query_id: u32,
@@ -140,8 +164,8 @@ pub struct QueryMetadata {
 
 impl QueryMetadata {
     // Constants for bit manipulation
-    const STRAND_BIT: u64 = 0x8000000000000000; // Most significant bit for u64
-    const REVERSED_BIT: u64 = 0x4000000000000000; // Second-most significant bit for reversed frame
+    const STRAND_BIT: u64 = 0x8000000000000000; // Most significant bit for u64 (bit 63)
+    const REVERSED_BIT: u64 = 0x4000000000000000; // Second-most significant bit for reversed flag (bit 62)
 
     pub fn query_id(&self) -> u32 {
         self.query_id
@@ -163,14 +187,16 @@ impl QueryMetadata {
         }
     }
 
-    /// Returns true if this is a reversed index entry (query-indexed rather than target-indexed).
-    /// Reversed entries project from query coords back to target coords.
+    fn data_offset(&self) -> u64 {
+        self.strand_and_data_offset & !(Self::STRAND_BIT | Self::REVERSED_BIT)
+    }
+
     fn is_reversed(&self) -> bool {
         (self.strand_and_data_offset & Self::REVERSED_BIT) != 0
     }
 
-    fn data_offset(&self) -> u64 {
-        self.strand_and_data_offset & !(Self::STRAND_BIT | Self::REVERSED_BIT)
+    fn set_reversed(&mut self) {
+        self.strand_and_data_offset |= Self::REVERSED_BIT;
     }
 
     /// Determine file type based on extension
@@ -351,29 +377,6 @@ struct SubsettingResult {
     last_segment_info: (i32, i32, i32, i32, i32, i32),
 }
 
-/// Results from scanning tracepoints to find segments overlapping a query range (inverse of SubsettingResult)
-#[derive(Debug)]
-struct InverseSubsettingResult {
-    /// Index of first overlapping tracepoint
-    first_idx: usize,
-    /// Index of last overlapping tracepoint (inclusive)
-    last_idx: usize,
-    /// Target position at start of first overlapping segment (before refinement)
-    first_target_pos: i32,
-    /// Target position at end of last overlapping segment (before refinement)
-    last_target_pos: i32,
-    /// Number of overlapping segments
-    num_overlapping_segments: usize,
-    /// Total matches accumulated across overlapping segments
-    total_matches: f64,
-    /// Total mismatches accumulated across overlapping segments
-    total_mismatches: f64,
-    /// Info about first overlapping segment: (target_pos, target_delta, seg_query_start, seg_query_end, abs_query_delta, trace_diffs)
-    first_segment_info: (i32, i32, i32, i32, i32, i32),
-    /// Info about last overlapping segment: (target_pos, target_delta, seg_query_start, seg_query_end, abs_query_delta, trace_diffs)
-    last_segment_info: (i32, i32, i32, i32, i32, i32),
-}
-
 pub struct Impg {
     pub trees: RwLock<TreeMap>,
     pub seq_index: SequenceIndex,
@@ -477,7 +480,7 @@ impl Impg {
     ) -> Vec<CigarOp> {
         let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
 
-        match QueryMetadata::get_file_type(alignment_file) {
+        let ops = match QueryMetadata::get_file_type(alignment_file) {
             FileType::Paf => {
                 // For PAF files, read CIGAR directly from file
                 if metadata.data_bytes == 0 {
@@ -514,6 +517,13 @@ impl Impg {
                     sequence_index.expect("Sequence index required for .1aln files"),
                 )
             }
+        };
+
+        // Apply CIGAR inversion if this is a reversed entry
+        if metadata.is_reversed() {
+            invert_cigar_ops(&ops, metadata.strand())
+        } else {
+            ops
         }
     }
 
@@ -647,123 +657,6 @@ impl Impg {
             last_idx,
             first_query_pos: first_query_pos.unwrap(),
             last_query_pos: last_query_pos.unwrap(),
-            num_overlapping_segments,
-            total_matches,
-            total_mismatches,
-            first_segment_info: first_segment_info.unwrap(),
-            last_segment_info: last_segment_info.unwrap(),
-        })
-    }
-
-    /// Scan tracepoints to find segments overlapping the requested query range (inverse of scan_overlapping_tracepoints).
-    /// Used for reversed index entries where we query by original query coordinates.
-    fn scan_overlapping_tracepoints_by_query(
-        &self,
-        alignment: &OneAlnAlignment,
-        metadata: &QueryMetadata,
-        range_start: i32,
-        range_end: i32,
-    ) -> Option<InverseSubsettingResult> {
-        let trace_spacing = alignment.trace_spacing as i32;
-        let is_reverse = metadata.strand() == Strand::Reverse;
-
-        // Calculate first boundary: FASTGA-style first segment length
-        let query_start_in_contig = alignment.query_contig_start as i32;
-        let first_boundary =
-            ((query_start_in_contig / trace_spacing) + 1) * trace_spacing - query_start_in_contig;
-
-        // Metadata stores query coords in FORWARD order for both strands
-        let working_query_start = metadata.query_start;
-
-        // Initialize scanning positions
-        let mut target_pos = if is_reverse {
-            metadata.target_end // Start from target end, scan backward
-        } else {
-            metadata.target_start
-        };
-        let mut query_pos = working_query_start; // Always start from working start
-        let target_dir = if is_reverse { -1 } else { 1 };
-
-        // Normalize query range for comparison (handle both orientations)
-        let (query_range_low, query_range_high) = (range_start.min(range_end), range_start.max(range_end));
-
-        // Track overlapping segments
-        let mut first_idx: Option<usize> = None;
-        let mut last_idx: usize = 0;
-        let mut first_target_pos: Option<i32> = None;
-        let mut last_target_pos: Option<i32> = None;
-        let mut first_segment_info: Option<(i32, i32, i32, i32, i32, i32)> = None;
-        let mut last_segment_info: Option<(i32, i32, i32, i32, i32, i32)> = None;
-        let mut num_overlapping_segments = 0;
-
-        // Statistics for identity calculation
-        let mut total_matches = 0.0;
-        let mut total_mismatches = 0.0;
-
-        // Scan tracepoints and collect those that overlap the requested query range
-        for (idx, &tracepoint) in alignment.tracepoints.iter().enumerate() {
-            // Calculate deltas for this segment
-            let query_delta = if idx == 0 {
-                first_boundary
-            } else {
-                trace_spacing
-            };
-            let target_delta = (tracepoint as i32) * target_dir;
-            let abs_target_delta = tracepoint.abs() as i32;
-
-            // Query segment boundaries (in forward coordinate space)
-            let seg_query_start = query_pos;
-            let seg_query_end = query_pos + query_delta;
-
-            // Check overlap with requested query range
-            if seg_query_start < query_range_high && seg_query_end > query_range_low {
-                num_overlapping_segments += 1;
-                let num_diffs = alignment.trace_diffs[idx] as i32;
-
-                // For inverse: track target positions, segment info stores target-centric data
-                let seg_info = (
-                    target_pos,
-                    target_delta,
-                    seg_query_start,
-                    seg_query_end,
-                    query_delta,
-                    num_diffs,
-                );
-
-                // Track first and last overlapping segments
-                if first_target_pos.is_none() {
-                    first_idx = Some(idx);
-                    first_target_pos = Some(target_pos);
-                    first_segment_info = Some(seg_info);
-                }
-                last_idx = idx;
-                last_target_pos = Some(target_pos + target_delta);
-                last_segment_info = Some(seg_info);
-
-                // Accumulate identity statistics
-                let aligned_len = (query_delta.min(abs_target_delta) as f64).max(0.0);
-                total_matches += (aligned_len - num_diffs as f64).max(0.0);
-                total_mismatches += num_diffs as f64;
-            }
-
-            // Advance to next segment
-            target_pos += target_delta;
-            query_pos += query_delta;
-
-            // Early exit when past requested query range
-            if query_pos >= query_range_high {
-                break;
-            }
-        }
-
-        // Return None if no overlapping segments found
-        first_idx?;
-
-        Some(InverseSubsettingResult {
-            first_idx: first_idx.unwrap(),
-            last_idx,
-            first_target_pos: first_target_pos.unwrap(),
-            last_target_pos: last_target_pos.unwrap(),
             num_overlapping_segments,
             total_matches,
             total_mismatches,
@@ -944,72 +837,27 @@ impl Impg {
 
         // Try subsetting approach for .1aln files
         if let (true, Some(sequence_index)) = (is_onealn, sequence_index) {
+
             // Fetch alignment with tracepoints
             let alignment = self.get_onealn_alignment(metadata).unwrap_or_else(|e| {
                 panic!("Subsetting failed: cannot fetch .1aln alignment: {}", e)
             });
 
-            let is_reversed = metadata.is_reversed();
-
             // Scan tracepoints to find overlapping segments
-            // For reversed entries, scan by query coords; for original, scan by target coords
-            let (subset_first_idx, subset_last_idx, subset_first_pos, subset_last_pos,
-                 num_overlapping_segments, total_matches, total_mismatches,
-                 first_segment_info, last_segment_info) = if is_reversed {
-                let subset = self.scan_overlapping_tracepoints_by_query(&alignment, metadata, range_start, range_end)
-                    .unwrap_or_else(|| panic!(
-                        "Subsetting failed: no overlapping segments found for query range {}-{} (target_id={}, file_index={})",
-                        range_start, range_end, target_id, metadata.alignment_file_index
-                    ));
-                // For reversed: positions are target coords, segment info is target-centric
-                (subset.first_idx, subset.last_idx, subset.first_target_pos, subset.last_target_pos,
-                 subset.num_overlapping_segments, subset.total_matches, subset.total_mismatches,
-                 subset.first_segment_info, subset.last_segment_info)
-            } else {
-                let subset = self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end)
-                    .unwrap_or_else(|| panic!(
-                        "Subsetting failed: no overlapping segments found for target range {}-{} (target_id={}, file_index={})",
-                        range_start, range_end, target_id, metadata.alignment_file_index
-                    ));
-                // For original: positions are query coords, segment info is query-centric
-                (subset.first_idx, subset.last_idx, subset.first_query_pos, subset.last_query_pos,
-                 subset.num_overlapping_segments, subset.total_matches, subset.total_mismatches,
-                 subset.first_segment_info, subset.last_segment_info)
-            };
-
-            // Create a temporary SubsettingResult for process_subset_tracepoints
-            // (it expects the original format regardless of reversed status)
-            let subset_for_cigar = SubsettingResult {
-                first_idx: subset_first_idx,
-                last_idx: subset_last_idx,
-                first_query_pos: if is_reversed { metadata.query_start } else { subset_first_pos },
-                last_query_pos: if is_reversed { metadata.query_end } else { subset_last_pos },
-                num_overlapping_segments,
-                total_matches,
-                total_mismatches,
-                first_segment_info: if is_reversed {
-                    // Convert from inverse format to original format for CIGAR processing
-                    // Original: (query_pos, query_delta, seg_start, seg_end, abs_target_delta, trace_diffs)
-                    // Inverse:  (target_pos, target_delta, seg_query_start, seg_query_end, query_delta, trace_diffs)
-                    let (target_pos, target_delta, seg_query_start, _seg_query_end, query_delta, trace_diffs) = first_segment_info;
-                    (seg_query_start, query_delta, target_pos.min(target_pos + target_delta), target_pos.max(target_pos + target_delta), target_delta.abs(), trace_diffs)
-                } else {
-                    first_segment_info
-                },
-                last_segment_info: if is_reversed {
-                    let (target_pos, target_delta, seg_query_start, _seg_query_end, query_delta, trace_diffs) = last_segment_info;
-                    (seg_query_start, query_delta, target_pos.min(target_pos + target_delta), target_pos.max(target_pos + target_delta), target_delta.abs(), trace_diffs)
-                } else {
-                    last_segment_info
-                },
-            };
+            let subset = self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end)
+                .unwrap_or_else(|| panic!(
+                    "Subsetting failed: no overlapping segments found for range {}-{} (target_id={}, file_index={})",
+                    range_start, range_end, target_id, metadata.alignment_file_index
+                ));
 
             // Reconstruct CIGAR from subset tracepoints
+            // Note: When last_idx is the actual last tracepoint, process_subset_tracepoints
+            // uses metadata boundaries to handle the potentially shorter last segment correctly
             let cigar_ops = self.process_subset_tracepoints(
                 &alignment,
                 metadata,
                 target_id,
-                &subset_for_cigar,
+                &subset,
                 sequence_index,
             );
 
@@ -1020,59 +868,55 @@ impl Impg {
                 }
             }
 
-            // Calculate alignment boundaries for CIGAR projection
-            let (alignment_query_start, alignment_query_end, alignment_target_start, alignment_target_end) = if is_reversed {
-                // For reversed: we scanned by query, got target positions
-                let (_, _, first_seg_query_start, first_seg_query_end, _, _) = first_segment_info;
-                let (_, _, last_seg_query_start, last_seg_query_end, _, _) = last_segment_info;
-                let query_start = first_seg_query_start.min(first_seg_query_end).min(last_seg_query_start.min(last_seg_query_end));
-                let query_end = if subset_last_idx == alignment.tracepoints.len() - 1 {
-                    metadata.query_end
-                } else {
-                    first_seg_query_start.max(first_seg_query_end).max(last_seg_query_start.max(last_seg_query_end))
-                };
-                let target_start = subset_first_pos;
-                let target_end = if subset_last_idx == alignment.tracepoints.len() - 1 {
-                    metadata.target_end
-                } else {
-                    subset_last_pos
-                };
-                (query_start, query_end, target_start, target_end)
+            // Project the CIGAR through the alignment to get exact coordinates
+            // Use same boundary logic as in process_subset_tracepoints
+            let subset_query_start = subset.first_query_pos;
+            let subset_query_end = if subset.last_idx == alignment.tracepoints.len() - 1 {
+                metadata.query_end
             } else {
-                // For original: we scanned by target, got query positions
-                let subset_query_start = subset_first_pos;
-                let subset_query_end = if subset_last_idx == alignment.tracepoints.len() - 1 {
-                    metadata.query_end
-                } else {
-                    subset_last_pos
-                };
-                let (_, _, first_seg_start, first_seg_end, _, _) = first_segment_info;
-                let (_, _, last_seg_start, last_seg_end, _, _) = last_segment_info;
-                let subset_target_start = first_seg_start.min(first_seg_end).min(last_seg_start.min(last_seg_end));
-                let subset_target_end = if subset_last_idx == alignment.tracepoints.len() - 1 {
-                    metadata.target_end
-                } else {
-                    first_seg_start.max(first_seg_end).max(last_seg_start.max(last_seg_end))
-                };
-                (subset_query_start, subset_query_end, subset_target_start, subset_target_end)
+                subset.last_query_pos
             };
 
-            // Project the requested range through the CIGAR
-            let projection = if is_reversed {
-                project_query_range_through_alignment(
-                    (range_start, range_end),
-                    (alignment_target_start, alignment_target_end, alignment_query_start, alignment_query_end, metadata.strand()),
-                    &cigar_ops,
-                )
+            let (_, _, first_seg_start, first_seg_end, _, _) = subset.first_segment_info;
+            let (_, _, last_seg_start, last_seg_end, _, _) = subset.last_segment_info;
+            let subset_target_start = first_seg_start
+                .min(first_seg_end)
+                .min(last_seg_start.min(last_seg_end));
+            let subset_target_end = if subset.last_idx == alignment.tracepoints.len() - 1 {
+                metadata.target_end
             } else {
-                project_target_range_through_alignment(
-                    (range_start, range_end),
-                    (alignment_target_start, alignment_target_end, alignment_query_start, alignment_query_end, metadata.strand()),
-                    &cigar_ops,
-                )
-            }.unwrap_or_else(|| panic!(
-                "Subsetting failed: projection failed for CIGAR (range={}-{}, query={}-{}, target={}-{}, reversed={})",
-                range_start, range_end, alignment_query_start, alignment_query_end, alignment_target_start, alignment_target_end, is_reversed
+                first_seg_start
+                    .max(first_seg_end)
+                    .max(last_seg_start.max(last_seg_end))
+            };
+
+            let (
+                alignment_query_start,
+                alignment_query_end,
+                alignment_target_start,
+                alignment_target_end,
+            ) = (
+                subset_query_start,
+                subset_query_end,
+                subset_target_start,
+                subset_target_end,
+            );
+
+            // Project the requested range through the CIGAR
+            let projection = project_target_range_through_alignment(
+                (range_start, range_end),
+                (
+                    alignment_target_start,
+                    alignment_target_end,
+                    alignment_query_start,
+                    alignment_query_end,
+                    metadata.strand(),
+                ),
+                &cigar_ops,
+            )
+            .unwrap_or_else(|| panic!(
+                "Subsetting failed: projection failed for CIGAR (range={}-{}, query={}-{}, target={}-{})",
+                range_start, range_end, alignment_query_start, alignment_query_end, alignment_target_start, alignment_target_end
             ));
 
             let (
@@ -1101,34 +945,17 @@ impl Impg {
         // Fallback: Full CIGAR reconstruction + projection (for non-.1aln files or if subsetting failed)
         let mut cigar_ops = self.get_cigar_ops(metadata, target_id, sequence_index);
 
-        // Dispatch projection based on whether this is a reversed (query-indexed) entry
-        let projection = if metadata.is_reversed() {
-            // Inverse projection: query coords → target coords
-            project_query_range_through_alignment(
-                (range_start, range_end),
-                (
-                    metadata.target_start,
-                    metadata.target_end,
-                    metadata.query_start,
-                    metadata.query_end,
-                    metadata.strand(),
-                ),
-                &cigar_ops,
-            )
-        } else {
-            // Forward projection: target coords → query coords (existing behavior)
-            project_target_range_through_alignment(
-                (range_start, range_end),
-                (
-                    metadata.target_start,
-                    metadata.target_end,
-                    metadata.query_start,
-                    metadata.query_end,
-                    metadata.strand(),
-                ),
-                &cigar_ops,
-            )
-        };
+        let projection = project_target_range_through_alignment(
+            (range_start, range_end),
+            (
+                metadata.target_start,
+                metadata.target_end,
+                metadata.query_start,
+                metadata.query_end,
+                metadata.strand(),
+            ),
+            &cigar_ops,
+        );
 
         if let Some((
             adjusted_query_start,
@@ -1180,9 +1007,6 @@ impl Impg {
         range_end: i32,
         min_gap_compressed_identity: Option<f64>,
     ) -> Option<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
-        let is_reversed = metadata.is_reversed();
-        let is_reverse_strand = metadata.strand() == Strand::Reverse;
-
         // Fetch tracepoints without sequence I/O
         let alignment = match self.get_onealn_alignment(metadata) {
             Ok(aln) => aln,
@@ -1192,267 +1016,188 @@ impl Impg {
             }
         };
 
-        if is_reversed {
-            // INVERSE PATH: query coords → target coords
-            // For reversed entries, range_start/range_end are in query coordinate space
-            // and we need to find the corresponding target coordinates
-            let subset = self.scan_overlapping_tracepoints_by_query(
-                &alignment,
-                metadata,
-                range_start,
-                range_end,
-            )?;
+        // Scan tracepoints to find overlapping segments
+        let subset =
+            self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end)?;
 
-            let working_target_start = metadata.target_start;
-            let working_target_end = metadata.target_end;
+        let is_reverse = metadata.strand() == Strand::Reverse;
+        let working_query_start = metadata.query_start;
+        let working_query_end = metadata.query_end;
 
-            // Refine target coordinates using indel-aware heuristic (inverse of normal refinement)
-            let refine_target_boundary = |target_pos: i32,
-                                          target_delta: i32,
-                                          segment_query_start: i32,
-                                          overlap_pos: i32,
-                                          abs_query_delta: i32,
-                                          trace_diffs: i32,
-                                          num_segs: usize|
-             -> i32 {
-                let aligned_len = target_delta.abs().min(abs_query_delta);
-                let segment_identity = if aligned_len > 0 {
-                    ((aligned_len - trace_diffs) as f64 / aligned_len as f64).max(0.0)
-                } else {
-                    0.0
-                };
+        // Store pre-refinement values for debugging
+        let pre_refinement_query = (subset.first_query_pos, subset.last_query_pos);
+        let pre_refinement_target = (range_start, range_end);
 
-                if abs_query_delta == 0 {
-                    panic!(
-                        "Cannot refine target position with zero query delta: num_segs={}, identity={:.3}, trace_diffs={}",
-                        num_segs, segment_identity, trace_diffs
-                    );
-                }
-
-                let query_fraction =
-                    (overlap_pos - segment_query_start) as f64 / abs_query_delta as f64;
-                let indel_ratio = target_delta.abs() as f64 / abs_query_delta as f64;
-                let target_advance = query_fraction * abs_query_delta as f64 * indel_ratio;
-                let refined_pos = target_pos + target_advance.round() as i32;
-
-                refined_pos.max(working_target_start).min(working_target_end)
-            };
-
-            // Refine first target position
-            // segment_info: (target_pos, target_delta, seg_query_start, seg_query_end, abs_query_delta, trace_diffs)
-            let (target_pos, target_delta, seg_query_start, _seg_query_end, abs_query_delta, trace_diffs) =
-                subset.first_segment_info;
-            let overlap_start = seg_query_start.max(range_start);
-            let refined_first = refine_target_boundary(
-                target_pos,
-                target_delta,
-                seg_query_start,
-                overlap_start,
-                abs_query_delta,
-                trace_diffs,
-                subset.num_overlapping_segments,
-            );
-
-            // Refine last target position
-            let (target_pos, target_delta, seg_query_start, seg_query_end, abs_query_delta, trace_diffs) =
-                subset.last_segment_info;
-            let overlap_end = seg_query_end.min(range_end);
-            let refined_last = refine_target_boundary(
-                target_pos,
-                target_delta,
-                seg_query_start,
-                overlap_end,
-                abs_query_delta,
-                trace_diffs,
-                subset.num_overlapping_segments,
-            );
-
-            // Create approximate CIGAR from accumulated statistics
-            let mut approx_cigar = Vec::new();
-            if subset.total_matches > 0.0 {
-                approx_cigar.push(CigarOp::new(subset.total_matches.round() as i32, '='));
-            }
-            if subset.total_mismatches > 0.0 {
-                approx_cigar.push(CigarOp::new(subset.total_mismatches.round() as i32, 'X'));
-            }
-
-            // Check identity threshold if specified
-            if let Some(threshold) = min_gap_compressed_identity {
-                let identity = calculate_gap_compressed_identity(&approx_cigar);
-                if identity < threshold {
-                    return None;
-                }
-            }
-
-            // For reversed entries with reverse strand: swap target coordinates
-            let (target_start, target_end) = if is_reverse_strand {
-                (refined_last, refined_first)
+        // Refine query coordinates using indel-aware heuristic
+        let refine_boundary = |query_pos: i32,
+                               query_delta: i32,
+                               segment_target_start: i32,
+                               overlap_pos: i32,
+                               abs_target_delta: i32,
+                               trace_diffs: i32,
+                               boundary_name: &str|
+         -> i32 {
+            let aligned_len = query_delta.min(abs_target_delta);
+            let segment_identity = if aligned_len > 0 {
+                ((aligned_len - trace_diffs) as f64 / aligned_len as f64).max(0.0)
             } else {
-                (refined_first, refined_last)
+                0.0
             };
 
-            // Validate coordinates are non-negative
-            if refined_first < 0 || refined_last < 0 {
+            if abs_target_delta == 0 {
                 panic!(
-                    "Inverse projection resulted in negative target coordinates: {}-{}",
-                    refined_first, refined_last
+                    "Cannot refine {} position with zero target delta: num_segs={}, identity={:.3}, trace_diffs={}",
+                    boundary_name, subset.num_overlapping_segments, segment_identity, trace_diffs
                 );
             }
 
-            // For reversed entries: query_interval contains the projected target coords,
-            // target_interval contains the input query range
-            let query_interval = Interval {
-                first: target_start,
-                last: target_end,
-                metadata: metadata.query_id, // This is the original target_id for reversed entries
-            };
+            let target_fraction =
+                (overlap_pos - segment_target_start) as f64 / abs_target_delta as f64;
+            let indel_ratio = query_delta as f64 / abs_target_delta as f64;
+            let query_advance = target_fraction * abs_target_delta as f64 * indel_ratio;
+            let refined_pos = query_pos + query_advance.round() as i32;
 
-            let target_interval = Interval {
-                first: range_start,
-                last: range_end,
-                metadata: target_id, // This is the original query_id for reversed entries
-            };
+            debug!(
+                "{} segment refinement: identity={:.3}, indel_ratio={:.3}, trace_diffs={}, target_frac={:.3}",
+                boundary_name, segment_identity, indel_ratio, trace_diffs, target_fraction
+            );
 
-            Some((query_interval, approx_cigar, target_interval))
+            refined_pos.max(working_query_start).min(working_query_end)
+        };
+
+        // Refine first and last query positions
+        let (query_pos, query_delta, segment_target_start, _, abs_target_delta, trace_diffs) =
+            subset.first_segment_info;
+        let overlap_start = segment_target_start.max(range_start);
+        let refined_first = refine_boundary(
+            query_pos,
+            query_delta,
+            segment_target_start,
+            overlap_start,
+            abs_target_delta,
+            trace_diffs,
+            "First",
+        );
+
+        let (
+            query_pos,
+            query_delta,
+            segment_target_start,
+            segment_target_end,
+            abs_target_delta,
+            trace_diffs,
+        ) = subset.last_segment_info;
+        let overlap_end = segment_target_end.min(range_end);
+        let refined_last = refine_boundary(
+            query_pos,
+            query_delta,
+            segment_target_start,
+            overlap_end,
+            abs_target_delta,
+            trace_diffs,
+            "Last",
+        );
+
+        // Debug: show before/after refinement
+        let post_refinement_query = (refined_first, refined_last);
+        let post_refinement_target = (range_start, range_end);
+        let overall_identity = if subset.total_matches + subset.total_mismatches > 0.0 {
+            subset.total_matches / (subset.total_matches + subset.total_mismatches)
         } else {
-            // ORIGINAL PATH: target coords → query coords
-            let subset =
-                self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end)?;
+            0.0
+        };
+        let requested_range_len = range_end - range_start;
+        let strand_char = if is_reverse { '-' } else { '+' };
 
-            let working_query_start = metadata.query_start;
-            let working_query_end = metadata.query_end;
+        debug!(
+            "Refinement [{}]: req_len={}, query {}-{} (Δ{}) -> {}-{} (Δ{}), target {}-{} (Δ{}) -> {}-{} (Δ{}), segs={}, id={:.3}, diffs={:.0}",
+            strand_char,
+            requested_range_len,
+            pre_refinement_query.0, pre_refinement_query.1,
+            (pre_refinement_query.1 - pre_refinement_query.0).abs(),
+            post_refinement_query.0, post_refinement_query.1,
+            (post_refinement_query.1 - post_refinement_query.0).abs(),
+            pre_refinement_target.0, pre_refinement_target.1,
+            pre_refinement_target.1 - pre_refinement_target.0,
+            post_refinement_target.0, post_refinement_target.1,
+            post_refinement_target.1 - post_refinement_target.0,
+            subset.num_overlapping_segments,
+            overall_identity,
+            subset.total_mismatches
+        );
 
-            // Refine query coordinates using indel-aware heuristic
-            let refine_query_boundary = |query_pos: i32,
-                                         query_delta: i32,
-                                         segment_target_start: i32,
-                                         overlap_pos: i32,
-                                         abs_target_delta: i32,
-                                         trace_diffs: i32,
-                                         num_segs: usize|
-             -> i32 {
-                let aligned_len = query_delta.min(abs_target_delta);
-                let segment_identity = if aligned_len > 0 {
-                    ((aligned_len - trace_diffs) as f64 / aligned_len as f64).max(0.0)
-                } else {
-                    0.0
-                };
-
-                if abs_target_delta == 0 {
-                    panic!(
-                        "Cannot refine query position with zero target delta: num_segs={}, identity={:.3}, trace_diffs={}",
-                        num_segs, segment_identity, trace_diffs
-                    );
-                }
-
-                let target_fraction =
-                    (overlap_pos - segment_target_start) as f64 / abs_target_delta as f64;
-                let indel_ratio = query_delta as f64 / abs_target_delta as f64;
-                let query_advance = target_fraction * abs_target_delta as f64 * indel_ratio;
-                let refined_pos = query_pos + query_advance.round() as i32;
-
-                refined_pos.max(working_query_start).min(working_query_end)
-            };
-
-            // Refine first and last query positions
-            let (query_pos, query_delta, segment_target_start, _, abs_target_delta, trace_diffs) =
-                subset.first_segment_info;
-            let overlap_start = segment_target_start.max(range_start);
-            let refined_first = refine_query_boundary(
-                query_pos,
-                query_delta,
-                segment_target_start,
-                overlap_start,
-                abs_target_delta,
-                trace_diffs,
-                subset.num_overlapping_segments,
-            );
-
-            let (
-                query_pos,
-                query_delta,
-                segment_target_start,
-                segment_target_end,
-                abs_target_delta,
-                trace_diffs,
-            ) = subset.last_segment_info;
-            let overlap_end = segment_target_end.min(range_end);
-            let refined_last = refine_query_boundary(
-                query_pos,
-                query_delta,
-                segment_target_start,
-                overlap_end,
-                abs_target_delta,
-                trace_diffs,
-                subset.num_overlapping_segments,
-            );
-
-            // Create approximate CIGAR from accumulated statistics (for identity calculation only)
-            let mut approx_cigar = Vec::new();
-            if subset.total_matches > 0.0 {
-                approx_cigar.push(CigarOp::new(subset.total_matches.round() as i32, '='));
-            }
-            if subset.total_mismatches > 0.0 {
-                approx_cigar.push(CigarOp::new(subset.total_mismatches.round() as i32, 'X'));
-            }
-
-            // Check identity threshold if specified
-            if let Some(threshold) = min_gap_compressed_identity {
-                let identity = calculate_gap_compressed_identity(&approx_cigar);
-                if identity < threshold {
-                    return None;
-                }
-            }
-
-            // Get refined query coordinates
-            let working_query_start = refined_first;
-            let working_query_end = refined_last;
-
-            // For reverse alignments: swap projected query coordinates to match normal mode output
-            let (query_start, query_end) = if is_reverse_strand {
-                (working_query_end, working_query_start) // Swap: first=end, last=start
-            } else {
-                (working_query_start, working_query_end)
-            };
-
-            // Target coordinates: use exact requested range
-            let target_start = range_start;
-            let target_end = range_end;
-
-            // Validate coordinates are non-negative
-            if working_query_start < 0 || working_query_end < 0 {
-                panic!(
-                    "Projection resulted in negative query coordinates: {}-{}",
-                    working_query_start, working_query_end
-                );
-            }
-
-            let query_interval = Interval {
-                first: query_start,
-                last: query_end,
-                metadata: metadata.query_id,
-            };
-
-            let target_interval = Interval {
-                first: target_start,
-                last: target_end,
-                metadata: target_id,
-            };
-
-            Some((query_interval, approx_cigar, target_interval))
+        // Create approximate CIGAR from accumulated statistics (for identity calculation only)
+        let mut approx_cigar = Vec::new();
+        if subset.total_matches > 0.0 {
+            approx_cigar.push(CigarOp::new(subset.total_matches.round() as i32, '='));
         }
+        if subset.total_mismatches > 0.0 {
+            approx_cigar.push(CigarOp::new(subset.total_mismatches.round() as i32, 'X'));
+        }
+
+        // Check identity threshold if specified
+        if let Some(threshold) = min_gap_compressed_identity {
+            let identity = calculate_gap_compressed_identity(&approx_cigar);
+            if identity < threshold {
+                return None;
+            }
+        }
+
+        // Get refined query coordinates
+        let working_query_start = refined_first;
+        let working_query_end = refined_last;
+
+        // For reverse alignments: swap projected query coordinates to match normal mode output
+        let (query_start, query_end) = if is_reverse {
+            (working_query_end, working_query_start) // Swap: first=end, last=start
+        } else {
+            (working_query_start, working_query_end)
+        };
+
+        // Target coordinates: use exact requested range
+        let target_start = range_start;
+        let target_end = range_end;
+
+        // Validate coordinates are non-negative
+        if working_query_start < 0 || working_query_end < 0 {
+            panic!(
+                "Projection resulted in negative query coordinates: {}-{}",
+                working_query_start, working_query_end
+            );
+        }
+
+        let query_interval = Interval {
+            first: query_start,
+            last: query_end,
+            metadata: metadata.query_id,
+        };
+
+        let target_interval = Interval {
+            first: target_start,
+            last: target_end,
+            metadata: target_id,
+        };
+
+        Some((query_interval, approx_cigar, target_interval))
     }
 
     pub fn from_multi_alignment_records(
         records_by_file: &[(Vec<AlignmentRecord>, String)],
         seq_index: SequenceIndex,
         sequence_files: Option<&[String]>,
+        bidirectional: bool,
     ) -> io::Result<Self> {
         // Extract just the alignment file paths
         let alignment_files: Vec<String> = records_by_file
             .par_iter()
             .map(|(_, alignment_file)| alignment_file.clone())
             .collect();
+
+        if bidirectional {
+            debug!("Creating bidirectional alignment entries");
+        } else {
+            debug!("Creating unidirectional alignment entries");
+        }
 
         let intervals: FxHashMap<u32, Vec<Interval<QueryMetadata>>> = records_by_file
             .par_iter()
@@ -1461,21 +1206,17 @@ impl Impg {
                 records
                     .par_iter()
                     .flat_map(|record| {
-                        // Create TWO entries per alignment for bidirectional indexing:
-                        // 1. Original entry: keyed by target, stores query in metadata
-                        // 2. Reversed entry: keyed by query, stores target in metadata (swapped roles)
+                        let mut entries = Vec::with_capacity(if bidirectional { 2 } else { 1 });
 
-                        let mut entries = Vec::with_capacity(2);
-
-                        // 1. ORIGINAL entry (existing behavior)
-                        let original_metadata = QueryMetadata {
+                        // ENTRY 1: Original direction (query → target)
+                        let forward_metadata = QueryMetadata {
                             query_id: record.query_id,
                             target_start: record.target_start as i32,
                             target_end: record.target_end as i32,
                             query_start: record.query_start as i32,
                             query_end: record.query_end as i32,
                             alignment_file_index: file_index as u32,
-                            strand_and_data_offset: record.strand_and_data_offset, // Already includes strand bit
+                            strand_and_data_offset: record.strand_and_data_offset,
                             data_bytes: record.data_bytes,
                         };
                         entries.push((
@@ -1483,32 +1224,34 @@ impl Impg {
                             Interval {
                                 first: record.target_start as i32,
                                 last: record.target_end as i32,
-                                metadata: original_metadata,
+                                metadata: forward_metadata,
                             },
                         ));
 
-                        // 2. REVERSED entry (new for bidirectional)
-                        // Keyed by query_id with query coords as interval bounds
-                        // Metadata stores target_id as "query_id" (the sequence we project TO)
-                        // REVERSED_BIT is set to indicate inverse projection is needed
-                        let reversed_metadata = QueryMetadata {
-                            query_id: record.target_id,  // Swap: original target becomes "query" in metadata
-                            target_start: record.target_start as i32,  // Keep original coords
-                            target_end: record.target_end as i32,
-                            query_start: record.query_start as i32,
-                            query_end: record.query_end as i32,
-                            alignment_file_index: file_index as u32,
-                            strand_and_data_offset: record.strand_and_data_offset | QueryMetadata::REVERSED_BIT,
-                            data_bytes: record.data_bytes,
-                        };
-                        entries.push((
-                            record.query_id,  // Key by original QUERY sequence
-                            Interval {
-                                first: record.query_start as i32,  // Use QUERY coords for interval
-                                last: record.query_end as i32,
-                                metadata: reversed_metadata,
-                            },
-                        ));
+                        // ENTRY 2: Reversed direction (target → query)
+                        // Skip self-alignments to avoid duplicates
+                        if bidirectional && record.query_id != record.target_id {
+                            let mut reversed_metadata = QueryMetadata {
+                                query_id: record.target_id,                 // SWAPPED
+                                target_start: record.query_start as i32,    // SWAPPED
+                                target_end: record.query_end as i32,        // SWAPPED
+                                query_start: record.target_start as i32,    // SWAPPED
+                                query_end: record.target_end as i32,        // SWAPPED
+                                alignment_file_index: file_index as u32,
+                                strand_and_data_offset: record.strand_and_data_offset,
+                                data_bytes: record.data_bytes,
+                            };
+                            reversed_metadata.set_reversed();  // Mark with REVERSED_BIT
+
+                            entries.push((
+                                record.query_id,  // NOW indexed by original query_id
+                                Interval {
+                                    first: record.query_start as i32,
+                                    last: record.query_end as i32,
+                                    metadata: reversed_metadata,
+                                },
+                            ));
+                        }
 
                         entries
                     })
@@ -1562,7 +1305,7 @@ impl Impg {
         &self,
         mut writer: W,
     ) -> std::io::Result<()> {
-        const MAGIC: &[u8] = b"IMPGIDX2"; // Version 2: bidirectional indexing
+        const MAGIC: &[u8] = b"IMPGIDX2";
         let mut forest_map = ForestMap::new();
 
         // Write magic bytes
@@ -1696,16 +1439,25 @@ impl Impg {
         index_file_path: String,
         sequence_files: Option<&[String]>,
     ) -> std::io::Result<Self> {
-        const MAGIC: &[u8] = b"IMPGIDX2"; // Version 2: bidirectional indexing
+        const MAGIC_V1: &[u8] = b"IMPGIDX1";
+        const MAGIC_V2: &[u8] = b"IMPGIDX2";
 
         // Read and verify magic bytes
         let mut magic_buf = [0u8; 8];
         reader.read_exact(&mut magic_buf)?;
-        if magic_buf != MAGIC {
+        if magic_buf != MAGIC_V1 && magic_buf != MAGIC_V2 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "Invalid magic bytes - not a valid IMPG index file",
+                format!(
+                    "Invalid magic bytes - not a valid IMPG index file (got {:?})",
+                    String::from_utf8_lossy(&magic_buf)
+                ),
             ));
+        }
+
+        // Warn if loading old format
+        if magic_buf == MAGIC_V1 {
+            warn!("Loading IMPGIDX1 format (unidirectional). Rebuild without --unidirectional for better transitive query reach (bidirectional mode is default).");
         }
 
         // Read forest map offset
@@ -2777,190 +2529,6 @@ fn project_target_range_through_alignment(
     }
 }
 
-/// Inverse of project_target_range_through_alignment.
-/// Given a range in query coordinates, project it back to target coordinates.
-/// Used for reversed index entries where we query by original query coords.
-///
-/// Returns: (target_start, target_end, cigar_subset, query_start, query_end)
-/// where target coords are the projected result and query coords are the overlapping input range.
-fn project_query_range_through_alignment(
-    requested_query_range: (i32, i32),
-    record: (i32, i32, i32, i32, Strand),
-    cigar_ops: &[CigarOp],
-) -> Option<(i32, i32, Vec<CigarOp>, i32, i32)> {
-    let (target_start, _target_end, query_start, query_end, strand) = record;
-    debug!(
-        "Inverse projecting query range {}-{} through alignment with query {}-{}, strand {:?}",
-        requested_query_range.0,
-        requested_query_range.1,
-        query_start,
-        query_end,
-        strand
-    );
-
-    // For CIGAR traversal:
-    // - Target always advances forward from target_start
-    // - Query advances forward for Forward strand, backward for Reverse strand
-    let dir = if strand == Strand::Forward { 1 } else { -1 };
-    let mut query_pos = if strand == Strand::Forward {
-        query_start
-    } else {
-        query_end
-    };
-    let mut target_pos = target_start; // Target always starts at target_start for CIGAR
-
-    // Track CIGAR slice bounds
-    let mut first_op_idx = 0;
-    let mut last_op_idx = 0;
-    let mut found_overlap = false;
-
-    let mut projected_target_start = -1;
-    let mut projected_target_end = -1;
-    let mut projected_query_start = -1;
-    let mut projected_query_end = -1;
-    let mut first_op_offset = 0;
-    let mut last_op_remaining = 0;
-
-    // For query-based overlap checking, we need to normalize coordinates for reverse strand
-    // In forward strand: query coords go low->high as we traverse CIGAR
-    // In reverse strand: query coords go high->low as we traverse CIGAR
-    let (query_range_low, query_range_high) = if strand == Strand::Forward {
-        (requested_query_range.0, requested_query_range.1)
-    } else {
-        // For reverse strand, the requested range might be given as (high, low) or (low, high)
-        // Normalize to (low, high) for comparison
-        (
-            requested_query_range.0.min(requested_query_range.1),
-            requested_query_range.0.max(requested_query_range.1),
-        )
-    };
-
-    for (curr_op_idx, cigar_op) in cigar_ops.iter().enumerate() {
-        let target_delta = cigar_op.target_delta();
-        let query_delta = cigar_op.query_delta(strand);
-
-        match (target_delta, query_delta) {
-            (0, query_delta) => {
-                // Insertion in query (no target movement)
-                // This contributes query bases but doesn't move target
-                let (q_start, q_end) = if dir > 0 {
-                    (query_pos, query_pos + query_delta)
-                } else {
-                    (query_pos + query_delta, query_pos) // query_delta is negative for reverse
-                };
-
-                // Check overlap with requested query range
-                let overlap_start = q_start.max(query_range_low);
-                let overlap_end = q_end.min(query_range_high);
-
-                if overlap_start < overlap_end {
-                    if !found_overlap {
-                        projected_target_start = target_pos;
-                        projected_query_start = overlap_start;
-                        first_op_idx = curr_op_idx;
-                        first_op_offset = if dir > 0 {
-                            overlap_start - q_start
-                        } else {
-                            q_end - overlap_end
-                        };
-                        found_overlap = true;
-                    }
-                    projected_target_end = target_pos; // No target movement
-                    projected_query_end = overlap_end;
-                    last_op_idx = curr_op_idx + 1;
-                    last_op_remaining = if dir > 0 {
-                        overlap_end - q_end
-                    } else {
-                        q_start - overlap_start
-                    };
-                }
-                query_pos += query_delta;
-            }
-            (target_delta, 0) => {
-                // Deletion in query (target moves, query doesn't)
-                // This doesn't contribute query bases, so skip if we haven't found overlap yet
-                // But if we're in the overlap, accumulate target movement
-                if found_overlap {
-                    projected_target_end = target_pos + target_delta;
-                    last_op_idx = curr_op_idx + 1;
-                }
-                target_pos += target_delta;
-            }
-            (target_delta, query_delta) => {
-                // Match or mismatch - both move
-                let (q_start, q_end) = if dir > 0 {
-                    (query_pos, query_pos + query_delta)
-                } else {
-                    (query_pos + query_delta, query_pos)
-                };
-
-                let overlap_start = q_start.max(query_range_low);
-                let overlap_end = q_end.min(query_range_high);
-
-                if overlap_start < overlap_end {
-                    // Calculate corresponding target positions
-                    // For forward strand: query offset directly maps to target offset
-                    // For reverse strand: query goes high→low while target goes low→high
-                    //   so distance from q_end maps to distance from target_start
-                    let (target_overlap_start, target_overlap_end, op_offset) = if dir > 0 {
-                        let query_offset_start = overlap_start - q_start;
-                        let query_offset_end = overlap_end - q_start;
-                        (target_pos + query_offset_start, target_pos + query_offset_end, query_offset_start)
-                    } else {
-                        // For reverse: overlap_start is the LOW query coord, which corresponds
-                        // to the HIGH target coord (further along in the traversal)
-                        let dist_from_q_end_start = q_end - overlap_end;   // How far overlap_end is from q_end
-                        let dist_from_q_end_end = q_end - overlap_start;   // How far overlap_start is from q_end
-                        // For CIGAR offset, use target-based offset since CIGAR follows target
-                        (target_pos + dist_from_q_end_start, target_pos + dist_from_q_end_end, dist_from_q_end_start)
-                    };
-
-                    if !found_overlap {
-                        projected_target_start = target_overlap_start;
-                        projected_query_start = overlap_start;
-                        first_op_idx = curr_op_idx;
-                        first_op_offset = op_offset;
-                        found_overlap = true;
-                    }
-                    projected_target_end = target_overlap_end;
-                    projected_query_end = overlap_end;
-                    last_op_idx = curr_op_idx + 1;
-                    last_op_remaining = overlap_end - q_end; // Will be negative or zero
-                }
-
-                target_pos += target_delta;
-                query_pos += query_delta;
-            }
-        }
-    }
-
-    // If we had at least one overlap
-    if found_overlap
-        && projected_target_start != projected_target_end
-        && projected_query_start != projected_query_end
-    {
-        let mut projected_cigar_ops = cigar_ops[first_op_idx..last_op_idx].to_vec();
-        // Adjust first operation length
-        if first_op_offset > 0 {
-            projected_cigar_ops[0].adjust_len(-first_op_offset);
-        }
-        // Adjust last operation length
-        if last_op_remaining < 0 && !projected_cigar_ops.is_empty() {
-            projected_cigar_ops[last_op_idx - first_op_idx - 1].adjust_len(last_op_remaining);
-        }
-
-        Some((
-            projected_target_start,
-            projected_target_end,
-            projected_cigar_ops,
-            projected_query_start,
-            projected_query_end,
-        ))
-    } else {
-        None
-    }
-}
-
 fn parse_cigar_to_delta(cigar: &str) -> Result<Vec<CigarOp>, OneAlnParseErr> {
     let mut ops = Vec::new();
     let mut len: i32 = 0;
@@ -3184,275 +2752,6 @@ mod tests {
         );
     }
 
-    // Tests for inverse projection (project_query_range_through_alignment)
-    #[test]
-    fn test_inverse_projection_simple_forward() {
-        // Simple 100bp match, forward strand
-        let query_range = (0, 100);
-        let record = (100, 200, 0, 100, Strand::Forward);
-        let cigar_ops = vec![CigarOp::new(100, '=')];
-        let result =
-            project_query_range_through_alignment(query_range, record, &cigar_ops).unwrap();
-        // Should project query 0-100 to target 100-200
-        assert_eq!(result, (100, 200, cigar_ops.clone(), 0, 100));
-    }
-
-    #[test]
-    fn test_inverse_projection_simple_reverse() {
-        // Simple 100bp match, reverse strand
-        let query_range = (0, 100);
-        let record = (100, 200, 0, 100, Strand::Reverse);
-        let cigar_ops = vec![CigarOp::new(100, '=')];
-        let result =
-            project_query_range_through_alignment(query_range, record, &cigar_ops).unwrap();
-        // For reverse strand, query coords go from 100 down to 0 as we traverse
-        // Querying 0-100 should still project to target 100-200
-        assert_eq!(result, (100, 200, cigar_ops.clone(), 0, 100));
-    }
-
-    #[test]
-    fn test_inverse_projection_partial_range() {
-        // Partial range query
-        let query_range = (10, 50);
-        let record = (0, 100, 0, 100, Strand::Forward);
-        let cigar_ops = vec![CigarOp::new(100, '=')];
-        let result =
-            project_query_range_through_alignment(query_range, record, &cigar_ops).unwrap();
-        // Query 10-50 should project to target 10-50 (1:1 mapping with match)
-        assert_eq!(result, (10, 50, vec![CigarOp::new(40, '=')], 10, 50));
-    }
-
-    #[test]
-    fn test_inverse_projection_with_insertion() {
-        // Alignment with insertion in query
-        // Target: 0-50, Query: 0-60 (10bp insertion in query)
-        let record = (0, 50, 0, 60, Strand::Forward);
-        let cigar_ops = vec![
-            CigarOp::new(25, '='), // Match
-            CigarOp::new(10, 'I'), // Insertion in query (query advances, target doesn't)
-            CigarOp::new(25, '='), // Match
-        ];
-
-        // Query the insertion region (query 25-35)
-        // This is pure insertion, so target range should be just the boundary
-        let query_range = (25, 35);
-        let result = project_query_range_through_alignment(query_range, record, &cigar_ops);
-        // The insertion contributes 10 query bases but 0 target bases
-        // So we should get target = 25-25 (empty target range... but we filter those out)
-        // Actually with our logic, this returns None because target_start == target_end
-        assert!(result.is_none());
-
-        // Query a range that spans the insertion (query 20-40)
-        let query_range = (20, 40);
-        let result =
-            project_query_range_through_alignment(query_range, record, &cigar_ops).unwrap();
-        // Query 20-25 maps to target 20-25 (5bp)
-        // Query 25-35 is insertion (0 target bases)
-        // Query 35-40 maps to target 25-30 (5bp)
-        // Total: target 20-30 (10bp)
-        assert_eq!(result.0, 20); // target_start
-        assert_eq!(result.1, 30); // target_end
-    }
-
-    #[test]
-    fn test_inverse_projection_with_deletion() {
-        // Alignment with deletion in query
-        // Target: 0-60, Query: 0-50 (10bp deletion in query)
-        let record = (0, 60, 0, 50, Strand::Forward);
-        let cigar_ops = vec![
-            CigarOp::new(25, '='), // Match
-            CigarOp::new(10, 'D'), // Deletion in query (target advances, query doesn't)
-            CigarOp::new(25, '='), // Match
-        ];
-
-        // Query 20-30 spans the deletion point
-        let query_range = (20, 30);
-        let result =
-            project_query_range_through_alignment(query_range, record, &cigar_ops).unwrap();
-        // Query 20-25 maps to target 20-25 (5bp)
-        // Deletion: target 25-35 (10bp) with no query contribution
-        // Query 25-30 maps to target 35-40 (5bp)
-        // Total: target 20-40 (20bp) because deletion is included
-        assert_eq!(result.0, 20); // target_start
-        assert_eq!(result.1, 40); // target_end (includes the deletion span)
-    }
-
-    #[test]
-    fn test_inverse_projection_complex_cigar() {
-        // Complex CIGAR: 10=5I5D50=
-        // Target: 0-65 (10 + 5 + 50 = 65)
-        // Query: 0-65 (10 + 5 + 50 = 65)
-        let record = (0, 65, 0, 65, Strand::Forward);
-        let cigar_ops = vec![
-            CigarOp::new(10, '='),
-            CigarOp::new(5, 'I'),  // Query advances 5, target stays
-            CigarOp::new(5, 'D'),  // Target advances 5, query stays
-            CigarOp::new(50, '='),
-        ];
-
-        // Query the full range
-        let query_range = (0, 65);
-        let result =
-            project_query_range_through_alignment(query_range, record, &cigar_ops).unwrap();
-        assert_eq!(result.0, 0);  // target_start
-        assert_eq!(result.1, 65); // target_end
-    }
-
-    // Round-trip property tests: forward projection followed by inverse should return original
-    #[test]
-    fn test_round_trip_simple_match_forward() {
-        // Simple 100bp match, forward strand
-        let cigar_ops = vec![CigarOp::new(100, '=')];
-        let record = (0, 100, 0, 100, Strand::Forward);
-
-        // Forward: target 20-60 → query
-        let target_range = (20, 60);
-        let (q_start, q_end, _, t_start_out, t_end_out) =
-            project_target_range_through_alignment(target_range, record, &cigar_ops).unwrap();
-
-        // For a perfect match with same coords, query should equal target
-        assert_eq!((q_start, q_end), (20, 60));
-        assert_eq!((t_start_out, t_end_out), (20, 60));
-
-        // Inverse: query 20-60 → target (should match)
-        let (t_start_back, t_end_back, _, q_start_back, q_end_back) =
-            project_query_range_through_alignment((q_start, q_end), record, &cigar_ops).unwrap();
-
-        assert_eq!((t_start_back, t_end_back), (t_start_out, t_end_out));
-        assert_eq!((q_start_back, q_end_back), (q_start, q_end));
-    }
-
-    #[test]
-    fn test_round_trip_simple_match_reverse() {
-        // Simple 100bp match, reverse strand
-        let cigar_ops = vec![CigarOp::new(100, '=')];
-        let record = (0, 100, 0, 100, Strand::Reverse);
-
-        // Forward: target 20-60 → query (in reverse coords)
-        let target_range = (20, 60);
-        let result = project_target_range_through_alignment(target_range, record, &cigar_ops);
-        assert!(result.is_some());
-        let (q_start, q_end, _, t_start_out, t_end_out) = result.unwrap();
-
-        // Inverse: query range → target (should get back to original target)
-        let inverse_result = project_query_range_through_alignment((q_start, q_end), record, &cigar_ops);
-        assert!(inverse_result.is_some());
-        let (t_start_back, t_end_back, _, _, _) = inverse_result.unwrap();
-
-        assert_eq!((t_start_back, t_end_back), (t_start_out, t_end_out));
-    }
-
-    #[test]
-    fn test_round_trip_with_offset() {
-        // Match with offset: target 100-200 → query 0-100
-        let cigar_ops = vec![CigarOp::new(100, '=')];
-        let record = (100, 200, 0, 100, Strand::Forward);
-
-        // Forward: target 120-180 → query
-        let target_range = (120, 180);
-        let (q_start, q_end, _, t_start_out, t_end_out) =
-            project_target_range_through_alignment(target_range, record, &cigar_ops).unwrap();
-
-        assert_eq!((q_start, q_end), (20, 80)); // Offset by 100
-        assert_eq!((t_start_out, t_end_out), (120, 180));
-
-        // Inverse: query 20-80 → target 120-180
-        let (t_start_back, t_end_back, _, _, _) =
-            project_query_range_through_alignment((q_start, q_end), record, &cigar_ops).unwrap();
-
-        assert_eq!((t_start_back, t_end_back), (t_start_out, t_end_out));
-    }
-
-    #[test]
-    fn test_round_trip_with_insertion() {
-        // CIGAR: 50=10I50= (query is 10bp longer due to insertion)
-        // Target: 0-100, Query: 0-110
-        let cigar_ops = vec![
-            CigarOp::new(50, '='),
-            CigarOp::new(10, 'I'), // 10bp insertion in query
-            CigarOp::new(50, '='),
-        ];
-        let record = (0, 100, 0, 110, Strand::Forward);
-
-        // Forward: target 40-60 (spans the insertion point at 50)
-        let target_range = (40, 60);
-        let (q_start, q_end, _, t_start_out, t_end_out) =
-            project_target_range_through_alignment(target_range, record, &cigar_ops).unwrap();
-
-        // Query should be 40-70 (10bp for first part + 10bp insertion + 10bp for second part = 30bp)
-        assert_eq!(t_start_out, 40);
-        assert_eq!(t_end_out, 60);
-
-        // Inverse: query range → target
-        let inverse = project_query_range_through_alignment((q_start, q_end), record, &cigar_ops);
-        assert!(inverse.is_some());
-        let (t_start_back, t_end_back, _, _, _) = inverse.unwrap();
-
-        // Should get back to original target range
-        assert_eq!((t_start_back, t_end_back), (t_start_out, t_end_out));
-    }
-
-    #[test]
-    fn test_round_trip_with_deletion() {
-        // CIGAR: 50=10D50= (target is 10bp longer due to deletion in query)
-        // Target: 0-110, Query: 0-100
-        let cigar_ops = vec![
-            CigarOp::new(50, '='),
-            CigarOp::new(10, 'D'), // 10bp deletion in query (exists in target only)
-            CigarOp::new(50, '='),
-        ];
-        let record = (0, 110, 0, 100, Strand::Forward);
-
-        // Forward: target 40-70 (spans the deletion at 50-60)
-        let target_range = (40, 70);
-        let (q_start, q_end, _, t_start_out, t_end_out) =
-            project_target_range_through_alignment(target_range, record, &cigar_ops).unwrap();
-
-        // Query should be 40-60 (10bp match + deletion skipped + 10bp match = 20bp)
-        assert_eq!(t_start_out, 40);
-        assert_eq!(t_end_out, 70);
-
-        // Inverse: query range → target
-        let inverse = project_query_range_through_alignment((q_start, q_end), record, &cigar_ops);
-        assert!(inverse.is_some());
-        let (t_start_back, t_end_back, _, _, _) = inverse.unwrap();
-
-        // Should get back to original target range (including the deletion)
-        assert_eq!((t_start_back, t_end_back), (t_start_out, t_end_out));
-    }
-
-    #[test]
-    fn test_round_trip_complex_cigar() {
-        // Complex CIGAR: 10=5I5D50=
-        let cigar_ops = vec![
-            CigarOp::new(10, '='),
-            CigarOp::new(5, 'I'),  // Query advances 5, target stays
-            CigarOp::new(5, 'D'),  // Target advances 5, query stays
-            CigarOp::new(50, '='),
-        ];
-        let record = (0, 65, 0, 65, Strand::Forward);
-
-        // Test multiple ranges
-        for (t_start, t_end) in [(5, 20), (0, 65), (15, 40), (50, 60)] {
-            let target_range = (t_start, t_end);
-            let forward = project_target_range_through_alignment(target_range, record, &cigar_ops);
-
-            if let Some((q_start, q_end, _, t_start_out, t_end_out)) = forward {
-                let inverse = project_query_range_through_alignment((q_start, q_end), record, &cigar_ops);
-
-                if let Some((t_start_back, t_end_back, _, _, _)) = inverse {
-                    // The round-trip should preserve the target range (at least the overlapping portion)
-                    assert_eq!(
-                        (t_start_back, t_end_back),
-                        (t_start_out, t_end_out),
-                        "Round-trip failed for target range {:?}",
-                        target_range
-                    );
-                }
-            }
-        }
-    }
-
     #[test]
     fn test_parse_cigar_to_delta_basic() {
         let cigar = "10=5I5D";
@@ -3495,101 +2794,69 @@ mod tests {
         assert_eq!(records, expected_records);
     }
 
-    // Tests for QueryMetadata bit operations (bidirectional indexing support)
     #[test]
-    fn test_query_metadata_reversed_bit_default_false() {
-        let metadata = QueryMetadata {
-            query_id: 1,
-            target_start: 0,
-            target_end: 100,
-            query_start: 0,
-            query_end: 100,
-            alignment_file_index: 0,
-            strand_and_data_offset: 42, // No special bits set
-            data_bytes: 10,
-        };
-        assert!(!metadata.is_reversed());
-        assert_eq!(metadata.strand(), Strand::Forward);
-        assert_eq!(metadata.data_offset(), 42);
+    fn test_invert_cigar_forward_strand() {
+        let ops = vec![
+            CigarOp::new(10, '='),
+            CigarOp::new(5, 'I'),
+            CigarOp::new(3, 'D'),
+            CigarOp::new(7, 'X'),
+        ];
+        let inverted = invert_cigar_ops(&ops, Strand::Forward);
+
+        // For forward strand: only I↔D swap, order unchanged
+        assert_eq!(inverted.len(), 4);
+        assert_eq!(inverted[0].op(), '=');
+        assert_eq!(inverted[0].len(), 10);
+        assert_eq!(inverted[1].op(), 'D'); // I became D
+        assert_eq!(inverted[1].len(), 5);
+        assert_eq!(inverted[2].op(), 'I'); // D became I
+        assert_eq!(inverted[2].len(), 3);
+        assert_eq!(inverted[3].op(), 'X');
+        assert_eq!(inverted[3].len(), 7);
     }
 
     #[test]
-    fn test_query_metadata_reversed_bit_set() {
-        let metadata = QueryMetadata {
-            query_id: 1,
-            target_start: 0,
-            target_end: 100,
-            query_start: 0,
-            query_end: 100,
-            alignment_file_index: 0,
-            strand_and_data_offset: 42 | QueryMetadata::REVERSED_BIT,
-            data_bytes: 10,
-        };
-        assert!(metadata.is_reversed());
-        assert_eq!(metadata.strand(), Strand::Forward);
-        assert_eq!(metadata.data_offset(), 42);
+    fn test_invert_cigar_reverse_strand() {
+        let ops = vec![
+            CigarOp::new(10, '='),
+            CigarOp::new(5, 'I'),
+            CigarOp::new(3, 'D'),
+        ];
+        let inverted = invert_cigar_ops(&ops, Strand::Reverse);
+
+        // For reverse strand: I↔D swap AND array reversal
+        assert_eq!(inverted.len(), 3);
+        assert_eq!(inverted[0].op(), 'I'); // Was D at end, now I at start
+        assert_eq!(inverted[0].len(), 3);
+        assert_eq!(inverted[1].op(), 'D'); // Was I in middle, now D
+        assert_eq!(inverted[1].len(), 5);
+        assert_eq!(inverted[2].op(), '='); // Was = at start, now at end
+        assert_eq!(inverted[2].len(), 10);
     }
 
     #[test]
-    fn test_query_metadata_strand_and_reversed_independent() {
-        // Both strand and reversed bits set
-        let metadata = QueryMetadata {
-            query_id: 1,
-            target_start: 0,
-            target_end: 100,
-            query_start: 0,
-            query_end: 100,
-            alignment_file_index: 0,
-            strand_and_data_offset: 42 | QueryMetadata::STRAND_BIT | QueryMetadata::REVERSED_BIT,
-            data_bytes: 10,
-        };
-        assert!(metadata.is_reversed());
-        assert_eq!(metadata.strand(), Strand::Reverse);
-        assert_eq!(metadata.data_offset(), 42);
+    fn test_invert_cigar_empty() {
+        let ops: Vec<CigarOp> = vec![];
+        let inverted_forward = invert_cigar_ops(&ops, Strand::Forward);
+        let inverted_reverse = invert_cigar_ops(&ops, Strand::Reverse);
+
+        assert_eq!(inverted_forward.len(), 0);
+        assert_eq!(inverted_reverse.len(), 0);
     }
 
     #[test]
-    fn test_query_metadata_data_offset_masks_both_bits() {
-        // Test that data_offset correctly masks both high bits
-        let base_offset: u64 = 0x1234567890ABCDEF & !(QueryMetadata::STRAND_BIT | QueryMetadata::REVERSED_BIT);
+    fn test_invert_cigar_matches_only() {
+        let ops = vec![CigarOp::new(100, '='), CigarOp::new(50, 'X')];
+        let inverted_forward = invert_cigar_ops(&ops, Strand::Forward);
+        let inverted_reverse = invert_cigar_ops(&ops, Strand::Reverse);
 
-        // Only strand bit
-        let metadata1 = QueryMetadata {
-            query_id: 1,
-            target_start: 0,
-            target_end: 100,
-            query_start: 0,
-            query_end: 100,
-            alignment_file_index: 0,
-            strand_and_data_offset: base_offset | QueryMetadata::STRAND_BIT,
-            data_bytes: 10,
-        };
-        assert_eq!(metadata1.data_offset(), base_offset);
+        // Forward: no change (no I or D)
+        assert_eq!(inverted_forward[0].op(), '=');
+        assert_eq!(inverted_forward[1].op(), 'X');
 
-        // Only reversed bit
-        let metadata2 = QueryMetadata {
-            query_id: 1,
-            target_start: 0,
-            target_end: 100,
-            query_start: 0,
-            query_end: 100,
-            alignment_file_index: 0,
-            strand_and_data_offset: base_offset | QueryMetadata::REVERSED_BIT,
-            data_bytes: 10,
-        };
-        assert_eq!(metadata2.data_offset(), base_offset);
-
-        // Both bits
-        let metadata3 = QueryMetadata {
-            query_id: 1,
-            target_start: 0,
-            target_end: 100,
-            query_start: 0,
-            query_end: 100,
-            alignment_file_index: 0,
-            strand_and_data_offset: base_offset | QueryMetadata::STRAND_BIT | QueryMetadata::REVERSED_BIT,
-            data_bytes: 10,
-        };
-        assert_eq!(metadata3.data_offset(), base_offset);
+        // Reverse: just reversed order
+        assert_eq!(inverted_reverse[0].op(), 'X');
+        assert_eq!(inverted_reverse[1].op(), '=');
     }
 }
