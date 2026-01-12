@@ -127,7 +127,6 @@ impl CigarOp {
 }
 
 /// Invert CIGAR operations for bidirectional alignment interpretation.
-/// Following rustybam's approach:
 /// - Swap I↔D (insertions become deletions and vice versa)
 /// - Reverse the CIGAR array only if strand is Reverse
 /// - Matches (=), mismatches (X), and ambiguous (M) stay the same
@@ -1195,7 +1194,7 @@ impl Impg {
             .collect();
 
         if bidirectional {
-            debug!("Creating bidirectional alignment entries (2x entries per alignment)");
+            debug!("Creating bidirectional alignment entries");
         } else {
             debug!("Creating unidirectional alignment entries");
         }
@@ -1233,11 +1232,11 @@ impl Impg {
                         // Skip self-alignments to avoid duplicates
                         if bidirectional && record.query_id != record.target_id {
                             let mut reversed_metadata = QueryMetadata {
-                                query_id: record.target_id,        // SWAPPED
-                                target_start: record.query_start as i32,   // SWAPPED
-                                target_end: record.query_end as i32,       // SWAPPED
-                                query_start: record.target_start as i32,   // SWAPPED
-                                query_end: record.target_end as i32,       // SWAPPED
+                                query_id: record.target_id,                 // SWAPPED
+                                target_start: record.query_start as i32,    // SWAPPED
+                                target_end: record.query_end as i32,        // SWAPPED
+                                query_start: record.target_start as i32,    // SWAPPED
+                                query_end: record.target_end as i32,        // SWAPPED
                                 alignment_file_index: file_index as u32,
                                 strand_and_data_offset: record.strand_and_data_offset,
                                 data_bytes: record.data_bytes,
@@ -1458,7 +1457,7 @@ impl Impg {
 
         // Warn if loading old format
         if magic_buf == MAGIC_V1 {
-            warn!("Loading IMPGIDX1 format (unidirectional). Consider rebuilding with --bidirectional for better transitive query reach.");
+            warn!("Loading IMPGIDX1 format (unidirectional). Rebuild without --unidirectional for better transitive query reach (bidirectional mode is default).");
         }
 
         // Read forest map offset

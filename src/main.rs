@@ -3995,7 +3995,7 @@ fn print_stats(impg: &impl ImpgIndex) {
     if bridges.len() < target_ids_set.len() / 2 {
         warn!(
             "Low bridge coverage ({:.1}%) may limit transitive query reach. \
-             Consider rebuilding with --bidirectional (default).",
+             Rebuild without --unidirectional for better coverage (bidirectional mode is default).",
             100.0 * bridges.len() as f64 / target_ids_set.len() as f64
         );
     }
