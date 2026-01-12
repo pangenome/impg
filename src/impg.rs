@@ -1194,6 +1194,12 @@ impl Impg {
             .map(|(_, alignment_file)| alignment_file.clone())
             .collect();
 
+        if bidirectional {
+            debug!("Creating bidirectional alignment entries (2x entries per alignment)");
+        } else {
+            debug!("Creating unidirectional alignment entries");
+        }
+
         let intervals: FxHashMap<u32, Vec<Interval<QueryMetadata>>> = records_by_file
             .par_iter()
             .enumerate() // Add enumeration to get the position as index

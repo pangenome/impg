@@ -92,12 +92,13 @@ struct AlignmentOpts {
     #[clap(long, value_parser, default_value = "100")]
     trace_spacing: u32,
 
-    /// Interpret alignments bidirectionally (default: true).
-    /// Every alignment A->B creates implicit reverse mapping B->A,
+    /// Disable bidirectional alignment interpretation (default: bidirectional enabled).
+    /// By default, every alignment A->B creates implicit reverse mapping B->A,
     /// guaranteeing all genomes are bridges for transitive queries.
+    /// Use this flag to build a smaller unidirectional index (not recommended).
     #[arg(help_heading = "Index options")]
-    #[clap(long, action = clap::ArgAction::SetFalse, default_value = "true")]
-    bidirectional: bool,
+    #[clap(long)]
+    unidirectional: bool,
 }
 
 /// Sequence file options for commands that need FASTA/AGC files
@@ -2353,7 +2354,7 @@ fn initialize_index(
             alignment.force_reindex,
             seq_files_opt,
             alignment.alignment_list.as_deref(),
-            alignment.bidirectional,
+            !alignment.unidirectional,
         )
     } else {
         let impg = load_or_build_single_index(
@@ -2362,7 +2363,7 @@ fn initialize_index(
             alignment.index.as_deref(),
             seq_files_opt,
             alignment.force_reindex,
-            alignment.bidirectional,
+            !alignment.unidirectional,
         )?;
         Ok(ImpgWrapper::from_single(impg))
     }
@@ -2598,6 +2599,12 @@ fn build_single_index(
 
     let index_file = get_combined_index_filename(alignment_files, custom_index);
     debug!("Creating index: {index_file}");
+
+    if bidirectional {
+        info!("Building bidirectional index");
+    } else {
+        info!("Building unidirectional index");
+    }
 
     let num_alignment_files = alignment_files.len();
 
