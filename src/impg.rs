@@ -126,6 +126,31 @@ impl CigarOp {
     }
 }
 
+/// Invert CIGAR operations for bidirectional alignment interpretation.
+/// Following rustybam's approach:
+/// - Swap I↔D (insertions become deletions and vice versa)
+/// - Reverse the CIGAR array only if strand is Reverse
+/// - Matches (=), mismatches (X), and ambiguous (M) stay the same
+fn invert_cigar_ops(ops: &[CigarOp], strand: Strand) -> Vec<CigarOp> {
+    let inverted: Vec<CigarOp> = ops
+        .iter()
+        .map(|op| {
+            let new_op = match op.op() {
+                'I' => 'D',
+                'D' => 'I',
+                other => other, // =, X, M unchanged
+            };
+            CigarOp::new(op.len(), new_op)
+        })
+        .collect();
+
+    if strand == Strand::Reverse {
+        inverted.into_iter().rev().collect()
+    } else {
+        inverted
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct QueryMetadata {
     query_id: u32,
@@ -140,7 +165,8 @@ pub struct QueryMetadata {
 
 impl QueryMetadata {
     // Constants for bit manipulation
-    const STRAND_BIT: u64 = 0x8000000000000000; // Most significant bit for u64
+    const STRAND_BIT: u64 = 0x8000000000000000; // Most significant bit for u64 (bit 63)
+    const REVERSED_BIT: u64 = 0x4000000000000000; // Second-most significant bit for reversed flag (bit 62)
 
     pub fn query_id(&self) -> u32 {
         self.query_id
@@ -163,7 +189,15 @@ impl QueryMetadata {
     }
 
     fn data_offset(&self) -> u64 {
-        self.strand_and_data_offset & !Self::STRAND_BIT
+        self.strand_and_data_offset & !(Self::STRAND_BIT | Self::REVERSED_BIT)
+    }
+
+    fn is_reversed(&self) -> bool {
+        (self.strand_and_data_offset & Self::REVERSED_BIT) != 0
+    }
+
+    fn set_reversed(&mut self) {
+        self.strand_and_data_offset |= Self::REVERSED_BIT;
     }
 
     /// Determine file type based on extension
@@ -447,7 +481,7 @@ impl Impg {
     ) -> Vec<CigarOp> {
         let alignment_file = &self.alignment_files[metadata.alignment_file_index as usize];
 
-        match QueryMetadata::get_file_type(alignment_file) {
+        let ops = match QueryMetadata::get_file_type(alignment_file) {
             FileType::Paf => {
                 // For PAF files, read CIGAR directly from file
                 if metadata.data_bytes == 0 {
@@ -484,6 +518,13 @@ impl Impg {
                     sequence_index.expect("Sequence index required for .1aln files"),
                 )
             }
+        };
+
+        // Apply CIGAR inversion if this is a reversed entry
+        if metadata.is_reversed() {
+            invert_cigar_ops(&ops, metadata.strand())
+        } else {
+            ops
         }
     }
 
@@ -1145,6 +1186,7 @@ impl Impg {
         records_by_file: &[(Vec<AlignmentRecord>, String)],
         seq_index: SequenceIndex,
         sequence_files: Option<&[String]>,
+        bidirectional: bool,
     ) -> io::Result<Self> {
         // Extract just the alignment file paths
         let alignment_files: Vec<String> = records_by_file
@@ -1158,26 +1200,55 @@ impl Impg {
             .flat_map(|(file_index, (records, _))| {
                 records
                     .par_iter()
-                    .filter_map(|record| {
-                        let query_metadata = QueryMetadata {
+                    .flat_map(|record| {
+                        let mut entries = Vec::with_capacity(if bidirectional { 2 } else { 1 });
+
+                        // ENTRY 1: Original direction (query → target)
+                        let forward_metadata = QueryMetadata {
                             query_id: record.query_id,
                             target_start: record.target_start as i32,
                             target_end: record.target_end as i32,
                             query_start: record.query_start as i32,
                             query_end: record.query_end as i32,
                             alignment_file_index: file_index as u32,
-                            strand_and_data_offset: record.strand_and_data_offset, // Already includes strand bit
+                            strand_and_data_offset: record.strand_and_data_offset,
                             data_bytes: record.data_bytes,
                         };
-
-                        Some((
+                        entries.push((
                             record.target_id,
                             Interval {
                                 first: record.target_start as i32,
                                 last: record.target_end as i32,
-                                metadata: query_metadata,
+                                metadata: forward_metadata,
                             },
-                        ))
+                        ));
+
+                        // ENTRY 2: Reversed direction (target → query)
+                        // Skip self-alignments to avoid duplicates
+                        if bidirectional && record.query_id != record.target_id {
+                            let mut reversed_metadata = QueryMetadata {
+                                query_id: record.target_id,        // SWAPPED
+                                target_start: record.query_start as i32,   // SWAPPED
+                                target_end: record.query_end as i32,       // SWAPPED
+                                query_start: record.target_start as i32,   // SWAPPED
+                                query_end: record.target_end as i32,       // SWAPPED
+                                alignment_file_index: file_index as u32,
+                                strand_and_data_offset: record.strand_and_data_offset,
+                                data_bytes: record.data_bytes,
+                            };
+                            reversed_metadata.set_reversed();  // Mark with REVERSED_BIT
+
+                            entries.push((
+                                record.query_id,  // NOW indexed by original query_id
+                                Interval {
+                                    first: record.query_start as i32,
+                                    last: record.query_end as i32,
+                                    metadata: reversed_metadata,
+                                },
+                            ));
+                        }
+
+                        entries
                     })
                     .collect::<Vec<_>>()
             })
@@ -1229,7 +1300,7 @@ impl Impg {
         &self,
         mut writer: W,
     ) -> std::io::Result<()> {
-        const MAGIC: &[u8] = b"IMPGIDX1";
+        const MAGIC: &[u8] = b"IMPGIDX2";
         let mut forest_map = ForestMap::new();
 
         // Write magic bytes
@@ -1363,16 +1434,25 @@ impl Impg {
         index_file_path: String,
         sequence_files: Option<&[String]>,
     ) -> std::io::Result<Self> {
-        const MAGIC: &[u8] = b"IMPGIDX1";
+        const MAGIC_V1: &[u8] = b"IMPGIDX1";
+        const MAGIC_V2: &[u8] = b"IMPGIDX2";
 
         // Read and verify magic bytes
         let mut magic_buf = [0u8; 8];
         reader.read_exact(&mut magic_buf)?;
-        if magic_buf != MAGIC {
+        if magic_buf != MAGIC_V1 && magic_buf != MAGIC_V2 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "Invalid magic bytes - not a valid IMPG index file",
+                format!(
+                    "Invalid magic bytes - not a valid IMPG index file (got {:?})",
+                    String::from_utf8_lossy(&magic_buf)
+                ),
             ));
+        }
+
+        // Warn if loading old format
+        if magic_buf == MAGIC_V1 {
+            warn!("Loading IMPGIDX1 format (unidirectional). Consider rebuilding with --bidirectional for better transitive query reach.");
         }
 
         // Read forest map offset
@@ -2707,5 +2787,71 @@ mod tests {
         ];
         let records = parse_paf(reader, &mut seq_index).unwrap();
         assert_eq!(records, expected_records);
+    }
+
+    #[test]
+    fn test_invert_cigar_forward_strand() {
+        let ops = vec![
+            CigarOp::new(10, '='),
+            CigarOp::new(5, 'I'),
+            CigarOp::new(3, 'D'),
+            CigarOp::new(7, 'X'),
+        ];
+        let inverted = invert_cigar_ops(&ops, Strand::Forward);
+
+        // For forward strand: only I↔D swap, order unchanged
+        assert_eq!(inverted.len(), 4);
+        assert_eq!(inverted[0].op(), '=');
+        assert_eq!(inverted[0].len(), 10);
+        assert_eq!(inverted[1].op(), 'D'); // I became D
+        assert_eq!(inverted[1].len(), 5);
+        assert_eq!(inverted[2].op(), 'I'); // D became I
+        assert_eq!(inverted[2].len(), 3);
+        assert_eq!(inverted[3].op(), 'X');
+        assert_eq!(inverted[3].len(), 7);
+    }
+
+    #[test]
+    fn test_invert_cigar_reverse_strand() {
+        let ops = vec![
+            CigarOp::new(10, '='),
+            CigarOp::new(5, 'I'),
+            CigarOp::new(3, 'D'),
+        ];
+        let inverted = invert_cigar_ops(&ops, Strand::Reverse);
+
+        // For reverse strand: I↔D swap AND array reversal
+        assert_eq!(inverted.len(), 3);
+        assert_eq!(inverted[0].op(), 'I'); // Was D at end, now I at start
+        assert_eq!(inverted[0].len(), 3);
+        assert_eq!(inverted[1].op(), 'D'); // Was I in middle, now D
+        assert_eq!(inverted[1].len(), 5);
+        assert_eq!(inverted[2].op(), '='); // Was = at start, now at end
+        assert_eq!(inverted[2].len(), 10);
+    }
+
+    #[test]
+    fn test_invert_cigar_empty() {
+        let ops: Vec<CigarOp> = vec![];
+        let inverted_forward = invert_cigar_ops(&ops, Strand::Forward);
+        let inverted_reverse = invert_cigar_ops(&ops, Strand::Reverse);
+
+        assert_eq!(inverted_forward.len(), 0);
+        assert_eq!(inverted_reverse.len(), 0);
+    }
+
+    #[test]
+    fn test_invert_cigar_matches_only() {
+        let ops = vec![CigarOp::new(100, '='), CigarOp::new(50, 'X')];
+        let inverted_forward = invert_cigar_ops(&ops, Strand::Forward);
+        let inverted_reverse = invert_cigar_ops(&ops, Strand::Reverse);
+
+        // Forward: no change (no I or D)
+        assert_eq!(inverted_forward[0].op(), '=');
+        assert_eq!(inverted_forward[1].op(), 'X');
+
+        // Reverse: just reversed order
+        assert_eq!(inverted_reverse[0].op(), 'X');
+        assert_eq!(inverted_reverse[1].op(), '=');
     }
 }

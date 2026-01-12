@@ -91,6 +91,13 @@ struct AlignmentOpts {
     #[arg(help_heading = "Alignment options")]
     #[clap(long, value_parser, default_value = "100")]
     trace_spacing: u32,
+
+    /// Interpret alignments bidirectionally (default: true).
+    /// Every alignment A->B creates implicit reverse mapping B->A,
+    /// guaranteeing all genomes are bridges for transitive queries.
+    #[arg(help_heading = "Index options")]
+    #[clap(long, action = clap::ArgAction::SetFalse, default_value = "true")]
+    bidirectional: bool,
 }
 
 /// Sequence file options for commands that need FASTA/AGC files
@@ -2346,6 +2353,7 @@ fn initialize_index(
             alignment.force_reindex,
             seq_files_opt,
             alignment.alignment_list.as_deref(),
+            alignment.bidirectional,
         )
     } else {
         let impg = load_or_build_single_index(
@@ -2354,6 +2362,7 @@ fn initialize_index(
             alignment.index.as_deref(),
             seq_files_opt,
             alignment.force_reindex,
+            alignment.bidirectional,
         )?;
         Ok(ImpgWrapper::from_single(impg))
     }
@@ -2366,6 +2375,7 @@ fn load_or_build_per_file_index(
     force_reindex: bool,
     sequence_files: Option<&[String]>,
     alignment_list: Option<&str>,
+    bidirectional: bool,
 ) -> io::Result<ImpgWrapper> {
     use indicatif::{ProgressBar, ProgressStyle};
     use std::path::{Path, PathBuf};
@@ -2434,6 +2444,7 @@ fn load_or_build_per_file_index(
                     Some(index_path.to_string_lossy().as_ref()),
                     sequence_files,
                     false,
+                    bidirectional,
                 )?;
 
                 // Save the index
@@ -2531,19 +2542,20 @@ fn load_or_build_single_index(
     custom_index: Option<&str>,
     sequence_files: Option<&[String]>,
     force_reindex: bool,
+    bidirectional: bool,
 ) -> io::Result<Impg> {
     let index_file = get_combined_index_filename(alignment_files, custom_index);
 
     if force_reindex {
         info!("Using single indexing mode (force rebuild)");
         info!("Building 1 index file processing {} alignment file(s)...", alignment_files.len());
-        return build_single_index(alignment_files, threads, custom_index, sequence_files, true);
+        return build_single_index(alignment_files, threads, custom_index, sequence_files, true, bidirectional);
     }
 
     if !std::path::Path::new(&index_file).exists() {
         info!("Using single indexing mode");
         info!("Building 1 index file processing {} alignment file(s)...", alignment_files.len());
-        return build_single_index(alignment_files, threads, custom_index, sequence_files, true);
+        return build_single_index(alignment_files, threads, custom_index, sequence_files, true, bidirectional);
     }
 
     // Load existing index
@@ -2580,6 +2592,7 @@ fn build_single_index(
     custom_index: Option<&str>,
     sequence_files: Option<&[String]>,
     show_progress: bool,
+    bidirectional: bool,
 ) -> io::Result<Impg> {
     use indicatif::{ProgressBar, ProgressStyle};
 
@@ -2716,7 +2729,7 @@ fn build_single_index(
         .map(|(records, path, _)| (records, path))
         .collect();
 
-    let impg = Impg::from_multi_alignment_records(&records_by_file, seq_index, sequence_files)
+    let impg = Impg::from_multi_alignment_records(&records_by_file, seq_index, sequence_files, bidirectional)
         .map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -3927,6 +3940,57 @@ fn print_stats(impg: &impl ImpgIndex) {
                 println!("{}. {}: {} overlaps", idx + 1, name, count);
             }
         }
+    }
+
+    // Bridge genome statistics
+    info!("Computing bridge genome statistics...");
+
+    use std::collections::HashSet;
+    let target_ids_set: HashSet<u32> = impg.target_ids().into_iter().collect();
+
+    // Collect query IDs from all trees
+    let query_ids_set: HashSet<u32> = impg
+        .target_ids()
+        .par_iter()
+        .flat_map(|&target_id| {
+            if let Some(tree) = impg.get_or_load_tree(target_id) {
+                let ids: Vec<u32> = tree
+                    .iter()
+                    .map(|interval| interval.metadata.query_id())
+                    .collect();
+                impg.remove_cached_tree(target_id);
+                ids
+            } else {
+                Vec::new()
+            }
+        })
+        .collect();
+
+    let bridges: HashSet<u32> = target_ids_set
+        .intersection(&query_ids_set)
+        .copied()
+        .collect();
+    let target_only = target_ids_set.len() - bridges.len();
+    let query_only = query_ids_set.len() - bridges.len();
+
+    println!("\nBridge genome coverage:");
+    println!("  Total sequences: {}", num_sequences);
+    println!("  Target sequences: {}", target_ids_set.len());
+    println!("  Query sequences: {}", query_ids_set.len());
+    println!(
+        "  Bridge sequences (both): {} ({:.1}%)",
+        bridges.len(),
+        100.0 * bridges.len() as f64 / num_sequences as f64
+    );
+    println!("  Target-only: {}", target_only);
+    println!("  Query-only: {}", query_only);
+
+    if bridges.len() < target_ids_set.len() / 2 {
+        warn!(
+            "Low bridge coverage ({:.1}%) may limit transitive query reach. \
+             Consider rebuilding with --bidirectional (default).",
+            100.0 * bridges.len() as f64 / target_ids_set.len() as f64
+        );
     }
 }
 
