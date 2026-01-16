@@ -94,8 +94,7 @@ pub trait ImpgIndex: Send + Sync {
     ) -> Vec<AdjustedInterval>;
 
     /// Get or load an interval tree for a target sequence.
-    fn get_or_load_tree(&self, target_id: u32)
-        -> Option<Arc<BasicCOITree<QueryMetadata, u32>>>;
+    fn get_or_load_tree(&self, target_id: u32) -> Option<Arc<BasicCOITree<QueryMetadata, u32>>>;
 
     /// Get all target IDs that have interval trees (for iteration).
     fn target_ids(&self) -> Vec<u32>;
@@ -343,10 +342,7 @@ impl ImpgIndex for ImpgWrapper {
         }
     }
 
-    fn get_or_load_tree(
-        &self,
-        target_id: u32,
-    ) -> Option<Arc<BasicCOITree<QueryMetadata, u32>>> {
+    fn get_or_load_tree(&self, target_id: u32) -> Option<Arc<BasicCOITree<QueryMetadata, u32>>> {
         match self {
             ImpgWrapper::Single(impg) => impg.get_or_load_tree(target_id),
             ImpgWrapper::Multi(multi) => multi.get_or_load_tree(target_id),

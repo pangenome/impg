@@ -334,12 +334,15 @@ pub fn prepare_poa_graph_and_sequences(
     let mut processed_sequences: Vec<(String, SequenceMetadata)> = results
         .par_iter()
         .map(|interval| -> io::Result<(String, SequenceMetadata)> {
-            let seq_name = impg.seq_index().get_name(interval.metadata).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("Sequence name not found for ID {}", interval.metadata),
-                )
-            })?;
+            let seq_name = impg
+                .seq_index()
+                .get_name(interval.metadata)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("Sequence name not found for ID {}", interval.metadata),
+                    )
+                })?;
 
             // Get total sequence length
             let total_length = impg
@@ -432,12 +435,15 @@ pub fn prepare_sequences(
         .par_iter()
         .map(|interval| -> std::io::Result<(String, SequenceMetadata)> {
             // Resolve sequence name
-            let seq_name = impg.seq_index().get_name(interval.metadata).ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("Sequence name not found for ID {}", interval.metadata),
-                )
-            })?;
+            let seq_name = impg
+                .seq_index()
+                .get_name(interval.metadata)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("Sequence name not found for ID {}", interval.metadata),
+                    )
+                })?;
 
             // Resolve total contig length
             let total_length = impg
@@ -695,11 +701,16 @@ pub fn sort_gfa(gfa_content: &str, num_threads: usize) -> io::Result<String> {
 
     // Write sorted GFA to string
     let mut sorted_output = Vec::new();
-    graph.write_gfa(&mut sorted_output)
+    graph
+        .write_gfa(&mut sorted_output)
         .map_err(|e| io::Error::other(format!("Failed to write sorted GFA: {}", e)))?;
 
-    String::from_utf8(sorted_output)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UTF-8 in sorted GFA: {}", e)))
+    String::from_utf8(sorted_output).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Invalid UTF-8 in sorted GFA: {}", e),
+        )
+    })
 }
 
 /// Configuration for seqwish-based GFA generation
@@ -889,8 +900,12 @@ pub fn generate_gfa_seqwish_from_intervals(
         )?;
     }
 
-    let gfa_string = String::from_utf8(gfa_output)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UTF-8 in GFA: {}", e)))?;
+    let gfa_string = String::from_utf8(gfa_output).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Invalid UTF-8 in GFA: {}", e),
+        )
+    })?;
 
     // Clean up seqwish temp files before returning
     seqwish::tempfile::cleanup();

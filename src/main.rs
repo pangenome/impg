@@ -2024,7 +2024,10 @@ fn run() -> io::Result<()> {
                 _ => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        format!("Unknown output format: {}. Valid: paf, 1aln, joblist", format),
+                        format!(
+                            "Unknown output format: {}. Valid: paf, 1aln, joblist",
+                            format
+                        ),
                     ));
                 }
             };
@@ -2404,14 +2407,21 @@ fn load_or_build_per_file_index(
         info!("Using per-file indexing mode");
     } else if force_reindex {
         info!("Using per-file indexing mode (force rebuild)");
-        info!("Building {} index file(s) processing {} alignment file(s)...", indices_to_build.len(), indices_to_build.len());
+        info!(
+            "Building {} index file(s) processing {} alignment file(s)...",
+            indices_to_build.len(),
+            indices_to_build.len()
+        );
     } else {
         info!("Using per-file indexing mode");
-        info!("Building {} index file(s) processing {} alignment file(s)...", indices_to_build.len(), indices_to_build.len());
+        info!(
+            "Building {} index file(s) processing {} alignment file(s)...",
+            indices_to_build.len(),
+            indices_to_build.len()
+        );
     }
 
     if !indices_to_build.is_empty() {
-
         // Create progress bar at info level (not at error-only or debug level)
         let pb = if log::log_enabled!(log::Level::Info) && !log::log_enabled!(log::Level::Debug) {
             let progress_bar = ProgressBar::new(indices_to_build.len() as u64);
@@ -2473,13 +2483,17 @@ fn load_or_build_per_file_index(
         for result in build_results {
             result?;
         }
-
     }
 
     // Load MultiImpg from all per-file indices
     let multi = if let Some(list_path) = alignment_list {
         // Use cache when alignment list file is available
-        MultiImpg::load_with_cache(&index_paths, alignment_files, sequence_files, Path::new(list_path))?
+        MultiImpg::load_with_cache(
+            &index_paths,
+            alignment_files,
+            sequence_files,
+            Path::new(list_path),
+        )?
     } else {
         // No list file, can't use cache (e.g., --alignment-files mode)
         MultiImpg::load_from_files(&index_paths, alignment_files, sequence_files)?
@@ -2549,14 +2563,34 @@ fn load_or_build_single_index(
 
     if force_reindex {
         info!("Using single indexing mode (force rebuild)");
-        info!("Building 1 index file processing {} alignment file(s)...", alignment_files.len());
-        return build_single_index(alignment_files, threads, custom_index, sequence_files, true, bidirectional);
+        info!(
+            "Building 1 index file processing {} alignment file(s)...",
+            alignment_files.len()
+        );
+        return build_single_index(
+            alignment_files,
+            threads,
+            custom_index,
+            sequence_files,
+            true,
+            bidirectional,
+        );
     }
 
     if !std::path::Path::new(&index_file).exists() {
         info!("Using single indexing mode");
-        info!("Building 1 index file processing {} alignment file(s)...", alignment_files.len());
-        return build_single_index(alignment_files, threads, custom_index, sequence_files, true, bidirectional);
+        info!(
+            "Building 1 index file processing {} alignment file(s)...",
+            alignment_files.len()
+        );
+        return build_single_index(
+            alignment_files,
+            threads,
+            custom_index,
+            sequence_files,
+            true,
+            bidirectional,
+        );
     }
 
     // Load existing index
@@ -2609,7 +2643,10 @@ fn build_single_index(
     let num_alignment_files = alignment_files.len();
 
     // Create progress bar at info level (not at error-only or debug level)
-    let pb = if show_progress && log::log_enabled!(log::Level::Info) && !log::log_enabled!(log::Level::Debug) {
+    let pb = if show_progress
+        && log::log_enabled!(log::Level::Info)
+        && !log::log_enabled!(log::Level::Debug)
+    {
         let progress_bar = ProgressBar::new(num_alignment_files as u64);
         progress_bar.set_style(
             ProgressStyle::default_bar()
@@ -2627,67 +2664,72 @@ fn build_single_index(
     let mut records_by_file_with_local_index: Vec<(Vec<AlignmentRecord>, String, SequenceIndex)> =
         (0..alignment_files.len())
             .into_par_iter()
-            .map(|file_index| -> io::Result<(Vec<AlignmentRecord>, String, SequenceIndex)> {
-                let aln_file = &alignment_files[file_index];
+            .map(
+                |file_index| -> io::Result<(Vec<AlignmentRecord>, String, SequenceIndex)> {
+                    let aln_file = &alignment_files[file_index];
 
-                debug!("Processing alignment file ({}/{num_alignment_files}): {aln_file}", file_index + 1);
+                    debug!(
+                        "Processing alignment file ({}/{num_alignment_files}): {aln_file}",
+                        file_index + 1
+                    );
 
-                // Local sequence index for this file only
-                let mut local_seq_index = SequenceIndex::new();
+                    // Local sequence index for this file only
+                    let mut local_seq_index = SequenceIndex::new();
 
-            // Detect file format and parse accordingly
-            let format = AlignmentFormat::from_path(aln_file).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("Unsupported alignment format: {aln_file}"),
-                )
-            })?;
+                    // Detect file format and parse accordingly
+                    let format = AlignmentFormat::from_path(aln_file).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Unsupported alignment format: {aln_file}"),
+                        )
+                    })?;
 
-                let records = match format {
-                    AlignmentFormat::Paf => {
-                        let file = File::open(aln_file).map_err(|e| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                format!("Failed to open PAF file: {}", e),
-                            )
-                        })?;
-                    impg::paf::parse_paf_file(aln_file, file, threads, &mut local_seq_index)
-                        .map_err(|e| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                format!("Failed to parse PAF records: {}", e),
-                            )
-                        })?
-                    }
-                    AlignmentFormat::OneAln => {
-                        let parser =
-                            OneAlnParser::new(aln_file.clone(), sequence_files).map_err(|e| {
+                    let records = match format {
+                        AlignmentFormat::Paf => {
+                            let file = File::open(aln_file).map_err(|e| {
                                 io::Error::new(
                                     io::ErrorKind::InvalidData,
-                                    format!("Failed to create 1aln parser: {}", e),
+                                    format!("Failed to open PAF file: {}", e),
                                 )
                             })?;
-                        parser.parse_alignments(&mut local_seq_index).map_err(|e| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                format!("Failed to parse 1aln records: {}", e),
-                            )
-                        })?
+                            impg::paf::parse_paf_file(aln_file, file, threads, &mut local_seq_index)
+                                .map_err(|e| {
+                                    io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        format!("Failed to parse PAF records: {}", e),
+                                    )
+                                })?
+                        }
+                        AlignmentFormat::OneAln => {
+                            let parser = OneAlnParser::new(aln_file.clone(), sequence_files)
+                                .map_err(|e| {
+                                    io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        format!("Failed to create 1aln parser: {}", e),
+                                    )
+                                })?;
+                            parser.parse_alignments(&mut local_seq_index).map_err(|e| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!("Failed to parse 1aln records: {}", e),
+                                )
+                            })?
+                        }
+                    };
+                    debug!(
+                        "Parsed {} alignment records from file: {aln_file}",
+                        records.len()
+                    );
+
+                    // Update progress bar
+                    if let Some(ref progress_bar) = pb {
+                        progress_bar.inc(1);
                     }
-                };
-                debug!(
-                    "Parsed {} alignment records from file: {aln_file}",
-                    records.len()
-                );
 
-                // Update progress bar
-                if let Some(ref progress_bar) = pb {
-                    progress_bar.inc(1);
-                }
-
-                Ok((records, aln_file.clone(), local_seq_index))
-            })
-        .collect::<Result<Vec<_>, _>>()?; // Propagate any errors
+                    Ok((records, aln_file.clone(), local_seq_index))
+                },
+            )
+            .collect::<Result<Vec<_>, _>>()?; // Propagate any errors
 
     if let Some(progress_bar) = pb {
         progress_bar.finish_with_message("Completed parsing alignment files");
@@ -2736,13 +2778,18 @@ fn build_single_index(
         .map(|(records, path, _)| (records, path))
         .collect();
 
-    let impg = Impg::from_multi_alignment_records(&records_by_file, seq_index, sequence_files, bidirectional)
-        .map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Failed to create index: {e}"),
-            )
-        })?;
+    let impg = Impg::from_multi_alignment_records(
+        &records_by_file,
+        seq_index,
+        sequence_files,
+        bidirectional,
+    )
+    .map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Failed to create index: {e}"),
+        )
+    })?;
 
     // Serialize the index with embedded forest map
     let index_file_path = index_file.clone();

@@ -97,13 +97,13 @@ impl Default for GraphBuildConfig {
             // Filtering options
             no_filter: false,
             num_mappings: "1:1".to_string(),
-            scaffold_jump: 50_000,       // 50kb default scaffold gap
-            scaffold_mass: 10_000,        // 10kb minimum scaffold length
-            scaffold_filter: "1:1".to_string(),  // 1:1 scaffold filtering (now fixed in sweepga 608547a)
+            scaffold_jump: 50_000,              // 50kb default scaffold gap
+            scaffold_mass: 10_000,              // 10kb minimum scaffold length
+            scaffold_filter: "1:1".to_string(), // 1:1 scaffold filtering (now fixed in sweepga 608547a)
             overlap: 0.95,
             min_identity: 0.0,
-            scaffold_dist: 0,         // No deviation limit by default
-            min_mapping_length: 0,   // No minimum mapping length by default
+            scaffold_dist: 0,      // No deviation limit by default
+            min_mapping_length: 0, // No minimum mapping length by default
         }
     }
 }
@@ -119,8 +119,9 @@ fn count_sequences_and_genomes_in_fasta(fasta_paths: &[String]) -> io::Result<(u
     for path in fasta_paths {
         let file = File::open(path)?;
         // Use niffler to auto-detect compression
-        let (reader, _format) = niffler::get_reader(Box::new(file))
-            .map_err(|e| io::Error::other(format!("Failed to open reader for '{}': {}", path, e)))?;
+        let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
+            io::Error::other(format!("Failed to open reader for '{}': {}", path, e))
+        })?;
         let reader = BufReader::new(reader);
 
         for line in reader.lines() {
@@ -231,10 +232,7 @@ pub fn build_graph<W: Write>(
         // Also configure seqwish's internal temp file handling
         seqwish::tempfile::set_dir(temp_dir);
         if config.show_progress {
-            info!(
-                "[graph::temp] Using temp directory: {}",
-                temp_dir
-            );
+            info!("[graph::temp] Using temp directory: {}", temp_dir);
         }
     }
 
@@ -266,16 +264,15 @@ pub fn build_graph<W: Write>(
     // 2) Create combined FASTA for alignment
     // sweepga's FastGA needs a single combined FASTA file for all-vs-all alignment
     // FastGA requires .fa extension to recognize the file format
-    let combined_fasta = tempfile::Builder::new()
-        .suffix(".fa")
-        .tempfile()?;
+    let combined_fasta = tempfile::Builder::new().suffix(".fa").tempfile()?;
     {
         let mut writer = BufWriter::new(&combined_fasta);
         for path in fasta_files {
             let file = File::open(path)?;
             // Use niffler to auto-detect compression
-            let (reader, _format) = niffler::get_reader(Box::new(file))
-                .map_err(|e| io::Error::other(format!("Failed to open reader for '{}': {}", path, e)))?;
+            let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
+                io::Error::other(format!("Failed to open reader for '{}': {}", path, e))
+            })?;
             let reader = BufReader::new(reader);
             for line in reader.lines() {
                 let line: String = line?;
@@ -302,9 +299,7 @@ pub fn build_graph<W: Write>(
                 input_paf
             );
         }
-        let paf_temp = tempfile::Builder::new()
-            .suffix(".paf")
-            .tempfile()?;
+        let paf_temp = tempfile::Builder::new().suffix(".paf").tempfile()?;
         std::fs::copy(input_paf, paf_temp.path())?;
         paf_temp
     } else {
@@ -606,8 +601,12 @@ pub fn build_graph<W: Write>(
         )?;
     }
 
-    let gfa_string = String::from_utf8(gfa_buffer)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Invalid UTF-8 in GFA: {}", e)))?;
+    let gfa_string = String::from_utf8(gfa_buffer).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Invalid UTF-8 in GFA: {}", e),
+        )
+    })?;
 
     // 10) Sort GFA using gfasort's Ygs pipeline (path-guided SGD + grooming + topological sort)
     if config.show_progress {

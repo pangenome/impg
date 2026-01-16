@@ -21,7 +21,10 @@ impl fmt::Debug for AgcIndex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AgcIndex")
             .field("agc_paths", &self.agc_paths)
-            .field("num_decompressors", &self.decompressors.lock().unwrap().len())
+            .field(
+                "num_decompressors",
+                &self.decompressors.lock().unwrap().len(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -43,7 +46,8 @@ impl AgcIndex {
             Arc::clone(arc)
         } else {
             let arc: Arc<str> = s.into();
-            self.interned_strings.insert(s.to_string(), Arc::clone(&arc));
+            self.interned_strings
+                .insert(s.to_string(), Arc::clone(&arc));
             arc
         }
     }
@@ -100,12 +104,14 @@ impl AgcIndex {
                     index.sample_contig_to_agc.insert(key, agc_idx);
 
                     // Key: contig alone (if unique)
-                    index.sample_contig_to_agc
+                    index
+                        .sample_contig_to_agc
                         .entry(contig.clone())
                         .or_insert(agc_idx);
 
                     // Contig -> (sample, contig, agc_idx) - values use Arc<str>
-                    index.contig_to_sample_info
+                    index
+                        .contig_to_sample_info
                         .entry(contig.clone())
                         .or_insert((Arc::clone(&sample_arc), Arc::clone(&contig_arc), agc_idx));
 
@@ -113,9 +119,16 @@ impl AgcIndex {
                     let short_contig = Self::extract_short_contig_name(&contig);
                     if short_contig != contig {
                         let short_key = format!("{short_contig}@{sample}");
-                        index.sample_contig_to_agc.entry(short_key).or_insert(agc_idx);
-                        index.sample_contig_to_agc.entry(short_contig.to_string()).or_insert(agc_idx);
-                        index.contig_to_sample_info
+                        index
+                            .sample_contig_to_agc
+                            .entry(short_key)
+                            .or_insert(agc_idx);
+                        index
+                            .sample_contig_to_agc
+                            .entry(short_contig.to_string())
+                            .or_insert(agc_idx);
+                        index
+                            .contig_to_sample_info
                             .entry(short_contig.to_string())
                             .or_insert((Arc::clone(&sample_arc), Arc::clone(&contig_arc), agc_idx));
                     }
@@ -143,7 +156,9 @@ impl AgcIndex {
         if let Some((contig, sample)) = seq_name.split_once('@') {
             let agc_idx = self.sample_contig_to_agc.get(seq_name).copied();
             (sample.to_string(), contig.to_string(), agc_idx)
-        } else if let Some((sample, full_contig, agc_idx)) = self.contig_to_sample_info.get(seq_name) {
+        } else if let Some((sample, full_contig, agc_idx)) =
+            self.contig_to_sample_info.get(seq_name)
+        {
             (sample.to_string(), full_contig.to_string(), Some(*agc_idx))
         } else {
             (String::new(), seq_name.to_string(), None)
@@ -197,9 +212,7 @@ impl AgcIndex {
         let length = decompressors[agc_idx]
             .get_contig_length(&sample, &contig)
             .map_err(|e| {
-                io::Error::other(format!(
-                    "Failed to get length for '{contig}@{sample}': {e}"
-                ))
+                io::Error::other(format!("Failed to get length for '{contig}@{sample}': {e}"))
             })?;
 
         Ok(length)

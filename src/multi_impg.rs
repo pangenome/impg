@@ -10,11 +10,11 @@ use crate::impg_index::ImpgIndex;
 use crate::seqidx::SequenceIndex;
 use crate::sequence_index::UnifiedSequenceIndex;
 use crate::subset_filter::SubsetFilter;
-use serde::{Deserialize, Serialize};
 use coitrees::{BasicCOITree, Interval};
 use log::{debug, info, warn};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -233,13 +233,21 @@ impl MultiImpg {
             match MultiImpgCache::load(&cache_path) {
                 Ok(cache) => {
                     if cache.is_valid(index_paths, list_file)? {
-                        return Self::from_cache(cache, index_paths, alignment_files, sequence_files);
+                        return Self::from_cache(
+                            cache,
+                            index_paths,
+                            alignment_files,
+                            sequence_files,
+                        );
                     } else {
                         info!("Cache stale, rebuilding...");
                     }
                 }
                 Err(e) => {
-                    warn!("Failed to load cache {:?}: {}, rebuilding...", cache_path, e);
+                    warn!(
+                        "Failed to load cache {:?}: {}, rebuilding...",
+                        cache_path, e
+                    );
                 }
             }
         }
@@ -269,7 +277,10 @@ impl MultiImpg {
             .unified_forest_map
             .into_iter()
             .map(|(target_id, locs)| {
-                (target_id, locs.into_iter().map(TreeLocation::from).collect())
+                (
+                    target_id,
+                    locs.into_iter().map(TreeLocation::from).collect(),
+                )
             })
             .collect();
 
@@ -314,9 +325,7 @@ impl MultiImpg {
         let unified_forest_map: Vec<(u32, Vec<TreeLocationSer>)> = self
             .forest_map
             .iter()
-            .map(|(&target_id, locs)| {
-                (target_id, locs.iter().map(TreeLocationSer::from).collect())
-            })
+            .map(|(&target_id, locs)| (target_id, locs.iter().map(TreeLocationSer::from).collect()))
             .collect();
 
         let cache = MultiImpgCache {
@@ -409,8 +418,12 @@ impl MultiImpg {
 
         let file = File::open(path)?;
         let reader = BufReader::new(file);
-        let impg =
-            Impg::load_from_file(reader, &alignment_files, path.to_string_lossy().to_string(), seq_files)?;
+        let impg = Impg::load_from_file(
+            reader,
+            &alignment_files,
+            path.to_string_lossy().to_string(),
+            seq_files,
+        )?;
         let impg = Arc::new(impg);
 
         // Store in cache
@@ -468,7 +481,14 @@ impl MultiImpg {
     ) -> Vec<AdjustedInterval> {
         let locations = match self.forest_map.get(&unified_target_id) {
             Some(locs) => locs,
-            None => return vec![self.make_self_interval(unified_target_id, range_start, range_end, store_cigar)],
+            None => {
+                return vec![self.make_self_interval(
+                    unified_target_id,
+                    range_start,
+                    range_end,
+                    store_cigar,
+                )]
+            }
         };
 
         // Query all relevant sub-indices in parallel
@@ -530,7 +550,10 @@ impl MultiImpg {
 
         // If we never saw a self-interval, add one
         if !seen_self {
-            final_results.insert(0, self.make_self_interval(unified_target_id, range_start, range_end, store_cigar));
+            final_results.insert(
+                0,
+                self.make_self_interval(unified_target_id, range_start, range_end, store_cigar),
+            );
         }
 
         // Sort results for deterministic ordering (excluding the self-interval which should stay first)
@@ -708,10 +731,7 @@ impl ImpgIndex for MultiImpg {
         )
     }
 
-    fn get_or_load_tree(
-        &self,
-        target_id: u32,
-    ) -> Option<Arc<BasicCOITree<QueryMetadata, u32>>> {
+    fn get_or_load_tree(&self, target_id: u32) -> Option<Arc<BasicCOITree<QueryMetadata, u32>>> {
         // For MultiImpg, we can't return a single tree since multiple indices
         // may have data for the same target. Return None and let callers use query().
         // This is only used by stats and similarity commands which may need adaptation.
@@ -791,20 +811,24 @@ impl MultiImpg {
 
         // Add filtered input ranges
         for (filtered_start, filtered_end) in filtered_input_range {
-            results.push(self.make_self_interval(target_id, filtered_start, filtered_end, store_cigar));
+            results.push(self.make_self_interval(
+                target_id,
+                filtered_start,
+                filtered_end,
+                store_cigar,
+            ));
 
             if (filtered_start - filtered_end).abs() >= min_transitive_len {
                 stack.push_back((target_id, filtered_start, filtered_end, 0));
             }
         }
 
-        while let Some((current_target_id, current_start, current_end, current_depth)) =
-            if use_dfs {
-                stack.pop_back()  // DFS: pop from back (LIFO) - O(1)
-            } else {
-                stack.pop_front()  // BFS: pop from front (FIFO) - O(1) with VecDeque
-            }
+        while let Some((current_target_id, current_start, current_end, current_depth)) = if use_dfs
         {
+            stack.pop_back() // DFS: pop from back (LIFO) - O(1)
+        } else {
+            stack.pop_front() // BFS: pop from front (FIFO) - O(1) with VecDeque
+        } {
             if max_depth > 0 && current_depth >= max_depth {
                 continue;
             }
@@ -849,7 +873,8 @@ impl MultiImpg {
                 }
 
                 // Normalize coordinates
-                let (adjusted_query_start, adjusted_query_end) = if result.0.first <= result.0.last {
+                let (adjusted_query_start, adjusted_query_end) = if result.0.first <= result.0.last
+                {
                     (result.0.first, result.0.last)
                 } else {
                     (result.0.last, result.0.first)
@@ -924,7 +949,8 @@ impl MultiImpg {
             let mut write = 0;
             for read in 1..slice.len() {
                 if slice[write].0 == slice[read].0 &&   // Same sequence_id
-                    slice[write].2 >= slice[read].1     // Overlapping or contiguous
+                    slice[write].2 >= slice[read].1
+                // Overlapping or contiguous
                 {
                     // Merge by extending end
                     slice[write].2 = slice[write].2.max(slice[read].2);
@@ -998,7 +1024,10 @@ impl MultiImpgCache {
         for (entry, path) in self.manifest.iter().zip(index_paths) {
             let path_str = path.to_string_lossy().to_string();
             if entry.path != path_str {
-                debug!("Cache invalid: path mismatch '{}' vs '{}'", entry.path, path_str);
+                debug!(
+                    "Cache invalid: path mismatch '{}' vs '{}'",
+                    entry.path, path_str
+                );
                 return Ok(false);
             }
 

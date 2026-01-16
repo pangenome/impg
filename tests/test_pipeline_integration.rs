@@ -34,9 +34,7 @@ fn get_impg_binary() -> PathBuf {
 
 fn decompress_gz(gz_path: &PathBuf, out_path: &PathBuf) -> std::io::Result<()> {
     // Use zcat which handles both standard gzip and BGZIP
-    let output = Command::new("zcat")
-        .arg(gz_path)
-        .output()?;
+    let output = Command::new("zcat").arg(gz_path).output()?;
     if !output.status.success() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Other,
@@ -50,7 +48,10 @@ fn decompress_gz(gz_path: &PathBuf, out_path: &PathBuf) -> std::io::Result<()> {
 
 fn run_impg(work_dir: &PathBuf, args: &[&str]) -> std::io::Result<std::process::Output> {
     let impg = get_impg_binary();
-    Command::new(&impg).current_dir(work_dir).args(args).output()
+    Command::new(&impg)
+        .current_dir(work_dir)
+        .args(args)
+        .output()
 }
 
 #[test]

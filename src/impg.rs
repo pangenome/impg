@@ -9,7 +9,6 @@ use crate::sequence_index::SequenceIndex as _; // The as _ syntax imports the tr
 use crate::sequence_index::UnifiedSequenceIndex;
 use crate::subset_filter::SubsetFilter;
 use coitrees::{BasicCOITree, Interval, IntervalTree};
-use tracepoints::tracepoints_to_cigar_fastga_with_aligner;
 use lib_wfa2::affine_wavefront::{AffineWavefronts, Distance};
 use log::{debug, warn};
 use onecode::OneFile;
@@ -21,6 +20,7 @@ use std::cmp::{max, min};
 use std::fs::File;
 use std::io::{self, BufReader, Seek, SeekFrom};
 use std::sync::{Arc, RwLock};
+use tracepoints::tracepoints_to_cigar_fastga_with_aligner;
 
 // use libc;
 // fn log_memory_usage(label: &str) {
@@ -837,7 +837,6 @@ impl Impg {
 
         // Try subsetting approach for .1aln files
         if let (true, Some(sequence_index)) = (is_onealn, sequence_index) {
-
             // Fetch alignment with tracepoints
             let alignment = self.get_onealn_alignment(metadata).unwrap_or_else(|e| {
                 panic!("Subsetting failed: cannot fetch .1aln alignment: {}", e)
@@ -1232,19 +1231,19 @@ impl Impg {
                         // Skip self-alignments to avoid duplicates
                         if bidirectional && record.query_id != record.target_id {
                             let mut reversed_metadata = QueryMetadata {
-                                query_id: record.target_id,                 // SWAPPED
-                                target_start: record.query_start as i32,    // SWAPPED
-                                target_end: record.query_end as i32,        // SWAPPED
-                                query_start: record.target_start as i32,    // SWAPPED
-                                query_end: record.target_end as i32,        // SWAPPED
+                                query_id: record.target_id,              // SWAPPED
+                                target_start: record.query_start as i32, // SWAPPED
+                                target_end: record.query_end as i32,     // SWAPPED
+                                query_start: record.target_start as i32, // SWAPPED
+                                query_end: record.target_end as i32,     // SWAPPED
                                 alignment_file_index: file_index as u32,
                                 strand_and_data_offset: record.strand_and_data_offset,
                                 data_bytes: record.data_bytes,
                             };
-                            reversed_metadata.set_reversed();  // Mark with REVERSED_BIT
+                            reversed_metadata.set_reversed(); // Mark with REVERSED_BIT
 
                             entries.push((
-                                record.query_id,  // NOW indexed by original query_id
+                                record.query_id, // NOW indexed by original query_id
                                 Interval {
                                     first: record.query_start as i32,
                                     last: record.query_end as i32,
@@ -1801,36 +1800,40 @@ impl Impg {
                                 min_gap_compressed_identity,
                             )
                         };
-                        projection_result.and_then(|(query_interval, cigar_ops, target_interval)| {
-                            let query_id = query_interval.metadata;
+                        projection_result.and_then(
+                            |(query_interval, cigar_ops, target_interval)| {
+                                let query_id = query_interval.metadata;
 
-                            // Apply subset filter: keep if it's the target or matches the filter
-                            let should_keep = if let Some(filter) = subset_filter {
-                                query_id == target_id ||
-                                self.seq_index
-                                    .get_name(query_id)
-                                    .is_some_and(|name| filter.matches(name))
-                            } else {
-                                true
-                            };
+                                // Apply subset filter: keep if it's the target or matches the filter
+                                let should_keep = if let Some(filter) = subset_filter {
+                                    query_id == target_id
+                                        || self
+                                            .seq_index
+                                            .get_name(query_id)
+                                            .is_some_and(|name| filter.matches(name))
+                                } else {
+                                    true
+                                };
 
-                            if should_keep {
-                                let adjusted_query_start = query_interval.first;
-                                let adjusted_query_end = query_interval.last;
-                                let cigar_vec = if store_cigar { cigar_ops } else { Vec::new() };
+                                if should_keep {
+                                    let adjusted_query_start = query_interval.first;
+                                    let adjusted_query_end = query_interval.last;
+                                    let cigar_vec =
+                                        if store_cigar { cigar_ops } else { Vec::new() };
 
-                                Some((
-                                    query_interval,
-                                    cigar_vec,
-                                    target_interval,
-                                    query_id,
-                                    adjusted_query_start,
-                                    adjusted_query_end,
-                                ))
-                            } else {
-                                None
-                            }
-                        })
+                                    Some((
+                                        query_interval,
+                                        cigar_vec,
+                                        target_interval,
+                                        query_id,
+                                        adjusted_query_start,
+                                        adjusted_query_end,
+                                    ))
+                                } else {
+                                    None
+                                }
+                            },
+                        )
                     })
                     .collect();
 
@@ -2061,17 +2064,21 @@ impl Impg {
 
                                             // Apply subset filter: keep if it's the target or matches the filter
                                             let should_keep = if let Some(filter) = subset_filter {
-                                                query_id == target_id ||
-                                                self.seq_index
-                                                    .get_name(query_id)
-                                                    .is_some_and(|name| filter.matches(name))
+                                                query_id == target_id
+                                                    || self
+                                                        .seq_index
+                                                        .get_name(query_id)
+                                                        .is_some_and(|name| filter.matches(name))
                                             } else {
                                                 true
                                             };
 
                                             if should_keep {
-                                                let cigar_vec =
-                                                    if store_cigar { cigar_ops } else { Vec::new() };
+                                                let cigar_vec = if store_cigar {
+                                                    cigar_ops
+                                                } else {
+                                                    Vec::new()
+                                                };
 
                                                 local_results.push((
                                                     query_id,
@@ -2365,10 +2372,7 @@ impl ImpgIndex for Impg {
         )
     }
 
-    fn get_or_load_tree(
-        &self,
-        target_id: u32,
-    ) -> Option<Arc<BasicCOITree<QueryMetadata, u32>>> {
+    fn get_or_load_tree(&self, target_id: u32) -> Option<Arc<BasicCOITree<QueryMetadata, u32>>> {
         Impg::get_or_load_tree(self, target_id)
     }
 

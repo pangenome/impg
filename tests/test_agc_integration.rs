@@ -16,11 +16,11 @@ fn test_agc_vs_fasta_same_content() -> io::Result<()> {
     // to avoid depending on library-specific ordering when contig names are duplicated
     let test_cases = vec![
         // (agc_query, fasta_file, fasta_contig, start, end)
-        ("chr1@ref", "ref.fa", "chr1", 0, 10),      // First 10 bp of chr1 from ref
-        ("chr1@ref", "ref.fa", "chr1", 5, 15),      // Middle section of chr1 from ref
-        ("chr1@b", "b.fa", "chr1", 0, 9),           // chr1 from sample b (9 bp)
-        ("chr1a", "a.fa", "chr1a", 0, 5),           // chr1a from sample a (unique)
-        ("1", "c.fa", "1", 0, 10),                  // sequence "1" from sample c (unique)
+        ("chr1@ref", "ref.fa", "chr1", 0, 10), // First 10 bp of chr1 from ref
+        ("chr1@ref", "ref.fa", "chr1", 5, 15), // Middle section of chr1 from ref
+        ("chr1@b", "b.fa", "chr1", 0, 9),      // chr1 from sample b (9 bp)
+        ("chr1a", "a.fa", "chr1a", 0, 5),      // chr1a from sample a (unique)
+        ("1", "c.fa", "1", 0, 10),             // sequence "1" from sample c (unique)
     ];
 
     for (agc_query, fasta_file, fasta_contig, start, end) in test_cases {

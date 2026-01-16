@@ -34,7 +34,10 @@ fn get_impg_binary() -> PathBuf {
 
 fn run_impg(work_dir: &PathBuf, args: &[&str]) -> std::io::Result<std::process::Output> {
     let impg = get_impg_binary();
-    Command::new(&impg).current_dir(work_dir).args(args).output()
+    Command::new(&impg)
+        .current_dir(work_dir)
+        .args(args)
+        .output()
 }
 
 fn create_paf_file(work_dir: &PathBuf, name: &str, alignments: &[&str]) -> PathBuf {
@@ -87,13 +90,25 @@ fn test_non_overlapping_regions_stay_separate() {
     // Query A:0-100 - should find A and B only
     let output = run_impg(
         &work_dir,
-        &["query", "-i", "test.impg", "-a", "test.paf", "-r", "A:0-100", "-x"],
+        &[
+            "query",
+            "-i",
+            "test.impg",
+            "-a",
+            "test.paf",
+            "-r",
+            "A:0-100",
+            "-x",
+        ],
     )
     .unwrap();
     assert!(output.status.success());
     let results = parse_query_output(&String::from_utf8_lossy(&output.stdout));
 
-    let seq_names: HashSet<_> = results.iter().map(|(name, _, _, _)| name.as_str()).collect();
+    let seq_names: HashSet<_> = results
+        .iter()
+        .map(|(name, _, _, _)| name.as_str())
+        .collect();
     assert!(seq_names.contains("A"), "Should contain source A");
     assert!(seq_names.contains("B"), "Should contain aligned B");
     assert!(!seq_names.contains("C"), "Should NOT contain unrelated C");
@@ -101,13 +116,25 @@ fn test_non_overlapping_regions_stay_separate() {
     // Query A:500-600 - should find A and C only
     let output = run_impg(
         &work_dir,
-        &["query", "-i", "test.impg", "-a", "test.paf", "-r", "A:500-600", "-x"],
+        &[
+            "query",
+            "-i",
+            "test.impg",
+            "-a",
+            "test.paf",
+            "-r",
+            "A:500-600",
+            "-x",
+        ],
     )
     .unwrap();
     assert!(output.status.success());
     let results = parse_query_output(&String::from_utf8_lossy(&output.stdout));
 
-    let seq_names: HashSet<_> = results.iter().map(|(name, _, _, _)| name.as_str()).collect();
+    let seq_names: HashSet<_> = results
+        .iter()
+        .map(|(name, _, _, _)| name.as_str())
+        .collect();
     assert!(seq_names.contains("A"), "Should contain source A");
     assert!(seq_names.contains("C"), "Should contain aligned C");
     assert!(!seq_names.contains("B"), "Should NOT contain unrelated B");
@@ -134,7 +161,18 @@ fn test_transitive_coordinate_accuracy() {
     // Query A:25-75 with transitive (use --min-transitive-len 0 for small test regions)
     let output = run_impg(
         &work_dir,
-        &["query", "-i", "test.impg", "-a", "test.paf", "-r", "A:25-75", "-x", "--min-transitive-len", "0"],
+        &[
+            "query",
+            "-i",
+            "test.impg",
+            "-a",
+            "test.paf",
+            "-r",
+            "A:25-75",
+            "-x",
+            "--min-transitive-len",
+            "0",
+        ],
     )
     .unwrap();
     assert!(output.status.success());
@@ -146,7 +184,10 @@ fn test_transitive_coordinate_accuracy() {
         assert!(
             length <= 55 && length >= 45, // Allow small variation due to projection
             "Region on {} should be ~50bp, got {}-{} ({}bp)",
-            name, start, end, length
+            name,
+            start,
+            end,
+            length
         );
 
         // Coordinates should be roughly 25-75, not 0-100
@@ -154,12 +195,14 @@ fn test_transitive_coordinate_accuracy() {
             assert!(
                 *start >= 20 && *start <= 30,
                 "Start on {} should be ~25, got {}",
-                name, start
+                name,
+                start
             );
             assert!(
                 *end >= 70 && *end <= 80,
                 "End on {} should be ~75, got {}",
-                name, end
+                name,
+                end
             );
         }
     }
@@ -175,9 +218,7 @@ fn test_bidirectional_symmetry() {
     let temp_dir = TempDir::new().unwrap();
     let work_dir = temp_dir.path().to_path_buf();
 
-    let alignments = [
-        "A\t1000\t0\t100\t+\tB\t1000\t200\t300\t100\t100\t60\tcg:Z:100=",
-    ];
+    let alignments = ["A\t1000\t0\t100\t+\tB\t1000\t200\t300\t100\t100\t60\tcg:Z:100="];
     create_paf_file(&work_dir, "test.paf", &alignments);
 
     let output = run_impg(&work_dir, &["index", "-a", "test.paf", "-i", "test.impg"]).unwrap();
@@ -186,7 +227,15 @@ fn test_bidirectional_symmetry() {
     // Query A:0-100 should find B:200-300
     let output = run_impg(
         &work_dir,
-        &["query", "-i", "test.impg", "-a", "test.paf", "-r", "A:0-100"],
+        &[
+            "query",
+            "-i",
+            "test.impg",
+            "-a",
+            "test.paf",
+            "-r",
+            "A:0-100",
+        ],
     )
     .unwrap();
     assert!(output.status.success());
@@ -201,7 +250,15 @@ fn test_bidirectional_symmetry() {
     // Query B:200-300 should find A:0-100
     let output = run_impg(
         &work_dir,
-        &["query", "-i", "test.impg", "-a", "test.paf", "-r", "B:200-300"],
+        &[
+            "query",
+            "-i",
+            "test.impg",
+            "-a",
+            "test.paf",
+            "-r",
+            "B:200-300",
+        ],
     )
     .unwrap();
     assert!(output.status.success());
@@ -224,9 +281,7 @@ fn test_reverse_strand_coordinates() {
     let temp_dir = TempDir::new().unwrap();
     let work_dir = temp_dir.path().to_path_buf();
 
-    let alignments = [
-        "A\t1000\t0\t100\t-\tB\t1000\t0\t100\t100\t100\t60\tcg:Z:100=",
-    ];
+    let alignments = ["A\t1000\t0\t100\t-\tB\t1000\t0\t100\t100\t100\t60\tcg:Z:100="];
     create_paf_file(&work_dir, "test.paf", &alignments);
 
     let output = run_impg(&work_dir, &["index", "-a", "test.paf", "-i", "test.impg"]).unwrap();
@@ -235,7 +290,17 @@ fn test_reverse_strand_coordinates() {
     // Query A:0-50 on reverse strand alignment
     let output = run_impg(
         &work_dir,
-        &["query", "-i", "test.impg", "-a", "test.paf", "-r", "A:0-50", "--min-transitive-len", "0"],
+        &[
+            "query",
+            "-i",
+            "test.impg",
+            "-a",
+            "test.paf",
+            "-r",
+            "A:0-50",
+            "--min-transitive-len",
+            "0",
+        ],
     )
     .unwrap();
     assert!(output.status.success());
@@ -251,7 +316,8 @@ fn test_reverse_strand_coordinates() {
     assert!(
         b_midpoint >= 50,
         "Reverse strand: A:0-50 should map to upper half of B, got {}-{}",
-        b_start, b_end
+        b_start,
+        b_end
     );
 }
 
@@ -283,13 +349,27 @@ fn test_distant_regions_no_collapse() {
     // Query A:0-100 - should find D:0-100 via B, but NOT D:500-600
     let output = run_impg(
         &work_dir,
-        &["query", "-i", "test.impg", "-a", "test.paf", "-r", "A:0-100", "-x", "-m", "3"],
+        &[
+            "query",
+            "-i",
+            "test.impg",
+            "-a",
+            "test.paf",
+            "-r",
+            "A:0-100",
+            "-x",
+            "-m",
+            "3",
+        ],
     )
     .unwrap();
     assert!(output.status.success());
     let results = parse_query_output(&String::from_utf8_lossy(&output.stdout));
 
-    let d_results: Vec<_> = results.iter().filter(|(name, _, _, _)| name == "D").collect();
+    let d_results: Vec<_> = results
+        .iter()
+        .filter(|(name, _, _, _)| name == "D")
+        .collect();
 
     // Should find D, and the coordinates should be around 0-100, NOT 500-600
     assert!(!d_results.is_empty(), "Should find D via transitive path");
@@ -297,27 +377,43 @@ fn test_distant_regions_no_collapse() {
         assert!(
             *start < 200,
             "D region from A:0-100 path should be near 0, got {}-{}",
-            start, end
+            start,
+            end
         );
     }
 
     // Query A:1000-1100 - should find D:500-600 via C, but NOT D:0-100
     let output = run_impg(
         &work_dir,
-        &["query", "-i", "test.impg", "-a", "test.paf", "-r", "A:1000-1100", "-x", "-m", "3"],
+        &[
+            "query",
+            "-i",
+            "test.impg",
+            "-a",
+            "test.paf",
+            "-r",
+            "A:1000-1100",
+            "-x",
+            "-m",
+            "3",
+        ],
     )
     .unwrap();
     assert!(output.status.success());
     let results = parse_query_output(&String::from_utf8_lossy(&output.stdout));
 
-    let d_results: Vec<_> = results.iter().filter(|(name, _, _, _)| name == "D").collect();
+    let d_results: Vec<_> = results
+        .iter()
+        .filter(|(name, _, _, _)| name == "D")
+        .collect();
 
     assert!(!d_results.is_empty(), "Should find D via transitive path");
     for (_, start, end, _) in d_results {
         assert!(
             *start >= 400,
             "D region from A:1000-1100 path should be near 500, got {}-{}",
-            start, end
+            start,
+            end
         );
     }
 }
@@ -335,9 +431,7 @@ fn test_indel_coordinate_accuracy() {
     //   - A:0-50 → B:0-50 (50 matches)
     //   - A:50-60 is an insertion (10bp in A, not in B)
     //   - A:60-110 → B:50-100 (50 matches)
-    let alignments = [
-        "A\t1000\t0\t110\t+\tB\t1000\t0\t100\t100\t110\t60\tcg:Z:50=10I50=",
-    ];
+    let alignments = ["A\t1000\t0\t110\t+\tB\t1000\t0\t100\t100\t110\t60\tcg:Z:50=10I50="];
     create_paf_file(&work_dir, "test.paf", &alignments);
 
     let output = run_impg(&work_dir, &["index", "-a", "test.paf", "-i", "test.impg"]).unwrap();
@@ -346,7 +440,17 @@ fn test_indel_coordinate_accuracy() {
     // Query A:0-50 - should map to B:0-50 (before the insertion)
     let output = run_impg(
         &work_dir,
-        &["query", "-i", "test.impg", "-a", "test.paf", "-r", "A:0-50", "--min-transitive-len", "0"],
+        &[
+            "query",
+            "-i",
+            "test.impg",
+            "-a",
+            "test.paf",
+            "-r",
+            "A:0-50",
+            "--min-transitive-len",
+            "0",
+        ],
     )
     .unwrap();
     assert!(output.status.success());
@@ -358,13 +462,24 @@ fn test_indel_coordinate_accuracy() {
     assert!(
         *b_start <= 5 && *b_end >= 45 && *b_end <= 55,
         "A:0-50 before insertion should map to B:0-50, got {}-{}",
-        b_start, b_end
+        b_start,
+        b_end
     );
 
     // Query A:60-110 - should map to B:50-100 (after the insertion)
     let output = run_impg(
         &work_dir,
-        &["query", "-i", "test.impg", "-a", "test.paf", "-r", "A:60-110", "--min-transitive-len", "0"],
+        &[
+            "query",
+            "-i",
+            "test.impg",
+            "-a",
+            "test.paf",
+            "-r",
+            "A:60-110",
+            "--min-transitive-len",
+            "0",
+        ],
     )
     .unwrap();
     assert!(output.status.success());
@@ -376,7 +491,8 @@ fn test_indel_coordinate_accuracy() {
     assert!(
         *b_start >= 45 && *b_start <= 55 && *b_end >= 95,
         "A:60-110 after insertion should map to B:50-100, got {}-{}",
-        b_start, b_end
+        b_start,
+        b_end
     );
 }
 
@@ -401,17 +517,29 @@ fn test_multiple_alignments_stay_separate() {
 
     let output = run_impg(
         &work_dir,
-        &["query", "-i", "test.impg", "-a", "test.paf", "-r", "A:0-100"],
+        &[
+            "query",
+            "-i",
+            "test.impg",
+            "-a",
+            "test.paf",
+            "-r",
+            "A:0-100",
+        ],
     )
     .unwrap();
     assert!(output.status.success());
     let results = parse_query_output(&String::from_utf8_lossy(&output.stdout));
 
-    let b_results: Vec<_> = results.iter().filter(|(name, _, _, _)| name == "B").collect();
+    let b_results: Vec<_> = results
+        .iter()
+        .filter(|(name, _, _, _)| name == "B")
+        .collect();
 
     // Should have TWO separate B results
     assert_eq!(
-        b_results.len(), 2,
+        b_results.len(),
+        2,
         "Should have 2 separate B alignments, got {}",
         b_results.len()
     );
@@ -419,7 +547,8 @@ fn test_multiple_alignments_stay_separate() {
     // They should be at different positions
     let positions: HashSet<_> = b_results.iter().map(|(_, start, _, _)| *start).collect();
     assert_eq!(
-        positions.len(), 2,
+        positions.len(),
+        2,
         "The two B results should be at different positions"
     );
 }
@@ -446,10 +575,17 @@ fn test_partition_window_separation() {
     let output = run_impg(
         &work_dir,
         &[
-            "partition", "-a", "test.paf", "-i", "test.impg",
-            "-w", "2000",  // Window size
-            "-o", "bed",
-            "--reference-fai", "A\t10000",
+            "partition",
+            "-a",
+            "test.paf",
+            "-i",
+            "test.impg",
+            "-w",
+            "2000", // Window size
+            "-o",
+            "bed",
+            "--reference-fai",
+            "A\t10000",
         ],
     );
 
@@ -476,9 +612,7 @@ fn test_empty_query_region() {
     let temp_dir = TempDir::new().unwrap();
     let work_dir = temp_dir.path().to_path_buf();
 
-    let alignments = [
-        "A\t1000\t0\t100\t+\tB\t1000\t0\t100\t100\t100\t60\tcg:Z:100=",
-    ];
+    let alignments = ["A\t1000\t0\t100\t+\tB\t1000\t0\t100\t100\t100\t60\tcg:Z:100="];
     create_paf_file(&work_dir, "test.paf", &alignments);
 
     let output = run_impg(&work_dir, &["index", "-a", "test.paf", "-i", "test.impg"]).unwrap();
@@ -487,7 +621,15 @@ fn test_empty_query_region() {
     // Query A:500-600 - a region with no alignments
     let output = run_impg(
         &work_dir,
-        &["query", "-i", "test.impg", "-a", "test.paf", "-r", "A:500-600"],
+        &[
+            "query",
+            "-i",
+            "test.impg",
+            "-a",
+            "test.paf",
+            "-r",
+            "A:500-600",
+        ],
     )
     .unwrap();
     assert!(output.status.success());
@@ -520,13 +662,27 @@ fn test_transitive_depth_limit() {
     // Query with max_depth=1 - should find A, B only
     let output = run_impg(
         &work_dir,
-        &["query", "-i", "test.impg", "-a", "test.paf", "-r", "A:0-100", "-x", "-m", "1"],
+        &[
+            "query",
+            "-i",
+            "test.impg",
+            "-a",
+            "test.paf",
+            "-r",
+            "A:0-100",
+            "-x",
+            "-m",
+            "1",
+        ],
     )
     .unwrap();
     assert!(output.status.success());
     let results = parse_query_output(&String::from_utf8_lossy(&output.stdout));
 
-    let seq_names: HashSet<_> = results.iter().map(|(name, _, _, _)| name.as_str()).collect();
+    let seq_names: HashSet<_> = results
+        .iter()
+        .map(|(name, _, _, _)| name.as_str())
+        .collect();
     assert!(seq_names.contains("A"), "Should contain A");
     assert!(seq_names.contains("B"), "Should contain B (depth 1)");
     assert!(!seq_names.contains("C"), "Should NOT contain C (depth 2)");
@@ -535,13 +691,27 @@ fn test_transitive_depth_limit() {
     // Query with max_depth=2 - should find A, B, C
     let output = run_impg(
         &work_dir,
-        &["query", "-i", "test.impg", "-a", "test.paf", "-r", "A:0-100", "-x", "-m", "2"],
+        &[
+            "query",
+            "-i",
+            "test.impg",
+            "-a",
+            "test.paf",
+            "-r",
+            "A:0-100",
+            "-x",
+            "-m",
+            "2",
+        ],
     )
     .unwrap();
     assert!(output.status.success());
     let results = parse_query_output(&String::from_utf8_lossy(&output.stdout));
 
-    let seq_names: HashSet<_> = results.iter().map(|(name, _, _, _)| name.as_str()).collect();
+    let seq_names: HashSet<_> = results
+        .iter()
+        .map(|(name, _, _, _)| name.as_str())
+        .collect();
     assert!(seq_names.contains("C"), "Should contain C at depth 2");
     assert!(!seq_names.contains("D"), "Should NOT contain D (depth 3)");
 }

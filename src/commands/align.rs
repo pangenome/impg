@@ -238,7 +238,9 @@ fn sketch_sequence(sequence: &[u8], k: usize, sketch_size: usize) -> Vec<u64> {
         let kmer = &sequence[i..i + k];
 
         // Skip k-mers with non-ACGT characters
-        if kmer.iter().any(|&b| !matches!(b, b'A' | b'C' | b'G' | b'T' | b'a' | b'c' | b'g' | b't'))
+        if kmer
+            .iter()
+            .any(|&b| !matches!(b, b'A' | b'C' | b'G' | b'T' | b'a' | b'c' | b'g' | b't'))
         {
             continue;
         }
@@ -464,51 +466,57 @@ fn load_sequences(
 ) -> io::Result<Vec<SequenceInfo>> {
     let sequences = Mutex::new(Vec::new());
 
-    fasta_files.par_iter().try_for_each(|path| -> io::Result<()> {
-        let file = File::open(path)?;
-        let (reader, _format) = niffler::get_reader(Box::new(file))
-            .map_err(|e| io::Error::other(format!("Failed to open {}: {}", path, e)))?;
-        let reader = BufReader::new(reader);
+    fasta_files
+        .par_iter()
+        .try_for_each(|path| -> io::Result<()> {
+            let file = File::open(path)?;
+            let (reader, _format) = niffler::get_reader(Box::new(file))
+                .map_err(|e| io::Error::other(format!("Failed to open {}: {}", path, e)))?;
+            let reader = BufReader::new(reader);
 
-        let mut current_name: Option<String> = None;
-        let mut current_seq = Vec::new();
+            let mut current_name: Option<String> = None;
+            let mut current_seq = Vec::new();
 
-        for line in reader.lines() {
-            let line = line?;
-            if let Some(header) = line.strip_prefix('>') {
-                // Process previous sequence
-                if let Some(name) = current_name.take() {
-                    let sketch = sketch_sequence(&current_seq, kmer_size, sketch_size);
-                    sequences.lock().unwrap().push(SequenceInfo {
-                        name,
-                        path: path.clone(),
-                        sketch,
-                    });
+            for line in reader.lines() {
+                let line = line?;
+                if let Some(header) = line.strip_prefix('>') {
+                    // Process previous sequence
+                    if let Some(name) = current_name.take() {
+                        let sketch = sketch_sequence(&current_seq, kmer_size, sketch_size);
+                        sequences.lock().unwrap().push(SequenceInfo {
+                            name,
+                            path: path.clone(),
+                            sketch,
+                        });
+                    }
+                    current_name = Some(header.split_whitespace().next().unwrap_or("").to_string());
+                    current_seq.clear();
+                } else {
+                    current_seq.extend(line.trim().as_bytes());
                 }
-                current_name = Some(header.split_whitespace().next().unwrap_or("").to_string());
-                current_seq.clear();
-            } else {
-                current_seq.extend(line.trim().as_bytes());
             }
-        }
 
-        // Don't forget last sequence
-        if let Some(name) = current_name {
-            let sketch = sketch_sequence(&current_seq, kmer_size, sketch_size);
-            sequences.lock().unwrap().push(SequenceInfo {
-                name,
-                path: path.clone(),
-                sketch,
-            });
-        }
+            // Don't forget last sequence
+            if let Some(name) = current_name {
+                let sketch = sketch_sequence(&current_seq, kmer_size, sketch_size);
+                sequences.lock().unwrap().push(SequenceInfo {
+                    name,
+                    path: path.clone(),
+                    sketch,
+                });
+            }
 
-        Ok(())
-    })?;
+            Ok(())
+        })?;
 
     let mut result = sequences.into_inner().unwrap();
 
     if show_progress {
-        info!("Loaded {} sequences from {} files", result.len(), fasta_files.len());
+        info!(
+            "Loaded {} sequences from {} files",
+            result.len(),
+            fasta_files.len()
+        );
     }
 
     // Sort by name for reproducibility
