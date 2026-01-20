@@ -850,14 +850,14 @@ dependencies = [
 [[package]]
 name = "fastga-rs"
 version = "0.1.2"
-source = "git+https://github.com/pangenome/fastga-rs#9e1d11019140db7c801c5bc7a7f9d47e70288090"
+source = "git+https://github.com/pangenome/fastga-rs?rev=7d01c36#7d01c36bf270cfefc4eaff1af75ce924db6b27ce"
 dependencies = [
  "anyhow",
  "cc",
  "libc",
  "nix",
  "num_cpus",
- "onecode 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "onecode 0.1.0 (git+https://github.com/pangenome/onecode-rs)",
  "pkg-config",
  "tempfile",
  "thiserror 1.0.69",
@@ -1820,8 +1820,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "onecode"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c58555aa93237650330e6f87e5c020d8eb16dd9ae2291f4e6519bb1aaf3cd791"
+source = "git+https://github.com/pangenome/onecode-rs?rev=38182c7acf7cccc53509176b1d11001ae6ff2642#38182c7acf7cccc53509176b1d11001ae6ff2642"
 dependencies = [
  "bindgen",
  "cc",
@@ -1831,9 +1830,17 @@ dependencies = [
 [[package]]
 name = "onecode"
 version = "0.1.0"
-source = "git+https://github.com/pangenome/onecode-rs?rev=38182c7acf7cccc53509176b1d11001ae6ff2642#38182c7acf7cccc53509176b1d11001ae6ff2642"
+source = "git+https://github.com/pangenome/onecode-rs?rev=f531f5b#f531f5b0ff54001a898ec4e0c0c761b2bd0a1f34"
 dependencies = [
- "bindgen",
+ "cc",
+ "libc",
+]
+
+[[package]]
+name = "onecode"
+version = "0.1.0"
+source = "git+https://github.com/pangenome/onecode-rs#f531f5b0ff54001a898ec4e0c0c761b2bd0a1f34"
+dependencies = [
  "cc",
  "libc",
 ]
@@ -2351,7 +2358,7 @@ checksum = "d4f410fedcf71af0345d7607d246e7ad15faaadd49d240ee3b24e5dc21a820ac"
 [[package]]
 name = "seqwish"
 version = "0.1.3"
-source = "git+https://github.com/ekg/seqwish?rev=81ceb66#81ceb667b2b05eee9e9a9e8378efda987de2e27d"
+source = "git+https://github.com/ekg/seqwish?rev=80c64c8#80c64c8d37ab3a9e2350788b3a977ecfe0f074a4"
 dependencies = [
  "bitvec",
  "cbindgen",
@@ -2369,7 +2376,6 @@ dependencies = [
  "rdst",
  "sucds",
  "uf_rush",
- "vers-vecs",
 ]
 
 [[package]]
@@ -2539,7 +2545,7 @@ dependencies = [
 [[package]]
 name = "sweepga"
 version = "0.1.1"
-source = "git+https://github.com/pangenome/sweepga?rev=d4b551d#d4b551d6e1fc05e3c5027371afb74481b67a1d9e"
+source = "git+https://github.com/pangenome/sweepga?rev=4889c0c#4889c0cb255c2d5b0b08647e5ad025ebdaeaec2e"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -2551,7 +2557,7 @@ dependencies = [
  "libc",
  "nom 7.1.3",
  "noodles",
- "onecode 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "onecode 0.1.0 (git+https://github.com/pangenome/onecode-rs?rev=f531f5b)",
  "ordered-float",
  "ragc-core 0.1.0 (git+https://github.com/ekg/ragc?rev=37af85a)",
  "rand 0.8.5",
