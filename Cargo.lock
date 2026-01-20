@@ -31,6 +31,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -142,6 +148,15 @@ dependencies = [
 
 [[package]]
 name = "bincode"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "bincode"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36eaf5d7b090263e8150820482d5d93cd964a81e4019913c972f4edcc6edb740"
@@ -169,7 +184,7 @@ dependencies = [
  "bitflags 2.10.0",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -560,7 +575,7 @@ dependencies = [
  "clap",
  "criterion-plot",
  "is-terminal",
- "itertools 0.10.5",
+ "itertools",
  "num-traits",
  "once_cell",
  "oorandom",
@@ -581,7 +596,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b50826342786a51a89e2da3a28f1c32b06e387201bc2d19791f622c673706b1"
 dependencies = [
  "cast",
- "itertools 0.10.5",
+ "itertools",
 ]
 
 [[package]]
@@ -725,6 +740,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dashmap"
+version = "6.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
+]
+
+[[package]]
 name = "derive-new"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -821,14 +850,14 @@ dependencies = [
 [[package]]
 name = "fastga-rs"
 version = "0.1.2"
-source = "git+https://github.com/pangenome/fastga-rs?branch=temp-dir#872d95dd211367c45301a53bd970b2ad5d2feb38"
+source = "git+https://github.com/pangenome/fastga-rs?rev=7d01c36#7d01c36bf270cfefc4eaff1af75ce924db6b27ce"
 dependencies = [
  "anyhow",
  "cc",
  "libc",
  "nix",
  "num_cpus",
- "onecode 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "onecode 0.1.0 (git+https://github.com/pangenome/onecode-rs)",
  "pkg-config",
  "tempfile",
  "thiserror 1.0.69",
@@ -1046,6 +1075,16 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
+version = "0.14.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
+dependencies = [
+ "ahash",
+ "allocator-api2",
+]
+
+[[package]]
+name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
@@ -1237,7 +1276,7 @@ dependencies = [
 name = "impg"
 version = "0.4.0"
 dependencies = [
- "bincode",
+ "bincode 2.0.1",
  "bitvec",
  "clap",
  "coitrees",
@@ -1276,7 +1315,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7714e70437a7dc3ac8eb7e6f8df75fd8eb422675fc7678aff7364301092b1017"
 dependencies = [
  "equivalent",
- "hashbrown",
+ "hashbrown 0.16.1",
 ]
 
 [[package]]
@@ -1314,15 +1353,6 @@ name = "itertools"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
 dependencies = [
  "either",
 ]
@@ -1781,8 +1811,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "onecode"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c58555aa93237650330e6f87e5c020d8eb16dd9ae2291f4e6519bb1aaf3cd791"
+source = "git+https://github.com/pangenome/onecode-rs?rev=38182c7acf7cccc53509176b1d11001ae6ff2642#38182c7acf7cccc53509176b1d11001ae6ff2642"
 dependencies = [
  "bindgen",
  "cc",
@@ -1792,9 +1821,17 @@ dependencies = [
 [[package]]
 name = "onecode"
 version = "0.1.0"
-source = "git+https://github.com/pangenome/onecode-rs?rev=38182c7acf7cccc53509176b1d11001ae6ff2642#38182c7acf7cccc53509176b1d11001ae6ff2642"
+source = "git+https://github.com/pangenome/onecode-rs?rev=f531f5b#f531f5b0ff54001a898ec4e0c0c761b2bd0a1f34"
 dependencies = [
- "bindgen",
+ "cc",
+ "libc",
+]
+
+[[package]]
+name = "onecode"
+version = "0.1.0"
+source = "git+https://github.com/pangenome/onecode-rs#f531f5b0ff54001a898ec4e0c0c761b2bd0a1f34"
+dependencies = [
  "cc",
  "libc",
 ]
@@ -1969,6 +2006,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
+name = "ragc-common"
+version = "0.1.0"
+source = "git+https://github.com/ekg/ragc?rev=37af85a#37af85a3a798219315651b1b1515d96b2a7995f9"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "bincode 1.3.3",
+ "byteorder",
+ "hashbrown 0.14.5",
+ "serde",
+ "thiserror 1.0.69",
+ "zstd",
+]
+
+[[package]]
 name = "ragc-core"
 version = "0.1.0"
 source = "git+https://github.com/AndreaGuarracino/ragc?branch=tweaks#10ef4bc5a0d5847a45be8aded7624bce57a3145d"
@@ -1980,12 +2032,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "ragc-core"
+version = "0.1.0"
+source = "git+https://github.com/ekg/ragc?rev=37af85a#37af85a3a798219315651b1b1515d96b2a7995f9"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "bincode 1.3.3",
+ "byteorder",
+ "cc",
+ "crossbeam",
+ "dashmap",
+ "flate2",
+ "hashbrown 0.14.5",
+ "num_cpus",
+ "ragc-common",
+ "rayon",
+ "rdst",
+ "serde",
+ "sha2",
+ "thiserror 1.0.69",
+ "zstd",
+ "zstd-safe",
+]
+
+[[package]]
 name = "ragc-reader"
 version = "0.1.0"
 source = "git+https://github.com/AndreaGuarracino/ragc?branch=tweaks#10ef4bc5a0d5847a45be8aded7624bce57a3145d"
 dependencies = [
  "anyhow",
- "ragc-core",
+ "ragc-core 0.1.0 (git+https://github.com/AndreaGuarracino/ragc?branch=tweaks)",
  "zstd",
 ]
 
@@ -2272,7 +2349,7 @@ checksum = "d4f410fedcf71af0345d7607d246e7ad15faaadd49d240ee3b24e5dc21a820ac"
 [[package]]
 name = "seqwish"
 version = "0.1.3"
-source = "git+https://github.com/ekg/seqwish?rev=81ceb66#81ceb667b2b05eee9e9a9e8378efda987de2e27d"
+source = "git+https://github.com/ekg/seqwish?rev=80c64c8#80c64c8d37ab3a9e2350788b3a977ecfe0f074a4"
 dependencies = [
  "bitvec",
  "cbindgen",
@@ -2290,7 +2367,6 @@ dependencies = [
  "rdst",
  "sucds",
  "uf_rush",
- "vers-vecs",
 ]
 
 [[package]]
@@ -2460,7 +2536,7 @@ dependencies = [
 [[package]]
 name = "sweepga"
 version = "0.1.1"
-source = "git+https://github.com/pangenome/sweepga?rev=608547a#608547a702e6d3d30eb410f8e29c17f3d1a5d165"
+source = "git+https://github.com/pangenome/sweepga?rev=4889c0c#4889c0cb255c2d5b0b08647e5ad025ebdaeaec2e"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -2472,8 +2548,9 @@ dependencies = [
  "libc",
  "nom 7.1.3",
  "noodles",
- "onecode 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "onecode 0.1.0 (git+https://github.com/pangenome/onecode-rs?rev=f531f5b)",
  "ordered-float",
+ "ragc-core 0.1.0 (git+https://github.com/ekg/ragc?rev=37af85a)",
  "rand 0.8.5",
  "rayon",
  "tempfile",
