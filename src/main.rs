@@ -1760,13 +1760,13 @@ fn run() -> io::Result<()> {
 
             // Setup POA/sequence resources (always required for similarity)
             let (sequence_index, scoring_params) = gfa_maf_fasta.setup_output_resources(
-                "gfa",
+                "gfa-poa",
                 false,
                 alignment_files.as_slice(),
                 false,
             )?;
-            let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
-            let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA
+            let sequence_index = sequence_index.unwrap(); // Safe since "gfa-poa" always requires sequence files
+            let scoring_params = scoring_params.unwrap(); // Safe since "gfa-poa" always requires POA
 
             let subset_filter = load_subset_filter_if_provided(&query.subset_sequence_list)?;
 
