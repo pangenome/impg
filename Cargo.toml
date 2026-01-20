@@ -25,7 +25,7 @@ spoa_rs = { git = "https://github.com/AndreaGuarracino/spoa-rs.git" }
 rust-htslib = { version = "0.46.0", default-features = false } # Don't update it, see https://github.com/rust-bio/rust-htslib/issues/434
 
 # Dependencies for AGC format (for sequences) support
-ragc-reader = { git = "https://github.com/AndreaGuarracino/ragc", branch = "tweaks" }
+ragc-core = { git = "https://github.com/ekg/ragc", rev = "40e5cad" }
 
 # Dependencies for 1aln format (for alignments) support
 lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2"}
@@ -44,7 +44,7 @@ zstd = { version = "0.13.3", features = ["zstdmt"] }
 gzp = "1.0.1"
 
 # Dependencies for graph building (sweepga + seqwish integration)
-sweepga = { git = "https://github.com/pangenome/sweepga", rev = "4889c0c", default-features = false }
+sweepga = { git = "https://github.com/pangenome/sweepga", rev = "0aa6743", default-features = false }
 seqwish = { git = "https://github.com/ekg/seqwish", rev = "80c64c8" }
 
 # Dependencies for graph sorting
@@ -54,3 +54,5 @@ gfasort = { git = "https://github.com/pangenome/gfasort", rev = "e23f45e" }
 
 [features]
 default = []
+
+
