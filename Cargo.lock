@@ -184,7 +184,7 @@ dependencies = [
  "bitflags 2.10.0",
  "cexpr",
  "clang-sys",
- "itertools",
+ "itertools 0.13.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -575,7 +575,7 @@ dependencies = [
  "clap",
  "criterion-plot",
  "is-terminal",
- "itertools",
+ "itertools 0.10.5",
  "num-traits",
  "once_cell",
  "oorandom",
@@ -596,7 +596,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b50826342786a51a89e2da3a28f1c32b06e387201bc2d19791f622c673706b1"
 dependencies = [
  "cast",
- "itertools",
+ "itertools 0.10.5",
 ]
 
 [[package]]
@@ -1043,7 +1043,7 @@ dependencies = [
  "libz-ng-sys",
  "log",
  "num_cpus",
- "thiserror 2.0.17",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1294,7 +1294,7 @@ dependencies = [
  "noodles",
  "num_cpus",
  "onecode 0.1.0 (git+https://github.com/pangenome/onecode-rs?rev=38182c7acf7cccc53509176b1d11001ae6ff2642)",
- "ragc-reader",
+ "ragc-core",
  "rayon",
  "regex",
  "rust-htslib",
@@ -1353,6 +1353,15 @@ name = "itertools"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
+dependencies = [
+ "either",
+]
+
+[[package]]
+name = "itertools"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
 dependencies = [
  "either",
 ]
@@ -1681,7 +1690,7 @@ dependencies = [
  "cfg-if",
  "flate2",
  "liblzma",
- "thiserror 2.0.17",
+ "thiserror 2.0.18",
  "zstd",
 ]
 
@@ -2007,8 +2016,8 @@ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
 name = "ragc-common"
-version = "0.1.0"
-source = "git+https://github.com/ekg/ragc?rev=37af85a#37af85a3a798219315651b1b1515d96b2a7995f9"
+version = "0.1.1"
+source = "git+https://github.com/ekg/ragc?rev=40e5cad#40e5cad11cab7d4df07a72d6b16d68c2d60b0742"
 dependencies = [
  "ahash",
  "anyhow",
@@ -2022,19 +2031,8 @@ dependencies = [
 
 [[package]]
 name = "ragc-core"
-version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/ragc?branch=tweaks#10ef4bc5a0d5847a45be8aded7624bce57a3145d"
-dependencies = [
- "ahash",
- "anyhow",
- "cc",
- "zstd",
-]
-
-[[package]]
-name = "ragc-core"
-version = "0.1.0"
-source = "git+https://github.com/ekg/ragc?rev=37af85a#37af85a3a798219315651b1b1515d96b2a7995f9"
+version = "0.1.1"
+source = "git+https://github.com/ekg/ragc?rev=40e5cad#40e5cad11cab7d4df07a72d6b16d68c2d60b0742"
 dependencies = [
  "ahash",
  "anyhow",
@@ -2054,16 +2052,6 @@ dependencies = [
  "thiserror 1.0.69",
  "zstd",
  "zstd-safe",
-]
-
-[[package]]
-name = "ragc-reader"
-version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/ragc?branch=tweaks#10ef4bc5a0d5847a45be8aded7624bce57a3145d"
-dependencies = [
- "anyhow",
- "ragc-core 0.1.0 (git+https://github.com/AndreaGuarracino/ragc?branch=tweaks)",
- "zstd",
 ]
 
 [[package]]
@@ -2536,7 +2524,7 @@ dependencies = [
 [[package]]
 name = "sweepga"
 version = "0.1.1"
-source = "git+https://github.com/pangenome/sweepga?rev=4889c0c#4889c0cb255c2d5b0b08647e5ad025ebdaeaec2e"
+source = "git+https://github.com/pangenome/sweepga?rev=0aa6743#0aa6743314f3c1dc178ee9072cdaaaecdd4e2249"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -2550,7 +2538,7 @@ dependencies = [
  "noodles",
  "onecode 0.1.0 (git+https://github.com/pangenome/onecode-rs?rev=f531f5b)",
  "ordered-float",
- "ragc-core 0.1.0 (git+https://github.com/ekg/ragc?rev=37af85a)",
+ "ragc-core",
  "rand 0.8.5",
  "rayon",
  "tempfile",
@@ -2628,11 +2616,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.17"
+version = "2.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f63587ca0f12b72a0600bcba1d40081f830876000bb46dd2337a3051618f4fc8"
+checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
 dependencies = [
- "thiserror-impl 2.0.17",
+ "thiserror-impl 2.0.18",
 ]
 
 [[package]]
@@ -2648,9 +2636,9 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.17"
+version = "2.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ff15c8ecd7de3849db632e14d18d2571fa09dfc5ed93479bc4485c7a517c913"
+checksum = "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3276,9 +3264,9 @@ checksum = "40990edd51aae2c2b6907af74ffb635029d5788228222c4bb811e9351c0caad3"
 
 [[package]]
 name = "zmij"
-version = "1.0.14"
+version = "1.0.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd8f3f50b848df28f887acb68e41201b5aea6bc8a8dacc00fb40635ff9a72fea"
+checksum = "dfcd145825aace48cff44a8844de64bf75feec3080e0aa5cdbde72961ae51a65"
 
 [[package]]
 name = "zstd"

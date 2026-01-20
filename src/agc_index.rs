@@ -1,4 +1,4 @@
-use ragc_reader::{Decompressor, DecompressorConfig};
+use ragc_core::{Decompressor, DecompressorConfig};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::fmt;
@@ -64,10 +64,7 @@ impl AgcIndex {
             .par_iter()
             .enumerate()
             .map(|(agc_idx, agc_path)| -> io::Result<(usize, String, Decompressor, Vec<(String, Vec<String>)>)> {
-                let config = DecompressorConfig {
-                    verbosity: 0,
-                    max_segment_cache_entries: 1, // ~1MB cache (16 × 60KB segments)
-                };
+                let config = DecompressorConfig { verbosity: 0 };
                 let mut decompressor = Decompressor::open(agc_path, config).map_err(|e| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -175,20 +172,20 @@ impl AgcIndex {
             )
         })?;
 
-        // ragc uses 0-based coordinates with exclusive end
+        // Use efficient sub-sequence extraction (only decompresses needed segments)
         let mut decompressors = self.decompressors.lock().unwrap();
         let sequence = decompressors[agc_idx]
             .get_contig_range(&sample, &contig, start as usize, end as usize)
             .map_err(|e| {
                 io::Error::other(format!(
-                    "Failed to fetch sequence '{contig}@{sample}:{start}:{end}': {e}"
+                    "Failed to fetch sequence '{contig}@{sample}:{start}-{end}': {e}"
                 ))
             })?;
 
         // Convert from numeric encoding (0-3) to ASCII (A,C,G,T)
         Ok(sequence
-            .into_iter()
-            .map(|b| match b {
+            .iter()
+            .map(|&b| match b {
                 0 => b'A',
                 1 => b'C',
                 2 => b'G',

@@ -99,3 +99,88 @@ fn test_mixed_file_types_error() {
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("Mixed file types"));
 }
+
+#[test]
+fn test_agc_sequence_length() -> io::Result<()> {
+    let test_data_dir = "tests/test_data";
+    let agc_file = format!("{test_data_dir}/test.agc");
+    let agc_index = AgcIndex::build_from_files(&[agc_file])?;
+
+    // Test that get_sequence_length matches FASTA lengths
+    let test_cases = vec![
+        ("chr1@ref", "ref.fa", "chr1"),
+        ("chr1@b", "b.fa", "chr1"),
+        ("chr1a", "a.fa", "chr1a"),
+        ("1", "c.fa", "1"),
+    ];
+
+    for (agc_query, fasta_file, fasta_contig) in test_cases {
+        let fasta_path = format!("{test_data_dir}/{fasta_file}");
+        let fasta_index = FastaIndex::build_from_files(&[fasta_path])?;
+
+        let agc_len = agc_index.get_sequence_length(agc_query)?;
+        let fasta_len = fasta_index.get_sequence_length(fasta_contig)?;
+
+        assert_eq!(
+            agc_len, fasta_len,
+            "Length mismatch for AGC:{agc_query} vs FASTA:{fasta_file}/{fasta_contig}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_agc_subsequence_extraction() -> io::Result<()> {
+    // Test that various subsequence ranges return correct data
+    let test_data_dir = "tests/test_data";
+    let agc_file = format!("{test_data_dir}/test.agc");
+    let agc_index = AgcIndex::build_from_files(&[agc_file])?;
+
+    let fasta_path = format!("{test_data_dir}/ref.fa");
+    let fasta_index = FastaIndex::build_from_files(&[fasta_path])?;
+
+    // Get full sequence length (chr1 in ref.fa is 16 bases)
+    let full_len = agc_index.get_sequence_length("chr1@ref")?;
+    assert_eq!(full_len, 16, "Expected chr1@ref to be 16 bases");
+
+    // Test various ranges within the sequence bounds
+    let ranges = vec![
+        (0, 1),                    // Single base at start
+        (0, full_len as i32),      // Full sequence
+        (full_len as i32 - 1, full_len as i32), // Single base at end
+        (5, 10),                   // Middle range
+        (0, full_len as i32 / 2),  // First half
+        (full_len as i32 / 2, full_len as i32), // Second half
+    ];
+
+    for (start, end) in ranges {
+        let agc_seq = agc_index.fetch_sequence("chr1@ref", start, end)?;
+        let fasta_seq = fasta_index.fetch_sequence("chr1", start, end)?;
+
+        assert_eq!(
+            agc_seq, fasta_seq,
+            "Subsequence mismatch for range {start}-{end}"
+        );
+        assert_eq!(
+            agc_seq.len(),
+            (end - start) as usize,
+            "Length mismatch for range {start}-{end}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_agc_empty_range() -> io::Result<()> {
+    let test_data_dir = "tests/test_data";
+    let agc_file = format!("{test_data_dir}/test.agc");
+    let agc_index = AgcIndex::build_from_files(&[agc_file])?;
+
+    // Empty range (start == end) should return empty sequence
+    let seq = agc_index.fetch_sequence("chr1@ref", 5, 5)?;
+    assert!(seq.is_empty(), "Empty range should return empty sequence");
+
+    Ok(())
+}
