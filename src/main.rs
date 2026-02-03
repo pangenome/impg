@@ -41,6 +41,18 @@ fn parse_size(s: &str) -> Result<u64, String> {
         .map_err(|e| format!("invalid number '{}': {}", num_str, e))
 }
 
+/// Index mode.
+#[derive(Clone, Debug, Default, clap::ValueEnum)]
+enum IndexMode {
+    /// Auto-select based on file count
+    #[default]
+    Auto,
+    /// Single combined index
+    Single,
+    /// One index per alignment file
+    PerFile,
+}
+
 /// Basic common options shared between all commands
 #[derive(Parser, Debug)]
 #[command(next_help_heading = "General options")]
@@ -72,9 +84,9 @@ struct AlignmentOpts {
     )]
     alignment_list: Option<String>,
 
-    /// Path to the IMPG index file.
+    /// Path to the IMPG index file (implies single-index mode).
     #[arg(help_heading = "Index options")]
-    #[clap(short = 'i', long, value_parser, conflicts_with = "per_file_index")]
+    #[clap(short = 'i', long, value_parser)]
     index: Option<String>,
 
     /// Force the regeneration of the index, even if it already exists.
@@ -82,10 +94,10 @@ struct AlignmentOpts {
     #[clap(short = 'f', long, action)]
     force_reindex: bool,
 
-    /// Use one IMPG index file per alignment file (enables incremental index updates).
+    /// Index mode: single, per-file or auto (single, but per-file if >= 100 files).
     #[arg(help_heading = "Index options")]
-    #[clap(long, action)]
-    per_file_index: bool,
+    #[clap(long, value_enum, default_value_t = IndexMode::Auto)]
+    index_mode: IndexMode,
 
     /// Trace spacing for .1aln alignment files (used when converting tracepoints to CIGAR)
     #[arg(help_heading = "Alignment options")]
@@ -2350,7 +2362,36 @@ fn initialize_index(
         Some(sequence_files.as_slice())
     };
 
-    if alignment.per_file_index {
+    // Determine index mode: explicit mode takes priority, then auto threshold
+    let use_per_file = match alignment.index_mode {
+        IndexMode::PerFile => {
+            if alignment.index.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Cannot use -i/--index with --index-mode per-file",
+                ));
+            }
+            true
+        }
+        IndexMode::Single => false,
+        IndexMode::Auto => {
+            if alignment.index.is_some() {
+                // Explicit -i path implies single index
+                false
+            } else if alignment_files.len() >= 100 {
+                warn!(
+                    "Auto-switching to per-file indexing ({} files >= 100). \
+                     Override with --index-mode single or --index-mode per-file.",
+                    alignment_files.len(),
+                );
+                true
+            } else {
+                false
+            }
+        }
+    };
+
+    if use_per_file {
         load_or_build_per_file_index(
             alignment_files,
             common.threads,
