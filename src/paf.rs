@@ -43,14 +43,42 @@ enum PafHandle {
     Compressed(bgzf::io::Reader<File>),
 }
 
+const BGZF_HEADER_SIZE: usize = 18;
+
+/// Check whether a file starts with a valid BGZF header.
+/// Returns `Ok(false)` for regular gzip, too-small files, or plain text.
+fn is_bgzf<R: Read + Seek>(reader: &mut R) -> std::io::Result<bool> {
+    let mut header = [0u8; BGZF_HEADER_SIZE];
+    let result = match reader.read_exact(&mut header) {
+        Ok(()) => {
+            Ok(header[0..2] == [0x1f, 0x8b]      // gzip magic
+                && header[2] == 0x08              // DEFLATE
+                && header[3] == 0x04              // FEXTRA
+                && header[10..12] == [0x06, 0x00] // XLEN=6
+                && header[12..14] == [b'B', b'C'] // BC subfield
+                && header[14..16] == [0x02, 0x00]) // SLEN=2
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(e) => Err(e),
+    };
+    reader.seek(SeekFrom::Start(0))?;
+    result
+}
+
 pub fn read_cigar_data(alignment_file: &str, offset: u64, buffer: &mut [u8]) -> Result<(), String> {
     let is_compressed = [".gz", ".bgz"]
         .iter()
         .any(|extension| alignment_file.ends_with(extension));
 
     let handle = if is_compressed {
-        let file = File::open(alignment_file)
+        let mut file = File::open(alignment_file)
             .map_err(|e| format!("Failed to open compressed file '{}': {}", alignment_file, e))?;
+        if !is_bgzf(&mut file).map_err(|e| format!("Failed to read header of '{}': {}", alignment_file, e))? {
+            return Err(format!(
+                "'{}' is regular gzip, not BGZF. Convert with: zcat '{}' | bgzip > output.paf.gz",
+                alignment_file, alignment_file
+            ));
+        }
         PafHandle::Compressed(bgzf::io::Reader::new(file))
     } else {
         let file = File::open(alignment_file)
@@ -280,6 +308,16 @@ pub fn parse_paf_file(
     seq_index: &mut SequenceIndex,
 ) -> std::io::Result<Vec<AlignmentRecord>> {
     if [".gz", ".bgz"].iter().any(|e| paf_file.ends_with(e)) {
+        let mut file = file;
+        if !is_bgzf(&mut file)? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "'{}' is regular gzip, not BGZF. Convert with: zcat '{}' | bgzip > output.paf.gz",
+                    paf_file, paf_file
+                ),
+            ));
+        }
         let gzi_path = format!("{}.gzi", paf_file);
         if std::path::Path::new(&gzi_path).exists() {
             debug!(
