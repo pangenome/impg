@@ -28,9 +28,9 @@ rust-htslib = { version = "0.46.0", default-features = false } # Don't update it
 ragc-core = { git = "https://github.com/ekg/ragc", rev = "40e5cad" }
 
 # Dependencies for 1aln format (for alignments) support
-lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2"}
+lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2", rev = "0fe1ebfb7a364226f3d8d7b84b703611168435c6" }
 #lib_wfa2 = { path = "/home/guarracino/Dropbox/git//lib_wfa2"}
-tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints"}
+tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints", rev = "3d9eba70b098807f3a168771ef419e84a26b0b8f" }
 #tracepoints = { path = "/home/guarracino/Dropbox/git/tracepoints"}
 #onecode = { path = "/home/guarracino/git/onecode-rs" }
 onecode = { git = "https://github.com/pangenome/onecode-rs", rev = "38182c7acf7cccc53509176b1d11001ae6ff2642"}

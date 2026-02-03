@@ -51,7 +51,7 @@ where
     EDIT_ALIGNER.with(|aligner_cell| {
         let mut aligner_opt = aligner_cell.borrow_mut();
         if aligner_opt.is_none() {
-            *aligner_opt = Some(Distance::Edit.create_aligner(None));
+            *aligner_opt = Some(Distance::Edit.create_aligner(None, None));
         }
         f(aligner_opt.as_mut().unwrap())
     })
