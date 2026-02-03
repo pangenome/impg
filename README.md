@@ -479,23 +479,29 @@ impg index --alignment-list alignment_files.txt
 
 #### Indexing Modes
 
-**Combined index** (default): Creates a single `.impg` file for all alignments.
+Use `--index-mode` to control how indices are built (`auto` by default):
+
+| Mode | Description |
+|------|-------------|
+| `auto` | Single index when < 100 files, per-file when >= 100 |
+| `single` | Always create a single combined `.impg` index |
+| `per-file` | One `.impg` per alignment file (e.g., `data.paf.impg`) |
+
 ```bash
+# Single combined index (explicit or via -i)
 impg index -a file1.paf file2.1aln -i combined.impg
 impg query -i combined.impg -r chr1:0-1000
-```
 
-**Per-file index** (`--per-file-index`): Creates one `.impg` per alignment file (e.g., `data.paf.impg`).
-```bash
-impg index --alignment-list files.txt --per-file-index -t 32
-impg query --alignment-list files.txt --per-file-index -r chr1:0-1000
+# Per-file index
+impg index --alignment-list files.txt --index-mode per-file -t 32
+impg query --alignment-list files.txt --index-mode per-file -r chr1:0-1000
 ```
 
 Both modes work with PAF and .1aln files (can be mixed in `--alignment-list`).
 
 **When to use per-file indexing:**
 - Incremental updates (only rebuild changed alignment files)
-- Many alignment files
+- Many alignment files (auto mode switches at 100 files)
 
 **Stale index detection:** impg warns if alignment files are modified after index creation. Use `-f/--force-reindex` to rebuild.
 
