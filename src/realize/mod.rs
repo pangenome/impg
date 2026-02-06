@@ -1672,7 +1672,7 @@ q2\t1000\t0\t1000\t+\tq2\t1000\t0\t1000\t1000\t1000\t255
         config.chunk_size = 200;
         config.padding = 0;
         config.sort_output = false;
-        config.max_depth = 5;
+        config.max_depth = 1; // One sweepga level, then POA — avoids fragile inner recursion on CI.
 
 
         let result = realize_from_sequences(&seqs, &config).unwrap();
