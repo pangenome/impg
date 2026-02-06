@@ -20,6 +20,7 @@ use seqwish::seqindex::SeqIndex;
 use seqwish::transclosure::compute_transitive_closures;
 use sweepga::fastga_integration::FastGAIntegration;
 
+#[derive(Clone)]
 pub struct SequenceMetadata {
     pub name: String,
     pub start: i32,
@@ -502,6 +503,106 @@ pub fn prepare_sequences(
     Ok(pairs)
 }
 
+/// Extract a multiple sequence alignment (MSA) from a GFA graph string.
+///
+/// Parses segment (S) and path (P) lines from the GFA. Uses the sorted segment
+/// order as the column order. For each path, outputs the segment sequence at
+/// positions the path visits, or a gap string of equal length where it doesn't.
+///
+/// Returns a vector of (path_name, msa_string) pairs, in the order paths appear
+/// in the GFA.
+pub fn gfa_to_msa(gfa: &str) -> Vec<(String, String)> {
+    use std::collections::HashMap;
+
+    // Parse segments: id -> sequence
+    let mut segments: HashMap<String, String> = HashMap::new();
+    // Ordered list of segment IDs (preserving GFA order for column layout)
+    let mut segment_order: Vec<String> = Vec::new();
+    // Parse paths: name -> vec of (segment_id, orientation)
+    let mut paths: Vec<(String, Vec<(String, char)>)> = Vec::new();
+
+    for line in gfa.lines() {
+        if line.starts_with("S\t") {
+            let fields: Vec<&str> = line.splitn(4, '\t').collect();
+            if fields.len() >= 3 {
+                let id = fields[1].to_string();
+                let seq = fields[2].to_string();
+                if !segments.contains_key(&id) {
+                    segment_order.push(id.clone());
+                }
+                segments.insert(id, seq);
+            }
+        } else if line.starts_with("P\t") {
+            let fields: Vec<&str> = line.splitn(4, '\t').collect();
+            if fields.len() >= 3 {
+                let path_name = fields[1].to_string();
+                let steps: Vec<(String, char)> = fields[2]
+                    .split(',')
+                    .map(|step| {
+                        if let Some(stripped) = step.strip_suffix('+') {
+                            (stripped.to_string(), '+')
+                        } else if let Some(stripped) = step.strip_suffix('-') {
+                            (stripped.to_string(), '-')
+                        } else {
+                            (step.to_string(), '+')
+                        }
+                    })
+                    .collect();
+                paths.push((path_name, steps));
+            }
+        }
+    }
+
+    if segments.is_empty() || paths.is_empty() {
+        return Vec::new();
+    }
+
+    // For each path, build a set of visited segments
+    // Then construct the MSA row
+    let mut result = Vec::with_capacity(paths.len());
+
+    for (path_name, steps) in &paths {
+        // Track which segments this path visits and in what order
+        let mut visited: HashMap<&str, char> = HashMap::new();
+        for (seg_id, orient) in steps {
+            visited.insert(seg_id.as_str(), *orient);
+        }
+
+        let mut msa_row = String::new();
+        for seg_id in &segment_order {
+            let seq = &segments[seg_id];
+            if let Some(&orient) = visited.get(seg_id.as_str()) {
+                if orient == '-' {
+                    // Reverse complement
+                    let rc: String = seq
+                        .bytes()
+                        .rev()
+                        .map(|b| match b {
+                            b'A' | b'a' => 'T',
+                            b'T' | b't' => 'A',
+                            b'C' | b'c' => 'G',
+                            b'G' | b'g' => 'C',
+                            _ => 'N',
+                        })
+                        .collect();
+                    msa_row.push_str(&rc);
+                } else {
+                    msa_row.push_str(seq);
+                }
+            } else {
+                // Gap: same length as segment
+                for _ in 0..seq.len() {
+                    msa_row.push('-');
+                }
+            }
+        }
+
+        result.push((path_name.clone(), msa_row));
+    }
+
+    result
+}
+
 /// Given a raw GFAv1.1 string and a `Write` target, convert it to GFAv1.0:
 ///  - Rewrite `H` lines to `H\tVN:Z:1.0`
 ///  - Strip leading `s` from every `S` and bump the numeric ID by 1
@@ -912,4 +1013,73 @@ pub fn generate_gfa_seqwish_from_intervals(
 
     // Sort the GFA using gfasort's Ygs pipeline (path-guided SGD + grooming + topological sort)
     sort_gfa(&gfa_string, config.num_threads)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gfa_to_msa_basic() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tACGT
+S\t2\tTG
+S\t3\tAATT
+P\tseq1:0-10\t1+,2+,3+\t*
+P\tseq2:0-8\t1+,3+\t*
+";
+        let msa = gfa_to_msa(gfa);
+        assert_eq!(msa.len(), 2);
+        assert_eq!(msa[0].0, "seq1:0-10");
+        assert_eq!(msa[0].1, "ACGTTGAATT");
+        assert_eq!(msa[1].0, "seq2:0-8");
+        assert_eq!(msa[1].1, "ACGT--AATT");
+    }
+
+    #[test]
+    fn test_gfa_to_msa_empty() {
+        let gfa = "H\tVN:Z:1.0\n";
+        let msa = gfa_to_msa(gfa);
+        assert!(msa.is_empty());
+    }
+
+    #[test]
+    fn test_gfa_to_msa_single_path() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tACGT
+P\tseq1:0-4\t1+\t*
+";
+        let msa = gfa_to_msa(gfa);
+        assert_eq!(msa.len(), 1);
+        assert_eq!(msa[0].1, "ACGT");
+    }
+
+    #[test]
+    fn test_gfa_to_msa_reverse_orient() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tACGT
+P\tseq1:0-4\t1-\t*
+";
+        let msa = gfa_to_msa(gfa);
+        assert_eq!(msa.len(), 1);
+        // Reverse complement of ACGT is ACGT
+        assert_eq!(msa[0].1, "ACGT");
+    }
+
+    #[test]
+    fn test_gfa_to_msa_reverse_orient_asymmetric() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tACG
+P\tseq1:0-3\t1+\t*
+P\tseq2:0-3\t1-\t*
+";
+        let msa = gfa_to_msa(gfa);
+        assert_eq!(msa.len(), 2);
+        assert_eq!(msa[0].1, "ACG"); // forward
+        assert_eq!(msa[1].1, "CGT"); // reverse complement of ACG
+    }
 }

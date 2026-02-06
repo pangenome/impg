@@ -10,6 +10,11 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::Instant;
+
+// Import sweepga for direct alignment execution
+use sweepga::fastga_integration::FastGAIntegration;
+use sweepga::paf_filter::{FilterConfig, PafFilter, ScoringFunction};
 
 /// Sparsification strategy for pair selection
 #[derive(Clone, Debug)]
@@ -594,6 +599,394 @@ fn write_job_list<W: Write>(
     Ok(())
 }
 
+/// Collect unique file pairs from sequence pairs.
+/// Returns deduplicated (path_i, path_j) pairs where path_i < path_j lexicographically,
+/// plus self-pairs where path_i == path_j (for multi-sequence FASTA files).
+fn collect_file_pairs(
+    pairs: &[(usize, usize)],
+    sequences: &[SequenceInfo],
+) -> Vec<(String, String)> {
+    let mut file_pairs = HashSet::new();
+    for &(i, j) in pairs {
+        let path_i = &sequences[i].path;
+        let path_j = &sequences[j].path;
+        // Normalize ordering for deduplication
+        let pair = if path_i <= path_j {
+            (path_i.clone(), path_j.clone())
+        } else {
+            (path_j.clone(), path_i.clone())
+        };
+        file_pairs.insert(pair);
+    }
+    let mut result: Vec<_> = file_pairs.into_iter().collect();
+    result.sort();
+    result
+}
+
+/// Count sequences and genomes across FASTA files (for k-mer frequency calculation).
+/// Returns (num_sequences, num_genomes) using PanSN naming convention.
+fn count_sequences_and_genomes(fasta_files: &[String]) -> io::Result<(usize, usize)> {
+    let mut seq_count = 0;
+    let mut genome_prefixes: HashSet<String> = HashSet::new();
+
+    for path in fasta_files {
+        let file = File::open(path)?;
+        let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
+            io::Error::other(format!("Failed to open reader for '{}': {}", path, e))
+        })?;
+        let reader = BufReader::new(reader);
+
+        for line in reader.lines() {
+            let line: String = line?;
+            if line.starts_with('>') {
+                seq_count += 1;
+                let name = line[1..].split_whitespace().next().unwrap_or("");
+                let parts: Vec<&str> = name.split('#').collect();
+                let prefix = if parts.len() >= 2 {
+                    format!("{}#{}", parts[0], parts[1])
+                } else {
+                    name.to_string()
+                };
+                genome_prefixes.insert(prefix);
+            }
+        }
+    }
+
+    let genome_count = genome_prefixes.len().max(1);
+    Ok((seq_count, genome_count))
+}
+
+/// Run sweepga alignments for selected pairs and write output.
+///
+/// For each unique file pair, runs FastGA alignment, applies filtering (unless --no-filter),
+/// and writes results to the output directory. For PAF format, produces a combined
+/// output.paf file. For 1aln format, produces individual .1aln files per pair.
+fn run_alignments(
+    pairs: &[(usize, usize)],
+    sequences: &[SequenceInfo],
+    output_dir: &str,
+    config: &AlignConfig,
+) -> io::Result<()> {
+    let start_time = Instant::now();
+
+    // Collect unique FASTA file paths for genome counting
+    let unique_files: Vec<String> = {
+        let mut files: HashSet<String> = HashSet::new();
+        for seq in sequences {
+            files.insert(seq.path.clone());
+        }
+        files.into_iter().collect()
+    };
+
+    // Determine k-mer frequency
+    let (_num_sequences, num_genomes) = count_sequences_and_genomes(&unique_files)?;
+    let kmer_frequency = config
+        .frequency
+        .unwrap_or(num_genomes * config.frequency_multiplier);
+
+    if config.show_progress {
+        info!(
+            "[align] {:.3}s {} genomes, using k-mer frequency {}",
+            start_time.elapsed().as_secs_f64(),
+            num_genomes,
+            kmer_frequency
+        );
+    }
+
+    // Collect unique file pairs
+    let file_pairs = collect_file_pairs(pairs, sequences);
+
+    if config.show_progress {
+        info!(
+            "[align] {:.3}s Running {} pairwise alignments ({} unique file pairs)",
+            start_time.elapsed().as_secs_f64(),
+            pairs.len(),
+            file_pairs.len()
+        );
+    }
+
+    // Create FastGA integration
+    let fastga = FastGAIntegration::new(
+        Some(kmer_frequency),
+        config.num_threads,
+        config.min_alignment_length,
+        None, // temp_dir uses system default
+    );
+
+    // Run alignments for each unique file pair
+    let paf_output_path = format!("{}/alignments.paf", output_dir);
+    let mut combined_writer = BufWriter::new(File::create(&paf_output_path)?);
+
+    for (pair_idx, (query_path, target_path)) in file_pairs.iter().enumerate() {
+        if config.show_progress {
+            info!(
+                "[align] {:.3}s Aligning pair {}/{}: {} vs {}",
+                start_time.elapsed().as_secs_f64(),
+                pair_idx + 1,
+                file_pairs.len(),
+                Path::new(query_path)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy(),
+                Path::new(target_path)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy(),
+            );
+        }
+
+        match config.output_format {
+            AlignOutputFormat::OneAln => {
+                // For 1aln format, use align_to_temp_1aln and copy to output
+                let temp_aln = fastga
+                    .align_to_temp_1aln(Path::new(query_path), Path::new(target_path))
+                    .map_err(|e| {
+                        io::Error::other(format!(
+                            "FastGA alignment failed for {} vs {}: {}",
+                            query_path, target_path, e
+                        ))
+                    })?;
+
+                let query_stem = Path::new(query_path)
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy();
+                let target_stem = Path::new(target_path)
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy();
+                let output_name = format!("{}_vs_{}.1aln", query_stem, target_stem);
+                let output_path = format!("{}/{}", output_dir, output_name);
+                std::fs::copy(temp_aln.path(), &output_path)?;
+            }
+            AlignOutputFormat::Paf => {
+                // Run alignment to temp PAF
+                let paf_temp = fastga
+                    .align_to_temp_paf(Path::new(query_path), Path::new(target_path))
+                    .map_err(|e| {
+                        io::Error::other(format!(
+                            "FastGA alignment failed for {} vs {}: {}",
+                            query_path, target_path, e
+                        ))
+                    })?;
+
+                // Apply filtering unless --no-filter
+                let result_paf = if config.no_filter {
+                    paf_temp
+                } else {
+                    apply_paf_filter(paf_temp, config)?
+                };
+
+                // Append to combined output
+                let paf_data = std::fs::read(result_paf.path())?;
+                combined_writer.write_all(&paf_data)?;
+            }
+            AlignOutputFormat::JobList => unreachable!(),
+        }
+    }
+
+    combined_writer.flush()?;
+
+    if config.show_progress {
+        match config.output_format {
+            AlignOutputFormat::Paf => {
+                info!(
+                    "[align] {:.3}s Alignments complete, wrote {}",
+                    start_time.elapsed().as_secs_f64(),
+                    paf_output_path,
+                );
+            }
+            AlignOutputFormat::OneAln => {
+                info!(
+                    "[align] {:.3}s Alignments complete, wrote {} .1aln files to {}",
+                    start_time.elapsed().as_secs_f64(),
+                    file_pairs.len(),
+                    output_dir,
+                );
+            }
+            AlignOutputFormat::JobList => unreachable!(),
+        }
+    }
+
+    Ok(())
+}
+
+/// Apply sweepga filtering to a PAF temp file, returning a new filtered temp file.
+fn apply_paf_filter(
+    paf_temp: tempfile::NamedTempFile,
+    config: &AlignConfig,
+) -> io::Result<tempfile::NamedTempFile> {
+    use super::graph::parse_filter_mode;
+
+    let (mapping_mode, mapping_per_query, mapping_per_target) =
+        parse_filter_mode(&config.num_mappings);
+    let (scaffold_mode, scaffold_per_query, scaffold_per_target) =
+        parse_filter_mode(&config.scaffold_filter);
+
+    let filter_config = FilterConfig {
+        chain_gap: 0,
+        min_block_length: config.min_mapping_length,
+        mapping_filter_mode: mapping_mode,
+        mapping_max_per_query: mapping_per_query,
+        mapping_max_per_target: mapping_per_target,
+        plane_sweep_secondaries: 0,
+        scaffold_filter_mode: scaffold_mode,
+        scaffold_max_per_query: scaffold_per_query,
+        scaffold_max_per_target: scaffold_per_target,
+        overlap_threshold: config.overlap,
+        sparsity: 1.0,
+        no_merge: true,
+        scaffold_gap: config.scaffold_jump,
+        min_scaffold_length: config.scaffold_mass,
+        scaffold_overlap_threshold: 0.5,
+        scaffold_max_deviation: config.scaffold_dist,
+        prefix_delimiter: '#',
+        skip_prefix: false,
+        scoring_function: ScoringFunction::LogLengthIdentity,
+        min_identity: config.min_identity,
+        min_scaffold_identity: config.min_identity,
+    };
+
+    let filtered_paf_file = tempfile::Builder::new()
+        .suffix(".filtered.paf")
+        .tempfile()?;
+
+    let filter = PafFilter::new(filter_config).with_keep_self(false);
+    filter
+        .filter_paf(paf_temp.path(), filtered_paf_file.path())
+        .map_err(|e| io::Error::other(format!("PAF filtering failed: {}", e)))?;
+
+    Ok(filtered_paf_file)
+}
+
+/// Configuration for in-memory sweepga alignment (used by the realize engine).
+pub struct SweepgaAlignConfig {
+    /// Number of threads for alignment
+    pub num_threads: usize,
+    /// K-mer frequency for FastGA
+    pub kmer_frequency: usize,
+    /// Minimum alignment length
+    pub min_alignment_length: u64,
+    /// Whether to skip filtering
+    pub no_filter: bool,
+    /// Filter: n:m-best mappings
+    pub num_mappings: String,
+    /// Filter: scaffold jump distance
+    pub scaffold_jump: u64,
+    /// Filter: minimum scaffold chain length
+    pub scaffold_mass: u64,
+    /// Filter: scaffold filter mode
+    pub scaffold_filter: String,
+    /// Filter: max overlap ratio
+    pub overlap: f64,
+    /// Filter: minimum identity
+    pub min_identity: f64,
+    /// Filter: max scaffold deviation
+    pub scaffold_dist: u64,
+    /// Filter: minimum mapping length
+    pub min_mapping_length: u64,
+    /// Optional temp directory
+    pub temp_dir: Option<String>,
+}
+
+impl Default for SweepgaAlignConfig {
+    fn default() -> Self {
+        SweepgaAlignConfig {
+            num_threads: 4,
+            kmer_frequency: 10,
+            min_alignment_length: 100,
+            no_filter: false,
+            num_mappings: "1:1".to_string(),
+            scaffold_jump: 50_000,
+            scaffold_mass: 10_000,
+            scaffold_filter: "1:1".to_string(),
+            overlap: 0.95,
+            min_identity: 0.0,
+            scaffold_dist: 0,
+            min_mapping_length: 0,
+            temp_dir: None,
+        }
+    }
+}
+
+/// Run sweepga all-vs-all alignment on in-memory sequences.
+///
+/// Writes sequences to a temporary FASTA file, runs FastGA alignment,
+/// applies filtering, and returns the resulting PAF as a temporary file.
+/// This is the core alignment function used by the realize engine.
+///
+/// # Arguments
+/// * `sequences` - Named sequences: `(name, sequence_bytes)` pairs
+/// * `config` - Alignment and filtering configuration
+///
+/// # Returns
+/// A `NamedTempFile` containing the (optionally filtered) PAF alignments.
+pub fn sweepga_align(
+    sequences: &[(String, &[u8])],
+    config: &SweepgaAlignConfig,
+) -> io::Result<tempfile::NamedTempFile> {
+    if sequences.len() < 2 {
+        // Nothing to align — return empty PAF
+        let temp = tempfile::Builder::new().suffix(".paf").tempfile()?;
+        return Ok(temp);
+    }
+
+    // Write sequences to a temporary FASTA file
+    let mut combined_fasta = tempfile::Builder::new().suffix(".fa").tempfile()?;
+    {
+        let mut writer = BufWriter::new(&mut combined_fasta);
+        for (name, seq) in sequences {
+            writeln!(writer, ">{}", name)?;
+            writer.write_all(seq)?;
+            writeln!(writer)?;
+        }
+        writer.flush()?;
+    }
+
+    // Set up temp directory
+    if let Some(ref temp_dir) = config.temp_dir {
+        std::env::set_var("TMPDIR", temp_dir);
+    }
+
+    // Run all-vs-all FastGA alignment
+    let fastga = FastGAIntegration::new(
+        Some(config.kmer_frequency),
+        config.num_threads,
+        config.min_alignment_length,
+        config.temp_dir.clone(),
+    );
+
+    let paf_temp = fastga
+        .align_to_temp_paf(combined_fasta.path(), combined_fasta.path())
+        .map_err(|e| io::Error::other(format!("FastGA alignment failed: {}", e)))?;
+
+    // Apply filtering unless disabled
+    if config.no_filter {
+        Ok(paf_temp)
+    } else {
+        // Convert SweepgaAlignConfig to AlignConfig for apply_paf_filter
+        let align_config = AlignConfig {
+            num_threads: config.num_threads,
+            sparsification: SparsificationStrategy::None,
+            frequency_multiplier: 10,
+            frequency: Some(config.kmer_frequency),
+            min_alignment_length: config.min_alignment_length,
+            output_format: AlignOutputFormat::Paf,
+            show_progress: false,
+            no_filter: config.no_filter,
+            num_mappings: config.num_mappings.clone(),
+            scaffold_jump: config.scaffold_jump,
+            scaffold_mass: config.scaffold_mass,
+            scaffold_filter: config.scaffold_filter.clone(),
+            overlap: config.overlap,
+            min_identity: config.min_identity,
+            scaffold_dist: config.scaffold_dist,
+            min_mapping_length: config.min_mapping_length,
+        };
+        apply_paf_filter(paf_temp, &align_config)
+    }
+}
+
 /// Run alignment command
 pub fn run_align(
     fasta_files: Vec<String>,
@@ -659,15 +1052,7 @@ pub fn run_align(
             info!("Wrote {} alignment jobs to {}", pairs.len(), job_file);
         }
         AlignOutputFormat::Paf | AlignOutputFormat::OneAln => {
-            // TODO: Actually run alignments using sweepga
-            // For now, just generate the job list
-            info!(
-                "Direct alignment execution not yet implemented. Use --joblist to generate commands."
-            );
-            let job_file = format!("{}/align_jobs.txt", output_dir);
-            let mut writer = BufWriter::new(File::create(&job_file)?);
-            write_job_list(&pairs, &sequences, output_dir, &mut writer, &config)?;
-            info!("Wrote {} alignment jobs to {}", pairs.len(), job_file);
+            run_alignments(&pairs, &sequences, output_dir, &config)?;
         }
     }
 
