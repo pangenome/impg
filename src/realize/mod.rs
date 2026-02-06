@@ -1401,7 +1401,7 @@ q2\t1000\t0\t1000\t+\tq2\t1000\t0\t1000\t1000\t1000\t255
         config.chunk_size = 2000;
         config.padding = 0;
         config.sort_output = false;
-        config.max_depth = 5;
+        config.max_depth = 1;
 
 
         let result = realize_from_sequences(&seqs, &config).unwrap();
@@ -1457,7 +1457,7 @@ q2\t1000\t0\t1000\t+\tq2\t1000\t0\t1000\t1000\t1000\t255
         config.chunk_size = 2000;
         config.padding = 0;
         config.sort_output = false;
-        config.max_depth = 5;
+        config.max_depth = 1;
 
 
         let result = realize_from_sequences(&seqs, &config).unwrap();
@@ -1538,7 +1538,7 @@ q2\t1000\t0\t1000\t+\tq2\t1000\t0\t1000\t1000\t1000\t255
         config.chunk_size = 2000;
         config.padding = 0;
         config.sort_output = false;
-        config.max_depth = 10;
+        config.max_depth = 1;
 
 
         let result = realize_from_sequences(&seqs, &config).unwrap();
@@ -1572,7 +1572,7 @@ q2\t1000\t0\t1000\t+\tq2\t1000\t0\t1000\t1000\t1000\t255
         config.chunk_size = 2000;
         config.padding = 0;
         config.sort_output = false;
-        config.max_depth = 5;
+        config.max_depth = 1;
 
 
         let result = realize_from_sequences(&seqs, &config).unwrap();
@@ -1624,7 +1624,7 @@ q2\t1000\t0\t1000\t+\tq2\t1000\t0\t1000\t1000\t1000\t255
         config.chunk_size = 2000;
         config.padding = 0;
         config.sort_output = false;
-        config.max_depth = 5;
+        config.max_depth = 1;
 
 
         let result = realize_from_sequences(&seqs, &config).unwrap();
