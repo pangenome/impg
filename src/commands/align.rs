@@ -347,6 +347,127 @@ fn compute_connectivity_probability(n: usize, connectivity_prob: f64) -> f64 {
     p.clamp(0.001, 1.0)
 }
 
+/// Generate alignment pairs from named in-memory sequences.
+///
+/// This is the version used by the realize engine's `sweepga_align`, where
+/// sequences are provided as `(name, bytes)` pairs rather than `SequenceInfo`.
+/// For `TreeSampling`, mash sketches are computed on the fly.
+pub fn generate_pairs_for_sequences(
+    sequences: &[(String, &[u8])],
+    strategy: &SparsificationStrategy,
+) -> Vec<(usize, usize)> {
+    let n = sequences.len();
+    if n <= 1 {
+        return vec![];
+    }
+
+    match strategy {
+        SparsificationStrategy::None => {
+            (0..n)
+                .flat_map(|i| ((i + 1)..n).map(move |j| (i, j)))
+                .collect()
+        }
+
+        SparsificationStrategy::Random(fraction) => {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+
+            let mut pairs = Vec::new();
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    let mut hasher = DefaultHasher::new();
+                    format!("{}:{}", sequences[i].0, sequences[j].0).hash(&mut hasher);
+                    let hash = hasher.finish();
+                    if (hash as f64 / u64::MAX as f64) < *fraction {
+                        pairs.push((i, j));
+                    }
+                }
+            }
+            pairs
+        }
+
+        SparsificationStrategy::Connectivity(prob) => {
+            let keep_fraction = compute_connectivity_probability(n, *prob);
+            generate_pairs_for_sequences(
+                sequences,
+                &SparsificationStrategy::Random(keep_fraction),
+            )
+        }
+
+        SparsificationStrategy::TreeSampling {
+            k_nearest,
+            k_farthest,
+            random_fraction,
+            kmer_size,
+        } => {
+            // Compute mash sketches on the fly
+            let sketches: Vec<Vec<u64>> = sequences
+                .iter()
+                .map(|(_, seq)| sketch_sequence(seq, *kmer_size, 1000))
+                .collect();
+
+            let distances: Vec<Vec<f64>> = (0..n)
+                .into_par_iter()
+                .map(|i| {
+                    (0..n)
+                        .map(|j| {
+                            if i == j {
+                                0.0
+                            } else {
+                                mash_distance(&sketches[i], &sketches[j], *kmer_size)
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+
+            let mut pairs = HashSet::new();
+
+            if *k_nearest > 0 {
+                for (i, dist_row) in distances.iter().enumerate() {
+                    let mut neighbors: Vec<(usize, f64)> = (0..n)
+                        .filter(|&j| i != j)
+                        .map(|j| (j, dist_row[j]))
+                        .collect();
+                    neighbors.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                    for (j, _) in neighbors.iter().take(*k_nearest) {
+                        let pair = if i < *j { (i, *j) } else { (*j, i) };
+                        pairs.insert(pair);
+                    }
+                }
+            }
+
+            if *k_farthest > 0 {
+                for (i, dist_row) in distances.iter().enumerate() {
+                    let mut neighbors: Vec<(usize, f64)> = (0..n)
+                        .filter(|&j| i != j)
+                        .map(|j| (j, dist_row[j]))
+                        .collect();
+                    neighbors.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                    for (j, _) in neighbors.iter().take(*k_farthest) {
+                        let pair = if i < *j { (i, *j) } else { (*j, i) };
+                        pairs.insert(pair);
+                    }
+                }
+            }
+
+            if *random_fraction > 0.0 {
+                let random_pairs = generate_pairs_for_sequences(
+                    sequences,
+                    &SparsificationStrategy::Random(*random_fraction),
+                );
+                for pair in random_pairs {
+                    pairs.insert(pair);
+                }
+            }
+
+            let mut result: Vec<_> = pairs.into_iter().collect();
+            result.sort_unstable();
+            result
+        }
+    }
+}
+
 /// Generate pairs using specified sparsification strategy
 fn generate_pairs(
     sequences: &[SequenceInfo],
@@ -887,6 +1008,9 @@ pub struct SweepgaAlignConfig {
     pub min_mapping_length: u64,
     /// Optional temp directory
     pub temp_dir: Option<String>,
+    /// Sparsification strategy for pair selection.
+    /// When not None, only alignments between selected pairs are retained.
+    pub sparsification: SparsificationStrategy,
 }
 
 impl Default for SweepgaAlignConfig {
@@ -905,19 +1029,20 @@ impl Default for SweepgaAlignConfig {
             scaffold_dist: 0,
             min_mapping_length: 0,
             temp_dir: None,
+            sparsification: SparsificationStrategy::None,
         }
     }
 }
 
-/// Run sweepga all-vs-all alignment on in-memory sequences.
+/// Run sweepga alignment on in-memory sequences with optional sparsification.
 ///
-/// Writes sequences to a temporary FASTA file, runs FastGA alignment,
-/// applies filtering, and returns the resulting PAF as a temporary file.
-/// This is the core alignment function used by the realize engine.
+/// When sparsification is `None`, runs all-vs-all alignment. Otherwise,
+/// generates selected pairs using the sparsification strategy and runs
+/// pairwise alignments only for those pairs.
 ///
 /// # Arguments
 /// * `sequences` - Named sequences: `(name, sequence_bytes)` pairs
-/// * `config` - Alignment and filtering configuration
+/// * `config` - Alignment, filtering, and sparsification configuration
 ///
 /// # Returns
 /// A `NamedTempFile` containing the (optionally filtered) PAF alignments.
@@ -931,40 +1056,37 @@ pub fn sweepga_align(
         return Ok(temp);
     }
 
-    // Write sequences to a temporary FASTA file
-    let mut combined_fasta = tempfile::Builder::new().suffix(".fa").tempfile()?;
-    {
-        let mut writer = BufWriter::new(&mut combined_fasta);
-        for (name, seq) in sequences {
-            writeln!(writer, ">{}", name)?;
-            writer.write_all(seq)?;
-            writeln!(writer)?;
-        }
-        writer.flush()?;
-    }
-
     // Set up temp directory
     if let Some(ref temp_dir) = config.temp_dir {
         std::env::set_var("TMPDIR", temp_dir);
     }
 
-    // Run all-vs-all FastGA alignment
-    let fastga = FastGAIntegration::new(
-        Some(config.kmer_frequency),
-        config.num_threads,
-        config.min_alignment_length,
-        config.temp_dir.clone(),
-    );
+    // Generate pairs based on sparsification strategy
+    let pairs = generate_pairs_for_sequences(sequences, &config.sparsification);
+    let total_possible = sequences.len() * (sequences.len() - 1) / 2;
 
-    let paf_temp = fastga
-        .align_to_temp_paf(combined_fasta.path(), combined_fasta.path())
-        .map_err(|e| io::Error::other(format!("FastGA alignment failed: {}", e)))?;
+    if pairs.is_empty() {
+        let temp = tempfile::Builder::new().suffix(".paf").tempfile()?;
+        return Ok(temp);
+    }
+
+    // If all pairs are selected (or None strategy), use fast all-vs-all
+    let paf_temp = if pairs.len() == total_possible {
+        sweepga_align_all_vs_all(sequences, config)?
+    } else {
+        log::info!(
+            "sweepga: sparsification selected {} of {} pairs ({:.1}%)",
+            pairs.len(),
+            total_possible,
+            (pairs.len() as f64 / total_possible as f64) * 100.0
+        );
+        sweepga_align_pairwise(sequences, &pairs, config)?
+    };
 
     // Apply filtering unless disabled
     if config.no_filter {
         Ok(paf_temp)
     } else {
-        // Convert SweepgaAlignConfig to AlignConfig for apply_paf_filter
         let align_config = AlignConfig {
             num_threads: config.num_threads,
             sparsification: SparsificationStrategy::None,
@@ -985,6 +1107,95 @@ pub fn sweepga_align(
         };
         apply_paf_filter(paf_temp, &align_config)
     }
+}
+
+/// All-vs-all alignment: write all sequences to one FASTA, align against itself.
+fn sweepga_align_all_vs_all(
+    sequences: &[(String, &[u8])],
+    config: &SweepgaAlignConfig,
+) -> io::Result<tempfile::NamedTempFile> {
+    let mut combined_fasta = tempfile::Builder::new().suffix(".fa").tempfile()?;
+    {
+        let mut writer = BufWriter::new(&mut combined_fasta);
+        for (name, seq) in sequences {
+            writeln!(writer, ">{}", name)?;
+            writer.write_all(seq)?;
+            writeln!(writer)?;
+        }
+        writer.flush()?;
+    }
+
+    let fastga = FastGAIntegration::new(
+        Some(config.kmer_frequency),
+        config.num_threads,
+        config.min_alignment_length,
+        config.temp_dir.clone(),
+    );
+
+    fastga
+        .align_to_temp_paf(combined_fasta.path(), combined_fasta.path())
+        .map_err(|e| io::Error::other(format!("FastGA alignment failed: {}", e)))
+}
+
+/// Pairwise alignment: write individual FASTA files per pair, align each pair,
+/// and combine results into a single PAF.
+fn sweepga_align_pairwise(
+    sequences: &[(String, &[u8])],
+    pairs: &[(usize, usize)],
+    config: &SweepgaAlignConfig,
+) -> io::Result<tempfile::NamedTempFile> {
+    let fastga = FastGAIntegration::new(
+        Some(config.kmer_frequency),
+        config.num_threads,
+        config.min_alignment_length,
+        config.temp_dir.clone(),
+    );
+
+    let mut combined_paf = tempfile::Builder::new().suffix(".paf").tempfile()?;
+
+    for &(i, j) in pairs {
+        // Write query FASTA
+        let mut query_fasta = tempfile::Builder::new().suffix(".fa").tempfile()?;
+        {
+            let mut writer = BufWriter::new(&mut query_fasta);
+            writeln!(writer, ">{}", sequences[i].0)?;
+            writer.write_all(sequences[i].1)?;
+            writeln!(writer)?;
+            writer.flush()?;
+        }
+
+        // Write target FASTA
+        let mut target_fasta = tempfile::Builder::new().suffix(".fa").tempfile()?;
+        {
+            let mut writer = BufWriter::new(&mut target_fasta);
+            writeln!(writer, ">{}", sequences[j].0)?;
+            writer.write_all(sequences[j].1)?;
+            writeln!(writer)?;
+            writer.flush()?;
+        }
+
+        // Align this pair
+        match fastga.align_to_temp_paf(query_fasta.path(), target_fasta.path()) {
+            Ok(pair_paf) => {
+                // Append this pair's PAF to the combined output
+                let contents = std::fs::read(pair_paf.path())?;
+                if !contents.is_empty() {
+                    combined_paf.write_all(&contents)?;
+                }
+            }
+            Err(e) => {
+                log::warn!(
+                    "sweepga: pairwise alignment failed for {} vs {}: {}",
+                    sequences[i].0,
+                    sequences[j].0,
+                    e
+                );
+            }
+        }
+    }
+
+    combined_paf.flush()?;
+    Ok(combined_paf)
 }
 
 /// Run alignment command

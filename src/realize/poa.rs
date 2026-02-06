@@ -1,4 +1,4 @@
-use crate::graph::{reverse_complement, SequenceMetadata};
+use crate::graph::{post_process_gfa_for_strands, reverse_complement, SequenceMetadata};
 use crate::impg_index::ImpgIndex;
 use crate::sequence_index::{SequenceIndex, UnifiedSequenceIndex};
 use coitrees::Interval;
@@ -447,99 +447,10 @@ fn build_trimmed_gfa(
 fn make_headers(padded_sequences: &[PaddedSequence]) -> Vec<String> {
     padded_sequences
         .iter()
-        .map(|ps| {
-            let meta = &ps.metadata;
-            format!(
-                "{}:{}-{}",
-                meta.name,
-                if meta.strand == '+' {
-                    meta.start
-                } else {
-                    (meta.total_length as i32) - meta.start - meta.size
-                },
-                if meta.strand == '+' {
-                    meta.start + meta.size
-                } else {
-                    (meta.total_length as i32) - meta.start
-                }
-            )
-        })
+        .map(|ps| ps.metadata.path_name())
         .collect()
 }
 
-/// Post-process GFA to handle strand information.
-/// Reverse strand paths need their segments reversed and orientations flipped.
-fn post_process_gfa_for_strands(gfa: String, metadata: &[SequenceMetadata]) -> String {
-    let mut output = String::new();
-
-    // Build a map of header -> strand
-    let strand_map: std::collections::HashMap<String, char> = metadata
-        .iter()
-        .map(|meta| {
-            let header = format!(
-                "{}:{}-{}",
-                meta.name,
-                if meta.strand == '+' {
-                    meta.start
-                } else {
-                    (meta.total_length as i32) - meta.start - meta.size
-                },
-                if meta.strand == '+' {
-                    meta.start + meta.size
-                } else {
-                    (meta.total_length as i32) - meta.start
-                }
-            );
-            (header, meta.strand)
-        })
-        .collect();
-
-    for line in gfa.lines() {
-        if line.starts_with("P\t") {
-            let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() >= 3 {
-                let path_name = parts[1];
-                let path_segments = parts[2];
-
-                if let Some(&strand) = strand_map.get(path_name) {
-                    if strand == '-' {
-                        let segments: Vec<&str> = path_segments.split(',').collect();
-                        let reversed_path: Vec<String> = segments
-                            .iter()
-                            .rev()
-                            .map(|seg| {
-                                if let Some(seg_stripped) = seg.strip_suffix('+') {
-                                    format!("{seg_stripped}-")
-                                } else if let Some(seg_stripped) = seg.strip_suffix('-') {
-                                    format!("{seg_stripped}+")
-                                } else {
-                                    seg.to_string()
-                                }
-                            })
-                            .collect();
-
-                        output.push_str(&format!(
-                            "P\t{}\t{}",
-                            path_name,
-                            reversed_path.join(",")
-                        ));
-                        if parts.len() > 3 {
-                            output.push('\t');
-                            output.push_str(&parts[3..].join("\t"));
-                        }
-                        output.push('\n');
-                        continue;
-                    }
-                }
-            }
-        }
-
-        output.push_str(line);
-        output.push('\n');
-    }
-
-    output
-}
 
 #[cfg(test)]
 mod tests {

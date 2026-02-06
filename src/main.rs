@@ -307,12 +307,6 @@ struct RealizeOpts {
     #[clap(long, value_parser, default_value_t = 10)]
     realize_max_depth: usize,
 
-    /// Sparsification strategy per recursion level (comma-separated).
-    /// Formats: "none", "random:0.5", "connectivity:0.99", "tree:2:1:0.1[:kmer_size]"
-    /// If fewer strategies than levels, the last entry is reused.
-    #[clap(long, value_parser, default_value = "connectivity:0.99")]
-    realize_sparsification: String,
-
     /// Whether to sort the final GFA output using gfasort
     #[clap(long, action, default_value_t = true)]
     realize_sort: bool,
@@ -325,34 +319,13 @@ impl RealizeOpts {
         num_threads: usize,
         scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
     ) -> io::Result<impg::realize::RealizeConfig> {
-        use impg::commands::align::SparsificationStrategy;
-
-        // Parse sparsification strategies (comma-separated list)
-        let sparsification: Vec<SparsificationStrategy> = self
-            .realize_sparsification
-            .split(',')
-            .map(|s| SparsificationStrategy::parse(s.trim()))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        if sparsification.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "At least one sparsification strategy is required",
-            ));
-        }
-
         Ok(impg::realize::RealizeConfig {
             poa_threshold: self.realize_poa_threshold,
             chunk_size: self.realize_chunk_size,
             padding: self.realize_padding,
             max_depth: self.realize_max_depth,
             num_threads,
-            sparsification,
             scoring_params: scoring_params.unwrap_or((5, 4, 6, 2, 24, 1)),
-            seqwish_config: impg::graph::SeqwishConfig {
-                num_threads,
-                ..Default::default()
-            },
             temp_dir: None,
             sort_output: self.realize_sort,
         })
@@ -1116,11 +1089,6 @@ enum Args {
         #[arg(help_heading = "Realize options")]
         #[clap(long = "realize-max-depth", value_parser, default_value_t = 10)]
         realize_max_depth: usize,
-
-        /// Sparsification strategy per recursion level (comma-separated): none, random:<frac>, giant:<prob>, tree:<k_near>:<k_far>:<rand>[:<kmer>]
-        #[arg(help_heading = "Realize options")]
-        #[clap(long, value_parser, default_value = "giant:0.99")]
-        sparsification: String,
 
         /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2
         #[arg(help_heading = "Realize options")]
@@ -2304,7 +2272,6 @@ fn run() -> io::Result<()> {
             chunk_size,
             padding,
             realize_max_depth,
-            sparsification,
             scoring,
             no_sort,
             transitive,
@@ -2336,19 +2303,6 @@ fn run() -> io::Result<()> {
                 parse_u8(scoring_parts[4], "gap_open2")?,
                 parse_u8(scoring_parts[5], "gap_extend2")?,
             );
-
-            // Parse sparsification strategies
-            let sparsification_strategies: Vec<align::SparsificationStrategy> = sparsification
-                .split(',')
-                .map(|s| align::SparsificationStrategy::parse(s.trim()))
-                .collect::<Result<Vec<_>, _>>()?;
-
-            if sparsification_strategies.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "At least one sparsification strategy is required",
-                ));
-            }
 
             // Validate that target_range or target_bed is provided
             if target_range.is_none() && target_bed.is_none() {
@@ -2436,12 +2390,7 @@ fn run() -> io::Result<()> {
                 padding,
                 max_depth: realize_max_depth,
                 num_threads,
-                sparsification: sparsification_strategies,
                 scoring_params,
-                seqwish_config: impg::graph::SeqwishConfig {
-                    num_threads,
-                    ..Default::default()
-                },
                 temp_dir: temp_dir.clone(),
                 sort_output: !no_sort,
             };

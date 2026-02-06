@@ -2,13 +2,14 @@ pub mod poa;
 
 use crate::commands::align::{SparsificationStrategy, SweepgaAlignConfig};
 use crate::graph::{
-    prepare_sequences, sort_gfa, SeqwishConfig, SequenceMetadata,
+    prepare_sequences, sort_gfa, SequenceMetadata,
 };
 use crate::impg_index::ImpgIndex;
 use crate::realize::poa::padded_poa_from_sequences;
 use crate::sequence_index::UnifiedSequenceIndex;
 use coitrees::Interval;
 use log::{info, warn};
+use rayon::prelude::*;
 use std::io::{self, BufRead, BufReader};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
@@ -39,18 +40,9 @@ pub struct RealizeConfig {
     /// Number of threads for parallel operations.
     pub num_threads: usize,
 
-    /// Sparsification strategy per recursion depth level.
-    /// Index 0 = depth 0 (coarsest), higher indices = deeper levels.
-    /// If depth exceeds the length, the last entry is reused.
-    /// Default: [Connectivity(0.99)]
-    pub sparsification: Vec<SparsificationStrategy>,
-
     /// SPOA scoring parameters: (match, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2)
     /// Default: (5, 4, 6, 2, 24, 1)
     pub scoring_params: (u8, u8, u8, u8, u8, u8),
-
-    /// SeqwishConfig for sweepga+seqwish alignment steps.
-    pub seqwish_config: SeqwishConfig,
 
     /// Optional temp directory for intermediate files.
     pub temp_dir: Option<String>,
@@ -67,9 +59,7 @@ impl Default for RealizeConfig {
             padding: 100,
             max_depth: 10,
             num_threads: 4,
-            sparsification: vec![SparsificationStrategy::Connectivity(0.99)],
             scoring_params: (5, 4, 6, 2, 24, 1),
-            seqwish_config: SeqwishConfig::default(),
             temp_dir: None,
             sort_output: true,
         }
@@ -292,27 +282,14 @@ fn realize_recursive(
     // Recursive case: sweepga align → partition → recurse → lace.
     sweepga_calls.fetch_add(1, Ordering::Relaxed);
 
-    let _strategy = config
-        .sparsification
-        .get(depth)
-        .or(config.sparsification.last())
-        .cloned()
-        .unwrap_or(SparsificationStrategy::Connectivity(0.99));
-
-    // Run sweepga all-vs-all alignment.
+    // Always use all-vs-all alignment in the realize engine.
+    // FastGA is efficient when run all-vs-all on a combined FASTA (indexes once).
+    // Sparsification is for the top-level `impg align` CLI with hundreds of genomes,
+    // not for the small sequence sets inside recursive chunks.
     let align_config = build_sweepga_config(config);
     let named_seqs: Vec<(String, &[u8])> = sequences
         .iter()
-        .map(|(seq, meta)| {
-            let name = format!(
-                "{}:{}-{}({})",
-                meta.name,
-                meta.start,
-                meta.start + meta.size,
-                meta.strand
-            );
-            (name, seq.as_bytes())
-        })
+        .map(|(seq, meta)| (meta.alignment_name(), seq.as_bytes()))
         .collect();
 
     let paf_temp = crate::commands::align::sweepga_align(&named_seqs, &align_config)?;
@@ -349,21 +326,30 @@ fn realize_recursive(
         chunks.len()
     );
 
-    // Recurse on each chunk.
-    let mut sub_gfas: Vec<String> = Vec::with_capacity(chunks.len());
-    for chunk in &chunks {
-        if chunk.sequences.is_empty() {
-            continue;
+    // Recurse on each chunk in parallel.
+    let sub_gfa_results: Vec<Option<io::Result<String>>> = chunks
+        .par_iter()
+        .map(|chunk| {
+            if chunk.sequences.is_empty() {
+                return None;
+            }
+            Some(realize_recursive(
+                &chunk.sequences,
+                config,
+                depth + 1,
+                poa_calls,
+                sweepga_calls,
+                max_depth_reached,
+            ))
+        })
+        .collect();
+
+    // Collect results, propagating any errors.
+    let mut sub_gfas: Vec<String> = Vec::with_capacity(sub_gfa_results.len());
+    for result in sub_gfa_results {
+        if let Some(gfa_result) = result {
+            sub_gfas.push(gfa_result?);
         }
-        let sub_gfa = realize_recursive(
-            &chunk.sequences,
-            config,
-            depth + 1,
-            poa_calls,
-            sweepga_calls,
-            max_depth_reached,
-        )?;
-        sub_gfas.push(sub_gfa);
     }
 
     if sub_gfas.is_empty() {
@@ -383,12 +369,18 @@ fn realize_recursive(
 // ---------------------------------------------------------------------------
 
 /// Build a SweepgaAlignConfig from RealizeConfig.
+///
+/// Uses `no_filter: true` because the realize engine only needs raw alignment
+/// coordinates for window projection — aggressive PAF filtering (overlap,
+/// scaffolding, 1:1 mapping) would remove valid cross-sequence alignments that
+/// are needed for partitioning. Self-alignments are still filtered out during
+/// PAF parsing since they share query_name == target_name.
 fn build_sweepga_config(config: &RealizeConfig) -> SweepgaAlignConfig {
     SweepgaAlignConfig {
         num_threads: config.num_threads,
         kmer_frequency: 10, // Reasonable default for small sets
         min_alignment_length: 100,
-        no_filter: false,
+        no_filter: true,
         num_mappings: "1:1".to_string(),
         scaffold_jump: 50_000,
         scaffold_mass: 10_000,
@@ -398,10 +390,11 @@ fn build_sweepga_config(config: &RealizeConfig) -> SweepgaAlignConfig {
         scaffold_dist: 0,
         min_mapping_length: 0,
         temp_dir: config.temp_dir.clone(),
+        sparsification: SparsificationStrategy::None, // Always all-vs-all for realize
     }
 }
 
-/// Parse a PAF file into PafRecord structs.
+/// Parse a PAF file into PafRecord structs, filtering out self-alignments.
 fn parse_paf_file(path: &std::path::Path) -> io::Result<Vec<PafRecord>> {
     let file = std::fs::File::open(path)?;
     let reader = BufReader::new(file);
@@ -415,11 +408,17 @@ fn parse_paf_file(path: &std::path::Path) -> io::Result<Vec<PafRecord>> {
         }
 
         let query_name = fields[0].to_string();
+        let target_name = fields[5].to_string();
+
+        // Skip self-alignments (same sequence aligned to itself).
+        if query_name == target_name {
+            continue;
+        }
+
         let query_len: usize = fields[1].parse().unwrap_or(0);
         let query_start: usize = fields[2].parse().unwrap_or(0);
         let query_end: usize = fields[3].parse().unwrap_or(0);
         let strand = if fields[4] == "-" { '-' } else { '+' };
-        let target_name = fields[5].to_string();
         let target_len: usize = fields[6].parse().unwrap_or(0);
         let target_start: usize = fields[7].parse().unwrap_or(0);
         let target_end: usize = fields[8].parse().unwrap_or(0);
@@ -461,13 +460,7 @@ fn partition_into_chunks(
     // The anchor is the longest sequence (sequences are pre-sorted longest-first).
     let (anchor_seq, anchor_meta) = &sequences[0];
     let anchor_len = anchor_seq.len();
-    let anchor_name = format!(
-        "{}:{}-{}({})",
-        anchor_meta.name,
-        anchor_meta.start,
-        anchor_meta.start + anchor_meta.size,
-        anchor_meta.strand
-    );
+    let anchor_name = anchor_meta.alignment_name();
 
     // If the anchor is smaller than one chunk, return a single chunk with all sequences.
     if anchor_len <= chunk_size + padding {
@@ -478,25 +471,20 @@ fn partition_into_chunks(
         }];
     }
 
-    // Build name-to-index map for the input sequences.
+    // Build name-to-index map for the input sequences (using alignment names to match PAF).
     let seq_name_map: std::collections::HashMap<String, usize> = sequences
         .iter()
         .enumerate()
-        .map(|(i, (_, meta))| {
-            let name = format!(
-                "{}:{}-{}({})",
-                meta.name, meta.start, meta.start + meta.size, meta.strand
-            );
-            (name, i)
-        })
+        .map(|(i, (_, meta))| (meta.alignment_name(), i))
         .collect();
 
     // For each non-anchor sequence, collect alignment projections from the anchor.
-    // projection[i] = Vec<(anchor_start, anchor_end, seq_start, seq_end)>
-    let mut projections: Vec<Vec<(usize, usize, usize, usize)>> =
+    // projection[i] = Vec<(anchor_start, anchor_end, seq_start, seq_end, is_reverse)>
+    let mut projections: Vec<Vec<(usize, usize, usize, usize, bool)>> =
         vec![Vec::new(); sequences.len()];
 
     for rec in paf_records {
+        let is_reverse = rec.strand == '-';
         // We want alignments where the anchor is either query or target.
         if rec.query_name == anchor_name {
             if let Some(&idx) = seq_name_map.get(&rec.target_name) {
@@ -505,6 +493,7 @@ fn partition_into_chunks(
                     rec.query_end,
                     rec.target_start,
                     rec.target_end,
+                    is_reverse,
                 ));
             }
         } else if rec.target_name == anchor_name {
@@ -514,6 +503,7 @@ fn partition_into_chunks(
                     rec.target_end,
                     rec.query_start,
                     rec.query_end,
+                    is_reverse,
                 ));
             }
         }
@@ -521,7 +511,7 @@ fn partition_into_chunks(
 
     // Sort projections by anchor start for binary search.
     for proj in &mut projections {
-        proj.sort_by_key(|&(a_start, _, _, _)| a_start);
+        proj.sort_by_key(|&(a_start, _, _, _, _)| a_start);
     }
 
     // Create windows along the anchor with overlap.
@@ -541,25 +531,28 @@ fn partition_into_chunks(
         let mut chunk_seqs: Vec<(String, SequenceMetadata)> = Vec::new();
 
         // Always include the anchor's slice for this window.
+        // Preserve the original metadata so that path_name() is consistent
+        // across all chunks — lacing merges paths by name.
         let anchor_slice = &anchor_seq[*win_start..*win_end];
-        let mut chunk_anchor_meta = anchor_meta.clone();
-        chunk_anchor_meta.start = anchor_meta.start + *win_start as i32;
-        chunk_anchor_meta.size = (*win_end - *win_start) as i32;
-        chunk_seqs.push((anchor_slice.to_string(), chunk_anchor_meta));
+        chunk_seqs.push((anchor_slice.to_string(), anchor_meta.clone()));
 
         // For each non-anchor sequence, project the window through alignments.
+        // If a sequence has no projection from the anchor (no direct alignment),
+        // include it fully in every chunk as a fallback.
         for (seq_idx, (seq_str, seq_meta)) in sequences.iter().enumerate().skip(1) {
-            if let Some((seq_start, seq_end)) =
+            if projections[seq_idx].is_empty() {
+                // No anchor alignment — include full sequence in every chunk.
+                chunk_seqs.push((seq_str.clone(), seq_meta.clone()));
+            } else if let Some((seq_start, seq_end)) =
                 project_window_to_sequence(&projections[seq_idx], *win_start, *win_end)
             {
                 let clamped_start = seq_start.min(seq_str.len());
                 let clamped_end = seq_end.min(seq_str.len());
                 if clamped_end > clamped_start {
                     let sub_seq = &seq_str[clamped_start..clamped_end];
-                    let mut sub_meta = seq_meta.clone();
-                    sub_meta.start = seq_meta.start + clamped_start as i32;
-                    sub_meta.size = (clamped_end - clamped_start) as i32;
-                    chunk_seqs.push((sub_seq.to_string(), sub_meta));
+                    // Preserve the original metadata so path_name() is
+                    // consistent across chunks for lacing.
+                    chunk_seqs.push((sub_seq.to_string(), seq_meta.clone()));
                 }
             }
         }
@@ -582,15 +575,18 @@ fn partition_into_chunks(
 ///
 /// Returns the (start, end) range in the target sequence coordinates, or None
 /// if no alignment covers this window.
+///
+/// For reverse-strand alignments, the mapping is inverted: moving forward in
+/// anchor space maps to moving backward in target sequence space.
 fn project_window_to_sequence(
-    projections: &[(usize, usize, usize, usize)],
+    projections: &[(usize, usize, usize, usize, bool)],
     win_start: usize,
     win_end: usize,
 ) -> Option<(usize, usize)> {
     let mut best_start = usize::MAX;
     let mut best_end = 0usize;
 
-    for &(a_start, a_end, s_start, s_end) in projections {
+    for &(a_start, a_end, s_start, s_end, is_reverse) in projections {
         // Check if this alignment overlaps the window.
         if a_start >= win_end || a_end <= win_start {
             continue;
@@ -603,12 +599,21 @@ fn project_window_to_sequence(
         let overlap_start = win_start.max(a_start);
         let overlap_end = win_end.min(a_end);
 
-        // Project the overlap region.
         let frac_start = (overlap_start - a_start) as f64 / a_span as f64;
         let frac_end = (overlap_end - a_start) as f64 / a_span as f64;
 
-        let projected_start = s_start + (frac_start * s_span as f64) as usize;
-        let projected_end = s_start + (frac_end * s_span as f64) as usize;
+        let (projected_start, projected_end) = if is_reverse {
+            // Reverse strand: moving forward in anchor space → backward in seq space.
+            // frac_start (closer to a_start) maps to s_end, frac_end maps toward s_start.
+            let p_end = s_end - (frac_start * s_span as f64) as usize;
+            let p_start = s_end - (frac_end * s_span as f64) as usize;
+            (p_start, p_end)
+        } else {
+            // Forward strand: straightforward linear interpolation.
+            let p_start = s_start + (frac_start * s_span as f64) as usize;
+            let p_end = s_start + (frac_end * s_span as f64) as usize;
+            (p_start, p_end)
+        };
 
         best_start = best_start.min(projected_start);
         best_end = best_end.max(projected_end);
@@ -781,11 +786,13 @@ fn lace_subgraphs(sub_gfas: &[String], _num_threads: usize) -> io::Result<String
         output.push('\n');
     }
 
-    // Deduplicate links.
-    let link_set: std::collections::HashSet<&String> = all_links.iter().collect();
-    for link in &link_set {
-        output.push_str(link);
-        output.push('\n');
+    // Deduplicate links while preserving insertion order for determinism.
+    let mut seen_links = std::collections::HashSet::new();
+    for link in &all_links {
+        if seen_links.insert(link) {
+            output.push_str(link);
+            output.push('\n');
+        }
     }
 
     for path_name in &path_order {
@@ -815,23 +822,9 @@ fn parse_step(step: &str) -> (&str, &str) {
 /// Create a trivial GFA for a single sequence: one segment, one path.
 fn make_trivial_gfa(seq_data: &(String, SequenceMetadata)) -> io::Result<String> {
     let (seq, meta) = seq_data;
-    let path_name = format!(
-        "{}:{}-{}",
-        meta.name,
-        if meta.strand == '+' {
-            meta.start
-        } else {
-            (meta.total_length as i32) - meta.start - meta.size
-        },
-        if meta.strand == '+' {
-            meta.start + meta.size
-        } else {
-            (meta.total_length as i32) - meta.start
-        }
-    );
     Ok(format!(
         "H\tVN:Z:1.0\nS\t1\t{}\nP\t{}\t1+\t*\n",
-        seq, path_name
+        seq, meta.path_name()
     ))
 }
 
@@ -907,7 +900,7 @@ mod tests {
 
     #[test]
     fn test_project_window_to_sequence_no_overlap() {
-        let projections = vec![(100, 200, 50, 150)];
+        let projections = vec![(100, 200, 50, 150, false)];
         // Window completely before the alignment.
         assert_eq!(project_window_to_sequence(&projections, 0, 50), None);
         // Window completely after the alignment.
@@ -917,7 +910,7 @@ mod tests {
     #[test]
     fn test_project_window_to_sequence_full_overlap() {
         // Alignment: anchor [100,200) → seq [50,150)
-        let projections = vec![(100, 200, 50, 150)];
+        let projections = vec![(100, 200, 50, 150, false)];
         // Window exactly covers the alignment.
         let result = project_window_to_sequence(&projections, 100, 200);
         assert_eq!(result, Some((50, 150)));
@@ -926,10 +919,58 @@ mod tests {
     #[test]
     fn test_project_window_to_sequence_partial_overlap() {
         // Alignment: anchor [100,200) → seq [0,100)
-        let projections = vec![(100, 200, 0, 100)];
+        let projections = vec![(100, 200, 0, 100, false)];
         // Window covers first half: anchor [100,150) → seq [0,50)
         let result = project_window_to_sequence(&projections, 100, 150);
         assert_eq!(result, Some((0, 50)));
+    }
+
+    #[test]
+    fn test_project_window_reverse_strand_full_overlap() {
+        // Reverse-strand alignment: anchor [100,200) → seq [50,150) but inverted.
+        // Moving forward in anchor → backward in seq.
+        // So anchor 100 → seq 150, anchor 200 → seq 50.
+        let projections = vec![(100, 200, 50, 150, true)];
+        let result = project_window_to_sequence(&projections, 100, 200);
+        assert_eq!(result, Some((50, 150)));
+    }
+
+    #[test]
+    fn test_project_window_reverse_strand_first_half() {
+        // Reverse-strand: anchor [100,200) → seq [0,100) inverted.
+        // anchor 100 → seq 100, anchor 200 → seq 0.
+        // Window [100,150): frac_start=0.0, frac_end=0.5
+        // projected: p_end = 100 - 0.0*100 = 100, p_start = 100 - 0.5*100 = 50
+        let projections = vec![(100, 200, 0, 100, true)];
+        let result = project_window_to_sequence(&projections, 100, 150);
+        assert_eq!(result, Some((50, 100)));
+    }
+
+    #[test]
+    fn test_project_window_reverse_strand_second_half() {
+        // Reverse-strand: anchor [100,200) → seq [0,100) inverted.
+        // Window [150,200): frac_start=0.5, frac_end=1.0
+        // projected: p_end = 100 - 0.5*100 = 50, p_start = 100 - 1.0*100 = 0
+        let projections = vec![(100, 200, 0, 100, true)];
+        let result = project_window_to_sequence(&projections, 150, 200);
+        assert_eq!(result, Some((0, 50)));
+    }
+
+    #[test]
+    fn test_project_window_mixed_strands() {
+        // Two alignments: one forward, one reverse, both overlapping the window.
+        // Forward: anchor [0,100) → seq [200,300)
+        // Reverse: anchor [50,150) → seq [400,500)
+        // Window [40,110):
+        //   Forward overlap [40,100): frac 0.4..1.0 → seq [240,300)
+        //   Reverse overlap [50,110): frac 0.0..0.6 → seq end=500-0=500, start=500-60=440 → [440,500)
+        let projections = vec![
+            (0, 100, 200, 300, false),
+            (50, 150, 400, 500, true),
+        ];
+        let result = project_window_to_sequence(&projections, 40, 110);
+        // best_start = min(240, 440) = 240, best_end = max(300, 500) = 500
+        assert_eq!(result, Some((240, 500)));
     }
 
     #[test]
@@ -969,5 +1010,1299 @@ mod tests {
     fn test_lace_subgraphs_empty() {
         let result = lace_subgraphs(&[], 1).unwrap();
         assert!(result.contains("H\tVN:Z:1.0"));
+    }
+
+    #[test]
+    fn test_lace_subgraphs_reverse_orientation() {
+        // GFA1 has a path step with reverse orientation; GFA2 has forward.
+        let gfa1 = "H\tVN:Z:1.0\nS\t1\tACGT\nP\tp1\t1-\t*\n".to_string();
+        let gfa2 = "H\tVN:Z:1.0\nS\t1\tTGCA\nP\tp1\t1+\t*\n".to_string();
+        let result = lace_subgraphs(&[gfa1, gfa2], 1).unwrap();
+
+        assert!(result.contains("S\t1\tACGT"));
+        assert!(result.contains("S\t2\tTGCA"));
+        // Linking edge should preserve orientations: 1- → 2+
+        assert!(result.contains("L\t1\t-\t2\t+\t0M"));
+        assert!(result.contains("P\tp1\t1-,2+\t*"));
+    }
+
+    #[test]
+    fn test_lace_subgraphs_multi_segment_paths() {
+        // Each sub-GFA has a path with multiple segments.
+        let gfa1 = "H\tVN:Z:1.0\n\
+                     S\t1\tACGT\n\
+                     S\t2\tTTTT\n\
+                     L\t1\t+\t2\t+\t0M\n\
+                     P\tp1\t1+,2+\t*\n"
+            .to_string();
+        let gfa2 = "H\tVN:Z:1.0\n\
+                     S\t1\tGGGG\n\
+                     S\t2\tCCCC\n\
+                     L\t1\t+\t2\t-\t0M\n\
+                     P\tp1\t1+,2-\t*\n"
+            .to_string();
+        let result = lace_subgraphs(&[gfa1, gfa2], 1).unwrap();
+
+        // Segments remapped: gfa1 1→1, 2→2; gfa2 1→3, 2→4
+        assert!(result.contains("S\t1\tACGT"));
+        assert!(result.contains("S\t2\tTTTT"));
+        assert!(result.contains("S\t3\tGGGG"));
+        assert!(result.contains("S\t4\tCCCC"));
+        // Internal links remapped
+        assert!(result.contains("L\t1\t+\t2\t+\t0M"));
+        assert!(result.contains("L\t3\t+\t4\t-\t0M"));
+        // Linking edge between last of gfa1 (2+) and first of gfa2 (3+)
+        assert!(result.contains("L\t2\t+\t3\t+\t0M"));
+        // Merged path
+        assert!(result.contains("P\tp1\t1+,2+,3+,4-\t*"));
+    }
+
+    #[test]
+    fn test_lace_subgraphs_multiple_paths() {
+        // Two different path names across two sub-GFAs.
+        let gfa1 = "H\tVN:Z:1.0\n\
+                     S\t1\tAAAA\n\
+                     S\t2\tCCCC\n\
+                     P\tpathA\t1+\t*\n\
+                     P\tpathB\t2+\t*\n"
+            .to_string();
+        let gfa2 = "H\tVN:Z:1.0\n\
+                     S\t1\tGGGG\n\
+                     S\t2\tTTTT\n\
+                     P\tpathA\t1+\t*\n\
+                     P\tpathB\t2-\t*\n"
+            .to_string();
+        let result = lace_subgraphs(&[gfa1, gfa2], 1).unwrap();
+
+        // Segments: gfa1 1→1, 2→2; gfa2 1→3, 2→4
+        assert!(result.contains("S\t1\tAAAA"));
+        assert!(result.contains("S\t2\tCCCC"));
+        assert!(result.contains("S\t3\tGGGG"));
+        assert!(result.contains("S\t4\tTTTT"));
+        // pathA: 1+ from gfa1, 3+ from gfa2, linked 1+ → 3+
+        assert!(result.contains("P\tpathA\t1+,3+\t*"));
+        assert!(result.contains("L\t1\t+\t3\t+\t0M"));
+        // pathB: 2+ from gfa1, 4- from gfa2, linked 2+ → 4-
+        assert!(result.contains("P\tpathB\t2+,4-\t*"));
+        assert!(result.contains("L\t2\t+\t4\t-\t0M"));
+    }
+
+    #[test]
+    fn test_lace_subgraphs_three_chunks() {
+        // Lace three sub-GFAs to verify chaining works across >2 chunks.
+        let gfa1 = "H\tVN:Z:1.0\nS\t1\tAA\nP\tp\t1+\t*\n".to_string();
+        let gfa2 = "H\tVN:Z:1.0\nS\t1\tCC\nP\tp\t1-\t*\n".to_string();
+        let gfa3 = "H\tVN:Z:1.0\nS\t1\tGG\nP\tp\t1+\t*\n".to_string();
+        let result = lace_subgraphs(&[gfa1, gfa2, gfa3], 1).unwrap();
+
+        assert!(result.contains("S\t1\tAA"));
+        assert!(result.contains("S\t2\tCC"));
+        assert!(result.contains("S\t3\tGG"));
+        // Linking edges: 1+ → 2-, 2- → 3+
+        assert!(result.contains("L\t1\t+\t2\t-\t0M"));
+        assert!(result.contains("L\t2\t-\t3\t+\t0M"));
+        assert!(result.contains("P\tp\t1+,2-,3+\t*"));
+    }
+
+    #[test]
+    fn test_lace_subgraphs_mixed_orientation_multi_segment() {
+        // Sub-GFAs with multi-segment paths in mixed orientations across 3 chunks.
+        let gfa1 = "H\tVN:Z:1.0\n\
+                     S\t1\tAA\n\
+                     S\t2\tCC\n\
+                     L\t1\t+\t2\t-\t0M\n\
+                     P\tp\t1+,2-\t*\n"
+            .to_string();
+        let gfa2 = "H\tVN:Z:1.0\n\
+                     S\t1\tGG\n\
+                     P\tp\t1-\t*\n"
+            .to_string();
+        let gfa3 = "H\tVN:Z:1.0\n\
+                     S\t1\tTT\n\
+                     S\t2\tAA\n\
+                     L\t1\t-\t2\t+\t0M\n\
+                     P\tp\t1-,2+\t*\n"
+            .to_string();
+        let result = lace_subgraphs(&[gfa1, gfa2, gfa3], 1).unwrap();
+
+        // Segments: gfa1 {1→1,2→2}, gfa2 {1→3}, gfa3 {1→4,2→5}
+        assert!(result.contains("S\t1\tAA"));
+        assert!(result.contains("S\t2\tCC"));
+        assert!(result.contains("S\t3\tGG"));
+        assert!(result.contains("S\t4\tTT"));
+        assert!(result.contains("S\t5\tAA"));
+        // Internal links remapped
+        assert!(result.contains("L\t1\t+\t2\t-\t0M"));
+        assert!(result.contains("L\t4\t-\t5\t+\t0M"));
+        // Linking edges: chunk1 last=2- → chunk2 first=3-, chunk2 last=3- → chunk3 first=4-
+        assert!(result.contains("L\t2\t-\t3\t-\t0M"));
+        assert!(result.contains("L\t3\t-\t4\t-\t0M"));
+        // Full merged path
+        assert!(result.contains("P\tp\t1+,2-,3-,4-,5+\t*"));
+    }
+
+    #[test]
+    fn test_lace_subgraphs_path_present_in_subset_of_chunks() {
+        // pathA appears in both chunks, pathB only in the first chunk.
+        let gfa1 = "H\tVN:Z:1.0\n\
+                     S\t1\tACGT\n\
+                     P\tpathA\t1+\t*\n\
+                     P\tpathB\t1-\t*\n"
+            .to_string();
+        let gfa2 = "H\tVN:Z:1.0\n\
+                     S\t1\tTGCA\n\
+                     P\tpathA\t1+\t*\n"
+            .to_string();
+        let result = lace_subgraphs(&[gfa1, gfa2], 1).unwrap();
+
+        // pathA should be merged with linking edge
+        assert!(result.contains("P\tpathA\t1+,2+\t*"));
+        assert!(result.contains("L\t1\t+\t2\t+\t0M"));
+        // pathB should appear with just its single step (no linking edge needed)
+        assert!(result.contains("P\tpathB\t1-\t*"));
+    }
+
+    #[test]
+    fn test_lace_subgraphs_link_deduplication() {
+        // Both sub-GFAs have an internal link that, after remapping, would be
+        // different (1+→2+ vs 3+→4+). But a linking edge 2+→3+ is unique.
+        // Also test that truly duplicate links are deduplicated.
+        let gfa1 = "H\tVN:Z:1.0\n\
+                     S\t1\tAA\n\
+                     S\t2\tCC\n\
+                     L\t1\t+\t2\t+\t0M\n\
+                     L\t1\t+\t2\t+\t0M\n\
+                     P\tp\t1+,2+\t*\n"
+            .to_string();
+        let gfa2 = "H\tVN:Z:1.0\n\
+                     S\t1\tGG\n\
+                     P\tp\t1+\t*\n"
+            .to_string();
+        let result = lace_subgraphs(&[gfa1, gfa2], 1).unwrap();
+
+        // The duplicate L 1+→2+ should appear only once.
+        let link_count = result.matches("L\t1\t+\t2\t+\t0M").count();
+        assert_eq!(link_count, 1, "duplicate links should be deduplicated");
+        // Linking edge 2+ → 3+
+        assert!(result.contains("L\t2\t+\t3\t+\t0M"));
+    }
+
+    #[test]
+    fn test_lace_subgraphs_segment_tags_preserved() {
+        // Segments may have optional tag fields after the sequence.
+        let gfa1 = "H\tVN:Z:1.0\nS\t1\tACGT\tLN:i:4\nP\tp\t1+\t*\n".to_string();
+        let gfa2 = "H\tVN:Z:1.0\nS\t1\tTGCA\nP\tp\t1+\t*\n".to_string();
+        let result = lace_subgraphs(&[gfa1, gfa2], 1).unwrap();
+
+        // Tag should be preserved on the first segment.
+        assert!(result.contains("S\t1\tACGT\tLN:i:4"));
+        assert!(result.contains("S\t2\tTGCA"));
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_paf_file tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: write PAF content to a temp file and return its path handle.
+    fn write_paf_temp(content: &str) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f.flush().unwrap();
+        f
+    }
+
+    #[test]
+    fn test_parse_paf_file_basic() {
+        // Standard 12-column PAF line (mandatory fields).
+        let paf = "qry1\t1000\t100\t500\t+\ttgt1\t2000\t200\t600\t350\t400\t60\n";
+        let f = write_paf_temp(paf);
+        let records = parse_paf_file(f.path()).unwrap();
+        assert_eq!(records.len(), 1);
+        let r = &records[0];
+        assert_eq!(r.query_name, "qry1");
+        assert_eq!(r.query_len, 1000);
+        assert_eq!(r.query_start, 100);
+        assert_eq!(r.query_end, 500);
+        assert_eq!(r.strand, '+');
+        assert_eq!(r.target_name, "tgt1");
+        assert_eq!(r.target_len, 2000);
+        assert_eq!(r.target_start, 200);
+        assert_eq!(r.target_end, 600);
+    }
+
+    #[test]
+    fn test_parse_paf_file_reverse_strand() {
+        let paf = "q\t100\t10\t90\t-\tt\t200\t20\t180\t70\t80\t60\n";
+        let f = write_paf_temp(paf);
+        let records = parse_paf_file(f.path()).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].strand, '-');
+    }
+
+    #[test]
+    fn test_parse_paf_file_multiple_records() {
+        let paf = "\
+q1\t1000\t0\t500\t+\tt1\t2000\t0\t500\t400\t500\t60
+q2\t800\t100\t700\t-\tt2\t1500\t200\t1200\t500\t600\t60
+q3\t500\t50\t450\t+\tt3\t600\t60\t460\t350\t400\t60
+";
+        let f = write_paf_temp(paf);
+        let records = parse_paf_file(f.path()).unwrap();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].query_name, "q1");
+        assert_eq!(records[1].query_name, "q2");
+        assert_eq!(records[1].strand, '-');
+        assert_eq!(records[2].query_name, "q3");
+        assert_eq!(records[2].target_start, 60);
+        assert_eq!(records[2].target_end, 460);
+    }
+
+    #[test]
+    fn test_parse_paf_file_extra_columns() {
+        // PAF files often have optional tag columns beyond the 12 mandatory fields.
+        let paf = "q\t1000\t10\t90\t+\tt\t2000\t20\t180\t70\t80\t60\tcg:Z:80M\tNM:i:5\n";
+        let f = write_paf_temp(paf);
+        let records = parse_paf_file(f.path()).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].query_name, "q");
+        assert_eq!(records[0].target_name, "t");
+    }
+
+    #[test]
+    fn test_parse_paf_file_skips_short_lines() {
+        // Lines with fewer than 12 tab-delimited fields should be skipped.
+        let paf = "\
+q1\t1000\t0\t500\t+\tt1\t2000\t0\t500\t400\t500\t60
+too\tfew\tfields
+q2\t800\t100\t700\t+\tt2\t1500\t200\t1200\t500\t600\t60
+";
+        let f = write_paf_temp(paf);
+        let records = parse_paf_file(f.path()).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].query_name, "q1");
+        assert_eq!(records[1].query_name, "q2");
+    }
+
+    #[test]
+    fn test_parse_paf_file_empty_file() {
+        let f = write_paf_temp("");
+        let records = parse_paf_file(f.path()).unwrap();
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn test_parse_paf_file_blank_lines() {
+        // Blank lines should be skipped (fewer than 12 fields).
+        let paf = "\n\nq\t100\t0\t50\t+\tt\t200\t0\t50\t40\t50\t60\n\n";
+        let f = write_paf_temp(paf);
+        let records = parse_paf_file(f.path()).unwrap();
+        assert_eq!(records.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_paf_file_nonexistent_path() {
+        let result = parse_paf_file(std::path::Path::new("/nonexistent/path.paf"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_paf_file_non_numeric_fields_default_to_zero() {
+        // If numeric fields can't be parsed, unwrap_or(0) kicks in.
+        let paf = "q\tNaN\tabc\txyz\t+\tt\tNaN\tabc\txyz\t0\t0\t0\n";
+        let f = write_paf_temp(paf);
+        let records = parse_paf_file(f.path()).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].query_len, 0);
+        assert_eq!(records[0].query_start, 0);
+        assert_eq!(records[0].query_end, 0);
+        assert_eq!(records[0].target_len, 0);
+        assert_eq!(records[0].target_start, 0);
+        assert_eq!(records[0].target_end, 0);
+    }
+
+    #[test]
+    fn test_parse_paf_file_strand_defaults_to_plus() {
+        // Any strand value other than "-" should be treated as '+'.
+        let paf = "q\t100\t0\t50\t*\tt\t200\t0\t50\t40\t50\t60\n";
+        let f = write_paf_temp(paf);
+        let records = parse_paf_file(f.path()).unwrap();
+        assert_eq!(records[0].strand, '+');
+    }
+
+    #[test]
+    fn test_parse_paf_file_realize_style_names() {
+        // The realize engine generates names like "chr1:100-200(+)".
+        let paf = "chr1:100-200(+)\t100\t0\t100\t+\tchr2:300-400(+)\t100\t0\t100\t90\t100\t60\n";
+        let f = write_paf_temp(paf);
+        let records = parse_paf_file(f.path()).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].query_name, "chr1:100-200(+)");
+        assert_eq!(records[0].target_name, "chr2:300-400(+)");
+    }
+
+    #[test]
+    fn test_parse_paf_file_skips_self_alignments() {
+        // Self-alignments (query_name == target_name) should be filtered out.
+        let paf = "\
+q1\t1000\t0\t1000\t+\tq1\t1000\t0\t1000\t1000\t1000\t255
+q1\t1000\t0\t1000\t+\tq2\t1000\t0\t1000\t990\t1000\t255
+q2\t1000\t0\t1000\t+\tq2\t1000\t0\t1000\t1000\t1000\t255
+";
+        let f = write_paf_temp(paf);
+        let records = parse_paf_file(f.path()).unwrap();
+        // Only the cross-alignment (q1→q2) should survive.
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].query_name, "q1");
+        assert_eq!(records[0].target_name, "q2");
+    }
+
+    // -----------------------------------------------------------------------
+    // Recursive sweepga → partition → lace integration tests
+    // -----------------------------------------------------------------------
+
+    /// Generate a pseudorandom DNA sequence of given length using a simple LCG.
+    /// The seed ensures reproducibility across test runs.
+    fn make_random_dna(len: usize, seed: u64) -> String {
+        const BASES: [char; 4] = ['A', 'C', 'G', 'T'];
+        let mut state = seed;
+        (0..len)
+            .map(|_| {
+                // LCG: state = (a * state + c) mod m
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                BASES[((state >> 33) % 4) as usize]
+            })
+            .collect()
+    }
+
+    /// Create a variant of a base sequence by introducing a SNP every `interval` bp.
+    fn mutate_every_n(base: &str, interval: usize, replacement: char) -> String {
+        base.chars()
+            .enumerate()
+            .map(|(i, c)| if i > 0 && i % interval == 0 { replacement } else { c })
+            .collect()
+    }
+
+    #[test]
+    fn test_recursive_path_triggers_sweepga() {
+        // Sequences larger than poa_threshold trigger the sweepga path.
+        // Use 5000bp pseudorandom sequences — FastGA needs sufficient length for
+        // k-mer seeding to produce alignments that survive filtering.
+        let base = make_random_dna(5000, 42);
+        let variant = mutate_every_n(&base, 500, 'T');
+
+        let seqs = vec![
+            make_seq("s1", &base, 0, 10000),
+            make_seq("s2", &variant, 0, 10000),
+        ];
+
+        let mut config = RealizeConfig::default();
+        config.poa_threshold = 1000;
+        config.chunk_size = 2000;
+        config.padding = 0;
+        config.sort_output = false;
+        config.max_depth = 5;
+
+
+        let result = realize_from_sequences(&seqs, &config).unwrap();
+
+        // Must produce valid GFA with segments and paths.
+        assert!(result.gfa.contains("H\tVN:Z:1.0"), "missing GFA header");
+        assert!(
+            result.gfa.lines().any(|l| l.starts_with("S\t")),
+            "no segments in GFA"
+        );
+        assert!(
+            result.gfa.lines().any(|l| l.starts_with("P\t")),
+            "no paths in GFA"
+        );
+
+        // The sweepga path should have been taken.
+        assert!(
+            result.stats.sweepga_calls >= 1,
+            "expected sweepga_calls >= 1, got {}",
+            result.stats.sweepga_calls
+        );
+
+        // POA should also have been called (as leaf base cases).
+        assert!(
+            result.stats.poa_calls >= 1,
+            "expected poa_calls >= 1, got {}",
+            result.stats.poa_calls
+        );
+
+        // Should have recursed (depth > 0 reached).
+        assert!(
+            result.stats.max_depth_reached >= 1,
+            "expected recursion depth >= 1, got {}",
+            result.stats.max_depth_reached
+        );
+    }
+
+    #[test]
+    fn test_recursive_path_multi_sequence() {
+        // Three similar 5kb sequences → sweepga + partition + lace.
+        let base = make_random_dna(5000, 42);
+        let v1 = mutate_every_n(&base, 500, 'A');
+        let v2 = mutate_every_n(&base, 700, 'G');
+
+        let seqs = vec![
+            make_seq("s1", &base, 0, 10000),
+            make_seq("s2", &v1, 0, 10000),
+            make_seq("s3", &v2, 0, 10000),
+        ];
+
+        let mut config = RealizeConfig::default();
+        config.poa_threshold = 1000;
+        config.chunk_size = 2000;
+        config.padding = 0;
+        config.sort_output = false;
+        config.max_depth = 5;
+
+
+        let result = realize_from_sequences(&seqs, &config).unwrap();
+
+        assert_eq!(result.stats.num_sequences, 3);
+        assert!(result.stats.sweepga_calls >= 1);
+        assert!(result.stats.poa_calls >= 1);
+
+        // All three paths should be present in the output GFA.
+        let path_lines: Vec<&str> = result.gfa.lines().filter(|l| l.starts_with("P\t")).collect();
+        assert!(
+            path_lines.len() >= 3,
+            "expected at least 3 paths, got {}: {:?}",
+            path_lines.len(),
+            path_lines
+        );
+    }
+
+    #[test]
+    fn test_recursive_max_depth_forces_poa() {
+        // With max_depth=1, depth 0 uses sweepga, chunks at depth 1 must use POA
+        // even though they exceed poa_threshold.
+        let base = make_random_dna(5000, 42);
+        let variant = mutate_every_n(&base, 500, 'T');
+
+        let seqs = vec![
+            make_seq("s1", &base, 0, 10000),
+            make_seq("s2", &variant, 0, 10000),
+        ];
+
+        let mut config = RealizeConfig::default();
+        config.poa_threshold = 1000;
+        config.chunk_size = 2000;   // Chunks ~2000bp > poa_threshold.
+        config.padding = 0;
+        config.sort_output = false;
+        config.max_depth = 1;       // Force POA at depth 1.
+
+
+        let result = realize_from_sequences(&seqs, &config).unwrap();
+
+        assert!(result.gfa.contains("H\tVN:Z:1.0"));
+        assert!(
+            result.gfa.lines().any(|l| l.starts_with("S\t")),
+            "no segments"
+        );
+
+        // Depth 0: sweepga should be called.
+        assert!(
+            result.stats.sweepga_calls >= 1,
+            "expected sweepga at depth 0"
+        );
+        // Depth 1: forced to POA (max_depth reached).
+        assert!(
+            result.stats.poa_calls >= 1,
+            "expected POA calls from max_depth forcing"
+        );
+        // max_depth_reached should be at least 1 (chunks recurse to depth 1).
+        assert!(
+            result.stats.max_depth_reached >= 1,
+            "expected max_depth_reached >= 1, got {}",
+            result.stats.max_depth_reached
+        );
+    }
+
+    #[test]
+    fn test_recursive_stats_depth_tracking() {
+        // Verify that depth tracking works correctly in the recursive case.
+        let base = make_random_dna(5000, 42);
+        let variant = mutate_every_n(&base, 500, 'T');
+
+        let seqs = vec![
+            make_seq("s1", &base, 0, 10000),
+            make_seq("s2", &variant, 0, 10000),
+        ];
+
+        let mut config = RealizeConfig::default();
+        config.poa_threshold = 1000;
+        config.chunk_size = 2000;
+        config.padding = 0;
+        config.sort_output = false;
+        config.max_depth = 10;
+
+
+        let result = realize_from_sequences(&seqs, &config).unwrap();
+
+        // Should have recursed at least once (depth > 0).
+        assert!(
+            result.stats.max_depth_reached >= 1,
+            "expected recursion depth >= 1, got {}",
+            result.stats.max_depth_reached
+        );
+
+        // Both sweepga and POA should have been called.
+        assert!(result.stats.sweepga_calls >= 1);
+        assert!(result.stats.poa_calls >= 1);
+    }
+
+    #[test]
+    fn test_recursive_gfa_paths_cover_sequences() {
+        // Verify that all input sequences appear as paths in the output GFA
+        // and every path step references a valid segment.
+        let base = make_random_dna(5000, 42);
+        let v1 = mutate_every_n(&base, 500, 'A');
+
+        let seqs = vec![
+            make_seq("s1", &base, 0, 10000),
+            make_seq("s2", &v1, 50, 10000),
+        ];
+
+        let mut config = RealizeConfig::default();
+        config.poa_threshold = 1000;
+        config.chunk_size = 2000;
+        config.padding = 0;
+        config.sort_output = false;
+        config.max_depth = 5;
+
+
+        let result = realize_from_sequences(&seqs, &config).unwrap();
+
+        // Both sequences should have corresponding paths.
+        let path_lines: Vec<&str> = result.gfa.lines().filter(|l| l.starts_with("P\t")).collect();
+        assert!(
+            path_lines.len() >= 2,
+            "expected at least 2 paths, got {}: {:?}",
+            path_lines.len(),
+            path_lines
+        );
+
+        // Every segment referenced by a path should exist.
+        let segment_ids: std::collections::HashSet<&str> = result
+            .gfa
+            .lines()
+            .filter(|l| l.starts_with("S\t"))
+            .filter_map(|l| l.split('\t').nth(1))
+            .collect();
+
+        for path_line in &path_lines {
+            let steps_str = path_line.split('\t').nth(2).unwrap_or("");
+            for step in steps_str.split(',') {
+                let node = step.trim_end_matches(['+', '-']);
+                assert!(
+                    segment_ids.contains(node),
+                    "path references non-existent segment '{}' in: {}",
+                    node,
+                    path_line
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_recursive_links_reference_valid_segments() {
+        // Verify that all links reference segments that exist.
+        let base = make_random_dna(5000, 42);
+        let variant = mutate_every_n(&base, 500, 'G');
+
+        let seqs = vec![
+            make_seq("s1", &base, 0, 10000),
+            make_seq("s2", &variant, 0, 10000),
+        ];
+
+        let mut config = RealizeConfig::default();
+        config.poa_threshold = 1000;
+        config.chunk_size = 2000;
+        config.padding = 0;
+        config.sort_output = false;
+        config.max_depth = 5;
+
+
+        let result = realize_from_sequences(&seqs, &config).unwrap();
+
+        let segment_ids: std::collections::HashSet<&str> = result
+            .gfa
+            .lines()
+            .filter(|l| l.starts_with("S\t"))
+            .filter_map(|l| l.split('\t').nth(1))
+            .collect();
+
+        for line in result.gfa.lines().filter(|l| l.starts_with("L\t")) {
+            let fields: Vec<&str> = line.split('\t').collect();
+            if fields.len() >= 5 {
+                assert!(
+                    segment_ids.contains(fields[1]),
+                    "link from-node '{}' not in segments: {}",
+                    fields[1],
+                    line
+                );
+                assert!(
+                    segment_ids.contains(fields[3]),
+                    "link to-node '{}' not in segments: {}",
+                    fields[3],
+                    line
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_sweepga_empty_alignment_falls_back_to_poa() {
+        // When sequences are too small/repetitive for sweepga to produce
+        // usable alignments, the engine should gracefully fall back to POA.
+        let base = make_random_dna(500, 42);
+        let variant = mutate_every_n(&base, 50, 'T');
+
+        let seqs = vec![
+            make_seq("s1", &base, 0, 1000),
+            make_seq("s2", &variant, 0, 1000),
+        ];
+
+        let mut config = RealizeConfig::default();
+        config.poa_threshold = 100;  // Below sequence length → tries sweepga.
+        config.chunk_size = 200;
+        config.padding = 0;
+        config.sort_output = false;
+        config.max_depth = 5;
+
+
+        let result = realize_from_sequences(&seqs, &config).unwrap();
+
+        // Should produce valid GFA regardless of whether sweepga succeeded.
+        assert!(result.gfa.contains("H\tVN:Z:1.0"));
+        assert!(result.gfa.lines().any(|l| l.starts_with("S\t")));
+        assert!(result.gfa.lines().any(|l| l.starts_with("P\t")));
+        assert!(result.stats.poa_calls >= 1);
+    }
+
+    #[test]
+    fn test_partition_multiple_chunks_with_projections() {
+        // Test partition_into_chunks with synthetic PAF records.
+        // Anchor is 1000bp, chunk_size=300, padding=50.
+        let anchor = make_random_dna(1000, 42);
+        let other = make_random_dna(900, 99);
+
+        let seqs = vec![
+            make_seq("anchor", &anchor, 0, 2000),
+            make_seq("other", &other, 0, 2000),
+        ];
+
+        // PAF: anchor aligns to other over [0,900) → [0,900).
+        let paf_records = vec![PafRecord {
+            query_name: "anchor:0-1000(+)".to_string(),
+            query_len: 1000,
+            query_start: 0,
+            query_end: 900,
+            target_name: "other:0-900(+)".to_string(),
+            target_len: 900,
+            target_start: 0,
+            target_end: 900,
+            strand: '+',
+        }];
+
+        let chunks = partition_into_chunks(&seqs, &paf_records, 300, 50);
+
+        // 1000bp / 300bp chunks = ~4 windows.
+        assert!(
+            chunks.len() >= 3,
+            "expected at least 3 chunks, got {}",
+            chunks.len()
+        );
+
+        // Each chunk should contain the anchor slice.
+        for chunk in &chunks {
+            assert!(
+                !chunk.sequences.is_empty(),
+                "chunk should have at least the anchor"
+            );
+        }
+
+        // At least some chunks should contain the other sequence (projected).
+        let chunks_with_other: usize = chunks
+            .iter()
+            .filter(|c| c.sequences.len() > 1)
+            .count();
+        assert!(
+            chunks_with_other >= 2,
+            "expected multiple chunks to contain the projected sequence, got {}",
+            chunks_with_other
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // P1: Multi-chunk partition and projection edge cases
+    // -----------------------------------------------------------------------
+
+    // --- project_window_to_sequence edge cases ---
+
+    #[test]
+    fn test_project_window_empty_projections() {
+        assert_eq!(project_window_to_sequence(&[], 0, 100), None);
+        assert_eq!(project_window_to_sequence(&[], 500, 1000), None);
+    }
+
+    #[test]
+    fn test_project_window_gap_between_disjoint_blocks() {
+        // Window falls entirely in a gap between two alignment blocks → None.
+        let projections = vec![
+            (0, 100, 0, 100, false),
+            (200, 300, 200, 300, false),
+        ];
+        assert_eq!(project_window_to_sequence(&projections, 100, 200), None);
+    }
+
+    #[test]
+    fn test_project_window_spans_disjoint_blocks() {
+        // Window overlaps both disjoint blocks.
+        let projections = vec![
+            (0, 100, 0, 100, false),
+            (200, 300, 200, 300, false),
+        ];
+        let result = project_window_to_sequence(&projections, 90, 210);
+        // Block 1: [90,100) → seq [90,100)
+        // Block 2: [200,210) → seq [200,210)
+        assert_eq!(result, Some((90, 210)));
+    }
+
+    #[test]
+    fn test_project_window_compression_scaling() {
+        // 2:1 compression: anchor [0,100) → seq [0,50).
+        // Window [25,75): frac 0.25..0.75 → seq [12,37)
+        let projections = vec![(0, 100, 0, 50, false)];
+        assert_eq!(project_window_to_sequence(&projections, 25, 75), Some((12, 37)));
+    }
+
+    #[test]
+    fn test_project_window_expansion_scaling() {
+        // 1:4 expansion: anchor [0,50) → seq [0,200).
+        // Window [0,25): frac 0.0..0.5 → seq [0,100)
+        let projections = vec![(0, 50, 0, 200, false)];
+        assert_eq!(project_window_to_sequence(&projections, 0, 25), Some((0, 100)));
+    }
+
+    #[test]
+    fn test_project_window_reverse_compression() {
+        // Reverse strand with 2:1 compression.
+        // anchor [0,100) → seq [0,50), reversed.
+        // Window [0,50): frac_start=0.0, frac_end=0.5
+        // p_end = 50 - 0*50 = 50, p_start = 50 - 25 = 25
+        let projections = vec![(0, 100, 0, 50, true)];
+        assert_eq!(project_window_to_sequence(&projections, 0, 50), Some((25, 50)));
+    }
+
+    #[test]
+    fn test_project_window_touching_adjacent_blocks() {
+        // Two blocks touch at position 100 with no gap.
+        let projections = vec![
+            (0, 100, 0, 100, false),
+            (100, 200, 100, 200, false),
+        ];
+        assert_eq!(project_window_to_sequence(&projections, 80, 120), Some((80, 120)));
+    }
+
+    #[test]
+    fn test_project_window_single_base() {
+        let projections = vec![(0, 100, 0, 100, false)];
+        assert_eq!(project_window_to_sequence(&projections, 50, 51), Some((50, 51)));
+    }
+
+    #[test]
+    fn test_project_window_at_start_boundary() {
+        let projections = vec![(100, 200, 50, 150, false)];
+        assert_eq!(project_window_to_sequence(&projections, 100, 120), Some((50, 70)));
+    }
+
+    #[test]
+    fn test_project_window_at_end_boundary() {
+        let projections = vec![(100, 200, 50, 150, false)];
+        assert_eq!(project_window_to_sequence(&projections, 180, 200), Some((130, 150)));
+    }
+
+    // --- partition_into_chunks edge cases ---
+
+    #[test]
+    fn test_partition_empty_input() {
+        assert!(partition_into_chunks(&[], &[], 1000, 100).is_empty());
+    }
+
+    #[test]
+    fn test_partition_multi_chunk_projected_slices() {
+        // Anchor 300bp, chunk_size=100, padding=10 → 3 windows.
+        // Verify anchor ranges and that s2 appears in each chunk.
+        let anchor = "A".repeat(300);
+        let seq2 = "C".repeat(280);
+        let seqs = vec![
+            make_seq("anchor", &anchor, 0, 300),
+            make_seq("s2", &seq2, 0, 280),
+        ];
+
+        let anchor_name = seqs[0].1.alignment_name();
+        let s2_name = seqs[1].1.alignment_name();
+        let paf_records = vec![PafRecord {
+            query_name: anchor_name,
+            query_len: 300,
+            query_start: 0,
+            query_end: 300,
+            target_name: s2_name,
+            target_len: 280,
+            target_start: 0,
+            target_end: 280,
+            strand: '+',
+        }];
+
+        let chunks = partition_into_chunks(&seqs, &paf_records, 100, 10);
+        assert_eq!(chunks.len(), 3);
+
+        for chunk in &chunks {
+            assert_eq!(chunk.sequences.len(), 2, "each chunk: anchor + s2");
+        }
+
+        // Windows: pos=0→[0,110), pos=100→[90,210), pos=200→[190,300)
+        assert_eq!((chunks[0].anchor_start, chunks[0].anchor_end), (0, 110));
+        assert_eq!((chunks[1].anchor_start, chunks[1].anchor_end), (90, 210));
+        assert_eq!((chunks[2].anchor_start, chunks[2].anchor_end), (190, 300));
+    }
+
+    #[test]
+    fn test_partition_unaligned_seq_included_as_fallback() {
+        // s3 has no alignment to anchor → included fully in every chunk
+        // as a fallback so it doesn't get dropped.
+        let anchor = "A".repeat(300);
+        let seqs = vec![
+            make_seq("anchor", &anchor, 0, 300),
+            make_seq("s2", &"C".repeat(280), 0, 280),
+            make_seq("s3", &"G".repeat(100), 0, 100),
+        ];
+
+        let anchor_name = seqs[0].1.alignment_name();
+        let s2_name = seqs[1].1.alignment_name();
+        let paf_records = vec![PafRecord {
+            query_name: anchor_name,
+            query_len: 300,
+            query_start: 0,
+            query_end: 300,
+            target_name: s2_name,
+            target_len: 280,
+            target_start: 0,
+            target_end: 280,
+            strand: '+',
+        }];
+
+        let chunks = partition_into_chunks(&seqs, &paf_records, 100, 10);
+        for (i, chunk) in chunks.iter().enumerate() {
+            assert!(chunk.sequences.iter().any(|(_, m)| m.name == "s3"),
+                "chunk {} should have s3 (fallback inclusion)", i);
+        }
+    }
+
+    #[test]
+    fn test_partition_partial_alignment_drops_from_late_chunks() {
+        // s2 aligns only to anchor [0,150). Chunks past that range exclude s2.
+        let anchor = "A".repeat(300);
+        let seqs = vec![
+            make_seq("anchor", &anchor, 0, 300),
+            make_seq("s2", &"C".repeat(150), 0, 150),
+        ];
+
+        let anchor_name = seqs[0].1.alignment_name();
+        let s2_name = seqs[1].1.alignment_name();
+        let paf_records = vec![PafRecord {
+            query_name: anchor_name,
+            query_len: 300,
+            query_start: 0,
+            query_end: 150,
+            target_name: s2_name,
+            target_len: 150,
+            target_start: 0,
+            target_end: 150,
+            strand: '+',
+        }];
+
+        let chunks = partition_into_chunks(&seqs, &paf_records, 100, 10);
+        assert!(chunks.len() >= 3);
+
+        assert!(chunks[0].sequences.iter().any(|(_, m)| m.name == "s2"),
+            "first chunk should include s2");
+        // Last chunk [190,300) doesn't overlap [0,150).
+        assert!(!chunks.last().unwrap().sequences.iter().any(|(_, m)| m.name == "s2"),
+            "last chunk should not include s2");
+    }
+
+    #[test]
+    fn test_partition_reverse_strand() {
+        // s2 aligns in reverse across the full anchor.
+        let anchor = "A".repeat(300);
+        let seqs = vec![
+            make_seq("anchor", &anchor, 0, 300),
+            make_seq("s2", &"C".repeat(300), 0, 300),
+        ];
+
+        let anchor_name = seqs[0].1.alignment_name();
+        let s2_name = seqs[1].1.alignment_name();
+        let paf_records = vec![PafRecord {
+            query_name: anchor_name,
+            query_len: 300,
+            query_start: 0,
+            query_end: 300,
+            target_name: s2_name,
+            target_len: 300,
+            target_start: 0,
+            target_end: 300,
+            strand: '-',
+        }];
+
+        let chunks = partition_into_chunks(&seqs, &paf_records, 100, 10);
+        assert!(chunks.len() >= 3);
+        for (i, chunk) in chunks.iter().enumerate() {
+            assert!(chunk.sequences.iter().any(|(_, m)| m.name == "s2"),
+                "chunk {} should have s2 (reverse strand full coverage)", i);
+        }
+    }
+
+    #[test]
+    fn test_partition_anchor_as_paf_target() {
+        // Anchor appears as target (not query) in PAF → still projects correctly.
+        let anchor = "A".repeat(300);
+        let seqs = vec![
+            make_seq("anchor", &anchor, 0, 300),
+            make_seq("s2", &"C".repeat(300), 0, 300),
+        ];
+
+        let anchor_name = seqs[0].1.alignment_name();
+        let s2_name = seqs[1].1.alignment_name();
+        let paf_records = vec![PafRecord {
+            query_name: s2_name,
+            query_len: 300,
+            query_start: 0,
+            query_end: 300,
+            target_name: anchor_name,
+            target_len: 300,
+            target_start: 0,
+            target_end: 300,
+            strand: '+',
+        }];
+
+        let chunks = partition_into_chunks(&seqs, &paf_records, 100, 10);
+        assert!(chunks.len() >= 3);
+        for (i, chunk) in chunks.iter().enumerate() {
+            assert!(chunk.sequences.iter().any(|(_, m)| m.name == "s2"),
+                "chunk {} should have s2 (anchor as PAF target)", i);
+        }
+    }
+
+    #[test]
+    fn test_partition_fragmented_alignment_gap() {
+        // Two alignment blocks with a gap: anchor [0,100)→s2 [0,100), anchor [200,300)→s2 [100,200).
+        // Middle chunk (anchor [100,200)) has no alignment → no s2.
+        let anchor = "A".repeat(300);
+        let seqs = vec![
+            make_seq("anchor", &anchor, 0, 300),
+            make_seq("s2", &"C".repeat(200), 0, 200),
+        ];
+
+        let anchor_name = seqs[0].1.alignment_name();
+        let s2_name = seqs[1].1.alignment_name();
+        let paf_records = vec![
+            PafRecord {
+                query_name: anchor_name.clone(), query_len: 300,
+                query_start: 0, query_end: 100,
+                target_name: s2_name.clone(), target_len: 200,
+                target_start: 0, target_end: 100, strand: '+',
+            },
+            PafRecord {
+                query_name: anchor_name, query_len: 300,
+                query_start: 200, query_end: 300,
+                target_name: s2_name, target_len: 200,
+                target_start: 100, target_end: 200, strand: '+',
+            },
+        ];
+
+        let chunks = partition_into_chunks(&seqs, &paf_records, 100, 0);
+        assert_eq!(chunks.len(), 3);
+
+        assert!(chunks[0].sequences.iter().any(|(_, m)| m.name == "s2"),
+            "first chunk should have s2");
+        assert!(!chunks[1].sequences.iter().any(|(_, m)| m.name == "s2"),
+            "middle chunk should NOT have s2 (alignment gap)");
+        assert!(chunks[2].sequences.iter().any(|(_, m)| m.name == "s2"),
+            "last chunk should have s2");
+    }
+
+    #[test]
+    fn test_partition_length_sort_with_expansion() {
+        // Projected s2 is longer than anchor slice → s2 should sort first.
+        let anchor = "A".repeat(300);
+        let seqs = vec![
+            make_seq("anchor", &anchor, 0, 300),
+            make_seq("s2", &"C".repeat(400), 0, 400),
+        ];
+
+        let anchor_name = seqs[0].1.alignment_name();
+        let s2_name = seqs[1].1.alignment_name();
+        let paf_records = vec![PafRecord {
+            query_name: anchor_name, query_len: 300,
+            query_start: 0, query_end: 300,
+            target_name: s2_name, target_len: 400,
+            target_start: 0, target_end: 400, strand: '+',
+        }];
+
+        let chunks = partition_into_chunks(&seqs, &paf_records, 100, 10);
+        for (i, chunk) in chunks.iter().enumerate() {
+            let lens: Vec<usize> = chunk.sequences.iter().map(|(s, _)| s.len()).collect();
+            for w in lens.windows(2) {
+                assert!(w[0] >= w[1], "chunk {} not sorted desc: {:?}", i, lens);
+            }
+        }
+    }
+
+    #[test]
+    fn test_partition_metadata_preserved_across_chunks() {
+        // Verify that chunk metadata preserves original coordinates for
+        // consistent path naming across chunks (needed for lacing).
+        let anchor = "A".repeat(300);
+        let seqs = vec![
+            make_seq("anchor", &anchor, 100, 1000),
+            make_seq("s2", &"C".repeat(300), 50, 500),
+        ];
+
+        let anchor_name = seqs[0].1.alignment_name();
+        let s2_name = seqs[1].1.alignment_name();
+        let paf_records = vec![PafRecord {
+            query_name: anchor_name, query_len: 300,
+            query_start: 0, query_end: 300,
+            target_name: s2_name, target_len: 300,
+            target_start: 0, target_end: 300, strand: '+',
+        }];
+
+        let chunks = partition_into_chunks(&seqs, &paf_records, 100, 0);
+        assert!(chunks.len() >= 3);
+
+        // All chunks should preserve the original metadata so path_name()
+        // is consistent for lacing.
+        for (i, chunk) in chunks.iter().enumerate() {
+            let anchor_meta = &chunk.sequences.iter().find(|(_, m)| m.name == "anchor").unwrap().1;
+            assert_eq!(anchor_meta.start, 100,
+                "chunk {} anchor should preserve original start", i);
+            assert_eq!(anchor_meta.size, 300,
+                "chunk {} anchor should preserve original size", i);
+        }
+    }
+
+    #[test]
+    fn test_partition_no_paf_includes_unaligned_as_fallback() {
+        // Large anchor, no PAF records → each chunk has the anchor plus
+        // unaligned sequences as fallback (to avoid dropping them).
+        let seqs = vec![
+            make_seq("anchor", &"A".repeat(300), 0, 300),
+            make_seq("s2", &"C".repeat(100), 0, 100),
+        ];
+
+        let chunks = partition_into_chunks(&seqs, &[], 100, 10);
+        assert!(chunks.len() >= 3);
+        for (i, chunk) in chunks.iter().enumerate() {
+            assert_eq!(chunk.sequences.len(), 2,
+                "chunk {} should have anchor + s2 (fallback)", i);
+        }
+    }
+
+    #[test]
+    fn test_partition_five_sequences_all_aligned() {
+        // All 5 sequences aligned → every chunk has 5 sequences.
+        let anchor = "A".repeat(500);
+        let seqs: Vec<_> = std::iter::once(make_seq("anchor", &anchor, 0, 500))
+            .chain((1..=4).map(|i| make_seq(&format!("s{}", i), &"C".repeat(500), 0, 500)))
+            .collect();
+
+        let anchor_name = seqs[0].1.alignment_name();
+        let paf_records: Vec<PafRecord> = (1..=4).map(|i| PafRecord {
+            query_name: anchor_name.clone(), query_len: 500,
+            query_start: 0, query_end: 500,
+            target_name: seqs[i].1.alignment_name(), target_len: 500,
+            target_start: 0, target_end: 500, strand: '+',
+        }).collect();
+
+        let chunks = partition_into_chunks(&seqs, &paf_records, 100, 10);
+        for (i, chunk) in chunks.iter().enumerate() {
+            assert_eq!(chunk.sequences.len(), 5, "chunk {} should have all 5 seqs", i);
+        }
+    }
+
+    #[test]
+    fn test_partition_projection_clamped_to_seq_length() {
+        // PAF says s2 maps to [0,300) but s2 is only 200bp. Should not panic.
+        let seqs = vec![
+            make_seq("anchor", &"A".repeat(300), 0, 300),
+            make_seq("s2", &"C".repeat(200), 0, 200),
+        ];
+
+        let anchor_name = seqs[0].1.alignment_name();
+        let s2_name = seqs[1].1.alignment_name();
+        let paf_records = vec![PafRecord {
+            query_name: anchor_name, query_len: 300,
+            query_start: 0, query_end: 300,
+            target_name: s2_name, target_len: 300,
+            target_start: 0, target_end: 300, strand: '+',
+        }];
+
+        // Should not panic.
+        let chunks = partition_into_chunks(&seqs, &paf_records, 100, 0);
+        for chunk in &chunks {
+            for (seq_str, _) in &chunk.sequences {
+                assert!(!seq_str.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn test_partition_window_padding_clamped_at_boundaries() {
+        // First window starts at 0 (not negative), last window ends at anchor_len.
+        let seqs = vec![make_seq("anchor", &"A".repeat(250), 0, 250)];
+        let chunks = partition_into_chunks(&seqs, &[], 100, 20);
+
+        assert_eq!(chunks[0].anchor_start, 0, "first window should start at 0");
+        assert_eq!(chunks.last().unwrap().anchor_end, 250, "last window should end at anchor_len");
+    }
+
+    #[test]
+    fn test_partition_boundary_exactly_threshold() {
+        // anchor_len == chunk_size + padding → single chunk (early return).
+        let seqs = vec![
+            make_seq("anchor", &"A".repeat(110), 0, 110),
+            make_seq("s2", &"C".repeat(100), 0, 100),
+        ];
+        let chunks = partition_into_chunks(&seqs, &[], 100, 10);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].sequences.len(), 2);
+    }
+
+    #[test]
+    fn test_partition_boundary_one_over_threshold() {
+        // anchor_len = chunk_size + padding + 1 → multi-chunk.
+        let seqs = vec![make_seq("anchor", &"A".repeat(111), 0, 111)];
+        let chunks = partition_into_chunks(&seqs, &[], 100, 10);
+        assert!(chunks.len() >= 2, "should produce multiple chunks");
+    }
+
+    #[test]
+    fn test_project_window_zero_length_alignment_span() {
+        // a_start == a_end → zero-length alignment block.
+        // The code uses .max(1) on a_span to avoid division by zero.
+        // With s_start == s_end, projection produces a zero-length range → None.
+        let projections = vec![(50, 50, 100, 100, false)];
+        assert_eq!(project_window_to_sequence(&projections, 0, 100), None);
+    }
+
+    #[test]
+    fn test_project_window_zero_length_at_boundary() {
+        // Zero-length alignment at the exact window boundary.
+        let projections = vec![(100, 100, 50, 50, false)];
+        // a_start(100) >= win_end(100) → skip. Returns None.
+        assert_eq!(project_window_to_sequence(&projections, 0, 100), None);
+    }
+
+    #[test]
+    fn test_partition_small_chunk_size_one() {
+        // chunk_size = 1 should create many chunks without panicking.
+        let anchor = "A".repeat(50);
+        let other = "C".repeat(50);
+
+        let seqs = vec![
+            make_seq("anchor", &anchor, 0, 100),
+            make_seq("other", &other, 0, 100),
+        ];
+
+        let paf_records = vec![PafRecord {
+            query_name: seqs[0].1.alignment_name(),
+            query_len: 50,
+            query_start: 0,
+            query_end: 50,
+            target_name: seqs[1].1.alignment_name(),
+            target_len: 50,
+            target_start: 0,
+            target_end: 50,
+            strand: '+',
+        }];
+
+        // chunk_size=1, padding=0 → should create ~50 chunks.
+        let chunks = partition_into_chunks(&seqs, &paf_records, 1, 0);
+        assert!(chunks.len() >= 40, "expected many chunks with chunk_size=1, got {}", chunks.len());
+
+        // No chunk should be empty (anchor always included).
+        for chunk in &chunks {
+            assert!(!chunk.sequences.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_partition_chunk_size_larger_than_anchor() {
+        // chunk_size >> anchor_len → single chunk (early return).
+        let seqs = vec![
+            make_seq("anchor", &"A".repeat(100), 0, 200),
+            make_seq("s2", &"C".repeat(80), 0, 200),
+        ];
+        let chunks = partition_into_chunks(&seqs, &[], 10000, 0);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].sequences.len(), 2);
+    }
+
+    #[test]
+    fn test_partition_large_padding_relative_to_chunk() {
+        // padding = chunk_size → heavy overlap between adjacent chunks.
+        let anchor = "A".repeat(500);
+        let seqs = vec![make_seq("anchor", &anchor, 0, 500)];
+
+        let chunks = partition_into_chunks(&seqs, &[], 100, 100);
+        assert!(chunks.len() >= 2);
+
+        // Every pair of adjacent chunks should overlap significantly.
+        for pair in chunks.windows(2) {
+            let overlap = pair[0].anchor_end.saturating_sub(pair[1].anchor_start);
+            assert!(overlap >= 100, "expected >= 100bp overlap, got {}", overlap);
+        }
+    }
+
+    #[test]
+    fn test_project_window_many_small_blocks() {
+        // Many small alignment blocks covering the window.
+        let projections: Vec<_> = (0..10)
+            .map(|i| {
+                let start = i * 20;
+                (start, start + 20, start, start + 20, false)
+            })
+            .collect();
+
+        // Window covering all blocks [0, 200).
+        let result = project_window_to_sequence(&projections, 0, 200);
+        assert_eq!(result, Some((0, 200)));
+
+        // Window covering middle blocks [40, 120).
+        let result = project_window_to_sequence(&projections, 40, 120);
+        assert_eq!(result, Some((40, 120)));
+    }
+
+    #[test]
+    fn test_project_window_overlapping_reverse_forward() {
+        // A forward and reverse block cover the same anchor region.
+        // Forward: anchor [0,100) → seq [0,100)
+        // Reverse: anchor [0,100) → seq [200,300)
+        // Window [0,100):
+        //   Forward: [0,100)
+        //   Reverse: p_end = 300 - 0 = 300, p_start = 300 - 100 = 200 → [200,300)
+        //   Union: [0, 300)
+        let projections = vec![
+            (0, 100, 0, 100, false),
+            (0, 100, 200, 300, true),
+        ];
+        let result = project_window_to_sequence(&projections, 0, 100);
+        assert_eq!(result, Some((0, 300)));
     }
 }

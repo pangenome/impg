@@ -580,7 +580,7 @@ fn create_groups(
             .iter()
             .enumerate()
             .map(|(i, meta)| {
-                let name = format!("{}:{}-{}", meta.name, meta.start, meta.start + meta.size);
+                let name = meta.path_name();
                 GroupInfo {
                     name,
                     sequence_indices: vec![i],

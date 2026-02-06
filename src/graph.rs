@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 // Gfasort imports for graph sorting
 use gfasort::gfa_parser::load_gfa;
-use gfasort::ygs::{ygs_sort, YgsParams};
+use gfasort::ygs::{unchop_only, ygs_sort, YgsParams};
 
 // Seqwish imports for graph induction
 use bitvec::prelude::*;
@@ -29,6 +29,38 @@ pub struct SequenceMetadata {
     pub total_length: usize,
 }
 
+impl SequenceMetadata {
+    /// Canonical GFA path name in forward-strand coordinates: `name:fwd_start-fwd_end`.
+    ///
+    /// For `+` strand this is `name:start-(start+size)`.
+    /// For `-` strand this converts from MAF-style RC-frame coordinates back to
+    /// forward-strand: `name:(total-start-size)-(total-start)`.
+    pub fn path_name(&self) -> String {
+        let (fwd_start, fwd_end) = if self.strand == '+' {
+            (self.start, self.start + self.size)
+        } else {
+            (
+                (self.total_length as i32) - self.start - self.size,
+                (self.total_length as i32) - self.start,
+            )
+        };
+        format!("{}:{}-{}", self.name, fwd_start, fwd_end)
+    }
+
+    /// Name used in FASTA headers for alignment tools (sweepga/FastGA).
+    /// Includes strand to distinguish orientations: `name:start-end(strand)`.
+    /// Uses raw metadata coordinates (MAF-style for `-` strand).
+    pub fn alignment_name(&self) -> String {
+        format!(
+            "{}:{}-{}({})",
+            self.name,
+            self.start,
+            self.start + self.size,
+            self.strand
+        )
+    }
+}
+
 pub fn generate_gfa_from_intervals(
     impg: &impl ImpgIndex,
     results: &[Interval<u32>],
@@ -42,22 +74,7 @@ pub fn generate_gfa_from_intervals(
     // Generate headers for GFA
     let headers: Vec<String> = sequence_metadata
         .iter()
-        .map(|meta| {
-            format!(
-                "{}:{}-{}",
-                meta.name,
-                if meta.strand == '+' {
-                    meta.start
-                } else {
-                    (meta.total_length as i32) - meta.start - meta.size
-                },
-                if meta.strand == '+' {
-                    meta.start + meta.size
-                } else {
-                    (meta.total_length as i32) - meta.start
-                }
-            )
-        })
+        .map(|meta| meta.path_name())
         .collect();
 
     // Generate GFA directly from the graph
@@ -67,29 +84,13 @@ pub fn generate_gfa_from_intervals(
     post_process_gfa_for_strands(gfa_output, &sequence_metadata)
 }
 
-fn post_process_gfa_for_strands(gfa: String, sequence_metadata: &[SequenceMetadata]) -> String {
+pub fn post_process_gfa_for_strands(gfa: String, sequence_metadata: &[SequenceMetadata]) -> String {
     let mut output = String::new();
 
     // Create a map of sequence names to their strand information
     let strand_map: std::collections::HashMap<String, char> = sequence_metadata
         .iter()
-        .map(|meta| {
-            let header = format!(
-                "{}:{}-{}",
-                meta.name,
-                if meta.strand == '+' {
-                    meta.start
-                } else {
-                    (meta.total_length as i32) - meta.start - meta.size
-                },
-                if meta.strand == '+' {
-                    meta.start + meta.size
-                } else {
-                    (meta.total_length as i32) - meta.start
-                }
-            );
-            (header, meta.strand)
-        })
+        .map(|meta| (meta.path_name(), meta.strand))
         .collect();
 
     // Process each line
@@ -115,7 +116,7 @@ fn post_process_gfa_for_strands(gfa: String, sequence_metadata: &[SequenceMetada
                                 } else if let Some(seg_stripped) = seg.strip_suffix('-') {
                                     format!("{seg_stripped}+")
                                 } else {
-                                    panic!("Missing segment orientation in path: {path_name}");
+                                    seg.to_string()
                                 }
                             })
                             .collect();
@@ -794,6 +795,9 @@ pub fn sort_gfa(gfa_content: &str, num_threads: usize) -> io::Result<String> {
         return Ok(gfa_content.to_string());
     }
 
+    // Compact single-base nodes into longer segments (unchop)
+    unchop_only(&mut graph, 0);
+
     // Create Ygs parameters from the graph
     let params = YgsParams::from_graph(&graph, 0, num_threads);
 
@@ -874,14 +878,8 @@ pub fn generate_gfa_seqwish_from_intervals(
     {
         let mut writer = BufWriter::new(&combined_fasta);
         for (seq, meta) in &sequences {
-            // Use a unique name for each sequence that includes coordinates
-            let header = format!(
-                ">{}:{}-{}({})",
-                meta.name,
-                meta.start,
-                meta.start + meta.size,
-                meta.strand
-            );
+            // Use a unique name for each sequence that includes coordinates and strand
+            let header = format!(">{}", meta.alignment_name());
             writeln!(writer, "{}", header)?;
             writeln!(writer, "{}", seq)?;
         }
