@@ -795,8 +795,8 @@ impl Impg {
                     &tracepoints,
                     &query_seq,
                     &target_seq,
-                    alignment.query_contig_start.try_into().unwrap(),
-                    alignment.target_contig_start.try_into().unwrap(),
+                    0,
+                    0,
                     metric,
                     aligner,
                     max_val,
@@ -915,7 +915,8 @@ impl Impg {
 
         // Reconstruct CIGAR for subset only
         let cigar_str = if has_query_deltas {
-            // Standard mode
+            // Standard mode: pass 0,0 since sequences are fetched for exactly the aligned region
+            // and Standard tracepoints use a_start/b_start as array indices, not for modular arithmetic
             let metric = alignment
                 .complexity_metric
                 .unwrap_or(tracepoints::ComplexityMetric::EditDistance);
@@ -925,8 +926,8 @@ impl Impg {
                     &subset_tracepoints,
                     &query_seq,
                     &target_seq,
-                    adjusted_query_offset,
-                    adjusted_target_offset,
+                    0,
+                    0,
                     metric,
                     aligner,
                     max_val,
@@ -975,6 +976,12 @@ impl Impg {
 
         // Try subsetting approach for tracepoint files
         if let (true, Some(sequence_index)) = (is_tracepoint_file, sequence_index) {
+            // Pre-filter: coitrees uses closed-interval overlap, but coordinates are half-open.
+            // Skip alignments that merely touch at an endpoint (no actual overlap).
+            if metadata.target_start >= range_end || metadata.target_end <= range_start {
+                return None;
+            }
+
             // Fetch alignment with tracepoints
             let alignment = self.get_tracepoint_alignment(metadata).unwrap_or_else(|e| {
                 panic!("Subsetting failed: cannot fetch tracepoint alignment: {}", e)
@@ -1040,7 +1047,7 @@ impl Impg {
             );
 
             // Project the requested range through the CIGAR
-            let projection = project_target_range_through_alignment(
+            let projection = match project_target_range_through_alignment(
                 (range_start, range_end),
                 (
                     alignment_target_start,
@@ -1050,11 +1057,16 @@ impl Impg {
                     metadata.strand(),
                 ),
                 &cigar_ops,
-            )
-            .unwrap_or_else(|| panic!(
-                "Subsetting failed: projection failed for CIGAR (range={}-{}, query={}-{}, target={}-{})",
-                range_start, range_end, alignment_query_start, alignment_query_end, alignment_target_start, alignment_target_end
-            ));
+            ) {
+                Some(p) => p,
+                None => {
+                    debug!(
+                        "Subsetting projection failed for tracepoint alignment (range={}-{}, query={}-{}, target={}-{})",
+                        range_start, range_end, alignment_query_start, alignment_query_end, alignment_target_start, alignment_target_end
+                    );
+                    return None;
+                }
+            };
 
             let (
                 adjusted_query_start,
@@ -1144,6 +1156,12 @@ impl Impg {
         range_end: i32,
         min_gap_compressed_identity: Option<f64>,
     ) -> Option<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
+        // Pre-filter: coitrees uses closed-interval overlap, but coordinates are half-open.
+        // Skip alignments that merely touch at an endpoint (no actual overlap).
+        if metadata.target_start >= range_end || metadata.target_end <= range_start {
+            return None;
+        }
+
         // Fetch tracepoints without sequence I/O
         let alignment = match self.get_tracepoint_alignment(metadata) {
             Ok(aln) => aln,

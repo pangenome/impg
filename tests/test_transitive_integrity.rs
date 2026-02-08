@@ -99,6 +99,8 @@ fn test_non_overlapping_regions_stay_separate() {
             "-r",
             "A:0-100",
             "-x",
+            "--min-transitive-len",
+            "0",
         ],
     )
     .unwrap();
@@ -125,6 +127,8 @@ fn test_non_overlapping_regions_stay_separate() {
             "-r",
             "A:500-600",
             "-x",
+            "--min-transitive-len",
+            "0",
         ],
     )
     .unwrap();
@@ -235,6 +239,8 @@ fn test_bidirectional_symmetry() {
             "test.paf",
             "-r",
             "A:0-100",
+            "--min-transitive-len",
+            "0",
         ],
     )
     .unwrap();
@@ -258,6 +264,8 @@ fn test_bidirectional_symmetry() {
             "test.paf",
             "-r",
             "B:200-300",
+            "--min-transitive-len",
+            "0",
         ],
     )
     .unwrap();
@@ -360,6 +368,8 @@ fn test_distant_regions_no_collapse() {
             "-x",
             "-m",
             "3",
+            "--min-transitive-len",
+            "0",
         ],
     )
     .unwrap();
@@ -396,6 +406,8 @@ fn test_distant_regions_no_collapse() {
             "-x",
             "-m",
             "3",
+            "--min-transitive-len",
+            "0",
         ],
     )
     .unwrap();
@@ -525,6 +537,8 @@ fn test_multiple_alignments_stay_separate() {
             "test.paf",
             "-r",
             "A:0-100",
+            "--min-transitive-len",
+            "0",
         ],
     )
     .unwrap();
@@ -629,6 +643,8 @@ fn test_empty_query_region() {
             "test.paf",
             "-r",
             "A:500-600",
+            "--min-transitive-len",
+            "0",
         ],
     )
     .unwrap();
@@ -673,6 +689,8 @@ fn test_transitive_depth_limit() {
             "-x",
             "-m",
             "1",
+            "--min-transitive-len",
+            "0",
         ],
     )
     .unwrap();
@@ -702,6 +720,8 @@ fn test_transitive_depth_limit() {
             "-x",
             "-m",
             "2",
+            "--min-transitive-len",
+            "0",
         ],
     )
     .unwrap();
