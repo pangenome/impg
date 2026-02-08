@@ -125,6 +125,9 @@ impl OneAlnParser {
             tracepoints: Vec::new(),
             trace_diffs: Vec::new(),
             trace_spacing,
+            query_deltas: Vec::new(),
+            complexity_metric: None,
+            max_complexity: None,
         };
 
         // Read associated lines to get tracepoints and strand
@@ -779,6 +782,9 @@ pub struct OneAlnAlignment {
     pub tracepoints: Vec<i64>,
     pub trace_diffs: Vec<i64>,
     pub trace_spacing: i64,
+    pub query_deltas: Vec<i64>,
+    pub complexity_metric: Option<tracepoints::ComplexityMetric>,
+    pub max_complexity: Option<u32>,
 }
 
 impl OneAlnAlignment {
