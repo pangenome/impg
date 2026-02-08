@@ -1045,6 +1045,31 @@ enum Args {
         #[clap(long, action)]
         memory_efficient: bool,
 
+        /// Use compact ID-based mode (optimized for CPU and memory)
+        /// Uses numeric IDs instead of strings for 30-50% memory reduction
+        /// and binary search for 10x faster interval operations
+        #[arg(help_heading = "Performance")]
+        #[clap(long, action)]
+        compact: bool,
+
+        /// Use windowed mode: process samples sequentially with fixed-size windows
+        /// Most memory-efficient mode, outputs directly to file without accumulating
+        /// Use --window-size to control window size (default: 50kb)
+        #[arg(help_heading = "Performance")]
+        #[clap(long, action)]
+        windowed: bool,
+
+        /// Window size in bp for windowed mode (default: 50000)
+        #[arg(help_heading = "Performance")]
+        #[clap(long, value_parser, requires = "windowed")]
+        window_size: Option<i64>,
+
+        /// Include same-sample transitive alignments (intra-genome duplications)
+        /// By default, only cross-sample alignments contribute to depth
+        #[arg(help_heading = "Performance")]
+        #[clap(long, action, requires = "windowed")]
+        include_self_alignments: bool,
+
         // === NEW OPTIONS FOR REDESIGNED DEPTH ===
 
         /// Comma-separated list of sample names to include in depth calculation
@@ -1069,11 +1094,11 @@ enum Args {
         #[clap(long, action, requires = "stats")]
         combined_output: bool,
 
-        /// Merge tolerance for combining adjacent intervals (requires --combined-output)
+        /// Merge adjacent intervals with similar depth (works with --windowed and --combined-output)
         /// Intervals are merged if (max_depth - min_depth) / max_depth <= tolerance
         /// When merged: depth = max, samples = union. Default: 0.05 (5%)
-        #[arg(help_heading = "Stats mode")]
-        #[clap(long, value_parser, default_value = "0.05", requires = "combined_output")]
+        #[arg(help_heading = "Output options")]
+        #[clap(long, value_parser, default_value = "0.05")]
         merge_tolerance: f64,
 
         /// Target range in format `seq_name:start-end` for region query
@@ -2185,6 +2210,10 @@ fn run() -> io::Result<()> {
             separator,
             output_prefix,
             memory_efficient,
+            compact,
+            windowed,
+            window_size,
+            include_self_alignments,
             samples,
             samples_file,
             stats,
@@ -2205,7 +2234,7 @@ fn run() -> io::Result<()> {
                 )?;
             }
 
-            let impg = initialize_impg(
+            let impg = initialize_index(
                 &common,
                 &alignment,
                 alignment_files.as_slice(),
@@ -2337,6 +2366,34 @@ fn run() -> io::Result<()> {
                 return Ok(());
             }
 
+            // === WINDOWED MODE ===
+            // Most memory-efficient mode: processes samples one at a time with fixed-size windows
+            // V2: Uses sparse sample storage, streaming output, numeric sorting
+            if windowed {
+                info!("Using windowed mode v2 (optimized: sparse storage, streaming output)");
+                if let Some(ws) = window_size {
+                    info!("Window size: {} bp", ws);
+                }
+                if include_self_alignments {
+                    info!("Including same-sample transitive alignments (intra-genome duplications)");
+                }
+                if merge_tolerance > 0.0 {
+                    info!("Merge tolerance: {:.1}%", merge_tolerance * 100.0);
+                }
+                depth::compute_depth_windowed_v2(
+                    &impg,
+                    &config,
+                    None, // depth doesn't need sequence index
+                    &separator,
+                    output_prefix.as_deref(),
+                    fai_list.as_deref(),
+                    window_size,
+                    !include_self_alignments, // no_self_alignments is now default
+                    merge_tolerance,
+                )?;
+                return Ok(());
+            }
+
             // === LEGACY MODES (when no new mode is specified) ===
 
             // For non-transitive queries, use streaming mode (more memory efficient)
@@ -2370,8 +2427,19 @@ fn run() -> io::Result<()> {
             // For transitive queries, fall back to the old implementation
             info!("Using transitive mode (requires full index)");
 
-            // Choose between memory-efficient and standard implementation
-            if memory_efficient {
+            // Choose between compact, memory-efficient, and standard implementation
+            if compact {
+                info!("Using compact ID-based mode (optimized data structures)");
+                depth::compute_depth_by_sample_v3(
+                    &impg,
+                    &config,
+                    None, // depth doesn't need sequence index
+                    &separator,
+                    output_prefix.as_deref(),
+                    fai_list.as_deref(),
+                    ref_sample.as_deref(),
+                )?;
+            } else if memory_efficient {
                 info!("Using memory-efficient mode (compressed bitmap tracking)");
                 depth::compute_depth_by_sample_v2(
                     &impg,

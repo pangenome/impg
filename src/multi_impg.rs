@@ -10,7 +10,7 @@ use crate::impg_index::ImpgIndex;
 use crate::seqidx::SequenceIndex;
 use crate::sequence_index::UnifiedSequenceIndex;
 use crate::subset_filter::SubsetFilter;
-use coitrees::{BasicCOITree, Interval};
+use coitrees::{BasicCOITree, Interval, IntervalTree};
 use log::{debug, info, warn};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -99,6 +99,8 @@ struct IndexHeader {
     seq_index: SequenceIndex,
     /// Forest map from this file
     forest_map: ForestMap,
+    /// Whether this index is bidirectional (V2 format)
+    is_bidirectional: bool,
 }
 
 /// Multi-file IMPG index.
@@ -130,6 +132,10 @@ pub struct MultiImpg {
 
     /// Lazily-loaded sub-indices (only loaded when tree data is needed)
     sub_indices: RwLock<Vec<Option<Arc<Impg>>>>,
+
+    /// Whether all indices are bidirectional (V2 format)
+    /// True only if ALL sub-indices are V2 format
+    is_bidirectional: bool,
 }
 
 impl MultiImpg {
@@ -198,10 +204,21 @@ impl MultiImpg {
             }
         }
 
+        // Check if all indices are bidirectional
+        let all_bidirectional = headers.iter().all(|h| h.is_bidirectional);
+        if !all_bidirectional {
+            let v1_count = headers.iter().filter(|h| !h.is_bidirectional).count();
+            warn!(
+                "{} of {} indices are V1 (unidirectional). Rebuild with default settings for full bidirectional support.",
+                v1_count, num_indices
+            );
+        }
+
         info!(
-            "Built unified index with {} sequences and {} targets",
+            "Built unified index with {} sequences and {} targets (bidirectional: {})",
             unified_seq_index.len(),
-            unified_forest_map.len()
+            unified_forest_map.len(),
+            all_bidirectional
         );
 
         Ok(Self {
@@ -212,6 +229,7 @@ impl MultiImpg {
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
             local_to_unified,
             sub_indices: RwLock::new(vec![None; num_indices]),
+            is_bidirectional: all_bidirectional,
         })
     }
 
@@ -290,6 +308,9 @@ impl MultiImpg {
             forest_map.len()
         );
 
+        // Note: When loading from cache, we assume bidirectional=true since
+        // caches are only created for new-format indices. If users have
+        // V1 indices, the cache will be invalidated and rebuilt.
         Ok(Self {
             seq_index: cache.unified_seq_index,
             forest_map,
@@ -298,6 +319,7 @@ impl MultiImpg {
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
             local_to_unified: cache.local_to_unified,
             sub_indices: RwLock::new(vec![None; num_indices]),
+            is_bidirectional: true,
         })
     }
 
@@ -350,15 +372,16 @@ impl MultiImpg {
 
     /// Load only the header (seq_index + forest_map) from a single index file.
     fn load_header(path: &Path) -> std::io::Result<IndexHeader> {
-        const MAGIC: &[u8] = b"IMPGIDX1";
+        const MAGIC_V1: &[u8] = b"IMPGIDX1";
+        const MAGIC_V2: &[u8] = b"IMPGIDX2";
 
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
 
-        // Read and verify magic bytes
+        // Read and verify magic bytes (support both V1 and V2)
         let mut magic_buf = [0u8; 8];
         reader.read_exact(&mut magic_buf)?;
-        if magic_buf != MAGIC {
+        if magic_buf != MAGIC_V1 && magic_buf != MAGIC_V2 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("Invalid magic bytes in {:?}", path),
@@ -391,9 +414,11 @@ impl MultiImpg {
                     )
                 })?;
 
+        let is_bidirectional = magic_buf == MAGIC_V2;
         Ok(IndexHeader {
             seq_index,
             forest_map,
+            is_bidirectional,
         })
     }
 
@@ -762,6 +787,87 @@ impl ImpgIndex for MultiImpg {
 
     fn sequence_files(&self) -> &[String] {
         &self.sequence_files
+    }
+
+    fn query_reverse_for_depth(&self, query_id: u32) -> Vec<(i32, i32, u32)> {
+        let mut results = Vec::new();
+
+        // Iterate through all target_ids in the forest map
+        for &target_id in self.forest_map.keys() {
+            // Skip if querying self
+            if target_id == query_id {
+                continue;
+            }
+
+            if let Some(tree) = self.get_or_load_tree(target_id) {
+                for interval in tree.iter() {
+                    if interval.metadata.query_id() == query_id {
+                        let query_start = interval.metadata.query_start();
+                        let query_end = interval.metadata.query_end();
+                        results.push((query_start, query_end, target_id));
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
+    fn build_query_to_targets_map(&self) -> FxHashMap<u32, Vec<u32>> {
+        let mut query_to_targets: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+
+        for &target_id in self.forest_map.keys() {
+            if let Some(tree) = self.get_or_load_tree(target_id) {
+                let mut seen_queries: rustc_hash::FxHashSet<u32> = rustc_hash::FxHashSet::default();
+                for interval in tree.iter() {
+                    let qid = interval.metadata.query_id();
+                    if qid != target_id && seen_queries.insert(qid) {
+                        query_to_targets.entry(qid).or_default().push(target_id);
+                    }
+                }
+            }
+        }
+
+        // Clear tree cache after building the map
+        self.clear_tree_cache();
+
+        query_to_targets
+    }
+
+    fn query_reverse_for_depth_with_map(
+        &self,
+        query_id: u32,
+        query_to_targets: &FxHashMap<u32, Vec<u32>>,
+    ) -> Vec<(i32, i32, u32)> {
+        let mut results = Vec::new();
+
+        if let Some(target_ids) = query_to_targets.get(&query_id) {
+            for &target_id in target_ids {
+                if let Some(tree) = self.get_or_load_tree(target_id) {
+                    for interval in tree.iter() {
+                        if interval.metadata.query_id() == query_id {
+                            let query_start = interval.metadata.query_start();
+                            let query_end = interval.metadata.query_end();
+                            results.push((query_start, query_end, target_id));
+                        }
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
+    fn clear_tree_cache(&self) {
+        // For MultiImpg, clear caches of all loaded sub-indices
+        let indices = self.sub_indices.read().unwrap();
+        for sub_index in indices.iter().flatten() {
+            sub_index.clear_tree_cache();
+        }
+    }
+
+    fn is_bidirectional(&self) -> bool {
+        self.is_bidirectional
     }
 }
 

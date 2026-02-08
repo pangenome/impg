@@ -109,6 +109,28 @@ pub trait ImpgIndex: Send + Sync {
 
     /// Get the sequence files (FASTA/AGC) associated with this index.
     fn sequence_files(&self) -> &[String];
+
+    /// Query alignments where the specified sequence is the QUERY (reverse direction).
+    /// Returns: Vec of (query_start, query_end, target_id) tuples
+    fn query_reverse_for_depth(&self, query_id: u32) -> Vec<(i32, i32, u32)>;
+
+    /// Build a lightweight reverse index: query_id -> [target_ids that have alignments with this query]
+    fn build_query_to_targets_map(&self) -> FxHashMap<u32, Vec<u32>>;
+
+    /// Query reverse alignments using a pre-built query_to_targets map.
+    fn query_reverse_for_depth_with_map(
+        &self,
+        query_id: u32,
+        query_to_targets: &FxHashMap<u32, Vec<u32>>,
+    ) -> Vec<(i32, i32, u32)>;
+
+    /// Clear tree cache to free memory.
+    fn clear_tree_cache(&self);
+
+    /// Check if this index was built with bidirectional mode.
+    /// Bidirectional indices contain both A→B and B→A entries for each alignment,
+    /// eliminating the need for a separate reverse index in depth calculations.
+    fn is_bidirectional(&self) -> bool;
 }
 
 /// Enum wrapper that can hold either a single `Impg` or a `MultiImpg`.
@@ -374,6 +396,45 @@ impl ImpgIndex for ImpgWrapper {
         match self {
             ImpgWrapper::Single(impg) => impg.sequence_files(),
             ImpgWrapper::Multi(multi) => multi.sequence_files(),
+        }
+    }
+
+    fn query_reverse_for_depth(&self, query_id: u32) -> Vec<(i32, i32, u32)> {
+        match self {
+            ImpgWrapper::Single(impg) => impg.query_reverse_for_depth(query_id),
+            ImpgWrapper::Multi(multi) => multi.query_reverse_for_depth(query_id),
+        }
+    }
+
+    fn build_query_to_targets_map(&self) -> FxHashMap<u32, Vec<u32>> {
+        match self {
+            ImpgWrapper::Single(impg) => impg.build_query_to_targets_map(),
+            ImpgWrapper::Multi(multi) => multi.build_query_to_targets_map(),
+        }
+    }
+
+    fn query_reverse_for_depth_with_map(
+        &self,
+        query_id: u32,
+        query_to_targets: &FxHashMap<u32, Vec<u32>>,
+    ) -> Vec<(i32, i32, u32)> {
+        match self {
+            ImpgWrapper::Single(impg) => impg.query_reverse_for_depth_with_map(query_id, query_to_targets),
+            ImpgWrapper::Multi(multi) => multi.query_reverse_for_depth_with_map(query_id, query_to_targets),
+        }
+    }
+
+    fn clear_tree_cache(&self) {
+        match self {
+            ImpgWrapper::Single(impg) => impg.clear_tree_cache(),
+            ImpgWrapper::Multi(multi) => multi.clear_tree_cache(),
+        }
+    }
+
+    fn is_bidirectional(&self) -> bool {
+        match self {
+            ImpgWrapper::Single(impg) => impg.is_bidirectional(),
+            ImpgWrapper::Multi(multi) => multi.is_bidirectional(),
         }
     }
 }

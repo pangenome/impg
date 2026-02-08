@@ -1192,6 +1192,32 @@ impl Impg {
             .map(|(_, alignment_file)| alignment_file.clone())
             .collect();
 
+        // Validate that all PAF records have CIGAR strings
+        // This is a fundamental requirement for transitive queries
+        for (records, alignment_file) in records_by_file {
+            // Skip .1aln files as they use tracepoints instead of CIGAR
+            if alignment_file.ends_with(".1aln") {
+                continue;
+            }
+
+            let missing_cigar_count = records
+                .iter()
+                .filter(|r| r.data_bytes == 0)
+                .count();
+
+            if missing_cigar_count > 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "PAF file '{}' contains {} alignment(s) without CIGAR strings (cg:Z: tag). \
+                         All alignments must have CIGAR for transitive queries. \
+                         Please regenerate the PAF file with CIGAR output enabled (e.g., minimap2 -c or wfmash with default settings).",
+                        alignment_file, missing_cigar_count
+                    ),
+                ));
+            }
+        }
+
         if bidirectional {
             debug!("Creating bidirectional alignment entries");
         } else {
@@ -2538,6 +2564,33 @@ impl ImpgIndex for Impg {
 
     fn sequence_files(&self) -> &[String] {
         &self.sequence_files
+    }
+
+    fn query_reverse_for_depth(&self, query_id: u32) -> Vec<(i32, i32, u32)> {
+        Impg::query_reverse_for_depth(self, query_id)
+    }
+
+    fn build_query_to_targets_map(&self) -> FxHashMap<u32, Vec<u32>> {
+        Impg::build_query_to_targets_map(self)
+    }
+
+    fn query_reverse_for_depth_with_map(
+        &self,
+        query_id: u32,
+        query_to_targets: &FxHashMap<u32, Vec<u32>>,
+    ) -> Vec<(i32, i32, u32)> {
+        Impg::query_reverse_for_depth_with_map(self, query_id, query_to_targets)
+    }
+
+    fn clear_tree_cache(&self) {
+        Impg::clear_tree_cache(self)
+    }
+
+    fn is_bidirectional(&self) -> bool {
+        // Check the magic bytes stored during load
+        // For now, assume all Impg instances are bidirectional unless explicitly marked otherwise
+        // This will be properly tracked when we add the is_bidirectional field
+        true
     }
 }
 
