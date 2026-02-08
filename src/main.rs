@@ -1,7 +1,7 @@
 use clap::Parser;
 use coitrees::{Interval, IntervalTree};
 use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
-use impg::commands::{align, graph, lace, partition, refine, similarity};
+use impg::commands::{align, depth, graph, lace, partition, refine, similarity};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::impg_index::{ImpgIndex, ImpgWrapper};
 use impg::multi_impg::MultiImpg;
@@ -979,6 +979,137 @@ enum Args {
         /// Minimum mapping length to include in filtering. Accepts k/m/g suffixes.
         #[clap(short = 'b', long = "min-mapping-length", value_parser = parse_size, default_value = "0")]
         min_mapping_length: u64,
+
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+
+    /// Compute coverage depth across sequences, partitioning by unique haplotype count
+    Depth {
+        #[clap(flatten)]
+        alignment: AlignmentOpts,
+
+        /// Enable transitive queries (with Breadth-First Search)
+        #[arg(help_heading = "Transitive queries")]
+        #[clap(short = 'x', long, action, conflicts_with = "transitive_dfs")]
+        transitive: bool,
+
+        #[clap(flatten)]
+        transitive_opts: TransitiveOpts,
+
+        /// File containing reference sequence names in processing order (one per line)
+        #[arg(help_heading = "Reference order")]
+        #[clap(long, value_parser, conflicts_with = "ref_order")]
+        ref_order_file: Option<String>,
+
+        /// Comma-separated list of reference sequence names in processing order
+        #[arg(help_heading = "Reference order")]
+        #[clap(long, value_parser, value_delimiter = ',', conflicts_with = "ref_order_file")]
+        ref_order: Option<Vec<String>>,
+
+        /// Path to a text file containing paths to FAI index files (one per line)
+        /// When provided, uncovered regions will be filled with depth=1
+        #[arg(help_heading = "Sequence input")]
+        #[clap(long, value_parser)]
+        fai_list: Option<String>,
+
+        /// Reference sample name for targeted mode (only output depth for this sample's sequences)
+        /// When not specified, computes depth for all sequences (global mode)
+        #[arg(help_heading = "Reference selection")]
+        #[clap(long = "ref", value_parser)]
+        ref_sample: Option<String>,
+
+        /// Merge adjacent windows with the same depth and haplotype set
+        #[arg(help_heading = "Output options")]
+        #[clap(long, action)]
+        merge_adjacent: bool,
+
+        /// Use approximate mode for faster queries with 1aln files
+        #[arg(help_heading = "Performance")]
+        #[clap(long, action)]
+        approximate: bool,
+
+        /// Separator for PanSN format (default: #)
+        #[arg(help_heading = "Output options")]
+        #[clap(long, value_parser, default_value = "#")]
+        separator: String,
+
+        /// Prefix for output file (outputs to stdout if not specified)
+        #[arg(help_heading = "Output options")]
+        #[clap(short = 'O', long, value_parser)]
+        output_prefix: Option<String>,
+
+        /// Use memory-efficient mode (recommended for TB-scale data)
+        /// Uses compressed bitmap instead of interval sets (~50x less memory)
+        #[arg(help_heading = "Performance")]
+        #[clap(long, action)]
+        memory_efficient: bool,
+
+        /// Use compact ID-based mode (optimized for CPU and memory)
+        /// Uses numeric IDs instead of strings for 30-50% memory reduction
+        /// and binary search for 10x faster interval operations
+        #[arg(help_heading = "Performance")]
+        #[clap(long, action)]
+        compact: bool,
+
+        /// Use windowed mode: process samples sequentially with fixed-size windows
+        /// Most memory-efficient mode, outputs directly to file without accumulating
+        /// Use --window-size to control window size (default: 50kb)
+        #[arg(help_heading = "Performance")]
+        #[clap(long, action)]
+        windowed: bool,
+
+        /// Window size in bp for windowed mode (default: 50000)
+        #[arg(help_heading = "Performance")]
+        #[clap(long, value_parser, requires = "windowed")]
+        window_size: Option<i64>,
+
+        /// Include same-sample transitive alignments (intra-genome duplications)
+        /// By default, only cross-sample alignments contribute to depth
+        #[arg(help_heading = "Performance")]
+        #[clap(long, action, requires = "windowed")]
+        include_self_alignments: bool,
+
+        // === NEW OPTIONS FOR REDESIGNED DEPTH ===
+
+        /// Comma-separated list of sample names to include in depth calculation
+        #[arg(help_heading = "Sample filtering")]
+        #[clap(long, value_parser, value_delimiter = ',', conflicts_with = "samples_file")]
+        samples: Option<Vec<String>>,
+
+        /// File containing sample names to include (one per line)
+        #[arg(help_heading = "Sample filtering")]
+        #[clap(long, value_parser, conflicts_with = "samples")]
+        samples_file: Option<String>,
+
+        /// Calculate global depth statistics across all sequences
+        /// Outputs summary and per-depth BED files
+        #[arg(help_heading = "Stats mode")]
+        #[clap(long, action, conflicts_with_all = &["target_range", "target_bed"])]
+        stats: bool,
+
+        /// Output combined file with sample lists (requires --stats)
+        /// Creates a single BED file sorted by position with depth and sample columns
+        #[arg(help_heading = "Stats mode")]
+        #[clap(long, action, requires = "stats")]
+        combined_output: bool,
+
+        /// Merge adjacent intervals with similar depth (works with --windowed and --combined-output)
+        /// Intervals are merged if (max_depth - min_depth) / max_depth <= tolerance
+        /// When merged: depth = max, samples = union. Default: 0.05 (5%)
+        #[arg(help_heading = "Output options")]
+        #[clap(long, value_parser, default_value = "0.05")]
+        merge_tolerance: f64,
+
+        /// Target range in format `seq_name:start-end` for region query
+        #[arg(help_heading = "Region query")]
+        #[clap(short = 'r', long, value_parser, conflicts_with_all = &["target_bed", "stats"])]
+        target_range: Option<String>,
+
+        /// Path to BED file containing target regions for region query
+        #[arg(help_heading = "Region query")]
+        #[clap(short = 'b', long, value_parser, conflicts_with_all = &["target_range", "stats"])]
+        target_bed: Option<String>,
 
         #[clap(flatten)]
         common: CommonOpts,
@@ -2065,6 +2196,272 @@ fn run() -> io::Result<()> {
 
             align::run_align(fasta_files, fasta_list, &output_dir, config)?;
         }
+        Args::Depth {
+            common,
+            alignment,
+            transitive,
+            transitive_opts,
+            ref_order_file: _,  // Not used in sample-based mode
+            ref_order: _,       // Not used in sample-based mode
+            fai_list,
+            ref_sample,
+            merge_adjacent,
+            approximate,
+            separator,
+            output_prefix,
+            memory_efficient,
+            compact,
+            windowed,
+            window_size,
+            include_self_alignments,
+            samples,
+            samples_file,
+            stats,
+            combined_output,
+            merge_tolerance,
+            target_range,
+            target_bed,
+        } => {
+            initialize_threads_and_log(&common);
+
+            let alignment_files = resolve_alignment_files(&alignment)?;
+
+            // Validate approximate mode
+            if approximate {
+                validate_approximate_mode_min_length(
+                    transitive_opts.min_transitive_len,
+                    transitive || transitive_opts.transitive_dfs,
+                )?;
+            }
+
+            let impg = initialize_index(
+                &common,
+                &alignment,
+                alignment_files.as_slice(),
+                Vec::new(), // depth doesn't need sequence files
+            )?;
+
+            // Load sample filter if provided
+            let sample_filter = load_sample_filter_depth(samples, samples_file)?;
+            if let Some(ref filter) = sample_filter {
+                info!("Sample filter active: {} samples", filter.len());
+            }
+
+            // Build depth config
+            let config = depth::DepthConfig {
+                transitive,
+                transitive_dfs: transitive_opts.transitive_dfs,
+                max_depth: transitive_opts.max_depth,
+                min_transitive_len: transitive_opts.effective_min_transitive_len(),
+                min_distance_between_ranges: transitive_opts.min_distance_between_ranges,
+                merge_adjacent,
+                approximate_mode: approximate,
+            };
+
+            // === NEW MODES ===
+
+            // Stats mode: global depth statistics
+            if stats {
+                let prefix = output_prefix.as_deref().unwrap_or("depth_stats");
+                if ref_sample.is_some() {
+                    info!("Running stats mode (single reference), output prefix: {}", prefix);
+                } else {
+                    info!("Running stats mode (global), output prefix: {}", prefix);
+                }
+
+                if combined_output {
+                    info!("Combined output mode: will generate single file with sample lists");
+                    if merge_tolerance > 0.0 {
+                        info!("Merge tolerance: {:.1}%", merge_tolerance * 100.0);
+                    }
+                    depth::compute_depth_stats_with_samples(
+                        &impg,
+                        &config,
+                        &separator,
+                        prefix,
+                        sample_filter.as_ref(),
+                        fai_list.as_deref(),
+                        ref_sample.as_deref(),
+                        merge_tolerance,
+                    )?;
+                } else {
+                    depth::compute_depth_stats(
+                        &impg,
+                        &config,
+                        &separator,
+                        prefix,
+                        sample_filter.as_ref(),
+                        fai_list.as_deref(),
+                        ref_sample.as_deref(),
+                    )?;
+                }
+                return Ok(());
+            }
+
+            // Region query mode: query specific regions
+            if target_range.is_some() || target_bed.is_some() {
+                info!("Running region query mode");
+
+                // Parse regions
+                let regions: Vec<(String, i32, i32)> = if let Some(ref range) = target_range {
+                    vec![depth::parse_target_range_depth(range)?]
+                } else if let Some(ref bed_path) = target_bed {
+                    depth::parse_bed_file_depth(bed_path)?
+                } else {
+                    Vec::new()
+                };
+
+                if regions.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "No valid regions found",
+                    ));
+                }
+
+                info!("Querying {} region(s)", regions.len());
+
+                // Collect all results
+                let mut all_results: Vec<depth::RegionDepthResult> = Vec::new();
+                let mut all_samples: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+
+                for (seq_name, start, end) in &regions {
+                    let results = depth::query_region_depth(
+                        &impg,
+                        &config,
+                        seq_name,
+                        *start,
+                        *end,
+                        &separator,
+                        sample_filter.as_ref(),
+                        None,
+                    )?;
+
+                    // Collect sample names
+                    for result in &results {
+                        for sample in result.sample_positions.keys() {
+                            all_samples.insert(sample.clone());
+                        }
+                    }
+
+                    all_results.extend(results);
+                }
+
+                // Sort sample names for consistent output
+                let mut sample_order: Vec<String> = all_samples.into_iter().collect();
+                sample_order.sort();
+
+                // Write output
+                let writer: Box<dyn std::io::Write> = if let Some(ref prefix) = output_prefix {
+                    let path = format!("{}.depth.tsv", prefix);
+                    Box::new(std::io::BufWriter::new(std::fs::File::create(&path)?))
+                } else {
+                    Box::new(std::io::BufWriter::new(std::io::stdout()))
+                };
+                let mut writer = std::io::BufWriter::new(writer);
+
+                depth::write_region_depth_output(&mut writer, &all_results, &sample_order)?;
+                writer.flush()?;
+
+                info!("Region query complete: {} windows", all_results.len());
+                return Ok(());
+            }
+
+            // === WINDOWED MODE ===
+            // Most memory-efficient mode: processes samples one at a time with fixed-size windows
+            // V2: Uses sparse sample storage, streaming output, numeric sorting
+            if windowed {
+                info!("Using windowed mode v2 (optimized: sparse storage, streaming output)");
+                if let Some(ws) = window_size {
+                    info!("Window size: {} bp", ws);
+                }
+                if include_self_alignments {
+                    info!("Including same-sample transitive alignments (intra-genome duplications)");
+                }
+                if merge_tolerance > 0.0 {
+                    info!("Merge tolerance: {:.1}%", merge_tolerance * 100.0);
+                }
+                depth::compute_depth_windowed_v2(
+                    &impg,
+                    &config,
+                    None, // depth doesn't need sequence index
+                    &separator,
+                    output_prefix.as_deref(),
+                    fai_list.as_deref(),
+                    window_size,
+                    !include_self_alignments, // no_self_alignments is now default
+                    merge_tolerance,
+                )?;
+                return Ok(());
+            }
+
+            // === LEGACY MODES (when no new mode is specified) ===
+
+            // For non-transitive queries, use streaming mode (more memory efficient)
+            if !transitive && !transitive_opts.transitive_dfs {
+                if let Some(ref ref_name) = ref_sample {
+                    // Single reference sample mode
+                    info!("Using streaming mode for --ref '{}'", ref_name);
+                    depth::compute_depth_streaming(
+                        &impg,
+                        ref_name,
+                        &separator,
+                        output_prefix.as_deref(),
+                        merge_adjacent,
+                        fai_list.as_deref(),
+                    )?;
+                } else {
+                    // Global mode - process all samples
+                    info!("Using global streaming mode (all samples)");
+                    depth::compute_depth_global_streaming(
+                        &impg,
+                        &separator,
+                        output_prefix.as_deref(),
+                        merge_adjacent,
+                        fai_list.as_deref(),
+                        None,  // No sample to put first
+                    )?;
+                }
+                return Ok(());
+            }
+
+            // For transitive queries, fall back to the old implementation
+            info!("Using transitive mode (requires full index)");
+
+            // Choose between compact, memory-efficient, and standard implementation
+            if compact {
+                info!("Using compact ID-based mode (optimized data structures)");
+                depth::compute_depth_by_sample_v3(
+                    &impg,
+                    &config,
+                    None, // depth doesn't need sequence index
+                    &separator,
+                    output_prefix.as_deref(),
+                    fai_list.as_deref(),
+                    ref_sample.as_deref(),
+                )?;
+            } else if memory_efficient {
+                info!("Using memory-efficient mode (compressed bitmap tracking)");
+                depth::compute_depth_by_sample_v2(
+                    &impg,
+                    &config,
+                    None, // depth doesn't need sequence index
+                    &separator,
+                    output_prefix.as_deref(),
+                    fai_list.as_deref(),
+                    ref_sample.as_deref(),
+                )?;
+            } else {
+                depth::compute_depth_by_sample(
+                    &impg,
+                    &config,
+                    None, // depth doesn't need sequence index
+                    &separator,
+                    output_prefix.as_deref(),
+                    fai_list.as_deref(),
+                    ref_sample.as_deref(),
+                )?;
+            }
+        }
     }
 
     Ok(())
@@ -2980,6 +3377,31 @@ fn load_subset_filter_if_provided(path: &Option<String>) -> io::Result<Option<Su
     } else {
         Ok(None)
     }
+}
+
+/// Load sample filter for depth command
+fn load_sample_filter_depth(
+    samples: Option<Vec<String>>,
+    samples_file: Option<String>,
+) -> io::Result<Option<depth::SampleFilter>> {
+    if let Some(samples_list) = samples {
+        if samples_list.is_empty() {
+            return Ok(None);
+        }
+        info!(
+            "Using sample filter with {} samples from CLI",
+            samples_list.len()
+        );
+        return Ok(Some(depth::SampleFilter::from_samples(samples_list)));
+    }
+
+    if let Some(ref file_path) = samples_file {
+        let filter = depth::SampleFilter::from_file(file_path)?;
+        info!("Loaded {} samples from file: {}", filter.len(), file_path);
+        return Ok(Some(filter));
+    }
+
+    Ok(None)
 }
 
 fn output_results_bed(
