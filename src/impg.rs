@@ -4,6 +4,7 @@ use crate::graph::reverse_complement;
 use crate::impg_index::ImpgIndex;
 use crate::onealn::{OneAlnAlignment, OneAlnParser, ParseErr as OneAlnParseErr};
 use crate::paf::read_cigar_data;
+use crate::tpa_parser::{ParseErr as TpaParseErr, TpaParser};
 use crate::seqidx::SequenceIndex;
 use crate::sequence_index::SequenceIndex as _; // The as _ syntax imports the trait so its methods are available, but doesn't bring the name into scope (avoiding the naming conflict)
 use crate::sequence_index::UnifiedSequenceIndex;
@@ -20,7 +21,7 @@ use std::cmp::{max, min};
 use std::fs::File;
 use std::io::{self, BufReader, Seek, SeekFrom};
 use std::sync::{Arc, RwLock};
-use tracepoints::tracepoints_to_cigar_fastga_with_aligner;
+use tracepoints::{tracepoints_to_cigar_fastga_with_aligner, tracepoints_to_cigar_with_aligner};
 
 // use libc;
 // fn log_memory_usage(label: &str) {
@@ -40,6 +41,7 @@ use tracepoints::tracepoints_to_cigar_fastga_with_aligner;
 thread_local! {
     static EDIT_ALIGNER: RefCell<Option<AffineWavefronts>> = const { RefCell::new(None) };
     static ONEALN_HANDLE: RefCell<Option<(usize, OneFile)>> = const { RefCell::new(None) };
+    static TPA_HANDLE: RefCell<Option<(usize, tpa::TpaReader)>> = const { RefCell::new(None) };
     static TARGET_SEQ_CACHE: RefCell<Option<((u32, i32, i32, bool), Vec<u8>)>> = const { RefCell::new(None) };
 }
 
@@ -203,6 +205,8 @@ impl QueryMetadata {
     fn get_file_type(alignment_file: &str) -> FileType {
         if alignment_file.ends_with(".1aln") {
             FileType::OneAln
+        } else if alignment_file.ends_with(".tpa") {
+            FileType::Tpa
         } else {
             FileType::Paf
         }
@@ -216,6 +220,7 @@ type TreeMap = FxHashMap<u32, Arc<BasicCOITree<QueryMetadata, u32>>>;
 enum FileType {
     Paf,
     OneAln,
+    Tpa,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -403,8 +408,13 @@ impl Impg {
         }
 
         // Slow path: read from file and cache
-        let spacing = OneAlnParser::read_trace_spacing(file_path)
-            .map_err(|e| format!("Failed to read trace_spacing from '{}': {:?}", file_path, e))?;
+        let spacing = if file_path.ends_with(".tpa") {
+            TpaParser::read_trace_spacing(file_path)
+                .map_err(|e| format!("Failed to read trace_spacing from '{}': {}", file_path, e))?
+        } else {
+            OneAlnParser::read_trace_spacing(file_path)
+                .map_err(|e| format!("Failed to read trace_spacing from '{}': {:?}", file_path, e))?
+        };
 
         // Cache it
         let mut cache = self.trace_spacing_cache.write().unwrap();
@@ -504,17 +514,17 @@ impl Impg {
                     )
                 })
             }
-            FileType::OneAln => {
-                // For 1aln files, convert tracepoints to CIGAR
+            FileType::OneAln | FileType::Tpa => {
+                // For 1aln/TPA files, convert tracepoints to CIGAR
                 let alignment = self
-                    .get_onealn_alignment(metadata)
+                    .get_tracepoint_alignment(metadata)
                     .unwrap_or_else(|e| panic!("{}", e));
 
                 self.process_tracepoints_data(
                     &alignment,
                     metadata,
                     target_id,
-                    sequence_index.expect("Sequence index required for .1aln files"),
+                    sequence_index.expect("Sequence index required for tracepoint files"),
                 )
             }
         };
@@ -551,6 +561,66 @@ impl Impg {
                 alignment_index, alignment_file, e
             )
         })
+    }
+
+    fn with_tpa_reader<F, R>(&self, file_index: usize, f: F) -> Result<R, String>
+    where
+        F: FnOnce(&mut tpa::TpaReader) -> Result<R, TpaParseErr>,
+    {
+        let file_path = &self.alignment_files[file_index];
+        TPA_HANDLE.with(|handle_cell| {
+            let mut slot = handle_cell.borrow_mut();
+            let needs_open = match slot.as_ref() {
+                Some((idx, _)) => *idx != file_index,
+                None => true,
+            };
+
+            if needs_open {
+                *slot = None;
+                let mut reader = tpa::TpaReader::new(file_path)
+                    .map_err(|e| format!("Failed to open TPA file '{}': {}", file_path, e))?;
+                reader
+                    .load_string_table()
+                    .map_err(|e| format!("Failed to load TPA string table '{}': {}", file_path, e))?;
+                *slot = Some((file_index, reader));
+            }
+
+            let (_, handle) = slot
+                .as_mut()
+                .expect("TPA_HANDLE must contain a handle after opening");
+            f(handle).map_err(|e| e.to_string())
+        })
+    }
+
+    fn get_tpa_alignment(&self, metadata: &QueryMetadata) -> Result<OneAlnAlignment, String> {
+        let file_index = metadata.alignment_file_index as usize;
+        let alignment_file = &self.alignment_files[file_index];
+        let record_id = metadata.data_offset();
+
+        self.with_tpa_reader(file_index, |reader| {
+            TpaParser::fetch_alignment(reader, record_id)
+        })
+        .map_err(|e| {
+            format!(
+                "Failed to fetch TPA alignment {} from '{}': {}",
+                record_id, alignment_file, e
+            )
+        })
+    }
+
+    /// Get tracepoint alignment from either .1aln or .tpa file
+    fn get_tracepoint_alignment(
+        &self,
+        metadata: &QueryMetadata,
+    ) -> Result<OneAlnAlignment, String> {
+        let file = &self.alignment_files[metadata.alignment_file_index as usize];
+        if file.ends_with(".tpa") {
+            self.get_tpa_alignment(metadata)
+        } else if file.ends_with(".1aln") {
+            self.get_onealn_alignment(metadata)
+        } else {
+            Err(format!("No tracepoint support for: {}", file))
+        }
     }
 
     /// Scan tracepoints to find segments overlapping the requested target range.
@@ -594,13 +664,17 @@ impl Impg {
         let mut total_matches = 0.0;
         let mut total_mismatches = 0.0;
 
+        let has_query_deltas = !alignment.query_deltas.is_empty();
+
         // Scan tracepoints and collect those that overlap the requested range
         for (idx, &tracepoint) in alignment.tracepoints.iter().enumerate() {
             // Calculate deltas for this segment
-            let query_delta = if idx == 0 {
-                first_boundary
+            let query_delta = if has_query_deltas {
+                // Standard mode: query delta from data
+                alignment.query_deltas[idx] as i32
             } else {
-                trace_spacing
+                // Fastga mode: query delta from spacing
+                if idx == 0 { first_boundary } else { trace_spacing }
             };
             let target_delta = (tracepoint as i32) * target_dir;
             let abs_target_delta = tracepoint.abs() as i32;
@@ -612,7 +686,12 @@ impl Impg {
             // Check overlap with requested range
             if seg_start < range_end && seg_end > range_start {
                 num_overlapping_segments += 1;
-                let num_diffs = alignment.trace_diffs[idx] as i32;
+                let num_diffs = if idx < alignment.trace_diffs.len() {
+                    alignment.trace_diffs[idx] as i32
+                } else {
+                    // Standard mode: estimate from net indel (lower bound)
+                    (query_delta - abs_target_delta).unsigned_abs() as i32
+                };
                 let seg_info = (
                     query_pos,
                     query_delta,
@@ -681,14 +760,6 @@ impl Impg {
             return vec![CigarOp::new(match_len, '=')];
         }
 
-        let tracepoints: Vec<(usize, usize)> = alignment
-            .trace_diffs
-            .iter()
-            .zip(alignment.tracepoints.iter())
-            .map(|(&diff, &tp)| (diff as usize, tp as usize))
-            .collect();
-        let trace_spacing = alignment.trace_spacing as usize;
-
         // Fetch query sequence (not cached)
         let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
         let query_seq = sequence_index
@@ -707,18 +778,52 @@ impl Impg {
             is_reverse,
         );
 
-        let cigar_str = with_edit_aligner(|aligner| {
-            tracepoints_to_cigar_fastga_with_aligner(
-                &tracepoints,
-                trace_spacing.try_into().unwrap(),
-                &query_seq,
-                &target_seq,
-                alignment.query_contig_start.try_into().unwrap(),
-                alignment.target_contig_start.try_into().unwrap(),
-                metadata.strand() == Strand::Reverse,
-                aligner,
-            )
-        });
+        let cigar_str = if !alignment.query_deltas.is_empty() {
+            // Standard mode: use tracepoints_to_cigar_with_aligner
+            let tracepoints: Vec<(usize, usize)> = alignment
+                .query_deltas
+                .iter()
+                .zip(alignment.tracepoints.iter())
+                .map(|(&qd, &td)| (qd as usize, td as usize))
+                .collect();
+            let metric = alignment
+                .complexity_metric
+                .unwrap_or(tracepoints::ComplexityMetric::EditDistance);
+            let max_val = alignment.max_complexity;
+            with_edit_aligner(|aligner| {
+                tracepoints_to_cigar_with_aligner(
+                    &tracepoints,
+                    &query_seq,
+                    &target_seq,
+                    alignment.query_contig_start.try_into().unwrap(),
+                    alignment.target_contig_start.try_into().unwrap(),
+                    metric,
+                    aligner,
+                    max_val,
+                )
+            })
+        } else {
+            // Fastga mode: existing code with tracepoints_to_cigar_fastga_with_aligner
+            let tracepoints: Vec<(usize, usize)> = alignment
+                .trace_diffs
+                .iter()
+                .zip(alignment.tracepoints.iter())
+                .map(|(&diff, &tp)| (diff as usize, tp as usize))
+                .collect();
+            let trace_spacing = alignment.trace_spacing as usize;
+            with_edit_aligner(|aligner| {
+                tracepoints_to_cigar_fastga_with_aligner(
+                    &tracepoints,
+                    trace_spacing.try_into().unwrap(),
+                    &query_seq,
+                    &target_seq,
+                    alignment.query_contig_start.try_into().unwrap(),
+                    alignment.target_contig_start.try_into().unwrap(),
+                    metadata.strand() == Strand::Reverse,
+                    aligner,
+                )
+            })
+        };
 
         match parse_cigar_to_delta(&cigar_str) {
             Ok(ops) => ops,
@@ -740,13 +845,24 @@ impl Impg {
     ) -> Vec<CigarOp> {
         let is_reverse = metadata.strand() == Strand::Reverse;
 
+        let has_query_deltas = !alignment.query_deltas.is_empty();
+
         // Extract subset tracepoints [first_idx..=last_idx]
-        let subset_tracepoints: Vec<(usize, usize)> = alignment.trace_diffs
-            [subset.first_idx..=subset.last_idx]
-            .iter()
-            .zip(alignment.tracepoints[subset.first_idx..=subset.last_idx].iter())
-            .map(|(&diff, &tp)| (diff as usize, tp as usize))
-            .collect();
+        let subset_tracepoints: Vec<(usize, usize)> = if has_query_deltas {
+            // Standard mode: (query_delta, target_delta)
+            alignment.query_deltas[subset.first_idx..=subset.last_idx]
+                .iter()
+                .zip(alignment.tracepoints[subset.first_idx..=subset.last_idx].iter())
+                .map(|(&qd, &tp)| (qd as usize, tp as usize))
+                .collect()
+        } else {
+            // Fastga mode: (diffs, target_delta)
+            alignment.trace_diffs[subset.first_idx..=subset.last_idx]
+                .iter()
+                .zip(alignment.tracepoints[subset.first_idx..=subset.last_idx].iter())
+                .map(|(&diff, &tp)| (diff as usize, tp as usize))
+                .collect()
+        };
 
         // Calculate subset sequence ranges (use RAW boundaries from subsetting scan, no refinement)
         let subset_query_start = subset.first_query_pos;
@@ -798,19 +914,40 @@ impl Impg {
             + (subset_target_start - metadata.target_start) as usize;
 
         // Reconstruct CIGAR for subset only
-        let trace_spacing = alignment.trace_spacing as usize;
-        let cigar_str = with_edit_aligner(|aligner| {
-            tracepoints_to_cigar_fastga_with_aligner(
-                &subset_tracepoints,
-                trace_spacing.try_into().unwrap(),
-                &query_seq,
-                &target_seq,
-                adjusted_query_offset,
-                adjusted_target_offset,
-                is_reverse,
-                aligner,
-            )
-        });
+        let cigar_str = if has_query_deltas {
+            // Standard mode
+            let metric = alignment
+                .complexity_metric
+                .unwrap_or(tracepoints::ComplexityMetric::EditDistance);
+            let max_val = alignment.max_complexity;
+            with_edit_aligner(|aligner| {
+                tracepoints_to_cigar_with_aligner(
+                    &subset_tracepoints,
+                    &query_seq,
+                    &target_seq,
+                    adjusted_query_offset,
+                    adjusted_target_offset,
+                    metric,
+                    aligner,
+                    max_val,
+                )
+            })
+        } else {
+            // Fastga mode
+            let trace_spacing = alignment.trace_spacing as usize;
+            with_edit_aligner(|aligner| {
+                tracepoints_to_cigar_fastga_with_aligner(
+                    &subset_tracepoints,
+                    trace_spacing.try_into().unwrap(),
+                    &query_seq,
+                    &target_seq,
+                    adjusted_query_offset,
+                    adjusted_target_offset,
+                    is_reverse,
+                    aligner,
+                )
+            })
+        };
 
         match parse_cigar_to_delta(&cigar_str) {
             Ok(ops) => ops,
@@ -830,16 +967,17 @@ impl Impg {
         sequence_index: Option<&UnifiedSequenceIndex>,
         min_gap_compressed_identity: Option<f64>,
     ) -> Option<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
-        // Check if this is a .1aln file that supports tracepoint subsetting
+        // Check if this is a tracepoint file that supports subsetting
         let file_index = metadata.alignment_file_index as usize;
         let alignment_file = &self.alignment_files[file_index];
-        let is_onealn = alignment_file.ends_with(".1aln");
+        let is_tracepoint_file =
+            alignment_file.ends_with(".1aln") || alignment_file.ends_with(".tpa");
 
-        // Try subsetting approach for .1aln files
-        if let (true, Some(sequence_index)) = (is_onealn, sequence_index) {
+        // Try subsetting approach for tracepoint files
+        if let (true, Some(sequence_index)) = (is_tracepoint_file, sequence_index) {
             // Fetch alignment with tracepoints
-            let alignment = self.get_onealn_alignment(metadata).unwrap_or_else(|e| {
-                panic!("Subsetting failed: cannot fetch .1aln alignment: {}", e)
+            let alignment = self.get_tracepoint_alignment(metadata).unwrap_or_else(|e| {
+                panic!("Subsetting failed: cannot fetch tracepoint alignment: {}", e)
             });
 
             // Scan tracepoints to find overlapping segments
@@ -1007,7 +1145,7 @@ impl Impg {
         min_gap_compressed_identity: Option<f64>,
     ) -> Option<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
         // Fetch tracepoints without sequence I/O
-        let alignment = match self.get_onealn_alignment(metadata) {
+        let alignment = match self.get_tracepoint_alignment(metadata) {
             Ok(aln) => aln,
             Err(e) => {
                 warn!("Failed to fetch alignment for fast projection: {}", e);

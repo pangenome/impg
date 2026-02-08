@@ -6,6 +6,7 @@ use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::impg_index::{ImpgIndex, ImpgWrapper};
 use impg::multi_impg::MultiImpg;
 use impg::onealn::OneAlnParser;
+use impg::tpa_parser::TpaParser;
 use impg::seqidx::SequenceIndex;
 use impg::sequence_index::{SequenceIndex as SeqIndexTrait, UnifiedSequenceIndex};
 use impg::subset_filter::{apply_subset_filter, load_subset_filter, SubsetFilter};
@@ -244,17 +245,19 @@ impl GfaMafFastaOpts {
         Option<UnifiedSequenceIndex>,
         Option<(u8, u8, u8, u8, u8, u8)>,
     )> {
-        // Check if any of the alignment files are .1aln files (which require sequence data for tracepoint conversion)
-        let has_onealn_files = alignment_files.iter().any(|f| f.ends_with(".1aln"));
+        // Check if any of the alignment files are tracepoint-based (.1aln/.tpa, which require sequence data for tracepoint conversion)
+        let has_tracepoint_files = alignment_files
+            .iter()
+            .any(|f| f.ends_with(".1aln") || f.ends_with(".tpa"));
 
-        // In approximate mode with bed/bedpe output, .1aln files don't need sequences
-        let onealn_needs_sequences = has_onealn_files
+        // In approximate mode with bed/bedpe output, tracepoint files don't need sequences
+        let tracepoint_needs_sequences = has_tracepoint_files
             && !(approximate_mode && (output_format == "bed" || output_format == "bedpe"));
 
         let needs_sequence_mandatory = matches!(
             output_format,
             "gfa" | "gfa-seqwish" | "gfa-poa" | "maf" | "fasta" | "fasta-aln" | "fasta+paf"
-        ) || onealn_needs_sequences;
+        ) || tracepoint_needs_sequences;
         let needs_sequence_optional = output_format == "paf" && original_sequence_coordinates;
         // POA is only needed for gfa-poa, maf, and fasta-aln (not for gfa/gfa-seqwish which use seqwish)
         let needs_poa = matches!(output_format, "gfa-poa" | "maf" | "fasta-aln");
@@ -270,8 +273,8 @@ impl GfaMafFastaOpts {
             if index.is_none() && needs_sequence_mandatory {
                 let file_types = "FASTA/AGC";
 
-                let msg = if has_onealn_files {
-                    format!("Sequence files ({file_types}) are required for .1aln alignment files to convert tracepoints to CIGAR strings. Use --sequence-files or --sequence-list")
+                let msg = if has_tracepoint_files {
+                    format!("Sequence files ({file_types}) are required for tracepoint alignment files (.1aln/.tpa) to convert tracepoints to CIGAR strings. Use --sequence-files or --sequence-list")
                 } else {
                     format!("Sequence files ({file_types}) are required for '{output_format}' output format. Use --sequence-files or --sequence-list")
                 };
@@ -375,7 +378,7 @@ struct QueryOpts {
     #[clap(long, action)]
     original_sequence_coordinates: bool,
 
-    /// Use approximate mode for faster queries with 1aln files (only bed/bedpe output)
+    /// Use approximate mode for faster queries with tracepoint files (.1aln/.tpa, only bed/bedpe output)
     #[arg(help_heading = "Performance")]
     #[clap(long, action)]
     approximate: bool,
@@ -681,7 +684,7 @@ enum Args {
         #[clap(long, action)]
         separate_files: bool,
 
-        /// Use approximate mode for faster queries with 1aln files (only bed/bedpe output)
+        /// Use approximate mode for faster queries with tracepoint files (.1aln/.tpa, only bed/bedpe output)
         #[arg(help_heading = "Performance")]
         #[clap(long, action)]
         approximate: bool,
@@ -1251,18 +1254,18 @@ fn run() -> io::Result<()> {
 
             // Early validation for approximate mode (before expensive operations)
             if query.approximate {
-                // Check that all alignment files are .1aln files
-                let non_onealn_files: Vec<&String> = alignment_files
+                // Check that all alignment files are tracepoint-based (.1aln or .tpa)
+                let non_tracepoint_files: Vec<&String> = alignment_files
                     .iter()
-                    .filter(|f| !f.ends_with(".1aln"))
+                    .filter(|f| !f.ends_with(".1aln") && !f.ends_with(".tpa"))
                     .collect();
 
-                if !non_onealn_files.is_empty() {
+                if !non_tracepoint_files.is_empty() {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "--approximate mode only works with .1aln alignment files (found {} non-.1aln files).",
-                            non_onealn_files.len()
+                            "--approximate mode only works with tracepoint alignment files (.1aln or .tpa), found {} incompatible files.",
+                            non_tracepoint_files.len()
                         ),
                     ));
                 }
@@ -2753,6 +2756,21 @@ fn build_single_index(
                                 io::Error::new(
                                     io::ErrorKind::InvalidData,
                                     format!("Failed to parse 1aln records: {}", e),
+                                )
+                            })?
+                        }
+                        AlignmentFormat::Tpa => {
+                            let parser =
+                                TpaParser::new(aln_file.clone()).map_err(|e| {
+                                    io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        format!("Failed to create TPA parser: {}", e),
+                                    )
+                                })?;
+                            parser.parse_alignments(&mut local_seq_index, threads.get()).map_err(|e| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!("Failed to parse TPA records: {}", e),
                                 )
                             })?
                         }

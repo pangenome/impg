@@ -34,6 +34,9 @@ tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints", rev = "
 #tracepoints = { path = "/home/guarracino/Dropbox/git/tracepoints"}
 #onecode = { path = "/home/guarracino/git/onecode-rs" }
 onecode = { git = "https://github.com/pangenome/onecode-rs", rev = "38182c7acf7cccc53509176b1d11001ae6ff2642"}
+# Dependencies for TPA format (for alignments) support
+tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "7637ad40a83011c0c46c6aeb7c6eb5ed4025bf02" }
+#tpa = { path = "/home/guarracino/git/tpa" }
 
 # Dependencies for lace functionality
 handlegraph = { git = "https://github.com/chfi/rs-handlegraph", rev = "3ac575e4216ce16a16667503a8875e469a40a97a" }
