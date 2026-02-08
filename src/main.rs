@@ -303,7 +303,7 @@ struct TransitiveOpts {
     #[clap(short = 'm', long, value_parser, default_value_t = 2)]
     max_depth: u16,
 
-    /// Minimum region size to consider for transitive queries (required > trace_spacing when using --approximate )
+    /// Minimum region size to consider for transitive queries (default: 101; for fastga --approximate, set > trace_spacing)
     #[arg(help_heading = "Transitive query options")]
     #[clap(long, value_parser)]
     min_transitive_len: Option<i32>,
@@ -315,9 +315,9 @@ struct TransitiveOpts {
 }
 
 impl TransitiveOpts {
-    /// Get the effective min_transitive_len value (default: 100 for non-approximate mode)
+    /// Get the effective min_transitive_len value (default: 101)
     fn effective_min_transitive_len(&self) -> i32 {
-        self.min_transitive_len.unwrap_or(100)
+        self.min_transitive_len.unwrap_or(101)
     }
 }
 
@@ -2077,13 +2077,13 @@ fn validate_approximate_mode_min_length(
     min_transitive_len_opt: Option<i32>,
     is_transitive: bool,
 ) -> io::Result<()> {
-    // Only require explicit --min-transitive-len for transitive queries in approximate mode
+    // For transitive queries in approximate mode, warn if min-transitive-len is not set
+    // (coordinates are coarse-grained from tracepoint boundaries)
     if is_transitive && min_transitive_len_opt.is_none() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "--approximate mode with transitive queries requires explicitly setting --min-transitive-len. \
-            Set it to greater than your trace_spacing (e.g., 101 for trace_spacing=100).",
-        ));
+        log::warn!(
+            "--approximate mode with transitive queries uses default --min-transitive-len=101. \
+            For fastga tracepoints, consider setting it greater than your trace_spacing."
+        );
     }
 
     Ok(())
