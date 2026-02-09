@@ -3,7 +3,7 @@
 //! Handles parsing of TracePoint Alignment format (.tpa files) using the tpa crate.
 
 use crate::alignment_record::{AlignmentRecord, Strand};
-use crate::onealn::OneAlnAlignment;
+use crate::onealn::{OneAlnAlignment, TracepointModeData};
 use crate::seqidx::SequenceIndex;
 use log::debug;
 use tpa::{TracepointData, TpaReader};
@@ -147,6 +147,7 @@ impl TpaParser {
         let tp_type = header.tp_type();
         let complexity_metric = header.complexity_metric();
         let max_complexity = header.max_complexity();
+        let distance = header.distance();
 
         let compact = reader.get_compact_record(record_id).map_err(|e| {
             ParseErr::InvalidFormat(format!(
@@ -166,7 +167,6 @@ impl TpaParser {
         let mut tracepoints = Vec::new();
         let mut trace_diffs = Vec::new();
         let mut query_deltas = Vec::new();
-        let trace_spacing = max_complexity as i64;
 
         match compact.tracepoints {
             TracepointData::Fastga(pairs) => {
@@ -209,7 +209,19 @@ impl TpaParser {
             }
         }
 
-        let is_fastga = matches!(tp_type, tpa::TracepointType::Fastga);
+        let mode_data = if matches!(tp_type, tpa::TracepointType::Fastga) {
+            TracepointModeData::Fastga {
+                diffs: trace_diffs,
+                trace_spacing: max_complexity as i64,
+            }
+        } else {
+            TracepointModeData::Standard {
+                query_deltas,
+                complexity_metric,
+                max_complexity: max_complexity as i64,
+                distance,
+            }
+        };
 
         Ok(OneAlnAlignment {
             query_name: String::new(),
@@ -224,21 +236,9 @@ impl TpaParser {
             target_contig_offset: 0,
             target_contig_len: 0,
             strand,
-            differences: 0,
+            differences: (compact.alignment_block_len - compact.residue_matches) as i64,
             tracepoints,
-            trace_diffs,
-            trace_spacing,
-            query_deltas,
-            complexity_metric: if !is_fastga {
-                Some(complexity_metric)
-            } else {
-                None
-            },
-            max_complexity: if !is_fastga {
-                Some(max_complexity)
-            } else {
-                None
-            },
+            mode_data,
         })
     }
 }

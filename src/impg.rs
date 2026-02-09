@@ -2,7 +2,7 @@ use crate::alignment_record::{AlignmentRecord, Strand};
 use crate::forest_map::ForestMap;
 use crate::graph::reverse_complement;
 use crate::impg_index::ImpgIndex;
-use crate::onealn::{OneAlnAlignment, OneAlnParser, ParseErr as OneAlnParseErr};
+use crate::onealn::{OneAlnAlignment, OneAlnParser, ParseErr as OneAlnParseErr, TracepointModeData};
 use crate::paf::read_cigar_data;
 use crate::tpa_parser::{ParseErr as TpaParseErr, TpaParser};
 use crate::seqidx::SequenceIndex;
@@ -40,22 +40,29 @@ use tracepoints::{tracepoints_to_cigar_fastga_with_aligner, tracepoints_to_cigar
 
 thread_local! {
     static EDIT_ALIGNER: RefCell<Option<AffineWavefronts>> = const { RefCell::new(None) };
+    static GAP_AFFINE_ALIGNER: RefCell<Option<AffineWavefronts>> = const { RefCell::new(None) };
+    static GAP_AFFINE2P_ALIGNER: RefCell<Option<AffineWavefronts>> = const { RefCell::new(None) };
     static ONEALN_HANDLE: RefCell<Option<(usize, OneFile)>> = const { RefCell::new(None) };
     static TPA_HANDLE: RefCell<Option<(usize, tpa::TpaReader)>> = const { RefCell::new(None) };
     static TARGET_SEQ_CACHE: RefCell<Option<((u32, i32, i32, bool), Vec<u8>)>> = const { RefCell::new(None) };
 }
 
-/// Execute a closure with a thread-local edit distance mode aligner
-fn with_edit_aligner<F, R>(f: F) -> R
+/// Execute a closure with a thread-local aligner matched to the given distance metric
+fn with_aligner<F, R>(distance: &Distance, f: F) -> R
 where
     F: FnOnce(&mut AffineWavefronts) -> R,
 {
-    EDIT_ALIGNER.with(|aligner_cell| {
-        let mut aligner_opt = aligner_cell.borrow_mut();
-        if aligner_opt.is_none() {
-            *aligner_opt = Some(Distance::Edit.create_aligner(None, None));
+    let (cell, dist) = match distance {
+        d @ Distance::Edit => (&EDIT_ALIGNER, d),
+        d @ Distance::GapAffine { .. } => (&GAP_AFFINE_ALIGNER, d),
+        d @ Distance::GapAffine2p { .. } => (&GAP_AFFINE2P_ALIGNER, d),
+    };
+    cell.with(|aligner_cell| {
+        let mut opt = aligner_cell.borrow_mut();
+        if opt.is_none() {
+            *opt = Some(dist.create_aligner(None, None));
         }
-        f(aligner_opt.as_mut().unwrap())
+        f(opt.as_mut().unwrap())
     })
 }
 
@@ -631,13 +638,7 @@ impl Impg {
         range_start: i32,
         range_end: i32,
     ) -> Option<SubsettingResult> {
-        let trace_spacing = alignment.trace_spacing as i32;
         let is_reverse = metadata.strand() == Strand::Reverse;
-
-        // Calculate first boundary: FASTGA-style first segment length
-        let query_start_in_contig = alignment.query_contig_start as i32;
-        let first_boundary =
-            ((query_start_in_contig / trace_spacing) + 1) * trace_spacing - query_start_in_contig;
 
         // Metadata stores query coords in FORWARD order for both strands
         let working_query_start = metadata.query_start;
@@ -664,17 +665,27 @@ impl Impg {
         let mut total_matches = 0.0;
         let mut total_mismatches = 0.0;
 
-        let has_query_deltas = !alignment.query_deltas.is_empty();
+        // Pre-compute FASTGA-specific values if needed
+        let (trace_spacing, first_boundary) = match &alignment.mode_data {
+            TracepointModeData::Fastga { trace_spacing, .. } => {
+                let ts = *trace_spacing as i32;
+                let query_start_in_contig = alignment.query_contig_start as i32;
+                let fb = ((query_start_in_contig / ts) + 1) * ts - query_start_in_contig;
+                (ts, fb)
+            }
+            TracepointModeData::Standard { .. } => (0, 0), // not used
+        };
 
         // Scan tracepoints and collect those that overlap the requested range
         for (idx, &tracepoint) in alignment.tracepoints.iter().enumerate() {
             // Calculate deltas for this segment
-            let query_delta = if has_query_deltas {
-                // Standard mode: query delta from data
-                alignment.query_deltas[idx] as i32
-            } else {
-                // Fastga mode: query delta from spacing
-                if idx == 0 { first_boundary } else { trace_spacing }
+            let query_delta = match &alignment.mode_data {
+                TracepointModeData::Standard { query_deltas, .. } => {
+                    query_deltas[idx] as i32
+                }
+                TracepointModeData::Fastga { .. } => {
+                    if idx == 0 { first_boundary } else { trace_spacing }
+                }
             };
             let target_delta = (tracepoint as i32) * target_dir;
             let abs_target_delta = tracepoint.abs() as i32;
@@ -686,11 +697,22 @@ impl Impg {
             // Check overlap with requested range
             if seg_start < range_end && seg_end > range_start {
                 num_overlapping_segments += 1;
-                let num_diffs = if idx < alignment.trace_diffs.len() {
-                    alignment.trace_diffs[idx] as i32
-                } else {
-                    // Standard mode: estimate from net indel (lower bound)
-                    (query_delta - abs_target_delta).unsigned_abs() as i32
+                let num_diffs = match &alignment.mode_data {
+                    TracepointModeData::Fastga { diffs, .. } => {
+                        if idx < diffs.len() {
+                            diffs[idx] as i32
+                        } else {
+                            0
+                        }
+                    }
+                    TracepointModeData::Standard { max_complexity, .. } => {
+                        // Estimate: use max_complexity unless one delta is 0
+                        if query_delta == 0 || abs_target_delta == 0 {
+                            query_delta.max(abs_target_delta)
+                        } else {
+                            *max_complexity as i32
+                        }
+                    }
                 };
                 let seg_info = (
                     query_pos,
@@ -778,51 +800,48 @@ impl Impg {
             is_reverse,
         );
 
-        let cigar_str = if !alignment.query_deltas.is_empty() {
-            // Standard mode: use tracepoints_to_cigar_with_aligner
-            let tracepoints: Vec<(usize, usize)> = alignment
-                .query_deltas
-                .iter()
-                .zip(alignment.tracepoints.iter())
-                .map(|(&qd, &td)| (qd as usize, td as usize))
-                .collect();
-            let metric = alignment
-                .complexity_metric
-                .unwrap_or(tracepoints::ComplexityMetric::EditDistance);
-            let max_val = alignment.max_complexity;
-            with_edit_aligner(|aligner| {
-                tracepoints_to_cigar_with_aligner(
-                    &tracepoints,
-                    &query_seq,
-                    &target_seq,
-                    0,
-                    0,
-                    metric,
-                    aligner,
-                    max_val,
-                )
-            })
-        } else {
-            // Fastga mode: existing code with tracepoints_to_cigar_fastga_with_aligner
-            let tracepoints: Vec<(usize, usize)> = alignment
-                .trace_diffs
-                .iter()
-                .zip(alignment.tracepoints.iter())
-                .map(|(&diff, &tp)| (diff as usize, tp as usize))
-                .collect();
-            let trace_spacing = alignment.trace_spacing as usize;
-            with_edit_aligner(|aligner| {
-                tracepoints_to_cigar_fastga_with_aligner(
-                    &tracepoints,
-                    trace_spacing.try_into().unwrap(),
-                    &query_seq,
-                    &target_seq,
-                    alignment.query_contig_start.try_into().unwrap(),
-                    alignment.target_contig_start.try_into().unwrap(),
-                    metadata.strand() == Strand::Reverse,
-                    aligner,
-                )
-            })
+        let cigar_str = match &alignment.mode_data {
+            TracepointModeData::Standard { query_deltas, complexity_metric, max_complexity, distance } => {
+                let tracepoints: Vec<(usize, usize)> = query_deltas
+                    .iter()
+                    .zip(alignment.tracepoints.iter())
+                    .map(|(&qd, &td)| (qd as usize, td as usize))
+                    .collect();
+                let metric = *complexity_metric;
+                let max_val = Some(*max_complexity as u32);
+                with_aligner(distance, |aligner| {
+                    tracepoints_to_cigar_with_aligner(
+                        &tracepoints,
+                        &query_seq,
+                        &target_seq,
+                        0,
+                        0,
+                        metric,
+                        aligner,
+                        max_val,
+                    )
+                })
+            }
+            TracepointModeData::Fastga { diffs, trace_spacing } => {
+                let tracepoints: Vec<(usize, usize)> = diffs
+                    .iter()
+                    .zip(alignment.tracepoints.iter())
+                    .map(|(&diff, &tp)| (diff as usize, tp as usize))
+                    .collect();
+                let ts = *trace_spacing as usize;
+                with_aligner(&Distance::Edit, |aligner| {
+                    tracepoints_to_cigar_fastga_with_aligner(
+                        &tracepoints,
+                        ts.try_into().unwrap(),
+                        &query_seq,
+                        &target_seq,
+                        alignment.query_contig_start.try_into().unwrap(),
+                        alignment.target_contig_start.try_into().unwrap(),
+                        metadata.strand() == Strand::Reverse,
+                        aligner,
+                    )
+                })
+            }
         };
 
         match parse_cigar_to_delta(&cigar_str) {
@@ -845,23 +864,24 @@ impl Impg {
     ) -> Vec<CigarOp> {
         let is_reverse = metadata.strand() == Strand::Reverse;
 
-        let has_query_deltas = !alignment.query_deltas.is_empty();
-
         // Extract subset tracepoints [first_idx..=last_idx]
-        let subset_tracepoints: Vec<(usize, usize)> = if has_query_deltas {
-            // Standard mode: (query_delta, target_delta)
-            alignment.query_deltas[subset.first_idx..=subset.last_idx]
-                .iter()
-                .zip(alignment.tracepoints[subset.first_idx..=subset.last_idx].iter())
-                .map(|(&qd, &tp)| (qd as usize, tp as usize))
-                .collect()
-        } else {
-            // Fastga mode: (diffs, target_delta)
-            alignment.trace_diffs[subset.first_idx..=subset.last_idx]
-                .iter()
-                .zip(alignment.tracepoints[subset.first_idx..=subset.last_idx].iter())
-                .map(|(&diff, &tp)| (diff as usize, tp as usize))
-                .collect()
+        let subset_tracepoints: Vec<(usize, usize)> = match &alignment.mode_data {
+            TracepointModeData::Standard { query_deltas, .. } => {
+                // Standard mode: (query_delta, target_delta)
+                query_deltas[subset.first_idx..=subset.last_idx]
+                    .iter()
+                    .zip(alignment.tracepoints[subset.first_idx..=subset.last_idx].iter())
+                    .map(|(&qd, &tp)| (qd as usize, tp as usize))
+                    .collect()
+            }
+            TracepointModeData::Fastga { diffs, .. } => {
+                // Fastga mode: (diffs, target_delta)
+                diffs[subset.first_idx..=subset.last_idx]
+                    .iter()
+                    .zip(alignment.tracepoints[subset.first_idx..=subset.last_idx].iter())
+                    .map(|(&diff, &tp)| (diff as usize, tp as usize))
+                    .collect()
+            }
         };
 
         // Calculate subset sequence ranges (use RAW boundaries from subsetting scan, no refinement)
@@ -914,40 +934,38 @@ impl Impg {
             + (subset_target_start - metadata.target_start) as usize;
 
         // Reconstruct CIGAR for subset only
-        let cigar_str = if has_query_deltas {
-            // Standard mode: pass 0,0 since sequences are fetched for exactly the aligned region
-            // and Standard tracepoints use a_start/b_start as array indices, not for modular arithmetic
-            let metric = alignment
-                .complexity_metric
-                .unwrap_or(tracepoints::ComplexityMetric::EditDistance);
-            let max_val = alignment.max_complexity;
-            with_edit_aligner(|aligner| {
-                tracepoints_to_cigar_with_aligner(
-                    &subset_tracepoints,
-                    &query_seq,
-                    &target_seq,
-                    0,
-                    0,
-                    metric,
-                    aligner,
-                    max_val,
-                )
-            })
-        } else {
-            // Fastga mode
-            let trace_spacing = alignment.trace_spacing as usize;
-            with_edit_aligner(|aligner| {
-                tracepoints_to_cigar_fastga_with_aligner(
-                    &subset_tracepoints,
-                    trace_spacing.try_into().unwrap(),
-                    &query_seq,
-                    &target_seq,
-                    adjusted_query_offset,
-                    adjusted_target_offset,
-                    is_reverse,
-                    aligner,
-                )
-            })
+        let cigar_str = match &alignment.mode_data {
+            TracepointModeData::Standard { complexity_metric, max_complexity, distance, .. } => {
+                let metric = *complexity_metric;
+                let max_val = Some(*max_complexity as u32);
+                with_aligner(distance, |aligner| {
+                    tracepoints_to_cigar_with_aligner(
+                        &subset_tracepoints,
+                        &query_seq,
+                        &target_seq,
+                        0,
+                        0,
+                        metric,
+                        aligner,
+                        max_val,
+                    )
+                })
+            }
+            TracepointModeData::Fastga { trace_spacing, .. } => {
+                let ts = *trace_spacing as usize;
+                with_aligner(&Distance::Edit, |aligner| {
+                    tracepoints_to_cigar_fastga_with_aligner(
+                        &subset_tracepoints,
+                        ts.try_into().unwrap(),
+                        &query_seq,
+                        &target_seq,
+                        adjusted_query_offset,
+                        adjusted_target_offset,
+                        is_reverse,
+                        aligner,
+                    )
+                })
+            }
         };
 
         match parse_cigar_to_delta(&cigar_str) {

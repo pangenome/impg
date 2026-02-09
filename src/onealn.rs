@@ -4,6 +4,7 @@
 
 use crate::alignment_record::{AlignmentRecord, Strand};
 use crate::seqidx::SequenceIndex;
+use lib_wfa2::affine_wavefront::Distance;
 use log::{debug, warn};
 use onecode::OneFile;
 use std::collections::{HashMap, HashSet};
@@ -123,14 +124,14 @@ impl OneAlnParser {
             strand: '+',
             differences: 0,
             tracepoints: Vec::new(),
-            trace_diffs: Vec::new(),
-            trace_spacing,
-            query_deltas: Vec::new(),
-            complexity_metric: None,
-            max_complexity: None,
+            mode_data: TracepointModeData::Fastga {
+                diffs: Vec::new(),
+                trace_spacing,
+            },
         };
 
         // Read associated lines to get tracepoints and strand
+        let mut trace_diffs = Vec::new();
         loop {
             match file.read_line() {
                 'R' => alignment.strand = '-',
@@ -139,12 +140,17 @@ impl OneAlnParser {
                     alignment.tracepoints = file.int_list().map(|v| v.to_vec()).unwrap_or_default()
                 }
                 'X' => {
-                    alignment.trace_diffs = file.int_list().map(|v| v.to_vec()).unwrap_or_default()
+                    trace_diffs = file.int_list().map(|v| v.to_vec()).unwrap_or_default()
                 }
                 'A' | 'a' | 'g' | '^' | '\0' => break,
                 _ => {}
             }
         }
+
+        alignment.mode_data = TracepointModeData::Fastga {
+            diffs: trace_diffs,
+            trace_spacing,
+        };
 
         Ok(alignment)
     }
@@ -763,6 +769,23 @@ impl OneAlnParser {
     }
 }
 
+/// Mode-specific tracepoint data
+#[derive(Debug)]
+pub enum TracepointModeData {
+    /// FASTGA: fixed query spacing, stores per-segment difference counts
+    Fastga {
+        diffs: Vec<i64>,
+        trace_spacing: i64,
+    },
+    /// Standard: variable query deltas, max_complexity bounds per-segment diffs
+    Standard {
+        query_deltas: Vec<i64>,
+        complexity_metric: tracepoints::ComplexityMetric,
+        max_complexity: i64,
+        distance: Distance,
+    },
+}
+
 /// Represents a complete 1aln alignment with tracepoints for CIGAR reconstruction
 #[derive(Debug)]
 pub struct OneAlnAlignment {
@@ -780,11 +803,7 @@ pub struct OneAlnAlignment {
     pub strand: char,
     pub differences: i64,
     pub tracepoints: Vec<i64>,
-    pub trace_diffs: Vec<i64>,
-    pub trace_spacing: i64,
-    pub query_deltas: Vec<i64>,
-    pub complexity_metric: Option<tracepoints::ComplexityMetric>,
-    pub max_complexity: Option<u32>,
+    pub mode_data: TracepointModeData,
 }
 
 impl OneAlnAlignment {
