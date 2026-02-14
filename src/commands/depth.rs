@@ -1,13 +1,14 @@
-use crate::impg::{AdjustedInterval, CigarOp};
-use crate::impg_index::ImpgIndex;
+use crate::impg::CigarOp;
+use crate::impg_index::{ImpgIndex, RawAlignmentInterval};
+use indicatif::{ProgressBar, ProgressStyle};
 use crate::sequence_index::UnifiedSequenceIndex;
 use bitvec::prelude::*;
-use coitrees::IntervalTree;
 use log::{debug, info};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::io::{self, BufRead, BufWriter, Write};
+use std::io::{self, BufWriter, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 /// Configuration for the depth command
 pub struct DepthConfig {
@@ -306,7 +307,7 @@ impl DepthStatsWithSamples {
         });
 
         // Write header
-        writeln!(writer, "#seq_name\tstart\tend\tdepth\tsamples")?;
+        writeln!(writer, "#seq_name\tlength\tdepth\tsamples")?;
 
         if merge_tolerance > 0.0 && !self.intervals.is_empty() {
             // Merge adjacent intervals within tolerance
@@ -322,8 +323,8 @@ impl DepthStatsWithSamples {
                 let samples_str = interval.samples.join(",");
                 writeln!(
                     writer,
-                    "{}\t{}\t{}\t{}\t{}",
-                    interval.seq_name, interval.start, interval.end, interval.depth, samples_str
+                    "{}\t{}\t{}\t{}",
+                    interval.seq_name, interval.end - interval.start, interval.depth, samples_str
                 )?;
             }
 
@@ -339,8 +340,8 @@ impl DepthStatsWithSamples {
                 let samples_str = interval.samples.join(",");
                 writeln!(
                     writer,
-                    "{}\t{}\t{}\t{}\t{}",
-                    interval.seq_name, interval.start, interval.end, interval.depth, samples_str
+                    "{}\t{}\t{}\t{}",
+                    interval.seq_name, interval.end - interval.start, interval.depth, samples_str
                 )?;
             }
 
@@ -903,111 +904,6 @@ impl CompactSequenceLengths {
     }
 }
 
-/// Compact pool using numeric IDs instead of strings
-/// Memory usage: ~50% less than Pool for large datasets
-#[derive(Debug)]
-pub struct CompactPool {
-    /// sample_id -> seq_id -> interval set of unprocessed regions
-    regions: Vec<FxHashMap<u32, IntervalSet>>,
-}
-
-impl CompactPool {
-    /// Initialize pool with full-length intervals for all sequences
-    pub fn new(compact_lengths: &CompactSequenceLengths) -> Self {
-        let mut regions = Vec::with_capacity(compact_lengths.num_samples());
-
-        for sample_id in 0..compact_lengths.num_samples() as u16 {
-            let mut sample_regions = FxHashMap::default();
-            for &seq_id in compact_lengths.get_seqs_of_sample(sample_id) {
-                let len = compact_lengths.get_length(seq_id);
-                if len > 0 {
-                    sample_regions.insert(seq_id, IntervalSet::new_single(0, len));
-                }
-            }
-            regions.push(sample_regions);
-        }
-
-        CompactPool { regions }
-    }
-
-    /// Get remaining intervals for a specific sequence
-    pub fn get_intervals(&self, sample_id: u16, seq_id: u32) -> Vec<(i64, i64)> {
-        self.regions
-            .get(sample_id as usize)
-            .and_then(|s| s.get(&seq_id))
-            .map(|is| is.intervals().to_vec())
-            .unwrap_or_default()
-    }
-
-    /// Check if a sample has no remaining intervals
-    pub fn is_sample_empty(&self, sample_id: u16) -> bool {
-        self.regions
-            .get(sample_id as usize)
-            .map(|seqs| seqs.values().all(|is| is.is_empty()))
-            .unwrap_or(true)
-    }
-
-    /// Check if entire pool is empty
-    pub fn is_empty(&self) -> bool {
-        self.regions.iter().all(|seqs| seqs.values().all(|is| is.is_empty()))
-    }
-
-    /// Subtract a single region
-    pub fn subtract(&mut self, sample_id: u16, seq_id: u32, start: i64, end: i64) {
-        if let Some(seqs) = self.regions.get_mut(sample_id as usize) {
-            if let Some(interval_set) = seqs.get_mut(&seq_id) {
-                interval_set.subtract(start, end);
-            }
-        }
-    }
-
-    /// Get overlap with the pool for a sample/seq
-    pub fn get_overlap(&self, sample_id: u16, seq_id: u32, start: i64, end: i64) -> Vec<(i64, i64)> {
-        if let Some(seqs) = self.regions.get(sample_id as usize) {
-            if let Some(interval_set) = seqs.get(&seq_id) {
-                return interval_set.intersect(start, end);
-            }
-        }
-        Vec::new()
-    }
-
-    /// Check if a region has any overlap with the pool
-    pub fn has_overlap(&self, sample_id: u16, seq_id: u32, start: i64, end: i64) -> bool {
-        !self.get_overlap(sample_id, seq_id, start, end).is_empty()
-    }
-
-    /// Batch subtract multiple regions: Vec<(sample_id, seq_id, start, end)>
-    pub fn subtract_batch(&mut self, regions_to_remove: &[(u16, u32, i64, i64)]) {
-        // Group by (sample_id, seq_id) for efficiency
-        let mut grouped: FxHashMap<(u16, u32), Vec<(i64, i64)>> = FxHashMap::default();
-
-        for &(sample_id, seq_id, start, end) in regions_to_remove {
-            grouped
-                .entry((sample_id, seq_id))
-                .or_default()
-                .push((start, end));
-        }
-
-        // Batch update each (sample_id, seq_id)
-        for ((sample_id, seq_id), intervals) in grouped {
-            if let Some(seqs) = self.regions.get_mut(sample_id as usize) {
-                if let Some(interval_set) = seqs.get_mut(&seq_id) {
-                    interval_set.subtract_batch(&intervals);
-                }
-            }
-        }
-    }
-
-    /// Get total remaining length across all samples
-    pub fn total_remaining_length(&self) -> i64 {
-        self.regions
-            .iter()
-            .flat_map(|seqs| seqs.values())
-            .map(|is| is.total_length())
-            .sum()
-    }
-}
-
 /// Compact alignment info using numeric IDs
 /// Memory usage: ~60% less than SampleAlignmentInfo for large datasets
 #[derive(Debug, Clone)]
@@ -1392,468 +1288,6 @@ fn merge_intervals(intervals: &[(i64, i64)]) -> Vec<(i64, i64)> {
     merged
 }
 
-/// Pool: tracks unprocessed regions for all samples
-#[derive(Debug)]
-pub struct Pool {
-    /// sample_name -> seq_name -> interval set of unprocessed regions
-    regions: FxHashMap<String, FxHashMap<String, IntervalSet>>,
-}
-
-impl Pool {
-    /// Initialize pool with full-length intervals for all sequences
-    pub fn new(seq_lengths: &SequenceLengths) -> Self {
-        let mut regions = FxHashMap::default();
-
-        for (sample, seqs) in &seq_lengths.sample_to_seqs {
-            let mut sample_regions = FxHashMap::default();
-            for seq in seqs {
-                if let Some(&len) = seq_lengths.lengths.get(seq) {
-                    sample_regions.insert(seq.clone(), IntervalSet::new_single(0, len));
-                }
-            }
-            regions.insert(sample.clone(), sample_regions);
-        }
-
-        Pool { regions }
-    }
-
-    /// Get remaining intervals for a specific sequence
-    pub fn get_intervals(&self, sample: &str, seq: &str) -> Vec<(i64, i64)> {
-        self.regions
-            .get(sample)
-            .and_then(|s| s.get(seq))
-            .map(|is| is.intervals().to_vec())
-            .unwrap_or_default()
-    }
-
-    /// Get all remaining intervals for a sample: Vec<(seq_name, start, end)>
-    pub fn get_sample_intervals(&self, sample: &str) -> Vec<(String, i64, i64)> {
-        let mut result = Vec::new();
-        if let Some(seqs) = self.regions.get(sample) {
-            for (seq, interval_set) in seqs {
-                for &(start, end) in interval_set.intervals() {
-                    result.push((seq.clone(), start, end));
-                }
-            }
-        }
-        result
-    }
-
-    /// Count total intervals for a sample
-    pub fn count_intervals(&self, sample: &str) -> usize {
-        self.regions
-            .get(sample)
-            .map(|seqs| seqs.values().map(|is| is.interval_count()).sum())
-            .unwrap_or(0)
-    }
-
-    /// Check if a sample has no remaining intervals
-    pub fn is_sample_empty(&self, sample: &str) -> bool {
-        self.regions
-            .get(sample)
-            .map(|seqs| seqs.values().all(|is| is.is_empty()))
-            .unwrap_or(true)
-    }
-
-    /// Check if entire pool is empty
-    pub fn is_empty(&self) -> bool {
-        self.regions
-            .values()
-            .all(|seqs| seqs.values().all(|is| is.is_empty()))
-    }
-
-    /// Subtract a single region
-    pub fn subtract(&mut self, sample: &str, seq: &str, start: i64, end: i64) {
-        if let Some(seqs) = self.regions.get_mut(sample) {
-            if let Some(interval_set) = seqs.get_mut(seq) {
-                interval_set.subtract(start, end);
-            }
-        }
-    }
-
-    /// Check if a region has any overlap with the pool for a sample/seq
-    /// Returns the intersection intervals if any
-    pub fn get_overlap(&self, sample: &str, seq: &str, start: i64, end: i64) -> Vec<(i64, i64)> {
-        if let Some(seqs) = self.regions.get(sample) {
-            if let Some(interval_set) = seqs.get(seq) {
-                return interval_set.intersect(start, end);
-            }
-        }
-        Vec::new()
-    }
-
-    /// Check if a region has any overlap with the pool
-    pub fn has_overlap(&self, sample: &str, seq: &str, start: i64, end: i64) -> bool {
-        !self.get_overlap(sample, seq, start, end).is_empty()
-    }
-
-    /// Batch subtract multiple regions: Vec<(sample, seq, start, end)>
-    pub fn subtract_batch(&mut self, regions_to_remove: &[(String, String, i64, i64)]) {
-        // Group by (sample, seq) for efficiency
-        let mut grouped: FxHashMap<(&str, &str), Vec<(i64, i64)>> = FxHashMap::default();
-
-        for (sample, seq, start, end) in regions_to_remove {
-            grouped
-                .entry((sample.as_str(), seq.as_str()))
-                .or_default()
-                .push((*start, *end));
-        }
-
-        // Batch update each (sample, seq)
-        for ((sample, seq), intervals) in grouped {
-            if let Some(seqs) = self.regions.get_mut(sample) {
-                if let Some(interval_set) = seqs.get_mut(seq) {
-                    interval_set.subtract_batch(&intervals);
-                }
-            }
-        }
-    }
-
-    /// Get total remaining length across all samples
-    pub fn total_remaining_length(&self) -> i64 {
-        self.regions
-            .values()
-            .flat_map(|seqs| seqs.values())
-            .map(|is| is.total_length())
-            .sum()
-    }
-}
-
-/// Reverse index: maps query sequences to their alignments
-/// This enables efficient lookup of alignments where a sequence is the query
-#[derive(Debug, Default)]
-pub struct ReverseAlignmentIndex {
-    /// seq_name -> Vec<(target_seq_name, target_start, target_end, query_start, query_end, is_reverse)>
-    by_query_seq: FxHashMap<String, Vec<ReverseAlignmentEntry>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ReverseAlignmentEntry {
-    pub target_seq: String,
-    pub target_start: i64,
-    pub target_end: i64,
-    pub query_start: i64,
-    pub query_end: i64,
-    pub is_reverse: bool,
-}
-
-impl ReverseAlignmentIndex {
-    /// Build reverse index from impg
-    pub fn build(impg: &impl ImpgIndex) -> Self {
-        let mut by_query_seq: FxHashMap<String, Vec<ReverseAlignmentEntry>> = FxHashMap::default();
-
-        // Iterate through all target sequences' interval trees
-        let target_ids: Vec<u32> = impg.target_ids().iter().copied().collect();
-
-        for target_id in target_ids {
-            let target_name = match impg.seq_index().get_name(target_id) {
-                Some(name) => name.to_string(),
-                None => continue,
-            };
-
-            // Get the actual tree
-            let tree = match impg.get_or_load_tree(target_id) {
-                Some(t) => t,
-                None => continue,
-            };
-
-            // Query all intervals in this tree
-            let target_len = impg.seq_index().get_len_from_id(target_id).unwrap_or(0);
-            tree.query(0, target_len as i32, |interval| {
-                let query_id = interval.metadata.query_id();
-                if let Some(query_name) = impg.seq_index().get_name(query_id) {
-                    let q_start = interval.metadata.query_start();
-                    let q_end = interval.metadata.query_end();
-                    let is_reverse = q_start > q_end;
-                    let query_start = q_start.min(q_end) as i64;
-                    let query_end = q_start.max(q_end) as i64;
-
-                    by_query_seq
-                        .entry(query_name.to_string())
-                        .or_default()
-                        .push(ReverseAlignmentEntry {
-                            target_seq: target_name.clone(),
-                            target_start: interval.first as i64,
-                            target_end: interval.last as i64,
-                            query_start,
-                            query_end,
-                            is_reverse,
-                        });
-                }
-            });
-        }
-
-        ReverseAlignmentIndex { by_query_seq }
-    }
-
-    /// Query alignments where the given sequence is a query, filtering by range
-    pub fn query_range(
-        &self,
-        query_seq: &str,
-        range_start: i64,
-        range_end: i64,
-    ) -> Vec<&ReverseAlignmentEntry> {
-        self.by_query_seq
-            .get(query_seq)
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter(|e| {
-                        // Check if alignment overlaps with query range
-                        e.query_start < range_end && e.query_end > range_start
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// Get all alignments where the given sequence is a query
-    pub fn get_all(&self, query_seq: &str) -> Option<&Vec<ReverseAlignmentEntry>> {
-        self.by_query_seq.get(query_seq)
-    }
-
-    /// Count total alignments indexed
-    pub fn total_alignments(&self) -> usize {
-        self.by_query_seq.values().map(|v| v.len()).sum()
-    }
-}
-
-/// Strategy for querying alignments
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueryStrategy {
-    /// First round: collect all alignments for the sample from index
-    FromIndex,
-    /// Subsequent rounds: query from remaining pool intervals
-    FromPool,
-}
-
-/// Result from processing a single sequence's alignments
-#[derive(Debug)]
-pub struct SeqProcessResult {
-    /// Generated depth windows
-    pub windows: Vec<DepthWindow>,
-    /// Regions to remove from pool: (sample, seq, start, end)
-    pub regions_to_remove: Vec<(String, String, i64, i64)>,
-}
-
-/// Result from processing a sample
-#[derive(Debug)]
-pub struct SampleProcessResult {
-    /// All windows from this sample
-    pub windows: Vec<DepthWindow>,
-    /// All regions to remove from pool
-    pub regions_to_remove: Vec<(String, String, i64, i64)>,
-}
-
-/// Tracks processed regions for each haplotype to avoid duplicate output
-#[derive(Default)]
-pub struct ProcessedRegions {
-    /// haplotype_name -> sorted list of (start, end) intervals
-    regions: FxHashMap<String, Vec<(i64, i64)>>,
-}
-
-impl ProcessedRegions {
-    pub fn new() -> Self {
-        Self {
-            regions: FxHashMap::default(),
-        }
-    }
-
-    /// Check if a region overlaps with any processed region for this haplotype
-    /// Returns the unprocessed portion, or None if fully processed
-    pub fn get_unprocessed(&self, haplotype: &str, start: i64, end: i64) -> Option<(i64, i64)> {
-        if let Some(intervals) = self.regions.get(haplotype) {
-            let mut current_start = start;
-
-            for &(proc_start, proc_end) in intervals {
-                if proc_end <= current_start {
-                    continue; // Processed region is before our region
-                }
-                if proc_start >= end {
-                    break; // Processed region is after our region
-                }
-
-                // There's overlap
-                if proc_start <= current_start {
-                    // Our start is inside a processed region
-                    current_start = proc_end;
-                    if current_start >= end {
-                        return None; // Fully processed
-                    }
-                } else {
-                    // There's an unprocessed gap before this processed region
-                    return Some((current_start, proc_start.min(end)));
-                }
-            }
-
-            if current_start < end {
-                Some((current_start, end))
-            } else {
-                None
-            }
-        } else {
-            Some((start, end))
-        }
-    }
-
-    /// Mark a region as processed for a haplotype
-    pub fn mark_processed(&mut self, haplotype: &str, start: i64, end: i64) {
-        let intervals = self.regions.entry(haplotype.to_string()).or_default();
-
-        // Insert and merge overlapping intervals
-        let mut new_start = start;
-        let mut new_end = end;
-        let mut merged_indices = Vec::new();
-
-        for (i, &(s, e)) in intervals.iter().enumerate() {
-            if e < new_start {
-                continue; // Before our region
-            }
-            if s > new_end {
-                break; // After our region
-            }
-            // Overlapping or adjacent - merge
-            new_start = new_start.min(s);
-            new_end = new_end.max(e);
-            merged_indices.push(i);
-        }
-
-        // Remove merged intervals (in reverse order to preserve indices)
-        for i in merged_indices.into_iter().rev() {
-            intervals.remove(i);
-        }
-
-        // Insert the new merged interval at the correct position
-        let pos = intervals
-            .iter()
-            .position(|&(s, _)| s > new_start)
-            .unwrap_or(intervals.len());
-        intervals.insert(pos, (new_start, new_end));
-    }
-
-    /// Check if a region is completely processed
-    pub fn is_fully_processed(&self, haplotype: &str, start: i64, end: i64) -> bool {
-        self.get_unprocessed(haplotype, start, end).is_none()
-    }
-}
-
-/// Tracks processed regions in query space for each (sample, query_seq) pair
-#[derive(Default)]
-pub struct QueryProcessedRegions {
-    /// (sample, query_seq_name) -> sorted list of (start, end) intervals
-    regions: FxHashMap<(String, String), Vec<(i64, i64)>>,
-}
-
-impl QueryProcessedRegions {
-    pub fn new() -> Self {
-        Self {
-            regions: FxHashMap::default(),
-        }
-    }
-
-    /// Get ALL unprocessed portions of a query region
-    /// Returns a vector of (start, end) intervals that haven't been processed yet
-    pub fn get_all_unprocessed(
-        &self,
-        sample: &str,
-        query_seq: &str,
-        start: i64,
-        end: i64,
-    ) -> Vec<(i64, i64)> {
-        let key = (sample.to_string(), query_seq.to_string());
-        if let Some(intervals) = self.regions.get(&key) {
-            let mut result = Vec::new();
-            let mut current_start = start;
-
-            for &(proc_start, proc_end) in intervals {
-                if proc_end <= current_start {
-                    continue;
-                }
-                if proc_start >= end {
-                    break;
-                }
-
-                if proc_start > current_start {
-                    // There's an unprocessed gap before this processed region
-                    result.push((current_start, proc_start.min(end)));
-                }
-                // Move past this processed region
-                current_start = proc_end;
-                if current_start >= end {
-                    return result;
-                }
-            }
-
-            // Don't forget the tail portion after all processed regions
-            if current_start < end {
-                result.push((current_start, end));
-            }
-            result
-        } else {
-            vec![(start, end)]
-        }
-    }
-
-    /// Mark a query region as processed
-    pub fn mark_processed(&mut self, sample: &str, query_seq: &str, start: i64, end: i64) {
-        let key = (sample.to_string(), query_seq.to_string());
-        let intervals = self.regions.entry(key).or_default();
-
-        let mut new_start = start;
-        let mut new_end = end;
-        let mut merged_indices = Vec::new();
-
-        for (i, &(s, e)) in intervals.iter().enumerate() {
-            if e < new_start {
-                continue;
-            }
-            if s > new_end {
-                break;
-            }
-            new_start = new_start.min(s);
-            new_end = new_end.max(e);
-            merged_indices.push(i);
-        }
-
-        for i in merged_indices.into_iter().rev() {
-            intervals.remove(i);
-        }
-
-        let pos = intervals
-            .iter()
-            .position(|&(s, _)| s > new_start)
-            .unwrap_or(intervals.len());
-        intervals.insert(pos, (new_start, new_end));
-    }
-}
-
-/// Represents a depth window - a region with a specific coverage depth
-#[derive(Debug, Clone)]
-pub struct DepthWindow {
-    pub window_id: usize,
-    pub depth: usize,
-    pub ref_name: String,
-    pub ref_start: i64,
-    pub ref_end: i64,
-    /// sample_name -> (query_seq_name, query_start, query_end) position on the query sequence
-    pub haplotype_positions: FxHashMap<String, (String, i64, i64)>,
-}
-
-/// Information about a sample's alignment (for tracking query coordinates)
-#[derive(Debug, Clone)]
-struct SampleAlignmentInfo {
-    sample: String,
-    query_name: String,
-    query_start: i64,
-    query_end: i64,
-    target_start: i64,
-    target_end: i64,
-    /// True if the alignment is on the reverse strand (query.first > query.last)
-    is_reverse: bool,
-    /// CIGAR operations for precise coordinate mapping
-    cigar: Vec<CigarOp>,
-}
-
 /// Map a target coordinate range to query coordinates using linear interpolation.
 /// This provides smooth coordinate transitions between adjacent windows.
 ///
@@ -1897,31 +1331,6 @@ fn map_target_to_query_linear(
     }
 }
 
-/// Event for sweep-line algorithm to compute depth
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DepthEvent {
-    position: i64,
-    is_start: bool,
-    haplotype: String,
-    /// Index into the alignment info array (for looking up query coordinates)
-    alignment_idx: usize,
-}
-
-impl Ord for DepthEvent {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.position
-            .cmp(&other.position)
-            .then_with(|| other.is_start.cmp(&self.is_start)) // Starts before ends at same position
-            .then_with(|| self.haplotype.cmp(&other.haplotype))
-    }
-}
-
-impl PartialOrd for DepthEvent {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
 /// Extract sample from PanSN format sequence name (sample#haplotype#chr -> sample)
 pub fn extract_sample(seq_name: &str, separator: &str) -> String {
     let parts: Vec<&str> = seq_name.split(separator).collect();
@@ -1931,2298 +1340,6 @@ pub fn extract_sample(seq_name: &str, separator: &str) -> String {
         seq_name.to_string()
     }
 }
-/// Merge adjacent windows with the same depth and same haplotype set
-fn merge_adjacent_windows(mut windows: Vec<DepthWindow>) -> Vec<DepthWindow> {
-    if windows.len() <= 1 {
-        return windows;
-    }
-
-    let mut merged: Vec<DepthWindow> = Vec::new();
-    let mut current = windows.remove(0);
-
-    for window in windows {
-        // Check if windows are adjacent and have same haplotype set
-        let same_haplotypes = current.haplotype_positions.len() == window.haplotype_positions.len()
-            && current
-                .haplotype_positions
-                .keys()
-                .all(|k| window.haplotype_positions.contains_key(k));
-
-        if current.ref_end == window.ref_start
-            && current.depth == window.depth
-            && same_haplotypes
-            && current.ref_name == window.ref_name
-        {
-            // Merge windows
-            current.ref_end = window.ref_end;
-            // Update haplotype positions to span both windows
-            // Format: (query_name, query_start, query_end)
-            for (hap, (query_name, _, new_end)) in window.haplotype_positions {
-                if let Some(pos) = current.haplotype_positions.get_mut(&hap) {
-                    // Only extend if same query sequence
-                    if pos.0 == query_name {
-                        pos.2 = new_end;
-                    }
-                }
-            }
-        } else {
-            merged.push(current);
-            current = window;
-        }
-    }
-    merged.push(current);
-
-    // Renumber window IDs
-    for (i, w) in merged.iter_mut().enumerate() {
-        w.window_id = i;
-    }
-
-    merged
-}
-
-/// Query overlaps for a single reference (used in parallel phase)
-fn query_overlaps_for_ref(
-    impg: &impl ImpgIndex,
-    ref_id: u32,
-    ref_length: i64,
-    config: &DepthConfig,
-    sequence_index: Option<&UnifiedSequenceIndex>,
-) -> Vec<AdjustedInterval> {
-    if config.transitive {
-        if config.transitive_dfs {
-            impg.query_transitive_dfs(
-                ref_id,
-                0,
-                ref_length as i32,
-                None,
-                config.max_depth,
-                config.min_transitive_len,
-                config.min_distance_between_ranges,
-                None,
-                true, // Store CIGAR for precise coordinate mapping
-                None,
-                sequence_index,
-                config.approximate_mode,
-                None, // subset_filter
-            )
-        } else {
-            impg.query_transitive_bfs(
-                ref_id,
-                0,
-                ref_length as i32,
-                None,
-                config.max_depth,
-                config.min_transitive_len,
-                config.min_distance_between_ranges,
-                None,
-                true, // Store CIGAR for precise coordinate mapping
-                None,
-                sequence_index,
-                config.approximate_mode,
-                None, // subset_filter
-            )
-        }
-    } else {
-        impg.query(
-            ref_id,
-            0,
-            ref_length as i32,
-            true, // Store CIGAR for precise coordinate mapping
-            None,
-            sequence_index,
-            config.approximate_mode,
-        )
-    }
-}
-
-/// Process overlaps into depth windows (used in sequential phase)
-/// Note: Deduplication is handled in output_depth_tsv using QueryProcessedRegions
-/// reverse_alignments: Vec of (ref_start, ref_end, target_id) for alignments where ref is query
-fn process_overlaps_to_windows(
-    impg: &impl ImpgIndex,
-    _ref_id: u32,
-    ref_name: &str,
-    ref_length: i64,
-    overlaps: &[AdjustedInterval],
-    reverse_alignments: &[(i32, i32, u32)],
-    config: &DepthConfig,
-    separator: &str,
-) -> Vec<DepthWindow> {
-    let ref_sample = extract_sample(ref_name, separator);
-
-    if overlaps.is_empty() && reverse_alignments.is_empty() {
-        debug!("No overlaps found for reference {}", ref_name);
-        return vec![DepthWindow {
-            window_id: 0,
-            depth: 1,
-            ref_name: ref_name.to_string(),
-            ref_start: 0,
-            ref_end: ref_length,
-            haplotype_positions: {
-                let mut map = FxHashMap::default();
-                map.insert(ref_sample.clone(), (ref_name.to_string(), 0, ref_length));
-                map
-            },
-        }];
-    }
-
-    // Collect all alignment info (including query coordinates and CIGAR)
-    let mut all_alignments: Vec<SampleAlignmentInfo> = Vec::new();
-
-    // Forward direction: ref is target, other samples are queries
-    for overlap in overlaps {
-        let query_interval = &overlap.0;
-        let cigar = &overlap.1;
-        let target_interval = &overlap.2;
-
-        let query_name = impg.seq_index().get_name(query_interval.metadata).unwrap();
-        let sample = extract_sample(query_name, separator);
-
-        // Check if reverse strand (query.first > query.last)
-        let is_reverse = query_interval.first > query_interval.last;
-        let query_start = query_interval.first.min(query_interval.last) as i64;
-        let query_end = query_interval.first.max(query_interval.last) as i64;
-        let target_start = target_interval.first.min(target_interval.last) as i64;
-        let target_end = target_interval.first.max(target_interval.last) as i64;
-
-        all_alignments.push(SampleAlignmentInfo {
-            sample,
-            query_name: query_name.to_string(),
-            query_start,
-            query_end,
-            target_start,
-            target_end,
-            is_reverse,
-            cigar: cigar.clone(),
-        });
-    }
-
-    // Reverse direction: ref is query, other samples are targets
-    // In these alignments, our ref was aligned TO other sequences
-    // So the "covering sample" is the original target sequence
-    for &(ref_start, ref_end, target_id) in reverse_alignments {
-        // target_id is the sequence that our ref aligned to
-        // That sequence's sample is the "covering sample"
-        if let Some(target_name) = impg.seq_index().get_name(target_id) {
-            let sample = extract_sample(target_name, separator);
-
-            // Skip if same sample (shouldn't contribute to depth)
-            if sample == ref_sample {
-                continue;
-            }
-
-            // For reverse alignments:
-            // - target_start/target_end on ref = ref_start/ref_end (the query coords)
-            // - query_start/query_end = position on the covering sample's sequence (we use ref coords for simplicity)
-            // Since we're computing depth on ref, the "target" coords are the ref coords
-            all_alignments.push(SampleAlignmentInfo {
-                sample,
-                query_name: target_name.to_string(),
-                query_start: ref_start as i64, // Approximation: use ref coords
-                query_end: ref_end as i64,
-                target_start: ref_start as i64,
-                target_end: ref_end as i64,
-                is_reverse: false,
-                cigar: Vec::new(), // No CIGAR for reverse (linear mapping)
-            });
-        }
-    }
-
-    // Add self (reference) as a sample with empty CIGAR (identity mapping)
-    all_alignments.push(SampleAlignmentInfo {
-        sample: ref_sample.clone(),
-        query_name: ref_name.to_string(),
-        query_start: 0,
-        query_end: ref_length,
-        target_start: 0,
-        target_end: ref_length,
-        is_reverse: false,
-        cigar: Vec::new(), // Empty CIGAR for self-alignment (identity)
-    });
-
-    // Create events for sweep-line algorithm
-    // We need to track alignment indices to look up query info later
-    let mut events: Vec<DepthEvent> = Vec::new();
-    for (idx, aln) in all_alignments.iter().enumerate() {
-        events.push(DepthEvent {
-            position: aln.target_start,
-            is_start: true,
-            haplotype: aln.sample.clone(),
-            alignment_idx: idx,
-        });
-        events.push(DepthEvent {
-            position: aln.target_end,
-            is_start: false,
-            haplotype: aln.sample.clone(),
-            alignment_idx: idx,
-        });
-    }
-    events.sort();
-
-    // Sweep-line to compute depth windows
-    // Track active alignments for each sample (to get query info)
-    let mut windows: Vec<DepthWindow> = Vec::new();
-    let mut active_alignments: FxHashMap<String, Vec<usize>> = FxHashMap::default();
-    let mut prev_pos: Option<i64> = None;
-    let mut window_id = 0;
-
-    for event in events {
-        if let Some(prev) = prev_pos {
-            if event.position > prev {
-                // Collect samples that are currently active (have at least one alignment)
-                let active_samples: Vec<&String> = active_alignments
-                    .iter()
-                    .filter(|(_, alns)| !alns.is_empty())
-                    .map(|(s, _)| s)
-                    .collect();
-
-                if !active_samples.is_empty() {
-                    let mut sample_positions: FxHashMap<String, (String, i64, i64)> =
-                        FxHashMap::default();
-                    for sample in &active_samples {
-                        // Get the best alignment for this sample (pick the one with largest overlap)
-                        if let Some(aln_indices) = active_alignments.get(*sample) {
-                            if let Some(&best_idx) = aln_indices.iter().max_by_key(|&&idx| {
-                                let aln = &all_alignments[idx];
-                                // Calculate overlap with current window
-                                let overlap_start = prev.max(aln.target_start);
-                                let overlap_end = event.position.min(aln.target_end);
-                                overlap_end - overlap_start
-                            }) {
-                                let aln = &all_alignments[best_idx];
-
-                                // Calculate query coordinates corresponding to this window
-                                // Window on target: [prev, event.position]
-                                let window_target_start = prev.max(aln.target_start);
-                                let window_target_end = event.position.min(aln.target_end);
-
-                                // Use linear interpolation for coordinate mapping
-                                let (window_query_start, window_query_end) =
-                                    map_target_to_query_linear(
-                                        &aln.cigar,
-                                        aln.target_start,
-                                        aln.target_end,
-                                        aln.query_start,
-                                        aln.query_end,
-                                        window_target_start,
-                                        window_target_end,
-                                        aln.is_reverse,
-                                    );
-
-                                sample_positions.insert(
-                                    (*sample).clone(),
-                                    (aln.query_name.clone(), window_query_start, window_query_end),
-                                );
-                            }
-                        }
-                    }
-
-                    if !sample_positions.is_empty() {
-                        windows.push(DepthWindow {
-                            window_id,
-                            depth: sample_positions.len(),
-                            ref_name: ref_name.to_string(),
-                            ref_start: prev,
-                            ref_end: event.position,
-                            haplotype_positions: sample_positions,
-                        });
-                        window_id += 1;
-                    }
-                }
-            }
-        }
-
-        // Update active alignments
-        if event.is_start {
-            active_alignments
-                .entry(event.haplotype.clone())
-                .or_default()
-                .push(event.alignment_idx);
-        } else if let Some(alns) = active_alignments.get_mut(&event.haplotype) {
-            alns.retain(|&idx| idx != event.alignment_idx);
-        }
-
-        prev_pos = Some(event.position);
-    }
-
-    // Optionally merge adjacent windows
-    if config.merge_adjacent {
-        windows = merge_adjacent_windows(windows);
-    }
-
-    windows
-}
-
-/// Main function to compute depth across all sequences
-/// Uses streaming architecture to minimize memory usage:
-/// - Process one reference at a time
-/// - Query overlaps → Process windows → Deduplicate → Output immediately
-/// - Release memory before processing next reference
-pub fn compute_depth(
-    impg: &impl ImpgIndex,
-    config: &DepthConfig,
-    ref_order: Option<Vec<String>>,
-    sequence_index: Option<&UnifiedSequenceIndex>,
-    separator: &str,
-    output_prefix: Option<&str>,
-) -> io::Result<()> {
-    info!("Computing depth coverage (streaming mode)");
-
-    // Determine processing order
-    let mut seq_order: Vec<(u32, String, i64)> = Vec::new();
-
-    // First add user-specified sequences
-    if let Some(order) = ref_order {
-        for name in order {
-            if let Some(id) = impg.seq_index().get_id(&name) {
-                let len = impg.seq_index().get_len_from_id(id).unwrap_or(0) as i64;
-                seq_order.push((id, name, len));
-            } else {
-                debug!("Sequence '{}' from ref-order not found in index", name);
-            }
-        }
-    }
-
-    // Add remaining sequences in alphabetical order
-    let mut all_seqs: Vec<(u32, String, i64)> = (0..impg.seq_index().len() as u32)
-        .filter_map(|id| {
-            let name = impg.seq_index().get_name(id)?;
-            let len = impg.seq_index().get_len_from_id(id)? as i64;
-            Some((id, name.to_string(), len))
-        })
-        .collect();
-    all_seqs.sort_by(|a, b| a.1.cmp(&b.1));
-
-    let specified_ids: FxHashSet<u32> = seq_order.iter().map(|(id, _, _)| *id).collect();
-    for (id, name, len) in all_seqs {
-        if !specified_ids.contains(&id) {
-            seq_order.push((id, name, len));
-        }
-    }
-
-    debug!("Processing {} sequences as references", seq_order.len());
-
-    // Collect all unique samples for header
-    let mut all_samples: FxHashSet<String> = FxHashSet::default();
-    for (_, name, _) in &seq_order {
-        all_samples.insert(extract_sample(name, separator));
-    }
-    let mut sample_list: Vec<String> = all_samples.into_iter().collect();
-    sample_list.sort();
-
-    // Build seq_lengths map for uncovered regions
-    let seq_lengths: FxHashMap<String, i64> = seq_order
-        .iter()
-        .map(|(_, name, len)| (name.clone(), *len))
-        .collect();
-
-    // Build string interning maps
-    let sample_to_idx: FxHashMap<&str, u16> = sample_list
-        .iter()
-        .enumerate()
-        .map(|(i, s)| (s.as_str(), i as u16))
-        .collect();
-
-    let seq_names: Vec<&String> = seq_lengths.keys().collect();
-    let seq_to_idx: FxHashMap<&str, u32> = seq_names
-        .iter()
-        .enumerate()
-        .map(|(i, s)| (s.as_str(), i as u32))
-        .collect();
-
-    let idx_to_seq: Vec<&str> = {
-        let mut v: Vec<(&str, u32)> = seq_to_idx.iter().map(|(&s, &i)| (s, i)).collect();
-        v.sort_by_key(|(_, i)| *i);
-        v.into_iter().map(|(s, _)| s).collect()
-    };
-
-    debug!(
-        "String interning: {} samples, {} sequences",
-        sample_to_idx.len(),
-        seq_to_idx.len()
-    );
-
-    // Open output file
-    let writer: Box<dyn Write> = if let Some(prefix) = output_prefix {
-        let path = format!("{}.depth.tsv", prefix);
-        Box::new(BufWriter::new(std::fs::File::create(&path)?))
-    } else {
-        Box::new(BufWriter::new(std::io::stdout()))
-    };
-    let mut writer = BufWriter::new(writer);
-
-    // Write header
-    write!(writer, "window_id\tdepth")?;
-    for sample in &sample_list {
-        write!(writer, "\t{}", sample)?;
-    }
-    writeln!(writer)?;
-
-    // Coverage trackers for each (sample_idx, seq_idx) pair
-    // This tracks what we've already output to avoid duplicates
-    let mut coverage_trackers: FxHashMap<(u16, u32), CoverageTracker> = FxHashMap::default();
-
-    // Process in batches for parallelism while limiting memory
-    // Batch size: process N references at a time
-    const BATCH_SIZE: usize = 8;
-    let mut global_window_id: usize = 0;
-    let total_refs = seq_order.len();
-
-    debug!("Processing {} references in batches of {}", total_refs, BATCH_SIZE);
-
-    for (batch_idx, batch) in seq_order.chunks(BATCH_SIZE).enumerate() {
-        let batch_start = batch_idx * BATCH_SIZE;
-        debug!(
-            "Processing batch {}: refs {}-{} of {}",
-            batch_idx,
-            batch_start,
-            batch_start + batch.len() - 1,
-            total_refs
-        );
-
-        // Phase 1: Query overlaps for this batch in parallel
-        let batch_overlaps: Vec<Vec<AdjustedInterval>> = batch
-            .par_iter()
-            .map(|(ref_id, _ref_name, ref_len)| {
-                query_overlaps_for_ref(impg, *ref_id, *ref_len, config, sequence_index)
-            })
-            .collect();
-
-        // Phase 2: Query reverse alignments in parallel (where ref is query in PAF)
-        let batch_reverse_alignments: Vec<Vec<(i32, i32, u32)>> = batch
-            .par_iter()
-            .map(|(ref_id, _ref_name, _ref_len)| {
-                impg.query_reverse_for_depth(*ref_id)
-            })
-            .collect();
-
-        // Phase 3: Process overlaps into depth windows in parallel
-        let batch_windows: Vec<Vec<DepthWindow>> = batch
-            .par_iter()
-            .zip(batch_overlaps.par_iter())
-            .zip(batch_reverse_alignments.par_iter())
-            .map(|(((ref_id, ref_name, ref_len), overlaps), reverse_alignments)| {
-                process_overlaps_to_windows(
-                    impg,
-                    *ref_id,
-                    ref_name,
-                    *ref_len,
-                    overlaps,
-                    reverse_alignments,
-                    config,
-                    separator,
-                )
-            })
-            .collect();
-
-        // Phase 4: Deduplicate and output (sequential to maintain order)
-        for mut windows in batch_windows {
-            // Assign global window IDs
-            for w in &mut windows {
-                w.window_id = global_window_id;
-                global_window_id += 1;
-            }
-
-            // Process each window and output deduplicated intervals
-            for window in &windows {
-                for (sample, (seq_name, start, end)) in &window.haplotype_positions {
-                    if let (Some(&sample_idx), Some(&seq_idx)) = (
-                        sample_to_idx.get(sample.as_str()),
-                        seq_to_idx.get(seq_name.as_str()),
-                    ) {
-                        let key = (sample_idx, seq_idx);
-                        let tracker = coverage_trackers.entry(key).or_default();
-
-                        // Get uncovered portions
-                        let uncovered = tracker.add_interval(*start, *end);
-
-                        // Output each uncovered portion
-                        for (unc_start, unc_end) in uncovered {
-                            write!(writer, "{}\t{}", window.window_id, window.depth)?;
-                            for (i, _) in sample_list.iter().enumerate() {
-                                if i as u16 == sample_idx {
-                                    write!(
-                                        writer,
-                                        "\t{}:{}-{}",
-                                        idx_to_seq[seq_idx as usize], unc_start, unc_end
-                                    )?;
-                                } else {
-                                    write!(writer, "\tNA")?;
-                                }
-                            }
-                            writeln!(writer)?;
-                        }
-                    }
-                }
-            }
-            // Windows for this reference are dropped here, releasing memory
-        }
-        // batch_overlaps and batch_windows are dropped here
-
-        if (batch_idx + 1) % 10 == 0 || batch_idx == seq_order.chunks(BATCH_SIZE).count() - 1 {
-            debug!(
-                "Progress: {}/{} references processed",
-                (batch_idx + 1) * BATCH_SIZE.min(total_refs - batch_idx * BATCH_SIZE),
-                total_refs
-            );
-        }
-    }
-
-    debug!("Generated {} depth windows", global_window_id);
-
-    // Phase 4: Find and output uncovered regions
-    debug!("Finding uncovered regions...");
-    let mut uncovered_count = 0;
-
-    for (seq_name, &seq_len) in &seq_lengths {
-        let sample = extract_sample(seq_name, separator);
-        if let (Some(&sample_idx), Some(&seq_idx)) = (
-            sample_to_idx.get(sample.as_str()),
-            seq_to_idx.get(seq_name.as_str()),
-        ) {
-            let key = (sample_idx, seq_idx);
-            let mut current_pos: i64 = 0;
-
-            if let Some(tracker) = coverage_trackers.get(&key) {
-                for &(iv_start, iv_end) in tracker.get_intervals() {
-                    if iv_start > current_pos {
-                        // Output uncovered region
-                        write!(writer, "uncovered\t1")?;
-                        for (i, _) in sample_list.iter().enumerate() {
-                            if i as u16 == sample_idx {
-                                write!(
-                                    writer,
-                                    "\t{}:{}-{}",
-                                    idx_to_seq[seq_idx as usize], current_pos, iv_start
-                                )?;
-                            } else {
-                                write!(writer, "\tNA")?;
-                            }
-                        }
-                        writeln!(writer)?;
-                        uncovered_count += 1;
-                    }
-                    current_pos = current_pos.max(iv_end);
-                }
-            }
-
-            // Check for uncovered region at the end
-            if current_pos < seq_len {
-                write!(writer, "uncovered\t1")?;
-                for (i, _) in sample_list.iter().enumerate() {
-                    if i as u16 == sample_idx {
-                        write!(
-                            writer,
-                            "\t{}:{}-{}",
-                            idx_to_seq[seq_idx as usize], current_pos, seq_len
-                        )?;
-                    } else {
-                        write!(writer, "\tNA")?;
-                    }
-                }
-                writeln!(writer)?;
-                uncovered_count += 1;
-            }
-        }
-    }
-
-    if uncovered_count > 0 {
-        debug!("Found {} uncovered regions", uncovered_count);
-    }
-
-    writer.flush()?;
-    debug!("Output complete");
-
-    Ok(())
-}
-
-/// Coverage tracker for a single (sample, seq) pair
-/// Maintains a sorted list of non-overlapping covered intervals
-#[derive(Debug, Default)]
-struct CoverageTracker {
-    /// Sorted, non-overlapping intervals: Vec<(start, end)>
-    intervals: Vec<(i64, i64)>,
-}
-
-impl CoverageTracker {
-    /// Add a new interval and return the uncovered portions
-    /// Returns: Vec<(start, end)> of newly covered regions
-    ///
-    /// This implementation uses a simple linear scan to be robust against edge cases.
-    /// It guarantees that returned intervals are non-overlapping with existing coverage.
-    fn add_interval(&mut self, start: i64, end: i64) -> Vec<(i64, i64)> {
-        if start >= end {
-            return Vec::new();
-        }
-
-        let mut uncovered = Vec::new();
-        let mut current = start;
-
-        // Simple linear scan through all intervals
-        for &(iv_start, iv_end) in &self.intervals {
-            // Skip intervals that end before our current position
-            if iv_end <= current {
-                continue;
-            }
-            // Stop if interval starts at or after our end
-            if iv_start >= end {
-                break;
-            }
-
-            // There's some overlap or gap
-            if current < iv_start {
-                // Gap before this interval - this portion is uncovered
-                let gap_end = iv_start.min(end);
-                uncovered.push((current, gap_end));
-            }
-
-            // Move current position past this interval
-            current = current.max(iv_end);
-
-            // Early exit if we've passed our end
-            if current >= end {
-                break;
-            }
-        }
-
-        // Final gap after all intervals
-        if current < end {
-            uncovered.push((current, end));
-        }
-
-        // Merge the new interval into our list if there are uncovered portions
-        if !uncovered.is_empty() {
-            self.merge_interval(start, end);
-        }
-
-        uncovered
-    }
-
-    /// Merge a new interval into the sorted list
-    /// Maintains the invariant that intervals are sorted and non-overlapping
-    fn merge_interval(&mut self, start: i64, end: i64) {
-        if self.intervals.is_empty() {
-            self.intervals.push((start, end));
-            return;
-        }
-
-        // Find all intervals that overlap or are adjacent to [start, end]
-        let mut merge_start = start;
-        let mut merge_end = end;
-        let mut first_overlap: Option<usize> = None;
-        let mut last_overlap: Option<usize> = None;
-
-        for (i, &(iv_start, iv_end)) in self.intervals.iter().enumerate() {
-            // Check if overlaps or adjacent (iv_end >= start && iv_start <= end)
-            if iv_end >= start && iv_start <= end {
-                if first_overlap.is_none() {
-                    first_overlap = Some(i);
-                }
-                last_overlap = Some(i);
-                merge_start = merge_start.min(iv_start);
-                merge_end = merge_end.max(iv_end);
-            }
-        }
-
-        match (first_overlap, last_overlap) {
-            (Some(first), Some(last)) => {
-                // Remove overlapping intervals and insert merged one
-                self.intervals.drain(first..=last);
-                self.intervals.insert(first, (merge_start, merge_end));
-            }
-            _ => {
-                // No overlap, insert at correct position
-                let pos = self
-                    .intervals
-                    .iter()
-                    .position(|&(s, _)| s > start)
-                    .unwrap_or(self.intervals.len());
-                self.intervals.insert(pos, (start, end));
-            }
-        }
-    }
-
-    /// Get all intervals (for final output)
-    fn get_intervals(&self) -> &[(i64, i64)] {
-        &self.intervals
-    }
-}
-
-/// Load reference order from file
-pub fn load_ref_order_file(path: &str) -> io::Result<Vec<String>> {
-    let content = std::fs::read_to_string(path)?;
-    Ok(content
-        .lines()
-        .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
-        .map(|line| line.trim().to_string())
-        .collect())
-}
-
-// ============================================================================
-// New sample-based depth computation with hybrid strategy
-// ============================================================================
-
-/// Determine the optimal sample processing order
-/// Samples with more alignments are processed first to maximize pool coverage early
-#[allow(dead_code)]
-fn determine_sample_order(
-    seq_lengths: &SequenceLengths,
-    impg: &impl ImpgIndex,
-    separator: &str,
-) -> Vec<String> {
-    let mut sample_alignment_counts: FxHashMap<String, usize> = FxHashMap::default();
-
-    // Count alignments per sample (as target)
-    let target_ids: Vec<u32> = impg.target_ids().iter().copied().collect();
-
-    for target_id in target_ids {
-        if let Some(target_name) = impg.seq_index().get_name(target_id) {
-            let sample = extract_sample(target_name, separator);
-
-            // Get the actual tree and count alignments
-            if let Some(tree) = impg.get_or_load_tree(target_id) {
-                let target_len = impg.seq_index().get_len_from_id(target_id).unwrap_or(0);
-                let mut count = 0;
-                tree.query(0, target_len as i32, |_| count += 1);
-                *sample_alignment_counts.entry(sample).or_default() += count;
-            }
-        }
-    }
-
-    // Sort samples by alignment count (descending) for better early coverage
-    let mut samples: Vec<_> = seq_lengths.get_samples();
-    samples.sort_by(|a, b| {
-        let count_a = sample_alignment_counts.get(a).copied().unwrap_or(0);
-        let count_b = sample_alignment_counts.get(b).copied().unwrap_or(0);
-        count_b.cmp(&count_a).then_with(|| a.cmp(b))
-    });
-
-    samples
-}
-
-/// Choose query strategy based on pool state and alignment density
-fn choose_strategy(
-    _sample: &str,
-    _pool: &Pool,
-    _impg: &impl ImpgIndex,
-    _seq_lengths: &SequenceLengths,
-    _is_first_round: bool,
-) -> QueryStrategy {
-    // Always use FromIndex to ensure ALL alignments are collected
-    // This is necessary because FromPool would miss alignments for regions
-    // that were removed from the pool when earlier samples were processed,
-    // resulting in incomplete windows (missing samples)
-    // The pool filtering in window generation prevents duplicate output
-    QueryStrategy::FromIndex
-}
-
-/// Collect alignments for a sequence using FromIndex strategy
-/// If reverse_index is None (bidirectional mode), skip reverse lookups since
-/// bidirectional indices already contain both directions.
-fn collect_alignments_from_index(
-    impg: &impl ImpgIndex,
-    anchor_seq: &str,
-    anchor_sample: &str,
-    reverse_index: Option<&ReverseAlignmentIndex>,
-    config: &DepthConfig,
-    sequence_index: Option<&UnifiedSequenceIndex>,
-    separator: &str,
-) -> Vec<SampleAlignmentInfo> {
-    let mut alignments = Vec::new();
-
-    let seq_id = match impg.seq_index().get_id(anchor_seq) {
-        Some(id) => id,
-        None => return alignments,
-    };
-    let seq_len = impg.seq_index().get_len_from_id(seq_id).unwrap_or(0) as i64;
-
-    // 1. Query where anchor_seq is TARGET (other samples aligned to this)
-    let overlaps = if config.transitive {
-        if config.transitive_dfs {
-            impg.query_transitive_dfs(
-                seq_id,
-                0,
-                seq_len as i32,
-                None,
-                config.max_depth,
-                config.min_transitive_len,
-                config.min_distance_between_ranges,
-                None,
-                false, // Don't need CIGAR for now
-                None,
-                sequence_index,
-                config.approximate_mode,
-                None,
-            )
-        } else {
-            impg.query_transitive_bfs(
-                seq_id,
-                0,
-                seq_len as i32,
-                None,
-                config.max_depth,
-                config.min_transitive_len,
-                config.min_distance_between_ranges,
-                None,
-                false,
-                None,
-                sequence_index,
-                config.approximate_mode,
-                None,
-            )
-        }
-    } else {
-        impg.query(seq_id, 0, seq_len as i32, false, None, sequence_index, config.approximate_mode)
-    };
-
-    for overlap in overlaps {
-        let query_interval = &overlap.0;
-        let target_interval = &overlap.2;
-
-        let query_name = match impg.seq_index().get_name(query_interval.metadata) {
-            Some(name) => name,
-            None => continue,
-        };
-        let sample = extract_sample(query_name, separator);
-
-        let is_reverse = query_interval.first > query_interval.last;
-        let query_start = query_interval.first.min(query_interval.last) as i64;
-        let query_end = query_interval.first.max(query_interval.last) as i64;
-        let target_start = target_interval.first.min(target_interval.last) as i64;
-        let target_end = target_interval.first.max(target_interval.last) as i64;
-
-        alignments.push(SampleAlignmentInfo {
-            sample,
-            query_name: query_name.to_string(),
-            query_start,
-            query_end,
-            target_start,
-            target_end,
-            is_reverse,
-            cigar: Vec::new(),
-        });
-    }
-
-    // 2. Query where anchor_seq is QUERY (this sample aligned to others)
-    // Skip this step in bidirectional mode - the forward query already includes both directions
-    if let Some(rev_idx) = reverse_index {
-        if let Some(reverse_entries) = rev_idx.get_all(anchor_seq) {
-            for entry in reverse_entries {
-                let target_sample = extract_sample(&entry.target_seq, separator);
-
-                // Skip self-alignments
-                if target_sample == anchor_sample {
-                    continue;
-                }
-
-                alignments.push(SampleAlignmentInfo {
-                    sample: target_sample,
-                    query_name: entry.target_seq.clone(),
-                    query_start: entry.target_start,
-                    query_end: entry.target_end,
-                    target_start: entry.query_start,
-                    target_end: entry.query_end,
-                    is_reverse: entry.is_reverse,
-                    cigar: Vec::new(),
-                });
-            }
-        }
-    }
-
-    alignments
-}
-
-/// Collect alignments for pool intervals using FromPool strategy
-/// If reverse_index is None (bidirectional mode), skip reverse lookups.
-fn collect_alignments_from_pool(
-    impg: &impl ImpgIndex,
-    anchor_seq: &str,
-    anchor_sample: &str,
-    pool_intervals: &[(i64, i64)],
-    reverse_index: Option<&ReverseAlignmentIndex>,
-    config: &DepthConfig,
-    sequence_index: Option<&UnifiedSequenceIndex>,
-    separator: &str,
-) -> Vec<SampleAlignmentInfo> {
-    let mut alignments = Vec::new();
-    let mut seen_alignments: FxHashSet<(String, i64, i64, i64, i64)> = FxHashSet::default();
-
-    let seq_id = match impg.seq_index().get_id(anchor_seq) {
-        Some(id) => id,
-        None => return alignments,
-    };
-
-    // Merge nearby pool intervals to reduce query count
-    let merged_intervals = merge_nearby_intervals(pool_intervals, 1000);
-
-    for (start, end) in merged_intervals {
-        // 1. Query where anchor_seq is TARGET
-        let overlaps = if config.transitive {
-            if config.transitive_dfs {
-                impg.query_transitive_dfs(
-                    seq_id,
-                    start as i32,
-                    end as i32,
-                    None,
-                    config.max_depth,
-                    config.min_transitive_len,
-                    config.min_distance_between_ranges,
-                    None,
-                    false,
-                    None,
-                    sequence_index,
-                    config.approximate_mode,
-                    None,
-                )
-            } else {
-                impg.query_transitive_bfs(
-                    seq_id,
-                    start as i32,
-                    end as i32,
-                    None,
-                    config.max_depth,
-                    config.min_transitive_len,
-                    config.min_distance_between_ranges,
-                    None,
-                    false,
-                    None,
-                    sequence_index,
-                    config.approximate_mode,
-                    None,
-                )
-            }
-        } else {
-            impg.query(seq_id, start as i32, end as i32, false, None, sequence_index, config.approximate_mode)
-        };
-
-        for overlap in overlaps {
-            let query_interval = &overlap.0;
-            let target_interval = &overlap.2;
-
-            let query_name = match impg.seq_index().get_name(query_interval.metadata) {
-                Some(name) => name,
-                None => continue,
-            };
-            let sample = extract_sample(query_name, separator);
-
-            let is_reverse = query_interval.first > query_interval.last;
-            let query_start = query_interval.first.min(query_interval.last) as i64;
-            let query_end = query_interval.first.max(query_interval.last) as i64;
-            let target_start = target_interval.first.min(target_interval.last) as i64;
-            let target_end = target_interval.first.max(target_interval.last) as i64;
-
-            // Deduplicate
-            let key = (query_name.to_string(), query_start, query_end, target_start, target_end);
-            if seen_alignments.insert(key) {
-                alignments.push(SampleAlignmentInfo {
-                    sample,
-                    query_name: query_name.to_string(),
-                    query_start,
-                    query_end,
-                    target_start,
-                    target_end,
-                    is_reverse,
-                    cigar: Vec::new(),
-                });
-            }
-        }
-
-        // 2. Query reverse alignments for this range
-        // Skip in bidirectional mode - forward query already includes both directions
-        if let Some(rev_idx) = reverse_index {
-            let reverse_entries = rev_idx.query_range(anchor_seq, start, end);
-            for entry in reverse_entries {
-                let target_sample = extract_sample(&entry.target_seq, separator);
-
-                if target_sample == anchor_sample {
-                    continue;
-                }
-
-                let key = (
-                    entry.target_seq.clone(),
-                    entry.target_start,
-                    entry.target_end,
-                    entry.query_start,
-                    entry.query_end,
-                );
-                if seen_alignments.insert(key) {
-                    alignments.push(SampleAlignmentInfo {
-                        sample: target_sample,
-                        query_name: entry.target_seq.clone(),
-                        query_start: entry.target_start,
-                        query_end: entry.target_end,
-                        target_start: entry.query_start,
-                        target_end: entry.query_end,
-                        is_reverse: entry.is_reverse,
-                        cigar: Vec::new(),
-                    });
-                }
-            }
-        }
-    }
-
-    alignments
-}
-
-/// Merge nearby intervals (gap <= max_gap)
-fn merge_nearby_intervals(intervals: &[(i64, i64)], max_gap: i64) -> Vec<(i64, i64)> {
-    if intervals.is_empty() {
-        return Vec::new();
-    }
-
-    let mut sorted: Vec<_> = intervals.to_vec();
-    sorted.sort_by_key(|&(s, _)| s);
-
-    let mut merged = Vec::new();
-    let mut current = sorted[0];
-
-    for &(start, end) in &sorted[1..] {
-        if start <= current.1 + max_gap {
-            current.1 = current.1.max(end);
-        } else {
-            merged.push(current);
-            current = (start, end);
-        }
-    }
-    merged.push(current);
-
-    merged
-}
-
-/// Process alignments for a single anchor sequence, generating depth windows
-fn process_seq_to_windows(
-    anchor_sample: &str,
-    anchor_seq: &str,
-    anchor_len: i64,
-    alignments: &[SampleAlignmentInfo],
-    pool_intervals: &[(i64, i64)],
-    config: &DepthConfig,
-    _separator: &str,
-) -> SeqProcessResult {
-    let mut windows = Vec::new();
-    let mut regions_to_remove = Vec::new();
-
-    if alignments.is_empty() && pool_intervals.is_empty() {
-        return SeqProcessResult {
-            windows,
-            regions_to_remove,
-        };
-    }
-
-    // Build events for sweep-line
-    let mut events: Vec<DepthEvent> = Vec::new();
-    let mut all_alignments: Vec<SampleAlignmentInfo> = Vec::new();
-
-    // Add anchor sample itself
-    all_alignments.push(SampleAlignmentInfo {
-        sample: anchor_sample.to_string(),
-        query_name: anchor_seq.to_string(),
-        query_start: 0,
-        query_end: anchor_len,
-        target_start: 0,
-        target_end: anchor_len,
-        is_reverse: false,
-        cigar: Vec::new(),
-    });
-
-    // Add other alignments
-    all_alignments.extend(alignments.iter().cloned());
-
-    // Create events
-    for (idx, aln) in all_alignments.iter().enumerate() {
-        events.push(DepthEvent {
-            position: aln.target_start,
-            is_start: true,
-            haplotype: aln.sample.clone(),
-            alignment_idx: idx,
-        });
-        events.push(DepthEvent {
-            position: aln.target_end,
-            is_start: false,
-            haplotype: aln.sample.clone(),
-            alignment_idx: idx,
-        });
-    }
-    events.sort();
-
-    // Sweep-line to compute raw windows
-    let mut raw_windows: Vec<DepthWindow> = Vec::new();
-    let mut active_alignments: FxHashMap<String, Vec<usize>> = FxHashMap::default();
-    let mut prev_pos: Option<i64> = None;
-    let mut window_id = 0;
-
-    for event in events {
-        if let Some(prev) = prev_pos {
-            if event.position > prev {
-                let active_samples: Vec<&String> = active_alignments
-                    .iter()
-                    .filter(|(_, alns)| !alns.is_empty())
-                    .map(|(s, _)| s)
-                    .collect();
-
-                if !active_samples.is_empty() {
-                    let mut sample_positions: FxHashMap<String, (String, i64, i64)> =
-                        FxHashMap::default();
-
-                    for sample in &active_samples {
-                        if let Some(aln_indices) = active_alignments.get(*sample) {
-                            if let Some(&best_idx) = aln_indices.iter().max_by_key(|&&idx| {
-                                let aln = &all_alignments[idx];
-                                let overlap_start = prev.max(aln.target_start);
-                                let overlap_end = event.position.min(aln.target_end);
-                                overlap_end - overlap_start
-                            }) {
-                                let aln = &all_alignments[best_idx];
-                                let (window_query_start, window_query_end) =
-                                    map_target_to_query_linear(
-                                        &aln.cigar,
-                                        aln.target_start,
-                                        aln.target_end,
-                                        aln.query_start,
-                                        aln.query_end,
-                                        prev,
-                                        event.position,
-                                        aln.is_reverse,
-                                    );
-
-                                sample_positions.insert(
-                                    (*sample).clone(),
-                                    (aln.query_name.clone(), window_query_start, window_query_end),
-                                );
-                            }
-                        }
-                    }
-
-                    if !sample_positions.is_empty() {
-                        raw_windows.push(DepthWindow {
-                            window_id,
-                            depth: sample_positions.len(),
-                            ref_name: anchor_seq.to_string(),
-                            ref_start: prev,
-                            ref_end: event.position,
-                            haplotype_positions: sample_positions,
-                        });
-                        window_id += 1;
-                    }
-                }
-            }
-        }
-
-        if event.is_start {
-            active_alignments
-                .entry(event.haplotype.clone())
-                .or_default()
-                .push(event.alignment_idx);
-        } else if let Some(alns) = active_alignments.get_mut(&event.haplotype) {
-            alns.retain(|&idx| idx != event.alignment_idx);
-        }
-
-        prev_pos = Some(event.position);
-    }
-
-    // Optionally merge adjacent windows
-    if config.merge_adjacent {
-        raw_windows = merge_adjacent_windows(raw_windows);
-    }
-
-    // Filter windows by pool intervals and collect regions to remove
-    let pool_interval_set = {
-        let mut is = IntervalSet::new();
-        for &(start, end) in pool_intervals {
-            // Simple merge for filtering
-            is.intervals.push((start, end));
-        }
-        is.intervals.sort_by_key(|&(s, _)| s);
-        is
-    };
-
-    for window in raw_windows {
-        // Check if window overlaps with any pool interval
-        let intersections = pool_interval_set.intersect(window.ref_start, window.ref_end);
-
-        for (int_start, int_end) in intersections {
-            // Create clipped window
-            let mut clipped_window = window.clone();
-            clipped_window.ref_start = int_start;
-            clipped_window.ref_end = int_end;
-
-            // Update sample positions proportionally
-            let window_len = window.ref_end - window.ref_start;
-            if window_len > 0 {
-                let ratio_start =
-                    (int_start - window.ref_start) as f64 / window_len as f64;
-                let ratio_end = (int_end - window.ref_start) as f64 / window_len as f64;
-
-                for (sample, (seq, orig_start, orig_end)) in &window.haplotype_positions {
-                    let orig_len = orig_end - orig_start;
-                    let new_start = orig_start + (orig_len as f64 * ratio_start) as i64;
-                    let new_end = orig_start + (orig_len as f64 * ratio_end) as i64;
-
-                    clipped_window
-                        .haplotype_positions
-                        .insert(sample.clone(), (seq.clone(), new_start, new_end));
-                }
-            }
-
-            // Record regions to remove from pool (for all samples in window)
-            for (sample, (seq, start, end)) in &clipped_window.haplotype_positions {
-                regions_to_remove.push((sample.clone(), seq.clone(), *start, *end));
-            }
-
-            windows.push(clipped_window);
-        }
-    }
-
-    SeqProcessResult {
-        windows,
-        regions_to_remove,
-    }
-}
-
-/// Main function: compute depth using sample-based iteration with hybrid strategy
-///
-/// When `ref_sample` is specified (targeted mode), only computes depth for the specified
-/// sample's sequences as reference. When `ref_sample` is None (global mode), computes
-/// depth for all sequences.
-pub fn compute_depth_by_sample(
-    impg: &impl ImpgIndex,
-    config: &DepthConfig,
-    sequence_index: Option<&UnifiedSequenceIndex>,
-    separator: &str,
-    output_prefix: Option<&str>,
-    fai_list: Option<&str>,
-    ref_sample: Option<&str>,
-) -> io::Result<()> {
-    if let Some(ref_name) = ref_sample {
-        info!("Computing depth (targeted: {})", ref_name);
-    } else {
-        info!("Computing depth (global mode)");
-    }
-
-    // Phase 0: Preprocessing
-    let seq_lengths = SequenceLengths::from_impg(impg, separator);
-    debug!(
-        "Found {} samples, {} sequences in alignments",
-        seq_lengths.sample_to_seqs.len(),
-        seq_lengths.lengths.len()
-    );
-
-    // Build reverse alignment index (skip for bidirectional indices)
-    let reverse_index = if impg.is_bidirectional() {
-        debug!("Skipping reverse index (bidirectional mode)");
-        None
-    } else {
-        debug!("Building reverse alignment index...");
-        let rev_idx = ReverseAlignmentIndex::build(impg);
-        debug!("Reverse index: {} alignments", rev_idx.total_alignments());
-        impg.clear_tree_cache();
-        Some(rev_idx)
-    };
-
-    // Initialize pool - use FAI files if provided for full coverage
-    let (pool_seq_lengths, mut pool) = if let Some(fai_path) = fai_list {
-        let fai_seq_lengths = SequenceLengths::from_fai_list(fai_path, separator)?;
-        debug!(
-            "FAI: {} samples, {} sequences",
-            fai_seq_lengths.sample_to_seqs.len(),
-            fai_seq_lengths.lengths.len()
-        );
-        let p = Pool::new(&fai_seq_lengths);
-        (fai_seq_lengths, p)
-    } else {
-        let p = Pool::new(&seq_lengths);
-        (seq_lengths.clone(), p)
-    };
-    let initial_pool_length = pool.total_remaining_length();
-    debug!("Pool: {} bp total", initial_pool_length);
-
-    // Determine sample processing order
-    let sample_order = pool_seq_lengths.get_samples();
-    debug!("Sample order: {:?}", sample_order);
-
-    // Validate ref_sample if specified
-    if let Some(ref_name) = ref_sample {
-        if !sample_order.contains(&ref_name.to_string()) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Reference sample '{}' not found. Available samples: {:?}",
-                    ref_name, sample_order
-                ),
-            ));
-        }
-    }
-
-    // 0.5 Prepare output
-    let writer: Box<dyn Write> = if let Some(prefix) = output_prefix {
-        let path = format!("{}.depth.tsv", prefix);
-        Box::new(BufWriter::new(std::fs::File::create(&path)?))
-    } else {
-        Box::new(BufWriter::new(std::io::stdout()))
-    };
-    let mut writer = BufWriter::new(writer);
-
-    // Write header
-    write!(writer, "window_id\tdepth")?;
-    for sample in &sample_order {
-        write!(writer, "\t{}", sample)?;
-    }
-    writeln!(writer)?;
-
-    let mut global_window_id: usize = 0;
-    let total_samples = sample_order.len();
-    debug!("Processing {} samples...", total_samples);
-
-    for (sample_idx, anchor_sample) in sample_order.iter().enumerate() {
-        // In targeted mode, only process the specified reference sample
-        if let Some(ref_name) = ref_sample {
-            if anchor_sample != ref_name {
-                continue;
-            }
-        }
-
-        // Check if sample has remaining intervals
-        if pool.is_sample_empty(anchor_sample) {
-            debug!("Sample {} has no remaining intervals, skipping", anchor_sample);
-            continue;
-        }
-
-        let is_first_round = sample_idx == 0;
-        let strategy = choose_strategy(anchor_sample, &pool, impg, &seq_lengths, is_first_round);
-
-        debug!(
-            "Processing sample {}/{}: {} (strategy: {:?})",
-            sample_idx + 1,
-            total_samples,
-            anchor_sample,
-            strategy
-        );
-
-        // Get sequences for this sample
-        let seqs = seq_lengths.get_seqs_of_sample(anchor_sample);
-
-        // Process sequences in parallel
-        let seq_results: Vec<SeqProcessResult> = seqs
-            .par_iter()
-            .filter_map(|seq_name| {
-                let pool_intervals = pool.get_intervals(anchor_sample, seq_name);
-                if pool_intervals.is_empty() {
-                    return None;
-                }
-
-                let seq_len = seq_lengths.get_length(seq_name).unwrap_or(0);
-
-                // Collect alignments based on strategy
-                let alignments = match strategy {
-                    QueryStrategy::FromIndex => collect_alignments_from_index(
-                        impg,
-                        seq_name,
-                        anchor_sample,
-                        reverse_index.as_ref(),
-                        config,
-                        sequence_index,
-                        separator,
-                    ),
-                    QueryStrategy::FromPool => collect_alignments_from_pool(
-                        impg,
-                        seq_name,
-                        anchor_sample,
-                        &pool_intervals,
-                        reverse_index.as_ref(),
-                        config,
-                        sequence_index,
-                        separator,
-                    ),
-                };
-
-                // Process to windows
-                let result = process_seq_to_windows(
-                    anchor_sample,
-                    seq_name,
-                    seq_len,
-                    &alignments,
-                    &pool_intervals,
-                    config,
-                    separator,
-                );
-
-                Some(result)
-            })
-            .collect();
-
-        // Collect all windows from parallel processing
-        let mut all_windows: Vec<DepthWindow> = Vec::new();
-        for result in seq_results {
-            all_windows.extend(result.windows);
-        }
-
-        // Track regions output in this batch to prevent intra-batch overlaps
-        // Key: (sample, seq) -> IntervalSet of output regions
-        let mut batch_output: FxHashMap<(String, String), IntervalSet> = FxHashMap::default();
-        let mut regions_to_remove: Vec<(String, String, i64, i64)> = Vec::new();
-
-        for mut window in all_windows {
-            // Check each sample's region against:
-            // 1. The global pool (for inter-sample filtering)
-            // 2. The batch_output (for intra-batch overlap prevention)
-            let mut valid_positions: FxHashMap<String, (String, i64, i64)> =
-                FxHashMap::default();
-
-            for (sample, (seq, start, end)) in &window.haplotype_positions {
-                // First check global pool
-                let pool_overlaps = pool.get_overlap(sample, seq, *start, *end);
-                if pool_overlaps.is_empty() {
-                    continue;
-                }
-
-                // Get the largest overlap with pool
-                let (pool_start, pool_end) = pool_overlaps
-                    .iter()
-                    .max_by_key(|(s, e)| e - s)
-                    .copied()
-                    .unwrap();
-
-                // Then check if this region overlaps with already-output regions in this batch
-                let key = (sample.clone(), seq.clone());
-                let batch_overlaps = batch_output
-                    .get(&key)
-                    .map(|is| is.intersect(pool_start, pool_end))
-                    .unwrap_or_default();
-
-                if batch_overlaps.is_empty() {
-                    // No overlap with batch output, this region is valid
-                    valid_positions.insert(sample.clone(), (seq.clone(), pool_start, pool_end));
-                } else {
-                    // There's overlap - try to find a non-overlapping portion
-                    // Subtract batch_overlaps from [pool_start, pool_end]
-                    let mut remaining = vec![(pool_start, pool_end)];
-                    for (ov_start, ov_end) in batch_overlaps {
-                        let mut new_remaining = Vec::new();
-                        for (r_start, r_end) in remaining {
-                            if r_end <= ov_start || r_start >= ov_end {
-                                // No overlap
-                                new_remaining.push((r_start, r_end));
-                            } else {
-                                // Split around overlap
-                                if r_start < ov_start {
-                                    new_remaining.push((r_start, ov_start));
-                                }
-                                if r_end > ov_end {
-                                    new_remaining.push((ov_end, r_end));
-                                }
-                            }
-                        }
-                        remaining = new_remaining;
-                    }
-
-                    // Use the largest remaining interval if any
-                    if let Some(&(best_start, best_end)) =
-                        remaining.iter().max_by_key(|(s, e)| e - s)
-                    {
-                        if best_end > best_start {
-                            valid_positions
-                                .insert(sample.clone(), (seq.clone(), best_start, best_end));
-                        }
-                    }
-                }
-            }
-
-            // Skip window if no valid samples remain
-            if valid_positions.is_empty() {
-                continue;
-            }
-
-            // Update window with only valid positions
-            window.haplotype_positions = valid_positions;
-            window.depth = window.haplotype_positions.len();
-            window.window_id = global_window_id;
-            global_window_id += 1;
-
-            // Write window
-            write!(writer, "{}\t{}", window.window_id, window.depth)?;
-            for sample in &sample_order {
-                if let Some((seq, start, end)) = window.haplotype_positions.get(sample) {
-                    write!(writer, "\t{}:{}-{}", seq, start, end)?;
-                } else {
-                    write!(writer, "\tNA")?;
-                }
-            }
-            writeln!(writer)?;
-
-            // Record output regions for both batch tracking and pool update
-            for (sample, (seq, start, end)) in &window.haplotype_positions {
-                let key = (sample.clone(), seq.clone());
-                batch_output
-                    .entry(key)
-                    .or_default()
-                    .add(*start, *end);
-                regions_to_remove.push((sample.clone(), seq.clone(), *start, *end));
-            }
-        }
-
-        // Batch update pool at end
-        pool.subtract_batch(&regions_to_remove);
-
-        // Progress reporting (every 20% or at completion)
-        let progress_interval = std::cmp::max(total_samples / 5, 1);
-        if (sample_idx + 1) % progress_interval == 0 || sample_idx + 1 == total_samples {
-            let remaining = pool.total_remaining_length();
-            let processed_pct =
-                100.0 * (1.0 - remaining as f64 / initial_pool_length as f64);
-            debug!(
-                "Progress: {}/{} samples, {:.1}% covered",
-                sample_idx + 1,
-                total_samples,
-                processed_pct
-            );
-        }
-
-        // Early termination if pool is empty
-        if pool.is_empty() {
-            debug!("All regions covered after {} samples", sample_idx + 1);
-            break;
-        }
-    }
-
-    // Fill remaining pool intervals with depth=1 (uncovered regions)
-    let remaining_length = pool.total_remaining_length();
-    if remaining_length > 0 {
-        debug!(
-            "Filling {} uncovered bp with depth=1",
-            remaining_length
-        );
-
-        let mut gap_windows = 0u64;
-
-        for sample in &sample_order {
-            let seqs = pool_seq_lengths.get_seqs_of_sample(sample);
-            for seq_name in seqs {
-                let remaining_intervals = pool.get_intervals(sample, seq_name);
-
-                for (gap_start, gap_end) in remaining_intervals {
-                    if gap_end <= gap_start {
-                        continue;
-                    }
-
-                    write!(writer, "{}\t1", global_window_id)?;
-                    for s in &sample_order {
-                        if s == sample {
-                            write!(writer, "\t{}:{}-{}", seq_name, gap_start, gap_end)?;
-                        } else {
-                            write!(writer, "\tNA")?;
-                        }
-                    }
-                    writeln!(writer)?;
-
-                    global_window_id += 1;
-                    gap_windows += 1;
-                }
-            }
-        }
-        debug!("Generated {} gap windows", gap_windows);
-    }
-
-    writer.flush()?;
-    debug!("Done: {} windows", global_window_id);
-
-    Ok(())
-}
-
-// ============================================================================
-// Memory-efficient implementation using compressed bitmap coverage tracking
-// ============================================================================
-
-/// Resolution for bitmap coverage tracking (bp per bit)
-/// Lower value = more accurate but more memory
-/// 1bp: 3TB genome = 375GB (too much)
-/// 10bp: 3TB genome = 37.5GB (acceptable for most systems)
-/// For TB-scale data, recommend 10-100bp resolution
-const COVERAGE_RESOLUTION: i64 = 1;
-
-/// Compressed coverage tracker using BitVec
-/// Memory usage: ~375MB for 3TB genome @ 100bp resolution
-#[derive(Debug)]
-pub struct CompressedCoverageTracker {
-    /// (sample_idx, seq_idx) -> BitVec where each bit = COVERAGE_RESOLUTION bp
-    coverage: FxHashMap<(u16, u32), BitVec>,
-    /// Sequence lengths for bounds checking
-    seq_lengths: Vec<i64>,
-    /// Sample index mapping
-    sample_to_idx: FxHashMap<String, u16>,
-    /// Sequence index mapping
-    seq_to_idx: FxHashMap<String, u32>,
-    /// Reverse mappings for output (reserved for future use)
-    #[allow(dead_code)]
-    idx_to_sample: Vec<String>,
-    #[allow(dead_code)]
-    idx_to_seq: Vec<String>,
-}
-
-impl CompressedCoverageTracker {
-    /// Create a new coverage tracker from sequence lengths
-    pub fn new(seq_lengths_map: &SequenceLengths) -> Self {
-        let mut sample_to_idx = FxHashMap::default();
-        let mut seq_to_idx = FxHashMap::default();
-        let mut idx_to_sample = Vec::new();
-        let mut idx_to_seq = Vec::new();
-        let mut seq_lengths = Vec::new();
-
-        // Build sample index
-        let mut samples: Vec<_> = seq_lengths_map.sample_to_seqs.keys().collect();
-        samples.sort();
-        for (i, sample) in samples.iter().enumerate() {
-            sample_to_idx.insert((*sample).clone(), i as u16);
-            idx_to_sample.push((*sample).clone());
-        }
-
-        // Build sequence index
-        let mut seqs: Vec<_> = seq_lengths_map.lengths.keys().collect();
-        seqs.sort();
-        for (i, seq) in seqs.iter().enumerate() {
-            seq_to_idx.insert((*seq).clone(), i as u32);
-            idx_to_seq.push((*seq).clone());
-            seq_lengths.push(*seq_lengths_map.lengths.get(*seq).unwrap_or(&0));
-        }
-
-        // Initialize coverage bitmaps (all zeros = uncovered)
-        let mut coverage = FxHashMap::default();
-        for (seq_name, &length) in &seq_lengths_map.lengths {
-            let sample = seq_lengths_map.seq_to_sample.get(seq_name).unwrap();
-            if let (Some(&sample_idx), Some(&seq_idx)) = (
-                sample_to_idx.get(sample),
-                seq_to_idx.get(seq_name.as_str()),
-            ) {
-                let num_bits = ((length + COVERAGE_RESOLUTION - 1) / COVERAGE_RESOLUTION) as usize;
-                coverage.insert((sample_idx, seq_idx), bitvec![0; num_bits]);
-            }
-        }
-
-        CompressedCoverageTracker {
-            coverage,
-            seq_lengths,
-            sample_to_idx,
-            seq_to_idx,
-            idx_to_sample,
-            idx_to_seq,
-        }
-    }
-
-    /// Convert position to bit index
-    #[inline]
-    fn pos_to_bit(pos: i64) -> usize {
-        (pos / COVERAGE_RESOLUTION) as usize
-    }
-
-    /// Convert bit index to position range
-    #[inline]
-    fn bit_to_pos_range(bit_idx: usize) -> (i64, i64) {
-        let start = bit_idx as i64 * COVERAGE_RESOLUTION;
-        (start, start + COVERAGE_RESOLUTION)
-    }
-
-    /// Check if any portion of [start, end) is uncovered
-    pub fn has_uncovered(&self, sample: &str, seq: &str, start: i64, end: i64) -> bool {
-        let sample_idx = match self.sample_to_idx.get(sample) {
-            Some(&idx) => idx,
-            None => return false,
-        };
-        let seq_idx = match self.seq_to_idx.get(seq) {
-            Some(&idx) => idx,
-            None => return false,
-        };
-
-        if let Some(bits) = self.coverage.get(&(sample_idx, seq_idx)) {
-            let start_bit = Self::pos_to_bit(start);
-            let end_bit = Self::pos_to_bit(end.saturating_sub(1)).min(bits.len().saturating_sub(1));
-
-            for bit_idx in start_bit..=end_bit {
-                if bit_idx < bits.len() && !bits[bit_idx] {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    /// Get uncovered intervals within [start, end)
-    /// Returns merged intervals of uncovered regions
-    pub fn get_uncovered_intervals(
-        &self,
-        sample: &str,
-        seq: &str,
-        start: i64,
-        end: i64,
-    ) -> Vec<(i64, i64)> {
-        let sample_idx = match self.sample_to_idx.get(sample) {
-            Some(&idx) => idx,
-            None => return vec![(start, end)],
-        };
-        let seq_idx = match self.seq_to_idx.get(seq) {
-            Some(&idx) => idx,
-            None => return vec![(start, end)],
-        };
-
-        let bits = match self.coverage.get(&(sample_idx, seq_idx)) {
-            Some(b) => b,
-            None => return vec![(start, end)],
-        };
-
-        let seq_len = self.seq_lengths.get(seq_idx as usize).copied().unwrap_or(end);
-        let clamped_end = end.min(seq_len);
-
-        let start_bit = Self::pos_to_bit(start);
-        let end_bit = Self::pos_to_bit(clamped_end.saturating_sub(1));
-
-        let mut result = Vec::new();
-        let mut current_start: Option<i64> = None;
-
-        for bit_idx in start_bit..=end_bit {
-            if bit_idx >= bits.len() {
-                break;
-            }
-
-            let (bit_start, bit_end) = Self::bit_to_pos_range(bit_idx);
-            let interval_start = bit_start.max(start);
-            let _interval_end = bit_end.min(clamped_end);
-
-            if !bits[bit_idx] {
-                // Uncovered
-                if current_start.is_none() {
-                    current_start = Some(interval_start);
-                }
-            } else {
-                // Covered - close current interval if open
-                if let Some(s) = current_start {
-                    result.push((s, interval_start));
-                    current_start = None;
-                }
-            }
-        }
-
-        // Close final interval
-        if let Some(s) = current_start {
-            result.push((s, clamped_end));
-        }
-
-        result
-    }
-
-    /// Mark region [start, end) as covered
-    pub fn mark_covered(&mut self, sample: &str, seq: &str, start: i64, end: i64) {
-        let sample_idx = match self.sample_to_idx.get(sample) {
-            Some(&idx) => idx,
-            None => return,
-        };
-        let seq_idx = match self.seq_to_idx.get(seq) {
-            Some(&idx) => idx,
-            None => return,
-        };
-
-        if let Some(bits) = self.coverage.get_mut(&(sample_idx, seq_idx)) {
-            let start_bit = Self::pos_to_bit(start);
-            let end_bit = Self::pos_to_bit(end.saturating_sub(1));
-
-            for bit_idx in start_bit..=end_bit {
-                if bit_idx < bits.len() {
-                    bits.set(bit_idx, true);
-                }
-            }
-        }
-    }
-
-    /// Get all uncovered intervals for a (sample, seq) pair
-    pub fn get_all_uncovered(&self, sample: &str, seq: &str) -> Vec<(i64, i64)> {
-        let sample_idx = match self.sample_to_idx.get(sample) {
-            Some(&idx) => idx,
-            None => return Vec::new(),
-        };
-        let seq_idx = match self.seq_to_idx.get(seq) {
-            Some(&idx) => idx,
-            None => return Vec::new(),
-        };
-
-        let bits = match self.coverage.get(&(sample_idx, seq_idx)) {
-            Some(b) => b,
-            None => return Vec::new(),
-        };
-
-        let seq_len = self.seq_lengths.get(seq_idx as usize).copied().unwrap_or(0);
-
-        let mut result = Vec::new();
-        let mut current_start: Option<i64> = None;
-
-        for (bit_idx, bit) in bits.iter().enumerate() {
-            let (bit_start, bit_end) = Self::bit_to_pos_range(bit_idx);
-            let _interval_end = bit_end.min(seq_len);
-
-            if !*bit {
-                if current_start.is_none() {
-                    current_start = Some(bit_start);
-                }
-            } else if let Some(s) = current_start {
-                result.push((s, bit_start));
-                current_start = None;
-            }
-        }
-
-        if let Some(s) = current_start {
-            result.push((s, seq_len));
-        }
-
-        result
-    }
-
-    /// Get total uncovered length
-    pub fn total_uncovered_length(&self) -> i64 {
-        let mut total = 0i64;
-
-        for ((_sample_idx, seq_idx), bits) in &self.coverage {
-            let seq_len = self.seq_lengths.get(*seq_idx as usize).copied().unwrap_or(0);
-
-            for (bit_idx, bit) in bits.iter().enumerate() {
-                if !*bit {
-                    let (bit_start, bit_end) = Self::bit_to_pos_range(bit_idx);
-                    let interval_len = bit_end.min(seq_len) - bit_start;
-                    if interval_len > 0 {
-                        total += interval_len;
-                    }
-                }
-            }
-        }
-
-        total
-    }
-
-    /// Get memory usage estimate in bytes
-    pub fn memory_usage(&self) -> usize {
-        let mut total = 0;
-        for (_, bits) in &self.coverage {
-            total += bits.len() / 8 + 1;
-        }
-        total
-    }
-}
-
-/// Memory-efficient depth computation using compressed bitmap
-///
-/// Key improvements over compute_depth_by_sample:
-/// 1. Uses BitVec instead of IntervalSet (memory: ~50GB -> ~500MB)
-/// 2. No pre-built reverse index (memory: ~30GB -> 0)
-/// 3. Streaming output (no batch accumulation)
-///
-/// When `ref_sample` is specified (targeted mode), only computes depth for the specified
-/// sample's sequences as reference. When `ref_sample` is None (global mode), computes
-/// depth for all sequences.
-pub fn compute_depth_by_sample_v2(
-    impg: &impl ImpgIndex,
-    config: &DepthConfig,
-    sequence_index: Option<&UnifiedSequenceIndex>,
-    separator: &str,
-    output_prefix: Option<&str>,
-    fai_list: Option<&str>,
-    ref_sample: Option<&str>,
-) -> io::Result<()> {
-    if let Some(ref_name) = ref_sample {
-        info!("Computing depth (memory-efficient, targeted: {})", ref_name);
-    } else {
-        info!("Computing depth (memory-efficient, global)");
-    }
-
-    let seq_lengths = SequenceLengths::from_impg(impg, separator);
-    debug!(
-        "Found {} samples, {} sequences",
-        seq_lengths.sample_to_seqs.len(),
-        seq_lengths.lengths.len()
-    );
-
-    // Use FAI files for pool if provided
-    let pool_seq_lengths = if let Some(fai_path) = fai_list {
-        let fai_seq_lengths = SequenceLengths::from_fai_list(fai_path, separator)?;
-        debug!(
-            "FAI: {} samples, {} sequences",
-            fai_seq_lengths.sample_to_seqs.len(),
-            fai_seq_lengths.lengths.len()
-        );
-        fai_seq_lengths
-    } else {
-        seq_lengths.clone()
-    };
-
-    // Initialize compressed coverage tracker
-    let mut coverage = CompressedCoverageTracker::new(&pool_seq_lengths);
-    debug!("Coverage tracker: {} bytes", coverage.memory_usage());
-
-    let initial_uncovered = coverage.total_uncovered_length();
-    debug!("Total genome: {} bp", initial_uncovered);
-
-    // Sample processing order
-    let sample_order = pool_seq_lengths.get_samples();
-    debug!("Sample order: {:?}", sample_order);
-
-    // Validate ref_sample if specified
-    if let Some(ref_name) = ref_sample {
-        if !sample_order.contains(&ref_name.to_string()) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Reference sample '{}' not found. Available: {:?}",
-                    ref_name, sample_order
-                ),
-            ));
-        }
-    }
-
-    // Build lightweight reverse index only for global mode (skip for bidirectional)
-    let query_to_targets = if ref_sample.is_none() && !impg.is_bidirectional() {
-        debug!("Building lightweight reverse index...");
-        let map = impg.build_query_to_targets_map();
-        debug!("Reverse index: {} query sequences", map.len());
-        Some(map)
-    } else {
-        debug!("Skipping reverse index (bidirectional or targeted mode)");
-        None
-    };
-
-    // Prepare output
-    let writer: Box<dyn Write> = if let Some(prefix) = output_prefix {
-        let path = format!("{}.depth.tsv", prefix);
-        Box::new(BufWriter::new(std::fs::File::create(&path)?))
-    } else {
-        Box::new(BufWriter::new(std::io::stdout()))
-    };
-    let mut writer = BufWriter::new(writer);
-
-    // Write header
-    write!(writer, "window_id\tdepth")?;
-    for sample in &sample_order {
-        write!(writer, "\t{}", sample)?;
-    }
-    writeln!(writer)?;
-
-    let mut global_window_id: usize = 0;
-    let total_samples = sample_order.len();
-    debug!("Processing {} samples...", total_samples);
-
-    for (sample_idx, anchor_sample) in sample_order.iter().enumerate() {
-        // In targeted mode, only process the specified reference sample
-        if let Some(ref_name) = ref_sample {
-            if anchor_sample != ref_name {
-                continue;
-            }
-        }
-
-        let seqs = seq_lengths.get_seqs_of_sample(anchor_sample);
-
-        debug!(
-            "Processing sample {}/{}: {} ({} sequences)",
-            sample_idx + 1,
-            total_samples,
-            anchor_sample,
-            seqs.len()
-        );
-
-        // Process each sequence of this sample
-        for anchor_seq in seqs {
-            let seq_id = match impg.seq_index().get_id(anchor_seq) {
-                Some(id) => id,
-                None => continue,
-            };
-            let seq_len = impg.seq_index().get_len_from_id(seq_id).unwrap_or(0) as i64;
-
-            // Check if there are any uncovered regions for this sequence
-            let uncovered = coverage.get_all_uncovered(anchor_sample, anchor_seq);
-            if uncovered.is_empty() {
-                continue;
-            }
-
-            // Collect forward alignments (anchor_seq as target)
-            let overlaps = if config.transitive {
-                if config.transitive_dfs {
-                    impg.query_transitive_dfs(
-                        seq_id, 0, seq_len as i32, None,
-                        config.max_depth, config.min_transitive_len,
-                        config.min_distance_between_ranges, None, false, None,
-                        sequence_index, config.approximate_mode, None,
-                    )
-                } else {
-                    impg.query_transitive_bfs(
-                        seq_id, 0, seq_len as i32, None,
-                        config.max_depth, config.min_transitive_len,
-                        config.min_distance_between_ranges, None, false, None,
-                        sequence_index, config.approximate_mode, None,
-                    )
-                }
-            } else {
-                impg.query(seq_id, 0, seq_len as i32, false, None, sequence_index, config.approximate_mode)
-            };
-
-            // Collect reverse alignments (anchor_seq as query) using pre-built index
-            // Skip in targeted mode (--ref) to save memory - forward queries capture most coverage
-            let reverse_alignments = if let Some(ref map) = query_to_targets {
-                impg.query_reverse_for_depth_with_map(seq_id, map)
-            } else {
-                Vec::new() // Skip reverse queries in targeted mode
-            };
-
-            // Build alignment info list
-            let mut all_alignments: Vec<SampleAlignmentInfo> = Vec::new();
-
-            // Add self
-            all_alignments.push(SampleAlignmentInfo {
-                sample: anchor_sample.clone(),
-                query_name: anchor_seq.clone(),
-                query_start: 0,
-                query_end: seq_len,
-                target_start: 0,
-                target_end: seq_len,
-                is_reverse: false,
-                cigar: Vec::new(),
-            });
-
-            // Forward alignments
-            for overlap in &overlaps {
-                let query_interval = &overlap.0;
-                let target_interval = &overlap.2;
-
-                let query_name = match impg.seq_index().get_name(query_interval.metadata) {
-                    Some(name) => name,
-                    None => continue,
-                };
-                let sample = extract_sample(query_name, separator);
-
-                let is_reverse = query_interval.first > query_interval.last;
-                let query_start = query_interval.first.min(query_interval.last) as i64;
-                let query_end = query_interval.first.max(query_interval.last) as i64;
-                let target_start = target_interval.first.min(target_interval.last) as i64;
-                let target_end = target_interval.first.max(target_interval.last) as i64;
-
-                all_alignments.push(SampleAlignmentInfo {
-                    sample,
-                    query_name: query_name.to_string(),
-                    query_start,
-                    query_end,
-                    target_start,
-                    target_end,
-                    is_reverse,
-                    cigar: Vec::new(),
-                });
-            }
-
-            // Reverse alignments
-            for &(ref_start, ref_end, target_id) in &reverse_alignments {
-                if let Some(target_name) = impg.seq_index().get_name(target_id) {
-                    let sample = extract_sample(target_name, separator);
-                    if sample == *anchor_sample {
-                        continue;
-                    }
-
-                    all_alignments.push(SampleAlignmentInfo {
-                        sample,
-                        query_name: target_name.to_string(),
-                        query_start: ref_start as i64,
-                        query_end: ref_end as i64,
-                        target_start: ref_start as i64,
-                        target_end: ref_end as i64,
-                        is_reverse: false,
-                        cigar: Vec::new(),
-                    });
-                }
-            }
-
-            // Build sweep-line events
-            let mut events: Vec<DepthEvent> = Vec::new();
-            for (idx, aln) in all_alignments.iter().enumerate() {
-                events.push(DepthEvent {
-                    position: aln.target_start,
-                    is_start: true,
-                    haplotype: aln.sample.clone(),
-                    alignment_idx: idx,
-                });
-                events.push(DepthEvent {
-                    position: aln.target_end,
-                    is_start: false,
-                    haplotype: aln.sample.clone(),
-                    alignment_idx: idx,
-                });
-            }
-            events.sort();
-
-            // Sweep-line to generate windows and output immediately
-            let mut active_alignments: FxHashMap<String, Vec<usize>> = FxHashMap::default();
-            let mut prev_pos: Option<i64> = None;
-
-            for event in events {
-                if let Some(prev) = prev_pos {
-                    if event.position > prev {
-                        // Check if this window overlaps any uncovered region
-                        let window_start = prev;
-                        let window_end = event.position;
-
-                        // Get active samples
-                        let active_samples: Vec<&String> = active_alignments
-                            .iter()
-                            .filter(|(_, alns)| !alns.is_empty())
-                            .map(|(s, _)| s)
-                            .collect();
-
-                        if !active_samples.is_empty() {
-                            // Build sample positions for this window
-                            let mut sample_positions: FxHashMap<String, (String, i64, i64)> =
-                                FxHashMap::default();
-
-                            for sample in &active_samples {
-                                if let Some(aln_indices) = active_alignments.get(*sample) {
-                                    if let Some(&best_idx) = aln_indices.iter().max_by_key(|&&idx| {
-                                        let aln = &all_alignments[idx];
-                                        let overlap_start = prev.max(aln.target_start);
-                                        let overlap_end = event.position.min(aln.target_end);
-                                        overlap_end - overlap_start
-                                    }) {
-                                        let aln = &all_alignments[best_idx];
-                                        let (q_start, q_end) = map_target_to_query_linear(
-                                            &aln.cigar,
-                                            aln.target_start, aln.target_end,
-                                            aln.query_start, aln.query_end,
-                                            window_start, window_end,
-                                            aln.is_reverse,
-                                        );
-                                        sample_positions.insert(
-                                            (*sample).clone(),
-                                            (aln.query_name.clone(), q_start, q_end),
-                                        );
-                                    }
-                                }
-                            }
-
-                            // Filter: only output samples with uncovered regions
-                            let mut valid_positions: FxHashMap<String, (String, i64, i64)> =
-                                FxHashMap::default();
-
-                            for (sample, (seq, start, end)) in &sample_positions {
-                                // Check if this sample has uncovered region
-                                let uncovered_parts =
-                                    coverage.get_uncovered_intervals(sample, seq, *start, *end);
-
-                                if !uncovered_parts.is_empty() {
-                                    // Use the largest uncovered portion
-                                    if let Some(&(unc_start, unc_end)) = uncovered_parts
-                                        .iter()
-                                        .max_by_key(|(s, e)| e - s)
-                                    {
-                                        valid_positions.insert(
-                                            sample.clone(),
-                                            (seq.clone(), unc_start, unc_end),
-                                        );
-                                    }
-                                }
-                            }
-
-                            // Output if any valid samples
-                            if !valid_positions.is_empty() {
-                                let depth = valid_positions.len();
-
-                                write!(writer, "{}\t{}", global_window_id, depth)?;
-                                for sample in &sample_order {
-                                    if let Some((seq, start, end)) = valid_positions.get(sample) {
-                                        write!(writer, "\t{}:{}-{}", seq, start, end)?;
-                                    } else {
-                                        write!(writer, "\tNA")?;
-                                    }
-                                }
-                                writeln!(writer)?;
-                                global_window_id += 1;
-
-                                // Mark as covered
-                                for (sample, (seq, start, end)) in &valid_positions {
-                                    coverage.mark_covered(sample, seq, *start, *end);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Update active alignments
-                if event.is_start {
-                    active_alignments
-                        .entry(event.haplotype.clone())
-                        .or_default()
-                        .push(event.alignment_idx);
-                } else if let Some(alns) = active_alignments.get_mut(&event.haplotype) {
-                    alns.retain(|&idx| idx != event.alignment_idx);
-                }
-
-                prev_pos = Some(event.position);
-            }
-        }
-
-        // Progress reporting (every 10 samples or at the end)
-        if (sample_idx + 1) % 10 == 0 || sample_idx + 1 == total_samples {
-            let remaining = coverage.total_uncovered_length();
-            let covered_pct = 100.0 * (1.0 - remaining as f64 / initial_uncovered as f64);
-            debug!(
-                "Progress: {}/{} samples, {:.1}% covered, {} windows, {} cached trees",
-                sample_idx + 1,
-                total_samples,
-                covered_pct,
-                global_window_id,
-                impg.num_targets()
-            );
-        }
-
-        // Clear tree cache after processing each sample to control memory usage
-        // Trees will be reloaded from disk as needed for subsequent samples
-        impg.clear_tree_cache();
-    }
-
-    // Phase 2: Output uncovered regions as depth=1
-    let final_uncovered = coverage.total_uncovered_length();
-    if final_uncovered > 0 {
-        let uncovered_pct = 100.0 * final_uncovered as f64 / initial_uncovered as f64;
-        debug!(
-            "Phase 2: Outputting uncovered regions ({} bp, {:.2}%) as depth=1...",
-            final_uncovered, uncovered_pct
-        );
-
-        let mut gap_count = 0u64;
-
-        for sample in &sample_order {
-            let seqs = pool_seq_lengths.get_seqs_of_sample(sample);
-            for seq_name in seqs {
-                let uncovered = coverage.get_all_uncovered(sample, seq_name);
-                for (gap_start, gap_end) in uncovered {
-                    if gap_end <= gap_start {
-                        continue;
-                    }
-
-                    write!(writer, "{}\t1", global_window_id)?;
-                    for s in &sample_order {
-                        if s == sample {
-                            write!(writer, "\t{}:{}-{}", seq_name, gap_start, gap_end)?;
-                        } else {
-                            write!(writer, "\tNA")?;
-                        }
-                    }
-                    writeln!(writer)?;
-
-                    global_window_id += 1;
-                    gap_count += 1;
-                }
-            }
-        }
-
-        debug!("Generated {} gap windows", gap_count);
-    }
-
-    writer.flush()?;
-    debug!(
-        "Output complete: {} windows, memory tracker: {} bytes",
-        global_window_id,
-        coverage.memory_usage()
-    );
-
-    Ok(())
-}
-
 // ============================================================================
 // Compact depth computation using ID-based data structures
 // ============================================================================
@@ -4252,435 +1369,13 @@ impl PartialOrd for CompactDepthEvent {
     }
 }
 
-/// Memory-optimized depth computation using compact ID-based data structures
-///
-/// Key improvements over compute_depth_by_sample:
-/// 1. Uses CompactSequenceLengths instead of SequenceLengths (30-50% less memory)
-/// 2. Uses CompactPool instead of Pool (50% less memory for pool operations)
-/// 3. Uses CompactAlignmentInfo instead of SampleAlignmentInfo (60% less memory)
-/// 4. Uses SampleBitmap for active sample tracking (O(1) depth query, less allocations)
-///
-/// When `ref_sample` is specified (targeted mode), only computes depth for the specified
-/// sample's sequences as reference. When `ref_sample` is None (global mode), computes
-/// depth for all sequences.
-///
-/// If `fai_list` is provided, sequences in the FAI files but not in the alignment index
-/// will be output as depth=1 at the end.
-pub fn compute_depth_by_sample_v3(
-    impg: &impl ImpgIndex,
-    config: &DepthConfig,
-    sequence_index: Option<&UnifiedSequenceIndex>,
-    separator: &str,
-    output_prefix: Option<&str>,
-    fai_list: Option<&str>,
-    ref_sample: Option<&str>,
-) -> io::Result<()> {
-    if let Some(ref_name) = ref_sample {
-        info!("Computing depth (compact mode, targeted: {})", ref_name);
-    } else {
-        info!("Computing depth (compact mode, global)");
-    }
-
-    // Build compact data structures
-    let compact_lengths = CompactSequenceLengths::from_impg(impg, separator);
-    let sample_index = compact_lengths.sample_index();
-    let num_samples = sample_index.len();
-
-    debug!(
-        "Found {} samples, {} sequences (compact)",
-        num_samples,
-        impg.seq_index().len()
-    );
-
-    // Validate ref_sample if specified
-    let ref_sample_id: Option<u16> = if let Some(ref_name) = ref_sample {
-        match sample_index.get_id(ref_name) {
-            Some(id) => Some(id),
-            None => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "Reference sample '{}' not found. Available: {:?}",
-                        ref_name,
-                        sample_index.names()
-                    ),
-                ));
-            }
-        }
-    } else {
-        None
-    };
-
-    // Initialize compact pool
-    let mut pool = CompactPool::new(&compact_lengths);
-    let initial_pool_length = pool.total_remaining_length();
-    debug!("Pool: {} bp total (compact)", initial_pool_length);
-
-    // Prepare output
-    let writer: Box<dyn Write> = if let Some(prefix) = output_prefix {
-        let path = format!("{}.depth.tsv", prefix);
-        Box::new(BufWriter::new(std::fs::File::create(&path)?))
-    } else {
-        Box::new(BufWriter::new(std::io::stdout()))
-    };
-    let mut writer = BufWriter::new(writer);
-
-    // Write header using sample names
-    write!(writer, "window_id\tdepth")?;
-    for sample_id in 0..num_samples as u16 {
-        if let Some(name) = sample_index.get_name(sample_id) {
-            write!(writer, "\t{}", name)?;
-        }
-    }
-    writeln!(writer)?;
-
-    let mut global_window_id: usize = 0;
-    let total_samples = num_samples;
-    debug!("Processing {} samples (compact mode)...", total_samples);
-
-    // Process each sample as anchor
-    for anchor_sample_id in 0..num_samples as u16 {
-        // In targeted mode, only process the specified reference sample
-        if let Some(target_id) = ref_sample_id {
-            if anchor_sample_id != target_id {
-                continue;
-            }
-        }
-
-        // Check if sample has remaining intervals
-        if pool.is_sample_empty(anchor_sample_id) {
-            debug!("Sample {} has no remaining intervals, skipping", anchor_sample_id);
-            continue;
-        }
-
-        let anchor_sample_name = sample_index.get_name(anchor_sample_id).unwrap_or("");
-
-        debug!(
-            "Processing sample {}/{}: {} (id={})",
-            anchor_sample_id + 1,
-            total_samples,
-            anchor_sample_name,
-            anchor_sample_id
-        );
-
-        // Get sequences for this sample
-        let seq_ids = compact_lengths.get_seqs_of_sample(anchor_sample_id);
-
-        // Collect pool intervals for each sequence (needed for parallel processing)
-        let seq_pool_intervals: Vec<(u32, Vec<(i64, i64)>)> = seq_ids
-            .iter()
-            .filter_map(|&seq_id| {
-                let intervals = pool.get_intervals(anchor_sample_id, seq_id);
-                if intervals.is_empty() {
-                    None
-                } else {
-                    Some((seq_id, intervals))
-                }
-            })
-            .collect();
-
-        // Process sequences in BATCHES to limit memory usage
-        // Each batch: parallel process -> output -> update pool -> release memory
-        const BATCH_SIZE: usize = 50; // Process 50 sequences at a time
-
-        for batch in seq_pool_intervals.chunks(BATCH_SIZE) {
-            // Phase 1: Parallel processing of this batch
-            let batch_results: Vec<Vec<(usize, Vec<Option<(u32, i64, i64)>>, Vec<(u16, u32, i64, i64)>)>> = batch
-                .par_iter()
-                .map(|(seq_id, pool_intervals)| {
-                    let seq_len = compact_lengths.get_length(*seq_id);
-
-                    // Collect alignments using compact format
-                    let mut alignments: Vec<CompactAlignmentInfo> = Vec::new();
-
-                    // Add self (anchor sample)
-                    alignments.push(CompactAlignmentInfo::new(
-                        anchor_sample_id,
-                        *seq_id,
-                        0,
-                        seq_len,
-                        0,
-                        seq_len,
-                        false,
-                    ));
-
-                    // Query overlaps (anchor_seq as target)
-                    let overlaps = if config.transitive {
-                        if config.transitive_dfs {
-                            impg.query_transitive_dfs(
-                                *seq_id, 0, seq_len as i32, None,
-                                config.max_depth, config.min_transitive_len,
-                                config.min_distance_between_ranges, None, false, None,
-                                sequence_index, config.approximate_mode, None,
-                            )
-                        } else {
-                            impg.query_transitive_bfs(
-                                *seq_id, 0, seq_len as i32, None,
-                                config.max_depth, config.min_transitive_len,
-                                config.min_distance_between_ranges, None, false, None,
-                                sequence_index, config.approximate_mode, None,
-                            )
-                        }
-                    } else {
-                        impg.query(*seq_id, 0, seq_len as i32, false, None, sequence_index, config.approximate_mode)
-                    };
-
-                    // Convert overlaps to compact alignments
-                    for overlap in &overlaps {
-                        let query_interval = &overlap.0;
-                        let target_interval = &overlap.2;
-
-                        let query_id = query_interval.metadata;
-                        let query_sample_id = compact_lengths.get_sample_id(query_id);
-
-                        let is_reverse = query_interval.first > query_interval.last;
-                        let query_start = query_interval.first.min(query_interval.last) as i64;
-                        let query_end = query_interval.first.max(query_interval.last) as i64;
-                        let target_start = target_interval.first.min(target_interval.last) as i64;
-                        let target_end = target_interval.first.max(target_interval.last) as i64;
-
-                        alignments.push(CompactAlignmentInfo::new(
-                            query_sample_id,
-                            query_id,
-                            query_start,
-                            query_end,
-                            target_start,
-                            target_end,
-                            is_reverse,
-                        ));
-                    }
-
-                    // Build compact events for sweep-line
-                    let mut events: Vec<CompactDepthEvent> = Vec::with_capacity(alignments.len() * 2);
-                    for (idx, aln) in alignments.iter().enumerate() {
-                        events.push(CompactDepthEvent {
-                            position: aln.target_start,
-                            is_start: true,
-                            sample_id: aln.sample_id,
-                            alignment_idx: idx,
-                        });
-                        events.push(CompactDepthEvent {
-                            position: aln.target_end,
-                            is_start: false,
-                            sample_id: aln.sample_id,
-                            alignment_idx: idx,
-                        });
-                    }
-                    events.sort();
-
-                    // Sweep-line using SampleBitmap for active tracking
-                    let mut active_bitmap = SampleBitmap::new(num_samples);
-                    let mut active_alns: Vec<Vec<usize>> = vec![Vec::new(); num_samples];
-                    let mut prev_pos: Option<i64> = None;
-
-                    // Collect windows for this sequence
-                    let mut windows: Vec<(usize, Vec<Option<(u32, i64, i64)>>, Vec<(u16, u32, i64, i64)>)> = Vec::new();
-
-                    // Build interval set from pool intervals for this sequence
-                    let mut pool_set = IntervalSet::new();
-                    for &(start, end) in pool_intervals {
-                        pool_set.add(start, end);
-                    }
-
-                    for event in events {
-                        if let Some(prev) = prev_pos {
-                            if event.position > prev && active_bitmap.depth() > 0 {
-                                let window_start = prev;
-                                let window_end = event.position;
-
-                                // Check if this window overlaps with pool
-                                let pool_overlaps = pool_set.intersect(window_start, window_end);
-
-                                for (pool_start, pool_end) in pool_overlaps {
-                                    // Build sample positions for output
-                                    let mut sample_positions: Vec<Option<(u32, i64, i64)>> = vec![None; num_samples];
-                                    let mut regions_to_remove: Vec<(u16, u32, i64, i64)> = Vec::new();
-
-                                    for sample_id in active_bitmap.active_samples() {
-                                        let alns = &active_alns[sample_id as usize];
-                                        if let Some(&best_idx) = alns.iter().max_by_key(|&&idx| {
-                                            let aln = &alignments[idx];
-                                            let overlap_start = pool_start.max(aln.target_start);
-                                            let overlap_end = pool_end.min(aln.target_end);
-                                            overlap_end - overlap_start
-                                        }) {
-                                            let aln = &alignments[best_idx];
-
-                                            // Map target coordinates to query using linear interpolation
-                                            let (q_start, q_end) = map_target_to_query_linear(
-                                                &[], // No CIGAR in compact mode
-                                                aln.target_start, aln.target_end,
-                                                aln.query_start, aln.query_end,
-                                                pool_start, pool_end,
-                                                aln.is_reverse,
-                                            );
-
-                                            sample_positions[sample_id as usize] = Some((aln.query_id, q_start, q_end));
-                                            regions_to_remove.push((sample_id, aln.query_id, q_start, q_end));
-                                        }
-                                    }
-
-                                    // Count valid samples
-                                    let depth = sample_positions.iter().filter(|p| p.is_some()).count();
-                                    if depth > 0 {
-                                        windows.push((depth, sample_positions, regions_to_remove));
-                                    }
-                                }
-                            }
-                        }
-
-                        // Update active samples using bitmap
-                        if event.is_start {
-                            active_bitmap.add(event.sample_id);
-                            active_alns[event.sample_id as usize].push(event.alignment_idx);
-                        } else {
-                            active_bitmap.remove(event.sample_id);
-                            active_alns[event.sample_id as usize].retain(|&idx| idx != event.alignment_idx);
-                        }
-
-                        prev_pos = Some(event.position);
-                    }
-
-                    windows
-                })
-                .collect();
-
-            // Phase 2: Sequential output and pool update for this batch
-            let mut batch_regions_to_remove: Vec<(u16, u32, i64, i64)> = Vec::new();
-
-            for seq_windows in batch_results {
-                for (depth, sample_positions, regions_to_remove) in seq_windows {
-                    write!(writer, "{}\t{}", global_window_id, depth)?;
-
-                    for sample_id in 0..num_samples {
-                        if let Some((query_id, start, end)) = sample_positions[sample_id] {
-                            let query_name = impg.seq_index().get_name(query_id).unwrap_or("?");
-                            write!(writer, "\t{}:{}-{}", query_name, start, end)?;
-                        } else {
-                            write!(writer, "\tNA")?;
-                        }
-                    }
-                    writeln!(writer)?;
-                    global_window_id += 1;
-
-                    batch_regions_to_remove.extend(regions_to_remove);
-                }
-            }
-
-            // Update pool after each batch
-            pool.subtract_batch(&batch_regions_to_remove);
-            // batch_results is dropped here, releasing memory
-        }
-
-        // Progress reporting
-        let progress_interval = std::cmp::max(total_samples / 5, 1);
-        if (anchor_sample_id as usize + 1) % progress_interval == 0 || anchor_sample_id as usize + 1 == total_samples {
-            let remaining = pool.total_remaining_length();
-            let processed_pct = 100.0 * (1.0 - remaining as f64 / initial_pool_length as f64);
-            debug!(
-                "Progress: {}/{} samples, {:.1}% covered",
-                anchor_sample_id + 1, total_samples, processed_pct
-            );
-        }
-
-        // Early termination if pool is empty
-        if pool.is_empty() {
-            debug!("All regions covered after {} samples", anchor_sample_id + 1);
-            break;
-        }
-
-        // Clear tree cache periodically
-        impg.clear_tree_cache();
-    }
-
-    // Output remaining uncovered regions as depth=1
-    let remaining_length = pool.total_remaining_length();
-    if remaining_length > 0 {
-        debug!("Filling {} uncovered bp with depth=1", remaining_length);
-
-        for sample_id in 0..num_samples as u16 {
-            for &seq_id in compact_lengths.get_seqs_of_sample(sample_id) {
-                let remaining = pool.get_intervals(sample_id, seq_id);
-                let seq_name = impg.seq_index().get_name(seq_id).unwrap_or("?");
-
-                for (gap_start, gap_end) in remaining {
-                    if gap_end <= gap_start {
-                        continue;
-                    }
-
-                    write!(writer, "{}\t1", global_window_id)?;
-                    for s_id in 0..num_samples {
-                        if s_id as u16 == sample_id {
-                            write!(writer, "\t{}:{}-{}", seq_name, gap_start, gap_end)?;
-                        } else {
-                            write!(writer, "\tNA")?;
-                        }
-                    }
-                    writeln!(writer)?;
-                    global_window_id += 1;
-                }
-            }
-        }
-    }
-
-    // Phase 3: Check for sequences in FAI but not in alignment index
-    if let Some(fai_path) = fai_list {
-        debug!("Checking FAI list for sequences not in alignment index...");
-        let fai_seq_lengths = SequenceLengths::from_fai_list(fai_path, separator)?;
-
-        // Build set of sequence names already in alignment index
-        let indexed_seqs: FxHashSet<&str> = (0..impg.seq_index().len() as u32)
-            .filter_map(|id| impg.seq_index().get_name(id))
-            .collect();
-
-        let mut missing_count = 0u64;
-        let mut missing_bp = 0i64;
-
-        // Find sequences in FAI but not in index
-        for (seq_name, &seq_len) in &fai_seq_lengths.lengths {
-            if indexed_seqs.contains(seq_name.as_str()) {
-                continue; // Already processed
-            }
-
-            // This sequence has no alignments - output as depth=1
-            let sample_name = extract_sample(seq_name, separator);
-
-            write!(writer, "{}\t1", global_window_id)?;
-            for sample_id in 0..num_samples {
-                let current_sample = sample_index.get_name(sample_id as u16).unwrap_or("");
-                if current_sample == sample_name {
-                    write!(writer, "\t{}:{}-{}", seq_name, 0, seq_len)?;
-                } else {
-                    write!(writer, "\tNA")?;
-                }
-            }
-            // Also check if sample is not in the index at all
-            if sample_index.get_id(&sample_name).is_none() {
-                // Sample not in index - add a new column? No, just output NA for all
-                // Actually, we should handle this case - the sample might be entirely missing
-                // For now, just warn
-                debug!("Sample '{}' from FAI not in alignment index", sample_name);
-            }
-            writeln!(writer)?;
-
-            global_window_id += 1;
-            missing_count += 1;
-            missing_bp += seq_len;
-        }
-
-        if missing_count > 0 {
-            debug!(
-                "Added {} sequences ({} bp) from FAI with no alignments as depth=1",
-                missing_count, missing_bp
-            );
-        }
-    }
-
-    writer.flush()?;
-    debug!("Done (compact mode): {} windows", global_window_id);
-
-    Ok(())
+/// Check if an alignment is a same-sample transitive alignment (intra-genome duplication).
+/// Returns true if the alignment should be filtered out.
+#[inline]
+fn is_self_alignment(query_sample_id: u16, anchor_sample_id: u16, query_id: u32, target_seq_id: u32) -> bool {
+    query_sample_id == anchor_sample_id && query_id != target_seq_id
 }
+
 
 // ============================================================================
 // Windowed depth computation - fixed window size, sample by sample
@@ -4689,34 +1384,8 @@ pub fn compute_depth_by_sample_v3(
 /// Default window size for windowed depth computation (50kb)
 const DEFAULT_WINDOW_SIZE: i64 = 50_000;
 
-/// Depth interval within a window (LEGACY - dense storage)
-#[derive(Debug, Clone)]
-struct WindowedDepthInterval {
-    /// Start position within the anchor sequence
-    start: i64,
-    /// End position within the anchor sequence
-    end: i64,
-    /// Depth (number of samples)
-    depth: usize,
-    /// Sample positions: sample_id -> (query_seq_id, query_start, query_end)
-    sample_positions: Vec<Option<(u32, i64, i64)>>,
-}
-
-/// Result for a single window (LEGACY)
-#[derive(Debug, Clone)]
-struct WindowResult {
-    /// Sequence ID
-    seq_id: u32,
-    /// Window start
-    window_start: i64,
-    /// Window end
-    window_end: i64,
-    /// Depth intervals within this window
-    intervals: Vec<WindowedDepthInterval>,
-}
-
 // ============================================================================
-// Optimized V2 structures - sparse storage, streaming output
+// Windowed depth structures - sparse storage, streaming output
 // ============================================================================
 
 /// Sample position entry (sparse representation)
@@ -4748,6 +1417,47 @@ impl SparseDepthInterval {
             .ok()
             .map(|idx| (self.samples[idx].1, self.samples[idx].2, self.samples[idx].3))
     }
+}
+
+/// Split intervals at fixed window boundaries.
+/// Each interval crossing a window edge is cut into pieces,
+/// with sample query coordinates proportionally adjusted.
+fn split_intervals_by_window(intervals: Vec<SparseDepthInterval>, window_size: i64) -> Vec<SparseDepthInterval> {
+    let mut result: Vec<SparseDepthInterval> = Vec::new();
+    for interval in intervals {
+        let mut pos = interval.start;
+        while pos < interval.end {
+            // Next window boundary after pos
+            let next_boundary = ((pos / window_size) + 1) * window_size;
+            let chunk_end = interval.end.min(next_boundary);
+
+            if pos >= chunk_end {
+                break;
+            }
+
+            let interval_len = interval.end - interval.start;
+            // Proportionally adjust sample query coordinates for this chunk
+            let samples: Vec<SamplePosition> = interval.samples.iter().map(|&(sid, qid, qs, qe)| {
+                if interval_len <= 0 {
+                    return (sid, qid, qs, qe);
+                }
+                let q_len = qe - qs;
+                let frac_start = (pos - interval.start) as f64 / interval_len as f64;
+                let frac_end = (chunk_end - interval.start) as f64 / interval_len as f64;
+                let new_qs = qs + (frac_start * q_len as f64) as i64;
+                let new_qe = qs + (frac_end * q_len as f64) as i64;
+                (sid, qid, new_qs, new_qe)
+            }).collect();
+
+            result.push(SparseDepthInterval {
+                start: pos,
+                end: chunk_end,
+                samples,
+            });
+            pos = chunk_end;
+        }
+    }
+    result
 }
 
 /// Merge adjacent intervals with similar depth
@@ -4813,563 +1523,826 @@ fn merge_sparse_intervals(intervals: Vec<SparseDepthInterval>, tolerance: f64) -
     merged
 }
 
-/// Tracks which regions have been output (for anti-selection)
-#[derive(Debug, Default)]
-struct OutputTracker {
-    /// (sample_id, seq_id) -> sorted list of (start, end) intervals that have been output
-    output_regions: FxHashMap<(u16, u32), Vec<(i64, i64)>>,
+/// Thread-safe processed region tracker using per-sequence locks.
+/// Each sequence has its own Mutex, so concurrent access to different
+/// sequences has zero contention. This enables fully parallel depth
+/// computation across all sequences without batch synchronization barriers.
+#[derive(Debug)]
+struct ConcurrentProcessedTracker {
+    /// Per-sequence IntervalSet behind a Mutex for thread-safe access
+    processed: Vec<Mutex<IntervalSet>>,
 }
 
-impl OutputTracker {
-    fn new() -> Self {
+impl ConcurrentProcessedTracker {
+    /// Create a new tracker for the given number of sequences
+    fn new(num_sequences: usize) -> Self {
         Self {
-            output_regions: FxHashMap::default(),
+            processed: (0..num_sequences)
+                .map(|_| Mutex::new(IntervalSet::new()))
+                .collect(),
         }
     }
 
-    /// Mark a region as output
-    fn mark_output(&mut self, sample_id: u16, seq_id: u32, start: i64, end: i64) {
-        let key = (sample_id, seq_id);
-        let intervals = self.output_regions.entry(key).or_default();
-
-        // Insert maintaining sorted order and merge overlapping
-        let mut new_start = start;
-        let mut new_end = end;
-        let mut to_remove = Vec::new();
-
-        for (i, &(s, e)) in intervals.iter().enumerate() {
-            if e < new_start {
-                continue;
-            }
-            if s > new_end {
-                break;
-            }
-            // Overlapping or adjacent - merge
-            new_start = new_start.min(s);
-            new_end = new_end.max(e);
-            to_remove.push(i);
+    /// Get unprocessed regions for a sequence within [start, end)
+    fn get_unprocessed(&self, seq_id: u32, start: i64, end: i64) -> Vec<(i64, i64)> {
+        let lock = self.processed[seq_id as usize].lock().unwrap();
+        if lock.is_empty() {
+            return vec![(start, end)];
         }
-
-        // Remove merged intervals in reverse order
-        for i in to_remove.into_iter().rev() {
-            intervals.remove(i);
+        if lock.total_length() >= (end - start) {
+            return Vec::new();
         }
-
-        // Insert merged interval
-        let pos = intervals.iter().position(|&(s, _)| s > new_start).unwrap_or(intervals.len());
-        intervals.insert(pos, (new_start, new_end));
-    }
-
-    /// Check if a region overlaps with any output region
-    fn has_overlap(&self, sample_id: u16, seq_id: u32, start: i64, end: i64) -> bool {
-        if let Some(intervals) = self.output_regions.get(&(sample_id, seq_id)) {
-            for &(s, e) in intervals {
-                if e <= start {
-                    continue;
-                }
-                if s >= end {
-                    break;
-                }
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Get unprocessed portions of a region (anti-selection)
-    fn get_unprocessed(&self, sample_id: u16, seq_id: u32, start: i64, end: i64) -> Vec<(i64, i64)> {
-        let intervals = match self.output_regions.get(&(sample_id, seq_id)) {
-            Some(v) => v,
-            None => return vec![(start, end)],
-        };
-
-        let mut result = Vec::new();
-        let mut current = start;
-
-        for &(s, e) in intervals {
-            if e <= current {
-                continue;
-            }
+        // Subtract processed intervals from [start, end)
+        let mut unprocessed = IntervalSet::new_single(start, end);
+        for &(s, e) in lock.intervals() {
             if s >= end {
                 break;
             }
-
-            if s > current {
-                // Gap before this processed region
-                result.push((current, s.min(end)));
+            if e <= start {
+                continue;
             }
-            current = e;
+            unprocessed.subtract(s, e);
         }
+        unprocessed.intervals().to_vec()
+    }
 
-        if current < end {
-            result.push((current, end));
+    /// Mark a region as processed
+    fn mark_processed(&self, seq_id: u32, start: i64, end: i64) {
+        let mut lock = self.processed[seq_id as usize].lock().unwrap();
+        lock.add(start, end);
+    }
+
+    /// Mark a batch of regions as processed: Vec<(seq_id, start, end)>
+    fn mark_processed_batch(&self, regions: &[(u32, i64, i64)]) {
+        for &(seq_id, start, end) in regions {
+            self.mark_processed(seq_id, start, end);
         }
-
-        result
     }
 }
 
-/// Windowed depth computation with fixed window size
-///
-/// Algorithm:
-/// 1. Process samples one by one
-/// 2. For each sample:
-///    - Divide sequences into fixed windows (default 50kb)
-///    - For each window, query the index
-///    - Use sweep-line to compute detailed depth changes
-///    - After all windows processed, sort by chr-position and output
-/// 3. Track output regions for anti-selection in subsequent samples
-/// 4. Include unaligned regions as depth=1
-///
-/// Memory model: Only one sample's windows in memory at a time
-pub fn compute_depth_windowed(
-    impg: &impl ImpgIndex,
-    config: &DepthConfig,
-    sequence_index: Option<&UnifiedSequenceIndex>,
-    separator: &str,
-    output_prefix: Option<&str>,
-    fai_list: Option<&str>,
-    window_size: Option<i64>,
-) -> io::Result<()> {
-    let window_size = window_size.unwrap_or(DEFAULT_WINDOW_SIZE);
-    info!("Computing depth (windowed mode, {}kb windows)", window_size / 1000);
+// ============================================================================
+// Global depth computation - connected-component traversal
+// ============================================================================
 
-    // Build compact data structures
-    let compact_lengths = CompactSequenceLengths::from_impg(impg, separator);
-    let sample_index = compact_lengths.sample_index();
-    let num_samples = sample_index.len();
-
-    debug!(
-        "Found {} samples, {} sequences",
-        num_samples,
-        impg.seq_index().len()
-    );
-
-    // Load FAI sequences if provided (for complete coverage)
-    let fai_seq_lengths: Option<SequenceLengths> = if let Some(fai_path) = fai_list {
-        let fai = SequenceLengths::from_fai_list(fai_path, separator)?;
-        debug!("FAI: {} samples, {} sequences", fai.sample_to_seqs.len(), fai.lengths.len());
-        Some(fai)
-    } else {
-        None
-    };
-
-    // Initialize output tracker for anti-selection
-    let mut output_tracker = OutputTracker::new();
-
-    // Prepare output
-    let writer: Box<dyn Write> = if let Some(prefix) = output_prefix {
-        let path = format!("{}.depth.tsv", prefix);
-        Box::new(BufWriter::new(std::fs::File::create(&path)?))
-    } else {
-        Box::new(BufWriter::new(std::io::stdout()))
-    };
-    let mut writer = BufWriter::new(writer);
-
-    // Write header
-    write!(writer, "#seq\tstart\tend\tdepth")?;
-    for sample_id in 0..num_samples as u16 {
-        if let Some(name) = sample_index.get_name(sample_id) {
-            write!(writer, "\t{}", name)?;
-        }
-    }
-    writeln!(writer)?;
-
-    let mut total_windows = 0usize;
-    let mut total_intervals = 0usize;
-
-    // Process samples one by one
-    for anchor_sample_id in 0..num_samples as u16 {
-        let anchor_sample_name = sample_index.get_name(anchor_sample_id).unwrap_or("?");
-        let seq_ids = compact_lengths.get_seqs_of_sample(anchor_sample_id);
-
-        debug!(
-            "Processing sample {}/{}: {} ({} sequences)",
-            anchor_sample_id + 1,
-            num_samples,
-            anchor_sample_name,
-            seq_ids.len()
-        );
-
-        // Collect all windows for this sample
-        let mut sample_windows: Vec<WindowResult> = Vec::new();
-
-        // Process each sequence
-        for &seq_id in seq_ids {
-            let seq_len = compact_lengths.get_length(seq_id);
-            if seq_len <= 0 {
-                continue;
+/// Pre-scan: compute alignment degree for each included sequence.
+/// Degree = number of unique OTHER samples with direct alignments to this sequence.
+/// Used to automatically identify hub sequences for Phase 1 when --ref is not specified.
+fn compute_alignment_degrees(
+    impg: &(impl ImpgIndex + Sync),
+    compact_lengths: &CompactSequenceLengths,
+    seq_included: &[bool],
+) -> Vec<u16> {
+    (0..seq_included.len() as u32)
+        .into_par_iter()
+        .map(|seq_id| {
+            if !seq_included.get(seq_id as usize).copied().unwrap_or(false) {
+                return 0u16;
             }
-
-            // Divide sequence into windows
-            let mut window_start = 0i64;
-            while window_start < seq_len {
-                let window_end = (window_start + window_size).min(seq_len);
-
-                // Anti-selection: check if this window region was already output
-                let unprocessed = output_tracker.get_unprocessed(
-                    anchor_sample_id, seq_id, window_start, window_end
-                );
-
-                if unprocessed.is_empty() {
-                    window_start = window_end;
+            let raw_alns = impg.query_raw_intervals(seq_id);
+            if raw_alns.is_empty() {
+                return 0;
+            }
+            let self_sample = compact_lengths.get_sample_id(seq_id);
+            let mut samples = FxHashSet::default();
+            for aln in &raw_alns {
+                if !seq_included.get(aln.query_id as usize).copied().unwrap_or(false) {
                     continue;
                 }
-
-                // Query alignments for this window
-                // Note: Query the full window, alignments spanning boundaries are included (choice A)
-                let overlaps = if config.transitive {
-                    if config.transitive_dfs {
-                        impg.query_transitive_dfs(
-                            seq_id, window_start as i32, window_end as i32, None,
-                            config.max_depth, config.min_transitive_len,
-                            config.min_distance_between_ranges, None, false, None,
-                            sequence_index, config.approximate_mode, None,
-                        )
-                    } else {
-                        impg.query_transitive_bfs(
-                            seq_id, window_start as i32, window_end as i32, None,
-                            config.max_depth, config.min_transitive_len,
-                            config.min_distance_between_ranges, None, false, None,
-                            sequence_index, config.approximate_mode, None,
-                        )
-                    }
-                } else {
-                    impg.query(seq_id, window_start as i32, window_end as i32,
-                              false, None, sequence_index, config.approximate_mode)
-                };
-
-                // Build alignments for sweep-line
-                let mut alignments: Vec<CompactAlignmentInfo> = Vec::new();
-
-                // Add self (anchor sample covers the window)
-                alignments.push(CompactAlignmentInfo::new(
-                    anchor_sample_id,
-                    seq_id,
-                    window_start,
-                    window_end,
-                    window_start,
-                    window_end,
-                    false,
-                ));
-
-                // Add alignments from query results
-                for overlap in &overlaps {
-                    let query_interval = &overlap.0;
-                    let target_interval = &overlap.2;
-
-                    let query_id = query_interval.metadata;
-                    let query_sample_id = compact_lengths.get_sample_id(query_id);
-
-                    let is_reverse = query_interval.first > query_interval.last;
-                    let query_start = query_interval.first.min(query_interval.last) as i64;
-                    let query_end = query_interval.first.max(query_interval.last) as i64;
-                    let target_start = target_interval.first.min(target_interval.last) as i64;
-                    let target_end = target_interval.first.max(target_interval.last) as i64;
-
-                    // Clip to window boundaries
-                    let clipped_target_start = target_start.max(window_start);
-                    let clipped_target_end = target_end.min(window_end);
-
-                    if clipped_target_start >= clipped_target_end {
-                        continue;
-                    }
-
-                    // Proportionally adjust query coordinates
-                    let target_len = target_end - target_start;
-                    let query_len = query_end - query_start;
-                    let ratio = if target_len > 0 { query_len as f64 / target_len as f64 } else { 1.0 };
-
-                    let clipped_query_start;
-                    let clipped_query_end;
-                    if is_reverse {
-                        clipped_query_end = query_end - ((clipped_target_start - target_start) as f64 * ratio) as i64;
-                        clipped_query_start = query_end - ((clipped_target_end - target_start) as f64 * ratio) as i64;
-                    } else {
-                        clipped_query_start = query_start + ((clipped_target_start - target_start) as f64 * ratio) as i64;
-                        clipped_query_end = query_start + ((clipped_target_end - target_start) as f64 * ratio) as i64;
-                    }
-
-                    alignments.push(CompactAlignmentInfo::new(
-                        query_sample_id,
-                        query_id,
-                        clipped_query_start.min(clipped_query_end),
-                        clipped_query_start.max(clipped_query_end),
-                        clipped_target_start,
-                        clipped_target_end,
-                        is_reverse,
-                    ));
+                let sample_id = compact_lengths.get_sample_id(aln.query_id);
+                if sample_id != self_sample {
+                    samples.insert(sample_id);
                 }
+            }
+            samples.len().min(u16::MAX as usize) as u16
+        })
+        .collect()
+}
 
-                // Build sweep-line events
-                let mut events: Vec<CompactDepthEvent> = Vec::with_capacity(alignments.len() * 2);
-                for (idx, aln) in alignments.iter().enumerate() {
-                    events.push(CompactDepthEvent {
-                        position: aln.target_start,
-                        is_start: true,
-                        sample_id: aln.sample_id,
-                        alignment_idx: idx,
-                    });
-                    events.push(CompactDepthEvent {
-                        position: aln.target_end,
-                        is_start: false,
-                        sample_id: aln.sample_id,
-                        alignment_idx: idx,
-                    });
-                }
-                events.sort();
+/// Build sequence processing order: sorted by degree descending, then length descending.
+/// If ref_sample is specified, that sample's sequences are moved to the front.
+fn build_sequence_order(
+    impg: &impl ImpgIndex,
+    compact_lengths: &CompactSequenceLengths,
+    ref_sample_id: Option<u16>,
+    seq_included: &[bool],
+    degrees: &[u16],
+) -> Vec<u32> {
+    let num_seqs = impg.seq_index().len();
+    let mut seq_order: Vec<(u32, i64, bool, u16)> = (0..num_seqs as u32)
+        .filter_map(|seq_id| {
+            if !seq_included.get(seq_id as usize).copied().unwrap_or(false) {
+                return None;
+            }
+            let len = compact_lengths.get_length(seq_id);
+            if len <= 0 {
+                return None;
+            }
+            let is_ref = ref_sample_id
+                .map(|ref_id| compact_lengths.get_sample_id(seq_id) == ref_id)
+                .unwrap_or(false);
+            let degree = degrees.get(seq_id as usize).copied().unwrap_or(0);
+            Some((seq_id, len, is_ref, degree))
+        })
+        .collect();
 
-                // Sweep-line to compute depth intervals
-                let mut active_bitmap = SampleBitmap::new(num_samples);
-                let mut active_alns: Vec<Vec<usize>> = vec![Vec::new(); num_samples];
-                let mut prev_pos: Option<i64> = None;
-                let mut intervals: Vec<WindowedDepthInterval> = Vec::new();
+    // Sort: ref sample first, then by degree descending, then by length descending
+    seq_order.sort_by(|a, b| {
+        b.2.cmp(&a.2) // ref sequences first
+            .then_with(|| b.3.cmp(&a.3)) // then by degree descending
+            .then_with(|| b.1.cmp(&a.1)) // then by length descending
+    });
 
-                for event in events {
-                    if let Some(prev) = prev_pos {
-                        if event.position > prev && active_bitmap.depth() > 0 {
-                            // Check if this interval is in unprocessed regions
-                            let interval_start = prev;
-                            let interval_end = event.position;
+    seq_order.into_iter().map(|(seq_id, _, _, _)| seq_id).collect()
+}
 
-                            for &(unproc_start, unproc_end) in &unprocessed {
-                                let clipped_start = interval_start.max(unproc_start);
-                                let clipped_end = interval_end.min(unproc_end);
+/// Result of processing a single anchor region
+struct AnchorRegionResult {
+    /// Depth intervals for output
+    intervals: Vec<SparseDepthInterval>,
+    /// All discovered regions to mark as processed: (seq_id, start, end)
+    discovered_regions: Vec<(u32, i64, i64)>,
+    /// The anchor seq_id
+    anchor_seq_id: u32,
+    /// The anchor sample_id
+    anchor_sample_id: u16,
+}
 
-                                if clipped_start >= clipped_end {
-                                    continue;
-                                }
+/// Process a single anchor region: query alignments, compute depth via sweep-line.
+/// Returns depth intervals and all discovered regions (for marking as processed).
+///
+/// Query strategy:
+/// - Non-transitive (default): direct query — O(log n), bounded results.
+///   impg's bidirectional index means 1-hop already captures both alignment directions.
+/// - Transitive (-x): BFS — richer depth for sparse alignments, but heavier.
+///   Caller should pass bounded-size regions (see TRANSITIVE_CHUNK_SIZE).
+#[allow(dead_code)]
+fn process_anchor_region(
+    impg: &impl ImpgIndex,
+    config: &DepthConfig,
+    compact_lengths: &CompactSequenceLengths,
+    num_samples: usize,
+    anchor_seq_id: u32,
+    anchor_sample_id: u16,
+    region_start: i64,
+    region_end: i64,
+) -> AnchorRegionResult {
+    let mut discovered_regions: Vec<(u32, i64, i64)> = Vec::new();
 
-                                // Build sample positions
-                                let mut sample_positions: Vec<Option<(u32, i64, i64)>> = vec![None; num_samples];
+    // Always mark the anchor region itself as discovered
+    discovered_regions.push((anchor_seq_id, region_start, region_end));
 
-                                for sample_id in active_bitmap.active_samples() {
-                                    let alns = &active_alns[sample_id as usize];
-                                    if let Some(&best_idx) = alns.iter().max_by_key(|&&idx| {
-                                        let aln = &alignments[idx];
-                                        let overlap_start = clipped_start.max(aln.target_start);
-                                        let overlap_end = clipped_end.min(aln.target_end);
-                                        overlap_end - overlap_start
-                                    }) {
-                                        let aln = &alignments[best_idx];
-                                        let (q_start, q_end) = map_target_to_query_linear(
-                                            &[],
-                                            aln.target_start, aln.target_end,
-                                            aln.query_start, aln.query_end,
-                                            clipped_start, clipped_end,
-                                            aln.is_reverse,
-                                        );
-                                        sample_positions[sample_id as usize] = Some((aln.query_id, q_start, q_end));
-                                    }
-                                }
+    let is_transitive = config.transitive || config.transitive_dfs;
 
-                                let depth = sample_positions.iter().filter(|p| p.is_some()).count();
-                                if depth > 0 {
-                                    intervals.push(WindowedDepthInterval {
-                                        start: clipped_start,
-                                        end: clipped_end,
-                                        depth,
-                                        sample_positions,
-                                    });
-                                }
-                            }
+    // Query alignments overlapping this region
+    let overlaps = if is_transitive {
+        if config.transitive_dfs {
+            impg.query_transitive_dfs(
+                anchor_seq_id, region_start as i32, region_end as i32, None,
+                config.max_depth, config.min_transitive_len,
+                config.min_distance_between_ranges, None, false, None,
+                None, config.approximate_mode, None,
+            )
+        } else {
+            impg.query_transitive_bfs(
+                anchor_seq_id, region_start as i32, region_end as i32, None,
+                config.max_depth, config.min_transitive_len,
+                config.min_distance_between_ranges, None, false, None,
+                None, config.approximate_mode, None,
+            )
+        }
+    } else {
+        // Direct query: fast O(log n) interval tree lookup.
+        // Bidirectional index ensures both forward and reverse alignments are found.
+        impg.query(
+            anchor_seq_id, region_start as i32, region_end as i32,
+            false, None, None, config.approximate_mode,
+        )
+    };
+
+    // Build alignments for sweep-line
+    let mut alignments: Vec<CompactAlignmentInfo> = Vec::new();
+
+    // Add self (anchor sample covers the range)
+    alignments.push(CompactAlignmentInfo::new(
+        anchor_sample_id,
+        anchor_seq_id,
+        region_start,
+        region_end,
+        region_start,
+        region_end,
+        false,
+    ));
+
+    // Add alignments from query results
+    for overlap in &overlaps {
+        let query_interval = &overlap.0;
+        let target_interval = &overlap.2;
+
+        let query_id = query_interval.metadata;
+        let query_sample_id = compact_lengths.get_sample_id(query_id);
+
+        // Always filter self-alignments (same sample, different sequence)
+        if is_self_alignment(query_sample_id, anchor_sample_id, query_id, anchor_seq_id) {
+            continue;
+        }
+
+        let is_reverse = query_interval.first > query_interval.last;
+        let query_start = query_interval.first.min(query_interval.last) as i64;
+        let query_end = query_interval.first.max(query_interval.last) as i64;
+        let target_start = target_interval.first.min(target_interval.last) as i64;
+        let target_end = target_interval.first.max(target_interval.last) as i64;
+
+        // Clip to range boundaries
+        let clipped_target_start = target_start.max(region_start);
+        let clipped_target_end = target_end.min(region_end);
+
+        if clipped_target_start >= clipped_target_end {
+            continue;
+        }
+
+        // Proportionally adjust query coordinates
+        let target_len = target_end - target_start;
+        let query_len = query_end - query_start;
+        let ratio = if target_len > 0 { query_len as f64 / target_len as f64 } else { 1.0 };
+
+        let clipped_query_start;
+        let clipped_query_end;
+        if is_reverse {
+            clipped_query_end = query_end - ((clipped_target_start - target_start) as f64 * ratio) as i64;
+            clipped_query_start = query_end - ((clipped_target_end - target_start) as f64 * ratio) as i64;
+        } else {
+            clipped_query_start = query_start + ((clipped_target_start - target_start) as f64 * ratio) as i64;
+            clipped_query_end = query_start + ((clipped_target_end - target_start) as f64 * ratio) as i64;
+        }
+
+        alignments.push(CompactAlignmentInfo::new(
+            query_sample_id,
+            query_id,
+            clipped_query_start.min(clipped_query_end),
+            clipped_query_start.max(clipped_query_end),
+            clipped_target_start,
+            clipped_target_end,
+            is_reverse,
+        ));
+
+        // Record discovered query region for marking as processed
+        discovered_regions.push((query_id, query_start, query_end));
+    }
+
+    // Build sweep-line events
+    let mut events: Vec<CompactDepthEvent> = Vec::with_capacity(alignments.len() * 2);
+    for (idx, aln) in alignments.iter().enumerate() {
+        events.push(CompactDepthEvent {
+            position: aln.target_start,
+            is_start: true,
+            sample_id: aln.sample_id,
+            alignment_idx: idx,
+        });
+        events.push(CompactDepthEvent {
+            position: aln.target_end,
+            is_start: false,
+            sample_id: aln.sample_id,
+            alignment_idx: idx,
+        });
+    }
+    events.sort();
+
+    // Sweep-line to compute depth intervals with SPARSE storage
+    let mut seq_intervals: Vec<SparseDepthInterval> = Vec::new();
+    let mut active_bitmap = SampleBitmap::new(num_samples);
+    let mut active_alns: Vec<Vec<usize>> = vec![Vec::new(); num_samples];
+    let mut prev_pos: Option<i64> = None;
+
+    for event in events {
+        if let Some(prev) = prev_pos {
+            if event.position > prev && active_bitmap.depth() > 0 {
+                let interval_start = prev;
+                let interval_end = event.position;
+
+                // Clip to anchor region
+                let clipped_start = interval_start.max(region_start);
+                let clipped_end = interval_end.min(region_end);
+
+                if clipped_start < clipped_end {
+                    // Build SPARSE sample positions
+                    let mut samples: Vec<SamplePosition> = Vec::new();
+
+                    for sample_id in active_bitmap.active_samples() {
+                        let alns = &active_alns[sample_id as usize];
+                        if let Some(&best_idx) = alns.iter().max_by_key(|&&idx| {
+                            let aln = &alignments[idx];
+                            let overlap_start = clipped_start.max(aln.target_start);
+                            let overlap_end = clipped_end.min(aln.target_end);
+                            overlap_end - overlap_start
+                        }) {
+                            let aln = &alignments[best_idx];
+                            let (q_start, q_end) = map_target_to_query_linear(
+                                &[],
+                                aln.target_start, aln.target_end,
+                                aln.query_start, aln.query_end,
+                                clipped_start, clipped_end,
+                                aln.is_reverse,
+                            );
+                            samples.push((sample_id, aln.query_id, q_start, q_end));
                         }
                     }
 
-                    // Update active samples
-                    if event.is_start {
-                        active_bitmap.add(event.sample_id);
-                        active_alns[event.sample_id as usize].push(event.alignment_idx);
-                    } else {
-                        active_bitmap.remove(event.sample_id);
-                        active_alns[event.sample_id as usize].retain(|&idx| idx != event.alignment_idx);
-                    }
-
-                    prev_pos = Some(event.position);
-                }
-
-                // Add depth=1 intervals for unprocessed regions not covered by any alignment
-                // Collect new intervals first to avoid borrow checker issues
-                let mut depth1_intervals: Vec<WindowedDepthInterval> = Vec::new();
-                for &(unproc_start, unproc_end) in &unprocessed {
-                    // Check which parts of unprocessed are not in intervals
-                    let mut covered_pos = unproc_start;
-                    for interval in &intervals {
-                        if interval.end <= unproc_start || interval.start >= unproc_end {
-                            continue;
-                        }
-                        if interval.start > covered_pos {
-                            // Gap: depth=1 (only anchor sample)
-                            let mut sample_positions: Vec<Option<(u32, i64, i64)>> = vec![None; num_samples];
-                            sample_positions[anchor_sample_id as usize] = Some((seq_id, covered_pos, interval.start));
-                            depth1_intervals.push(WindowedDepthInterval {
-                                start: covered_pos,
-                                end: interval.start,
-                                depth: 1,
-                                sample_positions,
-                            });
-                        }
-                        covered_pos = covered_pos.max(interval.end);
-                    }
-                    if covered_pos < unproc_end {
-                        // Trailing gap
-                        let mut sample_positions: Vec<Option<(u32, i64, i64)>> = vec![None; num_samples];
-                        sample_positions[anchor_sample_id as usize] = Some((seq_id, covered_pos, unproc_end));
-                        depth1_intervals.push(WindowedDepthInterval {
-                            start: covered_pos,
-                            end: unproc_end,
-                            depth: 1,
-                            sample_positions,
+                    if !samples.is_empty() {
+                        samples.sort_by_key(|s| s.0);
+                        seq_intervals.push(SparseDepthInterval {
+                            start: clipped_start,
+                            end: clipped_end,
+                            samples,
                         });
                     }
                 }
-                intervals.extend(depth1_intervals);
-
-                // Sort intervals by start position
-                intervals.sort_by_key(|i| i.start);
-
-                if !intervals.is_empty() {
-                    sample_windows.push(WindowResult {
-                        seq_id,
-                        window_start,
-                        window_end,
-                        intervals,
-                    });
-                }
-
-                window_start = window_end;
             }
         }
 
-        // Sort all windows by sequence name then position
-        sample_windows.sort_by(|a, b| {
-            let name_a = impg.seq_index().get_name(a.seq_id).unwrap_or("");
-            let name_b = impg.seq_index().get_name(b.seq_id).unwrap_or("");
-            name_a.cmp(name_b)
-                .then_with(|| a.window_start.cmp(&b.window_start))
-        });
-
-        // Output all intervals for this sample and mark as output
-        for window in &sample_windows {
-            let seq_name = impg.seq_index().get_name(window.seq_id).unwrap_or("?");
-
-            for interval in &window.intervals {
-                // Output
-                write!(writer, "{}\t{}\t{}\t{}",
-                       seq_name, interval.start, interval.end, interval.depth)?;
-
-                for sample_id in 0..num_samples {
-                    if let Some((query_id, start, end)) = interval.sample_positions[sample_id] {
-                        let query_name = impg.seq_index().get_name(query_id).unwrap_or("?");
-                        write!(writer, "\t{}:{}-{}", query_name, start, end)?;
-                    } else {
-                        write!(writer, "\tNA")?;
-                    }
-                }
-                writeln!(writer)?;
-
-                total_intervals += 1;
-
-                // Mark all sample positions as output (for anti-selection)
-                for sample_id in 0..num_samples as u16 {
-                    if let Some((query_id, start, end)) = interval.sample_positions[sample_id as usize] {
-                        output_tracker.mark_output(sample_id, query_id, start, end);
-                    }
-                }
-            }
-
-            total_windows += 1;
+        // Update active samples
+        if event.is_start {
+            active_bitmap.add(event.sample_id);
+            active_alns[event.sample_id as usize].push(event.alignment_idx);
+        } else {
+            active_bitmap.remove(event.sample_id);
+            active_alns[event.sample_id as usize].retain(|&idx| idx != event.alignment_idx);
         }
 
-        // Clear tree cache after each sample
-        impg.clear_tree_cache();
-
-        debug!(
-            "Sample {} complete: {} windows, {} intervals",
-            anchor_sample_name,
-            sample_windows.len(),
-            sample_windows.iter().map(|w| w.intervals.len()).sum::<usize>()
-        );
-
-        // sample_windows is dropped here, releasing memory
+        prev_pos = Some(event.position);
     }
 
-    // Handle FAI sequences not in alignment index
-    if let Some(ref fai) = fai_seq_lengths {
-        let indexed_seqs: FxHashSet<&str> = (0..impg.seq_index().len() as u32)
-            .filter_map(|id| impg.seq_index().get_name(id))
-            .collect();
+    // Add depth=1 intervals for gaps (anchor only, not covered by any alignment)
+    let mut depth1_intervals: Vec<SparseDepthInterval> = Vec::new();
+    let mut covered_pos = region_start;
+    for interval in &seq_intervals {
+        if interval.start > covered_pos {
+            depth1_intervals.push(SparseDepthInterval {
+                start: covered_pos,
+                end: interval.start,
+                samples: vec![(anchor_sample_id, anchor_seq_id, covered_pos, interval.start)],
+            });
+        }
+        covered_pos = covered_pos.max(interval.end);
+    }
+    if covered_pos < region_end {
+        depth1_intervals.push(SparseDepthInterval {
+            start: covered_pos,
+            end: region_end,
+            samples: vec![(anchor_sample_id, anchor_seq_id, covered_pos, region_end)],
+        });
+    }
+    seq_intervals.extend(depth1_intervals);
 
-        for (seq_name, &seq_len) in &fai.lengths {
-            if indexed_seqs.contains(seq_name.as_str()) {
+    // Sort intervals by position
+    seq_intervals.sort_by_key(|i| i.start);
+
+    AnchorRegionResult {
+        intervals: seq_intervals,
+        discovered_regions,
+        anchor_seq_id,
+        anchor_sample_id,
+    }
+}
+
+/// Process a single anchor region using pre-scanned raw alignment data.
+/// No CIGAR projection — uses raw coordinates from interval tree metadata.
+/// This is the fast path for non-transitive depth computation.
+fn process_anchor_region_raw(
+    raw_intervals: &[RawAlignmentInterval],
+    compact_lengths: &CompactSequenceLengths,
+    num_samples: usize,
+    anchor_seq_id: u32,
+    anchor_sample_id: u16,
+    region_start: i64,
+    region_end: i64,
+) -> AnchorRegionResult {
+    let mut discovered_regions: Vec<(u32, i64, i64)> = Vec::new();
+    discovered_regions.push((anchor_seq_id, region_start, region_end));
+
+    let mut alignments: Vec<CompactAlignmentInfo> = Vec::new();
+
+    // Self alignment (anchor covers itself)
+    alignments.push(CompactAlignmentInfo::new(
+        anchor_sample_id, anchor_seq_id,
+        region_start, region_end, region_start, region_end, false,
+    ));
+
+    // Binary search: only scan intervals where target_start < region_end
+    // (alignment_table is sorted by target_start after pre-scan)
+    let end_idx = raw_intervals.partition_point(|aln| (aln.target_start as i64) < region_end);
+    for aln in &raw_intervals[..end_idx] {
+        let target_start = aln.target_start as i64;
+        let target_end = aln.target_end as i64;
+
+        // Skip intervals that end before region starts
+        if target_end <= region_start {
+            continue;
+        }
+
+        let query_sample_id = compact_lengths.get_sample_id(aln.query_id);
+
+        // Filter self-alignments (same sample, different sequence)
+        if is_self_alignment(query_sample_id, anchor_sample_id, aln.query_id, anchor_seq_id) {
+            continue;
+        }
+
+        let query_start = aln.query_start as i64;
+        let query_end = aln.query_end as i64;
+
+        // Clip target to region
+        let clipped_target_start = target_start.max(region_start);
+        let clipped_target_end = target_end.min(region_end);
+
+        // Proportional query coordinate clipping (linear interpolation)
+        let target_len = target_end - target_start;
+        let query_len = query_end - query_start;
+        let ratio = if target_len > 0 { query_len as f64 / target_len as f64 } else { 1.0 };
+
+        let (clipped_query_start, clipped_query_end) = if aln.is_reverse {
+            let cqe = query_end - ((clipped_target_start - target_start) as f64 * ratio) as i64;
+            let cqs = query_end - ((clipped_target_end - target_start) as f64 * ratio) as i64;
+            (cqs, cqe)
+        } else {
+            let cqs = query_start + ((clipped_target_start - target_start) as f64 * ratio) as i64;
+            let cqe = query_start + ((clipped_target_end - target_start) as f64 * ratio) as i64;
+            (cqs, cqe)
+        };
+
+        alignments.push(CompactAlignmentInfo::new(
+            query_sample_id, aln.query_id,
+            clipped_query_start.min(clipped_query_end),
+            clipped_query_start.max(clipped_query_end),
+            clipped_target_start, clipped_target_end,
+            aln.is_reverse,
+        ));
+
+        // Record discovered query region
+        discovered_regions.push((aln.query_id, query_start, query_end));
+    }
+
+    // Sweep-line to compute depth intervals
+    let seq_intervals = sweep_line_depth(
+        &alignments, num_samples, region_start, region_end,
+        anchor_sample_id, anchor_seq_id,
+    );
+
+    AnchorRegionResult {
+        intervals: seq_intervals,
+        discovered_regions,
+        anchor_seq_id,
+        anchor_sample_id,
+    }
+}
+
+/// Sweep-line algorithm: given alignments, produce depth intervals with sample tracking.
+/// Extracted as a shared helper for both raw and query-based paths.
+fn sweep_line_depth(
+    alignments: &[CompactAlignmentInfo],
+    num_samples: usize,
+    region_start: i64,
+    region_end: i64,
+    anchor_sample_id: u16,
+    anchor_seq_id: u32,
+) -> Vec<SparseDepthInterval> {
+    // Build sweep-line events
+    let mut events: Vec<CompactDepthEvent> = Vec::with_capacity(alignments.len() * 2);
+    for (idx, aln) in alignments.iter().enumerate() {
+        events.push(CompactDepthEvent {
+            position: aln.target_start,
+            is_start: true,
+            sample_id: aln.sample_id,
+            alignment_idx: idx,
+        });
+        events.push(CompactDepthEvent {
+            position: aln.target_end,
+            is_start: false,
+            sample_id: aln.sample_id,
+            alignment_idx: idx,
+        });
+    }
+    events.sort();
+
+    // Sweep-line to compute depth intervals with SPARSE storage
+    let mut seq_intervals: Vec<SparseDepthInterval> = Vec::new();
+    let mut active_bitmap = SampleBitmap::new(num_samples);
+    let mut active_alns: Vec<Vec<usize>> = vec![Vec::new(); num_samples];
+    let mut prev_pos: Option<i64> = None;
+
+    for event in events {
+        if let Some(prev) = prev_pos {
+            if event.position > prev && active_bitmap.depth() > 0 {
+                let interval_start = prev;
+                let interval_end = event.position;
+
+                // Clip to anchor region
+                let clipped_start = interval_start.max(region_start);
+                let clipped_end = interval_end.min(region_end);
+
+                if clipped_start < clipped_end {
+                    // Build SPARSE sample positions
+                    let mut samples: Vec<SamplePosition> = Vec::new();
+
+                    for sample_id in active_bitmap.active_samples() {
+                        let alns = &active_alns[sample_id as usize];
+                        if let Some(&best_idx) = alns.iter().max_by_key(|&&idx| {
+                            let aln = &alignments[idx];
+                            let overlap_start = clipped_start.max(aln.target_start);
+                            let overlap_end = clipped_end.min(aln.target_end);
+                            overlap_end - overlap_start
+                        }) {
+                            let aln = &alignments[best_idx];
+                            let (q_start, q_end) = map_target_to_query_linear(
+                                &[],
+                                aln.target_start, aln.target_end,
+                                aln.query_start, aln.query_end,
+                                clipped_start, clipped_end,
+                                aln.is_reverse,
+                            );
+                            samples.push((sample_id, aln.query_id, q_start, q_end));
+                        }
+                    }
+
+                    if !samples.is_empty() {
+                        samples.sort_by_key(|s| s.0);
+                        seq_intervals.push(SparseDepthInterval {
+                            start: clipped_start,
+                            end: clipped_end,
+                            samples,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Update active samples
+        if event.is_start {
+            active_bitmap.add(event.sample_id);
+            active_alns[event.sample_id as usize].push(event.alignment_idx);
+        } else {
+            active_bitmap.remove(event.sample_id);
+            active_alns[event.sample_id as usize].retain(|&idx| idx != event.alignment_idx);
+        }
+
+        prev_pos = Some(event.position);
+    }
+
+    // Add depth=1 intervals for gaps (anchor only, not covered by any alignment)
+    let mut depth1_intervals: Vec<SparseDepthInterval> = Vec::new();
+    let mut covered_pos = region_start;
+    for interval in &seq_intervals {
+        if interval.start > covered_pos {
+            depth1_intervals.push(SparseDepthInterval {
+                start: covered_pos,
+                end: interval.start,
+                samples: vec![(anchor_sample_id, anchor_seq_id, covered_pos, interval.start)],
+            });
+        }
+        covered_pos = covered_pos.max(interval.end);
+    }
+    if covered_pos < region_end {
+        depth1_intervals.push(SparseDepthInterval {
+            start: covered_pos,
+            end: region_end,
+            samples: vec![(anchor_sample_id, anchor_seq_id, covered_pos, region_end)],
+        });
+    }
+    seq_intervals.extend(depth1_intervals);
+
+    // Sort intervals by position
+    seq_intervals.sort_by_key(|i| i.start);
+
+    seq_intervals
+}
+
+/// Process a single anchor region using BFS with range-based interval queries.
+/// Discovers transitively connected regions without CIGAR projection.
+/// All results are projected back to anchor coordinates via chained linear interpolation.
+///
+/// Uses query_raw_overlapping() to fetch only intervals overlapping the current BFS region,
+/// achieving O(n+k) performance and minimal memory footprint (no full-sequence caching).
+fn process_anchor_region_transitive_raw(
+    impg: &(impl ImpgIndex + ?Sized),
+    compact_lengths: &CompactSequenceLengths,
+    num_samples: usize,
+    anchor_seq_id: u32,
+    anchor_sample_id: u16,
+    region_start: i64,
+    region_end: i64,
+    max_depth: u16,
+    min_transitive_len: i32,
+    seq_included: &[bool],
+    min_seq_length: i64,
+) -> AnchorRegionResult {
+    use std::collections::VecDeque;
+
+    // BFS entry: a region on some sequence with its projection onto the anchor
+    struct BfsEntry {
+        seq_id: u32,
+        start: i64,
+        end: i64,
+        anchor_start: i64,
+        anchor_end: i64,
+    }
+
+    let mut queue: VecDeque<(BfsEntry, u16)> = VecDeque::new();
+    // Visited tracking: per seq_id, list of visited ranges (to avoid infinite loops)
+    let mut visited: FxHashMap<u32, Vec<(i64, i64)>> = FxHashMap::default();
+    let mut discovered_regions: Vec<(u32, i64, i64)> = Vec::new();
+    let mut alignments: Vec<CompactAlignmentInfo> = Vec::new();
+
+    // Helper: check if a range is already mostly visited
+    let is_visited = |visited: &FxHashMap<u32, Vec<(i64, i64)>>, seq_id: u32, start: i64, end: i64| -> bool {
+        if let Some(ranges) = visited.get(&seq_id) {
+            let len = end - start;
+            if len <= 0 { return true; }
+            let mut covered = 0i64;
+            for &(vs, ve) in ranges {
+                let overlap_start = vs.max(start);
+                let overlap_end = ve.min(end);
+                if overlap_end > overlap_start {
+                    covered += overlap_end - overlap_start;
+                }
+            }
+            // Consider visited if >80% covered
+            covered as f64 / len as f64 > 0.8
+        } else {
+            false
+        }
+    };
+
+    // Mark a range as visited
+    let mark_visited = |visited: &mut FxHashMap<u32, Vec<(i64, i64)>>, seq_id: u32, start: i64, end: i64| {
+        visited.entry(seq_id).or_default().push((start, end));
+    };
+
+    // Start from anchor
+    queue.push_back((BfsEntry {
+        seq_id: anchor_seq_id,
+        start: region_start,
+        end: region_end,
+        anchor_start: region_start,
+        anchor_end: region_end,
+    }, 0));
+    mark_visited(&mut visited, anchor_seq_id, region_start, region_end);
+    discovered_regions.push((anchor_seq_id, region_start, region_end));
+
+    // Self alignment
+    alignments.push(CompactAlignmentInfo::new(
+        anchor_sample_id, anchor_seq_id,
+        region_start, region_end, region_start, region_end, false,
+    ));
+
+    while let Some((entry, depth)) = queue.pop_front() {
+        if max_depth > 0 && depth >= max_depth { continue; }
+
+        let entry_len = entry.end - entry.start;
+        let anchor_len = entry.anchor_end - entry.anchor_start;
+        if entry_len <= 0 || anchor_len <= 0 { continue; }
+
+        // Use query_raw_overlapping to fetch ONLY intervals overlapping [entry.start, entry.end)
+        // This is O(n+k) via coitrees range query, vastly more memory-efficient than loading all intervals
+        let mut raw_alns = impg.query_raw_overlapping(
+            entry.seq_id,
+            entry.start as i32,
+            entry.end as i32
+        );
+
+        // Filter by sequence inclusion if needed
+        if min_seq_length > 0 {
+            raw_alns.retain(|aln| {
+                seq_included.get(aln.query_id as usize).copied().unwrap_or(false)
+            });
+        }
+
+        let current_sample_id = compact_lengths.get_sample_id(entry.seq_id);
+
+        // All returned intervals already overlap [entry.start, entry.end) by definition
+        for aln in &raw_alns {
+            let target_start = aln.target_start as i64;
+            let target_end = aln.target_end as i64;
+
+            let query_sample_id = compact_lengths.get_sample_id(aln.query_id);
+            if is_self_alignment(query_sample_id, current_sample_id, aln.query_id, entry.seq_id) {
                 continue;
             }
 
-            let sample_name = extract_sample(seq_name, separator);
+            let query_start = aln.query_start as i64;
+            let query_end = aln.query_end as i64;
+            let query_len = (query_end - query_start).abs();
 
-            // Output as depth=1 for entire sequence
-            write!(writer, "{}\t0\t{}\t1", seq_name, seq_len)?;
-            for sample_id in 0..num_samples as u16 {
-                let current_sample = sample_index.get_name(sample_id).unwrap_or("");
-                if current_sample == sample_name {
-                    write!(writer, "\t{}:0-{}", seq_name, seq_len)?;
-                } else {
-                    write!(writer, "\tNA")?;
-                }
+            // Min length filter
+            if min_transitive_len > 0 && query_len < min_transitive_len as i64 { continue; }
+
+            // Compute overlap on current sequence
+            let overlap_start = target_start.max(entry.start);
+            let overlap_end = target_end.min(entry.end);
+            if overlap_end <= overlap_start { continue; }
+
+            // Project overlap to anchor coordinates via linear interpolation
+            let frac_start = (overlap_start - entry.start) as f64 / entry_len as f64;
+            let frac_end = (overlap_end - entry.start) as f64 / entry_len as f64;
+            let anchor_proj_start = entry.anchor_start + (frac_start * anchor_len as f64) as i64;
+            let anchor_proj_end = entry.anchor_start + (frac_end * anchor_len as f64) as i64;
+
+            // Project overlap to query coordinates
+            let target_len = target_end - target_start;
+            let ratio = if target_len > 0 { (query_end - query_start) as f64 / target_len as f64 } else { 1.0 };
+            let (proj_query_start, proj_query_end) = if aln.is_reverse {
+                let cqe = query_end - ((overlap_start - target_start) as f64 * ratio) as i64;
+                let cqs = query_end - ((overlap_end - target_start) as f64 * ratio) as i64;
+                (cqs.min(cqe), cqs.max(cqe))
+            } else {
+                let cqs = query_start + ((overlap_start - target_start) as f64 * ratio) as i64;
+                let cqe = query_start + ((overlap_end - target_start) as f64 * ratio) as i64;
+                (cqs.min(cqe), cqs.max(cqe))
+            };
+
+            // Add alignment projected to anchor coordinates for sweep-line
+            let a_start = anchor_proj_start.min(anchor_proj_end);
+            let a_end = anchor_proj_start.max(anchor_proj_end);
+            alignments.push(CompactAlignmentInfo::new(
+                query_sample_id, aln.query_id,
+                proj_query_start, proj_query_end,
+                a_start, a_end,
+                aln.is_reverse,
+            ));
+
+            discovered_regions.push((aln.query_id, query_start, query_end));
+
+            // Add to BFS queue if not already visited
+            if !is_visited(&visited, aln.query_id, proj_query_start, proj_query_end) {
+                mark_visited(&mut visited, aln.query_id, proj_query_start, proj_query_end);
+                queue.push_back((BfsEntry {
+                    seq_id: aln.query_id,
+                    start: proj_query_start,
+                    end: proj_query_end,
+                    anchor_start: a_start,
+                    anchor_end: a_end,
+                }, depth + 1));
             }
-            writeln!(writer)?;
-
-            total_intervals += 1;
         }
     }
 
-    writer.flush()?;
-    info!(
-        "Done (windowed mode): {} windows, {} intervals",
-        total_windows, total_intervals
+    // Sweep-line
+    let seq_intervals = sweep_line_depth(
+        &alignments, num_samples, region_start, region_end,
+        anchor_sample_id, anchor_seq_id,
     );
 
-    Ok(())
+    AnchorRegionResult {
+        intervals: seq_intervals,
+        discovered_regions,
+        anchor_seq_id,
+        anchor_sample_id,
+    }
 }
 
-// ============================================================================
-// Windowed V2 - Optimized with sparse storage and streaming output
-// ============================================================================
+/// Maximum region size for a single transitive BFS query (5 MB).
+/// Prevents BFS from visiting the entire pangenome when starting from a large chromosome.
+/// Non-transitive queries don't need this limit (they're O(log n) per lookup).
+const TRANSITIVE_CHUNK_SIZE: i64 = 5_000_000;
 
-/// Windowed depth computation V2 - optimized version
+/// Reference-free global depth computation.
 ///
-/// Optimizations over V1:
-/// 1. Sparse sample_positions: Vec<(u16, u32, i64, i64)> instead of Vec<Option<...>>
-///    - Memory: 16 bytes per actual sample vs 16 bytes per ALL samples
-///    - For 50 samples with avg 5 present: 80 bytes vs 800 bytes (10x reduction)
+/// Algorithm:
+/// 1. Sort all sequences by length descending (--ref sample gets priority)
+/// 2. For each sequence, find unprocessed regions
+/// 3. Query alignments for each unprocessed region (direct or transitive)
+/// 4. Compute depth via sweep-line, mark all discovered regions as processed
+/// 5. Every base in the pangenome is assigned to exactly one output row
 ///
-/// 2. Streaming output: Output immediately after each sequence
-///    - No collection of all windows before output
-///    - Memory: O(windows_per_sequence) vs O(windows_per_sample)
+/// Query modes:
+/// - Default (non-transitive): direct 1-hop queries. Fast, bounded memory.
+///   impg's bidirectional index captures both alignment directions in one lookup.
+/// - Transitive (-x): BFS with 5MB region chunking to bound memory.
 ///
-/// 3. Numeric sorting: Sort by seq_id, resolve names only for output
-///    - Avoids repeated string comparisons
-///
-/// 4. Optional: --no-self-alignments to filter same-sample transitive alignments
-///
-/// Output format:
-///   #id  start  end  depth  anchor  Sample1  Sample2  ...
-///   1    0      100  5      seq:0-100  seq:x-y  seq:x-y  ...
-pub fn compute_depth_windowed_v2(
+/// Key properties:
+/// - Every base processed exactly once (no double-counting)
+/// - No reference bias: longest sequences naturally become anchors
+/// - --ref is an ordering hint (process this sample first)
+/// - --ref-only filters output to only ref sample's sequences
+pub fn compute_depth_global(
     impg: &impl ImpgIndex,
     config: &DepthConfig,
-    _sequence_index: Option<&UnifiedSequenceIndex>,
     separator: &str,
     output_prefix: Option<&str>,
     fai_list: Option<&str>,
     window_size: Option<i64>,
-    no_self_alignments: bool,
     merge_tolerance: f64,
+    ref_sample: Option<&str>,
+    ref_only: bool,
+    min_seq_length: i64,
 ) -> io::Result<()> {
+    let is_transitive = config.transitive || config.transitive_dfs;
+    let user_window_size = window_size;
     let window_size = window_size.unwrap_or(DEFAULT_WINDOW_SIZE);
-    info!("Computing depth (windowed v2, {}kb windows)", window_size / 1000);
-    if no_self_alignments {
-        info!("Filtering out same-sample transitive alignments");
+    if is_transitive {
+        info!(
+            "Computing depth (global mode, transitive BFS, {}MB query chunks)",
+            TRANSITIVE_CHUNK_SIZE / 1_000_000
+        );
+    } else {
+        info!("Computing depth (global mode, pre-scan + sweep-line)");
     }
     if merge_tolerance > 0.0 {
         info!("Merge tolerance: {:.1}%", merge_tolerance * 100.0);
@@ -5379,12 +2352,49 @@ pub fn compute_depth_windowed_v2(
     let compact_lengths = CompactSequenceLengths::from_impg(impg, separator);
     let sample_index = compact_lengths.sample_index();
     let num_samples = sample_index.len();
+    let num_sequences = impg.seq_index().len();
 
     debug!(
         "Found {} samples, {} sequences",
-        num_samples,
-        impg.seq_index().len()
+        num_samples, num_sequences
     );
+
+    // Build sequence inclusion filter (for --min-seq-length)
+    let seq_included: Vec<bool> = (0..num_sequences as u32)
+        .map(|id| compact_lengths.get_length(id) >= min_seq_length)
+        .collect();
+    if min_seq_length > 0 {
+        let included = seq_included.iter().filter(|&&v| v).count();
+        let excluded = num_sequences - included;
+        info!(
+            "Sequence length filter (>= {} bp): {} included, {} excluded",
+            min_seq_length, included, excluded
+        );
+    }
+
+    // Resolve ref sample ID
+    let ref_sample_id: Option<u16> = if let Some(ref_name) = ref_sample {
+        let id = sample_index.get_id(ref_name).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Reference sample '{}' not found in alignment index", ref_name),
+            )
+        })?;
+        if ref_only {
+            info!("Reference sample: '{}' (ref-only: output filtered to this sample)", ref_name);
+        } else {
+            info!("Reference sample: '{}' (ordering priority)", ref_name);
+        }
+        Some(id)
+    } else {
+        if ref_only {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--ref-only requires --ref to be specified",
+            ));
+        }
+        None
+    };
 
     // Load FAI sequences if provided
     let fai_seq_lengths: Option<SequenceLengths> = if let Some(fai_path) = fai_list {
@@ -5395,20 +2405,33 @@ pub fn compute_depth_windowed_v2(
         None
     };
 
-    // Initialize output tracker for anti-selection
-    let mut output_tracker = OutputTracker::new();
+    // Pre-scan: compute alignment degrees for all included sequences.
+    // Used for automatic hub detection (when --ref is not specified) and
+    // for sorting sequences by connectivity (hubs first) in all modes.
+    info!("Pre-scanning alignment degrees...");
+    let degrees = compute_alignment_degrees(impg, &compact_lengths, &seq_included);
+    let max_degree = degrees.iter().copied().max().unwrap_or(0);
+    let included_count = seq_included.iter().filter(|&&v| v).count();
+    info!(
+        "Degree scan complete: {} sequences, max degree = {}",
+        included_count, max_degree
+    );
 
-    // Prepare output
-    let writer: Box<dyn Write> = if let Some(prefix) = output_prefix {
+    // Build sequence processing order (degree descending, length descending, ref sample first)
+    let sequence_order = build_sequence_order(impg, &compact_lengths, ref_sample_id, &seq_included, &degrees);
+    debug!("Sequence processing order: {} sequences", sequence_order.len());
+
+    // Prepare output (Send required for parallel streaming output)
+    let inner_writer: Box<dyn Write + Send> = if let Some(prefix) = output_prefix {
         let path = format!("{}.depth.tsv", prefix);
         Box::new(BufWriter::new(std::fs::File::create(&path)?))
     } else {
         Box::new(BufWriter::new(std::io::stdout()))
     };
-    let mut writer = BufWriter::new(writer);
+    let mut writer = BufWriter::new(inner_writer);
 
-    // Write header: #id start end depth Sample1 Sample2 ...
-    write!(writer, "#id\tstart\tend\tdepth")?;
+    // Write header: #id length depth Sample1 Sample2 ...
+    write!(writer, "#id\tlength\tdepth")?;
     for sample_id in 0..num_samples as u16 {
         if let Some(name) = sample_index.get_name(sample_id) {
             write!(writer, "\t{}", name)?;
@@ -5416,359 +2439,363 @@ pub fn compute_depth_windowed_v2(
     }
     writeln!(writer)?;
 
-    let mut total_windows = 0usize;
-    let mut total_intervals = 0usize;
-    let mut row_id = 0usize;
+    let total_sequences = sequence_order.len();
 
-    // Batch size for parallel processing
-    const BATCH_SIZE: usize = 100;
+    // Enable tree caching: trees loaded by get_or_load_tree are cached in sub-indices.
+    // With jemalloc, this no longer causes RSS fragmentation. Trees are reused across
+    // BFS nodes within the same sequence (avoiding repeated disk I/O), then freed
+    // when clear_sub_index_cache drops the sub-index Arc (and all its cached trees).
+    impg.set_tree_cache_enabled(true);
 
-    // Process samples one by one (sequential - anti-selection dependency)
-    for anchor_sample_id in 0..num_samples as u16 {
-        let anchor_sample_name = sample_index.get_name(anchor_sample_id).unwrap_or("?");
-        let seq_ids = compact_lengths.get_seqs_of_sample(anchor_sample_id);
+    let tracker = ConcurrentProcessedTracker::new(num_sequences);
 
-        // Sort sequences by seq_id (numeric) upfront for deterministic output order
-        let mut sorted_seq_ids: Vec<u32> = seq_ids.to_vec();
-        sorted_seq_ids.sort_unstable();
+    // =========================================================================
+    // Two-phase parallel processing with hub-first guarantee.
+    //
+    // Phase 1 ensures high-connectivity (hub) sequences are processed first,
+    // so their coordinate systems become the anchors for all homologous regions.
+    //
+    // Hub selection:
+    //   --ref specified: ref sample's sequences are the hubs.
+    //   --ref not specified: auto-detect hubs via alignment degree pre-scan.
+    //     Sequences with degree >= max_degree/2 are classified as hubs.
+    //     For star topology (hub degree ~800, leaf degree ~1), this cleanly
+    //     separates the central sequence from leaves.
+    //
+    // Phase 1 parallelism:
+    //   Transitive (-x): chunk-level (5MB chunks) for full thread utilization.
+    //   Non-transitive: sequence-level (fast per-sequence, acceptable overhead).
+    //
+    // Phase 2: remaining sequences, most regions already claimed by Phase 1.
+    // =========================================================================
 
-        debug!(
-            "Processing sample {}/{}: {} ({} sequences, batch_size={})",
-            anchor_sample_id + 1,
-            num_samples,
-            anchor_sample_name,
-            sorted_seq_ids.len(),
-            BATCH_SIZE
-        );
+    // Partition sequences into Phase 1 (hubs) and Phase 2 (rest)
+    let (phase1_seqs, phase2_seqs): (Vec<u32>, Vec<u32>) = if let Some(ref_id) = ref_sample_id {
+        // --ref specified: ref sequences go to Phase 1
+        sequence_order.iter().partition(|&&seq_id| {
+            compact_lengths.get_sample_id(seq_id) == ref_id
+        })
+    } else {
+        // No --ref: auto-detect hubs by alignment degree
+        let hub_threshold = (max_degree + 1) / 2; // ceiling of max_degree/2
+        if hub_threshold > 1 {
+            let (p1, p2): (Vec<u32>, Vec<u32>) = sequence_order.iter().partition(|&&seq_id| {
+                degrees.get(seq_id as usize).copied().unwrap_or(0) >= hub_threshold
+            });
+            if !p1.is_empty() {
+                info!(
+                    "Auto-detected {} hub sequences (degree >= {}) for Phase 1",
+                    p1.len(), hub_threshold
+                );
+            }
+            (p1, p2)
+        } else {
+            // No clear hubs (max_degree <= 1), skip Phase 1
+            (Vec::new(), sequence_order.clone())
+        }
+    };
 
-        let mut sample_intervals = 0usize;
-        let mut sample_windows = 0usize;
+    let processed_count = AtomicUsize::new(0);
+    let row_counter = AtomicUsize::new(0);
+    let intervals_counter = AtomicUsize::new(0);
+    let writer = Mutex::new(writer);
 
-        // Process sequences in batches for parallelism while limiting memory
-        for batch in sorted_seq_ids.chunks(BATCH_SIZE) {
-            // Prepare batch info: (seq_id, seq_len, unprocessed_regions)
-            let batch_info: Vec<(u32, i64, Vec<(i64, i64)>)> = batch
-                .iter()
-                .filter_map(|&seq_id| {
-                    let seq_len = compact_lengths.get_length(seq_id);
-                    if seq_len <= 0 {
-                        return None;
-                    }
-                    // Get unprocessed regions for the entire sequence
-                    let unprocessed = output_tracker.get_unprocessed(
-                        anchor_sample_id, seq_id, 0, seq_len
-                    );
-                    if unprocessed.is_empty() {
-                        return None;
-                    }
-                    Some((seq_id, seq_len, unprocessed))
-                })
-                .collect();
+    // Helper closure: format and write results for a batch of AnchorRegionResults
+    let write_results = |region_results: Vec<AnchorRegionResult>,
+                         buf: &mut Vec<u8>| -> io::Result<()> {
+        for result in region_results {
+            let seq_name = impg.seq_index().get_name(result.anchor_seq_id).unwrap_or("?");
+            let anchor_sample_id = result.anchor_sample_id;
 
-            if batch_info.is_empty() {
+            let should_output = if ref_only {
+                ref_sample_id == Some(anchor_sample_id)
+            } else {
+                true
+            };
+
+            if !should_output {
                 continue;
             }
 
-            // PARALLEL PHASE: Process all sequences in this batch in parallel
-            let batch_results: Vec<(u32, Vec<SparseDepthInterval>, usize)> = batch_info
-                .par_iter()
-                .map(|(seq_id, seq_len, seq_unprocessed)| {
-                    let seq_id = *seq_id;
-                    let seq_len = *seq_len;
+            let windowed_intervals = if user_window_size.is_some() {
+                split_intervals_by_window(result.intervals, window_size)
+            } else {
+                result.intervals
+            };
 
-                    let mut seq_intervals: Vec<SparseDepthInterval> = Vec::new();
-                    let mut window_count = 0usize;
+            let final_intervals = if merge_tolerance > 0.0 {
+                merge_sparse_intervals(windowed_intervals, merge_tolerance)
+            } else {
+                windowed_intervals
+            };
 
-                    // Process windows for this sequence
-                    let mut window_start = 0i64;
-                    while window_start < seq_len {
-                        let window_end = (window_start + window_size).min(seq_len);
+            for interval in &final_intervals {
+                let rid = row_counter.fetch_add(1, Ordering::Relaxed) + 1;
 
-                        // Get unprocessed portions within this window
-                        let unprocessed: Vec<(i64, i64)> = seq_unprocessed
-                            .iter()
-                            .filter_map(|&(s, e)| {
-                                let cs = s.max(window_start);
-                                let ce = e.min(window_end);
-                                if cs < ce { Some((cs, ce)) } else { None }
-                            })
-                            .collect();
+                write!(buf, "{}\t{}\t{}",
+                       rid, interval.end - interval.start, interval.depth())?;
 
-                        if unprocessed.is_empty() {
-                            window_start = window_end;
-                            continue;
-                        }
-
-                        // Query alignments for this window
-                        let overlaps = if config.transitive {
-                            if config.transitive_dfs {
-                                impg.query_transitive_dfs(
-                                    seq_id, window_start as i32, window_end as i32, None,
-                                    config.max_depth, config.min_transitive_len,
-                                    config.min_distance_between_ranges, None, false, None,
-                                    None, config.approximate_mode, None,
-                                )
-                            } else {
-                                impg.query_transitive_bfs(
-                                    seq_id, window_start as i32, window_end as i32, None,
-                                    config.max_depth, config.min_transitive_len,
-                                    config.min_distance_between_ranges, None, false, None,
-                                    None, config.approximate_mode, None,
-                                )
-                            }
-                        } else {
-                            impg.query(seq_id, window_start as i32, window_end as i32,
-                                      false, None, None, config.approximate_mode)
-                        };
-
-                        // Build alignments for sweep-line
-                        let mut alignments: Vec<CompactAlignmentInfo> = Vec::new();
-
-                        // Add self (anchor sample covers the window)
-                        alignments.push(CompactAlignmentInfo::new(
-                            anchor_sample_id,
-                            seq_id,
-                            window_start,
-                            window_end,
-                            window_start,
-                            window_end,
-                            false,
-                        ));
-
-                        // Add alignments from query results
-                        for overlap in &overlaps {
-                            let query_interval = &overlap.0;
-                            let target_interval = &overlap.2;
-
-                            let query_id = query_interval.metadata;
-                            let query_sample_id = compact_lengths.get_sample_id(query_id);
-
-                            // Filter out same-sample transitive alignments if requested
-                            // (same sample, different sequence = intra-genome duplication)
-                            if no_self_alignments && query_sample_id == anchor_sample_id && query_id != seq_id {
-                                continue;
-                            }
-
-                            let is_reverse = query_interval.first > query_interval.last;
-                            let query_start = query_interval.first.min(query_interval.last) as i64;
-                            let query_end = query_interval.first.max(query_interval.last) as i64;
-                            let target_start = target_interval.first.min(target_interval.last) as i64;
-                            let target_end = target_interval.first.max(target_interval.last) as i64;
-
-                            // Clip to window boundaries
-                            let clipped_target_start = target_start.max(window_start);
-                            let clipped_target_end = target_end.min(window_end);
-
-                            if clipped_target_start >= clipped_target_end {
-                                continue;
-                            }
-
-                            // Proportionally adjust query coordinates
-                            let target_len = target_end - target_start;
-                            let query_len = query_end - query_start;
-                            let ratio = if target_len > 0 { query_len as f64 / target_len as f64 } else { 1.0 };
-
-                            let clipped_query_start;
-                            let clipped_query_end;
-                            if is_reverse {
-                                clipped_query_end = query_end - ((clipped_target_start - target_start) as f64 * ratio) as i64;
-                                clipped_query_start = query_end - ((clipped_target_end - target_start) as f64 * ratio) as i64;
-                            } else {
-                                clipped_query_start = query_start + ((clipped_target_start - target_start) as f64 * ratio) as i64;
-                                clipped_query_end = query_start + ((clipped_target_end - target_start) as f64 * ratio) as i64;
-                            }
-
-                            alignments.push(CompactAlignmentInfo::new(
-                                query_sample_id,
-                                query_id,
-                                clipped_query_start.min(clipped_query_end),
-                                clipped_query_start.max(clipped_query_end),
-                                clipped_target_start,
-                                clipped_target_end,
-                                is_reverse,
-                            ));
-                        }
-
-                        // Build sweep-line events
-                        let mut events: Vec<CompactDepthEvent> = Vec::with_capacity(alignments.len() * 2);
-                        for (idx, aln) in alignments.iter().enumerate() {
-                            events.push(CompactDepthEvent {
-                                position: aln.target_start,
-                                is_start: true,
-                                sample_id: aln.sample_id,
-                                alignment_idx: idx,
-                            });
-                            events.push(CompactDepthEvent {
-                                position: aln.target_end,
-                                is_start: false,
-                                sample_id: aln.sample_id,
-                                alignment_idx: idx,
-                            });
-                        }
-                        events.sort();
-
-                        // Sweep-line to compute depth intervals with SPARSE storage
-                        let mut active_bitmap = SampleBitmap::new(num_samples);
-                        let mut active_alns: Vec<Vec<usize>> = vec![Vec::new(); num_samples];
-                        let mut prev_pos: Option<i64> = None;
-
-                        for event in events {
-                            if let Some(prev) = prev_pos {
-                                if event.position > prev && active_bitmap.depth() > 0 {
-                                    let interval_start = prev;
-                                    let interval_end = event.position;
-
-                                    for &(unproc_start, unproc_end) in &unprocessed {
-                                        let clipped_start = interval_start.max(unproc_start);
-                                        let clipped_end = interval_end.min(unproc_end);
-
-                                        if clipped_start >= clipped_end {
-                                            continue;
-                                        }
-
-                                        // Build SPARSE sample positions
-                                        let mut samples: Vec<SamplePosition> = Vec::new();
-
-                                        for sample_id in active_bitmap.active_samples() {
-                                            let alns = &active_alns[sample_id as usize];
-                                            if let Some(&best_idx) = alns.iter().max_by_key(|&&idx| {
-                                                let aln = &alignments[idx];
-                                                let overlap_start = clipped_start.max(aln.target_start);
-                                                let overlap_end = clipped_end.min(aln.target_end);
-                                                overlap_end - overlap_start
-                                            }) {
-                                                let aln = &alignments[best_idx];
-                                                let (q_start, q_end) = map_target_to_query_linear(
-                                                    &[],
-                                                    aln.target_start, aln.target_end,
-                                                    aln.query_start, aln.query_end,
-                                                    clipped_start, clipped_end,
-                                                    aln.is_reverse,
-                                                );
-                                                samples.push((sample_id, aln.query_id, q_start, q_end));
-                                            }
-                                        }
-
-                                        if !samples.is_empty() {
-                                            samples.sort_by_key(|s| s.0);
-                                            seq_intervals.push(SparseDepthInterval {
-                                                start: clipped_start,
-                                                end: clipped_end,
-                                                samples,
-                                            });
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Update active samples
-                            if event.is_start {
-                                active_bitmap.add(event.sample_id);
-                                active_alns[event.sample_id as usize].push(event.alignment_idx);
-                            } else {
-                                active_bitmap.remove(event.sample_id);
-                                active_alns[event.sample_id as usize].retain(|&idx| idx != event.alignment_idx);
-                            }
-
-                            prev_pos = Some(event.position);
-                        }
-
-                        // Add depth=1 intervals for gaps in unprocessed regions
-                        let mut depth1_intervals: Vec<SparseDepthInterval> = Vec::new();
-                        for &(unproc_start, unproc_end) in &unprocessed {
-                            let mut covered_pos = unproc_start;
-                            for interval in &seq_intervals {
-                                if interval.end <= unproc_start || interval.start >= unproc_end {
-                                    continue;
-                                }
-                                if interval.start > covered_pos {
-                                    depth1_intervals.push(SparseDepthInterval {
-                                        start: covered_pos,
-                                        end: interval.start,
-                                        samples: vec![(anchor_sample_id, seq_id, covered_pos, interval.start)],
-                                    });
-                                }
-                                covered_pos = covered_pos.max(interval.end);
-                            }
-                            if covered_pos < unproc_end {
-                                depth1_intervals.push(SparseDepthInterval {
-                                    start: covered_pos,
-                                    end: unproc_end,
-                                    samples: vec![(anchor_sample_id, seq_id, covered_pos, unproc_end)],
-                                });
-                            }
-                        }
-                        seq_intervals.extend(depth1_intervals);
-
-                        window_count += 1;
-                        window_start = window_end;
-                    }
-
-                    // Sort intervals by position
-                    seq_intervals.sort_by_key(|i| i.start);
-
-                    (seq_id, seq_intervals, window_count)
-                })
-                .collect();
-
-            // SEQUENTIAL PHASE: Output results in sorted order and update tracker
-            // Results are already sorted by seq_id because batch was sorted
-            for (seq_id, seq_intervals, window_count) in batch_results {
-                let seq_name = impg.seq_index().get_name(seq_id).unwrap_or("?");
-
-                // Apply merge tolerance if set
-                let final_intervals = if merge_tolerance > 0.0 {
-                    merge_sparse_intervals(seq_intervals, merge_tolerance)
-                } else {
-                    seq_intervals
-                };
-
-                for interval in &final_intervals {
-                    // New format: id, start, end, depth, sample1, sample2, ...
-                    row_id += 1;
-
-                    // Column 1-4: id, start, end, depth
-                    write!(writer, "{}\t{}\t{}\t{}",
-                           row_id, interval.start, interval.end, interval.depth())?;
-
-                    // Column 5+: all samples in fixed order
-                    for sample_id in 0..num_samples as u16 {
-                        if sample_id == anchor_sample_id {
-                            // Anchor sample column: show anchor sequence's own coords
-                            write!(writer, "\t{}:{}-{}", seq_name, interval.start, interval.end)?;
-                        } else if let Some((query_id, start, end)) = interval.get_sample(sample_id) {
-                            let query_name = impg.seq_index().get_name(query_id).unwrap_or("?");
-                            write!(writer, "\t{}:{}-{}", query_name, start, end)?;
-                        } else {
-                            write!(writer, "\tNA")?;
-                        }
-                    }
-                    writeln!(writer)?;
-
-                    sample_intervals += 1;
-
-                    // Mark all sample positions as output (for anti-selection)
-                    for &(sample_id, query_id, start, end) in &interval.samples {
-                        output_tracker.mark_output(sample_id, query_id, start, end);
+                for sid in 0..num_samples as u16 {
+                    if sid == anchor_sample_id {
+                        write!(buf, "\t{}:{}-{}", seq_name, interval.start, interval.end)?;
+                    } else if let Some((query_id, start, end)) = interval.get_sample(sid) {
+                        let query_name = impg.seq_index().get_name(query_id).unwrap_or("?");
+                        write!(buf, "\t{}:{}-{}", query_name, start, end)?;
+                    } else {
+                        write!(buf, "\tNA")?;
                     }
                 }
+                writeln!(buf)?;
 
-                sample_windows += window_count;
+                intervals_counter.fetch_add(1, Ordering::Relaxed);
             }
-            // batch_results is dropped here, releasing memory
+        }
+        Ok(())
+    };
+
+    // =========================================================================
+    // Phase 1: Process hub sequences first (guaranteed to complete before Phase 2)
+    // =========================================================================
+    if !phase1_seqs.is_empty() {
+        if is_transitive {
+            // Transitive mode: chunk-level parallelism for full thread utilization.
+            // Split hub sequences into 5MB chunks → ~1200 tasks for 128 threads.
+            let phase1_chunks: Vec<(u32, u16, i64, i64)> = phase1_seqs.iter().flat_map(|&seq_id| {
+                let seq_len = compact_lengths.get_length(seq_id);
+                let sample_id = compact_lengths.get_sample_id(seq_id);
+                let mut chunks = Vec::new();
+                let mut pos = 0i64;
+                while pos < seq_len {
+                    let chunk_end = (pos + TRANSITIVE_CHUNK_SIZE).min(seq_len);
+                    chunks.push((seq_id, sample_id, pos, chunk_end));
+                    pos = chunk_end;
+                }
+                chunks
+            }).collect();
+
+            let num_chunks = phase1_chunks.len();
+            info!(
+                "Phase 1: {} hub sequences -> {} chunks ({}MB each), chunk-level parallelism",
+                phase1_seqs.len(), num_chunks, TRANSITIVE_CHUNK_SIZE / 1_000_000
+            );
+
+            let pb_phase1 = ProgressBar::new(num_chunks as u64);
+            pb_phase1.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} chunks ({eta}) | Phase 1: hub sequences")
+                    .unwrap()
+                    .progress_chars("#>-")
+            );
+
+            let phase1_count = AtomicUsize::new(0);
+
+            phase1_chunks.par_iter().try_for_each(|&(seq_id, sample_id, chunk_start, chunk_end)| -> io::Result<()> {
+                let result = process_anchor_region_transitive_raw(
+                    impg,
+                    &compact_lengths, num_samples,
+                    seq_id, sample_id, chunk_start, chunk_end,
+                    config.max_depth, config.min_transitive_len,
+                    &seq_included, min_seq_length,
+                );
+
+                tracker.mark_processed_batch(&result.discovered_regions);
+
+                let mut buf: Vec<u8> = Vec::new();
+                write_results(vec![result], &mut buf)?;
+                if !buf.is_empty() {
+                    let mut w = writer.lock().unwrap();
+                    w.write_all(&buf)?;
+                }
+
+                impg.clear_sub_index_cache();
+
+                let count = phase1_count.fetch_add(1, Ordering::Relaxed) + 1;
+                pb_phase1.set_position(count as u64);
+
+                Ok(())
+            })?;
+
+            pb_phase1.finish_and_clear();
+        } else {
+            // Non-transitive mode: sequence-level parallelism.
+            // Hub sequences are few but each is fast (direct query + sweep-line).
+            info!(
+                "Phase 1: {} hub sequences, sequence-level parallelism",
+                phase1_seqs.len()
+            );
+
+            let pb_phase1 = ProgressBar::new(phase1_seqs.len() as u64);
+            pb_phase1.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} seqs ({eta}) | Phase 1: hub sequences")
+                    .unwrap()
+                    .progress_chars("#>-")
+            );
+
+            let phase1_count = AtomicUsize::new(0);
+
+            phase1_seqs.par_iter().try_for_each(|&seq_id| -> io::Result<()> {
+                let seq_len = compact_lengths.get_length(seq_id);
+                if seq_len <= 0 {
+                    let count = phase1_count.fetch_add(1, Ordering::Relaxed) + 1;
+                    pb_phase1.set_position(count as u64);
+                    return Ok(());
+                }
+
+                let sample_id = compact_lengths.get_sample_id(seq_id);
+
+                let mut raw_alns = impg.query_raw_intervals(seq_id);
+                if min_seq_length > 0 {
+                    raw_alns.retain(|aln| {
+                        seq_included.get(aln.query_id as usize).copied().unwrap_or(false)
+                    });
+                    raw_alns.shrink_to_fit();
+                }
+                raw_alns.sort_unstable_by_key(|aln| aln.target_start);
+
+                let result = process_anchor_region_raw(
+                    &raw_alns, &compact_lengths, num_samples,
+                    seq_id, sample_id, 0, seq_len,
+                );
+                tracker.mark_processed_batch(&result.discovered_regions);
+
+                let mut buf: Vec<u8> = Vec::new();
+                write_results(vec![result], &mut buf)?;
+                if !buf.is_empty() {
+                    let mut w = writer.lock().unwrap();
+                    w.write_all(&buf)?;
+                }
+
+                let count = phase1_count.fetch_add(1, Ordering::Relaxed) + 1;
+                pb_phase1.set_position(count as u64);
+
+                Ok(())
+            })?;
+
+            pb_phase1.finish_and_clear();
         }
 
-        // Clear tree cache after each sample
-        impg.clear_tree_cache();
+        // Mark all Phase 1 sequences as fully processed in the tracker
+        for &seq_id in &phase1_seqs {
+            let seq_len = compact_lengths.get_length(seq_id);
+            tracker.mark_processed(seq_id, 0, seq_len);
+        }
 
-        debug!(
-            "Sample {} complete: {} windows, {} intervals",
-            anchor_sample_name, sample_windows, sample_intervals
+        processed_count.store(phase1_seqs.len(), Ordering::Relaxed);
+        info!(
+            "Phase 1 complete: {} hub sequences processed",
+            phase1_seqs.len()
         );
-
-        total_windows += sample_windows;
-        total_intervals += sample_intervals;
     }
+
+    // =========================================================================
+    // Phase 2: Process remaining sequences (sequence-level parallelism)
+    // =========================================================================
+    let phase2_label = if phase1_seqs.is_empty() { "" } else { "Phase 2: " };
+    let pb_depth = ProgressBar::new(total_sequences as u64);
+    pb_depth.set_style(
+        ProgressStyle::default_bar()
+            .template(&format!(
+                "{{spinner:.green}} [{{elapsed_precise}}] [{{wide_bar:.cyan/blue}}] {{pos}}/{{len}} seqs ({{eta}}) | {}remaining sequences",
+                phase2_label
+            ))
+            .unwrap()
+            .progress_chars("#>-")
+    );
+    pb_depth.set_position(processed_count.load(Ordering::Relaxed) as u64);
+
+    phase2_seqs.par_iter().try_for_each(|&seq_id| -> io::Result<()> {
+        let seq_len = compact_lengths.get_length(seq_id);
+        if seq_len <= 0 {
+            let count = processed_count.fetch_add(1, Ordering::Relaxed) + 1;
+            pb_depth.set_position(count as u64);
+            return Ok(());
+        }
+
+        let unprocessed = tracker.get_unprocessed(seq_id, 0, seq_len);
+        if unprocessed.is_empty() {
+            let count = processed_count.fetch_add(1, Ordering::Relaxed) + 1;
+            pb_depth.set_position(count as u64);
+            return Ok(());
+        }
+
+        let sample_id = compact_lengths.get_sample_id(seq_id);
+
+        for (region_start, region_end) in unprocessed {
+            let region_results = if is_transitive {
+                let mut results = Vec::new();
+                if (region_end - region_start) > TRANSITIVE_CHUNK_SIZE {
+                    let mut pos = region_start;
+                    while pos < region_end {
+                        let chunk_end = (pos + TRANSITIVE_CHUNK_SIZE).min(region_end);
+                        let result = process_anchor_region_transitive_raw(
+                            impg,
+                            &compact_lengths, num_samples,
+                            seq_id, sample_id, pos, chunk_end,
+                            config.max_depth, config.min_transitive_len,
+                            &seq_included, min_seq_length,
+                        );
+                        tracker.mark_processed_batch(&result.discovered_regions);
+                        results.push(result);
+                        pos = chunk_end;
+                    }
+                } else {
+                    let result = process_anchor_region_transitive_raw(
+                        impg,
+                        &compact_lengths, num_samples,
+                        seq_id, sample_id, region_start, region_end,
+                        config.max_depth, config.min_transitive_len,
+                        &seq_included, min_seq_length,
+                    );
+                    tracker.mark_processed_batch(&result.discovered_regions);
+                    results.push(result);
+                }
+                results
+            } else {
+                let mut raw_alns = impg.query_raw_intervals(seq_id);
+                if min_seq_length > 0 {
+                    raw_alns.retain(|aln| {
+                        seq_included.get(aln.query_id as usize).copied().unwrap_or(false)
+                    });
+                    raw_alns.shrink_to_fit();
+                }
+                raw_alns.sort_unstable_by_key(|aln| aln.target_start);
+                let result = process_anchor_region_raw(
+                    &raw_alns, &compact_lengths, num_samples,
+                    seq_id, sample_id, region_start, region_end,
+                );
+                tracker.mark_processed_batch(&result.discovered_regions);
+                vec![result]
+            };
+
+            // Format output into thread-local buffer, then write atomically
+            let mut buf: Vec<u8> = Vec::new();
+            write_results(region_results, &mut buf)?;
+            if !buf.is_empty() {
+                let mut w = writer.lock().unwrap();
+                w.write_all(&buf)?;
+            }
+        }
+
+        // Clear sub-index cache after each sequence to bound memory
+        let count = processed_count.fetch_add(1, Ordering::Relaxed) + 1;
+        if is_transitive {
+            impg.clear_sub_index_cache();
+        }
+        pb_depth.set_position(count as u64);
+
+        Ok(())
+    })?;
+
+    pb_depth.finish_and_clear();
+
+    let total_intervals = intervals_counter.load(Ordering::Relaxed);
+    let mut writer = writer.into_inner().unwrap();
+
+    info!(
+        "Depth complete: {} sequences, {} intervals output",
+        total_sequences, total_intervals
+    );
 
     // Handle FAI sequences not in alignment index
     if let Some(ref fai) = fai_seq_lengths {
@@ -5782,12 +2809,20 @@ pub fn compute_depth_windowed_v2(
             }
 
             let sample_name = extract_sample(seq_name, separator);
-            row_id += 1;
+
+            // ref_only filter for FAI sequences
+            if ref_only {
+                if let Some(ref_name) = ref_sample {
+                    if sample_name != ref_name {
+                        continue;
+                    }
+                }
+            }
+
+            let rid = row_counter.fetch_add(1, Ordering::Relaxed) + 1;
 
             // Output as depth=1 for entire sequence
-            // Format: id, start, end, depth, sample1, sample2, ...
-            write!(writer, "{}\t0\t{}\t1", row_id, seq_len)?;
-            // Sample columns
+            write!(writer, "{}\t{}\t1", rid, seq_len)?;
             for sample_id in 0..num_samples as u16 {
                 let current_sample = sample_index.get_name(sample_id).unwrap_or("");
                 if current_sample == sample_name {
@@ -5797,1202 +2832,17 @@ pub fn compute_depth_windowed_v2(
                 }
             }
             writeln!(writer)?;
-
-            total_intervals += 1;
         }
     }
 
     writer.flush()?;
+    let total_intervals = row_counter.load(Ordering::Relaxed);
     info!(
-        "Done (windowed v2): {} windows, {} intervals",
-        total_windows, total_intervals
+        "Done (global): {} intervals output",
+        total_intervals
     );
 
     Ok(())
-}
-
-// ============================================================================
-// Streaming depth computation - memory efficient for large datasets
-// ============================================================================
-
-/// Coverage entry storing both reference and query coordinates
-#[derive(Debug, Clone)]
-struct CoverageEntry {
-    sample: String,
-    query_seq: String,
-    ref_start: i64,
-    ref_end: i64,
-    query_start: i64,
-    query_end: i64,
-    is_reverse: bool, // true if query is on reverse strand relative to ref
-}
-
-/// Streaming depth computation that iterates through index without loading all trees.
-/// Memory usage is O(ref_genome_size × num_samples) instead of O(total_alignments).
-///
-/// Key insight: We load one tree at a time, extract coverage info, then release it.
-/// Uses parallel processing for scanning trees.
-pub fn compute_depth_streaming(
-    impg: &impl ImpgIndex,
-    ref_sample: &str,
-    separator: &str,
-    output_prefix: Option<&str>,
-    merge_adjacent: bool,
-    fai_list: Option<&str>,
-) -> io::Result<()> {
-    info!(
-        "Computing depth (streaming mode) for reference sample: {}",
-        ref_sample
-    );
-
-    // Phase 1: Identify reference sequences and collect all samples
-    debug!("Phase 1: Identifying reference sequences...");
-
-    let seq_lengths = SequenceLengths::from_impg(impg, separator);
-    let all_samples = seq_lengths.get_samples();
-
-    // Get reference sequence IDs
-    let ref_seq_ids: Vec<(u32, String, i64)> = (0..impg.seq_index().len() as u32)
-        .filter_map(|id| {
-            let name = impg.seq_index().get_name(id)?;
-            let sample = extract_sample(name, separator);
-            if sample == ref_sample {
-                let len = impg.seq_index().get_len_from_id(id)? as i64;
-                Some((id, name.to_string(), len))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    if ref_seq_ids.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("No sequences found for reference sample '{}'", ref_sample),
-        ));
-    }
-
-    // If FAI list provided, use it to get complete sequence lengths
-    let ref_seq_lengths: FxHashMap<String, i64> = if let Some(fai_path) = fai_list {
-        debug!("Loading sequence lengths from FAI files...");
-        let fai_lengths = load_fai_lengths_for_sample(fai_path, ref_sample, separator)?;
-        debug!("Loaded {} sequences from FAI", fai_lengths.len());
-        fai_lengths
-    } else {
-        ref_seq_ids.iter().map(|(_, name, len)| (name.clone(), *len)).collect()
-    };
-
-    debug!(
-        "Found {} reference sequences, {} total samples",
-        ref_seq_ids.len(),
-        all_samples.len()
-    );
-
-    // Phase 2: Parallel scan of index to accumulate coverage
-    debug!("Phase 2: Scanning index for coverage (parallel)...");
-
-    // Create a set of reference sequence IDs for quick lookup
-    let ref_id_set: FxHashSet<u32> = ref_seq_ids.iter().map(|(id, _, _)| *id).collect();
-    let ref_id_to_name: FxHashMap<u32, String> = ref_seq_ids.iter().map(|(id, name, _)| (*id, name.clone())).collect();
-
-    // Get all target IDs from forest map
-    let all_target_ids: Vec<u32> = impg.target_ids();
-    let total_trees = all_target_ids.len();
-    debug!(
-        "Processing {} trees in parallel with {} threads...",
-        total_trees,
-        rayon::current_num_threads()
-    );
-
-    // Progress tracking for Phase 2
-    let processed_trees = AtomicUsize::new(0);
-
-    // Parallel processing: each target_id is processed independently
-    let parallel_results: Vec<(FxHashMap<String, Vec<CoverageEntry>>, u64)> = all_target_ids
-        .par_iter()
-        .map(|&target_id| {
-            let mut local_coverage: FxHashMap<String, Vec<CoverageEntry>> = FxHashMap::default();
-            let mut local_alignments = 0u64;
-
-            // Progress logging every 1000 trees
-            let count = processed_trees.fetch_add(1, Ordering::Relaxed);
-            if count % 1000 == 0 || count < 10 {
-                debug!(
-                    "    Progress: {}/{} trees (thread {:?})",
-                    count,
-                    total_trees,
-                    std::thread::current().id()
-                );
-            }
-
-            {
-                let target_name = match impg.seq_index().get_name(target_id) {
-                    Some(n) => n.to_string(),
-                    None => return (local_coverage, local_alignments),
-                };
-                let target_sample = extract_sample(&target_name, separator);
-                let target_is_ref = ref_id_set.contains(&target_id);
-
-                // Load tree without caching (avoids write lock contention in parallel)
-                let tree = match impg.get_or_load_tree(target_id) {
-                    Some(t) => t,
-                    None => return (local_coverage, local_alignments),
-                };
-
-                // Iterate through all alignments in this tree
-                for interval in tree.iter() {
-                    let query_id = interval.metadata.query_id();
-                    let query_name = match impg.seq_index().get_name(query_id) {
-                        Some(n) => n.to_string(),
-                        None => continue,
-                    };
-                    let query_sample = extract_sample(&query_name, separator);
-
-                    let target_start = interval.first as i64;
-                    let target_end = interval.last as i64;
-                    let is_reverse = interval.metadata.query_start() > interval.metadata.query_end();
-                    let query_start = interval.metadata.query_start().min(interval.metadata.query_end()) as i64;
-                    let query_end = interval.metadata.query_start().max(interval.metadata.query_end()) as i64;
-
-                    // Case 1: target is reference -> query sample covers target region
-                    if target_is_ref {
-                        local_coverage
-                            .entry(target_name.clone())
-                            .or_default()
-                            .push(CoverageEntry {
-                                sample: query_sample.clone(),
-                                query_seq: query_name.clone(),
-                                ref_start: target_start,
-                                ref_end: target_end,
-                                query_start,
-                                query_end,
-                                is_reverse,
-                            });
-                        local_alignments += 1;
-                    }
-
-                    // Case 2: query is reference -> target sample covers query region
-                    if ref_id_set.contains(&query_id) {
-                        if let Some(ref_name) = ref_id_to_name.get(&query_id) {
-                            local_coverage
-                                .entry(ref_name.clone())
-                                .or_default()
-                                .push(CoverageEntry {
-                                    sample: target_sample.clone(),
-                                    query_seq: target_name.clone(),
-                                    ref_start: query_start,
-                                    ref_end: query_end,
-                                    query_start: target_start,
-                                    query_end: target_end,
-                                    is_reverse,
-                                });
-                            local_alignments += 1;
-                        }
-                    }
-                }
-            }
-
-            (local_coverage, local_alignments)
-        })
-        .collect();
-
-    // Note: No need to clear tree cache since load_tree_no_cache doesn't cache
-
-    // Merge results from all threads
-    let mut coverage: FxHashMap<String, Vec<CoverageEntry>> = FxHashMap::default();
-    for (_, name, _) in &ref_seq_ids {
-        coverage.insert(name.clone(), Vec::new());
-    }
-
-    let mut alignments_found = 0u64;
-    for (local_coverage, local_alignments) in parallel_results {
-        alignments_found += local_alignments;
-        for (ref_seq, entries) in local_coverage {
-            coverage
-                .entry(ref_seq)
-                .or_default()
-                .extend(entries);
-        }
-    }
-
-    debug!(
-        "Processed {} trees, found {} relevant alignments",
-        total_trees, alignments_found
-    );
-
-    // Add self-coverage for reference sample
-    for (ref_seq, seq_len) in &ref_seq_lengths {
-        if let Some(entries) = coverage.get_mut(ref_seq) {
-            entries.push(CoverageEntry {
-                sample: ref_sample.to_string(),
-                query_seq: ref_seq.clone(),
-                ref_start: 0,
-                ref_end: *seq_len,
-                query_start: 0,
-                query_end: *seq_len,
-                is_reverse: false, // self-coverage is always forward
-            });
-        }
-    }
-
-    // Phase 3: Generate depth output using sweep-line (parallel with chunking)
-    debug!("Phase 3: Generating depth output (parallel)...");
-
-    // Sort samples for consistent output, with reference sample first
-    let mut sample_order: Vec<String> = all_samples;
-    sample_order.sort_by(|a, b| {
-        // Reference sample comes first
-        if a == ref_sample {
-            std::cmp::Ordering::Less
-        } else if b == ref_sample {
-            std::cmp::Ordering::Greater
-        } else {
-            a.cmp(b)
-        }
-    });
-
-    // Sort reference sequences for consistent output
-    let mut ref_seq_list: Vec<(String, i64)> = ref_seq_lengths.into_iter().collect();
-    ref_seq_list.sort_by(|a, b| a.0.cmp(&b.0));
-
-    // Chunk size for parallel processing (10MB)
-    const CHUNK_SIZE: i64 = 10_000_000;
-
-    // Build list of all chunks across all reference sequences
-    // Each chunk is (ref_seq_idx, chunk_idx, chunk_start, chunk_end)
-    let mut all_chunks: Vec<(usize, usize, i64, i64)> = Vec::new();
-    for (ref_idx, (_, seq_len)) in ref_seq_list.iter().enumerate() {
-        let num_chunks = ((*seq_len + CHUNK_SIZE - 1) / CHUNK_SIZE) as usize;
-        for chunk_idx in 0..num_chunks {
-            let chunk_start = (chunk_idx as i64) * CHUNK_SIZE;
-            let chunk_end = ((chunk_idx as i64 + 1) * CHUNK_SIZE).min(*seq_len);
-            all_chunks.push((ref_idx, chunk_idx, chunk_start, chunk_end));
-        }
-    }
-
-    debug!(
-        "Processing {} chunks across {} sequences with {} threads",
-        all_chunks.len(),
-        ref_seq_list.len(),
-        rayon::current_num_threads()
-    );
-
-    // Create temp directory for parallel output files
-    let temp_dir = tempfile::tempdir()?;
-    let temp_dir_path = temp_dir.path().to_path_buf();
-
-    // Parallel processing: each chunk writes to its own temp file
-    // Returns (ref_seq_idx, chunk_idx, temp_file_path, window_count)
-    let processed_chunks = AtomicUsize::new(0);
-    let total_chunks = all_chunks.len();
-
-    let chunk_results: Vec<(usize, usize, std::path::PathBuf, usize)> = all_chunks
-        .par_iter()
-        .map(|&(ref_idx, chunk_idx, chunk_start, chunk_end)| {
-            let temp_path = temp_dir_path.join(format!("depth_{:06}_{:06}.tmp", ref_idx, chunk_idx));
-            let mut window_count = 0usize;
-
-            let (ref_seq, seq_len) = &ref_seq_list[ref_idx];
-
-            // Progress logging every 100 chunks
-            let count = processed_chunks.fetch_add(1, Ordering::Relaxed);
-            if count % 100 == 0 || count < 10 {
-                debug!(
-                    "    Progress: {}/{} chunks (thread {:?})",
-                    count,
-                    total_chunks,
-                    std::thread::current().id()
-                );
-            }
-            let entries = match coverage.get(ref_seq) {
-                Some(e) => e,
-                None => return (ref_idx, chunk_idx, temp_path, 0),
-            };
-
-            if entries.is_empty() {
-                return (ref_idx, chunk_idx, temp_path, 0);
-            }
-
-            // Find entries that overlap this chunk
-            let chunk_entries: Vec<(usize, &CoverageEntry)> = entries
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| e.ref_start < chunk_end && e.ref_end > chunk_start)
-                .collect();
-
-            if chunk_entries.is_empty() {
-                // No coverage in this chunk - output self-coverage only if this is part of ref
-                let file = match std::fs::File::create(&temp_path) {
-                    Ok(f) => f,
-                    Err(_) => return (ref_idx, chunk_idx, temp_path, 0),
-                };
-                let mut temp_writer = std::io::BufWriter::new(file);
-
-                // Output uncovered region with depth=1 (self only)
-                let _ = write!(temp_writer, "1");
-                for s in &sample_order {
-                    if s == ref_sample {
-                        let _ = write!(temp_writer, "\t{}:{}-{}", ref_seq, chunk_start, chunk_end);
-                    } else {
-                        let _ = write!(temp_writer, "\tNA");
-                    }
-                }
-                let _ = writeln!(temp_writer);
-                let _ = temp_writer.flush();
-                return (ref_idx, chunk_idx, temp_path, 1);
-            }
-
-            // Create temp file writer
-            let file = match std::fs::File::create(&temp_path) {
-                Ok(f) => f,
-                Err(_) => return (ref_idx, chunk_idx, temp_path, 0),
-            };
-            let mut temp_writer = std::io::BufWriter::new(file);
-
-            // Build sweep-line events for this chunk
-            // Include events at chunk boundaries for entries that span the boundary
-            let mut events: Vec<(i64, bool, usize)> = Vec::new();
-            for &(orig_idx, entry) in &chunk_entries {
-                // Event for entry start (or chunk start if entry started earlier)
-                let effective_start = entry.ref_start.max(chunk_start);
-                // Event for entry end (or chunk end if entry extends beyond)
-                let effective_end = entry.ref_end.min(chunk_end);
-
-                if effective_start < effective_end {
-                    events.push((effective_start, true, orig_idx));
-                    events.push((effective_end, false, orig_idx));
-                }
-            }
-
-            // Sort events: by position, then ends before starts at same position
-            events.sort_by(|a, b| {
-                a.0.cmp(&b.0)
-                    .then_with(|| a.1.cmp(&b.1))
-            });
-
-            // Sweep-line processing
-            let mut active_entries: FxHashMap<String, usize> = FxHashMap::default();
-            let mut prev_pos: Option<i64> = None;
-            let mut prev_active: Option<FxHashMap<String, usize>> = None;
-
-            for (pos, is_start, entry_idx) in events {
-                if let Some(prev) = prev_pos {
-                    if pos > prev && !active_entries.is_empty() {
-                        let should_output = if merge_adjacent {
-                            match &prev_active {
-                                Some(pa) => {
-                                    pa.len() != active_entries.len()
-                                    || !pa.keys().all(|k| active_entries.contains_key(k))
-                                }
-                                None => true,
-                            }
-                        } else {
-                            true
-                        };
-
-                        if should_output {
-                            let depth = active_entries.len();
-                            let _ = write!(temp_writer, "{}", depth);
-
-                            for s in &sample_order {
-                                if let Some(&eidx) = active_entries.get(s) {
-                                    let entry = &entries[eidx];
-                                    let ref_len = entry.ref_end - entry.ref_start;
-                                    let query_len = entry.query_end - entry.query_start;
-
-                                    let window_ref_start = prev.max(entry.ref_start);
-                                    let window_ref_end = pos.min(entry.ref_end);
-
-                                    let ratio_start = if ref_len > 0 {
-                                        (window_ref_start - entry.ref_start) as f64 / ref_len as f64
-                                    } else {
-                                        0.0
-                                    };
-                                    let ratio_end = if ref_len > 0 {
-                                        (window_ref_end - entry.ref_start) as f64 / ref_len as f64
-                                    } else {
-                                        1.0
-                                    };
-
-                                    let (wqs, wqe) = if entry.is_reverse {
-                                        // Reverse strand: moving forward in ref means moving backward in query
-                                        let s = entry.query_end - (query_len as f64 * ratio_start) as i64;
-                                        let e = entry.query_end - (query_len as f64 * ratio_end) as i64;
-                                        (s, e)
-                                    } else {
-                                        // Forward strand: simple linear mapping
-                                        let s = entry.query_start + (query_len as f64 * ratio_start) as i64;
-                                        let e = entry.query_start + (query_len as f64 * ratio_end) as i64;
-                                        (s, e)
-                                    };
-                                    // Always ensure output has start < end
-                                    let (window_query_start, window_query_end) = (wqs.min(wqe), wqs.max(wqe));
-
-                                    let _ = write!(temp_writer, "\t{}:{}-{}", entry.query_seq, window_query_start, window_query_end);
-                                } else {
-                                    let _ = write!(temp_writer, "\tNA");
-                                }
-                            }
-                            let _ = writeln!(temp_writer);
-                            window_count += 1;
-
-                            if merge_adjacent {
-                                prev_active = Some(active_entries.clone());
-                            }
-                        }
-                    }
-                }
-
-                // Update active entries
-                let entry = &entries[entry_idx];
-                if is_start {
-                    active_entries
-                        .entry(entry.sample.clone())
-                        .and_modify(|existing_idx| {
-                            let existing = &entries[*existing_idx];
-                            let existing_len = existing.ref_end - existing.ref_start;
-                            let new_len = entry.ref_end - entry.ref_start;
-                            if new_len > existing_len {
-                                *existing_idx = entry_idx;
-                            }
-                        })
-                        .or_insert(entry_idx);
-                } else if let Some(&active_idx) = active_entries.get(&entry.sample) {
-                    if active_idx == entry_idx {
-                        active_entries.remove(&entry.sample);
-                    }
-                }
-
-                prev_pos = Some(pos);
-            }
-
-            // Handle uncovered tail region within this chunk
-            let last_covered_pos = prev_pos.unwrap_or(chunk_start);
-            if last_covered_pos < chunk_end {
-                // Check if this is the last chunk for this sequence
-                let is_last_chunk = chunk_end >= *seq_len;
-                if is_last_chunk || last_covered_pos < chunk_end {
-                    let _ = write!(temp_writer, "1");
-                    for s in &sample_order {
-                        if s == ref_sample {
-                            let _ = write!(temp_writer, "\t{}:{}-{}", ref_seq, last_covered_pos, chunk_end);
-                        } else {
-                            let _ = write!(temp_writer, "\tNA");
-                        }
-                    }
-                    let _ = writeln!(temp_writer);
-                    window_count += 1;
-                }
-            }
-
-            let _ = temp_writer.flush();
-            (ref_idx, chunk_idx, temp_path, window_count)
-        })
-        .collect();
-
-    // Sort results by (ref_idx, chunk_idx) to ensure correct ordering
-    let mut sorted_results = chunk_results;
-    sorted_results.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-
-    // Convert to the format expected by merge step
-    let temp_files: Vec<(std::path::PathBuf, usize)> = sorted_results
-        .into_iter()
-        .map(|(_, _, path, count)| (path, count))
-        .collect();
-
-    // Merge temp files into final output with global window IDs
-    // Also handle deduplication at chunk boundaries
-    debug!("Merging {} temp files...", temp_files.len());
-
-    let writer: Box<dyn Write> = if let Some(prefix) = output_prefix {
-        let path = format!("{}.depth.tsv", prefix);
-        Box::new(std::io::BufWriter::new(std::fs::File::create(&path)?))
-    } else {
-        Box::new(std::io::BufWriter::new(std::io::stdout()))
-    };
-    let mut writer = std::io::BufWriter::new(writer);
-
-    // Write header
-    write!(writer, "window_id\tdepth")?;
-    for sample in &sample_order {
-        write!(writer, "\t{}", sample)?;
-    }
-    writeln!(writer)?;
-
-    // Helper function to extract coverage signature (depth + which samples have coverage)
-    // Returns (depth, Vec<bool>) where bool indicates if sample has coverage (not NA)
-    fn get_coverage_signature(line: &str) -> (String, Vec<bool>) {
-        let parts: Vec<&str> = line.split('\t').collect();
-        let depth = parts.first().map(|s| s.to_string()).unwrap_or_default();
-        let has_coverage: Vec<bool> = parts.iter().skip(1).map(|s| *s != "NA").collect();
-        (depth, has_coverage)
-    }
-
-    let mut global_window_id: usize = 0;
-    let mut prev_line: Option<String> = None;
-    let mut prev_signature: Option<(String, Vec<bool>)> = None;
-    let mut at_chunk_boundary = false;
-    let mut merged_count: usize = 0;
-
-    for (temp_path, window_count) in &temp_files {
-        if *window_count == 0 {
-            at_chunk_boundary = true;
-            continue;
-        }
-
-        let file = std::fs::File::open(temp_path)?;
-        let reader = std::io::BufReader::new(file);
-        let mut first_line_of_chunk = true;
-
-        for line in reader.lines() {
-            let line = line?;
-            let current_signature = get_coverage_signature(&line);
-
-            // Check for duplicate at chunk boundary
-            let is_duplicate = if at_chunk_boundary && first_line_of_chunk {
-                if let Some(ref prev_sig) = prev_signature {
-                    // Same depth and same coverage pattern -> likely duplicate at boundary
-                    prev_sig.0 == current_signature.0 && prev_sig.1 == current_signature.1
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-
-            if is_duplicate {
-                // Skip this line as it's a duplicate at chunk boundary
-                merged_count += 1;
-            } else {
-                // Output the previous line if exists
-                if let Some(ref prev) = prev_line {
-                    writeln!(writer, "{}\t{}", global_window_id, prev)?;
-                    global_window_id += 1;
-                }
-                prev_line = Some(line);
-                prev_signature = Some(current_signature);
-            }
-
-            first_line_of_chunk = false;
-        }
-
-        at_chunk_boundary = true;
-    }
-
-    // Output the last line
-    if let Some(ref prev) = prev_line {
-        writeln!(writer, "{}\t{}", global_window_id, prev)?;
-        global_window_id += 1;
-    }
-
-    writer.flush()?;
-
-    // Temp directory and files are automatically cleaned up when temp_dir goes out of scope
-    drop(temp_dir);
-
-    if merged_count > 0 {
-        debug!(
-            "Merged {} duplicate windows at chunk boundaries",
-            merged_count
-        );
-    }
-    debug!("Output complete: {} windows", global_window_id);
-
-    Ok(())
-}
-
-/// Global streaming depth computation - processes all samples as reference one by one.
-/// Each sample's sequences are processed once, ensuring complete coverage without overlap.
-///
-/// Algorithm:
-/// 1. Get all unique samples from the index
-/// 2. For each sample (in sorted order), compute coverage for its sequences
-/// 3. Output combined results with reference sample first if specified
-pub fn compute_depth_global_streaming(
-    impg: &impl ImpgIndex,
-    separator: &str,
-    output_prefix: Option<&str>,
-    merge_adjacent: bool,
-    fai_list: Option<&str>,
-    ref_sample_first: Option<&str>,  // Optional: put this sample's columns first
-) -> io::Result<()> {
-    info!("Computing depth (global streaming mode)...");
-
-    // Phase 1: Get all samples and their sequences
-    debug!("Phase 1: Collecting all samples and sequences...");
-
-    let seq_lengths = SequenceLengths::from_impg(impg, separator);
-    let mut all_samples: Vec<String> = seq_lengths.get_samples();
-
-    // Sort samples: ref_sample_first comes first if specified, then alphabetical
-    all_samples.sort_by(|a, b| {
-        if let Some(ref_first) = ref_sample_first {
-            if a == ref_first {
-                return std::cmp::Ordering::Less;
-            } else if b == ref_first {
-                return std::cmp::Ordering::Greater;
-            }
-        }
-        a.cmp(b)
-    });
-
-    debug!("Found {} samples to process", all_samples.len());
-
-    // Build mapping of sample -> sequences
-    let mut sample_seq_ids: FxHashMap<String, Vec<(u32, String, i64)>> = FxHashMap::default();
-    for id in 0..impg.seq_index().len() as u32 {
-        if let Some(name) = impg.seq_index().get_name(id) {
-            let sample = extract_sample(name, separator);
-            if let Some(len) = impg.seq_index().get_len_from_id(id) {
-                sample_seq_ids
-                    .entry(sample.to_string())
-                    .or_default()
-                    .push((id, name.to_string(), len as i64));
-            }
-        }
-    }
-
-    // Load FAI lengths if provided
-    let fai_lengths: Option<FxHashMap<String, i64>> = if let Some(fai_path) = fai_list {
-        debug!("Loading sequence lengths from FAI files...");
-        let fai_seq_lengths = SequenceLengths::from_fai_list(fai_path, separator)?;
-        debug!(
-            "FAI: {} samples, {} sequences",
-            fai_seq_lengths.sample_to_seqs.len(),
-            fai_seq_lengths.lengths.len()
-        );
-        Some(fai_seq_lengths.lengths)
-    } else {
-        None
-    };
-
-    // Phase 2: Process each sample's sequences
-    debug!("Phase 2: Scanning index for coverage...");
-
-    // Get all target IDs once
-    let all_target_ids: Vec<u32> = impg.target_ids();
-    let total_trees = all_target_ids.len();
-    debug!(
-        "{} trees to scan, {} threads available",
-        total_trees,
-        rayon::current_num_threads()
-    );
-
-    // Build a global mapping: for each sequence ID, record all overlapping alignments
-    // This is done once and used for all samples
-    let processed_trees = AtomicUsize::new(0);
-
-    // Collect all coverage entries in parallel
-    // Key: (ref_seq_name) -> Vec<CoverageEntry>
-    let parallel_results: Vec<FxHashMap<String, Vec<CoverageEntry>>> = all_target_ids
-        .par_iter()
-        .map(|&target_id| {
-            let mut local_coverage: FxHashMap<String, Vec<CoverageEntry>> = FxHashMap::default();
-
-            let count = processed_trees.fetch_add(1, Ordering::Relaxed);
-            if count % 1000 == 0 || count < 10 {
-                debug!(
-                    "    Progress: {}/{} trees (thread {:?})",
-                    count,
-                    total_trees,
-                    std::thread::current().id()
-                );
-            }
-
-            let target_name = match impg.seq_index().get_name(target_id) {
-                Some(n) => n.to_string(),
-                None => return local_coverage,
-            };
-            let target_sample = extract_sample(&target_name, separator);
-
-            // Load tree
-            let tree = match impg.get_or_load_tree(target_id) {
-                Some(t) => t,
-                None => return local_coverage,
-            };
-
-            // For each alignment in this tree
-            for interval in tree.iter() {
-                let query_id = interval.metadata.query_id();
-                let query_name = match impg.seq_index().get_name(query_id) {
-                    Some(n) => n.to_string(),
-                    None => continue,
-                };
-                let query_sample = extract_sample(&query_name, separator);
-
-                // Skip same-sample alignments (self-coverage added separately)
-                if target_sample == query_sample {
-                    continue;
-                }
-
-                let target_start = interval.first as i64;
-                let target_end = interval.last as i64;
-                let is_reverse = interval.metadata.query_start() > interval.metadata.query_end();
-                let query_start = interval.metadata.query_start().min(interval.metadata.query_end()) as i64;
-                let query_end = interval.metadata.query_start().max(interval.metadata.query_end()) as i64;
-
-                // Record coverage bidirectionally for complete coverage
-                // 1. On target's sequence: query sample provides coverage
-                local_coverage
-                    .entry(target_name.clone())
-                    .or_default()
-                    .push(CoverageEntry {
-                        sample: query_sample.to_string(),
-                        query_seq: query_name.clone(),
-                        ref_start: target_start,
-                        ref_end: target_end,
-                        query_start,
-                        query_end,
-                        is_reverse,
-                    });
-
-                // 2. On query's sequence: target sample provides coverage (reverse direction)
-                // This ensures the window can be output from the alphabetically-first sample's perspective
-                local_coverage
-                    .entry(query_name)  // Move instead of clone
-                    .or_default()
-                    .push(CoverageEntry {
-                        sample: target_sample.to_string(),
-                        query_seq: target_name.clone(),
-                        ref_start: query_start,
-                        ref_end: query_end,
-                        query_start: target_start,
-                        query_end: target_end,
-                        is_reverse, // same relative orientation
-                    });
-            }
-
-            local_coverage
-        })
-        .collect();
-
-    // Merge parallel results
-    debug!("Merging coverage data...");
-    let mut coverage: FxHashMap<String, Vec<CoverageEntry>> = FxHashMap::default();
-    for local in parallel_results {
-        for (seq_name, entries) in local {
-            coverage
-                .entry(seq_name)
-                .or_default()
-                .extend(entries);
-        }
-    }
-
-    // Add self-coverage for each sequence
-    for (sample, seqs) in &sample_seq_ids {
-        for (_, seq_name, seq_len) in seqs {
-            let len = if let Some(ref fai) = fai_lengths {
-                *fai.get(seq_name).unwrap_or(seq_len)
-            } else {
-                *seq_len
-            };
-
-            coverage
-                .entry(seq_name.clone())
-                .or_default()
-                .push(CoverageEntry {
-                    sample: sample.clone(),
-                    query_seq: seq_name.clone(),
-                    ref_start: 0,
-                    ref_end: len,
-                    query_start: 0,
-                    query_end: len,
-                    is_reverse: false, // self-coverage is always forward
-                });
-        }
-    }
-
-    debug!(
-        "Coverage data collected for {} sequences",
-        coverage.len()
-    );
-
-    // Phase 3: Generate depth output
-    debug!("Phase 3: Generating depth output (parallel with chunking)...");
-
-    // Chunk size for parallel processing
-    const CHUNK_SIZE: i64 = 10_000_000;
-
-    // Build list of all sequences to process, grouped by sample
-    // Process in sample order (ref_sample_first if specified)
-    let mut all_seq_list: Vec<(String, String, i64)> = Vec::new();  // (sample, seq_name, seq_len)
-    for sample in &all_samples {
-        if let Some(seqs) = sample_seq_ids.get(sample) {
-            for (_, seq_name, seq_len) in seqs {
-                let len = if let Some(ref fai) = fai_lengths {
-                    *fai.get(seq_name).unwrap_or(seq_len)
-                } else {
-                    *seq_len
-                };
-                all_seq_list.push((sample.clone(), seq_name.clone(), len));
-            }
-        }
-    }
-
-    // Sort sequences: by sample order, then by sequence name
-    all_seq_list.sort_by(|a, b| {
-        let sample_order_a = all_samples.iter().position(|s| s == &a.0).unwrap_or(usize::MAX);
-        let sample_order_b = all_samples.iter().position(|s| s == &b.0).unwrap_or(usize::MAX);
-        sample_order_a.cmp(&sample_order_b).then_with(|| a.1.cmp(&b.1))
-    });
-
-    // Build chunks for all sequences
-    let mut all_chunks: Vec<(usize, usize, String, i64, i64)> = Vec::new();  // (seq_idx, chunk_idx, seq_name, chunk_start, chunk_end)
-    for (seq_idx, (_, seq_name, seq_len)) in all_seq_list.iter().enumerate() {
-        let num_chunks = ((*seq_len + CHUNK_SIZE - 1) / CHUNK_SIZE) as usize;
-        for chunk_idx in 0..num_chunks.max(1) {
-            let chunk_start = (chunk_idx as i64) * CHUNK_SIZE;
-            let chunk_end = ((chunk_idx as i64 + 1) * CHUNK_SIZE).min(*seq_len);
-            all_chunks.push((seq_idx, chunk_idx, seq_name.clone(), chunk_start, chunk_end));
-        }
-    }
-
-    debug!(
-        "Processing {} chunks across {} sequences with {} threads",
-        all_chunks.len(),
-        all_seq_list.len(),
-        rayon::current_num_threads()
-    );
-
-    // Create temp directory
-    let temp_dir = tempfile::tempdir()?;
-    let temp_dir_path = temp_dir.path().to_path_buf();
-
-    // Process chunks in parallel
-    let processed_chunks = AtomicUsize::new(0);
-    let total_chunks = all_chunks.len();
-
-    let chunk_results: Vec<(usize, usize, std::path::PathBuf, usize)> = all_chunks
-        .par_iter()
-        .map(|(seq_idx, chunk_idx, seq_name, chunk_start, chunk_end)| {
-            let temp_path = temp_dir_path.join(format!("depth_{:06}_{:06}.tmp", seq_idx, chunk_idx));
-            let mut window_count = 0usize;
-
-            let count = processed_chunks.fetch_add(1, Ordering::Relaxed);
-            if count % 100 == 0 || count < 10 {
-                debug!(
-                    "    Progress: {}/{} chunks (thread {:?})",
-                    count,
-                    total_chunks,
-                    std::thread::current().id()
-                );
-            }
-
-            // Extract the reference sample from the sequence name
-            let ref_sample = extract_sample(seq_name, separator);
-
-            let entries = match coverage.get(seq_name) {
-                Some(e) => e,
-                None => return (*seq_idx, *chunk_idx, temp_path, 0),
-            };
-
-            if entries.is_empty() {
-                return (*seq_idx, *chunk_idx, temp_path, 0);
-            }
-
-            // Find entries that overlap this chunk
-            let chunk_entries: Vec<(usize, &CoverageEntry)> = entries
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| e.ref_start < *chunk_end && e.ref_end > *chunk_start)
-                .collect();
-
-            if chunk_entries.is_empty() {
-                return (*seq_idx, *chunk_idx, temp_path, 0);
-            }
-
-            // Create temp file
-            let file = match std::fs::File::create(&temp_path) {
-                Ok(f) => f,
-                Err(_) => return (*seq_idx, *chunk_idx, temp_path, 0),
-            };
-            let mut temp_writer = std::io::BufWriter::new(file);
-
-            // Build sweep-line events
-            let mut events: Vec<(i64, bool, usize)> = Vec::new();
-            for &(orig_idx, entry) in &chunk_entries {
-                let effective_start = entry.ref_start.max(*chunk_start);
-                let effective_end = entry.ref_end.min(*chunk_end);
-                if effective_start < effective_end {
-                    events.push((effective_start, true, orig_idx));
-                    events.push((effective_end, false, orig_idx));
-                }
-            }
-
-            events.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-
-            // Sweep-line processing
-            let mut active_entries: FxHashMap<String, usize> = FxHashMap::default();
-            let mut prev_pos: Option<i64> = None;
-            let mut prev_active: Option<FxHashMap<String, usize>> = None;
-
-            for (pos, is_start, entry_idx) in events {
-                if let Some(prev) = prev_pos {
-                    if pos > prev && !active_entries.is_empty() {
-                        let should_output = if merge_adjacent {
-                            match &prev_active {
-                                Some(pa) => {
-                                    pa.len() != active_entries.len()
-                                        || !pa.keys().all(|k| active_entries.contains_key(k))
-                                }
-                                None => true,
-                            }
-                        } else {
-                            true
-                        };
-
-                        if should_output {
-                            // Deduplication: only output if ref_sample is the first (alphabetically)
-                            // among all samples covering this window. This ensures each homologous
-                            // region is output exactly once.
-                            // Note: ref_sample is not in active_entries (it's implicit), so we
-                            // compare it against the first covering sample.
-                            let first_covering = active_entries.keys().min().map(|s| s.as_str());
-                            let is_first = match first_covering {
-                                Some(first) => ref_sample.as_str() <= first,
-                                None => true, // Only ref_sample covers this region
-                            };
-                            if !is_first {
-                                prev_pos = Some(pos);
-                                continue;
-                            }
-
-                            let depth = active_entries.len();
-                            let _ = write!(temp_writer, "{}", depth);
-
-                            for s in &all_samples {
-                                // For the reference sample, use window coordinates directly
-                                // This ensures contiguous coverage without overlaps
-                                if s.as_str() == ref_sample {
-                                    let _ = write!(
-                                        temp_writer,
-                                        "\t{}:{}-{}",
-                                        seq_name, prev, pos
-                                    );
-                                } else if let Some(&eidx) = active_entries.get(s) {
-                                    let entry = &entries[eidx];
-                                    let ref_len = entry.ref_end - entry.ref_start;
-                                    let query_len = entry.query_end - entry.query_start;
-
-                                    let window_ref_start = prev.max(entry.ref_start);
-                                    let window_ref_end = pos.min(entry.ref_end);
-
-                                    let ratio_start = if ref_len > 0 {
-                                        (window_ref_start - entry.ref_start) as f64 / ref_len as f64
-                                    } else {
-                                        0.0
-                                    };
-                                    let ratio_end = if ref_len > 0 {
-                                        (window_ref_end - entry.ref_start) as f64 / ref_len as f64
-                                    } else {
-                                        1.0
-                                    };
-
-                                    let (wqs, wqe) = if entry.is_reverse {
-                                        // Reverse strand: moving forward in ref means moving backward in query
-                                        let s = entry.query_end - (query_len as f64 * ratio_start) as i64;
-                                        let e = entry.query_end - (query_len as f64 * ratio_end) as i64;
-                                        (s, e)
-                                    } else {
-                                        // Forward strand: simple linear mapping
-                                        let s = entry.query_start + (query_len as f64 * ratio_start) as i64;
-                                        let e = entry.query_start + (query_len as f64 * ratio_end) as i64;
-                                        (s, e)
-                                    };
-                                    // Always ensure output has start < end
-                                    let (window_query_start, window_query_end) = (wqs.min(wqe), wqs.max(wqe));
-
-                                    let _ = write!(
-                                        temp_writer,
-                                        "\t{}:{}-{}",
-                                        entry.query_seq, window_query_start, window_query_end
-                                    );
-                                } else {
-                                    let _ = write!(temp_writer, "\tNA");
-                                }
-                            }
-                            let _ = writeln!(temp_writer);
-                            window_count += 1;
-
-                            if merge_adjacent {
-                                prev_active = Some(active_entries.clone());
-                            }
-                        }
-                    }
-                }
-
-                // Update active entries
-                let entry = &entries[entry_idx];
-                if is_start {
-                    active_entries
-                        .entry(entry.sample.clone())
-                        .and_modify(|existing_idx| {
-                            let existing = &entries[*existing_idx];
-                            let existing_len = existing.ref_end - existing.ref_start;
-                            let new_len = entry.ref_end - entry.ref_start;
-                            if new_len > existing_len {
-                                *existing_idx = entry_idx;
-                            }
-                        })
-                        .or_insert(entry_idx);
-                } else if let Some(&active_idx) = active_entries.get(&entry.sample) {
-                    if active_idx == entry_idx {
-                        active_entries.remove(&entry.sample);
-                    }
-                }
-
-                prev_pos = Some(pos);
-            }
-
-            let _ = temp_writer.flush();
-            (*seq_idx, *chunk_idx, temp_path, window_count)
-        })
-        .collect();
-
-    // Sort results
-    let mut sorted_results = chunk_results;
-    sorted_results.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-
-    let temp_files: Vec<(std::path::PathBuf, usize)> = sorted_results
-        .into_iter()
-        .map(|(_, _, path, count)| (path, count))
-        .collect();
-
-    // Merge and output
-    debug!("Merging {} temp files...", temp_files.len());
-
-    let writer: Box<dyn Write> = if let Some(prefix) = output_prefix {
-        let path = format!("{}.depth.tsv", prefix);
-        Box::new(std::io::BufWriter::new(std::fs::File::create(&path)?))
-    } else {
-        Box::new(std::io::BufWriter::new(std::io::stdout()))
-    };
-    let mut writer = std::io::BufWriter::new(writer);
-
-    // Write header
-    write!(writer, "window_id\tdepth")?;
-    for sample in &all_samples {
-        write!(writer, "\t{}", sample)?;
-    }
-    writeln!(writer)?;
-
-    // Merge with deduplication
-    fn get_coverage_signature(line: &str) -> (String, Vec<bool>) {
-        let parts: Vec<&str> = line.split('\t').collect();
-        let depth = parts.first().map(|s| s.to_string()).unwrap_or_default();
-        let has_coverage: Vec<bool> = parts.iter().skip(1).map(|s| *s != "NA").collect();
-        (depth, has_coverage)
-    }
-
-    let mut global_window_id: usize = 0;
-    let mut prev_line: Option<String> = None;
-    let mut prev_signature: Option<(String, Vec<bool>)> = None;
-    let mut at_chunk_boundary = false;
-    let mut merged_count: usize = 0;
-
-    for (temp_path, window_count) in &temp_files {
-        if *window_count == 0 {
-            at_chunk_boundary = true;
-            continue;
-        }
-
-        let file = std::fs::File::open(temp_path)?;
-        let reader = std::io::BufReader::new(file);
-        let mut first_line_of_chunk = true;
-
-        for line in reader.lines() {
-            let line = line?;
-            let current_signature = get_coverage_signature(&line);
-
-            let is_duplicate = if at_chunk_boundary && first_line_of_chunk {
-                if let Some(ref prev_sig) = prev_signature {
-                    prev_sig.0 == current_signature.0 && prev_sig.1 == current_signature.1
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-
-            if is_duplicate {
-                merged_count += 1;
-            } else {
-                if let Some(ref prev) = prev_line {
-                    writeln!(writer, "{}\t{}", global_window_id, prev)?;
-                    global_window_id += 1;
-                }
-                prev_line = Some(line);
-                prev_signature = Some(current_signature);
-            }
-
-            first_line_of_chunk = false;
-        }
-
-        at_chunk_boundary = true;
-    }
-
-    if let Some(ref prev) = prev_line {
-        writeln!(writer, "{}\t{}", global_window_id, prev)?;
-        global_window_id += 1;
-    }
-
-    writer.flush()?;
-    drop(temp_dir);
-
-    if merged_count > 0 {
-        debug!(
-            "Merged {} duplicate windows at chunk boundaries",
-            merged_count
-        );
-    }
-    debug!("Output complete: {} windows", global_window_id);
-
-    Ok(())
-}
-
-/// Load sequence lengths from FAI files for a specific sample
-fn load_fai_lengths_for_sample(
-    fai_list_path: &str,
-    ref_sample: &str,
-    separator: &str,
-) -> io::Result<FxHashMap<String, i64>> {
-    let mut lengths: FxHashMap<String, i64> = FxHashMap::default();
-
-    let content = std::fs::read_to_string(fai_list_path).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Failed to read FAI list file '{}': {}", fai_list_path, e),
-        )
-    })?;
-
-    for line in content.lines() {
-        let fai_path = line.trim();
-        if fai_path.is_empty() || fai_path.starts_with('#') {
-            continue;
-        }
-
-        let fai_content = std::fs::read_to_string(fai_path).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("Failed to read FAI file '{}': {}", fai_path, e),
-            )
-        })?;
-
-        for fai_line in fai_content.lines() {
-            let parts: Vec<&str> = fai_line.split('\t').collect();
-            if parts.len() >= 2 {
-                let seq_name = parts[0];
-                let seq_len: i64 = parts[1].parse().unwrap_or(0);
-                let sample = extract_sample(seq_name, separator);
-
-                if sample == ref_sample {
-                    lengths.insert(seq_name.to_string(), seq_len);
-                }
-            }
-        }
-    }
-
-    Ok(lengths)
 }
 
 // ============================================================================

@@ -1,3 +1,6 @@
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use clap::Parser;
 use coitrees::{Interval, IntervalTree};
 use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
@@ -1013,11 +1016,24 @@ enum Args {
         #[clap(long, value_parser)]
         fai_list: Option<String>,
 
-        /// Reference sample name for targeted mode (only output depth for this sample's sequences)
-        /// When not specified, computes depth for all sequences (global mode)
+        /// Prioritize this sample's sequences as anchors (ordering hint).
+        /// All sequences are still output unless --ref-only is also specified.
         #[arg(help_heading = "Reference selection")]
         #[clap(long = "ref", value_parser)]
         ref_sample: Option<String>,
+
+        /// Only output depth for the --ref sample's sequences (filter mode).
+        /// Requires --ref.
+        #[arg(help_heading = "Reference selection")]
+        #[clap(long, action, requires = "ref_sample")]
+        ref_only: bool,
+
+        /// Minimum sequence length to include in depth computation.
+        /// Sequences shorter than this are excluded entirely (not as anchors, not as alignments).
+        /// Accepts k/m/g suffixes (e.g., 1M, 500k). Default: 0 (no filter).
+        #[arg(help_heading = "Sequence filtering")]
+        #[clap(long, value_parser = parse_size, default_value = "0")]
+        min_seq_length: u64,
 
         /// Merge adjacent windows with the same depth and haplotype set
         #[arg(help_heading = "Output options")]
@@ -1039,36 +1055,10 @@ enum Args {
         #[clap(short = 'O', long, value_parser)]
         output_prefix: Option<String>,
 
-        /// Use memory-efficient mode (recommended for TB-scale data)
-        /// Uses compressed bitmap instead of interval sets (~50x less memory)
+        /// Window size in bp (default: 50000)
         #[arg(help_heading = "Performance")]
-        #[clap(long, action)]
-        memory_efficient: bool,
-
-        /// Use compact ID-based mode (optimized for CPU and memory)
-        /// Uses numeric IDs instead of strings for 30-50% memory reduction
-        /// and binary search for 10x faster interval operations
-        #[arg(help_heading = "Performance")]
-        #[clap(long, action)]
-        compact: bool,
-
-        /// Use windowed mode: process samples sequentially with fixed-size windows
-        /// Most memory-efficient mode, outputs directly to file without accumulating
-        /// Use --window-size to control window size (default: 50kb)
-        #[arg(help_heading = "Performance")]
-        #[clap(long, action)]
-        windowed: bool,
-
-        /// Window size in bp for windowed mode (default: 50000)
-        #[arg(help_heading = "Performance")]
-        #[clap(long, value_parser, requires = "windowed")]
+        #[clap(long, value_parser)]
         window_size: Option<i64>,
-
-        /// Include same-sample transitive alignments (intra-genome duplications)
-        /// By default, only cross-sample alignments contribute to depth
-        #[arg(help_heading = "Performance")]
-        #[clap(long, action, requires = "windowed")]
-        include_self_alignments: bool,
 
         // === NEW OPTIONS FOR REDESIGNED DEPTH ===
 
@@ -1094,7 +1084,7 @@ enum Args {
         #[clap(long, action, requires = "stats")]
         combined_output: bool,
 
-        /// Merge adjacent intervals with similar depth (works with --windowed and --combined-output)
+        /// Merge adjacent intervals with similar depth (works with depth and --combined-output)
         /// Intervals are merged if (max_depth - min_depth) / max_depth <= tolerance
         /// When merged: depth = max, samples = union. Default: 0.05 (5%)
         #[arg(help_heading = "Output options")]
@@ -2205,15 +2195,13 @@ fn run() -> io::Result<()> {
             ref_order: _,       // Not used in sample-based mode
             fai_list,
             ref_sample,
+            ref_only,
+            min_seq_length,
             merge_adjacent,
             approximate,
             separator,
             output_prefix,
-            memory_efficient,
-            compact,
-            windowed,
             window_size,
-            include_self_alignments,
             samples,
             samples_file,
             stats,
@@ -2366,101 +2354,31 @@ fn run() -> io::Result<()> {
                 return Ok(());
             }
 
-            // === WINDOWED MODE ===
-            // Most memory-efficient mode: processes samples one at a time with fixed-size windows
-            // V2: Uses sparse sample storage, streaming output, numeric sorting
-            if windowed {
-                info!("Using windowed mode v2 (optimized: sparse storage, streaming output)");
-                if let Some(ws) = window_size {
-                    info!("Window size: {} bp", ws);
-                }
-                if include_self_alignments {
-                    info!("Including same-sample transitive alignments (intra-genome duplications)");
-                }
-                if merge_tolerance > 0.0 {
-                    info!("Merge tolerance: {:.1}%", merge_tolerance * 100.0);
-                }
-                depth::compute_depth_windowed_v2(
-                    &impg,
-                    &config,
-                    None, // depth doesn't need sequence index
-                    &separator,
-                    output_prefix.as_deref(),
-                    fai_list.as_deref(),
-                    window_size,
-                    !include_self_alignments, // no_self_alignments is now default
-                    merge_tolerance,
-                )?;
-                return Ok(());
+            // Global depth computation (default mode)
+            // Non-transitive by default: direct queries are fast and complete
+            // (impg stores alignments bidirectionally, so 1-hop captures both directions)
+            // User can opt-in to transitive with -x for sparse alignment sets
+            if let Some(ws) = window_size {
+                info!("Window size: {} bp", ws);
             }
-
-            // === LEGACY MODES (when no new mode is specified) ===
-
-            // For non-transitive queries, use streaming mode (more memory efficient)
-            if !transitive && !transitive_opts.transitive_dfs {
-                if let Some(ref ref_name) = ref_sample {
-                    // Single reference sample mode
-                    info!("Using streaming mode for --ref '{}'", ref_name);
-                    depth::compute_depth_streaming(
-                        &impg,
-                        ref_name,
-                        &separator,
-                        output_prefix.as_deref(),
-                        merge_adjacent,
-                        fai_list.as_deref(),
-                    )?;
-                } else {
-                    // Global mode - process all samples
-                    info!("Using global streaming mode (all samples)");
-                    depth::compute_depth_global_streaming(
-                        &impg,
-                        &separator,
-                        output_prefix.as_deref(),
-                        merge_adjacent,
-                        fai_list.as_deref(),
-                        None,  // No sample to put first
-                    )?;
-                }
-                return Ok(());
+            if merge_tolerance > 0.0 {
+                info!("Merge tolerance: {:.1}%", merge_tolerance * 100.0);
             }
-
-            // For transitive queries, fall back to the old implementation
-            info!("Using transitive mode (requires full index)");
-
-            // Choose between compact, memory-efficient, and standard implementation
-            if compact {
-                info!("Using compact ID-based mode (optimized data structures)");
-                depth::compute_depth_by_sample_v3(
-                    &impg,
-                    &config,
-                    None, // depth doesn't need sequence index
-                    &separator,
-                    output_prefix.as_deref(),
-                    fai_list.as_deref(),
-                    ref_sample.as_deref(),
-                )?;
-            } else if memory_efficient {
-                info!("Using memory-efficient mode (compressed bitmap tracking)");
-                depth::compute_depth_by_sample_v2(
-                    &impg,
-                    &config,
-                    None, // depth doesn't need sequence index
-                    &separator,
-                    output_prefix.as_deref(),
-                    fai_list.as_deref(),
-                    ref_sample.as_deref(),
-                )?;
-            } else {
-                depth::compute_depth_by_sample(
-                    &impg,
-                    &config,
-                    None, // depth doesn't need sequence index
-                    &separator,
-                    output_prefix.as_deref(),
-                    fai_list.as_deref(),
-                    ref_sample.as_deref(),
-                )?;
+            if min_seq_length > 0 {
+                info!("Minimum sequence length filter: {} bp", min_seq_length);
             }
+            depth::compute_depth_global(
+                &impg,
+                &config,
+                &separator,
+                output_prefix.as_deref(),
+                fai_list.as_deref(),
+                window_size,
+                merge_tolerance,
+                ref_sample.as_deref(),
+                ref_only,
+                min_seq_length as i64,
+            )?;
         }
     }
 

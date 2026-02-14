@@ -1,7 +1,7 @@
 use crate::alignment_record::{AlignmentRecord, Strand};
 use crate::forest_map::ForestMap;
 use crate::graph::reverse_complement;
-use crate::impg_index::ImpgIndex;
+use crate::impg_index::{ImpgIndex, RawAlignmentInterval};
 use crate::onealn::{OneAlnAlignment, OneAlnParser, ParseErr as OneAlnParseErr};
 use crate::paf::read_cigar_data;
 use crate::seqidx::SequenceIndex;
@@ -193,6 +193,11 @@ impl QueryMetadata {
 
     fn is_reversed(&self) -> bool {
         (self.strand_and_data_offset & Self::REVERSED_BIT) != 0
+    }
+
+    /// Check if this alignment is on the reverse strand (public, for depth computation)
+    pub fn is_reverse_strand(&self) -> bool {
+        (self.strand_and_data_offset & Self::STRAND_BIT) != 0
     }
 
     fn set_reversed(&mut self) {
@@ -387,6 +392,10 @@ pub struct Impg {
     /// Cache for trace_spacing values per .1aln file (indexed by alignment_file_index)
     /// Uses Vec for O(1) direct indexing. None = not yet loaded or not a .1aln file.
     trace_spacing_cache: RwLock<Vec<Option<i64>>>,
+    /// When false, `load_tree_from_disk` loads trees without caching them.
+    /// This bounds memory usage for commands like `depth` where transitive BFS
+    /// would otherwise cache all trees simultaneously.
+    tree_cache_enabled: std::sync::atomic::AtomicBool,
 }
 
 impl Impg {
@@ -1322,6 +1331,7 @@ impl Impg {
             index_file_path: String::new(),
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
             trace_spacing_cache: RwLock::new(vec![None; num_files]),
+            tree_cache_enabled: std::sync::atomic::AtomicBool::new(true),
         })
     }
 
@@ -1428,11 +1438,13 @@ impl Impg {
 
             let arc_tree = Arc::new(tree);
 
-            // Cache the tree for future use
-            self.trees
-                .write()
-                .unwrap()
-                .insert(target_id, Arc::clone(&arc_tree));
+            // Only cache if tree caching is enabled
+            if self.tree_cache_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                self.trees
+                    .write()
+                    .unwrap()
+                    .insert(target_id, Arc::clone(&arc_tree));
+            }
 
             Some(arc_tree)
         } else {
@@ -1506,6 +1518,15 @@ impl Impg {
         debug!("Cleared {} trees from cache", count);
     }
 
+    /// Enable or disable tree caching.
+    /// When disabled, trees loaded from disk are returned directly without being
+    /// stored in the in-memory cache. Already-cached trees are still served from cache.
+    /// This bounds peak memory for workloads like transitive depth where BFS would
+    /// otherwise cache every tree it visits.
+    pub fn set_tree_cache_enabled(&self, enabled: bool) {
+        self.tree_cache_enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Get the number of trees currently cached in memory
     pub fn cached_tree_count(&self) -> usize {
         self.trees.read().unwrap().len()
@@ -1574,6 +1595,7 @@ impl Impg {
             index_file_path,
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
             trace_spacing_cache: RwLock::new(vec![None; num_files]),
+            tree_cache_enabled: std::sync::atomic::AtomicBool::new(true),
         })
     }
 
@@ -2586,11 +2608,55 @@ impl ImpgIndex for Impg {
         Impg::clear_tree_cache(self)
     }
 
+    fn clear_sub_index_cache(&self) {
+        // No-op for single Impg (no sub-indices)
+    }
+
+    fn set_tree_cache_enabled(&self, enabled: bool) {
+        Impg::set_tree_cache_enabled(self, enabled)
+    }
+
     fn is_bidirectional(&self) -> bool {
         // Check the magic bytes stored during load
         // For now, assume all Impg instances are bidirectional unless explicitly marked otherwise
         // This will be properly tracked when we add the is_bidirectional field
         true
+    }
+
+    fn query_raw_intervals(&self, target_id: u32) -> Vec<RawAlignmentInterval> {
+        if let Some(tree) = self.get_or_load_tree(target_id) {
+            tree.iter()
+                .map(|interval| RawAlignmentInterval {
+                    target_start: interval.first,
+                    target_end: interval.last,
+                    query_id: interval.metadata.query_id,
+                    query_start: interval.metadata.query_start,
+                    query_end: interval.metadata.query_end,
+                    is_reverse: interval.metadata.is_reverse_strand(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn query_raw_overlapping(&self, target_id: u32, start: i32, end: i32) -> Vec<RawAlignmentInterval> {
+        if let Some(tree) = self.get_or_load_tree(target_id) {
+            let mut results = Vec::new();
+            tree.query(start, end, |interval| {
+                results.push(RawAlignmentInterval {
+                    target_start: interval.first,
+                    target_end: interval.last,
+                    query_id: interval.metadata.query_id,
+                    query_start: interval.metadata.query_start,
+                    query_end: interval.metadata.query_end,
+                    is_reverse: interval.metadata.is_reverse_strand(),
+                });
+            });
+            results
+        } else {
+            Vec::new()
+        }
     }
 }
 

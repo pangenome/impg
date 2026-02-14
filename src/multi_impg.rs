@@ -6,7 +6,7 @@
 
 use crate::forest_map::ForestMap;
 use crate::impg::{AdjustedInterval, CigarOp, Impg, QueryMetadata, SortedRanges};
-use crate::impg_index::ImpgIndex;
+use crate::impg_index::{ImpgIndex, RawAlignmentInterval};
 use crate::seqidx::SequenceIndex;
 use crate::sequence_index::UnifiedSequenceIndex;
 use crate::subset_filter::SubsetFilter;
@@ -136,6 +136,10 @@ pub struct MultiImpg {
     /// Whether all indices are bidirectional (V2 format)
     /// True only if ALL sub-indices are V2 format
     is_bidirectional: bool,
+
+    /// Whether tree caching is enabled for sub-indices.
+    /// Propagated to newly lazy-loaded sub-indices.
+    tree_cache_enabled: std::sync::atomic::AtomicBool,
 }
 
 impl MultiImpg {
@@ -230,6 +234,7 @@ impl MultiImpg {
             local_to_unified,
             sub_indices: RwLock::new(vec![None; num_indices]),
             is_bidirectional: all_bidirectional,
+            tree_cache_enabled: std::sync::atomic::AtomicBool::new(true),
         })
     }
 
@@ -320,6 +325,7 @@ impl MultiImpg {
             local_to_unified: cache.local_to_unified,
             sub_indices: RwLock::new(vec![None; num_indices]),
             is_bidirectional: true,
+            tree_cache_enabled: std::sync::atomic::AtomicBool::new(true),
         })
     }
 
@@ -451,7 +457,11 @@ impl MultiImpg {
         )?;
         let impg = Arc::new(impg);
 
-        // Store in cache
+        // Propagate tree cache setting to the newly loaded sub-index
+        let cache_enabled = self.tree_cache_enabled.load(std::sync::atomic::Ordering::Relaxed);
+        impg.set_tree_cache_enabled(cache_enabled);
+
+        // Store in sub-index cache
         {
             let mut indices = self.sub_indices.write().unwrap();
             indices[index_idx] = Some(Arc::clone(&impg));
@@ -866,8 +876,94 @@ impl ImpgIndex for MultiImpg {
         }
     }
 
+    fn clear_sub_index_cache(&self) {
+        // Clear the sub-index cache to free memory
+        let mut indices = self.sub_indices.write().unwrap();
+        for slot in indices.iter_mut() {
+            *slot = None;
+        }
+    }
+
+    fn set_tree_cache_enabled(&self, enabled: bool) {
+        // Store at MultiImpg level so newly lazy-loaded sub-indices inherit the setting
+        self.tree_cache_enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
+        // Also propagate to already-loaded sub-indices
+        let indices = self.sub_indices.read().unwrap();
+        for sub_index in indices.iter().flatten() {
+            sub_index.set_tree_cache_enabled(enabled);
+        }
+    }
+
     fn is_bidirectional(&self) -> bool {
         self.is_bidirectional
+    }
+
+    fn query_raw_intervals(&self, unified_target_id: u32) -> Vec<RawAlignmentInterval> {
+        let locations = match self.forest_map.get(&unified_target_id) {
+            Some(locs) => locs,
+            None => return Vec::new(),
+        };
+
+        let mut results = Vec::new();
+        for loc in locations {
+            let impg = match self.get_sub_index(loc.index_idx) {
+                Ok(i) => i,
+                Err(_) => continue,
+            };
+            if let Some(tree) = impg.get_or_load_tree(loc.local_target_id) {
+                let l2u = &self.local_to_unified[loc.index_idx];
+                for interval in tree.iter() {
+                    let m = &interval.metadata;
+                    let unified_query_id = match l2u.get(m.query_id() as usize) {
+                        Some(&id) if id != u32::MAX => id,
+                        _ => continue,
+                    };
+                    results.push(RawAlignmentInterval {
+                        target_start: interval.first,
+                        target_end: interval.last,
+                        query_id: unified_query_id,
+                        query_start: m.query_start(),
+                        query_end: m.query_end(),
+                        is_reverse: m.is_reverse_strand(),
+                    });
+                }
+            }
+        }
+        results
+    }
+
+    fn query_raw_overlapping(&self, unified_target_id: u32, start: i32, end: i32) -> Vec<RawAlignmentInterval> {
+        let locations = match self.forest_map.get(&unified_target_id) {
+            Some(locs) => locs,
+            None => return Vec::new(),
+        };
+
+        let mut results = Vec::new();
+        for loc in locations {
+            let impg = match self.get_sub_index(loc.index_idx) {
+                Ok(i) => i,
+                Err(_) => continue,
+            };
+            if let Some(tree) = impg.get_or_load_tree(loc.local_target_id) {
+                let l2u = &self.local_to_unified[loc.index_idx];
+                tree.query(start, end, |interval| {
+                    let m = &interval.metadata;
+                    if let Some(&unified_query_id) = l2u.get(m.query_id() as usize) {
+                        if unified_query_id != u32::MAX {
+                            results.push(RawAlignmentInterval {
+                                target_start: interval.first,
+                                target_end: interval.last,
+                                query_id: unified_query_id,
+                                query_start: m.query_start(),
+                                query_end: m.query_end(),
+                                is_reverse: m.is_reverse_strand(),
+                            });
+                        }
+                    }
+                });
+            }
+        }
+        results
     }
 }
 
