@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex};
 
 // Structure to manage AGC archives using ragc-core
 pub struct AgcIndex {
-    decompressors: Arc<Mutex<Vec<Decompressor>>>,
+    /// Per-thread decompressor pools. Indexed by rayon::current_thread_index().
+    /// Each slot is lazily initialized on first access by opening the AGC files.
+    thread_decompressors: Vec<Mutex<Option<Vec<Decompressor>>>>,
     pub agc_paths: Vec<String>,
     // Interned strings - each unique string stored once
     interned_strings: FxHashMap<String, Arc<str>>,
@@ -21,10 +23,7 @@ impl fmt::Debug for AgcIndex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AgcIndex")
             .field("agc_paths", &self.agc_paths)
-            .field(
-                "num_decompressors",
-                &self.decompressors.lock().unwrap().len(),
-            )
+            .field("num_thread_slots", &self.thread_decompressors.len())
             .finish_non_exhaustive()
     }
 }
@@ -32,7 +31,7 @@ impl fmt::Debug for AgcIndex {
 impl AgcIndex {
     fn new() -> Self {
         AgcIndex {
-            decompressors: Arc::new(Mutex::new(Vec::new())),
+            thread_decompressors: Vec::new(),
             agc_paths: Vec::new(),
             interned_strings: FxHashMap::default(),
             sample_contig_to_agc: FxHashMap::default(),
@@ -87,7 +86,8 @@ impl AgcIndex {
             .collect::<io::Result<Vec<_>>>()?;
 
         // Sequential assembly phase to maintain order and avoid shared mutable state issues
-        for (agc_idx, agc_path, decompressor, sample_contigs) in metadata_results {
+        // Drop the metadata decompressors — each thread will lazily open its own set
+        for (agc_idx, agc_path, _decompressor, sample_contigs) in metadata_results {
             index.agc_paths.push(agc_path);
 
             for (sample, contigs) in sample_contigs {
@@ -132,8 +132,11 @@ impl AgcIndex {
                 }
             }
 
-            index.decompressors.lock().unwrap().push(decompressor);
         }
+
+        // Initialize per-thread decompressor slots (+1 for main-thread fallback)
+        let num_slots = rayon::current_num_threads() + 1;
+        index.thread_decompressors = (0..num_slots).map(|_| Mutex::new(None)).collect();
 
         // Shrink to fit after building
         index.sample_contig_to_agc.shrink_to_fit();
@@ -172,9 +175,20 @@ impl AgcIndex {
             )
         })?;
 
-        // Use efficient sub-sequence extraction (only decompresses needed segments)
-        let mut decompressors = self.decompressors.lock().unwrap();
-        let sequence = decompressors[agc_idx]
+        // Use per-thread decompressors to avoid mutex contention
+        let thread_idx = rayon::current_thread_index()
+            .unwrap_or(self.thread_decompressors.len() - 1);
+        let mut slot = self.thread_decompressors[thread_idx].lock().unwrap();
+        let decomps = slot.get_or_insert_with(|| {
+            self.agc_paths
+                .iter()
+                .map(|path| {
+                    Decompressor::open(path, DecompressorConfig { verbosity: 0 })
+                        .unwrap_or_else(|e| panic!("Failed to open AGC '{path}' for thread: {e}"))
+                })
+                .collect()
+        });
+        let sequence = decomps[agc_idx]
             .get_contig_range(&sample, &contig, start as usize, end as usize)
             .map_err(|e| {
                 io::Error::other(format!(
@@ -205,8 +219,19 @@ impl AgcIndex {
             )
         })?;
 
-        let mut decompressors = self.decompressors.lock().unwrap();
-        let length = decompressors[agc_idx]
+        let thread_idx = rayon::current_thread_index()
+            .unwrap_or(self.thread_decompressors.len() - 1);
+        let mut slot = self.thread_decompressors[thread_idx].lock().unwrap();
+        let decomps = slot.get_or_insert_with(|| {
+            self.agc_paths
+                .iter()
+                .map(|path| {
+                    Decompressor::open(path, DecompressorConfig { verbosity: 0 })
+                        .unwrap_or_else(|e| panic!("Failed to open AGC '{path}' for thread: {e}"))
+                })
+                .collect()
+        });
+        let length = decomps[agc_idx]
             .get_contig_length(&sample, &contig)
             .map_err(|e| {
                 io::Error::other(format!("Failed to get length for '{contig}@{sample}': {e}"))
