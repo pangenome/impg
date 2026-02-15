@@ -6,11 +6,11 @@
 
 use crate::forest_map::ForestMap;
 use crate::impg::{AdjustedInterval, CigarOp, Impg, QueryMetadata, SortedRanges};
-use crate::impg_index::ImpgIndex;
+use crate::impg_index::{ImpgIndex, RawAlignmentInterval};
 use crate::seqidx::SequenceIndex;
 use crate::sequence_index::UnifiedSequenceIndex;
 use crate::subset_filter::SubsetFilter;
-use coitrees::{BasicCOITree, Interval};
+use coitrees::{BasicCOITree, Interval, IntervalTree};
 use log::{debug, info, warn};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -99,6 +99,8 @@ struct IndexHeader {
     seq_index: SequenceIndex,
     /// Forest map from this file
     forest_map: ForestMap,
+    /// Whether this index is bidirectional (V2 format)
+    is_bidirectional: bool,
 }
 
 /// Multi-file IMPG index.
@@ -130,6 +132,14 @@ pub struct MultiImpg {
 
     /// Lazily-loaded sub-indices (only loaded when tree data is needed)
     sub_indices: RwLock<Vec<Option<Arc<Impg>>>>,
+
+    /// Whether all indices are bidirectional (V2 format)
+    /// True only if ALL sub-indices are V2 format
+    is_bidirectional: bool,
+
+    /// Whether tree caching is enabled for sub-indices.
+    /// Propagated to newly lazy-loaded sub-indices.
+    tree_cache_enabled: std::sync::atomic::AtomicBool,
 }
 
 impl MultiImpg {
@@ -198,10 +208,21 @@ impl MultiImpg {
             }
         }
 
+        // Check if all indices are bidirectional
+        let all_bidirectional = headers.iter().all(|h| h.is_bidirectional);
+        if !all_bidirectional {
+            let v1_count = headers.iter().filter(|h| !h.is_bidirectional).count();
+            warn!(
+                "{} of {} indices are V1 (unidirectional). Rebuild with default settings for full bidirectional support.",
+                v1_count, num_indices
+            );
+        }
+
         info!(
-            "Built unified index with {} sequences and {} targets",
+            "Built unified index with {} sequences and {} targets (bidirectional: {})",
             unified_seq_index.len(),
-            unified_forest_map.len()
+            unified_forest_map.len(),
+            all_bidirectional
         );
 
         Ok(Self {
@@ -212,6 +233,8 @@ impl MultiImpg {
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
             local_to_unified,
             sub_indices: RwLock::new(vec![None; num_indices]),
+            is_bidirectional: all_bidirectional,
+            tree_cache_enabled: std::sync::atomic::AtomicBool::new(true),
         })
     }
 
@@ -290,6 +313,9 @@ impl MultiImpg {
             forest_map.len()
         );
 
+        // Note: When loading from cache, we assume bidirectional=true since
+        // caches are only created for new-format indices. If users have
+        // V1 indices, the cache will be invalidated and rebuilt.
         Ok(Self {
             seq_index: cache.unified_seq_index,
             forest_map,
@@ -298,6 +324,8 @@ impl MultiImpg {
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
             local_to_unified: cache.local_to_unified,
             sub_indices: RwLock::new(vec![None; num_indices]),
+            is_bidirectional: true,
+            tree_cache_enabled: std::sync::atomic::AtomicBool::new(true),
         })
     }
 
@@ -350,15 +378,16 @@ impl MultiImpg {
 
     /// Load only the header (seq_index + forest_map) from a single index file.
     fn load_header(path: &Path) -> std::io::Result<IndexHeader> {
-        const MAGIC: &[u8] = b"IMPGIDX1";
+        const MAGIC_V1: &[u8] = b"IMPGIDX1";
+        const MAGIC_V2: &[u8] = b"IMPGIDX2";
 
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
 
-        // Read and verify magic bytes
+        // Read and verify magic bytes (support both V1 and V2)
         let mut magic_buf = [0u8; 8];
         reader.read_exact(&mut magic_buf)?;
-        if magic_buf != MAGIC {
+        if magic_buf != MAGIC_V1 && magic_buf != MAGIC_V2 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("Invalid magic bytes in {:?}", path),
@@ -391,9 +420,11 @@ impl MultiImpg {
                     )
                 })?;
 
+        let is_bidirectional = magic_buf == MAGIC_V2;
         Ok(IndexHeader {
             seq_index,
             forest_map,
+            is_bidirectional,
         })
     }
 
@@ -426,7 +457,11 @@ impl MultiImpg {
         )?;
         let impg = Arc::new(impg);
 
-        // Store in cache
+        // Propagate tree cache setting to the newly loaded sub-index
+        let cache_enabled = self.tree_cache_enabled.load(std::sync::atomic::Ordering::Relaxed);
+        impg.set_tree_cache_enabled(cache_enabled);
+
+        // Store in sub-index cache
         {
             let mut indices = self.sub_indices.write().unwrap();
             indices[index_idx] = Some(Arc::clone(&impg));
@@ -762,6 +797,173 @@ impl ImpgIndex for MultiImpg {
 
     fn sequence_files(&self) -> &[String] {
         &self.sequence_files
+    }
+
+    fn query_reverse_for_depth(&self, query_id: u32) -> Vec<(i32, i32, u32)> {
+        let mut results = Vec::new();
+
+        // Iterate through all target_ids in the forest map
+        for &target_id in self.forest_map.keys() {
+            // Skip if querying self
+            if target_id == query_id {
+                continue;
+            }
+
+            if let Some(tree) = self.get_or_load_tree(target_id) {
+                for interval in tree.iter() {
+                    if interval.metadata.query_id() == query_id {
+                        let query_start = interval.metadata.query_start();
+                        let query_end = interval.metadata.query_end();
+                        results.push((query_start, query_end, target_id));
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
+    fn build_query_to_targets_map(&self) -> FxHashMap<u32, Vec<u32>> {
+        let mut query_to_targets: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+
+        for &target_id in self.forest_map.keys() {
+            if let Some(tree) = self.get_or_load_tree(target_id) {
+                let mut seen_queries: rustc_hash::FxHashSet<u32> = rustc_hash::FxHashSet::default();
+                for interval in tree.iter() {
+                    let qid = interval.metadata.query_id();
+                    if qid != target_id && seen_queries.insert(qid) {
+                        query_to_targets.entry(qid).or_default().push(target_id);
+                    }
+                }
+            }
+        }
+
+        // Clear tree cache after building the map
+        self.clear_tree_cache();
+
+        query_to_targets
+    }
+
+    fn query_reverse_for_depth_with_map(
+        &self,
+        query_id: u32,
+        query_to_targets: &FxHashMap<u32, Vec<u32>>,
+    ) -> Vec<(i32, i32, u32)> {
+        let mut results = Vec::new();
+
+        if let Some(target_ids) = query_to_targets.get(&query_id) {
+            for &target_id in target_ids {
+                if let Some(tree) = self.get_or_load_tree(target_id) {
+                    for interval in tree.iter() {
+                        if interval.metadata.query_id() == query_id {
+                            let query_start = interval.metadata.query_start();
+                            let query_end = interval.metadata.query_end();
+                            results.push((query_start, query_end, target_id));
+                        }
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
+    fn clear_tree_cache(&self) {
+        // For MultiImpg, clear caches of all loaded sub-indices
+        let indices = self.sub_indices.read().unwrap();
+        for sub_index in indices.iter().flatten() {
+            sub_index.clear_tree_cache();
+        }
+    }
+
+    fn clear_sub_index_cache(&self) {
+        // Clear the sub-index cache to free memory
+        let mut indices = self.sub_indices.write().unwrap();
+        for slot in indices.iter_mut() {
+            *slot = None;
+        }
+    }
+
+    fn set_tree_cache_enabled(&self, enabled: bool) {
+        // Store at MultiImpg level so newly lazy-loaded sub-indices inherit the setting
+        self.tree_cache_enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
+        // Also propagate to already-loaded sub-indices
+        let indices = self.sub_indices.read().unwrap();
+        for sub_index in indices.iter().flatten() {
+            sub_index.set_tree_cache_enabled(enabled);
+        }
+    }
+
+    fn is_bidirectional(&self) -> bool {
+        self.is_bidirectional
+    }
+
+    fn query_raw_intervals(&self, unified_target_id: u32) -> Vec<RawAlignmentInterval> {
+        let locations = match self.forest_map.get(&unified_target_id) {
+            Some(locs) => locs,
+            None => return Vec::new(),
+        };
+
+        let mut results = Vec::new();
+        for loc in locations {
+            let impg = match self.get_sub_index(loc.index_idx) {
+                Ok(i) => i,
+                Err(_) => continue,
+            };
+            if let Some(tree) = impg.get_or_load_tree(loc.local_target_id) {
+                let l2u = &self.local_to_unified[loc.index_idx];
+                for interval in tree.iter() {
+                    let m = &interval.metadata;
+                    let unified_query_id = match l2u.get(m.query_id() as usize) {
+                        Some(&id) if id != u32::MAX => id,
+                        _ => continue,
+                    };
+                    results.push(RawAlignmentInterval {
+                        target_start: interval.first,
+                        target_end: interval.last,
+                        query_id: unified_query_id,
+                        query_start: m.query_start(),
+                        query_end: m.query_end(),
+                        is_reverse: m.is_reverse_strand(),
+                    });
+                }
+            }
+        }
+        results
+    }
+
+    fn query_raw_overlapping(&self, unified_target_id: u32, start: i32, end: i32) -> Vec<RawAlignmentInterval> {
+        let locations = match self.forest_map.get(&unified_target_id) {
+            Some(locs) => locs,
+            None => return Vec::new(),
+        };
+
+        let mut results = Vec::new();
+        for loc in locations {
+            let impg = match self.get_sub_index(loc.index_idx) {
+                Ok(i) => i,
+                Err(_) => continue,
+            };
+            if let Some(tree) = impg.get_or_load_tree(loc.local_target_id) {
+                let l2u = &self.local_to_unified[loc.index_idx];
+                tree.query(start, end, |interval| {
+                    let m = &interval.metadata;
+                    if let Some(&unified_query_id) = l2u.get(m.query_id() as usize) {
+                        if unified_query_id != u32::MAX {
+                            results.push(RawAlignmentInterval {
+                                target_start: interval.first,
+                                target_end: interval.last,
+                                query_id: unified_query_id,
+                                query_start: m.query_start(),
+                                query_end: m.query_end(),
+                                is_reverse: m.is_reverse_strand(),
+                            });
+                        }
+                    }
+                });
+            }
+        }
+        results
     }
 }
 

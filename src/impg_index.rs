@@ -14,6 +14,18 @@ use coitrees::BasicCOITree;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
+/// Raw alignment interval without CIGAR projection, for fast depth computation.
+/// Contains only the coordinate metadata stored in the interval tree nodes.
+#[derive(Debug, Clone)]
+pub struct RawAlignmentInterval {
+    pub target_start: i32,
+    pub target_end: i32,
+    pub query_id: u32,
+    pub query_start: i32,
+    pub query_end: i32,
+    pub is_reverse: bool,
+}
+
 /// Trait for IMPG index operations.
 ///
 /// Both `Impg` (single-file) and `MultiImpg` (multi-file) implement this trait,
@@ -109,6 +121,48 @@ pub trait ImpgIndex: Send + Sync {
 
     /// Get the sequence files (FASTA/AGC) associated with this index.
     fn sequence_files(&self) -> &[String];
+
+    /// Query alignments where the specified sequence is the QUERY (reverse direction).
+    /// Returns: Vec of (query_start, query_end, target_id) tuples
+    fn query_reverse_for_depth(&self, query_id: u32) -> Vec<(i32, i32, u32)>;
+
+    /// Build a lightweight reverse index: query_id -> [target_ids that have alignments with this query]
+    fn build_query_to_targets_map(&self) -> FxHashMap<u32, Vec<u32>>;
+
+    /// Query reverse alignments using a pre-built query_to_targets map.
+    fn query_reverse_for_depth_with_map(
+        &self,
+        query_id: u32,
+        query_to_targets: &FxHashMap<u32, Vec<u32>>,
+    ) -> Vec<(i32, i32, u32)>;
+
+    /// Clear tree cache to free memory.
+    fn clear_tree_cache(&self);
+
+    /// Clear sub-index cache (MultiImpg only) to free memory.
+    /// For single Impg, this is a no-op.
+    /// Useful for depth computation with many alignment files to bound peak memory.
+    fn clear_sub_index_cache(&self);
+
+    /// Enable or disable tree caching.
+    /// When disabled, trees loaded from disk are not stored in the cache,
+    /// bounding peak memory for transitive queries.
+    fn set_tree_cache_enabled(&self, enabled: bool);
+
+    /// Check if this index was built with bidirectional mode.
+    /// Bidirectional indices contain both A→B and B→A entries for each alignment,
+    /// eliminating the need for a separate reverse index in depth calculations.
+    fn is_bidirectional(&self) -> bool;
+
+    /// Iterate all alignment intervals for a target sequence, returning raw coordinates
+    /// without CIGAR projection. Much faster than query() for bulk operations like depth.
+    /// For MultiImpg, this merges results from all sub-indices that contain the target.
+    fn query_raw_intervals(&self, target_id: u32) -> Vec<RawAlignmentInterval>;
+
+    /// Query only alignment intervals that overlap a specific range [start, end) on a target sequence.
+    /// Returns raw coordinates without CIGAR projection, using coitrees range query for O(n+k) performance.
+    /// Much more efficient than query_raw_intervals() when only a subset of intervals is needed (e.g., BFS).
+    fn query_raw_overlapping(&self, target_id: u32, start: i32, end: i32) -> Vec<RawAlignmentInterval>;
 }
 
 /// Enum wrapper that can hold either a single `Impg` or a `MultiImpg`.
@@ -374,6 +428,73 @@ impl ImpgIndex for ImpgWrapper {
         match self {
             ImpgWrapper::Single(impg) => impg.sequence_files(),
             ImpgWrapper::Multi(multi) => multi.sequence_files(),
+        }
+    }
+
+    fn query_reverse_for_depth(&self, query_id: u32) -> Vec<(i32, i32, u32)> {
+        match self {
+            ImpgWrapper::Single(impg) => impg.query_reverse_for_depth(query_id),
+            ImpgWrapper::Multi(multi) => multi.query_reverse_for_depth(query_id),
+        }
+    }
+
+    fn build_query_to_targets_map(&self) -> FxHashMap<u32, Vec<u32>> {
+        match self {
+            ImpgWrapper::Single(impg) => impg.build_query_to_targets_map(),
+            ImpgWrapper::Multi(multi) => multi.build_query_to_targets_map(),
+        }
+    }
+
+    fn query_reverse_for_depth_with_map(
+        &self,
+        query_id: u32,
+        query_to_targets: &FxHashMap<u32, Vec<u32>>,
+    ) -> Vec<(i32, i32, u32)> {
+        match self {
+            ImpgWrapper::Single(impg) => impg.query_reverse_for_depth_with_map(query_id, query_to_targets),
+            ImpgWrapper::Multi(multi) => multi.query_reverse_for_depth_with_map(query_id, query_to_targets),
+        }
+    }
+
+    fn clear_tree_cache(&self) {
+        match self {
+            ImpgWrapper::Single(impg) => impg.clear_tree_cache(),
+            ImpgWrapper::Multi(multi) => multi.clear_tree_cache(),
+        }
+    }
+
+    fn clear_sub_index_cache(&self) {
+        match self {
+            ImpgWrapper::Single(impg) => impg.clear_sub_index_cache(),
+            ImpgWrapper::Multi(multi) => multi.clear_sub_index_cache(),
+        }
+    }
+
+    fn set_tree_cache_enabled(&self, enabled: bool) {
+        match self {
+            ImpgWrapper::Single(impg) => impg.set_tree_cache_enabled(enabled),
+            ImpgWrapper::Multi(multi) => multi.set_tree_cache_enabled(enabled),
+        }
+    }
+
+    fn is_bidirectional(&self) -> bool {
+        match self {
+            ImpgWrapper::Single(impg) => impg.is_bidirectional(),
+            ImpgWrapper::Multi(multi) => multi.is_bidirectional(),
+        }
+    }
+
+    fn query_raw_intervals(&self, target_id: u32) -> Vec<RawAlignmentInterval> {
+        match self {
+            ImpgWrapper::Single(impg) => impg.query_raw_intervals(target_id),
+            ImpgWrapper::Multi(multi) => multi.query_raw_intervals(target_id),
+        }
+    }
+
+    fn query_raw_overlapping(&self, target_id: u32, start: i32, end: i32) -> Vec<RawAlignmentInterval> {
+        match self {
+            ImpgWrapper::Single(impg) => impg.query_raw_overlapping(target_id, start, end),
+            ImpgWrapper::Multi(multi) => multi.query_raw_overlapping(target_id, start, end),
         }
     }
 }

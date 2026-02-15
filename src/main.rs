@@ -1,7 +1,10 @@
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use clap::Parser;
 use coitrees::{Interval, IntervalTree};
 use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
-use impg::commands::{align, graph, lace, partition, refine, similarity};
+use impg::commands::{align, depth, graph, lace, partition, refine, similarity};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::impg_index::{ImpgIndex, ImpgWrapper};
 use impg::multi_impg::MultiImpg;
@@ -979,6 +982,135 @@ enum Args {
         /// Minimum mapping length to include in filtering. Accepts k/m/g suffixes.
         #[clap(short = 'b', long = "min-mapping-length", value_parser = parse_size, default_value = "0")]
         min_mapping_length: u64,
+
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+
+    /// Compute pangenome coverage depth across sequences.
+    ///
+    /// Modes:
+    ///   (default)     Whole-pangenome depth with auto hub detection
+    ///   --ref SAMPLE  Ref-anchored: prioritize SAMPLE as coordinate-system anchor
+    ///   --ref + --ref-only  Ref-only: output only the ref sample's anchored regions
+    ///   -r / -b       Region query: depth for specific genomic regions
+    ///
+    /// Add-on:
+    ///   --stats       Produce summary statistics and per-depth BED files
+    Depth {
+        #[clap(flatten)]
+        alignment: AlignmentOpts,
+
+        /// Enable transitive queries (with Breadth-First Search)
+        #[arg(help_heading = "Transitive queries")]
+        #[clap(short = 'x', long, action, conflicts_with = "transitive_dfs")]
+        transitive: bool,
+
+        #[clap(flatten)]
+        transitive_opts: TransitiveOpts,
+
+        /// File containing reference sequence names in processing order (one per line)
+        #[arg(help_heading = "Reference order")]
+        #[clap(long, value_parser, conflicts_with = "ref_order")]
+        ref_order_file: Option<String>,
+
+        /// Comma-separated list of reference sequence names in processing order
+        #[arg(help_heading = "Reference order")]
+        #[clap(long, value_parser, value_delimiter = ',', conflicts_with = "ref_order_file")]
+        ref_order: Option<Vec<String>>,
+
+        /// Path to a text file containing paths to FAI index files (one per line)
+        /// When provided, uncovered regions will be filled with depth=1
+        #[arg(help_heading = "Sequence input")]
+        #[clap(long, value_parser)]
+        fai_list: Option<String>,
+
+        /// Ref-anchored mode: prioritize this sample's sequences as anchors.
+        /// Guarantees all regions covered by this sample use its coordinate system.
+        /// All sequences are still output unless --ref-only is also specified.
+        #[arg(help_heading = "Mode selection")]
+        #[clap(long = "ref", value_parser)]
+        ref_sample: Option<String>,
+
+        /// Ref-only mode: only output depth for the --ref sample's sequences.
+        /// Regions not covered by the ref sample are omitted entirely.
+        /// Requires --ref.
+        #[arg(help_heading = "Mode selection")]
+        #[clap(long, action, requires = "ref_sample")]
+        ref_only: bool,
+
+        /// Minimum sequence length to include in depth computation.
+        /// Sequences shorter than this are excluded entirely (not as anchors, not as alignments).
+        /// Accepts k/m/g suffixes (e.g., 1M, 500k). Default: 0 (no filter).
+        #[arg(help_heading = "Sequence filtering")]
+        #[clap(long, value_parser = parse_size, default_value = "0")]
+        min_seq_length: u64,
+
+        /// Merge adjacent windows with the same depth and haplotype set
+        #[arg(help_heading = "Output options")]
+        #[clap(long, action)]
+        merge_adjacent: bool,
+
+        /// Use approximate mode for faster queries with 1aln files
+        #[arg(help_heading = "Performance")]
+        #[clap(long, action)]
+        approximate: bool,
+
+        /// Separator for PanSN format (default: #)
+        #[arg(help_heading = "Output options")]
+        #[clap(long, value_parser, default_value = "#")]
+        separator: String,
+
+        /// Prefix for output file (outputs to stdout if not specified)
+        #[arg(help_heading = "Output options")]
+        #[clap(short = 'O', long, value_parser)]
+        output_prefix: Option<String>,
+
+        /// Window size in bp (default: 50000)
+        #[arg(help_heading = "Performance")]
+        #[clap(long, value_parser)]
+        window_size: Option<i64>,
+
+        // === NEW OPTIONS FOR REDESIGNED DEPTH ===
+
+        /// Comma-separated list of sample names to include in depth calculation
+        #[arg(help_heading = "Sample filtering")]
+        #[clap(long, value_parser, value_delimiter = ',', conflicts_with = "samples_file")]
+        samples: Option<Vec<String>>,
+
+        /// File containing sample names to include (one per line)
+        #[arg(help_heading = "Sample filtering")]
+        #[clap(long, value_parser, conflicts_with = "samples")]
+        samples_file: Option<String>,
+
+        /// Add-on: produce summary statistics and per-depth BED files.
+        /// Can be combined with --ref for reference-anchored statistics.
+        #[arg(help_heading = "Statistics add-on")]
+        #[clap(long, action, conflicts_with_all = &["target_range", "target_bed"])]
+        stats: bool,
+
+        /// Add-on: output combined file with sample lists (requires --stats).
+        /// Creates a single BED file sorted by position with depth and sample columns.
+        #[arg(help_heading = "Statistics add-on")]
+        #[clap(long, action, requires = "stats")]
+        combined_output: bool,
+
+        /// Merge adjacent intervals with similar depth (works with depth and --combined-output)
+        /// Intervals are merged if (max_depth - min_depth) / max_depth <= tolerance
+        /// When merged: depth = max, samples = union. Default: 0.05 (5%)
+        #[arg(help_heading = "Output options")]
+        #[clap(long, value_parser, default_value = "0.05")]
+        merge_tolerance: f64,
+
+        /// Region query mode: target range in format `seq_name:start-end`
+        #[arg(help_heading = "Mode selection")]
+        #[clap(short = 'r', long, value_parser, conflicts_with_all = &["target_bed", "stats"])]
+        target_range: Option<String>,
+
+        /// Region query mode: path to BED file containing target regions
+        #[arg(help_heading = "Mode selection")]
+        #[clap(short = 'b', long, value_parser, conflicts_with_all = &["target_range", "stats"])]
+        target_bed: Option<String>,
 
         #[clap(flatten)]
         common: CommonOpts,
@@ -2065,6 +2197,198 @@ fn run() -> io::Result<()> {
 
             align::run_align(fasta_files, fasta_list, &output_dir, config)?;
         }
+        Args::Depth {
+            common,
+            alignment,
+            transitive,
+            transitive_opts,
+            ref_order_file: _,  // Not used in sample-based mode
+            ref_order: _,       // Not used in sample-based mode
+            fai_list,
+            ref_sample,
+            ref_only,
+            min_seq_length,
+            merge_adjacent,
+            approximate,
+            separator,
+            output_prefix,
+            window_size,
+            samples,
+            samples_file,
+            stats,
+            combined_output,
+            merge_tolerance,
+            target_range,
+            target_bed,
+        } => {
+            initialize_threads_and_log(&common);
+
+            let alignment_files = resolve_alignment_files(&alignment)?;
+
+            // Validate approximate mode
+            if approximate {
+                validate_approximate_mode_min_length(
+                    transitive_opts.min_transitive_len,
+                    transitive || transitive_opts.transitive_dfs,
+                )?;
+            }
+
+            let impg = initialize_index(
+                &common,
+                &alignment,
+                alignment_files.as_slice(),
+                Vec::new(), // depth doesn't need sequence files
+            )?;
+
+            // Load sample filter if provided
+            let sample_filter = load_sample_filter_depth(samples, samples_file)?;
+            if let Some(ref filter) = sample_filter {
+                info!("Sample filter active: {} samples", filter.len());
+            }
+
+            // Build depth config
+            let config = depth::DepthConfig {
+                transitive,
+                transitive_dfs: transitive_opts.transitive_dfs,
+                max_depth: transitive_opts.max_depth,
+                min_transitive_len: transitive_opts.effective_min_transitive_len(),
+                min_distance_between_ranges: transitive_opts.min_distance_between_ranges,
+                merge_adjacent,
+                approximate_mode: approximate,
+            };
+
+            // Statistics add-on: produces summary and per-depth BED files
+            if stats {
+                let prefix = output_prefix.as_deref().unwrap_or("depth_stats");
+                if ref_sample.is_some() {
+                    info!("Running depth with --stats add-on (ref-anchored), output prefix: {}", prefix);
+                } else {
+                    info!("Running depth with --stats add-on, output prefix: {}", prefix);
+                }
+
+                if combined_output {
+                    info!("Combined output mode: will generate single file with sample lists");
+                    if merge_tolerance > 0.0 {
+                        info!("Merge tolerance: {:.1}%", merge_tolerance * 100.0);
+                    }
+                    depth::compute_depth_stats_with_samples(
+                        &impg,
+                        &config,
+                        &separator,
+                        prefix,
+                        sample_filter.as_ref(),
+                        fai_list.as_deref(),
+                        ref_sample.as_deref(),
+                        merge_tolerance,
+                    )?;
+                } else {
+                    depth::compute_depth_stats(
+                        &impg,
+                        &config,
+                        &separator,
+                        prefix,
+                        sample_filter.as_ref(),
+                        fai_list.as_deref(),
+                        ref_sample.as_deref(),
+                    )?;
+                }
+                return Ok(());
+            }
+
+            // Region query mode: depth for specific genomic regions
+            if target_range.is_some() || target_bed.is_some() {
+                info!("Running depth in region query mode");
+
+                // Parse regions
+                let regions: Vec<(String, i32, i32)> = if let Some(ref range) = target_range {
+                    vec![depth::parse_target_range_depth(range)?]
+                } else if let Some(ref bed_path) = target_bed {
+                    depth::parse_bed_file_depth(bed_path)?
+                } else {
+                    Vec::new()
+                };
+
+                if regions.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "No valid regions found",
+                    ));
+                }
+
+                info!("Querying {} region(s)", regions.len());
+
+                // Collect all results
+                let mut all_results: Vec<depth::RegionDepthResult> = Vec::new();
+                let mut all_samples: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+
+                for (seq_name, start, end) in &regions {
+                    let results = depth::query_region_depth(
+                        &impg,
+                        &config,
+                        seq_name,
+                        *start,
+                        *end,
+                        &separator,
+                        sample_filter.as_ref(),
+                        None,
+                    )?;
+
+                    // Collect sample names
+                    for result in &results {
+                        for sample in result.sample_positions.keys() {
+                            all_samples.insert(sample.clone());
+                        }
+                    }
+
+                    all_results.extend(results);
+                }
+
+                // Sort sample names for consistent output
+                let mut sample_order: Vec<String> = all_samples.into_iter().collect();
+                sample_order.sort();
+
+                // Write output
+                let writer: Box<dyn std::io::Write> = if let Some(ref prefix) = output_prefix {
+                    let path = format!("{}.depth.tsv", prefix);
+                    Box::new(std::io::BufWriter::new(std::fs::File::create(&path)?))
+                } else {
+                    Box::new(std::io::BufWriter::new(std::io::stdout()))
+                };
+                let mut writer = std::io::BufWriter::new(writer);
+
+                depth::write_region_depth_output(&mut writer, &all_results, &sample_order)?;
+                writer.flush()?;
+
+                info!("Region query complete: {} windows", all_results.len());
+                return Ok(());
+            }
+
+            // Default / ref-anchored / ref-only depth computation
+            // Without --ref: auto hub detection via degree pre-scan
+            // With --ref: ref sample's sequences are Phase 1 anchors
+            // With --ref --ref-only: output filtered to ref sample's anchored regions only
+            if let Some(ws) = window_size {
+                info!("Window size: {} bp", ws);
+            }
+            if merge_tolerance > 0.0 {
+                info!("Merge tolerance: {:.1}%", merge_tolerance * 100.0);
+            }
+            if min_seq_length > 0 {
+                info!("Minimum sequence length filter: {} bp", min_seq_length);
+            }
+            depth::compute_depth_global(
+                &impg,
+                &config,
+                &separator,
+                output_prefix.as_deref(),
+                fai_list.as_deref(),
+                window_size,
+                merge_tolerance,
+                ref_sample.as_deref(),
+                ref_only,
+                min_seq_length as i64,
+            )?;
+        }
     }
 
     Ok(())
@@ -2980,6 +3304,31 @@ fn load_subset_filter_if_provided(path: &Option<String>) -> io::Result<Option<Su
     } else {
         Ok(None)
     }
+}
+
+/// Load sample filter for depth command
+fn load_sample_filter_depth(
+    samples: Option<Vec<String>>,
+    samples_file: Option<String>,
+) -> io::Result<Option<depth::SampleFilter>> {
+    if let Some(samples_list) = samples {
+        if samples_list.is_empty() {
+            return Ok(None);
+        }
+        info!(
+            "Using sample filter with {} samples from CLI",
+            samples_list.len()
+        );
+        return Ok(Some(depth::SampleFilter::from_samples(samples_list)));
+    }
+
+    if let Some(ref file_path) = samples_file {
+        let filter = depth::SampleFilter::from_file(file_path)?;
+        info!("Loaded {} samples from file: {}", filter.len(), file_path);
+        return Ok(Some(filter));
+    }
+
+    Ok(None)
 }
 
 fn output_results_bed(

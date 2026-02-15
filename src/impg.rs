@@ -1,7 +1,7 @@
 use crate::alignment_record::{AlignmentRecord, Strand};
 use crate::forest_map::ForestMap;
 use crate::graph::reverse_complement;
-use crate::impg_index::ImpgIndex;
+use crate::impg_index::{ImpgIndex, RawAlignmentInterval};
 use crate::onealn::{OneAlnAlignment, OneAlnParser, ParseErr as OneAlnParseErr};
 use crate::paf::read_cigar_data;
 use crate::seqidx::SequenceIndex;
@@ -193,6 +193,11 @@ impl QueryMetadata {
 
     fn is_reversed(&self) -> bool {
         (self.strand_and_data_offset & Self::REVERSED_BIT) != 0
+    }
+
+    /// Check if this alignment is on the reverse strand (public, for depth computation)
+    pub fn is_reverse_strand(&self) -> bool {
+        (self.strand_and_data_offset & Self::STRAND_BIT) != 0
     }
 
     fn set_reversed(&mut self) {
@@ -387,6 +392,10 @@ pub struct Impg {
     /// Cache for trace_spacing values per .1aln file (indexed by alignment_file_index)
     /// Uses Vec for O(1) direct indexing. None = not yet loaded or not a .1aln file.
     trace_spacing_cache: RwLock<Vec<Option<i64>>>,
+    /// When false, `load_tree_from_disk` loads trees without caching them.
+    /// This bounds memory usage for commands like `depth` where transitive BFS
+    /// would otherwise cache all trees simultaneously.
+    tree_cache_enabled: std::sync::atomic::AtomicBool,
 }
 
 impl Impg {
@@ -1192,6 +1201,32 @@ impl Impg {
             .map(|(_, alignment_file)| alignment_file.clone())
             .collect();
 
+        // Validate that all PAF records have CIGAR strings
+        // This is a fundamental requirement for transitive queries
+        for (records, alignment_file) in records_by_file {
+            // Skip .1aln files as they use tracepoints instead of CIGAR
+            if alignment_file.ends_with(".1aln") {
+                continue;
+            }
+
+            let missing_cigar_count = records
+                .iter()
+                .filter(|r| r.data_bytes == 0)
+                .count();
+
+            if missing_cigar_count > 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "PAF file '{}' contains {} alignment(s) without CIGAR strings (cg:Z: tag). \
+                         All alignments must have CIGAR for transitive queries. \
+                         Please regenerate the PAF file with CIGAR output enabled (e.g., minimap2 -c or wfmash with default settings).",
+                        alignment_file, missing_cigar_count
+                    ),
+                ));
+            }
+        }
+
         if bidirectional {
             debug!("Creating bidirectional alignment entries");
         } else {
@@ -1296,6 +1331,7 @@ impl Impg {
             index_file_path: String::new(),
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
             trace_spacing_cache: RwLock::new(vec![None; num_files]),
+            tree_cache_enabled: std::sync::atomic::AtomicBool::new(true),
         })
     }
 
@@ -1402,11 +1438,13 @@ impl Impg {
 
             let arc_tree = Arc::new(tree);
 
-            // Cache the tree for future use
-            self.trees
-                .write()
-                .unwrap()
-                .insert(target_id, Arc::clone(&arc_tree));
+            // Only cache if tree caching is enabled
+            if self.tree_cache_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                self.trees
+                    .write()
+                    .unwrap()
+                    .insert(target_id, Arc::clone(&arc_tree));
+            }
 
             Some(arc_tree)
         } else {
@@ -1429,6 +1467,69 @@ impl Impg {
 
         // Not in memory - try to load from disk
         self.load_tree_from_disk(target_id)
+    }
+
+    /// Load a tree from disk WITHOUT caching it
+    /// This is useful for parallel processing where each thread loads trees independently
+    /// to avoid write lock contention on the shared tree cache
+    pub fn load_tree_no_cache(
+        &self,
+        target_id: u32,
+    ) -> Option<BasicCOITree<QueryMetadata, u32>> {
+        if let Some(tree_offset) = self.forest_map.get_tree_offset(target_id) {
+            let mut file = File::open(&self.index_file_path).ok()?;
+            file.seek(std::io::SeekFrom::Start(tree_offset)).ok()?;
+
+            let mut reader = BufReader::new(file);
+            let (loaded_target_id, intervals): (u32, Vec<SerializableInterval>) =
+                bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())
+                    .ok()?;
+
+            // Verify we loaded the correct tree
+            if loaded_target_id != target_id {
+                return None;
+            }
+
+            // Reconstruct the tree (no Arc, no caching)
+            let tree = BasicCOITree::new(
+                intervals
+                    .into_iter()
+                    .map(|interval| Interval {
+                        first: interval.first,
+                        last: interval.last,
+                        metadata: interval.metadata,
+                    })
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            );
+
+            Some(tree)
+        } else {
+            None
+        }
+    }
+
+    /// Clear the tree cache to free memory
+    /// This is useful for memory-constrained scenarios where trees can be reloaded from disk
+    pub fn clear_tree_cache(&self) {
+        let mut trees = self.trees.write().unwrap();
+        let count = trees.len();
+        trees.clear();
+        debug!("Cleared {} trees from cache", count);
+    }
+
+    /// Enable or disable tree caching.
+    /// When disabled, trees loaded from disk are returned directly without being
+    /// stored in the in-memory cache. Already-cached trees are still served from cache.
+    /// This bounds peak memory for workloads like transitive depth where BFS would
+    /// otherwise cache every tree it visits.
+    pub fn set_tree_cache_enabled(&self, enabled: bool) {
+        self.tree_cache_enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Get the number of trees currently cached in memory
+    pub fn cached_tree_count(&self) -> usize {
+        self.trees.read().unwrap().len()
     }
 
     /// Load IMPG index from the format with embedded forest map at the end
@@ -1494,6 +1595,7 @@ impl Impg {
             index_file_path,
             sequence_files: sequence_files.map(|s| s.to_vec()).unwrap_or_default(),
             trace_spacing_cache: RwLock::new(vec![None; num_files]),
+            tree_cache_enabled: std::sync::atomic::AtomicBool::new(true),
         })
     }
 
@@ -1570,6 +1672,100 @@ impl Impg {
                     results.push((query_interval, cigar_vec, target_interval));
                 }
             });
+        }
+
+        results
+    }
+
+    /// Query alignments where the specified sequence is the QUERY (reverse direction).
+    /// This finds alignments where query_id matches, scanning all trees.
+    /// Returns: Vec of (target_interval, query_interval, original_target_id) tuples
+    /// Note: This is O(N) where N is total alignments - use sparingly.
+    pub fn query_reverse_for_depth(
+        &self,
+        query_id: u32,
+    ) -> Vec<(i32, i32, u32)> {
+        let mut results = Vec::new();
+
+        // Iterate through all target_ids in the forest map
+        for &target_id in self.forest_map.entries.keys() {
+            // Skip if querying self (query_id == target_id means self-alignment)
+            if target_id == query_id {
+                continue;
+            }
+
+            if let Some(tree) = self.get_or_load_tree(target_id) {
+                // Iterate all intervals in this tree
+                for interval in tree.iter() {
+                    // Check if this alignment has our sequence as query
+                    if interval.metadata.query_id == query_id {
+                        // Return the query coordinates (which is our ref in reverse direction)
+                        let query_start = interval.metadata.query_start;
+                        let query_end = interval.metadata.query_end;
+                        results.push((query_start, query_end, target_id));
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
+    /// Get all target_ids from the forest map
+    pub fn get_all_target_ids(&self) -> Vec<u32> {
+        self.forest_map.entries.keys().copied().collect()
+    }
+
+    /// Build a lightweight reverse index: query_id -> [target_ids that have alignments with this query]
+    /// This scans all trees once but only stores ID mappings (very low memory).
+    /// After building, the tree cache is cleared to free memory.
+    pub fn build_query_to_targets_map(&self) -> FxHashMap<u32, Vec<u32>> {
+        let mut query_to_targets: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+
+        for &target_id in self.forest_map.entries.keys() {
+            if let Some(tree) = self.get_or_load_tree(target_id) {
+                // Collect unique query_ids from this tree
+                let mut seen_queries: rustc_hash::FxHashSet<u32> = rustc_hash::FxHashSet::default();
+                for interval in tree.iter() {
+                    let query_id = interval.metadata.query_id;
+                    if query_id != target_id && seen_queries.insert(query_id) {
+                        query_to_targets
+                            .entry(query_id)
+                            .or_default()
+                            .push(target_id);
+                    }
+                }
+            }
+        }
+
+        // Clear tree cache after building the map
+        self.clear_tree_cache();
+
+        query_to_targets
+    }
+
+    /// Query reverse alignments using a pre-built query_to_targets map.
+    /// Only loads the necessary trees instead of all trees.
+    pub fn query_reverse_for_depth_with_map(
+        &self,
+        query_id: u32,
+        query_to_targets: &FxHashMap<u32, Vec<u32>>,
+    ) -> Vec<(i32, i32, u32)> {
+        let mut results = Vec::new();
+
+        // Only query trees that we know have alignments with this query_id
+        if let Some(target_ids) = query_to_targets.get(&query_id) {
+            for &target_id in target_ids {
+                if let Some(tree) = self.get_or_load_tree(target_id) {
+                    for interval in tree.iter() {
+                        if interval.metadata.query_id == query_id {
+                            let query_start = interval.metadata.query_start;
+                            let query_end = interval.metadata.query_end;
+                            results.push((query_start, query_end, target_id));
+                        }
+                    }
+                }
+            }
         }
 
         results
@@ -2390,6 +2586,77 @@ impl ImpgIndex for Impg {
 
     fn sequence_files(&self) -> &[String] {
         &self.sequence_files
+    }
+
+    fn query_reverse_for_depth(&self, query_id: u32) -> Vec<(i32, i32, u32)> {
+        Impg::query_reverse_for_depth(self, query_id)
+    }
+
+    fn build_query_to_targets_map(&self) -> FxHashMap<u32, Vec<u32>> {
+        Impg::build_query_to_targets_map(self)
+    }
+
+    fn query_reverse_for_depth_with_map(
+        &self,
+        query_id: u32,
+        query_to_targets: &FxHashMap<u32, Vec<u32>>,
+    ) -> Vec<(i32, i32, u32)> {
+        Impg::query_reverse_for_depth_with_map(self, query_id, query_to_targets)
+    }
+
+    fn clear_tree_cache(&self) {
+        Impg::clear_tree_cache(self)
+    }
+
+    fn clear_sub_index_cache(&self) {
+        // No-op for single Impg (no sub-indices)
+    }
+
+    fn set_tree_cache_enabled(&self, enabled: bool) {
+        Impg::set_tree_cache_enabled(self, enabled)
+    }
+
+    fn is_bidirectional(&self) -> bool {
+        // Check the magic bytes stored during load
+        // For now, assume all Impg instances are bidirectional unless explicitly marked otherwise
+        // This will be properly tracked when we add the is_bidirectional field
+        true
+    }
+
+    fn query_raw_intervals(&self, target_id: u32) -> Vec<RawAlignmentInterval> {
+        if let Some(tree) = self.get_or_load_tree(target_id) {
+            tree.iter()
+                .map(|interval| RawAlignmentInterval {
+                    target_start: interval.first,
+                    target_end: interval.last,
+                    query_id: interval.metadata.query_id,
+                    query_start: interval.metadata.query_start,
+                    query_end: interval.metadata.query_end,
+                    is_reverse: interval.metadata.is_reverse_strand(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn query_raw_overlapping(&self, target_id: u32, start: i32, end: i32) -> Vec<RawAlignmentInterval> {
+        if let Some(tree) = self.get_or_load_tree(target_id) {
+            let mut results = Vec::new();
+            tree.query(start, end, |interval| {
+                results.push(RawAlignmentInterval {
+                    target_start: interval.first,
+                    target_end: interval.last,
+                    query_id: interval.metadata.query_id,
+                    query_start: interval.metadata.query_start,
+                    query_end: interval.metadata.query_end,
+                    is_reverse: interval.metadata.is_reverse_strand(),
+                });
+            });
+            results
+        } else {
+            Vec::new()
+        }
     }
 }
 
