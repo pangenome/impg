@@ -987,7 +987,16 @@ enum Args {
         common: CommonOpts,
     },
 
-    /// Compute coverage depth across sequences, partitioning by unique haplotype count
+    /// Compute pangenome coverage depth across sequences.
+    ///
+    /// Modes:
+    ///   (default)     Whole-pangenome depth with auto hub detection
+    ///   --ref SAMPLE  Ref-anchored: prioritize SAMPLE as coordinate-system anchor
+    ///   --ref + --ref-only  Ref-only: output only the ref sample's anchored regions
+    ///   -r / -b       Region query: depth for specific genomic regions
+    ///
+    /// Add-on:
+    ///   --stats       Produce summary statistics and per-depth BED files
     Depth {
         #[clap(flatten)]
         alignment: AlignmentOpts,
@@ -1016,15 +1025,17 @@ enum Args {
         #[clap(long, value_parser)]
         fai_list: Option<String>,
 
-        /// Prioritize this sample's sequences as anchors (ordering hint).
+        /// Ref-anchored mode: prioritize this sample's sequences as anchors.
+        /// Guarantees all regions covered by this sample use its coordinate system.
         /// All sequences are still output unless --ref-only is also specified.
-        #[arg(help_heading = "Reference selection")]
+        #[arg(help_heading = "Mode selection")]
         #[clap(long = "ref", value_parser)]
         ref_sample: Option<String>,
 
-        /// Only output depth for the --ref sample's sequences (filter mode).
+        /// Ref-only mode: only output depth for the --ref sample's sequences.
+        /// Regions not covered by the ref sample are omitted entirely.
         /// Requires --ref.
-        #[arg(help_heading = "Reference selection")]
+        #[arg(help_heading = "Mode selection")]
         #[clap(long, action, requires = "ref_sample")]
         ref_only: bool,
 
@@ -1072,15 +1083,15 @@ enum Args {
         #[clap(long, value_parser, conflicts_with = "samples")]
         samples_file: Option<String>,
 
-        /// Calculate global depth statistics across all sequences
-        /// Outputs summary and per-depth BED files
-        #[arg(help_heading = "Stats mode")]
+        /// Add-on: produce summary statistics and per-depth BED files.
+        /// Can be combined with --ref for reference-anchored statistics.
+        #[arg(help_heading = "Statistics add-on")]
         #[clap(long, action, conflicts_with_all = &["target_range", "target_bed"])]
         stats: bool,
 
-        /// Output combined file with sample lists (requires --stats)
-        /// Creates a single BED file sorted by position with depth and sample columns
-        #[arg(help_heading = "Stats mode")]
+        /// Add-on: output combined file with sample lists (requires --stats).
+        /// Creates a single BED file sorted by position with depth and sample columns.
+        #[arg(help_heading = "Statistics add-on")]
         #[clap(long, action, requires = "stats")]
         combined_output: bool,
 
@@ -1091,13 +1102,13 @@ enum Args {
         #[clap(long, value_parser, default_value = "0.05")]
         merge_tolerance: f64,
 
-        /// Target range in format `seq_name:start-end` for region query
-        #[arg(help_heading = "Region query")]
+        /// Region query mode: target range in format `seq_name:start-end`
+        #[arg(help_heading = "Mode selection")]
         #[clap(short = 'r', long, value_parser, conflicts_with_all = &["target_bed", "stats"])]
         target_range: Option<String>,
 
-        /// Path to BED file containing target regions for region query
-        #[arg(help_heading = "Region query")]
+        /// Region query mode: path to BED file containing target regions
+        #[arg(help_heading = "Mode selection")]
         #[clap(short = 'b', long, value_parser, conflicts_with_all = &["target_range", "stats"])]
         target_bed: Option<String>,
 
@@ -2246,15 +2257,13 @@ fn run() -> io::Result<()> {
                 approximate_mode: approximate,
             };
 
-            // === NEW MODES ===
-
-            // Stats mode: global depth statistics
+            // Statistics add-on: produces summary and per-depth BED files
             if stats {
                 let prefix = output_prefix.as_deref().unwrap_or("depth_stats");
                 if ref_sample.is_some() {
-                    info!("Running stats mode (single reference), output prefix: {}", prefix);
+                    info!("Running depth with --stats add-on (ref-anchored), output prefix: {}", prefix);
                 } else {
-                    info!("Running stats mode (global), output prefix: {}", prefix);
+                    info!("Running depth with --stats add-on, output prefix: {}", prefix);
                 }
 
                 if combined_output {
@@ -2286,9 +2295,9 @@ fn run() -> io::Result<()> {
                 return Ok(());
             }
 
-            // Region query mode: query specific regions
+            // Region query mode: depth for specific genomic regions
             if target_range.is_some() || target_bed.is_some() {
-                info!("Running region query mode");
+                info!("Running depth in region query mode");
 
                 // Parse regions
                 let regions: Vec<(String, i32, i32)> = if let Some(ref range) = target_range {
@@ -2354,10 +2363,10 @@ fn run() -> io::Result<()> {
                 return Ok(());
             }
 
-            // Global depth computation (default mode)
-            // Non-transitive by default: direct queries are fast and complete
-            // (impg stores alignments bidirectionally, so 1-hop captures both directions)
-            // User can opt-in to transitive with -x for sparse alignment sets
+            // Default / ref-anchored / ref-only depth computation
+            // Without --ref: auto hub detection via degree pre-scan
+            // With --ref: ref sample's sequences are Phase 1 anchors
+            // With --ref --ref-only: output filtered to ref sample's anchored regions only
             if let Some(ws) = window_size {
                 info!("Window size: {} bp", ws);
             }

@@ -2318,9 +2318,9 @@ const TRANSITIVE_CHUNK_SIZE: i64 = 5_000_000;
 ///
 /// Key properties:
 /// - Every base processed exactly once (no double-counting)
-/// - No reference bias: longest sequences naturally become anchors
-/// - --ref is an ordering hint (process this sample first)
-/// - --ref-only filters output to only ref sample's sequences
+/// - Hub-first ordering: high-connectivity sequences anchor first (auto-detected or via --ref)
+/// - --ref: ref-anchored mode, guarantees ref sample's coordinate system for covered regions
+/// - --ref-only: ref-only mode, output filtered to ref sample's anchored regions only
 pub fn compute_depth_global(
     impg: &impl ImpgIndex,
     config: &DepthConfig,
@@ -2381,9 +2381,9 @@ pub fn compute_depth_global(
             )
         })?;
         if ref_only {
-            info!("Reference sample: '{}' (ref-only: output filtered to this sample)", ref_name);
+            info!("Ref-only mode: '{}' (output filtered to this sample's anchored regions)", ref_name);
         } else {
-            info!("Reference sample: '{}' (ordering priority)", ref_name);
+            info!("Ref-anchored mode: '{}' (Phase 1 anchor, coordinate system priority)", ref_name);
         }
         Some(id)
     } else {
