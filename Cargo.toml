@@ -18,11 +18,10 @@ log = "0.4"
 env_logger = "0.11"
 natord = "1.0"
 rustc-hash = "2.1"
-libc = "0.2"
 nalgebra = "0.33"
 indicatif = "0.18"
 spoa_rs = { git = "https://github.com/AndreaGuarracino/spoa-rs.git" }
-rust-htslib = { version = "0.46.0", default-features = false } # Don't update it, see https://github.com/rust-bio/rust-htslib/issues/434
+rust-htslib = { version = "1.0.0", default-features = false, features = ["libdeflate"] }
 
 # Dependencies for AGC format (for sequences) support
 ragc-core = { git = "https://github.com/ekg/ragc", rev = "40e5cad" }
