@@ -2447,20 +2447,23 @@ fn load_or_build_per_file_index(
             .collect()
     };
 
+    let direction = if bidirectional { "bidirectional" } else { "unidirectional" };
     if indices_to_build.is_empty() {
         info!("Using per-file indexing mode");
     } else if force_reindex {
         info!("Using per-file indexing mode (force rebuild)");
         info!(
-            "Building {} index file(s) processing {} alignment file(s)...",
+            "Building {} {} index file(s) processing {} alignment file(s)...",
             indices_to_build.len(),
+            direction,
             indices_to_build.len()
         );
     } else {
         info!("Using per-file indexing mode");
         info!(
-            "Building {} index file(s) processing {} alignment file(s)...",
+            "Building {} {} index file(s) processing {} alignment file(s)...",
             indices_to_build.len(),
+            direction,
             indices_to_build.len()
         );
     }
@@ -2605,6 +2608,7 @@ fn load_or_build_single_index(
 ) -> io::Result<Impg> {
     let index_file = get_combined_index_filename(alignment_files, custom_index);
 
+    let direction = if bidirectional { "bidirectional" } else { "unidirectional" };
     let per_file_hint = if custom_index.is_some() && alignment_files.len() >= 100 {
         format!(
             " (drop -i or use --index-mode per-file for per-file indexing with {} files)",
@@ -2617,7 +2621,8 @@ fn load_or_build_single_index(
     if force_reindex {
         info!("Using single indexing mode (force rebuild){}", per_file_hint);
         info!(
-            "Building 1 index file processing {} alignment file(s)...",
+            "Building 1 {} index file processing {} alignment file(s)...",
+            direction,
             alignment_files.len()
         );
         return build_single_index(
@@ -2633,7 +2638,8 @@ fn load_or_build_single_index(
     if !std::path::Path::new(&index_file).exists() {
         info!("Using single indexing mode{}", per_file_hint);
         info!(
-            "Building 1 index file processing {} alignment file(s)...",
+            "Building 1 {} index file processing {} alignment file(s)...",
+            direction,
             alignment_files.len()
         );
         return build_single_index(
@@ -2688,9 +2694,9 @@ fn build_single_index(
     debug!("Creating index: {index_file}");
 
     if bidirectional {
-        info!("Building bidirectional index");
+        debug!("Building bidirectional index");
     } else {
-        info!("Building unidirectional index");
+        debug!("Building unidirectional index");
     }
 
     let num_alignment_files = alignment_files.len();
