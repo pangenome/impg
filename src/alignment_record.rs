@@ -61,6 +61,7 @@ impl AlignmentRecord {
 pub enum AlignmentFormat {
     Paf,
     OneAln,
+    Tpa,
 }
 
 impl AlignmentFormat {
@@ -70,6 +71,8 @@ impl AlignmentFormat {
             Some(AlignmentFormat::Paf)
         } else if path.ends_with(".1aln") {
             Some(AlignmentFormat::OneAln)
+        } else if path.ends_with(".tpa") {
+            Some(AlignmentFormat::Tpa)
         } else {
             None
         }
@@ -97,6 +100,10 @@ mod tests {
         assert_eq!(
             AlignmentFormat::from_path("test.1aln"),
             Some(AlignmentFormat::OneAln)
+        );
+        assert_eq!(
+            AlignmentFormat::from_path("test.tpa"),
+            Some(AlignmentFormat::Tpa)
         );
         assert_eq!(AlignmentFormat::from_path("test.txt"), None);
     }
