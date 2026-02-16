@@ -2448,23 +2448,21 @@ fn load_or_build_per_file_index(
     };
 
     let direction = if bidirectional { "bidirectional" } else { "unidirectional" };
-    if indices_to_build.is_empty() {
-        info!("Using per-file indexing mode");
+    let total = alignment_files.len();
+    let to_build = indices_to_build.len();
+    if to_build == 0 {
+        info!("Using per-file indexing mode ({} {} index file(s) up to date)", total, direction);
     } else if force_reindex {
         info!("Using per-file indexing mode (force rebuild)");
         info!(
-            "Building {} {} index file(s) processing {} alignment file(s)...",
-            indices_to_build.len(),
-            direction,
-            indices_to_build.len()
+            "Building {} of {} {} index file(s)...",
+            to_build, total, direction
         );
     } else {
         info!("Using per-file indexing mode");
         info!(
-            "Building {} {} index file(s) processing {} alignment file(s)...",
-            indices_to_build.len(),
-            direction,
-            indices_to_build.len()
+            "Building {} of {} {} index file(s) ({} already up to date)...",
+            to_build, total, direction, total - to_build
         );
     }
 
