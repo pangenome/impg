@@ -2605,8 +2605,17 @@ fn load_or_build_single_index(
 ) -> io::Result<Impg> {
     let index_file = get_combined_index_filename(alignment_files, custom_index);
 
+    let per_file_hint = if custom_index.is_some() && alignment_files.len() >= 100 {
+        format!(
+            " (drop -i or use --index-mode per-file for per-file indexing with {} files)",
+            alignment_files.len()
+        )
+    } else {
+        String::new()
+    };
+
     if force_reindex {
-        info!("Using single indexing mode (force rebuild)");
+        info!("Using single indexing mode (force rebuild){}", per_file_hint);
         info!(
             "Building 1 index file processing {} alignment file(s)...",
             alignment_files.len()
@@ -2622,7 +2631,7 @@ fn load_or_build_single_index(
     }
 
     if !std::path::Path::new(&index_file).exists() {
-        info!("Using single indexing mode");
+        info!("Using single indexing mode{}", per_file_hint);
         info!(
             "Building 1 index file processing {} alignment file(s)...",
             alignment_files.len()
