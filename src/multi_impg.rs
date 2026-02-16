@@ -350,7 +350,8 @@ impl MultiImpg {
 
     /// Load only the header (seq_index + forest_map) from a single index file.
     fn load_header(path: &Path) -> std::io::Result<IndexHeader> {
-        const MAGIC: &[u8] = b"IMPGIDX1";
+        const MAGIC_V1: &[u8] = b"IMPGIDX1";
+        const MAGIC_V2: &[u8] = b"IMPGIDX2";
 
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
@@ -358,7 +359,7 @@ impl MultiImpg {
         // Read and verify magic bytes
         let mut magic_buf = [0u8; 8];
         reader.read_exact(&mut magic_buf)?;
-        if magic_buf != MAGIC {
+        if magic_buf != MAGIC_V1 && magic_buf != MAGIC_V2 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("Invalid magic bytes in {:?}", path),
