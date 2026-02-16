@@ -1218,10 +1218,20 @@ impl Impg {
             };
 
             if abs_target_delta == 0 {
-                panic!(
-                    "Cannot refine {} position with zero target delta: num_segs={}, identity={:.3}, trace_diffs={}",
-                    boundary_name, subset.num_overlapping_segments, segment_identity, trace_diffs
+                // Pure insertion in query: zero target bases consumed.
+                // The entire insertion maps to a single target point strictly within the range.
+                // First boundary: start of insertion (query_pos)
+                // Last boundary: end of insertion (query_pos + query_delta)
+                let refined_pos = if boundary_name == "First" {
+                    query_pos
+                } else {
+                    query_pos + query_delta
+                };
+                debug!(
+                    "{} segment refinement: pure query insertion, abs_target_delta=0, query_delta={}, trace_diffs={}",
+                    boundary_name, query_delta, trace_diffs
                 );
+                return refined_pos.max(working_query_start).min(working_query_end);
             }
 
             let target_fraction =
