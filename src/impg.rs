@@ -631,32 +631,58 @@ impl Impg {
     }
 
     /// Scan tracepoints to find segments overlapping the requested target range.
+    ///
+    /// For forward entries: scans along the target axis, projects onto the query axis.
+    /// For reversed entries: scans along the query axis (stored as target in metadata),
+    /// projects onto the target axis (stored as query in metadata).
+    /// Same tracepoint segments, different scan dimension
     fn scan_overlapping_tracepoints(
         &self,
         alignment: &OneAlnAlignment,
         metadata: &QueryMetadata,
         range_start: i32,
         range_end: i32,
+        is_reversed_entry: bool,
     ) -> Option<SubsettingResult> {
         let is_reverse = metadata.strand() == Strand::Reverse;
 
-        // Metadata stores query coords in FORWARD order for both strands
-        let working_query_start = metadata.query_start;
-
-        // Initialize scanning positions
-        let mut target_pos = if is_reverse {
-            metadata.target_end // Start from target end, scan backward
+        // Scan axis = metadata target axis (where range_start/range_end live)
+        // Project axis = metadata query axis (output axis)
+        //
+        // Forward entry: scan along original target, project along original query
+        //   scan_dir: +1 (+strand) or -1 (-strand); project_dir: always +1
+        // Reversed entry: scan along original query (=metadata target), project along original target (=metadata query)
+        //   scan_dir: always +1; project_dir: +1 (+strand) or -1 (-strand)
+        let scan_dir: i32 = if is_reversed_entry {
+            1
         } else {
-            metadata.target_start
+            if is_reverse { -1 } else { 1 }
         };
-        let mut query_pos = working_query_start; // Always start from working start
-        let target_dir = if is_reverse { -1 } else { 1 };
+        let project_dir: i32 = if is_reversed_entry {
+            if is_reverse { -1 } else { 1 }
+        } else {
+            1
+        };
+
+        // Initialize scan position (along range axis)
+        let mut scan_pos = if is_reversed_entry {
+            metadata.target_start // = orig query_start, always scan forward
+        } else {
+            if is_reverse { metadata.target_end } else { metadata.target_start }
+        };
+
+        // Initialize project position (along output axis)
+        let mut project_pos = if is_reversed_entry {
+            if is_reverse { metadata.query_end } else { metadata.query_start }
+        } else {
+            metadata.query_start // Always start from query_start for forward
+        };
 
         // Track overlapping segments
         let mut first_idx: Option<usize> = None;
         let mut last_idx: usize = 0;
-        let mut first_query_pos: Option<i32> = None;
-        let mut last_query_pos: Option<i32> = None;
+        let mut first_project_pos: Option<i32> = None;
+        let mut last_project_pos: Option<i32> = None;
         let mut first_segment_info: Option<(i32, i32, i32, i32, i32, i32)> = None;
         let mut last_segment_info: Option<(i32, i32, i32, i32, i32, i32)> = None;
         let mut num_overlapping_segments = 0;
@@ -678,7 +704,7 @@ impl Impg {
 
         // Scan tracepoints and collect those that overlap the requested range
         for (idx, &tracepoint) in alignment.tracepoints.iter().enumerate() {
-            // Calculate deltas for this segment
+            // Query delta (always positive, along original query axis)
             let query_delta = match &alignment.mode_data {
                 TracepointModeData::Standard { query_deltas, .. } => {
                     query_deltas[idx] as i32
@@ -687,12 +713,20 @@ impl Impg {
                     if idx == 0 { first_boundary } else { trace_spacing }
                 }
             };
-            let target_delta = (tracepoint as i32) * target_dir;
-            let abs_target_delta = tracepoint.abs() as i32;
+            let abs_tracepoint = tracepoint.abs() as i32;
 
-            // Segment boundaries (forward coordinate space)
-            let seg_start = target_pos.min(target_pos + target_delta);
-            let seg_end = target_pos.max(target_pos + target_delta);
+            // Compute scan and project deltas based on entry type
+            let (scan_delta, project_delta, abs_scan_delta) = if is_reversed_entry {
+                // Reversed: scan with query_delta (always positive), project with tracepoint
+                (query_delta, abs_tracepoint * project_dir, query_delta)
+            } else {
+                // Forward: scan with tracepoint * scan_dir, project with query_delta
+                ((tracepoint as i32) * scan_dir, query_delta, abs_tracepoint)
+            };
+
+            // Segment boundaries (forward coordinate space along scan axis)
+            let seg_start = scan_pos.min(scan_pos + scan_delta);
+            let seg_end = scan_pos.max(scan_pos + scan_delta);
 
             // Check overlap with requested range
             if seg_start < range_end && seg_end > range_start {
@@ -707,44 +741,44 @@ impl Impg {
                     }
                     TracepointModeData::Standard { max_complexity, .. } => {
                         // Estimate: use max_complexity unless one delta is 0
-                        if query_delta == 0 || abs_target_delta == 0 {
-                            query_delta.max(abs_target_delta)
+                        if query_delta == 0 || abs_tracepoint == 0 {
+                            query_delta.max(abs_tracepoint)
                         } else {
                             *max_complexity as i32
                         }
                     }
                 };
                 let seg_info = (
-                    query_pos,
-                    query_delta,
+                    project_pos,
+                    project_delta,
                     seg_start,
                     seg_end,
-                    abs_target_delta,
+                    abs_scan_delta,
                     num_diffs,
                 );
 
                 // Track first and last overlapping segments
-                if first_query_pos.is_none() {
+                if first_project_pos.is_none() {
                     first_idx = Some(idx);
-                    first_query_pos = Some(query_pos);
+                    first_project_pos = Some(project_pos);
                     first_segment_info = Some(seg_info);
                 }
                 last_idx = idx;
-                last_query_pos = Some(query_pos + query_delta);
+                last_project_pos = Some(project_pos + project_delta);
                 last_segment_info = Some(seg_info);
 
                 // Accumulate identity statistics
-                let aligned_len = (query_delta.min(abs_target_delta) as f64).max(0.0);
+                let aligned_len = (project_delta.abs().min(abs_scan_delta) as f64).max(0.0);
                 total_matches += (aligned_len - num_diffs as f64).max(0.0);
                 total_mismatches += num_diffs as f64;
             }
 
             // Advance to next segment
-            target_pos += target_delta;
-            query_pos += query_delta;
+            scan_pos += scan_delta;
+            project_pos += project_delta;
 
             // Early exit when past requested range
-            if (is_reverse && target_pos <= range_start) || (!is_reverse && target_pos >= range_end)
+            if (scan_dir == -1 && scan_pos <= range_start) || (scan_dir == 1 && scan_pos >= range_end)
             {
                 break;
             }
@@ -756,8 +790,8 @@ impl Impg {
         Some(SubsettingResult {
             first_idx: first_idx.unwrap(),
             last_idx,
-            first_query_pos: first_query_pos.unwrap(),
-            last_query_pos: last_query_pos.unwrap(),
+            first_query_pos: first_project_pos.unwrap(),
+            last_query_pos: last_project_pos.unwrap(),
             num_overlapping_segments,
             total_matches,
             total_mismatches,
@@ -855,6 +889,11 @@ impl Impg {
     }
 
     /// Reconstruct CIGAR only for the subset of tracepoints that overlap the requested range.
+    ///
+    /// For reversed entries, the metadata names/coordinates are swapped but tracepoint
+    /// reconstruction needs the original sequences: a_seq = original query (from target_id
+    /// at scan-axis coords), b_seq = original target (from metadata.query_id at project-axis
+    /// coords, RC if - strand).
     fn process_subset_tracepoints(
         &self,
         alignment: &OneAlnAlignment,
@@ -864,6 +903,7 @@ impl Impg {
         sequence_index: &UnifiedSequenceIndex,
     ) -> Vec<CigarOp> {
         let is_reverse = metadata.strand() == Strand::Reverse;
+        let is_reversed_entry = metadata.is_reversed();
 
         // Extract subset tracepoints [first_idx..=last_idx]
         let subset_tracepoints: Vec<(usize, usize)> = match &alignment.mode_data {
@@ -886,17 +926,24 @@ impl Impg {
         };
 
         // Calculate subset sequence ranges (use RAW boundaries from subsetting scan, no refinement)
+        // first_query_pos/last_query_pos are project-axis positions from scan_overlapping_tracepoints
         let subset_query_start = subset.first_query_pos;
 
         // If last_idx is the actual last tracepoint of the alignment, the last
         // segment may be shorter than trace_spacing. Use metadata boundary.
         let subset_query_end = if subset.last_idx == alignment.tracepoints.len() - 1 {
-            metadata.query_end // Last segment of alignment - use exact boundary
+            // For reversed - strand: project went from query_end toward query_start,
+            // so the last segment ends at query_start, not query_end
+            if is_reversed_entry && is_reverse {
+                metadata.query_start
+            } else {
+                metadata.query_end
+            }
         } else {
             subset.last_query_pos // Middle segment - use calculated position
         };
 
-        // For target: extract from first/last segment info (seg_start, seg_end already in forward space)
+        // For target (scan axis): extract from first/last segment info (seg_start, seg_end already in forward space)
         let (_, _, first_seg_start, first_seg_end, _, _) = subset.first_segment_info;
         let (_, _, last_seg_start, last_seg_end, _, _) = subset.last_segment_info;
         let subset_target_start = first_seg_start
@@ -912,27 +959,62 @@ impl Impg {
                 .max(last_seg_start.max(last_seg_end)) // Middle segment - use calculated
         };
 
-        // Fetch only subset sequences
-        let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
-        let query_seq = sequence_index
-            .fetch_sequence(query_name, subset_query_start, subset_query_end)
-            .unwrap_or_else(|e| panic!("Failed to fetch subset query sequence: {e}"));
+        // Fetch sequences and compute contig offsets
+        let (query_seq, target_seq, adjusted_query_offset, adjusted_target_offset) = if is_reversed_entry {
+            // For reversed entries, tracepoint reconstruction needs ORIGINAL sequences:
+            // a_seq = original query (from target_id at scan-axis coords, no RC)
+            // b_seq = original target (from metadata.query_id at project-axis coords, RC if - strand)
+            let a_name = self.seq_index.get_name(target_id).unwrap();
+            let a_seq = sequence_index
+                .fetch_sequence(a_name, subset_target_start, subset_target_end)
+                .unwrap_or_else(|e| panic!("Failed to fetch subset query sequence (reversed): {e}"));
 
-        let target_name = self.seq_index.get_name(target_id).unwrap();
-        let target_seq = self.get_target_sequence_cached(
-            sequence_index,
-            target_name,
-            target_id,
-            subset_target_start,
-            subset_target_end,
-            is_reverse,
-        );
+            // Handle reversed - strand range ordering: project-axis start > end
+            let proj_lo = subset_query_start.min(subset_query_end);
+            let proj_hi = subset_query_start.max(subset_query_end);
+            let b_name = self.seq_index.get_name(metadata.query_id).unwrap();
+            let b_seq = self.get_target_sequence_cached(
+                sequence_index,
+                b_name,
+                metadata.query_id,
+                proj_lo,
+                proj_hi,
+                is_reverse,
+            );
 
-        // Adjust contig offsets for the subset
-        let adjusted_query_offset = alignment.query_contig_start as usize
-            + (subset_query_start - metadata.query_start) as usize;
-        let adjusted_target_offset = alignment.target_contig_start as usize
-            + (subset_target_start - metadata.target_start) as usize;
+            // Contig offsets for original alignment perspective:
+            // query offset = position in original query contig (scan axis)
+            let qoff = alignment.query_contig_start as usize
+                + (subset_target_start - metadata.target_start) as usize;
+            // target offset = position in original target contig (project axis)
+            let toff = alignment.target_contig_start as usize
+                + (proj_lo - metadata.query_start) as usize;
+
+            (a_seq, b_seq, qoff, toff)
+        } else {
+            // Forward entries: standard sequence fetching
+            let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
+            let query_seq = sequence_index
+                .fetch_sequence(query_name, subset_query_start, subset_query_end)
+                .unwrap_or_else(|e| panic!("Failed to fetch subset query sequence: {e}"));
+
+            let target_name = self.seq_index.get_name(target_id).unwrap();
+            let target_seq = self.get_target_sequence_cached(
+                sequence_index,
+                target_name,
+                target_id,
+                subset_target_start,
+                subset_target_end,
+                is_reverse,
+            );
+
+            let qoff = alignment.query_contig_start as usize
+                + (subset_query_start - metadata.query_start) as usize;
+            let toff = alignment.target_contig_start as usize
+                + (subset_target_start - metadata.target_start) as usize;
+
+            (query_seq, target_seq, qoff, toff)
+        };
 
         // Reconstruct CIGAR for subset only
         let cigar_str = match &alignment.mode_data {
@@ -996,18 +1078,6 @@ impl Impg {
 
         // Try subsetting approach for tracepoint files
         if let (true, Some(sequence_index)) = (is_tracepoint_file, sequence_index) {
-            // Reject reversed bidirectional entries for tracepoint files:
-            // Switched entries swap target/query coordinates but the on-disk tracepoints
-            // still contain the original target deltas, causing coordinate space mismatch
-            // in scan_overlapping_tracepoints (wrong results or silent failures).
-            if metadata.is_reversed() {
-                error!(
-                    "Bidirectional indexing is not supported for tracepoint files. \
-                     Rebuild with --unidirectional --force-reindex."
-                );
-                std::process::exit(1);
-            }
-
             // Pre-filter: coitrees uses closed-interval overlap, but coordinates are half-open.
             // Skip alignments that merely touch at an endpoint (no actual overlap).
             if metadata.target_start >= range_end || metadata.target_end <= range_start {
@@ -1021,7 +1091,7 @@ impl Impg {
             });
 
             // Scan tracepoints to find overlapping segments
-            let subset = self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end)
+            let subset = self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end, metadata.is_reversed())
                 .unwrap_or_else(|| {
                     error!(
                         "Subsetting failed: no overlapping segments found for range {}-{} (target_id={}, file_index={})",
@@ -1041,6 +1111,15 @@ impl Impg {
                 sequence_index,
             );
 
+            // For reversed entries, the CIGAR was reconstructed in the original alignment
+            // perspective. Invert it to the metadata's (reversed) perspective so that
+            // project_target_range_through_alignment works correctly.
+            let cigar_ops = if metadata.is_reversed() {
+                invert_cigar_ops(&cigar_ops, metadata.strand())
+            } else {
+                cigar_ops
+            };
+
             // Check identity threshold if specified
             if let Some(threshold) = min_gap_compressed_identity {
                 if calculate_gap_compressed_identity(&cigar_ops) < threshold {
@@ -1048,11 +1127,18 @@ impl Impg {
                 }
             }
 
+            let is_reverse = metadata.strand() == Strand::Reverse;
+
             // Project the CIGAR through the alignment to get exact coordinates
             // Use same boundary logic as in process_subset_tracepoints
             let subset_query_start = subset.first_query_pos;
             let subset_query_end = if subset.last_idx == alignment.tracepoints.len() - 1 {
-                metadata.query_end
+                // For reversed - strand: project went from query_end toward query_start
+                if metadata.is_reversed() && is_reverse {
+                    metadata.query_start
+                } else {
+                    metadata.query_end
+                }
             } else {
                 subset.last_query_pos
             };
@@ -1070,17 +1156,11 @@ impl Impg {
                     .max(last_seg_start.max(last_seg_end))
             };
 
-            let (
-                alignment_query_start,
-                alignment_query_end,
-                alignment_target_start,
-                alignment_target_end,
-            ) = (
-                subset_query_start,
-                subset_query_end,
-                subset_target_start,
-                subset_target_end,
-            );
+            // Normalize query bounds for projection (start < end required)
+            let alignment_target_start = subset_target_start;
+            let alignment_target_end = subset_target_end;
+            let alignment_query_start = subset_query_start.min(subset_query_end);
+            let alignment_query_end = subset_query_start.max(subset_query_end);
 
             // Project the requested range through the CIGAR
             let projection = match project_target_range_through_alignment(
@@ -1192,21 +1272,6 @@ impl Impg {
         range_end: i32,
         min_gap_compressed_identity: Option<f64>,
     ) -> Option<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
-        // Reject reversed bidirectional entries for tracepoint files (same as non-approximate path)
-        let file_index = metadata.alignment_file_index as usize;
-        let alignment_file = &self.alignment_files[file_index];
-        let is_tracepoint_file =
-            alignment_file.ends_with(".1aln") || alignment_file.ends_with(".tpa");
-        if is_tracepoint_file && metadata.is_reversed() {
-            error!(
-                "Bidirectional indexing is not supported for tracepoint files. \
-                 Reversed entry encountered for range {}-{} (target_id={}, file_index={}). \
-                 Rebuild with --unidirectional --force-reindex.",
-                range_start, range_end, target_id, metadata.alignment_file_index
-            );
-            std::process::exit(1);
-        }
-
         // Pre-filter: coitrees uses closed-interval overlap, but coordinates are half-open.
         // Skip alignments that merely touch at an endpoint (no actual overlap).
         if metadata.target_start >= range_end || metadata.target_end <= range_start {
@@ -1220,7 +1285,7 @@ impl Impg {
         });
 
         // Scan tracepoints to find overlapping segments
-        let subset = self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end)
+        let subset = self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end, metadata.is_reversed())
             .unwrap_or_else(|| {
                 error!(
                     "Subsetting failed: no overlapping segments found for range {}-{} (target_id={}, file_index={})",
@@ -1246,7 +1311,7 @@ impl Impg {
                                trace_diffs: i32,
                                boundary_name: &str|
          -> i32 {
-            let aligned_len = query_delta.min(abs_target_delta);
+            let aligned_len = query_delta.abs().min(abs_target_delta);
             let segment_identity = if aligned_len > 0 {
                 ((aligned_len - trace_diffs) as f64 / aligned_len as f64).max(0.0)
             } else {
@@ -1267,7 +1332,9 @@ impl Impg {
                     "{} segment refinement: pure query insertion, abs_target_delta=0, query_delta={}, trace_diffs={}",
                     boundary_name, query_delta, trace_diffs
                 );
-                return refined_pos.max(working_query_start).min(working_query_end);
+                let lo = working_query_start.min(working_query_end);
+                let hi = working_query_start.max(working_query_end);
+                return refined_pos.max(lo).min(hi);
             }
 
             let target_fraction =
@@ -1281,7 +1348,9 @@ impl Impg {
                 boundary_name, segment_identity, indel_ratio, trace_diffs, target_fraction
             );
 
-            refined_pos.max(working_query_start).min(working_query_end)
+            let lo = working_query_start.min(working_query_end);
+            let hi = working_query_start.max(working_query_end);
+            refined_pos.max(lo).min(hi)
         };
 
         // Refine first and last query positions
@@ -1366,8 +1435,9 @@ impl Impg {
         let working_query_start = refined_first;
         let working_query_end = refined_last;
 
-        // For reverse alignments: swap projected query coordinates to match normal mode output
-        let (query_start, query_end) = if is_reverse {
+        // For forward reverse-strand alignments: swap projected query coordinates.
+        // For reversed entries, the project direction already handles the ordering.
+        let (query_start, query_end) = if is_reverse && !metadata.is_reversed() {
             (working_query_end, working_query_start) // Swap: first=end, last=start
         } else {
             (working_query_start, working_query_end)

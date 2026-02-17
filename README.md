@@ -499,8 +499,6 @@ impg query --alignment-list files.txt --index-mode per-file -r chr1:0-1000
 
 Both modes work with PAF, 1ALN, and TPA files (can be mixed in `--alignment-list`).
 
-**Note:** Bidirectional indexing (the default) is not yet supported for `.1aln`/`.tpa` tracepoint files. When these formats are detected, `impg` automatically switches to unidirectional mode and emits a warning.
-
 **When to use per-file indexing:**
 - Incremental updates (only rebuild changed alignment files)
 - Many alignment files (auto mode switches at 100 files)
@@ -521,7 +519,7 @@ All commands support these options:
 - `-i, --index`: Path to an existing IMPG index file.
 - `-f, --force-reindex`: Always regenerate the IMPG index even if it already exists.
 - `-t, --threads`: Number of threads (default: 4)
-- `--unidirectional`: Disable bidirectional alignment interpretation. Automatically enabled for .1aln/.tpa tracepoint files (bidirectional mode is not yet supported for these formats).
+- `--unidirectional`: Disable bidirectional alignment interpretation.
 - `-v, --verbose`: Verbosity level (0=error/silent, 1=info with progress bar, 2=debug)
 
 ### Sequence file options
