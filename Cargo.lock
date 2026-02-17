@@ -1330,7 +1330,7 @@ dependencies = [
 
 [[package]]
 name = "impg"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "bincode 2.0.1",
  "bitvec",
@@ -2803,7 +2803,7 @@ checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 [[package]]
 name = "tpa"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/tpa?rev=7637ad40a83011c0c46c6aeb7c6eb5ed4025bf02#7637ad40a83011c0c46c6aeb7c6eb5ed4025bf02"
+source = "git+https://github.com/AndreaGuarracino/tpa?rev=301dc3ff53482d993c065217dbcd8abb6ffff2d9#301dc3ff53482d993c065217dbcd8abb6ffff2d9"
 dependencies = [
  "bgzip",
  "env_logger",
@@ -2819,7 +2819,7 @@ dependencies = [
 [[package]]
 name = "tracepoints"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/tracepoints?rev=3d9eba70b098807f3a168771ef419e84a26b0b8f#3d9eba70b098807f3a168771ef419e84a26b0b8f"
+source = "git+https://github.com/AndreaGuarracino/tracepoints?rev=b73773433561fb36f21136776a7297c5877ab593#b73773433561fb36f21136776a7297c5877ab593"
 dependencies = [
  "lib_wfa2",
 ]

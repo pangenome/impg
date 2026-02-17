@@ -70,12 +70,12 @@ struct CommonOpts {
 /// Alignment file and index options for commands that work with alignments
 #[derive(Parser, Debug)]
 struct AlignmentOpts {
-    /// Path to the alignment files (PAF or .1aln format).
+    /// Path to the alignment files (PAF, 1ALN, or TPA format).
     #[arg(help_heading = "Alignment input")]
     #[clap(short = 'a', long, value_parser, required = false, num_args = 1.., conflicts_with = "alignment_list")]
     alignment_files: Vec<String>,
 
-    /// Path to a text file containing paths to alignment files (one per line, PAF or .1aln format).
+    /// Path to a text file containing paths to alignment files (one per line, PAF, 1ALN, or TPA format).
     #[arg(help_heading = "Alignment input")]
     #[clap(
         long,
@@ -109,6 +109,7 @@ struct AlignmentOpts {
     /// By default, every alignment A->B creates implicit reverse mapping B->A,
     /// guaranteeing all genomes are bridges for transitive queries.
     /// Use this flag to build a smaller unidirectional index (not recommended).
+    /// Automatically enabled for .1aln/.tpa tracepoint files (bidirectional mode is not yet supported for these formats).
     #[arg(help_heading = "Index options")]
     #[clap(long)]
     unidirectional: bool,
@@ -2356,7 +2357,7 @@ fn initialize_index(
     alignment_files: &[String],
     sequence_files: Vec<String>,
 ) -> io::Result<ImpgWrapper> {
-    // The list of alignment files (PAF or .1aln) is pre-resolved
+    // The list of alignment files (PAF, 1ALN, or TPA) is pre-resolved
     info!("Found {} alignment file(s)", alignment_files.len());
 
     let seq_files_opt = if sequence_files.is_empty() {
@@ -2423,11 +2424,23 @@ fn load_or_build_per_file_index(
     force_reindex: bool,
     sequence_files: Option<&[String]>,
     alignment_list: Option<&str>,
-    bidirectional: bool,
+    mut bidirectional: bool,
 ) -> io::Result<ImpgWrapper> {
     use indicatif::{ProgressBar, ProgressStyle};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // Auto-override to unidirectional mode for tracepoint files
+    if bidirectional {
+        if let Some(f) = alignment_files.iter().find(|f| f.ends_with(".1aln") || f.ends_with(".tpa")) {
+            warn!(
+                "Bidirectional indexing is not yet supported for .1aln/.tpa files (found '{}'). \
+                 Automatically using unidirectional mode.",
+                f
+            );
+            bidirectional = false;
+        }
+    }
 
     // Generate per-file index paths
     let index_paths: Vec<PathBuf> = alignment_files
@@ -2547,7 +2560,7 @@ fn load_or_build_per_file_index(
     Ok(ImpgWrapper::from_multi(multi))
 }
 
-/// Resolve the list of alignment files (PAF or .1aln) from either --alignment-files or --alignment-list
+/// Resolve the list of alignment files (PAF, 1ALN, or TPA) from either --alignment-files or --alignment-list
 fn resolve_alignment_files(alignment: &AlignmentOpts) -> io::Result<Vec<String>> {
     let alignment_files = if !alignment.alignment_files.is_empty() {
         alignment.alignment_files.clone()
@@ -2602,8 +2615,20 @@ fn load_or_build_single_index(
     custom_index: Option<&str>,
     sequence_files: Option<&[String]>,
     force_reindex: bool,
-    bidirectional: bool,
+    mut bidirectional: bool,
 ) -> io::Result<Impg> {
+    // Auto-override to unidirectional mode for tracepoint files
+    if bidirectional {
+        if let Some(f) = alignment_files.iter().find(|f| f.ends_with(".1aln") || f.ends_with(".tpa")) {
+            warn!(
+                "Bidirectional indexing is not yet supported for .1aln/.tpa files (found '{}'). \
+                 Automatically using unidirectional mode.",
+                f
+            );
+            bidirectional = false;
+        }
+    }
+
     let index_file = get_combined_index_filename(alignment_files, custom_index);
 
     let direction = if bidirectional { "bidirectional" } else { "unidirectional" };
