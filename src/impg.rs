@@ -1410,20 +1410,6 @@ impl Impg {
             .map(|(_, alignment_file)| alignment_file.clone())
             .collect();
 
-        // Reject bidirectional mode for tracepoint files
-        if bidirectional {
-            if let Some(f) = alignment_files.iter().find(|f| f.ends_with(".1aln") || f.ends_with(".tpa")) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "Bidirectional indexing is not yet supported for .1aln/.tpa files (found '{}'). \
-                         Use --unidirectional or convert to PAF.",
-                        f
-                    ),
-                ));
-            }
-        }
-
         if bidirectional {
             debug!("Creating bidirectional alignment entries");
         } else {
