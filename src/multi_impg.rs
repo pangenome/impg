@@ -226,7 +226,29 @@ impl MultiImpg {
         sequence_files: Option<&[String]>,
         list_file: &Path,
     ) -> std::io::Result<Self> {
-        let cache_path = list_file.with_extension("multi_impg");
+        let list_str = list_file.to_string_lossy();
+        let cache_path = if list_str.starts_with("/proc/") || list_str.starts_with("/dev/fd/") {
+            // Process substitution: derive deterministic cache path from alignment file paths
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            for f in alignment_files {
+                f.hash(&mut hasher);
+            }
+            let hash = hasher.finish();
+            let dir = Path::new(&alignment_files[0])
+                .parent()
+                .unwrap_or(Path::new("."));
+            let cache_file = dir.join(format!("impg_cache_{:016x}.multi_impg", hash));
+            debug!(
+                "Alignment list is a process substitution ({}), using deterministic cache: {}",
+                list_str,
+                cache_file.display()
+            );
+            cache_file
+        } else {
+            list_file.with_extension("multi_impg")
+        };
 
         // Try to load from cache
         if cache_path.exists() {
