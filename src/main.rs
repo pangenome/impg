@@ -108,8 +108,6 @@ struct AlignmentOpts {
     /// Disable bidirectional alignment interpretation (default: bidirectional enabled).
     /// By default, every alignment A->B creates implicit reverse mapping B->A,
     /// guaranteeing all genomes are bridges for transitive queries.
-    /// Use this flag to build a smaller unidirectional index (not recommended).
-    /// Automatically enabled for .1aln/.tpa tracepoint files (bidirectional mode is not yet supported for these formats).
     #[arg(help_heading = "Index options")]
     #[clap(long)]
     unidirectional: bool,
@@ -2424,23 +2422,11 @@ fn load_or_build_per_file_index(
     force_reindex: bool,
     sequence_files: Option<&[String]>,
     alignment_list: Option<&str>,
-    mut bidirectional: bool,
+    bidirectional: bool,
 ) -> io::Result<ImpgWrapper> {
     use indicatif::{ProgressBar, ProgressStyle};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
-
-    // Auto-override to unidirectional mode for tracepoint files
-    if bidirectional {
-        if let Some(f) = alignment_files.iter().find(|f| f.ends_with(".1aln") || f.ends_with(".tpa")) {
-            warn!(
-                "Bidirectional indexing is not yet supported for .1aln/.tpa files (found '{}'). \
-                 Automatically using unidirectional mode.",
-                f
-            );
-            bidirectional = false;
-        }
-    }
 
     // Generate per-file index paths
     let index_paths: Vec<PathBuf> = alignment_files
@@ -2615,20 +2601,8 @@ fn load_or_build_single_index(
     custom_index: Option<&str>,
     sequence_files: Option<&[String]>,
     force_reindex: bool,
-    mut bidirectional: bool,
+    bidirectional: bool,
 ) -> io::Result<Impg> {
-    // Auto-override to unidirectional mode for tracepoint files
-    if bidirectional {
-        if let Some(f) = alignment_files.iter().find(|f| f.ends_with(".1aln") || f.ends_with(".tpa")) {
-            warn!(
-                "Bidirectional indexing is not yet supported for .1aln/.tpa files (found '{}'). \
-                 Automatically using unidirectional mode.",
-                f
-            );
-            bidirectional = false;
-        }
-    }
-
     let index_file = get_combined_index_filename(alignment_files, custom_index);
 
     let direction = if bidirectional { "bidirectional" } else { "unidirectional" };
