@@ -839,6 +839,7 @@ impl Impg {
                         alignment.target_contig_start.try_into().unwrap(),
                         metadata.strand() == Strand::Reverse,
                         aligner,
+                        true,
                     )
                 })
             }
@@ -963,6 +964,7 @@ impl Impg {
                         adjusted_target_offset,
                         is_reverse,
                         aligner,
+                        true,
                     )
                 })
             }
