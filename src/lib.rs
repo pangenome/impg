@@ -11,6 +11,7 @@ pub mod multi_impg;
 pub mod onealn;
 pub mod paf;
 pub mod realize;
+pub mod tpa_parser;
 pub mod seqidx;
 pub mod sequence_index;
 pub mod subset_filter;

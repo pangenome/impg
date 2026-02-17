@@ -14,7 +14,7 @@ Here's a basic example:
 impg query -a cerevisiae.pan.paf.gz -r S288C#1#chrI:50000-100000 -x
 ```
 
-- `-a` specifies the path to the alignment file in PAF or .1aln format. PAF files must use CIGAR strings with `=` for matches and `X` for mismatches (e.g., from `wfmash` or `minimap2 --eqx`).
+- `-a` specifies the path to the alignment file in PAF, 1ALN, or TPA format. PAF files must use CIGAR strings with `=` for matches and `X` for mismatches (e.g., from `wfmash` or `minimap2 --eqx`).
 - `-r` defines the target range in the format of `seq_name:start-end`
 - `-x` requests a *transitive closure* of the matches. That is, for each collected range, we then find what sequence ranges are aligned onto it. This is done progressively until we've closed the set of alignments connected to the initial target range.
 
@@ -497,7 +497,7 @@ impg index --alignment-list files.txt --index-mode per-file -t 32
 impg query --alignment-list files.txt --index-mode per-file -r chr1:0-1000
 ```
 
-Both modes work with PAF and .1aln files (can be mixed in `--alignment-list`).
+Both modes work with PAF, 1ALN, and TPA files (can be mixed in `--alignment-list`).
 
 **When to use per-file indexing:**
 - Incremental updates (only rebuild changed alignment files)
@@ -514,11 +514,12 @@ bgzip -r alignments.paf.gz  # Creates alignments.paf.gz.gzi (optional)
 ### Common options
 
 All commands support these options:
-- `-a, --alignment-files`: One or more paths to alignment files in PAF or .1aln format (can be mixed). Files can be gzipped or uncompressed.
-- `--alignment-list`: Path to a plain-text file listing one alignment path per line (PAF or .1aln files can be mixed).
+- `-a, --alignment-files`: One or more paths to alignment files in PAF, 1ALN, or TPA format (can be mixed). Files can be gzipped or uncompressed.
+- `--alignment-list`: Path to a plain-text file listing one alignment path per line (PAF, 1ALN, or TPA files can be mixed).
 - `-i, --index`: Path to an existing IMPG index file.
 - `-f, --force-reindex`: Always regenerate the IMPG index even if it already exists.
 - `-t, --threads`: Number of threads (default: 4)
+- `--unidirectional`: Disable bidirectional alignment interpretation.
 - `-v, --verbose`: Verbosity level (0=error/silent, 1=info with progress bar, 2=debug)
 
 ### Sequence file options

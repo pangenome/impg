@@ -6,6 +6,7 @@ use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::impg_index::{ImpgIndex, ImpgWrapper};
 use impg::multi_impg::MultiImpg;
 use impg::onealn::OneAlnParser;
+use impg::tpa_parser::TpaParser;
 use impg::seqidx::SequenceIndex;
 use impg::sequence_index::{SequenceIndex as SeqIndexTrait, UnifiedSequenceIndex};
 use impg::subset_filter::{apply_subset_filter, load_subset_filter, SubsetFilter};
@@ -69,12 +70,12 @@ struct CommonOpts {
 /// Alignment file and index options for commands that work with alignments
 #[derive(Parser, Debug)]
 struct AlignmentOpts {
-    /// Path to the alignment files (PAF or .1aln format).
+    /// Path to the alignment files (PAF, 1ALN, or TPA format).
     #[arg(help_heading = "Alignment input")]
     #[clap(short = 'a', long, value_parser, required = false, num_args = 1.., conflicts_with = "alignment_list")]
     alignment_files: Vec<String>,
 
-    /// Path to a text file containing paths to alignment files (one per line, PAF or .1aln format).
+    /// Path to a text file containing paths to alignment files (one per line, PAF, 1ALN, or TPA format).
     #[arg(help_heading = "Alignment input")]
     #[clap(
         long,
@@ -107,7 +108,6 @@ struct AlignmentOpts {
     /// Disable bidirectional alignment interpretation (default: bidirectional enabled).
     /// By default, every alignment A->B creates implicit reverse mapping B->A,
     /// guaranteeing all genomes are bridges for transitive queries.
-    /// Use this flag to build a smaller unidirectional index (not recommended).
     #[arg(help_heading = "Index options")]
     #[clap(long)]
     unidirectional: bool,
@@ -244,17 +244,19 @@ impl GfaMafFastaOpts {
         Option<UnifiedSequenceIndex>,
         Option<(u8, u8, u8, u8, u8, u8)>,
     )> {
-        // Check if any of the alignment files are .1aln files (which require sequence data for tracepoint conversion)
-        let has_onealn_files = alignment_files.iter().any(|f| f.ends_with(".1aln"));
+        // Check if any of the alignment files are tracepoint-based (.1aln/.tpa, which require sequence data for tracepoint conversion)
+        let has_tracepoint_files = alignment_files
+            .iter()
+            .any(|f| f.ends_with(".1aln") || f.ends_with(".tpa"));
 
-        // In approximate mode with bed/bedpe output, .1aln files don't need sequences
-        let onealn_needs_sequences = has_onealn_files
+        // In approximate mode with bed/bedpe output, tracepoint files don't need sequences
+        let tracepoint_needs_sequences = has_tracepoint_files
             && !(approximate_mode && (output_format == "bed" || output_format == "bedpe"));
 
         let needs_sequence_mandatory = matches!(
             output_format,
             "gfa" | "gfa-seqwish" | "gfa-poa" | "gfa-realize" | "maf" | "fasta" | "fasta-aln" | "fasta+paf"
-        ) || onealn_needs_sequences;
+        ) || tracepoint_needs_sequences;
         let needs_sequence_optional = output_format == "paf" && original_sequence_coordinates;
         // POA is only needed for gfa-poa, maf, and fasta-aln (not for gfa/gfa-seqwish/gfa-realize which use seqwish or realize)
         let needs_poa = matches!(output_format, "gfa-poa" | "maf" | "fasta-aln");
@@ -270,8 +272,8 @@ impl GfaMafFastaOpts {
             if index.is_none() && needs_sequence_mandatory {
                 let file_types = "FASTA/AGC";
 
-                let msg = if has_onealn_files {
-                    format!("Sequence files ({file_types}) are required for .1aln alignment files to convert tracepoints to CIGAR strings. Use --sequence-files or --sequence-list")
+                let msg = if has_tracepoint_files {
+                    format!("Sequence files ({file_types}) are required for tracepoint alignment files (.1aln/.tpa) to convert tracepoints to CIGAR strings. Use --sequence-files or --sequence-list")
                 } else {
                     format!("Sequence files ({file_types}) are required for '{output_format}' output format. Use --sequence-files or --sequence-list")
                 };
@@ -345,7 +347,7 @@ struct TransitiveOpts {
     #[clap(short = 'm', long, value_parser, default_value_t = 2)]
     max_depth: u16,
 
-    /// Minimum region size to consider for transitive queries (required > trace_spacing when using --approximate )
+    /// Minimum region size to consider for transitive queries (default: 101; for fastga --approximate, set > trace_spacing)
     #[arg(help_heading = "Transitive query options")]
     #[clap(long, value_parser)]
     min_transitive_len: Option<i32>,
@@ -357,9 +359,9 @@ struct TransitiveOpts {
 }
 
 impl TransitiveOpts {
-    /// Get the effective min_transitive_len value (default: 100 for non-approximate mode)
+    /// Get the effective min_transitive_len value (default: 101)
     fn effective_min_transitive_len(&self) -> i32 {
-        self.min_transitive_len.unwrap_or(100)
+        self.min_transitive_len.unwrap_or(101)
     }
 }
 
@@ -420,7 +422,7 @@ struct QueryOpts {
     #[clap(long, action)]
     original_sequence_coordinates: bool,
 
-    /// Use approximate mode for faster queries with 1aln files (only bed/bedpe output)
+    /// Use approximate mode for faster queries with tracepoint files (.1aln/.tpa, only bed/bedpe output)
     #[arg(help_heading = "Performance")]
     #[clap(long, action)]
     approximate: bool,
@@ -726,7 +728,7 @@ enum Args {
         #[clap(long, action)]
         separate_files: bool,
 
-        /// Use approximate mode for faster queries with 1aln files (only bed/bedpe output)
+        /// Use approximate mode for faster queries with tracepoint files (.1aln/.tpa, only bed/bedpe output)
         #[arg(help_heading = "Performance")]
         #[clap(long, action)]
         approximate: bool,
@@ -1396,18 +1398,18 @@ fn run() -> io::Result<()> {
 
             // Early validation for approximate mode (before expensive operations)
             if query.approximate {
-                // Check that all alignment files are .1aln files
-                let non_onealn_files: Vec<&String> = alignment_files
+                // Check that all alignment files are tracepoint-based (.1aln or .tpa)
+                let non_tracepoint_files: Vec<&String> = alignment_files
                     .iter()
-                    .filter(|f| !f.ends_with(".1aln"))
+                    .filter(|f| !f.ends_with(".1aln") && !f.ends_with(".tpa"))
                     .collect();
 
-                if !non_onealn_files.is_empty() {
+                if !non_tracepoint_files.is_empty() {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "--approximate mode only works with .1aln alignment files (found {} non-.1aln files).",
-                            non_onealn_files.len()
+                            "--approximate mode only works with tracepoint alignment files (.1aln or .tpa), found {} incompatible files.",
+                            non_tracepoint_files.len()
                         ),
                     ));
                 }
@@ -2459,13 +2461,13 @@ fn validate_approximate_mode_min_length(
     min_transitive_len_opt: Option<i32>,
     is_transitive: bool,
 ) -> io::Result<()> {
-    // Only require explicit --min-transitive-len for transitive queries in approximate mode
+    // For transitive queries in approximate mode, warn if min-transitive-len is not set
+    // (coordinates are coarse-grained from tracepoint boundaries)
     if is_transitive && min_transitive_len_opt.is_none() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "--approximate mode with transitive queries requires explicitly setting --min-transitive-len. \
-            Set it to greater than your trace_spacing (e.g., 101 for trace_spacing=100).",
-        ));
+        log::warn!(
+            "--approximate mode with transitive queries uses default --min-transitive-len=101. \
+            For fastga tracepoints, consider setting it greater than your trace_spacing."
+        );
     }
 
     Ok(())
@@ -2738,7 +2740,7 @@ fn initialize_index(
     alignment_files: &[String],
     sequence_files: Vec<String>,
 ) -> io::Result<ImpgWrapper> {
-    // The list of alignment files (PAF or .1aln) is pre-resolved
+    // The list of alignment files (PAF, 1ALN, or TPA) is pre-resolved
     info!("Found {} alignment file(s)", alignment_files.len());
 
     let seq_files_opt = if sequence_files.is_empty() {
@@ -2829,21 +2831,22 @@ fn load_or_build_per_file_index(
             .collect()
     };
 
-    if indices_to_build.is_empty() {
-        info!("Using per-file indexing mode");
+    let direction = if bidirectional { "bidirectional" } else { "unidirectional" };
+    let total = alignment_files.len();
+    let to_build = indices_to_build.len();
+    if to_build == 0 {
+        info!("Using per-file indexing mode ({} {} index file(s) up to date)", total, direction);
     } else if force_reindex {
         info!("Using per-file indexing mode (force rebuild)");
         info!(
-            "Building {} index file(s) processing {} alignment file(s)...",
-            indices_to_build.len(),
-            indices_to_build.len()
+            "Building {} of {} {} index file(s)...",
+            to_build, total, direction
         );
     } else {
         info!("Using per-file indexing mode");
         info!(
-            "Building {} index file(s) processing {} alignment file(s)...",
-            indices_to_build.len(),
-            indices_to_build.len()
+            "Building {} of {} {} index file(s) ({} already up to date)...",
+            to_build, total, direction, total - to_build
         );
     }
 
@@ -2928,7 +2931,7 @@ fn load_or_build_per_file_index(
     Ok(ImpgWrapper::from_multi(multi))
 }
 
-/// Resolve the list of alignment files (PAF or .1aln) from either --alignment-files or --alignment-list
+/// Resolve the list of alignment files (PAF, 1ALN, or TPA) from either --alignment-files or --alignment-list
 fn resolve_alignment_files(alignment: &AlignmentOpts) -> io::Result<Vec<String>> {
     let alignment_files = if !alignment.alignment_files.is_empty() {
         alignment.alignment_files.clone()
@@ -2987,10 +2990,21 @@ fn load_or_build_single_index(
 ) -> io::Result<Impg> {
     let index_file = get_combined_index_filename(alignment_files, custom_index);
 
+    let direction = if bidirectional { "bidirectional" } else { "unidirectional" };
+    let per_file_hint = if custom_index.is_some() && alignment_files.len() >= 100 {
+        format!(
+            " (drop -i or use --index-mode per-file for per-file indexing with {} files)",
+            alignment_files.len()
+        )
+    } else {
+        String::new()
+    };
+
     if force_reindex {
-        info!("Using single indexing mode (force rebuild)");
+        info!("Using single indexing mode (force rebuild){}", per_file_hint);
         info!(
-            "Building 1 index file processing {} alignment file(s)...",
+            "Building 1 {} index file processing {} alignment file(s)...",
+            direction,
             alignment_files.len()
         );
         return build_single_index(
@@ -3004,9 +3018,10 @@ fn load_or_build_single_index(
     }
 
     if !std::path::Path::new(&index_file).exists() {
-        info!("Using single indexing mode");
+        info!("Using single indexing mode{}", per_file_hint);
         info!(
-            "Building 1 index file processing {} alignment file(s)...",
+            "Building 1 {} index file processing {} alignment file(s)...",
+            direction,
             alignment_files.len()
         );
         return build_single_index(
@@ -3061,9 +3076,9 @@ fn build_single_index(
     debug!("Creating index: {index_file}");
 
     if bidirectional {
-        info!("Building bidirectional index");
+        debug!("Building bidirectional index");
     } else {
-        info!("Building unidirectional index");
+        debug!("Building unidirectional index");
     }
 
     let num_alignment_files = alignment_files.len();
@@ -3138,6 +3153,21 @@ fn build_single_index(
                                 io::Error::new(
                                     io::ErrorKind::InvalidData,
                                     format!("Failed to parse 1aln records: {}", e),
+                                )
+                            })?
+                        }
+                        AlignmentFormat::Tpa => {
+                            let parser =
+                                TpaParser::new(aln_file.clone()).map_err(|e| {
+                                    io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        format!("Failed to create TPA parser: {}", e),
+                                    )
+                                })?;
+                            parser.parse_alignments(&mut local_seq_index, threads.get()).map_err(|e| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!("Failed to parse TPA records: {}", e),
                                 )
                             })?
                         }

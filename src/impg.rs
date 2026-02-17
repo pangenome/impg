@@ -2,15 +2,16 @@ use crate::alignment_record::{AlignmentRecord, Strand};
 use crate::forest_map::ForestMap;
 use crate::graph::reverse_complement;
 use crate::impg_index::ImpgIndex;
-use crate::onealn::{OneAlnAlignment, OneAlnParser, ParseErr as OneAlnParseErr};
+use crate::onealn::{OneAlnAlignment, OneAlnParser, ParseErr as OneAlnParseErr, TracepointModeData};
 use crate::paf::read_cigar_data;
+use crate::tpa_parser::{ParseErr as TpaParseErr, TpaParser};
 use crate::seqidx::SequenceIndex;
 use crate::sequence_index::SequenceIndex as _; // The as _ syntax imports the trait so its methods are available, but doesn't bring the name into scope (avoiding the naming conflict)
 use crate::sequence_index::UnifiedSequenceIndex;
 use crate::subset_filter::SubsetFilter;
 use coitrees::{BasicCOITree, Interval, IntervalTree};
 use lib_wfa2::affine_wavefront::{AffineWavefronts, Distance};
-use log::{debug, warn};
+use log::{debug, error, warn};
 use onecode::OneFile;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -20,7 +21,7 @@ use std::cmp::{max, min};
 use std::fs::File;
 use std::io::{self, BufReader, Seek, SeekFrom};
 use std::sync::{Arc, RwLock};
-use tracepoints::tracepoints_to_cigar_fastga_with_aligner;
+use tracepoints::{tracepoints_to_cigar_fastga_with_aligner, tracepoints_to_cigar_with_aligner};
 
 // use libc;
 // fn log_memory_usage(label: &str) {
@@ -39,21 +40,29 @@ use tracepoints::tracepoints_to_cigar_fastga_with_aligner;
 
 thread_local! {
     static EDIT_ALIGNER: RefCell<Option<AffineWavefronts>> = const { RefCell::new(None) };
+    static GAP_AFFINE_ALIGNER: RefCell<Option<AffineWavefronts>> = const { RefCell::new(None) };
+    static GAP_AFFINE2P_ALIGNER: RefCell<Option<AffineWavefronts>> = const { RefCell::new(None) };
     static ONEALN_HANDLE: RefCell<Option<(usize, OneFile)>> = const { RefCell::new(None) };
+    static TPA_HANDLE: RefCell<Option<(usize, tpa::TpaReader)>> = const { RefCell::new(None) };
     static TARGET_SEQ_CACHE: RefCell<Option<((u32, i32, i32, bool), Vec<u8>)>> = const { RefCell::new(None) };
 }
 
-/// Execute a closure with a thread-local edit distance mode aligner
-fn with_edit_aligner<F, R>(f: F) -> R
+/// Execute a closure with a thread-local aligner matched to the given distance metric
+fn with_aligner<F, R>(distance: &Distance, f: F) -> R
 where
     F: FnOnce(&mut AffineWavefronts) -> R,
 {
-    EDIT_ALIGNER.with(|aligner_cell| {
-        let mut aligner_opt = aligner_cell.borrow_mut();
-        if aligner_opt.is_none() {
-            *aligner_opt = Some(Distance::Edit.create_aligner(None, None));
+    let (cell, dist) = match distance {
+        d @ Distance::Edit => (&EDIT_ALIGNER, d),
+        d @ Distance::GapAffine { .. } => (&GAP_AFFINE_ALIGNER, d),
+        d @ Distance::GapAffine2p { .. } => (&GAP_AFFINE2P_ALIGNER, d),
+    };
+    cell.with(|aligner_cell| {
+        let mut opt = aligner_cell.borrow_mut();
+        if opt.is_none() {
+            *opt = Some(dist.create_aligner(None, None));
         }
-        f(aligner_opt.as_mut().unwrap())
+        f(opt.as_mut().unwrap())
     })
 }
 
@@ -203,6 +212,8 @@ impl QueryMetadata {
     fn get_file_type(alignment_file: &str) -> FileType {
         if alignment_file.ends_with(".1aln") {
             FileType::OneAln
+        } else if alignment_file.ends_with(".tpa") {
+            FileType::Tpa
         } else {
             FileType::Paf
         }
@@ -216,6 +227,7 @@ type TreeMap = FxHashMap<u32, Arc<BasicCOITree<QueryMetadata, u32>>>;
 enum FileType {
     Paf,
     OneAln,
+    Tpa,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -403,8 +415,13 @@ impl Impg {
         }
 
         // Slow path: read from file and cache
-        let spacing = OneAlnParser::read_trace_spacing(file_path)
-            .map_err(|e| format!("Failed to read trace_spacing from '{}': {:?}", file_path, e))?;
+        let spacing = if file_path.ends_with(".tpa") {
+            TpaParser::read_trace_spacing(file_path)
+                .map_err(|e| format!("Failed to read trace_spacing from '{}': {}", file_path, e))?
+        } else {
+            OneAlnParser::read_trace_spacing(file_path)
+                .map_err(|e| format!("Failed to read trace_spacing from '{}': {:?}", file_path, e))?
+        };
 
         // Cache it
         let mut cache = self.trace_spacing_cache.write().unwrap();
@@ -504,17 +521,17 @@ impl Impg {
                     )
                 })
             }
-            FileType::OneAln => {
-                // For 1aln files, convert tracepoints to CIGAR
+            FileType::OneAln | FileType::Tpa => {
+                // For 1aln/TPA files, convert tracepoints to CIGAR
                 let alignment = self
-                    .get_onealn_alignment(metadata)
+                    .get_tracepoint_alignment(metadata)
                     .unwrap_or_else(|e| panic!("{}", e));
 
                 self.process_tracepoints_data(
                     &alignment,
                     metadata,
                     target_id,
-                    sequence_index.expect("Sequence index required for .1aln files"),
+                    sequence_index.expect("Sequence index required for tracepoint files"),
                 )
             }
         };
@@ -553,39 +570,119 @@ impl Impg {
         })
     }
 
+    fn with_tpa_reader<F, R>(&self, file_index: usize, f: F) -> Result<R, String>
+    where
+        F: FnOnce(&mut tpa::TpaReader) -> Result<R, TpaParseErr>,
+    {
+        let file_path = &self.alignment_files[file_index];
+        TPA_HANDLE.with(|handle_cell| {
+            let mut slot = handle_cell.borrow_mut();
+            let needs_open = match slot.as_ref() {
+                Some((idx, _)) => *idx != file_index,
+                None => true,
+            };
+
+            if needs_open {
+                *slot = None;
+                let mut reader = tpa::TpaReader::new(file_path)
+                    .map_err(|e| format!("Failed to open TPA file '{}': {}", file_path, e))?;
+                reader
+                    .load_string_table()
+                    .map_err(|e| format!("Failed to load TPA string table '{}': {}", file_path, e))?;
+                *slot = Some((file_index, reader));
+            }
+
+            let (_, handle) = slot
+                .as_mut()
+                .expect("TPA_HANDLE must contain a handle after opening");
+            f(handle).map_err(|e| e.to_string())
+        })
+    }
+
+    fn get_tpa_alignment(&self, metadata: &QueryMetadata) -> Result<OneAlnAlignment, String> {
+        let file_index = metadata.alignment_file_index as usize;
+        let alignment_file = &self.alignment_files[file_index];
+        let record_id = metadata.data_offset();
+
+        self.with_tpa_reader(file_index, |reader| {
+            TpaParser::fetch_alignment(reader, record_id)
+        })
+        .map_err(|e| {
+            format!(
+                "Failed to fetch TPA alignment {} from '{}': {}",
+                record_id, alignment_file, e
+            )
+        })
+    }
+
+    /// Get tracepoint alignment from either .1aln or .tpa file
+    fn get_tracepoint_alignment(
+        &self,
+        metadata: &QueryMetadata,
+    ) -> Result<OneAlnAlignment, String> {
+        let file = &self.alignment_files[metadata.alignment_file_index as usize];
+        if file.ends_with(".tpa") {
+            self.get_tpa_alignment(metadata)
+        } else if file.ends_with(".1aln") {
+            self.get_onealn_alignment(metadata)
+        } else {
+            Err(format!("No tracepoint support for: {}", file))
+        }
+    }
+
     /// Scan tracepoints to find segments overlapping the requested target range.
+    ///
+    /// For forward entries: scans along the target axis, projects onto the query axis.
+    /// For reversed entries: scans along the query axis (stored as target in metadata),
+    /// projects onto the target axis (stored as query in metadata).
+    /// Same tracepoint segments, different scan dimension
     fn scan_overlapping_tracepoints(
         &self,
         alignment: &OneAlnAlignment,
         metadata: &QueryMetadata,
         range_start: i32,
         range_end: i32,
+        is_reversed_entry: bool,
     ) -> Option<SubsettingResult> {
-        let trace_spacing = alignment.trace_spacing as i32;
         let is_reverse = metadata.strand() == Strand::Reverse;
 
-        // Calculate first boundary: FASTGA-style first segment length
-        let query_start_in_contig = alignment.query_contig_start as i32;
-        let first_boundary =
-            ((query_start_in_contig / trace_spacing) + 1) * trace_spacing - query_start_in_contig;
-
-        // Metadata stores query coords in FORWARD order for both strands
-        let working_query_start = metadata.query_start;
-
-        // Initialize scanning positions
-        let mut target_pos = if is_reverse {
-            metadata.target_end // Start from target end, scan backward
+        // Scan axis = metadata target axis (where range_start/range_end live)
+        // Project axis = metadata query axis (output axis)
+        //
+        // Forward entry: scan along original target, project along original query
+        //   scan_dir: +1 (+strand) or -1 (-strand); project_dir: always +1
+        // Reversed entry: scan along original query (=metadata target), project along original target (=metadata query)
+        //   scan_dir: always +1; project_dir: +1 (+strand) or -1 (-strand)
+        let scan_dir: i32 = if is_reversed_entry {
+            1
         } else {
-            metadata.target_start
+            if is_reverse { -1 } else { 1 }
         };
-        let mut query_pos = working_query_start; // Always start from working start
-        let target_dir = if is_reverse { -1 } else { 1 };
+        let project_dir: i32 = if is_reversed_entry {
+            if is_reverse { -1 } else { 1 }
+        } else {
+            1
+        };
+
+        // Initialize scan position (along range axis)
+        let mut scan_pos = if is_reversed_entry {
+            metadata.target_start // = orig query_start, always scan forward
+        } else {
+            if is_reverse { metadata.target_end } else { metadata.target_start }
+        };
+
+        // Initialize project position (along output axis)
+        let mut project_pos = if is_reversed_entry {
+            if is_reverse { metadata.query_end } else { metadata.query_start }
+        } else {
+            metadata.query_start // Always start from query_start for forward
+        };
 
         // Track overlapping segments
         let mut first_idx: Option<usize> = None;
         let mut last_idx: usize = 0;
-        let mut first_query_pos: Option<i32> = None;
-        let mut last_query_pos: Option<i32> = None;
+        let mut first_project_pos: Option<i32> = None;
+        let mut last_project_pos: Option<i32> = None;
         let mut first_segment_info: Option<(i32, i32, i32, i32, i32, i32)> = None;
         let mut last_segment_info: Option<(i32, i32, i32, i32, i32, i32)> = None;
         let mut num_overlapping_segments = 0;
@@ -594,56 +691,94 @@ impl Impg {
         let mut total_matches = 0.0;
         let mut total_mismatches = 0.0;
 
+        // Pre-compute FASTGA-specific values if needed
+        let (trace_spacing, first_boundary) = match &alignment.mode_data {
+            TracepointModeData::Fastga { trace_spacing, .. } => {
+                let ts = *trace_spacing as i32;
+                let query_start_in_contig = alignment.query_contig_start as i32;
+                let fb = ((query_start_in_contig / ts) + 1) * ts - query_start_in_contig;
+                (ts, fb)
+            }
+            TracepointModeData::Standard { .. } => (0, 0), // not used
+        };
+
         // Scan tracepoints and collect those that overlap the requested range
         for (idx, &tracepoint) in alignment.tracepoints.iter().enumerate() {
-            // Calculate deltas for this segment
-            let query_delta = if idx == 0 {
-                first_boundary
-            } else {
-                trace_spacing
+            // Query delta (always positive, along original query axis)
+            let query_delta = match &alignment.mode_data {
+                TracepointModeData::Standard { query_deltas, .. } => {
+                    query_deltas[idx] as i32
+                }
+                TracepointModeData::Fastga { .. } => {
+                    if idx == 0 { first_boundary } else { trace_spacing }
+                }
             };
-            let target_delta = (tracepoint as i32) * target_dir;
-            let abs_target_delta = tracepoint.abs() as i32;
+            let abs_tracepoint = tracepoint.abs() as i32;
 
-            // Segment boundaries (forward coordinate space)
-            let seg_start = target_pos.min(target_pos + target_delta);
-            let seg_end = target_pos.max(target_pos + target_delta);
+            // Compute scan and project deltas based on entry type
+            let (scan_delta, project_delta, abs_scan_delta) = if is_reversed_entry {
+                // Reversed: scan with query_delta (always positive), project with tracepoint
+                (query_delta, abs_tracepoint * project_dir, query_delta)
+            } else {
+                // Forward: scan with tracepoint * scan_dir, project with query_delta
+                ((tracepoint as i32) * scan_dir, query_delta, abs_tracepoint)
+            };
+
+            // Segment boundaries (forward coordinate space along scan axis)
+            let seg_start = scan_pos.min(scan_pos + scan_delta);
+            let seg_end = scan_pos.max(scan_pos + scan_delta);
 
             // Check overlap with requested range
             if seg_start < range_end && seg_end > range_start {
                 num_overlapping_segments += 1;
-                let num_diffs = alignment.trace_diffs[idx] as i32;
+                let num_diffs = match &alignment.mode_data {
+                    TracepointModeData::Fastga { diffs, .. } => {
+                        if idx < diffs.len() {
+                            diffs[idx] as i32
+                        } else {
+                            0
+                        }
+                    }
+                    TracepointModeData::Standard { max_complexity, .. } => {
+                        // Estimate: use max_complexity unless one delta is 0
+                        if query_delta == 0 || abs_tracepoint == 0 {
+                            query_delta.max(abs_tracepoint)
+                        } else {
+                            *max_complexity as i32
+                        }
+                    }
+                };
                 let seg_info = (
-                    query_pos,
-                    query_delta,
+                    project_pos,
+                    project_delta,
                     seg_start,
                     seg_end,
-                    abs_target_delta,
+                    abs_scan_delta,
                     num_diffs,
                 );
 
                 // Track first and last overlapping segments
-                if first_query_pos.is_none() {
+                if first_project_pos.is_none() {
                     first_idx = Some(idx);
-                    first_query_pos = Some(query_pos);
+                    first_project_pos = Some(project_pos);
                     first_segment_info = Some(seg_info);
                 }
                 last_idx = idx;
-                last_query_pos = Some(query_pos + query_delta);
+                last_project_pos = Some(project_pos + project_delta);
                 last_segment_info = Some(seg_info);
 
                 // Accumulate identity statistics
-                let aligned_len = (query_delta.min(abs_target_delta) as f64).max(0.0);
+                let aligned_len = (project_delta.abs().min(abs_scan_delta) as f64).max(0.0);
                 total_matches += (aligned_len - num_diffs as f64).max(0.0);
                 total_mismatches += num_diffs as f64;
             }
 
             // Advance to next segment
-            target_pos += target_delta;
-            query_pos += query_delta;
+            scan_pos += scan_delta;
+            project_pos += project_delta;
 
             // Early exit when past requested range
-            if (is_reverse && target_pos <= range_start) || (!is_reverse && target_pos >= range_end)
+            if (scan_dir == -1 && scan_pos <= range_start) || (scan_dir == 1 && scan_pos >= range_end)
             {
                 break;
             }
@@ -655,8 +790,8 @@ impl Impg {
         Some(SubsettingResult {
             first_idx: first_idx.unwrap(),
             last_idx,
-            first_query_pos: first_query_pos.unwrap(),
-            last_query_pos: last_query_pos.unwrap(),
+            first_query_pos: first_project_pos.unwrap(),
+            last_query_pos: last_project_pos.unwrap(),
             num_overlapping_segments,
             total_matches,
             total_mismatches,
@@ -681,14 +816,6 @@ impl Impg {
             return vec![CigarOp::new(match_len, '=')];
         }
 
-        let tracepoints: Vec<(usize, usize)> = alignment
-            .trace_diffs
-            .iter()
-            .zip(alignment.tracepoints.iter())
-            .map(|(&diff, &tp)| (diff as usize, tp as usize))
-            .collect();
-        let trace_spacing = alignment.trace_spacing as usize;
-
         // Fetch query sequence (not cached)
         let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
         let query_seq = sequence_index
@@ -707,18 +834,50 @@ impl Impg {
             is_reverse,
         );
 
-        let cigar_str = with_edit_aligner(|aligner| {
-            tracepoints_to_cigar_fastga_with_aligner(
-                &tracepoints,
-                trace_spacing.try_into().unwrap(),
-                &query_seq,
-                &target_seq,
-                alignment.query_contig_start.try_into().unwrap(),
-                alignment.target_contig_start.try_into().unwrap(),
-                metadata.strand() == Strand::Reverse,
-                aligner,
-            )
-        });
+        let cigar_str = match &alignment.mode_data {
+            TracepointModeData::Standard { query_deltas, complexity_metric, max_complexity, distance } => {
+                let tracepoints: Vec<(usize, usize)> = query_deltas
+                    .iter()
+                    .zip(alignment.tracepoints.iter())
+                    .map(|(&qd, &td)| (qd as usize, td as usize))
+                    .collect();
+                let metric = *complexity_metric;
+                let max_val = Some(*max_complexity as u32);
+                with_aligner(distance, |aligner| {
+                    tracepoints_to_cigar_with_aligner(
+                        &tracepoints,
+                        &query_seq,
+                        &target_seq,
+                        0,
+                        0,
+                        metric,
+                        aligner,
+                        max_val,
+                    )
+                })
+            }
+            TracepointModeData::Fastga { diffs, trace_spacing } => {
+                let tracepoints: Vec<(usize, usize)> = diffs
+                    .iter()
+                    .zip(alignment.tracepoints.iter())
+                    .map(|(&diff, &tp)| (diff as usize, tp as usize))
+                    .collect();
+                let ts = *trace_spacing as usize;
+                with_aligner(&Distance::Edit, |aligner| {
+                    tracepoints_to_cigar_fastga_with_aligner(
+                        &tracepoints,
+                        ts.try_into().unwrap(),
+                        &query_seq,
+                        &target_seq,
+                        alignment.query_contig_start.try_into().unwrap(),
+                        alignment.target_contig_start.try_into().unwrap(),
+                        metadata.strand() == Strand::Reverse,
+                        aligner,
+                        true,
+                    )
+                })
+            }
+        };
 
         match parse_cigar_to_delta(&cigar_str) {
             Ok(ops) => ops,
@@ -730,6 +889,11 @@ impl Impg {
     }
 
     /// Reconstruct CIGAR only for the subset of tracepoints that overlap the requested range.
+    ///
+    /// For reversed entries, the metadata names/coordinates are swapped but tracepoint
+    /// reconstruction needs the original sequences: a_seq = original query (from target_id
+    /// at scan-axis coords), b_seq = original target (from metadata.query_id at project-axis
+    /// coords, RC if - strand).
     fn process_subset_tracepoints(
         &self,
         alignment: &OneAlnAlignment,
@@ -739,27 +903,47 @@ impl Impg {
         sequence_index: &UnifiedSequenceIndex,
     ) -> Vec<CigarOp> {
         let is_reverse = metadata.strand() == Strand::Reverse;
+        let is_reversed_entry = metadata.is_reversed();
 
         // Extract subset tracepoints [first_idx..=last_idx]
-        let subset_tracepoints: Vec<(usize, usize)> = alignment.trace_diffs
-            [subset.first_idx..=subset.last_idx]
-            .iter()
-            .zip(alignment.tracepoints[subset.first_idx..=subset.last_idx].iter())
-            .map(|(&diff, &tp)| (diff as usize, tp as usize))
-            .collect();
+        let subset_tracepoints: Vec<(usize, usize)> = match &alignment.mode_data {
+            TracepointModeData::Standard { query_deltas, .. } => {
+                // Standard mode: (query_delta, target_delta)
+                query_deltas[subset.first_idx..=subset.last_idx]
+                    .iter()
+                    .zip(alignment.tracepoints[subset.first_idx..=subset.last_idx].iter())
+                    .map(|(&qd, &tp)| (qd as usize, tp as usize))
+                    .collect()
+            }
+            TracepointModeData::Fastga { diffs, .. } => {
+                // Fastga mode: (diffs, target_delta)
+                diffs[subset.first_idx..=subset.last_idx]
+                    .iter()
+                    .zip(alignment.tracepoints[subset.first_idx..=subset.last_idx].iter())
+                    .map(|(&diff, &tp)| (diff as usize, tp as usize))
+                    .collect()
+            }
+        };
 
         // Calculate subset sequence ranges (use RAW boundaries from subsetting scan, no refinement)
+        // first_query_pos/last_query_pos are project-axis positions from scan_overlapping_tracepoints
         let subset_query_start = subset.first_query_pos;
 
         // If last_idx is the actual last tracepoint of the alignment, the last
         // segment may be shorter than trace_spacing. Use metadata boundary.
         let subset_query_end = if subset.last_idx == alignment.tracepoints.len() - 1 {
-            metadata.query_end // Last segment of alignment - use exact boundary
+            // For reversed - strand: project went from query_end toward query_start,
+            // so the last segment ends at query_start, not query_end
+            if is_reversed_entry && is_reverse {
+                metadata.query_start
+            } else {
+                metadata.query_end
+            }
         } else {
             subset.last_query_pos // Middle segment - use calculated position
         };
 
-        // For target: extract from first/last segment info (seg_start, seg_end already in forward space)
+        // For target (scan axis): extract from first/last segment info (seg_start, seg_end already in forward space)
         let (_, _, first_seg_start, first_seg_end, _, _) = subset.first_segment_info;
         let (_, _, last_seg_start, last_seg_end, _, _) = subset.last_segment_info;
         let subset_target_start = first_seg_start
@@ -775,42 +959,98 @@ impl Impg {
                 .max(last_seg_start.max(last_seg_end)) // Middle segment - use calculated
         };
 
-        // Fetch only subset sequences
-        let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
-        let query_seq = sequence_index
-            .fetch_sequence(query_name, subset_query_start, subset_query_end)
-            .unwrap_or_else(|e| panic!("Failed to fetch subset query sequence: {e}"));
+        // Fetch sequences and compute contig offsets
+        let (query_seq, target_seq, adjusted_query_offset, adjusted_target_offset) = if is_reversed_entry {
+            // For reversed entries, tracepoint reconstruction needs ORIGINAL sequences:
+            // a_seq = original query (from target_id at scan-axis coords, no RC)
+            // b_seq = original target (from metadata.query_id at project-axis coords, RC if - strand)
+            let a_name = self.seq_index.get_name(target_id).unwrap();
+            let a_seq = sequence_index
+                .fetch_sequence(a_name, subset_target_start, subset_target_end)
+                .unwrap_or_else(|e| panic!("Failed to fetch subset query sequence (reversed): {e}"));
 
-        let target_name = self.seq_index.get_name(target_id).unwrap();
-        let target_seq = self.get_target_sequence_cached(
-            sequence_index,
-            target_name,
-            target_id,
-            subset_target_start,
-            subset_target_end,
-            is_reverse,
-        );
+            // Handle reversed - strand range ordering: project-axis start > end
+            let proj_lo = subset_query_start.min(subset_query_end);
+            let proj_hi = subset_query_start.max(subset_query_end);
+            let b_name = self.seq_index.get_name(metadata.query_id).unwrap();
+            let b_seq = self.get_target_sequence_cached(
+                sequence_index,
+                b_name,
+                metadata.query_id,
+                proj_lo,
+                proj_hi,
+                is_reverse,
+            );
 
-        // Adjust contig offsets for the subset
-        let adjusted_query_offset = alignment.query_contig_start as usize
-            + (subset_query_start - metadata.query_start) as usize;
-        let adjusted_target_offset = alignment.target_contig_start as usize
-            + (subset_target_start - metadata.target_start) as usize;
+            // Contig offsets for original alignment perspective:
+            // query offset = position in original query contig (scan axis)
+            let qoff = alignment.query_contig_start as usize
+                + (subset_target_start - metadata.target_start) as usize;
+            // target offset = position in original target contig (project axis)
+            let toff = alignment.target_contig_start as usize
+                + (proj_lo - metadata.query_start) as usize;
+
+            (a_seq, b_seq, qoff, toff)
+        } else {
+            // Forward entries: standard sequence fetching
+            let query_name = self.seq_index.get_name(metadata.query_id).unwrap();
+            let query_seq = sequence_index
+                .fetch_sequence(query_name, subset_query_start, subset_query_end)
+                .unwrap_or_else(|e| panic!("Failed to fetch subset query sequence: {e}"));
+
+            let target_name = self.seq_index.get_name(target_id).unwrap();
+            let target_seq = self.get_target_sequence_cached(
+                sequence_index,
+                target_name,
+                target_id,
+                subset_target_start,
+                subset_target_end,
+                is_reverse,
+            );
+
+            let qoff = alignment.query_contig_start as usize
+                + (subset_query_start - metadata.query_start) as usize;
+            let toff = alignment.target_contig_start as usize
+                + (subset_target_start - metadata.target_start) as usize;
+
+            (query_seq, target_seq, qoff, toff)
+        };
 
         // Reconstruct CIGAR for subset only
-        let trace_spacing = alignment.trace_spacing as usize;
-        let cigar_str = with_edit_aligner(|aligner| {
-            tracepoints_to_cigar_fastga_with_aligner(
-                &subset_tracepoints,
-                trace_spacing.try_into().unwrap(),
-                &query_seq,
-                &target_seq,
-                adjusted_query_offset,
-                adjusted_target_offset,
-                is_reverse,
-                aligner,
-            )
-        });
+        let cigar_str = match &alignment.mode_data {
+            TracepointModeData::Standard { complexity_metric, max_complexity, distance, .. } => {
+                let metric = *complexity_metric;
+                let max_val = Some(*max_complexity as u32);
+                with_aligner(distance, |aligner| {
+                    tracepoints_to_cigar_with_aligner(
+                        &subset_tracepoints,
+                        &query_seq,
+                        &target_seq,
+                        0,
+                        0,
+                        metric,
+                        aligner,
+                        max_val,
+                    )
+                })
+            }
+            TracepointModeData::Fastga { trace_spacing, .. } => {
+                let ts = *trace_spacing as usize;
+                with_aligner(&Distance::Edit, |aligner| {
+                    tracepoints_to_cigar_fastga_with_aligner(
+                        &subset_tracepoints,
+                        ts.try_into().unwrap(),
+                        &query_seq,
+                        &target_seq,
+                        adjusted_query_offset,
+                        adjusted_target_offset,
+                        is_reverse,
+                        aligner,
+                        true,
+                    )
+                })
+            }
+        };
 
         match parse_cigar_to_delta(&cigar_str) {
             Ok(ops) => ops,
@@ -830,24 +1070,35 @@ impl Impg {
         sequence_index: Option<&UnifiedSequenceIndex>,
         min_gap_compressed_identity: Option<f64>,
     ) -> Option<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
-        // Check if this is a .1aln file that supports tracepoint subsetting
+        // Check if this is a tracepoint file that supports subsetting
         let file_index = metadata.alignment_file_index as usize;
         let alignment_file = &self.alignment_files[file_index];
-        let is_onealn = alignment_file.ends_with(".1aln");
+        let is_tracepoint_file =
+            alignment_file.ends_with(".1aln") || alignment_file.ends_with(".tpa");
 
-        // Try subsetting approach for .1aln files
-        if let (true, Some(sequence_index)) = (is_onealn, sequence_index) {
+        // Try subsetting approach for tracepoint files
+        if let (true, Some(sequence_index)) = (is_tracepoint_file, sequence_index) {
+            // Pre-filter: coitrees uses closed-interval overlap, but coordinates are half-open.
+            // Skip alignments that merely touch at an endpoint (no actual overlap).
+            if metadata.target_start >= range_end || metadata.target_end <= range_start {
+                return None;
+            }
+
             // Fetch alignment with tracepoints
-            let alignment = self.get_onealn_alignment(metadata).unwrap_or_else(|e| {
-                panic!("Subsetting failed: cannot fetch .1aln alignment: {}", e)
+            let alignment = self.get_tracepoint_alignment(metadata).unwrap_or_else(|e| {
+                error!("Subsetting failed: cannot fetch tracepoint alignment: {}", e);
+                std::process::exit(1)
             });
 
             // Scan tracepoints to find overlapping segments
-            let subset = self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end)
-                .unwrap_or_else(|| panic!(
-                    "Subsetting failed: no overlapping segments found for range {}-{} (target_id={}, file_index={})",
-                    range_start, range_end, target_id, metadata.alignment_file_index
-                ));
+            let subset = self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end, metadata.is_reversed())
+                .unwrap_or_else(|| {
+                    error!(
+                        "Subsetting failed: no overlapping segments found for range {}-{} (target_id={}, file_index={})",
+                        range_start, range_end, target_id, metadata.alignment_file_index
+                    );
+                    std::process::exit(1)
+                });
 
             // Reconstruct CIGAR from subset tracepoints
             // Note: When last_idx is the actual last tracepoint, process_subset_tracepoints
@@ -860,6 +1111,15 @@ impl Impg {
                 sequence_index,
             );
 
+            // For reversed entries, the CIGAR was reconstructed in the original alignment
+            // perspective. Invert it to the metadata's (reversed) perspective so that
+            // project_target_range_through_alignment works correctly.
+            let cigar_ops = if metadata.is_reversed() {
+                invert_cigar_ops(&cigar_ops, metadata.strand())
+            } else {
+                cigar_ops
+            };
+
             // Check identity threshold if specified
             if let Some(threshold) = min_gap_compressed_identity {
                 if calculate_gap_compressed_identity(&cigar_ops) < threshold {
@@ -867,11 +1127,18 @@ impl Impg {
                 }
             }
 
+            let is_reverse = metadata.strand() == Strand::Reverse;
+
             // Project the CIGAR through the alignment to get exact coordinates
             // Use same boundary logic as in process_subset_tracepoints
             let subset_query_start = subset.first_query_pos;
             let subset_query_end = if subset.last_idx == alignment.tracepoints.len() - 1 {
-                metadata.query_end
+                // For reversed - strand: project went from query_end toward query_start
+                if metadata.is_reversed() && is_reverse {
+                    metadata.query_start
+                } else {
+                    metadata.query_end
+                }
             } else {
                 subset.last_query_pos
             };
@@ -889,20 +1156,14 @@ impl Impg {
                     .max(last_seg_start.max(last_seg_end))
             };
 
-            let (
-                alignment_query_start,
-                alignment_query_end,
-                alignment_target_start,
-                alignment_target_end,
-            ) = (
-                subset_query_start,
-                subset_query_end,
-                subset_target_start,
-                subset_target_end,
-            );
+            // Normalize query bounds for projection (start < end required)
+            let alignment_target_start = subset_target_start;
+            let alignment_target_end = subset_target_end;
+            let alignment_query_start = subset_query_start.min(subset_query_end);
+            let alignment_query_end = subset_query_start.max(subset_query_end);
 
             // Project the requested range through the CIGAR
-            let projection = project_target_range_through_alignment(
+            let projection = match project_target_range_through_alignment(
                 (range_start, range_end),
                 (
                     alignment_target_start,
@@ -912,11 +1173,16 @@ impl Impg {
                     metadata.strand(),
                 ),
                 &cigar_ops,
-            )
-            .unwrap_or_else(|| panic!(
-                "Subsetting failed: projection failed for CIGAR (range={}-{}, query={}-{}, target={}-{})",
-                range_start, range_end, alignment_query_start, alignment_query_end, alignment_target_start, alignment_target_end
-            ));
+            ) {
+                Some(p) => p,
+                None => {
+                    debug!(
+                        "Subsetting projection failed for tracepoint alignment (range={}-{}, query={}-{}, target={}-{})",
+                        range_start, range_end, alignment_query_start, alignment_query_end, alignment_target_start, alignment_target_end
+                    );
+                    return None;
+                }
+            };
 
             let (
                 adjusted_query_start,
@@ -1006,18 +1272,27 @@ impl Impg {
         range_end: i32,
         min_gap_compressed_identity: Option<f64>,
     ) -> Option<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
+        // Pre-filter: coitrees uses closed-interval overlap, but coordinates are half-open.
+        // Skip alignments that merely touch at an endpoint (no actual overlap).
+        if metadata.target_start >= range_end || metadata.target_end <= range_start {
+            return None;
+        }
+
         // Fetch tracepoints without sequence I/O
-        let alignment = match self.get_onealn_alignment(metadata) {
-            Ok(aln) => aln,
-            Err(e) => {
-                warn!("Failed to fetch alignment for fast projection: {}", e);
-                return None;
-            }
-        };
+        let alignment = self.get_tracepoint_alignment(metadata).unwrap_or_else(|e| {
+            error!("Subsetting failed: cannot fetch tracepoint alignment: {}", e);
+            std::process::exit(1)
+        });
 
         // Scan tracepoints to find overlapping segments
-        let subset =
-            self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end)?;
+        let subset = self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end, metadata.is_reversed())
+            .unwrap_or_else(|| {
+                error!(
+                    "Subsetting failed: no overlapping segments found for range {}-{} (target_id={}, file_index={})",
+                    range_start, range_end, target_id, metadata.alignment_file_index
+                );
+                std::process::exit(1)
+            });
 
         let is_reverse = metadata.strand() == Strand::Reverse;
         let working_query_start = metadata.query_start;
@@ -1036,7 +1311,7 @@ impl Impg {
                                trace_diffs: i32,
                                boundary_name: &str|
          -> i32 {
-            let aligned_len = query_delta.min(abs_target_delta);
+            let aligned_len = query_delta.abs().min(abs_target_delta);
             let segment_identity = if aligned_len > 0 {
                 ((aligned_len - trace_diffs) as f64 / aligned_len as f64).max(0.0)
             } else {
@@ -1044,10 +1319,22 @@ impl Impg {
             };
 
             if abs_target_delta == 0 {
-                panic!(
-                    "Cannot refine {} position with zero target delta: num_segs={}, identity={:.3}, trace_diffs={}",
-                    boundary_name, subset.num_overlapping_segments, segment_identity, trace_diffs
+                // Pure insertion in query: zero target bases consumed.
+                // The entire insertion maps to a single target point strictly within the range.
+                // First boundary: start of insertion (query_pos)
+                // Last boundary: end of insertion (query_pos + query_delta)
+                let refined_pos = if boundary_name == "First" {
+                    query_pos
+                } else {
+                    query_pos + query_delta
+                };
+                debug!(
+                    "{} segment refinement: pure query insertion, abs_target_delta=0, query_delta={}, trace_diffs={}",
+                    boundary_name, query_delta, trace_diffs
                 );
+                let lo = working_query_start.min(working_query_end);
+                let hi = working_query_start.max(working_query_end);
+                return refined_pos.max(lo).min(hi);
             }
 
             let target_fraction =
@@ -1061,7 +1348,9 @@ impl Impg {
                 boundary_name, segment_identity, indel_ratio, trace_diffs, target_fraction
             );
 
-            refined_pos.max(working_query_start).min(working_query_end)
+            let lo = working_query_start.min(working_query_end);
+            let hi = working_query_start.max(working_query_end);
+            refined_pos.max(lo).min(hi)
         };
 
         // Refine first and last query positions
@@ -1146,8 +1435,9 @@ impl Impg {
         let working_query_start = refined_first;
         let working_query_end = refined_last;
 
-        // For reverse alignments: swap projected query coordinates to match normal mode output
-        let (query_start, query_end) = if is_reverse {
+        // For forward reverse-strand alignments: swap projected query coordinates.
+        // For reversed entries, the project direction already handles the ordering.
+        let (query_start, query_end) = if is_reverse && !metadata.is_reversed() {
             (working_query_end, working_query_start) // Swap: first=end, last=start
         } else {
             (working_query_start, working_query_end)
