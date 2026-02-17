@@ -11,7 +11,7 @@ use crate::sequence_index::UnifiedSequenceIndex;
 use crate::subset_filter::SubsetFilter;
 use coitrees::{BasicCOITree, Interval, IntervalTree};
 use lib_wfa2::affine_wavefront::{AffineWavefronts, Distance};
-use log::{debug, warn};
+use log::{debug, error, warn};
 use onecode::OneFile;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -994,6 +994,18 @@ impl Impg {
 
         // Try subsetting approach for tracepoint files
         if let (true, Some(sequence_index)) = (is_tracepoint_file, sequence_index) {
+            // Reject reversed bidirectional entries for tracepoint files:
+            // Switched entries swap target/query coordinates but the on-disk tracepoints
+            // still contain the original target deltas, causing coordinate space mismatch
+            // in scan_overlapping_tracepoints (wrong results or silent failures).
+            if metadata.is_reversed() {
+                error!(
+                    "Bidirectional indexing is not supported for tracepoint files. \
+                     Rebuild with --unidirectional --force-reindex."
+                );
+                std::process::exit(1);
+            }
+
             // Pre-filter: coitrees uses closed-interval overlap, but coordinates are half-open.
             // Skip alignments that merely touch at an endpoint (no actual overlap).
             if metadata.target_start >= range_end || metadata.target_end <= range_start {
@@ -1002,15 +1014,19 @@ impl Impg {
 
             // Fetch alignment with tracepoints
             let alignment = self.get_tracepoint_alignment(metadata).unwrap_or_else(|e| {
-                panic!("Subsetting failed: cannot fetch tracepoint alignment: {}", e)
+                error!("Subsetting failed: cannot fetch tracepoint alignment: {}", e);
+                std::process::exit(1)
             });
 
             // Scan tracepoints to find overlapping segments
             let subset = self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end)
-                .unwrap_or_else(|| panic!(
-                    "Subsetting failed: no overlapping segments found for range {}-{} (target_id={}, file_index={})",
-                    range_start, range_end, target_id, metadata.alignment_file_index
-                ));
+                .unwrap_or_else(|| {
+                    error!(
+                        "Subsetting failed: no overlapping segments found for range {}-{} (target_id={}, file_index={})",
+                        range_start, range_end, target_id, metadata.alignment_file_index
+                    );
+                    std::process::exit(1)
+                });
 
             // Reconstruct CIGAR from subset tracepoints
             // Note: When last_idx is the actual last tracepoint, process_subset_tracepoints
@@ -1174,6 +1190,21 @@ impl Impg {
         range_end: i32,
         min_gap_compressed_identity: Option<f64>,
     ) -> Option<(Interval<u32>, Vec<CigarOp>, Interval<u32>)> {
+        // Reject reversed bidirectional entries for tracepoint files (same as non-approximate path)
+        let file_index = metadata.alignment_file_index as usize;
+        let alignment_file = &self.alignment_files[file_index];
+        let is_tracepoint_file =
+            alignment_file.ends_with(".1aln") || alignment_file.ends_with(".tpa");
+        if is_tracepoint_file && metadata.is_reversed() {
+            error!(
+                "Bidirectional indexing is not supported for tracepoint files. \
+                 Reversed entry encountered for range {}-{} (target_id={}, file_index={}). \
+                 Rebuild with --unidirectional --force-reindex.",
+                range_start, range_end, target_id, metadata.alignment_file_index
+            );
+            std::process::exit(1);
+        }
+
         // Pre-filter: coitrees uses closed-interval overlap, but coordinates are half-open.
         // Skip alignments that merely touch at an endpoint (no actual overlap).
         if metadata.target_start >= range_end || metadata.target_end <= range_start {
@@ -1181,17 +1212,20 @@ impl Impg {
         }
 
         // Fetch tracepoints without sequence I/O
-        let alignment = match self.get_tracepoint_alignment(metadata) {
-            Ok(aln) => aln,
-            Err(e) => {
-                warn!("Failed to fetch alignment for fast projection: {}", e);
-                return None;
-            }
-        };
+        let alignment = self.get_tracepoint_alignment(metadata).unwrap_or_else(|e| {
+            error!("Subsetting failed: cannot fetch tracepoint alignment: {}", e);
+            std::process::exit(1)
+        });
 
         // Scan tracepoints to find overlapping segments
-        let subset =
-            self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end)?;
+        let subset = self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end)
+            .unwrap_or_else(|| {
+                error!(
+                    "Subsetting failed: no overlapping segments found for range {}-{} (target_id={}, file_index={})",
+                    range_start, range_end, target_id, metadata.alignment_file_index
+                );
+                std::process::exit(1)
+            });
 
         let is_reverse = metadata.strand() == Strand::Reverse;
         let working_query_start = metadata.query_start;
@@ -1375,6 +1409,20 @@ impl Impg {
             .par_iter()
             .map(|(_, alignment_file)| alignment_file.clone())
             .collect();
+
+        // Reject bidirectional mode for tracepoint files
+        if bidirectional {
+            if let Some(f) = alignment_files.iter().find(|f| f.ends_with(".1aln") || f.ends_with(".tpa")) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Bidirectional indexing is not yet supported for .1aln/.tpa files (found '{}'). \
+                         Use --unidirectional or convert to PAF.",
+                        f
+                    ),
+                ));
+            }
+        }
 
         if bidirectional {
             debug!("Creating bidirectional alignment entries");
