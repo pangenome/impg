@@ -1,5 +1,6 @@
-use crate::graph::prepare_poa_graph_and_sequences;
+use crate::graph::{gfa_to_msa, prepare_poa_graph_and_sequences, SequenceMetadata};
 use crate::impg_index::ImpgIndex;
+use crate::realize::{realize, RealizeConfig};
 use crate::sequence_index::UnifiedSequenceIndex;
 use coitrees::Interval;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -93,6 +94,7 @@ pub fn compute_and_output_similarities(
     pca_similarity: &str,
     polarize_n_prev: usize,
     guide_samples: Option<&[String]>,
+    realize_config: Option<&RealizeConfig>,
 ) -> io::Result<()> {
     if !perform_pca {
         info!("Computing similarities for {} regions", query_data.len());
@@ -141,6 +143,7 @@ pub fn compute_and_output_similarities(
                     delim,
                     delim_pos,
                     region,
+                    realize_config,
                 )?;
 
                 // Lock stdout and write both header and results
@@ -192,6 +195,7 @@ pub fn compute_and_output_similarities(
                     delim_pos,
                     n_components,
                     pca_similarity,
+                    realize_config,
                 );
                 if let Some(ref progress_bar) = pb {
                     progress_bar.inc(1);
@@ -241,17 +245,15 @@ fn compute_similarities_for_region(
     delim: Option<char>,
     delim_pos: u16,
     region: &str,
+    realize_config: Option<&RealizeConfig>,
 ) -> io::Result<String> {
     debug!("Computing similarities for region {region:?}");
 
-    let (groups, msa_chars) = prepare_groups_and_msa(
-        impg,
-        results,
-        sequence_index,
-        scoring_params,
-        delim,
-        delim_pos,
-    )?;
+    let (groups, msa_chars) = if let Some(rc) = realize_config {
+        prepare_groups_and_msa_realize(impg, results, sequence_index, rc, delim, delim_pos)?
+    } else {
+        prepare_groups_and_msa(impg, results, sequence_index, scoring_params, delim, delim_pos)?
+    };
 
     // Parse region once
     let (chrom, start, end) = parse_region_string(region);
@@ -322,17 +324,15 @@ fn compute_pca_for_region(
     delim_pos: u16,
     n_components: usize,
     pca_similarity: &str,
+    realize_config: Option<&RealizeConfig>,
 ) -> io::Result<PcaResult> {
     debug!("Computing PCA for region with {} intervals", results.len());
 
-    let (groups, msa_chars) = prepare_groups_and_msa(
-        impg,
-        results,
-        sequence_index,
-        scoring_params,
-        delim,
-        delim_pos,
-    )?;
+    let (groups, msa_chars) = if let Some(rc) = realize_config {
+        prepare_groups_and_msa_realize(impg, results, sequence_index, rc, delim, delim_pos)?
+    } else {
+        prepare_groups_and_msa(impg, results, sequence_index, scoring_params, delim, delim_pos)?
+    };
 
     // Collect all similarities for PCA
     let mut similarities = Vec::new();
@@ -401,6 +401,77 @@ fn prepare_groups_and_msa(
     let groups = create_groups(&sequence_metadata, delim, delim_pos)?;
 
     Ok((groups, msa_chars))
+}
+
+// Helper to prepare groups and MSA using the realize engine (GFA-based)
+fn prepare_groups_and_msa_realize(
+    impg: &impl ImpgIndex,
+    results: &[Interval<u32>],
+    sequence_index: &UnifiedSequenceIndex,
+    realize_config: &RealizeConfig,
+    delim: Option<char>,
+    delim_pos: u16,
+) -> io::Result<(Vec<GroupInfo>, Vec<Vec<char>>)> {
+    // Use the realize engine to build a GFA variation graph
+    let realize_result = realize(impg, results, sequence_index, realize_config)?;
+
+    debug!(
+        "Realize produced GFA with {} seqs, {} POA calls, {} sweepga calls in {}ms",
+        realize_result.stats.num_sequences,
+        realize_result.stats.poa_calls,
+        realize_result.stats.sweepga_calls,
+        realize_result.stats.total_ms,
+    );
+
+    // Extract MSA from the GFA paths
+    let msa_entries = gfa_to_msa(&realize_result.gfa);
+
+    if msa_entries.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    // Build SequenceMetadata from path names (which encode name:start-end)
+    let sequence_metadata: Vec<SequenceMetadata> = msa_entries
+        .iter()
+        .map(|(path_name, _)| parse_path_name_to_metadata(path_name))
+        .collect();
+
+    let msa_chars: Vec<Vec<char>> = msa_entries
+        .iter()
+        .map(|(_, msa_str)| msa_str.chars().collect())
+        .collect();
+
+    let groups = create_groups(&sequence_metadata, delim, delim_pos)?;
+
+    Ok((groups, msa_chars))
+}
+
+/// Parse a GFA path name like "chr1:100-200" back into SequenceMetadata.
+fn parse_path_name_to_metadata(path_name: &str) -> SequenceMetadata {
+    // Try to parse "name:start-end" format
+    if let Some(colon_pos) = path_name.rfind(':') {
+        let name = &path_name[..colon_pos];
+        let range_part = &path_name[colon_pos + 1..];
+        if let Some(dash_pos) = range_part.find('-') {
+            let start: i32 = range_part[..dash_pos].parse().unwrap_or(0);
+            let end: i32 = range_part[dash_pos + 1..].parse().unwrap_or(0);
+            return SequenceMetadata {
+                name: name.to_string(),
+                start,
+                size: end - start,
+                strand: '+',
+                total_length: 0, // not available from path name alone
+            };
+        }
+    }
+    // Fallback: use the whole path name
+    SequenceMetadata {
+        name: path_name.to_string(),
+        start: 0,
+        size: 0,
+        strand: '+',
+        total_length: 0,
+    }
 }
 
 // Calculate intersection between two groups
@@ -509,7 +580,7 @@ fn create_groups(
             .iter()
             .enumerate()
             .map(|(i, meta)| {
-                let name = format!("{}:{}-{}", meta.name, meta.start, meta.start + meta.size);
+                let name = meta.path_name();
                 GroupInfo {
                     name,
                     sequence_indices: vec![i],

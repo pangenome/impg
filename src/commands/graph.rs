@@ -149,7 +149,7 @@ fn count_sequences_and_genomes_in_fasta(fasta_paths: &[String]) -> io::Result<(u
 }
 
 /// Parse filter mode string (e.g., "1:1", "many:many", "5:3") into FilterMode and limits
-fn parse_filter_mode(s: &str) -> (FilterMode, Option<usize>, Option<usize>) {
+pub fn parse_filter_mode(s: &str) -> (FilterMode, Option<usize>, Option<usize>) {
     let s_lower = s.to_lowercase();
     if s_lower == "many:many" || s_lower == "n:n" {
         return (FilterMode::ManyToMany, None, None);
@@ -665,6 +665,129 @@ pub fn run_graph_build(
     }
 
     Ok(())
+}
+
+/// Build a pangenome graph from FASTA sequences using the recursive realize engine
+///
+/// Instead of the seqwish graph induction pipeline, this uses the recursive
+/// realize engine (sweepga + POA with lacing) to build the variation graph.
+pub fn run_graph_build_realize<W: Write>(
+    fasta_files: Vec<String>,
+    fasta_list: Option<String>,
+    output: &mut W,
+    config: &crate::realize::RealizeConfig,
+) -> io::Result<()> {
+    let start_time = Instant::now();
+
+    // Resolve FASTA files
+    let fasta_files = resolve_fasta_files(fasta_files, fasta_list)?;
+
+    if fasta_files.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "No FASTA files specified. Use --fasta-files or --fasta-list",
+        ));
+    }
+
+    info!(
+        "Building graph from {} FASTA file(s) using realize engine",
+        fasta_files.len()
+    );
+
+    // Read all sequences from FASTA files into memory
+    let sequences = read_fasta_sequences(&fasta_files)?;
+
+    info!(
+        "[realize] {:.3}s Loaded {} sequences from FASTA files",
+        start_time.elapsed().as_secs_f64(),
+        sequences.len()
+    );
+
+    if sequences.is_empty() {
+        output.write_all(b"H\tVN:Z:1.0\n")?;
+        return Ok(());
+    }
+
+    // Run the realize engine
+    let result = crate::realize::realize_from_sequences(&sequences, config)?;
+
+    info!(
+        "[realize] {:.3}s Realize complete: {} sequences, max_depth={}, poa_calls={}, sweepga_calls={}, {}ms",
+        start_time.elapsed().as_secs_f64(),
+        result.stats.num_sequences,
+        result.stats.max_depth_reached,
+        result.stats.poa_calls,
+        result.stats.sweepga_calls,
+        result.stats.total_ms,
+    );
+
+    output.write_all(result.gfa.as_bytes())?;
+
+    Ok(())
+}
+
+/// Read sequences from FASTA files into (sequence, metadata) pairs for the realize engine.
+fn read_fasta_sequences(
+    fasta_paths: &[String],
+) -> io::Result<Vec<(String, crate::graph::SequenceMetadata)>> {
+    let mut sequences = Vec::new();
+
+    for path in fasta_paths {
+        let file = File::open(path)?;
+        // Use niffler to auto-detect compression
+        let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
+            io::Error::other(format!("Failed to open reader for '{}': {}", path, e))
+        })?;
+        let reader = BufReader::new(reader);
+
+        let mut current_name = String::new();
+        let mut current_seq = String::new();
+
+        for line in reader.lines() {
+            let line = line?;
+            if line.starts_with('>') {
+                // Save previous sequence if any
+                if !current_name.is_empty() && !current_seq.is_empty() {
+                    let seq_len = current_seq.len();
+                    let meta = crate::graph::SequenceMetadata {
+                        name: current_name.clone(),
+                        start: 0,
+                        size: seq_len as i32,
+                        strand: '+',
+                        total_length: seq_len,
+                    };
+                    sequences.push((current_seq.clone(), meta));
+                }
+                // Start new sequence
+                current_name = line[1..]
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                current_seq.clear();
+            } else {
+                current_seq.push_str(line.trim());
+            }
+        }
+
+        // Don't forget the last sequence
+        if !current_name.is_empty() && !current_seq.is_empty() {
+            let seq_len = current_seq.len();
+            let meta = crate::graph::SequenceMetadata {
+                name: current_name,
+                start: 0,
+                size: seq_len as i32,
+                strand: '+',
+                total_length: seq_len,
+            };
+            sequences.push((current_seq, meta));
+        }
+    }
+
+    // Sort by length descending (expected by realize engine)
+    sequences.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+
+    Ok(sequences)
 }
 
 /// Resolve FASTA files from either direct list or file list
