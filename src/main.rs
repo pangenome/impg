@@ -255,10 +255,10 @@ impl GfaMafFastaOpts {
 
         let needs_sequence_mandatory = matches!(
             output_format,
-            "gfa" | "gfa-seqwish" | "gfa-poa" | "gfa-realize" | "maf" | "fasta" | "fasta-aln" | "fasta+paf"
+            "gfa" | "gfa-seqwish" | "gfa-poa" | "maf" | "fasta" | "fasta-aln" | "fasta+paf"
         ) || tracepoint_needs_sequences;
         let needs_sequence_optional = output_format == "paf" && original_sequence_coordinates;
-        // POA is only needed for gfa-poa, maf, and fasta-aln (not for gfa/gfa-seqwish/gfa-realize which use seqwish or realize)
+        // POA is only needed for gfa-poa, maf, and fasta-aln (not for gfa/gfa-seqwish which use realize or seqwish)
         let needs_poa = matches!(output_format, "gfa-poa" | "maf" | "fasta-aln");
 
         let scoring_params = if needs_poa {
@@ -289,9 +289,9 @@ impl GfaMafFastaOpts {
     }
 }
 
-/// Options for the recursive realize engine (used with --output-format gfa-realize)
+/// Options for the recursive realize engine (used with --output-format gfa)
 #[derive(Parser, Debug)]
-#[command(next_help_heading = "Realize options (for gfa-realize output)")]
+#[command(next_help_heading = "Realize options (for gfa output)")]
 struct RealizeOpts {
     /// POA threshold: regions at or below this size (bp) go directly to POA
     #[clap(long, value_parser, default_value_t = 1000)]
@@ -744,7 +744,7 @@ enum Args {
         #[clap(flatten)]
         query: QueryOpts,
 
-        /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', 'gfa' (v1.0), 'gfa-realize' (recursive realize), 'maf', 'fasta', or 'fasta+paf' ('gfa', 'maf', 'fasta', and 'fasta+paf' require --sequence-files or --sequence-list)
+        /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', 'gfa' (recursive realize engine), 'gfa-seqwish' (seqwish variation graph), 'gfa-poa' (POA graph), 'maf', 'fasta', or 'fasta+paf' ('gfa', 'gfa-seqwish', 'maf', 'fasta', and 'fasta+paf' require --sequence-files or --sequence-list)
         #[arg(help_heading = "Output options")]
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
@@ -1377,7 +1377,6 @@ fn run() -> io::Result<()> {
                     "gfa",
                     "gfa-seqwish",
                     "gfa-poa",
-                    "gfa-realize",
                     "maf",
                     "fasta",
                     "fasta+paf",
@@ -1596,8 +1595,28 @@ fn run() -> io::Result<()> {
                             sequence_index.as_ref(),
                         )?;
                     }
-                    "gfa" | "gfa-seqwish" => {
-                        // Default GFA mode is seqwish (variation graph)
+                    "gfa" => {
+                        // Recursive realize engine (sweepga+POA with lacing)
+                        let realize_config = realize_opts.build_config(
+                            common.threads.get(),
+                            scoring_params,
+                        )?;
+                        output_results_gfa(
+                            &impg,
+                            &mut results,
+                            &mut find_output_stream(&output_prefix, "gfa")?,
+                            sequence_index.as_ref().unwrap(),
+                            &name,
+                            query.effective_merge_distance(),
+                            query.merge_strands_for_output("gfa"),
+                            scoring_params,
+                            GfaMode::Realize,
+                            common.threads.get(),
+                            Some(realize_config),
+                        )?;
+                    }
+                    "gfa-seqwish" => {
+                        // Seqwish variation graph
                         output_results_gfa(
                             &impg,
                             &mut results,
@@ -1626,26 +1645,6 @@ fn run() -> io::Result<()> {
                             GfaMode::Poa,
                             common.threads.get(),
                             None,
-                        )?;
-                    }
-                    "gfa-realize" => {
-                        // Recursive realize engine (sweepga+POA with lacing)
-                        let realize_config = realize_opts.build_config(
-                            common.threads.get(),
-                            scoring_params,
-                        )?;
-                        output_results_gfa(
-                            &impg,
-                            &mut results,
-                            &mut find_output_stream(&output_prefix, "gfa")?,
-                            sequence_index.as_ref().unwrap(),
-                            &name,
-                            query.effective_merge_distance(),
-                            query.merge_strands_for_output("gfa"),
-                            scoring_params,
-                            GfaMode::Realize,
-                            common.threads.get(),
-                            Some(realize_config),
                         )?;
                     }
                     "maf" => {
@@ -3697,7 +3696,7 @@ fn output_results_gfa(
             let config = realize_config.ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "RealizeConfig required for gfa-realize mode",
+                    "RealizeConfig required for realize mode",
                 )
             })?;
             let result = impg::realize::realize(

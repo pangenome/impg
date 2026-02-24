@@ -356,12 +356,12 @@ Replace the current single-shot GFA generation in `perform_query()`:
 "gfa-poa" => generate_gfa_from_intervals(...)
 
 // New (realize engine):
-"gfa" | "gfa-realize" => realize(impg, &results, &sequence_index, &realize_config)
+"gfa" => realize(impg, &results, &sequence_index, &realize_config)
 "gfa-seqwish" => generate_gfa_seqwish_from_intervals(...)  // keep as fallback
 "gfa-poa" => generate_gfa_from_intervals(...)              // keep as fallback
 ```
 
-The default `gfa` format switches from seqwish to the realize engine. The old modes remain accessible as `gfa-seqwish` and `gfa-poa`.
+The `gfa` format uses the realize engine. The old modes remain accessible as `gfa-seqwish` and `gfa-poa`.
 
 ### Wire into `impg graph`
 
