@@ -1051,10 +1051,12 @@ enum Args {
         #[clap(long, action)]
         merge_adjacent: bool,
 
-        /// Use approximate mode for faster queries with 1aln files
+        /// Use CIGAR-precise BFS for transitive depth (slower but base-level precision).
+        /// Default uses raw-interval BFS with linear interpolation, which is faster
+        /// and sufficient for region-level conservation depth.
         #[arg(help_heading = "Performance")]
-        #[clap(long, action)]
-        approximate: bool,
+        #[clap(long = "use-BFS", action)]
+        use_bfs: bool,
 
         /// Separator for PanSN format (default: #)
         #[arg(help_heading = "Output options")]
@@ -2209,7 +2211,7 @@ fn run() -> io::Result<()> {
             ref_only,
             min_seq_length,
             merge_adjacent,
-            approximate,
+            use_bfs,
             separator,
             output_prefix,
             window_size,
@@ -2224,14 +2226,6 @@ fn run() -> io::Result<()> {
             initialize_threads_and_log(&common);
 
             let alignment_files = resolve_alignment_files(&alignment)?;
-
-            // Validate approximate mode
-            if approximate {
-                validate_approximate_mode_min_length(
-                    transitive_opts.min_transitive_len,
-                    transitive || transitive_opts.transitive_dfs,
-                )?;
-            }
 
             let impg = initialize_index(
                 &common,
@@ -2254,46 +2248,8 @@ fn run() -> io::Result<()> {
                 min_transitive_len: transitive_opts.effective_min_transitive_len(),
                 min_distance_between_ranges: transitive_opts.min_distance_between_ranges,
                 merge_adjacent,
-                approximate_mode: approximate,
+                use_cigar_bfs: use_bfs,
             };
-
-            // Statistics add-on: produces summary and per-depth BED files
-            if stats {
-                let prefix = output_prefix.as_deref().unwrap_or("depth_stats");
-                if ref_sample.is_some() {
-                    info!("Running depth with --stats add-on (ref-anchored), output prefix: {}", prefix);
-                } else {
-                    info!("Running depth with --stats add-on, output prefix: {}", prefix);
-                }
-
-                if combined_output {
-                    info!("Combined output mode: will generate single file with sample lists");
-                    if merge_tolerance > 0.0 {
-                        info!("Merge tolerance: {:.1}%", merge_tolerance * 100.0);
-                    }
-                    depth::compute_depth_stats_with_samples(
-                        &impg,
-                        &config,
-                        &separator,
-                        prefix,
-                        sample_filter.as_ref(),
-                        fai_list.as_deref(),
-                        ref_sample.as_deref(),
-                        merge_tolerance,
-                    )?;
-                } else {
-                    depth::compute_depth_stats(
-                        &impg,
-                        &config,
-                        &separator,
-                        prefix,
-                        sample_filter.as_ref(),
-                        fai_list.as_deref(),
-                        ref_sample.as_deref(),
-                    )?;
-                }
-                return Ok(());
-            }
 
             // Region query mode: depth for specific genomic regions
             if target_range.is_some() || target_bed.is_some() {
@@ -2364,9 +2320,17 @@ fn run() -> io::Result<()> {
             }
 
             // Default / ref-anchored / ref-only depth computation
+            // --stats is an add-on: same hub-first pipeline, different output format
             // Without --ref: auto hub detection via degree pre-scan
             // With --ref: ref sample's sequences are Phase 1 anchors
             // With --ref --ref-only: output filtered to ref sample's anchored regions only
+            if stats {
+                let prefix = output_prefix.as_deref().unwrap_or("depth_stats");
+                info!("Stats add-on enabled, output prefix: {}", prefix);
+                if combined_output {
+                    info!("Combined output mode: will generate single file with sample lists");
+                }
+            }
             if let Some(ws) = window_size {
                 info!("Window size: {} bp", ws);
             }
@@ -2387,6 +2351,8 @@ fn run() -> io::Result<()> {
                 ref_sample.as_deref(),
                 ref_only,
                 min_seq_length as i64,
+                stats,
+                combined_output,
             )?;
         }
     }
