@@ -11,7 +11,7 @@ use crate::sequence_index::UnifiedSequenceIndex;
 use crate::subset_filter::SubsetFilter;
 use coitrees::{BasicCOITree, Interval, IntervalTree};
 use lib_wfa2::affine_wavefront::{AffineWavefronts, Distance};
-use log::{debug, error, warn};
+use log::{debug, warn};
 use onecode::OneFile;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -1085,20 +1085,26 @@ impl Impg {
             }
 
             // Fetch alignment with tracepoints
-            let alignment = self.get_tracepoint_alignment(metadata).unwrap_or_else(|e| {
-                error!("Subsetting failed: cannot fetch tracepoint alignment: {}", e);
-                std::process::exit(1)
-            });
+            let alignment = match self.get_tracepoint_alignment(metadata) {
+                Ok(a) => a,
+                Err(e) => {
+                    debug!("Cannot fetch tracepoint alignment for target_id={}, file_index={}: {}, skipping",
+                        target_id, metadata.alignment_file_index, e);
+                    return None;
+                }
+            };
 
             // Scan tracepoints to find overlapping segments
-            let subset = self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end, metadata.is_reversed())
-                .unwrap_or_else(|| {
-                    error!(
-                        "Subsetting failed: no overlapping segments found for range {}-{} (target_id={}, file_index={})",
+            let subset = match self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end, metadata.is_reversed()) {
+                Some(s) => s,
+                None => {
+                    debug!(
+                        "No overlapping tracepoint segments for range {}-{} (target_id={}, file_index={}), skipping",
                         range_start, range_end, target_id, metadata.alignment_file_index
                     );
-                    std::process::exit(1)
-                });
+                    return None;
+                }
+            };
 
             // Reconstruct CIGAR from subset tracepoints
             // Note: When last_idx is the actual last tracepoint, process_subset_tracepoints
@@ -1279,20 +1285,26 @@ impl Impg {
         }
 
         // Fetch tracepoints without sequence I/O
-        let alignment = self.get_tracepoint_alignment(metadata).unwrap_or_else(|e| {
-            error!("Subsetting failed: cannot fetch tracepoint alignment: {}", e);
-            std::process::exit(1)
-        });
+        let alignment = match self.get_tracepoint_alignment(metadata) {
+            Ok(a) => a,
+            Err(e) => {
+                debug!("Cannot fetch tracepoint alignment for target_id={}, file_index={}: {}, skipping",
+                    target_id, metadata.alignment_file_index, e);
+                return None;
+            }
+        };
 
         // Scan tracepoints to find overlapping segments
-        let subset = self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end, metadata.is_reversed())
-            .unwrap_or_else(|| {
-                error!(
-                    "Subsetting failed: no overlapping segments found for range {}-{} (target_id={}, file_index={})",
+        let subset = match self.scan_overlapping_tracepoints(&alignment, metadata, range_start, range_end, metadata.is_reversed()) {
+            Some(s) => s,
+            None => {
+                debug!(
+                    "No overlapping tracepoint segments for range {}-{} (target_id={}, file_index={}), skipping",
                     range_start, range_end, target_id, metadata.alignment_file_index
                 );
-                std::process::exit(1)
-            });
+                return None;
+            }
+        };
 
         let is_reverse = metadata.strand() == Strand::Reverse;
         let working_query_start = metadata.query_start;
