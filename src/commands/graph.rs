@@ -96,10 +96,10 @@ impl Default for GraphBuildConfig {
             input_paf: None,
             // Filtering options
             no_filter: false,
-            num_mappings: "1:1".to_string(),
+            num_mappings: "many:many".to_string(),
             scaffold_jump: 50_000,              // 50kb default scaffold gap
             scaffold_mass: 10_000,              // 10kb minimum scaffold length
-            scaffold_filter: "1:1".to_string(), // 1:1 scaffold filtering (now fixed in sweepga 608547a)
+            scaffold_filter: "many:many".to_string(),
             overlap: 0.95,
             min_identity: 0.0,
             scaffold_dist: 0,      // No deviation limit by default
@@ -231,6 +231,7 @@ pub fn build_graph<W: Write>(
     // sweepga's FastGA needs a single combined FASTA file for all-vs-all alignment
     // FastGA requires .fa extension to recognize the file format
     let combined_fasta = tempfile::Builder::new().suffix(".fa").tempfile()?;
+    let mut total_bases: u64 = 0;
     {
         let mut writer = BufWriter::new(&combined_fasta);
         for path in fasta_files {
@@ -242,16 +243,26 @@ pub fn build_graph<W: Write>(
             let reader = BufReader::new(reader);
             for line in reader.lines() {
                 let line: String = line?;
+                if !line.starts_with('>') {
+                    total_bases += line.trim().len() as u64;
+                }
                 writeln!(writer, "{}", line)?;
             }
         }
         writer.flush()?;
     }
 
+    let avg_seq_len = if num_sequences > 0 {
+        total_bases / num_sequences as u64
+    } else {
+        0
+    };
+
     if config.show_progress {
         info!(
-            "[graph::combine] {:.3}s Combined FASTA files for alignment",
-            start_time.elapsed().as_secs_f64()
+            "[graph::combine] {:.3}s Combined FASTA files for alignment (avg seq len: {} bp)",
+            start_time.elapsed().as_secs_f64(),
+            avg_seq_len
         );
     }
 
@@ -309,22 +320,38 @@ pub fn build_graph<W: Write>(
         }
         paf_temp
     } else {
-        if config.show_progress {
-            info!(
-                "[graph::filter] {:.3}s Filtering alignments with sweepga (n={}, scaffold_jump={}, scaffold_mass={}, scaffold_filter={})",
-                start_time.elapsed().as_secs_f64(),
-                config.num_mappings,
-                config.scaffold_jump,
-                config.scaffold_mass,
-                config.scaffold_filter
-            );
-        }
-
         // Parse filter modes
         let (mapping_mode, mapping_per_query, mapping_per_target) =
             parse_filter_mode(&config.num_mappings);
         let (scaffold_mode, scaffold_per_query, scaffold_per_target) =
             parse_filter_mode(&config.scaffold_filter);
+
+        // Auto-adapt scaffold parameters to input sequence sizes.
+        // Defaults (scaffold_mass=10kb, scaffold_jump=50kb) are tuned for
+        // whole-genome alignments. For short sequences (e.g. 1kb excerpts
+        // from `impg query -o fasta`), these thresholds would filter out
+        // every alignment. Clamp to 80% of the average sequence length.
+        let scaffold_mass = if avg_seq_len > 0 {
+            config.scaffold_mass.min(avg_seq_len * 4 / 5)
+        } else {
+            config.scaffold_mass
+        };
+        let scaffold_jump = if avg_seq_len > 0 {
+            config.scaffold_jump.min(avg_seq_len * 10)
+        } else {
+            config.scaffold_jump
+        };
+
+        if config.show_progress {
+            info!(
+                "[graph::filter] {:.3}s Filtering alignments with sweepga (n={}, scaffold_jump={}, scaffold_mass={}, scaffold_filter={})",
+                start_time.elapsed().as_secs_f64(),
+                config.num_mappings,
+                scaffold_jump,
+                scaffold_mass,
+                config.scaffold_filter
+            );
+        }
 
         // Create filter configuration
         let filter_config = FilterConfig {
@@ -340,8 +367,8 @@ pub fn build_graph<W: Write>(
             overlap_threshold: config.overlap,
             sparsity: 1.0,
             no_merge: true,
-            scaffold_gap: config.scaffold_jump,
-            min_scaffold_length: config.scaffold_mass,
+            scaffold_gap: scaffold_jump,
+            min_scaffold_length: scaffold_mass,
             scaffold_overlap_threshold: 0.5,
             scaffold_max_deviation: config.scaffold_dist,
             prefix_delimiter: '#',

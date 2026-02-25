@@ -932,7 +932,7 @@ enum Args {
         no_filter: bool,
 
         /// n:m-best mappings kept in query:target dimensions (e.g., "1:1", "many:many")
-        #[clap(short = 'n', long, value_parser, default_value = "1:1")]
+        #[clap(short = 'n', long, value_parser, default_value = "many:many")]
         num_mappings: String,
 
         /// Scaffold jump/gap distance in bp (0 = disable scaffolding). Accepts k/m/g suffixes.
@@ -944,7 +944,7 @@ enum Args {
         scaffold_mass: u64,
 
         /// Scaffold filter mode (e.g., "1:1", "many:many", "inf:inf" for no filtering)
-        #[clap(short = 'm', long, value_parser, default_value = "1:1")]
+        #[clap(short = 'm', long, value_parser, default_value = "many:many")]
         scaffold_filter: String,
 
         /// Maximum overlap ratio for plane sweep filtering (0.0-1.0)
@@ -1014,7 +1014,7 @@ enum Args {
         no_filter: bool,
 
         /// n:m-best mappings kept in query:target dimensions (e.g., "1:1", "many:many")
-        #[clap(short = 'n', long, value_parser, default_value = "1:1")]
+        #[clap(short = 'n', long, value_parser, default_value = "many:many")]
         num_mappings: String,
 
         /// Scaffold jump/gap distance in bp (0 = disable scaffolding). Accepts k/m/g suffixes.
@@ -1026,7 +1026,7 @@ enum Args {
         scaffold_mass: u64,
 
         /// Scaffold filter mode (e.g., "1:1", "many:many", "inf:inf" for no filtering)
-        #[clap(short = 'm', long, value_parser, default_value = "1:1")]
+        #[clap(short = 'm', long, value_parser, default_value = "many:many")]
         scaffold_filter: String,
 
         /// Maximum overlap ratio for plane sweep filtering (0.0-1.0)
