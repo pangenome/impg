@@ -505,7 +505,14 @@ fn test_realize_three_sequences_large_region() {
 
     assert_eq!(result.stats.num_sequences, 3);
     let names = path_names(&result.gfa);
-    assert_eq!(names.len(), 3);
+    // With overlap-trimming lace, non-contiguous ranges for a path key produce
+    // separate path lines (e.g. s1:0-280, s1:530-1500). So we check that all 3
+    // sequence keys are represented, not that there are exactly 3 path lines.
+    assert!(names.len() >= 3, "Expected at least 3 paths, got {}: {:?}", names.len(), names);
+    for key in &["s1", "s2", "s3"] {
+        assert!(names.iter().any(|n| n.contains(key)),
+            "Expected a path for {key}, got: {:?}", names);
+    }
 
     // Segments should exist and paths should reference them.
     let segments = count_gfa_lines(&result.gfa, "S\t");

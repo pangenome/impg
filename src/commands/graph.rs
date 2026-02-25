@@ -715,14 +715,10 @@ fn read_fasta_sequences(
                 // Save previous sequence if any
                 if !current_name.is_empty() && !current_seq.is_empty() {
                     let seq_len = current_seq.len();
-                    let meta = crate::graph::SequenceMetadata {
-                        name: current_name.clone(),
-                        start: 0,
-                        size: seq_len as i32,
-                        strand: '+',
-                        total_length: seq_len,
-                    };
-                    sequences.push((current_seq.clone(), meta));
+                    sequences.push((
+                        std::mem::take(&mut current_seq),
+                        metadata_from_fasta_header(&current_name, seq_len),
+                    ));
                 }
                 // Start new sequence
                 current_name = line[1..]
@@ -739,14 +735,7 @@ fn read_fasta_sequences(
         // Don't forget the last sequence
         if !current_name.is_empty() && !current_seq.is_empty() {
             let seq_len = current_seq.len();
-            let meta = crate::graph::SequenceMetadata {
-                name: current_name,
-                start: 0,
-                size: seq_len as i32,
-                strand: '+',
-                total_length: seq_len,
-            };
-            sequences.push((current_seq, meta));
+            sequences.push((current_seq, metadata_from_fasta_header(&current_name, seq_len)));
         }
     }
 
@@ -754,6 +743,41 @@ fn read_fasta_sequences(
     sequences.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
 
     Ok(sequences)
+}
+
+/// Parse a FASTA header into SequenceMetadata.
+///
+/// If the header contains a `name:start-end` suffix (e.g. from a prior
+/// `impg query -o fasta`), parse the coordinates so that `path_name()`
+/// reproduces the original name without double-encoding.
+/// Otherwise, treat the whole header as the name with start=0.
+fn metadata_from_fasta_header(header: &str, seq_len: usize) -> crate::graph::SequenceMetadata {
+    // Try to parse trailing :start-end
+    if let Some(last_colon) = header.rfind(':') {
+        let (key, range_str) = header.split_at(last_colon);
+        let range_str = &range_str[1..]; // skip ':'
+        if let Some((start_str, end_str)) = range_str.split_once('-') {
+            if let (Ok(start), Ok(end)) = (start_str.parse::<i32>(), end_str.parse::<i32>()) {
+                if end > start {
+                    return crate::graph::SequenceMetadata {
+                        name: key.to_string(),
+                        start,
+                        size: seq_len as i32,
+                        strand: '+',
+                        total_length: (start + seq_len as i32) as usize,
+                    };
+                }
+            }
+        }
+    }
+    // Fallback: treat whole header as name
+    crate::graph::SequenceMetadata {
+        name: header.to_string(),
+        start: 0,
+        size: seq_len as i32,
+        strand: '+',
+        total_length: seq_len,
+    }
 }
 
 /// Resolve FASTA files from either direct list or file list

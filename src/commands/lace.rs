@@ -46,44 +46,44 @@ fn get_compression_format(compress_arg: &str, output_path: &str) -> Format {
 
 // Compact edge representation using bit-packed orientations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct CompactEdge {
+pub(crate) struct CompactEdge {
     // Use top 2 bits for orientations, rest for node IDs
     from: u64, // bit 63: orientation, bits 0-62: node ID
     to: u64,   // bit 63: orientation, bits 0-62: node ID
 }
 
 impl CompactEdge {
-    const ORIENT_MASK: u64 = 1u64 << 63;
-    const ID_MASK: u64 = !Self::ORIENT_MASK;
+    pub(crate) const ORIENT_MASK: u64 = 1u64 << 63;
+    pub(crate) const ID_MASK: u64 = !Self::ORIENT_MASK;
 
-    fn new(from_id: u64, from_rev: bool, to_id: u64, to_rev: bool) -> Self {
+    pub(crate) fn new(from_id: u64, from_rev: bool, to_id: u64, to_rev: bool) -> Self {
         let from = from_id | (if from_rev { Self::ORIENT_MASK } else { 0 });
         let to = to_id | (if to_rev { Self::ORIENT_MASK } else { 0 });
         CompactEdge { from, to }
     }
 
-    fn source_id(&self) -> u64 {
+    pub(crate) fn source_id(&self) -> u64 {
         self.from & Self::ID_MASK
     }
-    fn source_rev(&self) -> bool {
+    pub(crate) fn source_rev(&self) -> bool {
         (self.from & Self::ORIENT_MASK) != 0
     }
-    fn target_id(&self) -> u64 {
+    pub(crate) fn target_id(&self) -> u64 {
         self.to & Self::ID_MASK
     }
-    fn target_rev(&self) -> bool {
+    pub(crate) fn target_rev(&self) -> bool {
         (self.to & Self::ORIENT_MASK) != 0
     }
 }
 
 // Sequence storage with memory mapping
-struct SequenceStore {
+pub(crate) struct SequenceStore {
     sequences_file: File,
     offsets: Vec<(u64, u32)>, // (offset, length) for each node
 }
 
 impl SequenceStore {
-    fn new(temp_dir: Option<&str>) -> io::Result<Self> {
+    pub(crate) fn new(temp_dir: Option<&str>) -> io::Result<Self> {
         let temp_file = if let Some(dir) = temp_dir {
             NamedTempFile::new_in(dir)?
         } else {
@@ -98,7 +98,7 @@ impl SequenceStore {
         })
     }
 
-    fn add_sequence(&mut self, seq: &[u8]) -> io::Result<usize> {
+    pub(crate) fn add_sequence(&mut self, seq: &[u8]) -> io::Result<usize> {
         let offset = self.sequences_file.seek(SeekFrom::End(0))?;
         self.sequences_file.write_all(seq)?;
 
@@ -107,7 +107,7 @@ impl SequenceStore {
         Ok(idx)
     }
 
-    fn get_sequence(&self, idx: usize) -> io::Result<Vec<u8>> {
+    pub(crate) fn get_sequence(&self, idx: usize) -> io::Result<Vec<u8>> {
         if idx >= self.offsets.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -126,7 +126,7 @@ impl SequenceStore {
     }
 
     // Get sequence length without reading the actual sequence data
-    fn get_sequence_length(&self, idx: usize) -> io::Result<usize> {
+    pub(crate) fn get_sequence_length(&self, idx: usize) -> io::Result<usize> {
         if idx < self.offsets.len() {
             let (_, length) = self.offsets[idx];
             Ok(length as usize)
@@ -140,14 +140,14 @@ impl SequenceStore {
 }
 
 // Simplified graph structure
-struct CompactGraph {
-    node_count: u64,
-    edges: FxHashSet<CompactEdge>,
-    sequence_store: SequenceStore,
+pub(crate) struct CompactGraph {
+    pub(crate) node_count: u64,
+    pub(crate) edges: FxHashSet<CompactEdge>,
+    pub(crate) sequence_store: SequenceStore,
 }
 
 impl CompactGraph {
-    fn new(temp_dir: Option<&str>) -> io::Result<Self> {
+    pub(crate) fn new(temp_dir: Option<&str>) -> io::Result<Self> {
         Ok(CompactGraph {
             node_count: 0,
             edges: FxHashSet::default(),
@@ -155,25 +155,25 @@ impl CompactGraph {
         })
     }
 
-    fn add_node(&mut self, seq: &[u8]) -> io::Result<u64> {
+    pub(crate) fn add_node(&mut self, seq: &[u8]) -> io::Result<u64> {
         self.sequence_store.add_sequence(seq)?;
         self.node_count += 1;
         Ok(self.node_count) // Return the actual node ID (1-based as per handlegraph convention)
     }
 
-    fn add_edge(&mut self, from_id: u64, from_rev: bool, to_id: u64, to_rev: bool) {
+    pub(crate) fn add_edge(&mut self, from_id: u64, from_rev: bool, to_id: u64, to_rev: bool) {
         self.edges
             .insert(CompactEdge::new(from_id, from_rev, to_id, to_rev));
     }
 
-    fn has_edge(&self, from_id: u64, from_rev: bool, to_id: u64, to_rev: bool) -> bool {
+    pub(crate) fn has_edge(&self, from_id: u64, from_rev: bool, to_id: u64, to_rev: bool) -> bool {
         // Check for the edge in both directions since handlegraph edges are bidirectional
         let edge1 = CompactEdge::new(from_id, from_rev, to_id, to_rev);
         let edge2 = CompactEdge::new(to_id, !to_rev, from_id, !from_rev);
         self.edges.contains(&edge1) || self.edges.contains(&edge2)
     }
 
-    fn get_sequence(&self, handle: Handle) -> io::Result<Vec<u8>> {
+    pub(crate) fn get_sequence(&self, handle: Handle) -> io::Result<Vec<u8>> {
         let seq = self
             .sequence_store
             .get_sequence((u64::from(handle.id()) - 1) as usize)?;
@@ -186,25 +186,25 @@ impl CompactGraph {
 }
 
 #[derive(Debug, Clone)]
-struct RangeInfo {
-    start: usize,
-    end: usize,
+pub(crate) struct RangeInfo {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
     //gfa_id: usize,      // GFA file ID this range belongs to
-    steps: Vec<Handle>, // Path steps for this range
+    pub(crate) steps: Vec<Handle>, // Path steps for this range
 }
 
 impl RangeInfo {
     /// Returns true if this range is immediately followed by another range
     /// with no gap between them
     #[inline]
-    fn is_contiguous_with(&self, other: &Self) -> bool {
+    pub(crate) fn is_contiguous_with(&self, other: &Self) -> bool {
         self.end == other.start
     }
 
     /// Returns true if this range overlaps with another range
     /// Two ranges overlap if one starts before the other ends
     #[inline]
-    fn overlaps_with(&self, other: &Self) -> bool {
+    pub(crate) fn overlaps_with(&self, other: &Self) -> bool {
         self.start < other.end && other.start < self.end
     }
 }
@@ -575,7 +575,7 @@ fn get_gfa_reader(gfa_path: &str) -> io::Result<Box<dyn BufRead>> {
     Ok(Box::new(BufReader::new(reader)))
 }
 
-fn split_path_name(path_name: &str) -> Option<(String, usize, usize)> {
+pub(crate) fn split_path_name(path_name: &str) -> Option<(String, usize, usize)> {
     // Find the last ':' to split the range from the key
     if let Some(last_colon) = path_name.rfind(':') {
         let (key, range_str) = path_name.split_at(last_colon);
@@ -592,7 +592,7 @@ fn split_path_name(path_name: &str) -> Option<(String, usize, usize)> {
     None
 }
 
-fn sort_and_filter_ranges(ranges: &mut Vec<RangeInfo>) {
+pub(crate) fn sort_and_filter_ranges(ranges: &mut Vec<RangeInfo>) {
     // Sort ranges by start position
     ranges.sort_by_key(|r| (r.start, r.end));
 
@@ -674,7 +674,7 @@ fn sort_and_filter_ranges(ranges: &mut Vec<RangeInfo>) {
     // }
 }
 
-fn trim_range_overlaps(ranges: &mut [RangeInfo], graph_mutex: &Arc<Mutex<CompactGraph>>) {
+pub(crate) fn trim_range_overlaps(ranges: &mut [RangeInfo], graph_mutex: &Arc<Mutex<CompactGraph>>) {
     debug!("  Trimming overlapping ranges");
 
     for i in 1..ranges.len() {
@@ -870,7 +870,7 @@ fn trim_range_overlaps(ranges: &mut [RangeInfo], graph_mutex: &Arc<Mutex<Compact
     }
 }
 
-fn link_contiguous_ranges(ranges: &[RangeInfo], graph_mutex: &Arc<Mutex<CompactGraph>>) {
+pub(crate) fn link_contiguous_ranges(ranges: &[RangeInfo], graph_mutex: &Arc<Mutex<CompactGraph>>) {
     debug!("  Linking contiguous ranges");
 
     for i in 1..ranges.len() {
@@ -908,7 +908,7 @@ fn link_contiguous_ranges(ranges: &[RangeInfo], graph_mutex: &Arc<Mutex<CompactG
     }
 }
 
-fn mark_nodes_for_removal(
+pub(crate) fn mark_nodes_for_removal(
     node_count: u64,
     path_key_ranges: &FxHashMap<String, Vec<RangeInfo>>,
 ) -> BitVec {

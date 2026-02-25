@@ -1,6 +1,10 @@
 pub mod poa;
 
 use crate::commands::align::{SparsificationStrategy, SweepgaAlignConfig};
+use crate::commands::lace::{
+    CompactGraph, RangeInfo, link_contiguous_ranges, mark_nodes_for_removal, sort_and_filter_ranges,
+    split_path_name, trim_range_overlaps,
+};
 use crate::graph::{
     prepare_sequences, sort_gfa, SequenceMetadata,
 };
@@ -8,10 +12,13 @@ use crate::impg_index::ImpgIndex;
 use crate::realize::poa::padded_poa_from_sequences;
 use crate::sequence_index::UnifiedSequenceIndex;
 use coitrees::Interval;
+use handlegraph::handle::{Handle, NodeId};
 use log::{info, warn};
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 use std::io::{self, BufRead, BufReader};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 // ---------------------------------------------------------------------------
@@ -319,7 +326,7 @@ fn realize_recursive(
     }
 
     // Lace sub-graphs together.
-    lace_subgraphs(&sub_gfas)
+    lace_subgraphs(&sub_gfas, config.temp_dir.as_deref())
 }
 
 // ---------------------------------------------------------------------------
@@ -488,11 +495,17 @@ fn partition_into_chunks(
     for (win_start, win_end) in &windows {
         let mut chunk_seqs: Vec<(String, SequenceMetadata)> = Vec::new();
 
-        // Always include the anchor's slice for this window.
-        // Preserve the original metadata so that path_name() is consistent
-        // across all chunks — lacing merges paths by name.
+        // Include the anchor's slice for this window with per-chunk metadata
+        // so that path names encode per-chunk coordinates for overlap-aware lacing.
         let anchor_slice = &anchor_seq[*win_start..*win_end];
-        chunk_seqs.push((anchor_slice.to_string(), anchor_meta.clone()));
+        let chunk_anchor_meta = SequenceMetadata {
+            name: anchor_meta.name.clone(),
+            start: anchor_meta.start + *win_start as i32,
+            size: (*win_end - *win_start) as i32,
+            strand: anchor_meta.strand,
+            total_length: anchor_meta.total_length,
+        };
+        chunk_seqs.push((anchor_slice.to_string(), chunk_anchor_meta));
 
         // For each non-anchor sequence, project the window through alignments.
         // If a sequence has no projection from the anchor (no direct alignment),
@@ -508,9 +521,15 @@ fn partition_into_chunks(
                 let clamped_end = seq_end.min(seq_str.len());
                 if clamped_end > clamped_start {
                     let sub_seq = &seq_str[clamped_start..clamped_end];
-                    // Preserve the original metadata so path_name() is
-                    // consistent across chunks for lacing.
-                    chunk_seqs.push((sub_seq.to_string(), seq_meta.clone()));
+                    // Per-chunk metadata with adjusted coordinates for overlap-aware lacing.
+                    let chunk_meta = SequenceMetadata {
+                        name: seq_meta.name.clone(),
+                        start: seq_meta.start + clamped_start as i32,
+                        size: (clamped_end - clamped_start) as i32,
+                        strand: seq_meta.strand,
+                        total_length: seq_meta.total_length,
+                    };
+                    chunk_seqs.push((sub_seq.to_string(), chunk_meta));
                 }
             }
         }
@@ -588,14 +607,16 @@ fn project_window_to_sequence(
 // Lacing sub-graphs
 // ---------------------------------------------------------------------------
 
-/// Lace multiple GFA sub-graphs into a single GFA.
+/// Lace multiple GFA sub-graphs into a single GFA with proper overlap trimming.
 ///
-/// This is a simplified version that:
-/// 1. Remaps node IDs to a unified namespace.
-/// 2. Concatenates segments and links.
-/// 3. Joins paths that share the same name across chunks by linking their
-///    last/first nodes.
-fn lace_subgraphs(sub_gfas: &[String]) -> io::Result<String> {
+/// Uses the lace pipeline from `commands::lace` to:
+/// 1. Parse all sub-GFA strings into a unified CompactGraph with translated node IDs.
+/// 2. Sort, deduplicate, and filter path ranges.
+/// 3. Trim overlapping boundary regions between adjacent chunks.
+/// 4. Link contiguous ranges.
+/// 5. Remove unused nodes and compact IDs.
+/// 6. Emit the final GFA as a string.
+fn lace_subgraphs(sub_gfas: &[String], temp_dir: Option<&str>) -> io::Result<String> {
     if sub_gfas.is_empty() {
         return Ok(String::from("H\tVN:Z:1.0\n"));
     }
@@ -604,173 +625,263 @@ fn lace_subgraphs(sub_gfas: &[String]) -> io::Result<String> {
         return Ok(sub_gfas[0].clone());
     }
 
-    let mut next_id: u64 = 1;
-    let mut all_segments: Vec<String> = Vec::new();
-    let mut all_links: Vec<String> = Vec::new();
-
-    // For each sub-GFA: map of path_name -> ordered list of (segment_id, orientation) tuples.
-    // We collect these across all sub-GFAs to build the final merged paths.
-    let mut path_segments_per_gfa: Vec<std::collections::HashMap<String, Vec<String>>> =
-        Vec::with_capacity(sub_gfas.len());
+    // 1. Build CompactGraph + path_key_ranges from in-memory GFA strings
+    let mut graph = CompactGraph::new(temp_dir)?;
+    let mut path_key_ranges: FxHashMap<String, Vec<RangeInfo>> = FxHashMap::default();
 
     for gfa_str in sub_gfas {
-        let mut id_remap: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-        let mut local_path_segments: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
+        let mut id_translation: FxHashMap<NodeId, NodeId> = FxHashMap::default();
+        let mut temp_edges: Vec<(u64, bool, u64, bool)> = Vec::new();
 
         for line in gfa_str.lines() {
-            if line.starts_with("S\t") {
-                let fields: Vec<&str> = line.splitn(4, '\t').collect();
-                if fields.len() >= 3 {
-                    let old_id = fields[1].to_string();
-                    let new_id = next_id;
-                    next_id += 1;
-                    id_remap.insert(old_id, new_id);
-                    // Re-emit segment with new ID.
-                    if fields.len() == 3 {
-                        all_segments.push(format!("S\t{}\t{}", new_id, fields[2]));
-                    } else {
-                        all_segments.push(format!("S\t{}\t{}\t{}", new_id, fields[2], fields[3]));
-                    }
-                }
-            } else if line.starts_with("L\t") {
-                let fields: Vec<&str> = line.splitn(7, '\t').collect();
-                if fields.len() >= 6 {
-                    let from_id = id_remap
-                        .get(fields[1])
-                        .copied()
-                        .unwrap_or_else(|| fields[1].parse().unwrap_or(0));
-                    let to_id = id_remap
-                        .get(fields[3])
-                        .copied()
-                        .unwrap_or_else(|| fields[3].parse().unwrap_or(0));
-                    if fields.len() == 6 {
-                        all_links.push(format!(
-                            "L\t{}\t{}\t{}\t{}\t{}",
-                            from_id, fields[2], to_id, fields[4], fields[5]
-                        ));
-                    } else {
-                        all_links.push(format!(
-                            "L\t{}\t{}\t{}\t{}\t{}\t{}",
-                            from_id, fields[2], to_id, fields[4], fields[5], fields[6]
+            if line.is_empty() || line.starts_with('#') || line.starts_with('H') {
+                continue;
+            }
+
+            let fields: Vec<&str> = line.split('\t').collect();
+            match fields[0] {
+                "S" => {
+                    if fields.len() < 3 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Invalid S line in sub-GFA: {line}"),
                         ));
                     }
+                    let node_id: u64 = fields[1].parse().map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Invalid node ID '{}' in S line", fields[1]),
+                        )
+                    })?;
+                    let sequence = fields[2].as_bytes();
+                    let new_node_id = graph.add_node(sequence)?;
+                    id_translation
+                        .insert(NodeId::from(node_id), NodeId::from(new_node_id));
                 }
-            } else if line.starts_with("P\t") {
-                let fields: Vec<&str> = line.splitn(4, '\t').collect();
-                if fields.len() >= 3 {
-                    let path_name = fields[1].to_string();
-                    let steps: Vec<String> = fields[2]
-                        .split(',')
-                        .map(|step| {
-                            // Remap node ID in step (e.g. "5+" → "12+").
+                "L" => {
+                    if fields.len() < 6 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Invalid L line in sub-GFA: {line}"),
+                        ));
+                    }
+                    let from_id: u64 = fields[1].parse().map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Invalid from node ID '{}' in L line", fields[1]),
+                        )
+                    })?;
+                    let from_rev = fields[2] == "-";
+                    let to_id: u64 = fields[3].parse().map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Invalid to node ID '{}' in L line", fields[3]),
+                        )
+                    })?;
+                    let to_rev = fields[4] == "-";
+                    temp_edges.push((from_id, from_rev, to_id, to_rev));
+                }
+                "P" => {
+                    if fields.len() < 3 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Invalid P line in sub-GFA: {line}"),
+                        ));
+                    }
+                    let path_name = fields[1];
+                    let nodes_str = fields[2];
+
+                    if let Some((path_key, start, end)) = split_path_name(path_name) {
+                        let mut translated_steps = Vec::new();
+                        for step_str in nodes_str.split(',') {
+                            if step_str.is_empty() {
+                                continue;
+                            }
                             let (node_str, orient) =
-                                if let Some(stripped) = step.strip_suffix('+') {
-                                    (stripped, "+")
-                                } else if let Some(stripped) = step.strip_suffix('-') {
-                                    (stripped, "-")
+                                if let Some(stripped) = step_str.strip_suffix('+') {
+                                    (stripped, false)
+                                } else if let Some(stripped) = step_str.strip_suffix('-') {
+                                    (stripped, true)
                                 } else {
-                                    (step, "+")
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        format!(
+                                            "Invalid step format '{step_str}' in path {path_name}"
+                                        ),
+                                    ));
                                 };
-                            let new_node = id_remap
-                                .get(node_str)
-                                .copied()
-                                .unwrap_or_else(|| node_str.parse().unwrap_or(0));
-                            format!("{}{}", new_node, orient)
-                        })
-                        .collect();
-                    local_path_segments
-                        .entry(path_name)
-                        .or_default()
-                        .extend(steps);
-                }
-            }
-        }
 
-        path_segments_per_gfa.push(local_path_segments);
-    }
+                            let node_id: u64 = node_str.parse().map_err(|_| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!(
+                                        "Invalid node ID '{node_str}' in path {path_name}"
+                                    ),
+                                )
+                            })?;
 
-    // Merge paths: for each path name, concatenate segments from all sub-GFAs
-    // and add linking edges between the last node of chunk N and first node of chunk N+1.
-    let mut merged_paths: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
-
-    // Collect all path names in order of first appearance.
-    let mut path_order: Vec<String> = Vec::new();
-    {
-        let mut seen = std::collections::HashSet::new();
-        for gfa_paths in &path_segments_per_gfa {
-            for name in gfa_paths.keys() {
-                if seen.insert(name.clone()) {
-                    path_order.push(name.clone());
-                }
-            }
-        }
-    }
-
-    for path_name in &path_order {
-        let mut full_path: Vec<String> = Vec::new();
-
-        for gfa_paths in &path_segments_per_gfa {
-            if let Some(steps) = gfa_paths.get(path_name) {
-                if !steps.is_empty() {
-                    // Add a linking edge between the last step of the accumulated path
-                    // and the first step of this chunk.
-                    if let (Some(last_step), Some(first_step)) = (full_path.last(), steps.first())
-                    {
-                        let (last_node, last_orient) = parse_step(last_step);
-                        let (first_node, first_orient) = parse_step(first_step);
-                        all_links.push(format!(
-                            "L\t{}\t{}\t{}\t{}\t0M",
-                            last_node, last_orient, first_node, first_orient
-                        ));
+                            if let Some(&translated_id) =
+                                id_translation.get(&NodeId::from(node_id))
+                            {
+                                translated_steps.push(Handle::pack(translated_id, orient));
+                            } else {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!(
+                                        "Node {node_id} in path {path_name} not found in translation map"
+                                    ),
+                                ));
+                            }
+                        }
+                        if !translated_steps.is_empty() {
+                            path_key_ranges
+                                .entry(path_key)
+                                .or_default()
+                                .push(RangeInfo {
+                                    start,
+                                    end,
+                                    steps: translated_steps,
+                                });
+                        }
                     }
-                    full_path.extend(steps.iter().cloned());
                 }
+                _ => {}
             }
         }
 
-        if !full_path.is_empty() {
-            merged_paths.insert(path_name.clone(), full_path);
+        // Translate and add edges
+        for (from_id, from_rev, to_id, to_rev) in temp_edges {
+            if let (Some(&translated_from), Some(&translated_to)) = (
+                id_translation.get(&NodeId::from(from_id)),
+                id_translation.get(&NodeId::from(to_id)),
+            ) {
+                graph.add_edge(
+                    translated_from.into(),
+                    from_rev,
+                    translated_to.into(),
+                    to_rev,
+                );
+            }
         }
     }
 
-    // Assemble final GFA.
+    // 2. Sort and filter ranges per path key
+    for ranges in path_key_ranges.values_mut() {
+        sort_and_filter_ranges(ranges);
+    }
+
+    // 3. Trim overlaps and link contiguous ranges
+    let graph_mutex = Arc::new(Mutex::new(graph));
+
+    for ranges in path_key_ranges.values_mut() {
+        trim_range_overlaps(ranges, &graph_mutex);
+        link_contiguous_ranges(ranges, &graph_mutex);
+    }
+
+    // Unwrap graph from mutex
+    let graph = Arc::try_unwrap(graph_mutex)
+        .ok()
+        .expect("Failed to unwrap graph mutex")
+        .into_inner()
+        .unwrap();
+
+    // 4. Mark unused nodes for removal
+    let nodes_to_remove = mark_nodes_for_removal(graph.node_count, &path_key_ranges);
+
+    // 5. Build ID compaction mapping
+    let max_id = graph.node_count as usize;
+    let mut id_mapping: Vec<u64> = vec![0; max_id + 1];
+    let mut new_id: u64 = 1;
+
+    // 6. Emit GFA as String
     let mut output = String::new();
     output.push_str("H\tVN:Z:1.0\n");
 
-    for seg in &all_segments {
-        output.push_str(seg);
-        output.push('\n');
-    }
-
-    // Deduplicate links while preserving insertion order for determinism.
-    let mut seen_links = std::collections::HashSet::new();
-    for link in &all_links {
-        if seen_links.insert(link) {
-            output.push_str(link);
-            output.push('\n');
+    // Write S lines with compacted IDs (skip removed nodes)
+    for node_id in 1..=graph.node_count {
+        if !nodes_to_remove[node_id as usize] {
+            id_mapping[node_id as usize] = new_id;
+            let sequence =
+                graph.get_sequence(Handle::pack(NodeId::from(node_id), false))?;
+            let sequence_str =
+                String::from_utf8(sequence).expect("Node sequence contains invalid UTF-8");
+            output.push_str(&format!("S\t{new_id}\t{sequence_str}\n"));
+            new_id += 1;
         }
     }
 
-    for path_name in &path_order {
-        if let Some(steps) = merged_paths.get(path_name) {
-            output.push_str(&format!("P\t{}\t{}\t*\n", path_name, steps.join(",")));
+    // Write L lines with mapped IDs (skip edges to removed nodes)
+    for edge in &graph.edges {
+        let from_id = edge.source_id() as usize;
+        let to_id = edge.target_id() as usize;
+
+        if !nodes_to_remove[from_id] && !nodes_to_remove[to_id] {
+            let from_mapped = id_mapping[from_id];
+            let to_mapped = id_mapping[to_id];
+            let from_orient = if edge.source_rev() { "-" } else { "+" };
+            let to_orient = if edge.target_rev() { "-" } else { "+" };
+            output.push_str(&format!(
+                "L\t{from_mapped}\t{from_orient}\t{to_mapped}\t{to_orient}\t0M\n"
+            ));
+        }
+    }
+
+    // Write P lines: merge contiguous ranges per path key
+    let mut path_keys: Vec<&String> = path_key_ranges.keys().collect();
+    path_keys.sort();
+
+    for path_key in path_keys {
+        let ranges = &path_key_ranges[path_key];
+        if ranges.is_empty() {
+            continue;
+        }
+
+        let mut path_elements: Vec<String> = Vec::new();
+        let mut path_start = ranges[0].start;
+        let mut path_end = ranges[0].start;
+
+        let mut i = 0;
+        while i < ranges.len() {
+            // Add steps from this range
+            for handle in &ranges[i].steps {
+                let node_id = id_mapping[u64::from(handle.id()) as usize];
+                let orient = if handle.is_reverse() { "-" } else { "+" };
+                path_elements.push(format!("{node_id}{orient}"));
+            }
+            let mut last_range_end = ranges[i].end;
+            i += 1;
+
+            // Merge contiguous ranges
+            while i < ranges.len() && ranges[i - 1].is_contiguous_with(&ranges[i]) {
+                for handle in &ranges[i].steps {
+                    let node_id = id_mapping[u64::from(handle.id()) as usize];
+                    let orient = if handle.is_reverse() { "-" } else { "+" };
+                    path_elements.push(format!("{node_id}{orient}"));
+                }
+                last_range_end = ranges[i].end;
+                i += 1;
+            }
+            path_end = last_range_end;
+
+            // If there's a gap before the next block, emit current path and start new one
+            if i < ranges.len() {
+                if !path_elements.is_empty() {
+                    let path_name = format!("{path_key}:{path_start}-{path_end}");
+                    output.push_str(&format!("P\t{}\t{}\t*\n", path_name, path_elements.join(",")));
+                    path_elements.clear();
+                }
+                path_start = ranges[i].start;
+            }
+        }
+
+        // Write remaining path
+        if !path_elements.is_empty() {
+            let path_name = format!("{path_key}:{path_start}-{path_end}");
+            output.push_str(&format!("P\t{}\t{}\t*\n", path_name, path_elements.join(",")));
         }
     }
 
     Ok(output)
-}
-
-/// Parse a GFA path step like "12+" into (node_id_str, orientation_str).
-fn parse_step(step: &str) -> (&str, &str) {
-    if let Some(stripped) = step.strip_suffix('+') {
-        (stripped, "+")
-    } else if let Some(stripped) = step.strip_suffix('-') {
-        (stripped, "-")
-    } else {
-        (step, "+")
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -946,60 +1057,277 @@ mod tests {
     #[test]
     fn test_lace_subgraphs_single() {
         let gfa = "H\tVN:Z:1.0\nS\t1\tACGT\nP\ts1:0-4\t1+\t*\n".to_string();
-        let result = lace_subgraphs(&[gfa.clone()]).unwrap();
+        let result = lace_subgraphs(&[gfa.clone()], None).unwrap();
         assert_eq!(result, gfa);
     }
 
     #[test]
-    fn test_lace_subgraphs_two() {
-        let gfa1 = "H\tVN:Z:1.0\nS\t1\tACGT\nP\ts1:0-8\t1+\t*\n".to_string();
-        let gfa2 = "H\tVN:Z:1.0\nS\t1\tTGCA\nP\ts1:0-8\t1+\t*\n".to_string();
-        let result = lace_subgraphs(&[gfa1, gfa2]).unwrap();
-
-        // Should have header, two segments (remapped to 1 and 2), a link, and one merged path.
-        assert!(result.contains("H\tVN:Z:1.0"));
-        assert!(result.contains("S\t1\tACGT"));
-        assert!(result.contains("S\t2\tTGCA"));
-        assert!(result.contains("L\t1\t+\t2\t+\t0M"));
-        assert!(result.contains("P\ts1:0-8\t1+,2+\t*"));
-    }
-
-    #[test]
     fn test_lace_subgraphs_empty() {
-        let result = lace_subgraphs(&[]).unwrap();
+        let result = lace_subgraphs(&[], None).unwrap();
         assert!(result.contains("H\tVN:Z:1.0"));
     }
 
     #[test]
-    fn test_lace_subgraphs_reverse_orientation() {
-        // GFA1 has a path step with reverse orientation; GFA2 has forward.
-        let gfa1 = "H\tVN:Z:1.0\nS\t1\tACGT\nP\tp1\t1-\t*\n".to_string();
-        let gfa2 = "H\tVN:Z:1.0\nS\t1\tTGCA\nP\tp1\t1+\t*\n".to_string();
-        let result = lace_subgraphs(&[gfa1, gfa2]).unwrap();
+    fn test_lace_subgraphs_contiguous_no_overlap() {
+        // Two chunks with contiguous ranges: s:0-10 and s:10-20.
+        // Should be linked but no trimming needed.
+        let gfa1 = "H\tVN:Z:1.0\nS\t1\tACGTACGTAC\nP\ts:0-10\t1+\t*\n".to_string();
+        let gfa2 = "H\tVN:Z:1.0\nS\t1\tTGCATGCATG\nP\ts:10-20\t1+\t*\n".to_string();
+        let result = lace_subgraphs(&[gfa1, gfa2], None).unwrap();
 
-        assert!(result.contains("S\t1\tACGT"));
-        assert!(result.contains("S\t2\tTGCA"));
-        // Linking edge should preserve orientations: 1- → 2+
-        assert!(result.contains("L\t1\t-\t2\t+\t0M"));
-        assert!(result.contains("P\tp1\t1-,2+\t*"));
+        assert!(result.contains("H\tVN:Z:1.0"));
+        assert!(result.contains("S\t1\tACGTACGTAC"));
+        assert!(result.contains("S\t2\tTGCATGCATG"));
+        // Contiguous ranges should be linked
+        assert!(result.contains("L\t1\t+\t2\t+\t0M"));
+        // Merged into a single path spanning 0-20
+        assert!(result.contains("P\ts:0-20\t1+,2+\t*"));
     }
 
     #[test]
-    fn test_lace_subgraphs_multi_segment_paths() {
-        // Each sub-GFA has a path with multiple segments.
+    fn test_lace_subgraphs_with_overlap() {
+        // Two chunks with overlapping ranges.
+        // Chunk 1: s:0-12 with nodes covering 12bp.
+        // Chunk 2: s:8-20 with nodes covering 12bp.
+        // The overlap region [8,12) (4bp) should be trimmed from chunk 2.
+        //
+        // Chunk 1: segment 1 (8bp "AAAAAAAA") + segment 2 (4bp "CCCC")
+        //   path s:0-12 = 1+,2+
+        // Chunk 2: segment 1 (4bp "CCCC") + segment 2 (8bp "GGGGGGGG")
+        //   path s:8-20 = 1+,2+
+        //
+        // After trimming: chunk 2's first segment (4bp at position 8-12) is fully
+        // in the overlap [8,12), so it's removed. Chunk 2 keeps only segment 2.
+        let gfa1 = "H\tVN:Z:1.0\n\
+                     S\t1\tAAAAAAAA\n\
+                     S\t2\tCCCC\n\
+                     L\t1\t+\t2\t+\t0M\n\
+                     P\ts:0-12\t1+,2+\t*\n"
+            .to_string();
+        let gfa2 = "H\tVN:Z:1.0\n\
+                     S\t1\tCCCC\n\
+                     S\t2\tGGGGGGGG\n\
+                     L\t1\t+\t2\t+\t0M\n\
+                     P\ts:8-20\t1+,2+\t*\n"
+            .to_string();
+        let result = lace_subgraphs(&[gfa1, gfa2], None).unwrap();
+
+        assert!(result.contains("H\tVN:Z:1.0"));
+        // Chunk 1 segments preserved
+        assert!(result.contains("S\t1\tAAAAAAAA"));
+        assert!(result.contains("S\t2\tCCCC"));
+        // Chunk 2's first segment (CCCC at 8-12) is removed by overlap trimming.
+        // Chunk 2's second segment (GGGGGGGG at 12-20) is kept.
+        // The trimmed node (node 3, original chunk2's node 1) is removed by ID compaction.
+        // So the GGGGGGGG segment gets compacted ID 3.
+        assert!(result.contains("S\t3\tGGGGGGGG"));
+        // Path should span 0-20 with trimmed overlap
+        assert!(
+            result.contains("P\ts:0-20\t1+,2+,3+\t*"),
+            "expected merged path, got:\n{result}"
+        );
+    }
+
+    #[test]
+    fn test_lace_subgraphs_overlap_with_node_split() {
+        // Two chunks where the overlap boundary falls in the middle of a node.
+        // Chunk 1: s:0-10 with single node (10bp "ACGTACGTAC")
+        //   path s:0-10 = 1+
+        // Chunk 2: s:8-18 with single node (10bp "ACGGGGGGGG")
+        //   path s:8-18 = 1+
+        //
+        // Overlap is [8,10) (2bp). In chunk 2, the overlap falls within the
+        // single node at positions [0,2) relative to the node. The node should
+        // be split: the overlap part (first 2bp) is removed, the remaining 8bp
+        // become a new node.
+        let gfa1 = "H\tVN:Z:1.0\n\
+                     S\t1\tACGTACGTAC\n\
+                     P\ts:0-10\t1+\t*\n"
+            .to_string();
+        let gfa2 = "H\tVN:Z:1.0\n\
+                     S\t1\tACGGGGGGGG\n\
+                     P\ts:8-18\t1+\t*\n"
+            .to_string();
+        let result = lace_subgraphs(&[gfa1, gfa2], None).unwrap();
+
+        assert!(result.contains("H\tVN:Z:1.0"));
+        // Chunk 1's node
+        assert!(result.contains("S\t1\tACGTACGTAC"));
+        // Chunk 2's original node (10bp) is split: overlap [8,10) removes first 2bp.
+        // Right part (8bp) becomes a new node: "GGGGGGGG"
+        assert!(
+            result.contains("S\t2\tGGGGGGGG"),
+            "expected split node with right part, got:\n{result}"
+        );
+        // Merged path
+        assert!(
+            result.contains("P\ts:0-18\t1+,2+\t*"),
+            "expected merged path, got:\n{result}"
+        );
+    }
+
+    #[test]
+    fn test_lace_subgraphs_multiple_paths() {
+        // Two different path keys across two contiguous chunks.
+        let gfa1 = "H\tVN:Z:1.0\n\
+                     S\t1\tAAAA\n\
+                     S\t2\tCCCC\n\
+                     P\tpathA:0-4\t1+\t*\n\
+                     P\tpathB:0-4\t2+\t*\n"
+            .to_string();
+        let gfa2 = "H\tVN:Z:1.0\n\
+                     S\t1\tGGGG\n\
+                     S\t2\tTTTT\n\
+                     P\tpathA:4-8\t1+\t*\n\
+                     P\tpathB:4-8\t2-\t*\n"
+            .to_string();
+        let result = lace_subgraphs(&[gfa1, gfa2], None).unwrap();
+
+        // All segments present
+        assert!(result.contains("S\t1\tAAAA"));
+        assert!(result.contains("S\t2\tCCCC"));
+        assert!(result.contains("S\t3\tGGGG"));
+        assert!(result.contains("S\t4\tTTTT"));
+        // pathA: contiguous [0-4) + [4-8) → merged to 0-8
+        assert!(
+            result.contains("P\tpathA:0-8\t1+,3+\t*"),
+            "expected pathA merged, got:\n{result}"
+        );
+        assert!(result.contains("L\t1\t+\t3\t+\t0M"));
+        // pathB: contiguous [0-4) + [4-8) → merged to 0-8
+        assert!(
+            result.contains("P\tpathB:0-8\t2+,4-\t*"),
+            "expected pathB merged, got:\n{result}"
+        );
+        assert!(result.contains("L\t2\t+\t4\t-\t0M"));
+    }
+
+    #[test]
+    fn test_lace_subgraphs_path_in_subset_of_chunks() {
+        // pathA appears in both chunks, pathB only in the first chunk.
+        let gfa1 = "H\tVN:Z:1.0\n\
+                     S\t1\tACGT\n\
+                     P\tpathA:0-4\t1+\t*\n\
+                     P\tpathB:0-4\t1-\t*\n"
+            .to_string();
+        let gfa2 = "H\tVN:Z:1.0\n\
+                     S\t1\tTGCA\n\
+                     P\tpathA:4-8\t1+\t*\n"
+            .to_string();
+        let result = lace_subgraphs(&[gfa1, gfa2], None).unwrap();
+
+        // pathA should be merged (contiguous 0-4 + 4-8)
+        assert!(
+            result.contains("P\tpathA:0-8\t1+,2+\t*"),
+            "expected pathA merged, got:\n{result}"
+        );
+        assert!(result.contains("L\t1\t+\t2\t+\t0M"));
+        // pathB should appear with just its single step
+        assert!(
+            result.contains("P\tpathB:0-4\t1-\t*"),
+            "expected pathB unchanged, got:\n{result}"
+        );
+    }
+
+    #[test]
+    fn test_lace_subgraphs_link_deduplication() {
+        // Duplicate links within a sub-GFA should be deduplicated via FxHashSet.
+        let gfa1 = "H\tVN:Z:1.0\n\
+                     S\t1\tAA\n\
+                     S\t2\tCC\n\
+                     L\t1\t+\t2\t+\t0M\n\
+                     L\t1\t+\t2\t+\t0M\n\
+                     P\ts:0-4\t1+,2+\t*\n"
+            .to_string();
+        let gfa2 = "H\tVN:Z:1.0\n\
+                     S\t1\tGG\n\
+                     P\ts:4-6\t1+\t*\n"
+            .to_string();
+        let result = lace_subgraphs(&[gfa1, gfa2], None).unwrap();
+
+        // The duplicate L 1+→2+ should appear only once (FxHashSet dedup).
+        let link_count = result.matches("L\t1\t+\t2\t+\t0M").count();
+        assert_eq!(link_count, 1, "duplicate links should be deduplicated");
+        // Contiguous linking edge 2+ → 3+
+        assert!(result.contains("L\t2\t+\t3\t+\t0M"));
+    }
+
+    #[test]
+    fn test_lace_subgraphs_id_compaction() {
+        // Verify that unused nodes from overlap trimming are removed and IDs are compacted.
+        // Chunk 1: s:0-8, two segments of 4bp each
+        // Chunk 2: s:4-12, two segments of 4bp each
+        // Overlap [4,8): chunk 2's first segment is fully in the overlap, removed.
+        let gfa1 = "H\tVN:Z:1.0\n\
+                     S\t1\tAAAA\n\
+                     S\t2\tBBBB\n\
+                     L\t1\t+\t2\t+\t0M\n\
+                     P\ts:0-8\t1+,2+\t*\n"
+            .to_string();
+        let gfa2 = "H\tVN:Z:1.0\n\
+                     S\t1\tBBBB\n\
+                     S\t2\tCCCC\n\
+                     L\t1\t+\t2\t+\t0M\n\
+                     P\ts:4-12\t1+,2+\t*\n"
+            .to_string();
+        let result = lace_subgraphs(&[gfa1, gfa2], None).unwrap();
+
+        // Total raw nodes: 4 (two per chunk). After trimming, chunk 2's node 1
+        // (which maps to global node 3) is removed. So 3 nodes remain.
+        // Compacted IDs: node 1 → 1, node 2 → 2, node 4 → 3 (node 3 removed).
+        let seg_count = result.lines().filter(|l| l.starts_with("S\t")).count();
+        assert_eq!(
+            seg_count, 3,
+            "expected 3 segments after compaction, got {seg_count}:\n{result}"
+        );
+
+        // IDs should be contiguous 1,2,3
+        assert!(result.contains("S\t1\t"));
+        assert!(result.contains("S\t2\t"));
+        assert!(result.contains("S\t3\t"));
+        // No node 4 should exist
+        assert!(
+            !result.contains("S\t4\t"),
+            "node 4 should be compacted away"
+        );
+    }
+
+    #[test]
+    fn test_lace_subgraphs_three_contiguous_chunks() {
+        // Lace three contiguous sub-GFAs to verify chaining works across >2 chunks.
+        let gfa1 = "H\tVN:Z:1.0\nS\t1\tAA\nP\ts:0-2\t1+\t*\n".to_string();
+        let gfa2 = "H\tVN:Z:1.0\nS\t1\tCC\nP\ts:2-4\t1-\t*\n".to_string();
+        let gfa3 = "H\tVN:Z:1.0\nS\t1\tGG\nP\ts:4-6\t1+\t*\n".to_string();
+        let result = lace_subgraphs(&[gfa1, gfa2, gfa3], None).unwrap();
+
+        assert!(result.contains("S\t1\tAA"));
+        assert!(result.contains("S\t2\tCC"));
+        assert!(result.contains("S\t3\tGG"));
+        // Linking edges between contiguous ranges
+        assert!(result.contains("L\t1\t+\t2\t-\t0M"));
+        assert!(result.contains("L\t2\t-\t3\t+\t0M"));
+        assert!(
+            result.contains("P\ts:0-6\t1+,2-,3+\t*"),
+            "expected merged path, got:\n{result}"
+        );
+    }
+
+    #[test]
+    fn test_lace_subgraphs_multi_segment_contiguous() {
+        // Each sub-GFA has a path with multiple segments, contiguous ranges.
         let gfa1 = "H\tVN:Z:1.0\n\
                      S\t1\tACGT\n\
                      S\t2\tTTTT\n\
                      L\t1\t+\t2\t+\t0M\n\
-                     P\tp1\t1+,2+\t*\n"
+                     P\ts:0-8\t1+,2+\t*\n"
             .to_string();
         let gfa2 = "H\tVN:Z:1.0\n\
                      S\t1\tGGGG\n\
                      S\t2\tCCCC\n\
                      L\t1\t+\t2\t-\t0M\n\
-                     P\tp1\t1+,2-\t*\n"
+                     P\ts:8-16\t1+,2-\t*\n"
             .to_string();
-        let result = lace_subgraphs(&[gfa1, gfa2]).unwrap();
+        let result = lace_subgraphs(&[gfa1, gfa2], None).unwrap();
 
         // Segments remapped: gfa1 1→1, 2→2; gfa2 1→3, 2→4
         assert!(result.contains("S\t1\tACGT"));
@@ -1012,149 +1340,10 @@ mod tests {
         // Linking edge between last of gfa1 (2+) and first of gfa2 (3+)
         assert!(result.contains("L\t2\t+\t3\t+\t0M"));
         // Merged path
-        assert!(result.contains("P\tp1\t1+,2+,3+,4-\t*"));
-    }
-
-    #[test]
-    fn test_lace_subgraphs_multiple_paths() {
-        // Two different path names across two sub-GFAs.
-        let gfa1 = "H\tVN:Z:1.0\n\
-                     S\t1\tAAAA\n\
-                     S\t2\tCCCC\n\
-                     P\tpathA\t1+\t*\n\
-                     P\tpathB\t2+\t*\n"
-            .to_string();
-        let gfa2 = "H\tVN:Z:1.0\n\
-                     S\t1\tGGGG\n\
-                     S\t2\tTTTT\n\
-                     P\tpathA\t1+\t*\n\
-                     P\tpathB\t2-\t*\n"
-            .to_string();
-        let result = lace_subgraphs(&[gfa1, gfa2]).unwrap();
-
-        // Segments: gfa1 1→1, 2→2; gfa2 1→3, 2→4
-        assert!(result.contains("S\t1\tAAAA"));
-        assert!(result.contains("S\t2\tCCCC"));
-        assert!(result.contains("S\t3\tGGGG"));
-        assert!(result.contains("S\t4\tTTTT"));
-        // pathA: 1+ from gfa1, 3+ from gfa2, linked 1+ → 3+
-        assert!(result.contains("P\tpathA\t1+,3+\t*"));
-        assert!(result.contains("L\t1\t+\t3\t+\t0M"));
-        // pathB: 2+ from gfa1, 4- from gfa2, linked 2+ → 4-
-        assert!(result.contains("P\tpathB\t2+,4-\t*"));
-        assert!(result.contains("L\t2\t+\t4\t-\t0M"));
-    }
-
-    #[test]
-    fn test_lace_subgraphs_three_chunks() {
-        // Lace three sub-GFAs to verify chaining works across >2 chunks.
-        let gfa1 = "H\tVN:Z:1.0\nS\t1\tAA\nP\tp\t1+\t*\n".to_string();
-        let gfa2 = "H\tVN:Z:1.0\nS\t1\tCC\nP\tp\t1-\t*\n".to_string();
-        let gfa3 = "H\tVN:Z:1.0\nS\t1\tGG\nP\tp\t1+\t*\n".to_string();
-        let result = lace_subgraphs(&[gfa1, gfa2, gfa3]).unwrap();
-
-        assert!(result.contains("S\t1\tAA"));
-        assert!(result.contains("S\t2\tCC"));
-        assert!(result.contains("S\t3\tGG"));
-        // Linking edges: 1+ → 2-, 2- → 3+
-        assert!(result.contains("L\t1\t+\t2\t-\t0M"));
-        assert!(result.contains("L\t2\t-\t3\t+\t0M"));
-        assert!(result.contains("P\tp\t1+,2-,3+\t*"));
-    }
-
-    #[test]
-    fn test_lace_subgraphs_mixed_orientation_multi_segment() {
-        // Sub-GFAs with multi-segment paths in mixed orientations across 3 chunks.
-        let gfa1 = "H\tVN:Z:1.0\n\
-                     S\t1\tAA\n\
-                     S\t2\tCC\n\
-                     L\t1\t+\t2\t-\t0M\n\
-                     P\tp\t1+,2-\t*\n"
-            .to_string();
-        let gfa2 = "H\tVN:Z:1.0\n\
-                     S\t1\tGG\n\
-                     P\tp\t1-\t*\n"
-            .to_string();
-        let gfa3 = "H\tVN:Z:1.0\n\
-                     S\t1\tTT\n\
-                     S\t2\tAA\n\
-                     L\t1\t-\t2\t+\t0M\n\
-                     P\tp\t1-,2+\t*\n"
-            .to_string();
-        let result = lace_subgraphs(&[gfa1, gfa2, gfa3]).unwrap();
-
-        // Segments: gfa1 {1→1,2→2}, gfa2 {1→3}, gfa3 {1→4,2→5}
-        assert!(result.contains("S\t1\tAA"));
-        assert!(result.contains("S\t2\tCC"));
-        assert!(result.contains("S\t3\tGG"));
-        assert!(result.contains("S\t4\tTT"));
-        assert!(result.contains("S\t5\tAA"));
-        // Internal links remapped
-        assert!(result.contains("L\t1\t+\t2\t-\t0M"));
-        assert!(result.contains("L\t4\t-\t5\t+\t0M"));
-        // Linking edges: chunk1 last=2- → chunk2 first=3-, chunk2 last=3- → chunk3 first=4-
-        assert!(result.contains("L\t2\t-\t3\t-\t0M"));
-        assert!(result.contains("L\t3\t-\t4\t-\t0M"));
-        // Full merged path
-        assert!(result.contains("P\tp\t1+,2-,3-,4-,5+\t*"));
-    }
-
-    #[test]
-    fn test_lace_subgraphs_path_present_in_subset_of_chunks() {
-        // pathA appears in both chunks, pathB only in the first chunk.
-        let gfa1 = "H\tVN:Z:1.0\n\
-                     S\t1\tACGT\n\
-                     P\tpathA\t1+\t*\n\
-                     P\tpathB\t1-\t*\n"
-            .to_string();
-        let gfa2 = "H\tVN:Z:1.0\n\
-                     S\t1\tTGCA\n\
-                     P\tpathA\t1+\t*\n"
-            .to_string();
-        let result = lace_subgraphs(&[gfa1, gfa2]).unwrap();
-
-        // pathA should be merged with linking edge
-        assert!(result.contains("P\tpathA\t1+,2+\t*"));
-        assert!(result.contains("L\t1\t+\t2\t+\t0M"));
-        // pathB should appear with just its single step (no linking edge needed)
-        assert!(result.contains("P\tpathB\t1-\t*"));
-    }
-
-    #[test]
-    fn test_lace_subgraphs_link_deduplication() {
-        // Both sub-GFAs have an internal link that, after remapping, would be
-        // different (1+→2+ vs 3+→4+). But a linking edge 2+→3+ is unique.
-        // Also test that truly duplicate links are deduplicated.
-        let gfa1 = "H\tVN:Z:1.0\n\
-                     S\t1\tAA\n\
-                     S\t2\tCC\n\
-                     L\t1\t+\t2\t+\t0M\n\
-                     L\t1\t+\t2\t+\t0M\n\
-                     P\tp\t1+,2+\t*\n"
-            .to_string();
-        let gfa2 = "H\tVN:Z:1.0\n\
-                     S\t1\tGG\n\
-                     P\tp\t1+\t*\n"
-            .to_string();
-        let result = lace_subgraphs(&[gfa1, gfa2]).unwrap();
-
-        // The duplicate L 1+→2+ should appear only once.
-        let link_count = result.matches("L\t1\t+\t2\t+\t0M").count();
-        assert_eq!(link_count, 1, "duplicate links should be deduplicated");
-        // Linking edge 2+ → 3+
-        assert!(result.contains("L\t2\t+\t3\t+\t0M"));
-    }
-
-    #[test]
-    fn test_lace_subgraphs_segment_tags_preserved() {
-        // Segments may have optional tag fields after the sequence.
-        let gfa1 = "H\tVN:Z:1.0\nS\t1\tACGT\tLN:i:4\nP\tp\t1+\t*\n".to_string();
-        let gfa2 = "H\tVN:Z:1.0\nS\t1\tTGCA\nP\tp\t1+\t*\n".to_string();
-        let result = lace_subgraphs(&[gfa1, gfa2]).unwrap();
-
-        // Tag should be preserved on the first segment.
-        assert!(result.contains("S\t1\tACGT\tLN:i:4"));
-        assert!(result.contains("S\t2\tTGCA"));
+        assert!(
+            result.contains("P\ts:0-16\t1+,2+,3+,4-\t*"),
+            "expected merged path, got:\n{result}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2023,9 +2212,9 @@ q2\t1000\t0\t1000\t+\tq2\t1000\t0\t1000\t1000\t1000\t255
     }
 
     #[test]
-    fn test_partition_metadata_preserved_across_chunks() {
-        // Verify that chunk metadata preserves original coordinates for
-        // consistent path naming across chunks (needed for lacing).
+    fn test_partition_metadata_per_chunk_coordinates() {
+        // Verify that chunk metadata has per-chunk coordinates reflecting
+        // actual slice positions (needed for overlap-aware lacing).
         let anchor = "A".repeat(300);
         let seqs = vec![
             make_seq("anchor", &anchor, 100, 1000),
@@ -2044,14 +2233,21 @@ q2\t1000\t0\t1000\t+\tq2\t1000\t0\t1000\t1000\t1000\t255
         let chunks = partition_into_chunks(&seqs, &paf_records, 100, 0);
         assert!(chunks.len() >= 3);
 
-        // All chunks should preserve the original metadata so path_name()
-        // is consistent for lacing.
+        // Each chunk's anchor metadata should have adjusted start/size
+        // reflecting the actual slice coordinates within that chunk.
         for (i, chunk) in chunks.iter().enumerate() {
-            let anchor_meta = &chunk.sequences.iter().find(|(_, m)| m.name == "anchor").unwrap().1;
-            assert_eq!(anchor_meta.start, 100,
-                "chunk {} anchor should preserve original start", i);
-            assert_eq!(anchor_meta.size, 300,
-                "chunk {} anchor should preserve original size", i);
+            let (seq, anchor_meta) = chunk.sequences.iter().find(|(_, m)| m.name == "anchor").unwrap();
+            // start should be original_start + win_start
+            assert!(anchor_meta.start >= 100,
+                "chunk {} anchor start should be >= original start 100, got {}", i, anchor_meta.start);
+            // size should match the actual sequence length
+            assert_eq!(anchor_meta.size as usize, seq.len(),
+                "chunk {} anchor size should match sequence length", i);
+            // name and total_length should be preserved
+            assert_eq!(anchor_meta.name, "anchor",
+                "chunk {} anchor name should be preserved", i);
+            assert_eq!(anchor_meta.total_length, 1000,
+                "chunk {} anchor total_length should be preserved", i);
         }
     }
 

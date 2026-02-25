@@ -898,7 +898,7 @@ pub fn generate_gfa_seqwish_from_intervals(
         let mut writer = BufWriter::new(&combined_fasta);
         for (seq, meta) in &sequences {
             // Use a unique name for each sequence that includes coordinates and strand
-            let header = format!(">{}", meta.alignment_name());
+            let header = format!(">{}", meta.path_name());
             writeln!(writer, "{}", header)?;
             writeln!(writer, "{}", seq)?;
         }
