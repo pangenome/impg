@@ -1,3 +1,4 @@
+use crate::{EngineOpts, GfaEngine};
 use crate::impg::CigarOp;
 use crate::impg::SortedRanges;
 use crate::impg_index::ImpgIndex;
@@ -47,6 +48,7 @@ pub fn partition_alignments(
     debug: bool,
     separate_files: bool,
     approximate_mode: bool,
+    engine_config: &EngineOpts,
 ) -> io::Result<()> {
     // Initialize windows from starting sequences if provided
     let mut windows = Vec::<(u32, i32, i32)>::new();
@@ -486,6 +488,7 @@ pub fn partition_alignments(
                     sequence_index,
                     scoring_params,
                     reverse_complement,
+                    engine_config,
                 )?;
 
                 // Delete temporary BED file
@@ -1226,6 +1229,7 @@ fn write_partition(
     sequence_index: Option<&UnifiedSequenceIndex>,
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
     reverse_complement: bool,
+    engine_config: &EngineOpts,
 ) -> io::Result<()> {
     info!(
         "Writing partition {} with {} intervals in {} format",
@@ -1243,12 +1247,6 @@ fn write_partition(
                     "FASTA index required for GFA output",
                 )
             })?;
-            let scoring_params = scoring_params.ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "POA scoring parameters required for GFA output",
-                )
-            })?;
             write_partition_gfa(
                 partition_num,
                 query_intervals,
@@ -1256,6 +1254,7 @@ fn write_partition(
                 output_folder,
                 sequence_index,
                 scoring_params,
+                engine_config,
             )
         }
         "maf" => {
@@ -1344,15 +1343,64 @@ fn write_partition_gfa(
     impg: &impl ImpgIndex,
     output_folder: Option<&str>,
     sequence_index: &UnifiedSequenceIndex,
-    scoring_params: (u8, u8, u8, u8, u8, u8),
+    scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
+    engine_config: &EngineOpts,
 ) -> io::Result<()> {
-    // Generate a GFA-formatted string from the list of intervals
-    let gfa_output = crate::graph::generate_gfa_from_intervals(
-        impg,
-        query_intervals,
-        sequence_index,
-        scoring_params,
-    );
+    let gfa_output = match engine_config.engine {
+        GfaEngine::Poa => {
+            let params = scoring_params.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "POA scoring parameters required for poa engine",
+                )
+            })?;
+            crate::graph::generate_gfa_from_intervals(
+                impg,
+                query_intervals,
+                sequence_index,
+                params,
+                engine_config.num_threads,
+            )?
+        }
+        GfaEngine::Seqwish => {
+            let config = crate::graph::SeqwishConfig {
+                num_threads: engine_config.num_threads,
+                frequency_multiplier: 10,
+                min_alignment_length: 100,
+                temp_dir: None,
+            };
+            crate::graph::generate_gfa_seqwish_from_intervals(
+                impg,
+                query_intervals,
+                sequence_index,
+                &config,
+            )?
+        }
+        GfaEngine::Recursive => {
+            let config = engine_config.recursive_config.as_ref().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "RecursiveOpts config required for recursive engine",
+                )
+            })?;
+            let result = crate::realize::realize(
+                impg,
+                query_intervals,
+                sequence_index,
+                config,
+            )?;
+            info!(
+                "Recursive engine stats for partition {}: {} sequences, max_depth={}, poa_calls={}, sweepga_calls={}, {}ms",
+                partition_num,
+                result.stats.num_sequences,
+                result.stats.max_depth_reached,
+                result.stats.poa_calls,
+                result.stats.sweepga_calls,
+                result.stats.total_ms,
+            );
+            result.gfa
+        }
+    };
 
     // Create output file
     let filename = format!("partition{partition_num}.gfa");

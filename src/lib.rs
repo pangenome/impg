@@ -15,3 +15,21 @@ pub mod tpa_parser;
 pub mod seqidx;
 pub mod sequence_index;
 pub mod subset_filter;
+
+/// GFA engine selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum GfaEngine {
+    /// Recursive partitioning + POA + lacing
+    Recursive,
+    /// Seqwish graph induction via transitive closure
+    Seqwish,
+    /// Flat single-pass partial order alignment
+    Poa,
+}
+
+/// Resolved engine configuration passed to subcommand functions.
+pub struct EngineOpts {
+    pub engine: GfaEngine,
+    pub recursive_config: Option<realize::RealizeConfig>,
+    pub num_threads: usize,
+}
