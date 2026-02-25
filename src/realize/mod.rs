@@ -117,7 +117,6 @@ struct PafRecord {
     target_len: usize,
     target_start: usize,
     target_end: usize,
-    #[allow(dead_code)]
     strand: char,
 }
 
@@ -135,49 +134,8 @@ pub fn realize(
     sequence_index: &UnifiedSequenceIndex,
     config: &RealizeConfig,
 ) -> io::Result<RealizeResult> {
-    let start = Instant::now();
-
-    // Extract sequences from intervals (parallel, strand-normalized, sorted longest-first).
     let sequences = prepare_sequences(impg, intervals, sequence_index)?;
-
-    if sequences.is_empty() {
-        return Ok(RealizeResult {
-            gfa: String::from("H\tVN:Z:1.0\n"),
-            stats: RealizeStats {
-                num_sequences: 0,
-                max_depth_reached: 0,
-                poa_calls: 0,
-                sweepga_calls: 0,
-                total_ms: start.elapsed().as_millis() as u64,
-            },
-        });
-    }
-
-    let num_sequences = sequences.len();
-
-    let poa_calls = AtomicUsize::new(0);
-    let sweepga_calls = AtomicUsize::new(0);
-    let max_depth_reached = AtomicUsize::new(0);
-
-    let gfa = realize_recursive(&sequences, config, 0, &poa_calls, &sweepga_calls, &max_depth_reached)?;
-
-    // Optionally sort the final GFA.
-    let gfa = if config.sort_output {
-        sort_gfa(&gfa, config.num_threads)?
-    } else {
-        gfa
-    };
-
-    Ok(RealizeResult {
-        gfa,
-        stats: RealizeStats {
-            num_sequences,
-            max_depth_reached: max_depth_reached.load(Ordering::Relaxed),
-            poa_calls: poa_calls.load(Ordering::Relaxed),
-            sweepga_calls: sweepga_calls.load(Ordering::Relaxed),
-            total_ms: start.elapsed().as_millis() as u64,
-        },
-    })
+    realize_from_sequences(&sequences, config)
 }
 
 /// Realize directly from pre-extracted sequences (for use by other modules that
@@ -361,7 +319,7 @@ fn realize_recursive(
     }
 
     // Lace sub-graphs together.
-    lace_subgraphs(&sub_gfas, config.num_threads)
+    lace_subgraphs(&sub_gfas)
 }
 
 // ---------------------------------------------------------------------------
@@ -637,7 +595,7 @@ fn project_window_to_sequence(
 /// 2. Concatenates segments and links.
 /// 3. Joins paths that share the same name across chunks by linking their
 ///    last/first nodes.
-fn lace_subgraphs(sub_gfas: &[String], _num_threads: usize) -> io::Result<String> {
+fn lace_subgraphs(sub_gfas: &[String]) -> io::Result<String> {
     if sub_gfas.is_empty() {
         return Ok(String::from("H\tVN:Z:1.0\n"));
     }
@@ -988,7 +946,7 @@ mod tests {
     #[test]
     fn test_lace_subgraphs_single() {
         let gfa = "H\tVN:Z:1.0\nS\t1\tACGT\nP\ts1:0-4\t1+\t*\n".to_string();
-        let result = lace_subgraphs(&[gfa.clone()], 1).unwrap();
+        let result = lace_subgraphs(&[gfa.clone()]).unwrap();
         assert_eq!(result, gfa);
     }
 
@@ -996,7 +954,7 @@ mod tests {
     fn test_lace_subgraphs_two() {
         let gfa1 = "H\tVN:Z:1.0\nS\t1\tACGT\nP\ts1:0-8\t1+\t*\n".to_string();
         let gfa2 = "H\tVN:Z:1.0\nS\t1\tTGCA\nP\ts1:0-8\t1+\t*\n".to_string();
-        let result = lace_subgraphs(&[gfa1, gfa2], 1).unwrap();
+        let result = lace_subgraphs(&[gfa1, gfa2]).unwrap();
 
         // Should have header, two segments (remapped to 1 and 2), a link, and one merged path.
         assert!(result.contains("H\tVN:Z:1.0"));
@@ -1008,7 +966,7 @@ mod tests {
 
     #[test]
     fn test_lace_subgraphs_empty() {
-        let result = lace_subgraphs(&[], 1).unwrap();
+        let result = lace_subgraphs(&[]).unwrap();
         assert!(result.contains("H\tVN:Z:1.0"));
     }
 
@@ -1017,7 +975,7 @@ mod tests {
         // GFA1 has a path step with reverse orientation; GFA2 has forward.
         let gfa1 = "H\tVN:Z:1.0\nS\t1\tACGT\nP\tp1\t1-\t*\n".to_string();
         let gfa2 = "H\tVN:Z:1.0\nS\t1\tTGCA\nP\tp1\t1+\t*\n".to_string();
-        let result = lace_subgraphs(&[gfa1, gfa2], 1).unwrap();
+        let result = lace_subgraphs(&[gfa1, gfa2]).unwrap();
 
         assert!(result.contains("S\t1\tACGT"));
         assert!(result.contains("S\t2\tTGCA"));
@@ -1041,7 +999,7 @@ mod tests {
                      L\t1\t+\t2\t-\t0M\n\
                      P\tp1\t1+,2-\t*\n"
             .to_string();
-        let result = lace_subgraphs(&[gfa1, gfa2], 1).unwrap();
+        let result = lace_subgraphs(&[gfa1, gfa2]).unwrap();
 
         // Segments remapped: gfa1 1→1, 2→2; gfa2 1→3, 2→4
         assert!(result.contains("S\t1\tACGT"));
@@ -1072,7 +1030,7 @@ mod tests {
                      P\tpathA\t1+\t*\n\
                      P\tpathB\t2-\t*\n"
             .to_string();
-        let result = lace_subgraphs(&[gfa1, gfa2], 1).unwrap();
+        let result = lace_subgraphs(&[gfa1, gfa2]).unwrap();
 
         // Segments: gfa1 1→1, 2→2; gfa2 1→3, 2→4
         assert!(result.contains("S\t1\tAAAA"));
@@ -1093,7 +1051,7 @@ mod tests {
         let gfa1 = "H\tVN:Z:1.0\nS\t1\tAA\nP\tp\t1+\t*\n".to_string();
         let gfa2 = "H\tVN:Z:1.0\nS\t1\tCC\nP\tp\t1-\t*\n".to_string();
         let gfa3 = "H\tVN:Z:1.0\nS\t1\tGG\nP\tp\t1+\t*\n".to_string();
-        let result = lace_subgraphs(&[gfa1, gfa2, gfa3], 1).unwrap();
+        let result = lace_subgraphs(&[gfa1, gfa2, gfa3]).unwrap();
 
         assert!(result.contains("S\t1\tAA"));
         assert!(result.contains("S\t2\tCC"));
@@ -1123,7 +1081,7 @@ mod tests {
                      L\t1\t-\t2\t+\t0M\n\
                      P\tp\t1-,2+\t*\n"
             .to_string();
-        let result = lace_subgraphs(&[gfa1, gfa2, gfa3], 1).unwrap();
+        let result = lace_subgraphs(&[gfa1, gfa2, gfa3]).unwrap();
 
         // Segments: gfa1 {1→1,2→2}, gfa2 {1→3}, gfa3 {1→4,2→5}
         assert!(result.contains("S\t1\tAA"));
@@ -1153,7 +1111,7 @@ mod tests {
                      S\t1\tTGCA\n\
                      P\tpathA\t1+\t*\n"
             .to_string();
-        let result = lace_subgraphs(&[gfa1, gfa2], 1).unwrap();
+        let result = lace_subgraphs(&[gfa1, gfa2]).unwrap();
 
         // pathA should be merged with linking edge
         assert!(result.contains("P\tpathA\t1+,2+\t*"));
@@ -1178,7 +1136,7 @@ mod tests {
                      S\t1\tGG\n\
                      P\tp\t1+\t*\n"
             .to_string();
-        let result = lace_subgraphs(&[gfa1, gfa2], 1).unwrap();
+        let result = lace_subgraphs(&[gfa1, gfa2]).unwrap();
 
         // The duplicate L 1+→2+ should appear only once.
         let link_count = result.matches("L\t1\t+\t2\t+\t0M").count();
@@ -1192,7 +1150,7 @@ mod tests {
         // Segments may have optional tag fields after the sequence.
         let gfa1 = "H\tVN:Z:1.0\nS\t1\tACGT\tLN:i:4\nP\tp\t1+\t*\n".to_string();
         let gfa2 = "H\tVN:Z:1.0\nS\t1\tTGCA\nP\tp\t1+\t*\n".to_string();
-        let result = lace_subgraphs(&[gfa1, gfa2], 1).unwrap();
+        let result = lace_subgraphs(&[gfa1, gfa2]).unwrap();
 
         // Tag should be preserved on the first segment.
         assert!(result.contains("S\t1\tACGT\tLN:i:4"));

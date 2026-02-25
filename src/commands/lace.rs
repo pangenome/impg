@@ -322,56 +322,7 @@ fn resolve_gfa_files(
     gfa_files: Option<Vec<String>>,
     gfa_list: Option<String>,
 ) -> io::Result<Vec<String>> {
-    match (gfa_files, gfa_list) {
-        (Some(files), None) => {
-            // Validate all files exist
-            for file in &files {
-                if !Path::new(file).exists() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("GFA file '{file}' not found"),
-                    ));
-                }
-            }
-            Ok(files)
-        }
-        (None, Some(list_file)) => {
-            let file = File::open(&list_file)?;
-            let reader = BufReader::new(file);
-            let mut files = Vec::new();
-
-            for line in reader.lines() {
-                let line = line?;
-                let trimmed = line.trim();
-                if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                    if !Path::new(trimmed).exists() {
-                        return Err(io::Error::new(
-                            io::ErrorKind::NotFound,
-                            format!("GFA file '{trimmed}' not found"),
-                        ));
-                    }
-                    files.push(trimmed.to_string());
-                }
-            }
-
-            if files.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("No valid GFA files found in list file: {list_file}"),
-                ));
-            }
-
-            Ok(files)
-        }
-        (None, None) => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Either --gfa-files or --gfa-list must be provided",
-        )),
-        (Some(_), Some(_)) => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Cannot specify both --gfa-files and --gfa-list",
-        )),
-    }
+    crate::commands::resolve_file_list(gfa_files.unwrap_or_default(), gfa_list, "GFA")
 }
 
 fn read_gfa_files(
@@ -1570,56 +1521,7 @@ fn resolve_vcf_files(
     vcf_files: Option<Vec<String>>,
     vcf_list: Option<String>,
 ) -> io::Result<Vec<String>> {
-    match (vcf_files, vcf_list) {
-        (Some(files), None) => {
-            // Validate all files exist
-            for file in &files {
-                if !Path::new(file).exists() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("VCF file '{file}' not found"),
-                    ));
-                }
-            }
-            Ok(files)
-        }
-        (None, Some(list_file)) => {
-            let file = File::open(&list_file)?;
-            let reader = BufReader::new(file);
-            let mut files = Vec::new();
-
-            for line in reader.lines() {
-                let line = line?;
-                let trimmed = line.trim();
-                if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                    if !Path::new(trimmed).exists() {
-                        return Err(io::Error::new(
-                            io::ErrorKind::NotFound,
-                            format!("VCF file '{trimmed}' not found"),
-                        ));
-                    }
-                    files.push(trimmed.to_string());
-                }
-            }
-
-            if files.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("No valid VCF files found in list file: {list_file}"),
-                ));
-            }
-
-            Ok(files)
-        }
-        (None, None) => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Either --vcf-files or --vcf-list must be provided",
-        )),
-        (Some(_), Some(_)) => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Cannot specify both --vcf-files and --vcf-list",
-        )),
-    }
+    crate::commands::resolve_file_list(vcf_files.unwrap_or_default(), vcf_list, "VCF")
 }
 
 /// Process a single VCF file to extract metadata

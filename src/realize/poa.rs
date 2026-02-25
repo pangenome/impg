@@ -1,8 +1,10 @@
-use crate::graph::{post_process_gfa_for_strands, reverse_complement, SequenceMetadata};
+use crate::graph::{
+    build_spoa_engine, feed_sequences_to_graph, post_process_gfa_for_strands, reverse_complement,
+    SequenceMetadata,
+};
 use crate::impg_index::ImpgIndex;
 use crate::sequence_index::{SequenceIndex, UnifiedSequenceIndex};
 use coitrees::Interval;
-use spoa_rs::{AlignmentEngine, AlignmentType as SpoaAlignmentType, Graph as SpoaGraph};
 use std::io;
 
 /// Result of padded POA: a GFA string with padding trimmed away.
@@ -51,66 +53,11 @@ pub fn padded_poa(
         });
     }
 
-    // Step 1-2: Fetch padded sequences
+    // Step 1-2: Fetch padded sequences, sort longest-first for SPOA quality.
     let mut padded_sequences = fetch_padded_sequences(impg, results, sequence_index, padding)?;
-
-    // Sort by total (padded) sequence length, longest first — best for SPOA quality
     padded_sequences.sort_by(|a, b| b.sequence.len().cmp(&a.sequence.len()));
 
-    // Step 3: Build SPOA graph
-    let (match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2) = scoring_params;
-    let mut graph = SpoaGraph::new();
-    let mut engine = AlignmentEngine::new_convex(
-        SpoaAlignmentType::kSW,
-        match_score as i8,
-        -(mismatch as i8),
-        -(gap_open1 as i8),
-        -(gap_extend1 as i8),
-        -(gap_open2 as i8),
-        -(gap_extend2 as i8),
-    );
-
-    for ps in &padded_sequences {
-        let weights = vec![1u32; ps.sequence.len()];
-        let (_, alignment) = engine.align(&ps.sequence, &graph);
-        graph.add_alignment_with_weights(alignment, &ps.sequence, &weights);
-    }
-
-    // If no padding was applied (all zeros), skip trimming
-    let any_padding = padded_sequences
-        .iter()
-        .any(|ps| ps.left_pad > 0 || ps.right_pad > 0);
-
-    if !any_padding {
-        // No padding — generate GFA directly (same as existing generate_gfa_from_intervals)
-        let headers = make_headers(&padded_sequences);
-        let gfa = graph.generate_gfa(&headers, false);
-        let metadata: Vec<SequenceMetadata> =
-            padded_sequences.into_iter().map(|ps| ps.metadata).collect();
-        let gfa = post_process_gfa_for_strands(gfa, &metadata);
-        return Ok(PaddedPoaResult {
-            gfa,
-            sequence_metadata: metadata,
-        });
-    }
-
-    // Step 4: Generate MSA to find padding column boundaries
-    let msa = graph.generate_msa();
-
-    // Step 5: Find the core (non-padding) column range
-    let (core_start, core_end) = find_core_column_range(&msa, &padded_sequences);
-
-    // Step 6: Build a new SPOA graph from only the trimmed (core) sequences
-    let trimmed_gfa =
-        build_trimmed_gfa(&msa, &padded_sequences, core_start, core_end, scoring_params)?;
-
-    let metadata: Vec<SequenceMetadata> =
-        padded_sequences.into_iter().map(|ps| ps.metadata).collect();
-
-    Ok(PaddedPoaResult {
-        gfa: trimmed_gfa,
-        sequence_metadata: metadata,
-    })
+    run_poa_on_padded_sequences(padded_sequences, scoring_params)
 }
 
 /// Run padded POA directly on pre-prepared sequences (no impg/index needed).
@@ -137,7 +84,6 @@ pub fn padded_poa_from_sequences(
     //
     // For the common case in recursive realize: sequences come pre-padded
     // and we need to trim `padding` bases from each end in MSA space.
-
     let padded_sequences: Vec<PaddedSequence> = sequences
         .iter()
         .map(|(seq, meta)| {
@@ -153,24 +99,24 @@ pub fn padded_poa_from_sequences(
         })
         .collect();
 
-    // Build SPOA graph
-    let (match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2) = scoring_params;
-    let mut graph = SpoaGraph::new();
-    let mut engine = AlignmentEngine::new_convex(
-        SpoaAlignmentType::kSW,
-        match_score as i8,
-        -(mismatch as i8),
-        -(gap_open1 as i8),
-        -(gap_extend1 as i8),
-        -(gap_open2 as i8),
-        -(gap_extend2 as i8),
-    );
+    run_poa_on_padded_sequences(padded_sequences, scoring_params)
+}
 
-    for ps in &padded_sequences {
-        let weights = vec![1u32; ps.sequence.len()];
-        let (_, alignment) = engine.align(&ps.sequence, &graph);
-        graph.add_alignment_with_weights(alignment, &ps.sequence, &weights);
-    }
+/// Core POA logic shared by `padded_poa` and `padded_poa_from_sequences`.
+///
+/// Builds a SPOA graph from the padded sequences, then either:
+/// - returns the GFA directly (when no padding was applied), or
+/// - trims the padding columns via MSA analysis and re-runs POA on core sequences.
+fn run_poa_on_padded_sequences(
+    padded_sequences: Vec<PaddedSequence>,
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+) -> io::Result<PaddedPoaResult> {
+    let (mut graph, mut engine) = build_spoa_engine(scoring_params);
+    feed_sequences_to_graph(
+        &mut engine,
+        &mut graph,
+        padded_sequences.iter().map(|ps| ps.sequence.as_str()),
+    );
 
     let any_padding = padded_sequences
         .iter()
@@ -190,10 +136,8 @@ pub fn padded_poa_from_sequences(
 
     let msa = graph.generate_msa();
     let (core_start, core_end) = find_core_column_range(&msa, &padded_sequences);
-
     let trimmed_gfa =
         build_trimmed_gfa(&msa, &padded_sequences, core_start, core_end, scoring_params)?;
-
     let metadata: Vec<SequenceMetadata> =
         padded_sequences.into_iter().map(|ps| ps.metadata).collect();
 
@@ -410,28 +354,9 @@ fn build_trimmed_gfa(
         core_sequences.push(core_seq);
     }
 
-    // Build fresh SPOA graph from core sequences
-    let (match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2) = scoring_params;
-    let mut graph = SpoaGraph::new();
-    let mut engine = AlignmentEngine::new_convex(
-        SpoaAlignmentType::kSW,
-        match_score as i8,
-        -(mismatch as i8),
-        -(gap_open1 as i8),
-        -(gap_extend1 as i8),
-        -(gap_open2 as i8),
-        -(gap_extend2 as i8),
-    );
-
-    // Keep original order (already sorted longest-first)
-    for seq in &core_sequences {
-        if seq.is_empty() {
-            continue;
-        }
-        let weights = vec![1u32; seq.len()];
-        let (_, alignment) = engine.align(seq, &graph);
-        graph.add_alignment_with_weights(alignment, seq, &weights);
-    }
+    // Build fresh SPOA graph from core sequences (keep original longest-first order)
+    let (mut graph, mut engine) = build_spoa_engine(scoring_params);
+    feed_sequences_to_graph(&mut engine, &mut graph, core_sequences.iter().map(|s| s.as_str()));
 
     // Generate GFA with headers matching the original (unpadded) metadata
     let headers = make_headers(padded_sequences);

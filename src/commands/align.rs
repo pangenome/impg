@@ -747,34 +747,7 @@ fn collect_file_pairs(
 /// Count sequences and genomes across FASTA files (for k-mer frequency calculation).
 /// Returns (num_sequences, num_genomes) using PanSN naming convention.
 fn count_sequences_and_genomes(fasta_files: &[String]) -> io::Result<(usize, usize)> {
-    let mut seq_count = 0;
-    let mut genome_prefixes: HashSet<String> = HashSet::new();
-
-    for path in fasta_files {
-        let file = File::open(path)?;
-        let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
-            io::Error::other(format!("Failed to open reader for '{}': {}", path, e))
-        })?;
-        let reader = BufReader::new(reader);
-
-        for line in reader.lines() {
-            let line: String = line?;
-            if line.starts_with('>') {
-                seq_count += 1;
-                let name = line[1..].split_whitespace().next().unwrap_or("");
-                let parts: Vec<&str> = name.split('#').collect();
-                let prefix = if parts.len() >= 2 {
-                    format!("{}#{}", parts[0], parts[1])
-                } else {
-                    name.to_string()
-                };
-                genome_prefixes.insert(prefix);
-            }
-        }
-    }
-
-    let genome_count = genome_prefixes.len().max(1);
-    Ok((seq_count, genome_count))
+    crate::commands::count_sequences_and_genomes(fasta_files)
 }
 
 /// Run sweepga alignments for selected pairs and write output.
@@ -1153,29 +1126,26 @@ fn sweepga_align_pairwise(
 
     let mut combined_paf = tempfile::Builder::new().suffix(".paf").tempfile()?;
 
+    // Pre-write one FASTA file per unique sequence index to avoid O(pairs) temp file creation.
+    let unique_indices: std::collections::BTreeSet<usize> =
+        pairs.iter().flat_map(|&(i, j)| [i, j]).collect();
+    let mut fasta_files: std::collections::HashMap<usize, tempfile::NamedTempFile> =
+        std::collections::HashMap::new();
+    for idx in unique_indices {
+        let mut fasta = tempfile::Builder::new().suffix(".fa").tempfile()?;
+        {
+            let mut writer = BufWriter::new(&mut fasta);
+            writeln!(writer, ">{}", sequences[idx].0)?;
+            writer.write_all(sequences[idx].1)?;
+            writeln!(writer)?;
+            writer.flush()?;
+        }
+        fasta_files.insert(idx, fasta);
+    }
+
     for &(i, j) in pairs {
-        // Write query FASTA
-        let mut query_fasta = tempfile::Builder::new().suffix(".fa").tempfile()?;
-        {
-            let mut writer = BufWriter::new(&mut query_fasta);
-            writeln!(writer, ">{}", sequences[i].0)?;
-            writer.write_all(sequences[i].1)?;
-            writeln!(writer)?;
-            writer.flush()?;
-        }
-
-        // Write target FASTA
-        let mut target_fasta = tempfile::Builder::new().suffix(".fa").tempfile()?;
-        {
-            let mut writer = BufWriter::new(&mut target_fasta);
-            writeln!(writer, ">{}", sequences[j].0)?;
-            writer.write_all(sequences[j].1)?;
-            writeln!(writer)?;
-            writer.flush()?;
-        }
-
-        // Align this pair
-        match fastga.align_to_temp_paf(query_fasta.path(), target_fasta.path()) {
+        // Align this pair using pre-written FASTA files
+        match fastga.align_to_temp_paf(fasta_files[&i].path(), fasta_files[&j].path()) {
             Ok(pair_paf) => {
                 // Append this pair's PAF to the combined output
                 let contents = std::fs::read(pair_paf.path())?;
@@ -1275,56 +1245,7 @@ fn resolve_fasta_files(
     fasta_files: Vec<String>,
     fasta_list: Option<String>,
 ) -> io::Result<Vec<String>> {
-    match (fasta_files.is_empty(), fasta_list) {
-        (false, None) => {
-            // Validate all files exist
-            for file in &fasta_files {
-                if !Path::new(file).exists() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("FASTA file '{}' not found", file),
-                    ));
-                }
-            }
-            Ok(fasta_files)
-        }
-        (true, Some(list_file)) => {
-            let file = File::open(&list_file)?;
-            let reader = BufReader::new(file);
-            let mut files = Vec::new();
-
-            for line in reader.lines() {
-                let line = line?;
-                let trimmed = line.trim();
-                if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                    if !Path::new(trimmed).exists() {
-                        return Err(io::Error::new(
-                            io::ErrorKind::NotFound,
-                            format!("FASTA file '{}' not found", trimmed),
-                        ));
-                    }
-                    files.push(trimmed.to_string());
-                }
-            }
-
-            if files.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("No valid FASTA files found in list file: {}", list_file),
-                ));
-            }
-
-            Ok(files)
-        }
-        (true, None) => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Either --fasta-files or --fasta-list must be provided",
-        )),
-        (false, Some(_)) => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Cannot specify both --fasta-files and --fasta-list",
-        )),
-    }
+    crate::commands::resolve_file_list(fasta_files, fasta_list, "FASTA")
 }
 
 #[cfg(test)]

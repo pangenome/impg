@@ -321,6 +321,41 @@ fn format_fasta_alignment_from_msa(
     out
 }
 
+/// Build a new SPOA graph and alignment engine with the given scoring parameters.
+pub(crate) fn build_spoa_engine(
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+) -> (SpoaGraph, AlignmentEngine) {
+    let (match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2) = scoring_params;
+    let graph = SpoaGraph::new();
+    let engine = AlignmentEngine::new_convex(
+        SpoaAlignmentType::kSW,
+        match_score as i8,
+        -(mismatch as i8),
+        -(gap_open1 as i8),
+        -(gap_extend1 as i8),
+        -(gap_open2 as i8),
+        -(gap_extend2 as i8),
+    );
+    (graph, engine)
+}
+
+/// Add sequences to a SPOA graph via `engine`. Skips empty sequences.
+pub(crate) fn feed_sequences_to_graph(
+    engine: &mut AlignmentEngine,
+    graph: &mut SpoaGraph,
+    sequences: impl Iterator<Item = impl AsRef<str>>,
+) {
+    for seq in sequences {
+        let seq = seq.as_ref();
+        if seq.is_empty() {
+            continue;
+        }
+        let weights = vec![1u32; seq.len()];
+        let (_, alignment) = engine.align(seq, graph);
+        graph.add_alignment_with_weights(alignment, seq, &weights);
+    }
+}
+
 pub fn prepare_poa_graph_and_sequences(
     impg: &impl ImpgIndex,
     results: &[Interval<u32>],
@@ -328,9 +363,6 @@ pub fn prepare_poa_graph_and_sequences(
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<(SpoaGraph, Vec<SequenceMetadata>)> {
     use rayon::prelude::*;
-
-    // Create scoring parameters for alignment
-    let (match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2) = scoring_params;
 
     // Parallelize sequence fetching and processing
     let mut processed_sequences: Vec<(String, SequenceMetadata)> = results
@@ -398,29 +430,16 @@ pub fn prepare_poa_graph_and_sequences(
     // Sort sequences by length in descending order (longest first)
     processed_sequences.par_sort_by(|a, b| b.0.len().cmp(&a.0.len()));
 
-    // Create a SPOA graph
-    let mut graph = SpoaGraph::new();
-    // Create an alignment engine with affine gap penalties
-    let mut engine = AlignmentEngine::new_convex(
-        SpoaAlignmentType::kSW, // Local alignment (Smith-Waterman)
-        match_score as i8,      // match score (positive)
-        -(mismatch as i8),      // mismatch penalty (negative)
-        -(gap_open1 as i8),     // gap open penalty (negative)
-        -(gap_extend1 as i8),   // gap extend penalty (negative)
-        -(gap_open2 as i8),     // gap open penalty (negative)
-        -(gap_extend2 as i8),   // gap extend penalty (negative)
+    let (mut graph, mut engine) = build_spoa_engine(scoring_params);
+
+    // Collect metadata and feed sequences to SPOA graph (SPOA is not thread-safe)
+    let sequence_metadata: Vec<SequenceMetadata> =
+        processed_sequences.iter().map(|(_, m)| m.clone()).collect();
+    feed_sequences_to_graph(
+        &mut engine,
+        &mut graph,
+        processed_sequences.iter().map(|(s, _)| s.as_str()),
     );
-
-    // Sequentially add sequences to SPOA graph (SPOA is not thread-safe)
-    let mut sequence_metadata = Vec::with_capacity(processed_sequences.len());
-    for (sequence_str, metadata) in processed_sequences {
-        sequence_metadata.push(metadata);
-
-        // Add to SPOA graph
-        let weights = vec![1u32; sequence_str.len()];
-        let (_, alignment) = engine.align(&sequence_str, &graph);
-        graph.add_alignment_with_weights(alignment, &sequence_str, &weights);
-    }
 
     Ok((graph, sequence_metadata))
 }
