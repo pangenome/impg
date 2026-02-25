@@ -3,23 +3,10 @@ use crate::sequence_index::{SequenceIndex, UnifiedSequenceIndex};
 use coitrees::Interval;
 use spoa_rs::{AlignmentEngine, AlignmentType as SpoaAlignmentType, Graph as SpoaGraph};
 use std::io::{self, BufWriter, Write};
-use std::sync::{Arc, Mutex, RwLock};
 
 // Gfasort imports for graph sorting
 use gfasort::gfa_parser::load_gfa;
 use gfasort::ygs::{unchop_only, ygs_sort, YgsParams};
-
-// Seqwish imports for graph induction
-use bitvec::prelude::*;
-use seqwish::alignments::unpack_paf_alignments;
-use seqwish::compact::compact_nodes;
-use seqwish::gfa::emit_gfa;
-use seqwish::intervaltree::{AdaptiveTree, IntervalTree};
-use seqwish::links::{derive_links, RankSelectBitVector};
-use seqwish::seqindex::SeqIndex;
-use seqwish::transclosure::compute_transitive_closures;
-use sweepga::fastga_integration::FastGAIntegration;
-use sweepga::paf_filter::{FilterConfig, FilterMode, PafFilter, ScoringFunction};
 
 #[derive(Clone)]
 pub struct SequenceMetadata {
@@ -869,16 +856,16 @@ impl Default for SeqwishConfig {
 ///
 /// This produces a proper variation graph where shared sequence is collapsed into
 /// single nodes, unlike POA which creates a partial order alignment graph.
+///
+/// Delegates to `commands::graph::build_graph()` so that query and graph
+/// subcommands use exactly the same alignment, filtering, and graph-building
+/// pipeline.
 pub fn generate_gfa_seqwish_from_intervals(
     impg: &impl ImpgIndex,
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
     config: &SeqwishConfig,
 ) -> io::Result<String> {
-    // Temp directory is now controlled by the caller via TMPDIR environment variable
-    // or seqwish::tempfile::set_dir(). Default is system temp (/tmp).
-    // For better I/O performance, callers can set --temp-dir /dev/shm
-
     if results.is_empty() {
         return Ok(String::from("H\tVN:Z:1.0\n"));
     }
@@ -890,9 +877,6 @@ pub fn generate_gfa_seqwish_from_intervals(
         return Ok(String::from("H\tVN:Z:1.0\n"));
     }
 
-    let num_sequences = sequences.len();
-    let kmer_frequency = num_sequences * config.frequency_multiplier;
-
     // 2) Write sequences to a temp FASTA file
     let combined_fasta = tempfile::Builder::new()
         .suffix(".fa")
@@ -902,7 +886,6 @@ pub fn generate_gfa_seqwish_from_intervals(
     {
         let mut writer = BufWriter::new(&combined_fasta);
         for (seq, meta) in &sequences {
-            // Use a unique name for each sequence that includes coordinates and strand
             let header = format!(">{}", meta.path_name());
             writeln!(writer, "{}", header)?;
             writeln!(writer, "{}", seq)?;
@@ -910,184 +893,35 @@ pub fn generate_gfa_seqwish_from_intervals(
         writer.flush()?;
     }
 
-    // 3) Run sweepga/FastGA alignment
-    let fastga = FastGAIntegration::new(
-        Some(kmer_frequency),
-        config.num_threads,
-        config.min_alignment_length,
-        config.temp_dir.clone(),
-    );
-
-    let paf_temp = fastga
-        .align_to_temp_paf(combined_fasta.path(), combined_fasta.path())
-        .map_err(|e| io::Error::other(format!("FastGA alignment failed: {}", e)))?;
-
-    // 3b) Filter the raw PAF to remove self-alignments and overlapping alignments.
-    //     This matches what `graph --engine seqwish` does (see commands/graph.rs).
-    let avg_seq_len = if num_sequences > 0 {
-        sequences.iter().map(|(seq, _)| seq.len()).sum::<usize>() / num_sequences
-    } else {
-        0
-    };
-    let scaffold_mass = if avg_seq_len > 0 {
-        10_000usize.min(avg_seq_len * 4 / 5)
-    } else {
-        10_000
-    };
-    let scaffold_jump = if avg_seq_len > 0 {
-        50_000usize.min(avg_seq_len * 10)
-    } else {
-        50_000
+    // 3) Build graph using the same pipeline as `graph --engine seqwish`
+    let graph_config = crate::commands::graph::GraphBuildConfig {
+        num_threads: config.num_threads,
+        frequency_multiplier: config.frequency_multiplier,
+        min_alignment_length: config.min_alignment_length,
+        temp_dir: config.temp_dir.clone(),
+        show_progress: false,
+        ..crate::commands::graph::GraphBuildConfig::default()
     };
 
-    let filter_config = FilterConfig {
-        chain_gap: 0,
-        min_block_length: 0,
-        mapping_filter_mode: FilterMode::ManyToMany,
-        mapping_max_per_query: None,
-        mapping_max_per_target: None,
-        plane_sweep_secondaries: 0,
-        scaffold_filter_mode: FilterMode::ManyToMany,
-        scaffold_max_per_query: None,
-        scaffold_max_per_target: None,
-        overlap_threshold: 0.95,
-        sparsity: 1.0,
-        no_merge: true,
-        scaffold_gap: scaffold_jump as u64,
-        min_scaffold_length: scaffold_mass as u64,
-        scaffold_overlap_threshold: 0.5,
-        scaffold_max_deviation: 0,
-        prefix_delimiter: '#',
-        skip_prefix: false,
-        scoring_function: ScoringFunction::LogLengthIdentity,
-        min_identity: 0.0,
-        min_scaffold_identity: 0.0,
-    };
+    let fasta_path = combined_fasta
+        .path()
+        .to_str()
+        .ok_or_else(|| io::Error::other("Temp FASTA path is not valid UTF-8"))?
+        .to_string();
 
-    let filtered_paf = {
-        let filtered_paf_file = tempfile::Builder::new()
-            .suffix(".filtered.paf")
-            .tempfile()?;
-        let filter = PafFilter::new(filter_config).with_keep_self(false);
-        filter
-            .filter_paf(paf_temp.path(), filtered_paf_file.path())
-            .map_err(|e| io::Error::other(format!("PAF filtering failed: {}", e)))?;
-        filtered_paf_file
-    };
-
-    // 4) Build seqwish sequence index
-    let mut seqidx = SeqIndex::new();
-    seqidx
-        .build_index(combined_fasta.path().to_str().unwrap())
-        .map_err(io::Error::other)?;
-    let seqidx = Arc::new(seqidx);
-
-    // 5) Index alignments into interval tree (in-memory for small datasets)
-    let _aln_iitree_idx = seqwish::tempfile::create("seqwish-", ".sqa")?;
-    let mut aln_iitree_obj = AdaptiveTree::new_memory()?;
-    aln_iitree_obj.open_writer()?;
-    let aln_iitree = Arc::new(Mutex::new(aln_iitree_obj));
-
-    unpack_paf_alignments(
-        filtered_paf.path().to_str().unwrap(),
-        Arc::clone(&aln_iitree),
-        Arc::clone(&seqidx),
-        0,   // min_match_len
-        0.0, // sparse_factor
-        config.num_threads,
-    )?;
-
-    aln_iitree.lock().unwrap().index()?;
-
-    // Unwrap Mutex - alignment tree is read-only during graph construction
-    let aln_iitree_readonly = Arc::new(
-        Arc::try_unwrap(aln_iitree)
-            .map_err(|_| io::Error::other("Failed to unwrap alignment tree Arc"))?
-            .into_inner()
-            .unwrap(),
-    );
-
-    // 6) Compute transitive closures
-    let seq_v_file = seqwish::tempfile::create("seqwish-", ".sqs")?;
-    let _node_iitree_idx = seqwish::tempfile::create("seqwish-", ".sqn")?;
-    let _path_iitree_idx = seqwish::tempfile::create("seqwish-", ".sqp")?;
-
-    let mut node_iitree_obj = AdaptiveTree::new_memory()?;
-    node_iitree_obj.open_writer()?;
-    let node_iitree = Arc::new(RwLock::new(node_iitree_obj));
-
-    let mut path_iitree_obj = AdaptiveTree::new_memory()?;
-    path_iitree_obj.open_writer()?;
-    let path_iitree = Arc::new(RwLock::new(path_iitree_obj));
-
-    let graph_length = compute_transitive_closures(
-        Arc::clone(&seqidx),
-        Arc::clone(&aln_iitree_readonly),
-        seq_v_file.to_str().unwrap(),
-        Arc::clone(&node_iitree),
-        Arc::clone(&path_iitree),
-        0,         // repeat_max
-        0,         // min_repeat_dist
-        1_000_000, // transclose_batch
-        false,     // show_progress
-        config.num_threads,
-    )?;
-
-    // 7) Compact nodes
-    let mut seq_id_bv = BitVec::<u64, Lsb0>::repeat(false, graph_length + 1);
-
-    compact_nodes(
-        Arc::clone(&seqidx),
-        graph_length,
-        Arc::clone(&node_iitree),
-        Arc::clone(&path_iitree),
-        &mut seq_id_bv,
-        config.num_threads,
-    )?;
-
-    // Build rank/select structure
-    let seq_id_cbv =
-        RankSelectBitVector::from_bitvec(&seq_id_bv.iter().by_vals().collect::<Vec<bool>>());
-    drop(seq_id_bv);
-
-    // 8) Derive links between nodes
-    let link_set = derive_links(
-        Arc::clone(&seqidx),
-        Arc::clone(&node_iitree),
-        Arc::clone(&path_iitree),
-        &seq_id_cbv,
-        config.num_threads,
-    )?;
-
-    // 9) Emit GFA output to string
     let mut gfa_output = Vec::new();
-    {
-        let mut writer = BufWriter::new(&mut gfa_output);
-        emit_gfa(
-            &mut writer,
-            graph_length,
-            seq_v_file.to_str().unwrap(),
-            Arc::clone(&node_iitree),
-            Arc::clone(&path_iitree),
-            &seq_id_cbv,
-            Arc::clone(&seqidx),
-            link_set.links(),
-            config.num_threads,
-        )?;
-    }
+    crate::commands::graph::build_graph(
+        &[fasta_path],
+        &mut gfa_output,
+        &graph_config,
+    )?;
 
-    let gfa_string = String::from_utf8(gfa_output).map_err(|e| {
+    String::from_utf8(gfa_output).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("Invalid UTF-8 in GFA: {}", e),
         )
-    })?;
-
-    // Clean up seqwish temp files before returning
-    seqwish::tempfile::cleanup();
-
-    // Sort the GFA using gfasort's Ygs pipeline (path-guided SGD + grooming + topological sort)
-    sort_gfa(&gfa_string, config.num_threads)
+    })
 }
 
 #[cfg(test)]
