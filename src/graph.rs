@@ -780,10 +780,8 @@ impl Default for SeqwishConfig {
     }
 }
 
-/// Generate GFA from intervals using sweepga+seqwish (variation graph induction)
-///
-/// This produces a proper variation graph where shared sequence is collapsed into
-/// single nodes, unlike POA which creates a partial order alignment graph.
+/// Generate a variation graph from intervals using sweepga+seqwish (graph induction
+/// via transitive closure). The resulting graph is raw (unsmoothed).
 ///
 /// Delegates to `commands::graph::build_graph()` so that query and graph
 /// subcommands use exactly the same alignment, filtering, and graph-building

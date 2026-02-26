@@ -654,7 +654,7 @@ enum Args {
         #[clap(short = 'o', long, value_parser, default_value = "bed")]
         output_format: String,
 
-        /// GFA engine: 'recursive' (sweepga+POA+lacing, default), 'seqwish' (variation graph), or 'poa' (single-pass POA)
+        /// GFA engine: 'recursive' (sweepga+POA+lacing, default), 'seqwish' (sweepga+seqwish, unsmoothed), or 'poa' (single-pass POA)
         #[arg(help_heading = "Output options")]
         #[clap(long, value_enum, default_value_t = GfaEngine::Recursive)]
         engine: GfaEngine,
@@ -743,7 +743,7 @@ enum Args {
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
 
-        /// GFA engine: 'recursive' (sweepga+POA+lacing), 'seqwish' (variation graph), or 'poa' (single-pass POA)
+        /// GFA engine: 'recursive' (sweepga+POA+lacing), 'seqwish' (sweepga+seqwish, unsmoothed), or 'poa' (single-pass POA)
         #[arg(help_heading = "Output options")]
         #[clap(long, value_enum, default_value_t = GfaEngine::Recursive)]
         engine: GfaEngine,
@@ -967,7 +967,7 @@ enum Args {
         #[clap(short = 'b', long = "min-mapping-length", value_parser = parse_size, default_value = "0")]
         min_mapping_length: u64,
 
-        /// GFA engine: 'seqwish' (variation graph, default), 'recursive' (sweepga+POA+lacing), or 'poa' (single-pass POA)
+        /// GFA engine: 'seqwish' (sweepga+seqwish, unsmoothed; default), 'recursive' (sweepga+POA+lacing), or 'poa' (single-pass POA)
         #[clap(long, value_enum, default_value_t = GfaEngine::Seqwish)]
         engine: GfaEngine,
 
