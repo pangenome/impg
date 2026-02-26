@@ -56,23 +56,25 @@ pub fn generate_gfa_from_intervals(
     scoring_params: (u8, u8, u8, u8, u8, u8),
     num_threads: usize,
 ) -> io::Result<String> {
-    // Prepare POA graph and sequences
     let (graph, sequence_metadata) =
         prepare_poa_graph_and_sequences(impg, results, sequence_index, scoring_params).unwrap();
+    spoa_graph_to_sorted_gfa(graph, &sequence_metadata, num_threads)
+}
 
-    // Generate headers for GFA
+/// Convert an SPOA graph + metadata into a sorted GFA string.
+///
+/// Shared pipeline: generate GFA → post-process strands → unchop + sort.
+pub(crate) fn spoa_graph_to_sorted_gfa(
+    graph: SpoaGraph,
+    sequence_metadata: &[SequenceMetadata],
+    num_threads: usize,
+) -> io::Result<String> {
     let headers: Vec<String> = sequence_metadata
         .iter()
         .map(|meta| meta.path_name())
         .collect();
-
-    // Generate GFA directly from the graph
     let gfa_output = graph.generate_gfa(&headers, false);
-
-    // Post-process GFA to handle strand information
-    let gfa_output = post_process_gfa_for_strands(gfa_output, &sequence_metadata);
-
-    // Sort the GFA using gfasort's Ygs pipeline (unchop + path-guided SGD + topological sort)
+    let gfa_output = post_process_gfa_for_strands(gfa_output, sequence_metadata);
     sort_gfa(&gfa_output, num_threads)
 }
 
@@ -150,6 +152,39 @@ pub fn generate_maf_from_intervals(
     format_maf_from_msa(&msa, &sequence_metadata, None)
 }
 
+/// Find the first and last non-gap columns in an MSA, returning `(left, right)` where
+/// `right` is exclusive. If the MSA is empty or all-gap, returns `(0, msa_len)`.
+fn find_msa_trim_bounds(msa: &[String]) -> (usize, usize) {
+    let msa_len = msa.first().map(|s| s.len()).unwrap_or(0);
+    if msa_len == 0 {
+        return (0, 0);
+    }
+    let mut left = 0usize;
+    let mut right = msa_len;
+
+    'find_left: for i in 0..msa_len {
+        for s in msa {
+            if s.as_bytes()[i] != b'-' {
+                left = i;
+                break 'find_left;
+            }
+        }
+    }
+    'find_right: for i in (0..msa_len).rev() {
+        for s in msa {
+            if s.as_bytes()[i] != b'-' {
+                right = i + 1;
+                break 'find_right;
+            }
+        }
+    }
+    if right < left {
+        (0, msa_len)
+    } else {
+        (left, right)
+    }
+}
+
 fn format_maf_from_msa(
     msa: &[String],
     sequence_metadata: &[SequenceMetadata],
@@ -163,30 +198,7 @@ fn format_maf_from_msa(
         output.push_str(&format!("# {name}\n"));
     }
 
-    // Find trimming positions (remove all-gap columns at start and end)
-    let msa_len = msa.first().map(|s| s.len()).unwrap_or(0);
-    let mut start_trim = 0;
-    let mut end_trim = msa_len;
-
-    // Find first non-gap column
-    'outer: for pos in 0..msa_len {
-        for seq in msa {
-            if seq.chars().nth(pos).unwrap_or('-') != '-' {
-                start_trim = pos;
-                break 'outer;
-            }
-        }
-    }
-
-    // Find last non-gap column
-    'outer2: for pos in (0..msa_len).rev() {
-        for seq in msa {
-            if seq.chars().nth(pos).unwrap_or('-') != '-' {
-                end_trim = pos + 1;
-                break 'outer2;
-            }
-        }
-    }
+    let (start_trim, end_trim) = find_msa_trim_bounds(msa);
 
     // Write alignment block
     output.push('\n'); // blank line before block
@@ -243,32 +255,11 @@ fn format_fasta_alignment_from_msa(
 
     // Determine trimming window (remove all-gap columns at the ends)
     let aln_len = msa.first().map(|s| s.len()).unwrap_or(0);
-    let (mut left, mut right) = (0usize, aln_len);
-
-    if trim_all_gap && aln_len > 0 {
-        // first non-gap column
-        'left: for i in 0..aln_len {
-            for s in msa {
-                if s.as_bytes()[i] != b'-' {
-                    left = i;
-                    break 'left;
-                }
-            }
-        }
-        // last non-gap column (exclusive)
-        'right: for i in (0..aln_len).rev() {
-            for s in msa {
-                if s.as_bytes()[i] != b'-' {
-                    right = i + 1;
-                    break 'right;
-                }
-            }
-        }
-        if right < left {
-            left = 0;
-            right = aln_len;
-        }
-    }
+    let (left, right) = if trim_all_gap && aln_len > 0 {
+        find_msa_trim_bounds(msa)
+    } else {
+        (0, aln_len)
+    };
 
     // Emit aligned FASTA:
     // Header encodes original label + coordinates consistent with MAF logic:
@@ -354,73 +345,7 @@ pub fn prepare_poa_graph_and_sequences(
     sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<(SpoaGraph, Vec<SequenceMetadata>)> {
-    use rayon::prelude::*;
-
-    // Parallelize sequence fetching and processing
-    let mut processed_sequences: Vec<(String, SequenceMetadata)> = results
-        .par_iter()
-        .map(|interval| -> io::Result<(String, SequenceMetadata)> {
-            let seq_name = impg
-                .seq_index()
-                .get_name(interval.metadata)
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("Sequence name not found for ID {}", interval.metadata),
-                    )
-                })?;
-
-            // Get total sequence length
-            let total_length = impg
-                .seq_index()
-                .get_len_from_id(interval.metadata)
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("Sequence length not found for ID {}", interval.metadata),
-                    )
-                })?;
-
-            // Determine actual start and end based on orientation
-            let (start, end, strand) = if interval.first <= interval.last {
-                (interval.first, interval.last, '+')
-            } else {
-                (interval.last, interval.first, '-')
-            };
-
-            // Fetch the sequence
-            let sequence = sequence_index.fetch_sequence(seq_name, start, end)?;
-
-            // If reverse strand, reverse complement the sequence
-            let sequence = if strand == '-' {
-                reverse_complement(&sequence)
-            } else {
-                sequence
-            };
-
-            let sequence_str = String::from_utf8_lossy(&sequence).to_string();
-            let seq_size = end - start;
-
-            // For MAF format, if strand is "-", start is relative to reverse-complemented sequence
-            let maf_start = if strand == '-' {
-                (total_length as i32) - end
-            } else {
-                start
-            };
-            let metadata = SequenceMetadata {
-                name: seq_name.to_string(),
-                start: maf_start,
-                size: seq_size,
-                strand,
-                total_length,
-            };
-
-            Ok((sequence_str, metadata))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // Sort sequences by length in descending order (longest first)
-    processed_sequences.par_sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    let processed_sequences = prepare_sequences(impg, results, sequence_index)?;
 
     let (mut graph, mut engine) = build_spoa_engine(scoring_params);
 
@@ -839,6 +764,8 @@ pub struct SeqwishConfig {
     pub min_alignment_length: u64,
     /// Optional temp directory for intermediate files
     pub temp_dir: Option<String>,
+    /// Skip PAF filtering (faster but may produce broken graphs)
+    pub no_filter: bool,
 }
 
 impl Default for SeqwishConfig {
@@ -848,6 +775,7 @@ impl Default for SeqwishConfig {
             frequency_multiplier: 10,
             min_alignment_length: 100,
             temp_dir: None,
+            no_filter: false,
         }
     }
 }
@@ -899,6 +827,7 @@ pub fn generate_gfa_seqwish_from_intervals(
         frequency_multiplier: config.frequency_multiplier,
         min_alignment_length: config.min_alignment_length,
         temp_dir: config.temp_dir.clone(),
+        no_filter: config.no_filter,
         show_progress: false,
         ..crate::commands::graph::GraphBuildConfig::default()
     };

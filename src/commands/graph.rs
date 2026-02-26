@@ -719,6 +719,57 @@ pub fn run_graph_build_realize<W: Write>(
     Ok(())
 }
 
+/// Build a POA graph from FASTA sequences.
+///
+/// Reads all sequences, runs single-pass SPOA, emits GFA, then sorts.
+pub fn run_graph_build_poa<W: Write>(
+    fasta_files: Vec<String>,
+    fasta_list: Option<String>,
+    output: &mut W,
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+    num_threads: usize,
+) -> io::Result<()> {
+    // Resolve FASTA files
+    let fasta_files = resolve_fasta_files(fasta_files, fasta_list)?;
+
+    if fasta_files.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "No FASTA files specified. Use --fasta-files or --fasta-list",
+        ));
+    }
+
+    info!(
+        "Building graph from {} FASTA file(s) using poa engine",
+        fasta_files.len()
+    );
+
+    let sequences = read_fasta_sequences(&fasta_files)?;
+
+    info!("Loaded {} sequences from FASTA files", sequences.len());
+
+    if sequences.is_empty() {
+        output.write_all(b"H\tVN:Z:1.0\n")?;
+        return Ok(());
+    }
+
+    // Build SPOA graph
+    let (mut graph, mut engine) = crate::graph::build_spoa_engine(scoring_params);
+    let metadata: Vec<crate::graph::SequenceMetadata> =
+        sequences.iter().map(|(_, m)| m.clone()).collect();
+    crate::graph::feed_sequences_to_graph(
+        &mut engine,
+        &mut graph,
+        sequences.iter().map(|(s, _)| s.as_str()),
+    );
+
+    // Generate GFA, post-process strands, sort
+    let sorted = crate::graph::spoa_graph_to_sorted_gfa(graph, &metadata, num_threads)?;
+    output.write_all(sorted.as_bytes())?;
+
+    Ok(())
+}
+
 /// Read sequences from FASTA files into (sequence, metadata) pairs for the realize engine.
 fn read_fasta_sequences(
     fasta_paths: &[String],

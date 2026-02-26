@@ -211,28 +211,7 @@ struct GfaMafFastaOpts {
 impl GfaMafFastaOpts {
     /// Parse POA scoring parameters
     fn parse_poa_scoring(&self) -> io::Result<(u8, u8, u8, u8, u8, u8)> {
-        let parts: Vec<&str> = self.poa_scoring.split(',').collect();
-        if parts.len() != 6 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "POA scoring format should be 'match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2'",
-            ));
-        }
-
-        let parse_u8 = |s: &str, name: &str| {
-            s.parse::<u8>().map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid {name} value"))
-            })
-        };
-
-        Ok((
-            parse_u8(parts[0], "match score")?,
-            parse_u8(parts[1], "mismatch cost")?,
-            parse_u8(parts[2], "gap opening 1 cost")?,
-            parse_u8(parts[3], "gap extension 1 cost")?,
-            parse_u8(parts[4], "gap opening 2 cost")?,
-            parse_u8(parts[5], "gap extension 2 cost")?,
-        ))
+        parse_poa_scoring_string(&self.poa_scoring)
     }
 
     /// Helper to validate and setup POA/sequence resources for a given output format, including sequence index for PAF with original coordinates or for 1aln files
@@ -680,6 +659,11 @@ enum Args {
         #[clap(long, value_enum, default_value_t = GfaEngine::Recursive)]
         engine: GfaEngine,
 
+        /// Disable alignment filtering for seqwish engine (faster but may produce broken graphs)
+        #[arg(help_heading = "Output options")]
+        #[clap(short = 'N', long, action)]
+        no_filter: bool,
+
         /// Output folder for partition files (default: current directory)
         #[arg(help_heading = "Output options")]
         #[clap(long, value_parser)]
@@ -763,6 +747,11 @@ enum Args {
         #[arg(help_heading = "Output options")]
         #[clap(long, value_enum, default_value_t = GfaEngine::Recursive)]
         engine: GfaEngine,
+
+        /// Disable alignment filtering for seqwish engine (faster but may produce broken graphs)
+        #[arg(help_heading = "Output options")]
+        #[clap(short = 'N', long, action)]
+        no_filter: bool,
 
         /// Prefix for output file (automatically appends the extension based on format)
         #[clap(short = 'O', long, value_parser, default_value = None)]
@@ -978,11 +967,11 @@ enum Args {
         #[clap(short = 'b', long = "min-mapping-length", value_parser = parse_size, default_value = "0")]
         min_mapping_length: u64,
 
-        /// GFA engine: 'seqwish' (variation graph, default) or 'recursive' (sweepga+POA+lacing)
+        /// GFA engine: 'seqwish' (variation graph, default), 'recursive' (sweepga+POA+lacing), or 'poa' (single-pass POA)
         #[clap(long, value_enum, default_value_t = GfaEngine::Seqwish)]
         engine: GfaEngine,
 
-        /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for recursive engine)
+        /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for recursive/poa engines)
         #[clap(long, value_parser, default_value = "5,4,6,2,24,1")]
         poa_scoring: String,
 
@@ -1200,6 +1189,7 @@ fn run() -> io::Result<()> {
             window_size,
             output_format,
             engine,
+            no_filter,
             output_folder,
             gfa_maf_fasta,
             recursive_opts,
@@ -1282,6 +1272,7 @@ fn run() -> io::Result<()> {
                     None
                 },
                 num_threads: common.threads.get(),
+                no_filter,
             };
 
             // Initialize impg after validation
@@ -1322,6 +1313,7 @@ fn run() -> io::Result<()> {
             query,
             output_format,
             engine,
+            no_filter,
             output_prefix,
             gfa_maf_fasta,
             recursive_opts,
@@ -1587,6 +1579,7 @@ fn run() -> io::Result<()> {
                                 None
                             },
                             num_threads: common.threads.get(),
+                            no_filter,
                         };
                         output_results_gfa(
                             &impg,
@@ -2109,13 +2102,6 @@ fn run() -> io::Result<()> {
                 ));
             }
 
-            if engine == GfaEngine::Poa {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "The 'poa' engine is not supported for the graph command. Use 'seqwish' or 'recursive'.",
-                ));
-            }
-
             match engine {
                 GfaEngine::Recursive => {
                     // Parse scoring for the recursive engine
@@ -2132,6 +2118,18 @@ fn run() -> io::Result<()> {
                     } else {
                         let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
                         graph::run_graph_build_realize(fasta_files, fasta_list, &mut out, &recursive_config)?;
+                    }
+                }
+                GfaEngine::Poa => {
+                    let scoring = parse_poa_scoring_string(&poa_scoring)?;
+
+                    if output == "-" {
+                        let stdout = io::stdout();
+                        let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
+                        graph::run_graph_build_poa(fasta_files, fasta_list, &mut out, scoring, common.threads.get())?;
+                    } else {
+                        let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
+                        graph::run_graph_build_poa(fasta_files, fasta_list, &mut out, scoring, common.threads.get())?;
                     }
                 }
                 GfaEngine::Seqwish => {
@@ -2162,7 +2160,6 @@ fn run() -> io::Result<()> {
 
                     graph::run_graph_build(fasta_files, fasta_list, &output, config)?;
                 }
-                GfaEngine::Poa => unreachable!(), // Already handled above
             }
         }
         Args::Align {
@@ -3463,54 +3460,13 @@ fn output_results_gfa(
         .map(|(query_interval, _, _)| query_interval)
         .collect();
 
-    let gfa_output = match engine_opts.engine {
-        GfaEngine::Poa => {
-            let params = scoring_params.ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "POA scoring parameters required for poa engine",
-                )
-            })?;
-            impg::graph::generate_gfa_from_intervals(impg, &query_intervals, sequence_index, params, engine_opts.num_threads)?
-        }
-        GfaEngine::Seqwish => {
-            let config = impg::graph::SeqwishConfig {
-                num_threads: engine_opts.num_threads,
-                frequency_multiplier: 10,
-                min_alignment_length: 100,
-                temp_dir: None,
-            };
-            impg::graph::generate_gfa_seqwish_from_intervals(
-                impg,
-                &query_intervals,
-                sequence_index,
-                &config,
-            )?
-        }
-        GfaEngine::Recursive => {
-            let config = engine_opts.recursive_config.as_ref().ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "RecursiveOpts config required for recursive engine",
-                )
-            })?;
-            let result = impg::realize::realize(
-                impg,
-                &query_intervals,
-                sequence_index,
-                config,
-            )?;
-            info!(
-                "Recursive engine stats: {} sequences, max_depth={}, poa_calls={}, sweepga_calls={}, {}ms",
-                result.stats.num_sequences,
-                result.stats.max_depth_reached,
-                result.stats.poa_calls,
-                result.stats.sweepga_calls,
-                result.stats.total_ms,
-            );
-            result.gfa
-        }
-    };
+    let gfa_output = impg::dispatch_gfa_engine(
+        impg,
+        &query_intervals,
+        sequence_index,
+        scoring_params,
+        engine_opts,
+    )?;
     writeln!(out, "{gfa_output}")?;
 
     Ok(())

@@ -1,4 +1,4 @@
-use crate::{EngineOpts, GfaEngine};
+use crate::EngineOpts;
 use crate::impg::CigarOp;
 use crate::impg::SortedRanges;
 use crate::impg_index::ImpgIndex;
@@ -1346,61 +1346,13 @@ fn write_partition_gfa(
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
     engine_config: &EngineOpts,
 ) -> io::Result<()> {
-    let gfa_output = match engine_config.engine {
-        GfaEngine::Poa => {
-            let params = scoring_params.ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "POA scoring parameters required for poa engine",
-                )
-            })?;
-            crate::graph::generate_gfa_from_intervals(
-                impg,
-                query_intervals,
-                sequence_index,
-                params,
-                engine_config.num_threads,
-            )?
-        }
-        GfaEngine::Seqwish => {
-            let config = crate::graph::SeqwishConfig {
-                num_threads: engine_config.num_threads,
-                frequency_multiplier: 10,
-                min_alignment_length: 100,
-                temp_dir: None,
-            };
-            crate::graph::generate_gfa_seqwish_from_intervals(
-                impg,
-                query_intervals,
-                sequence_index,
-                &config,
-            )?
-        }
-        GfaEngine::Recursive => {
-            let config = engine_config.recursive_config.as_ref().ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "RecursiveOpts config required for recursive engine",
-                )
-            })?;
-            let result = crate::realize::realize(
-                impg,
-                query_intervals,
-                sequence_index,
-                config,
-            )?;
-            info!(
-                "Recursive engine stats for partition {}: {} sequences, max_depth={}, poa_calls={}, sweepga_calls={}, {}ms",
-                partition_num,
-                result.stats.num_sequences,
-                result.stats.max_depth_reached,
-                result.stats.poa_calls,
-                result.stats.sweepga_calls,
-                result.stats.total_ms,
-            );
-            result.gfa
-        }
-    };
+    let gfa_output = crate::dispatch_gfa_engine(
+        impg,
+        query_intervals,
+        sequence_index,
+        scoring_params,
+        engine_config,
+    )?;
 
     // Create output file
     let filename = format!("partition{partition_num}.gfa");
