@@ -141,7 +141,9 @@ pub fn realize(
     sequence_index: &UnifiedSequenceIndex,
     config: &RealizeConfig,
 ) -> io::Result<RealizeResult> {
-    let sequences = prepare_sequences(impg, intervals, sequence_index)?;
+    let mut sequences = prepare_sequences(impg, intervals, sequence_index)?;
+    // SPOA benefits from longest-first feeding order
+    sequences.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
     realize_from_sequences(&sequences, config)
 }
 

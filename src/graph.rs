@@ -345,7 +345,9 @@ pub fn prepare_poa_graph_and_sequences(
     sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<(SpoaGraph, Vec<SequenceMetadata>)> {
-    let processed_sequences = prepare_sequences(impg, results, sequence_index)?;
+    let mut processed_sequences = prepare_sequences(impg, results, sequence_index)?;
+    // SPOA benefits from longest-first feeding order
+    processed_sequences.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
 
     let (mut graph, mut engine) = build_spoa_engine(scoring_params);
 
@@ -369,7 +371,7 @@ pub fn prepare_sequences(
     use rayon::prelude::*;
 
     // Fetch, strand-normalize, and annotate each interval
-    let mut pairs: Vec<(String, SequenceMetadata)> = results
+    let pairs: Vec<(String, SequenceMetadata)> = results
         .par_iter()
         .map(|interval| -> std::io::Result<(String, SequenceMetadata)> {
             // Resolve sequence name
@@ -433,9 +435,6 @@ pub fn prepare_sequences(
             Ok((sequence_str, meta))
         })
         .collect::<Result<Vec<_>, _>>()?;
-
-    // Keep longest-first ordering (matches SPOA feeding order)
-    pairs.par_sort_by(|a, b| b.0.len().cmp(&a.0.len()));
 
     Ok(pairs)
 }
