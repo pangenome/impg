@@ -705,12 +705,13 @@ pub fn run_graph_build_realize<W: Write>(
     let result = crate::realize::realize_from_sequences(&sequences, config)?;
 
     info!(
-        "[realize] {:.3}s Realize complete: {} sequences, max_depth={}, poa_calls={}, sweepga_calls={}, {}ms",
+        "[realize] {:.3}s Realize complete: {} sequences, max_depth={}, poa_calls={}, sweepga_calls={}, seqwish_calls={}, {}ms",
         start_time.elapsed().as_secs_f64(),
         result.stats.num_sequences,
         result.stats.max_depth_reached,
         result.stats.poa_calls,
         result.stats.sweepga_calls,
+        result.stats.seqwish_calls,
         result.stats.total_ms,
     );
 

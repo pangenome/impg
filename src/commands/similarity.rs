@@ -416,10 +416,11 @@ fn prepare_groups_and_msa_realize(
     let realize_result = realize(impg, results, sequence_index, realize_config)?;
 
     debug!(
-        "Realize produced GFA with {} seqs, {} POA calls, {} sweepga calls in {}ms",
+        "Realize produced GFA with {} seqs, {} POA calls, {} sweepga calls, {} seqwish calls in {}ms",
         realize_result.stats.num_sequences,
         realize_result.stats.poa_calls,
         realize_result.stats.sweepga_calls,
+        realize_result.stats.seqwish_calls,
         realize_result.stats.total_ms,
     );
 

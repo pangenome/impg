@@ -56,6 +56,16 @@ pub struct RealizeConfig {
 
     /// Whether to sort the final GFA using gfasort.
     pub sort_output: bool,
+
+    /// When the number of sequences exceeds this threshold, use seqwish
+    /// instead of POA for base-case graph construction. POA (SPOA) is
+    /// O(N×L) in memory and becomes impractical for hundreds of sequences.
+    /// Default: 500
+    pub seqwish_threshold: usize,
+
+    /// Optional directory for saving intermediate debug files (PAFs, sub-GFAs, FASTAs).
+    /// When set, each recursive step saves its inputs and outputs.
+    pub debug_dir: Option<String>,
 }
 
 impl Default for RealizeConfig {
@@ -69,6 +79,8 @@ impl Default for RealizeConfig {
             scoring_params: (5, 4, 6, 2, 24, 1),
             temp_dir: None,
             sort_output: true,
+            seqwish_threshold: 500,
+            debug_dir: None,
         }
     }
 }
@@ -91,6 +103,8 @@ pub struct RealizeStats {
     pub poa_calls: usize,
     /// Number of sweepga alignment calls.
     pub sweepga_calls: usize,
+    /// Number of seqwish leaf calls (used when sequence count exceeds seqwish_threshold).
+    pub seqwish_calls: usize,
     /// Total time in milliseconds.
     pub total_ms: u64,
 }
@@ -141,9 +155,7 @@ pub fn realize(
     sequence_index: &UnifiedSequenceIndex,
     config: &RealizeConfig,
 ) -> io::Result<RealizeResult> {
-    let mut sequences = prepare_sequences(impg, intervals, sequence_index)?;
-    // SPOA benefits from longest-first feeding order
-    sequences.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    let sequences = prepare_sequences(impg, intervals, sequence_index)?;
     realize_from_sequences(&sequences, config)
 }
 
@@ -163,6 +175,7 @@ pub fn realize_from_sequences(
                 max_depth_reached: 0,
                 poa_calls: 0,
                 sweepga_calls: 0,
+                seqwish_calls: 0,
                 total_ms: start.elapsed().as_millis() as u64,
             },
         });
@@ -171,9 +184,10 @@ pub fn realize_from_sequences(
     let num_sequences = sequences.len();
     let poa_calls = AtomicUsize::new(0);
     let sweepga_calls = AtomicUsize::new(0);
+    let seqwish_calls = AtomicUsize::new(0);
     let max_depth_reached = AtomicUsize::new(0);
 
-    let gfa = realize_recursive(sequences, config, 0, &poa_calls, &sweepga_calls, &max_depth_reached)?;
+    let gfa = realize_recursive(sequences, config, 0, &poa_calls, &sweepga_calls, &seqwish_calls, &max_depth_reached)?;
 
     let gfa = if config.sort_output {
         sort_gfa(&gfa, config.num_threads)?
@@ -188,6 +202,7 @@ pub fn realize_from_sequences(
             max_depth_reached: max_depth_reached.load(Ordering::Relaxed),
             poa_calls: poa_calls.load(Ordering::Relaxed),
             sweepga_calls: sweepga_calls.load(Ordering::Relaxed),
+            seqwish_calls: seqwish_calls.load(Ordering::Relaxed),
             total_ms: start.elapsed().as_millis() as u64,
         },
     })
@@ -197,6 +212,43 @@ pub fn realize_from_sequences(
 // Recursive orchestrator
 // ---------------------------------------------------------------------------
 
+/// Base case: use seqwish for large sequence sets, POA for small ones.
+fn realize_base_case(
+    sequences: &[(String, SequenceMetadata)],
+    config: &RealizeConfig,
+    depth: usize,
+    poa_calls: &AtomicUsize,
+    seqwish_calls: &AtomicUsize,
+) -> io::Result<String> {
+    if sequences.len() > config.seqwish_threshold {
+        info!(
+            "realize: depth={}, {} seqs > seqwish_threshold={}, using seqwish instead of POA",
+            depth, sequences.len(), config.seqwish_threshold
+        );
+        seqwish_calls.fetch_add(1, Ordering::Relaxed);
+        let seqwish_config = crate::graph::SeqwishConfig {
+            num_threads: config.num_threads,
+            temp_dir: config.temp_dir.clone(),
+            no_filter: false, // Must filter: raw PAF from many sequences is too large for seqwish
+            // Use 1:1 filtering: with hundreds of closely-related sequences from the
+            // same locus, keeping only the best alignment per query-target pair is
+            // sufficient for transitive closure and drastically reduces PAF size.
+            num_mappings: "1:1".to_string(),
+            scaffold_filter: "1:1".to_string(),
+            ..crate::graph::SeqwishConfig::default()
+        };
+        crate::graph::generate_gfa_seqwish_from_sequences(sequences, &seqwish_config)
+    } else {
+        poa_calls.fetch_add(1, Ordering::Relaxed);
+        // Pass padding=0: the lacing step handles overlap trimming between adjacent
+        // chunks, so we must NOT also trim padding in the POA. Doing both would shrink
+        // the actual sequence while keeping the original coordinate range in path names,
+        // creating gaps that the lacing can't bridge.
+        let result = padded_poa_from_sequences(sequences, config.scoring_params, 0)?;
+        Ok(result.gfa)
+    }
+}
+
 /// Recursive realize: decide between POA base case and sweepga + partition.
 fn realize_recursive(
     sequences: &[(String, SequenceMetadata)],
@@ -204,6 +256,7 @@ fn realize_recursive(
     depth: usize,
     poa_calls: &AtomicUsize,
     sweepga_calls: &AtomicUsize,
+    seqwish_calls: &AtomicUsize,
     max_depth_reached: &AtomicUsize,
 ) -> io::Result<String> {
     // Track max depth.
@@ -233,27 +286,47 @@ fn realize_recursive(
     // Determine the longest sequence span (the anchor).
     let total_span = sequences.iter().map(|(s, _)| s.len()).max().unwrap_or(0);
 
-    // Base case: small region or max depth → POA.
+    // Too many sequences for POA-based recursion → go straight to seqwish.
+    // This check MUST be before the recursive case: sweepga + par_iter on 1000+
+    // sequences consumes O(N×L) memory across parallel chunks before any base
+    // case is reached.  Seqwish handles large sequence counts efficiently.
+    if sequences.len() > config.seqwish_threshold {
+        info!(
+            "realize: depth={}, {} seqs > seqwish_threshold={}, bypassing recursion for seqwish",
+            depth, sequences.len(), config.seqwish_threshold
+        );
+        return realize_base_case(sequences, config, depth, poa_calls, seqwish_calls);
+    }
+
+    // Base case: small region or max depth → POA or seqwish.
     if total_span <= config.poa_threshold || depth >= config.max_depth {
         if depth >= config.max_depth && total_span > config.poa_threshold {
             warn!(
-                "realize: hit max depth {} with region of {}bp (poa_threshold={}), forcing POA",
+                "realize: hit max depth {} with region of {}bp (poa_threshold={}), forcing base case",
                 depth, total_span, config.poa_threshold
             );
         }
-        poa_calls.fetch_add(1, Ordering::Relaxed);
-        let result = padded_poa_from_sequences(sequences, config.scoring_params, config.padding)?;
-        return Ok(result.gfa);
+        return realize_base_case(sequences, config, depth, poa_calls, seqwish_calls);
     }
 
     // Recursive case: sweepga align → partition → recurse → lace.
+    //
+    // Sort longest-first: partition_into_chunks assumes sequences[0] is the
+    // anchor (longest).  SPOA also benefits from this order.  The sort is
+    // intentionally placed *after* the seqwish-threshold check so that the
+    // seqwish fallback receives sequences in their original (unsorted) order,
+    // matching the output of `graph --engine seqwish`.
+    let mut sequences = sequences.to_vec();
+    sequences.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    let sequences = sequences; // rebind as immutable
+
     sweepga_calls.fetch_add(1, Ordering::Relaxed);
 
     // Always use all-vs-all alignment in the realize engine.
     // FastGA is efficient when run all-vs-all on a combined FASTA (indexes once).
     // Sparsification is for the top-level `impg align` CLI with hundreds of genomes,
     // not for the small sequence sets inside recursive chunks.
-    let align_config = build_sweepga_config(config);
+    let align_config = build_sweepga_config(config, sequences.len());
     let named_seqs: Vec<(String, &[u8])> = sequences
         .iter()
         .map(|(seq, meta)| (meta.alignment_name(), seq.as_bytes()))
@@ -261,28 +334,42 @@ fn realize_recursive(
 
     let paf_temp = crate::commands::align::sweepga_align(&named_seqs, &align_config)?;
 
+    // Debug: save input FASTA and PAF
+    if let Some(ref debug_dir) = config.debug_dir {
+        let prefix = format!("{}/depth{}", debug_dir, depth);
+        // Save input sequences as FASTA
+        let fasta_path = format!("{}_input.fa", prefix);
+        if let Ok(mut f) = std::fs::File::create(&fasta_path) {
+            use std::io::Write;
+            for (seq, meta) in sequences.iter() {
+                let _ = writeln!(f, ">{}", meta.alignment_name());
+                let _ = writeln!(f, "{}", seq);
+            }
+        }
+        // Copy PAF
+        let paf_path = format!("{}_sweepga.paf", prefix);
+        let _ = std::fs::copy(paf_temp.path(), &paf_path);
+        info!("realize: debug saved {}_input.fa ({} seqs) and {}_sweepga.paf", prefix, sequences.len(), prefix);
+    }
+
     // Parse PAF records for partitioning.
     let paf_records = parse_paf_file(paf_temp.path())?;
 
-    // If no alignments were produced, fall back to POA.
+    // If no alignments were produced, fall back to POA (or seqwish for large sets).
     if paf_records.is_empty() {
         warn!(
-            "realize: sweepga produced no alignments at depth {} for {}bp region with {} sequences, falling back to POA",
+            "realize: sweepga produced no alignments at depth {} for {}bp region with {} sequences, falling back to base case",
             depth, total_span, sequences.len()
         );
-        poa_calls.fetch_add(1, Ordering::Relaxed);
-        let result = padded_poa_from_sequences(sequences, config.scoring_params, config.padding)?;
-        return Ok(result.gfa);
+        return realize_base_case(&sequences, config, depth, poa_calls, seqwish_calls);
     }
 
     // Partition into chunks along the anchor (longest) sequence.
-    let chunks = partition_into_chunks(sequences, &paf_records, config.chunk_size, config.padding);
+    let chunks = partition_into_chunks(&sequences, &paf_records, config.chunk_size, config.padding);
 
-    // If partitioning produced a single chunk that is no smaller, use POA directly.
+    // If partitioning produced a single chunk that is no smaller, use base case directly.
     if chunks.len() <= 1 {
-        poa_calls.fetch_add(1, Ordering::Relaxed);
-        let result = padded_poa_from_sequences(sequences, config.scoring_params, config.padding)?;
-        return Ok(result.gfa);
+        return realize_base_case(&sequences, config, depth, poa_calls, seqwish_calls);
     }
 
     info!(
@@ -293,10 +380,26 @@ fn realize_recursive(
         chunks.len()
     );
 
+    // Debug: save chunk info
+    if let Some(ref debug_dir) = config.debug_dir {
+        let chunks_path = format!("{}/depth{}_chunks.tsv", debug_dir, depth);
+        if let Ok(mut f) = std::fs::File::create(&chunks_path) {
+            use std::io::Write;
+            let _ = writeln!(f, "chunk\tnum_seqs\tanchor_start\tanchor_end\tmax_len\tmin_len");
+            for (ci, chunk) in chunks.iter().enumerate() {
+                let max_len = chunk.sequences.iter().map(|(s, _)| s.len()).max().unwrap_or(0);
+                let min_len = chunk.sequences.iter().map(|(s, _)| s.len()).min().unwrap_or(0);
+                let _ = writeln!(f, "{}\t{}\t{}\t{}\t{}\t{}",
+                    ci, chunk.sequences.len(), chunk.anchor_start, chunk.anchor_end, max_len, min_len);
+            }
+        }
+    }
+
     // Recurse on each chunk in parallel.
     let sub_gfa_results: Vec<Option<io::Result<String>>> = chunks
         .par_iter()
-        .map(|chunk| {
+        .enumerate()
+        .map(|(ci, chunk)| {
             if chunk.sequences.is_empty() {
                 return None;
             }
@@ -306,8 +409,16 @@ fn realize_recursive(
                 depth + 1,
                 poa_calls,
                 sweepga_calls,
+                seqwish_calls,
                 max_depth_reached,
-            ))
+            ).map(|gfa| {
+                // Debug: save each sub-GFA
+                if let Some(ref debug_dir) = config.debug_dir {
+                    let gfa_path = format!("{}/depth{}_chunk{}.gfa", debug_dir, depth, ci);
+                    let _ = std::fs::write(&gfa_path, &gfa);
+                }
+                gfa
+            }))
         })
         .collect();
 
@@ -328,7 +439,15 @@ fn realize_recursive(
     }
 
     // Lace sub-graphs together.
-    lace_subgraphs(&sub_gfas, config.temp_dir.as_deref())
+    let laced = lace_subgraphs(&sub_gfas, config.temp_dir.as_deref())?;
+
+    // Debug: save laced output
+    if let Some(ref debug_dir) = config.debug_dir {
+        let laced_path = format!("{}/depth{}_laced.gfa", debug_dir, depth);
+        let _ = std::fs::write(&laced_path, &laced);
+    }
+
+    Ok(laced)
 }
 
 // ---------------------------------------------------------------------------
@@ -342,10 +461,16 @@ fn realize_recursive(
 /// scaffolding, 1:1 mapping) would remove valid cross-sequence alignments that
 /// are needed for partitioning. Self-alignments are still filtered out during
 /// PAF parsing since they share query_name == target_name.
-fn build_sweepga_config(config: &RealizeConfig) -> SweepgaAlignConfig {
+fn build_sweepga_config(config: &RealizeConfig, num_sequences: usize) -> SweepgaAlignConfig {
+    // Scale k-mer frequency with sequence count.  With N nearly-identical
+    // sequences from the same locus, most k-mers appear ~N times.  A fixed
+    // frequency of 10 would discard almost all seeds when N >> 10, causing
+    // FastGA to produce too few alignments for effective partitioning.
+    // Using N * 10 mirrors what build_graph() does (num_genomes * multiplier).
+    let kmer_frequency = (num_sequences * 10).max(10);
     SweepgaAlignConfig {
         num_threads: config.num_threads,
-        kmer_frequency: 10, // Reasonable default for small sets
+        kmer_frequency,
         min_alignment_length: 100,
         no_filter: true,
         num_mappings: "1:1".to_string(),

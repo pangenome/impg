@@ -293,6 +293,15 @@ struct RecursiveOpts {
     /// Whether to sort the final GFA output using gfasort
     #[clap(long, action, default_value_t = true)]
     recursive_sort: bool,
+
+    /// Use seqwish instead of POA when sequence count exceeds this threshold.
+    /// POA is O(N*L) in memory and becomes impractical for many sequences.
+    #[clap(long, value_parser, default_value_t = 500)]
+    recursive_seqwish_threshold: usize,
+
+    /// Save intermediate debug files (PAFs, FASTAs, sub-GFAs, chunk info) to this directory.
+    #[clap(long, value_parser)]
+    recursive_debug_dir: Option<String>,
 }
 
 impl RecursiveOpts {
@@ -301,7 +310,13 @@ impl RecursiveOpts {
         &self,
         num_threads: usize,
         scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
+        temp_dir: Option<String>,
     ) -> io::Result<impg::realize::RealizeConfig> {
+        if let Some(ref dir) = self.recursive_debug_dir {
+            std::fs::create_dir_all(dir).map_err(|e| {
+                io::Error::other(format!("Failed to create debug dir '{}': {}", dir, e))
+            })?;
+        }
         Ok(impg::realize::RealizeConfig {
             poa_threshold: self.recursive_poa_threshold,
             chunk_size: self.recursive_chunk_size,
@@ -309,8 +324,10 @@ impl RecursiveOpts {
             max_depth: self.recursive_max_depth,
             num_threads,
             scoring_params: scoring_params.unwrap_or((5, 4, 6, 2, 24, 1)),
-            temp_dir: None,
+            temp_dir,
             sort_output: self.recursive_sort,
+            seqwish_threshold: self.recursive_seqwish_threshold,
+            debug_dir: self.recursive_debug_dir.clone(),
         })
     }
 }
@@ -762,6 +779,11 @@ enum Args {
 
         #[clap(flatten)]
         recursive_opts: RecursiveOpts,
+
+        /// Directory for temporary files (default: system TMPDIR)
+        #[arg(help_heading = "Output options")]
+        #[clap(long, value_parser)]
+        temp_dir: Option<String>,
 
         #[clap(flatten)]
         common: CommonOpts,
@@ -1267,7 +1289,7 @@ fn run() -> io::Result<()> {
             let engine_config = EngineOpts {
                 engine,
                 recursive_config: if output_format == "gfa" && engine == GfaEngine::Recursive {
-                    Some(recursive_opts.build_config(common.threads.get(), scoring_params)?)
+                    Some(recursive_opts.build_config(common.threads.get(), scoring_params, None)?)
                 } else {
                     None
                 },
@@ -1317,6 +1339,7 @@ fn run() -> io::Result<()> {
             output_prefix,
             gfa_maf_fasta,
             recursive_opts,
+            temp_dir,
         } => {
             initialize_threads_and_log(&common);
 
@@ -1574,6 +1597,7 @@ fn run() -> io::Result<()> {
                                 Some(recursive_opts.build_config(
                                     common.threads.get(),
                                     scoring_params,
+                                    temp_dir.clone(),
                                 )?)
                             } else {
                                 None
@@ -2018,7 +2042,7 @@ fn run() -> io::Result<()> {
 
             // Build recursive config if engine is Recursive
             let recursive_config = if engine == GfaEngine::Recursive {
-                Some(recursive_opts.build_config(common.threads.into(), Some(scoring_params))?)
+                Some(recursive_opts.build_config(common.threads.into(), Some(scoring_params), None)?)
             } else {
                 None
             };
@@ -2109,6 +2133,7 @@ fn run() -> io::Result<()> {
                     let recursive_config = recursive_opts.build_config(
                         common.threads.get(),
                         Some(scoring),
+                        temp_dir.clone(),
                     )?;
 
                     if output == "-" {

@@ -84,11 +84,12 @@ pub fn dispatch_gfa_engine(
             })?;
             let result = realize::realize(impg, query_intervals, sequence_index, config)?;
             log::info!(
-                "Recursive engine stats: {} sequences, max_depth={}, poa_calls={}, sweepga_calls={}, {}ms",
+                "Recursive engine stats: {} sequences, max_depth={}, poa_calls={}, sweepga_calls={}, seqwish_calls={}, {}ms",
                 result.stats.num_sequences,
                 result.stats.max_depth_reached,
                 result.stats.poa_calls,
                 result.stats.sweepga_calls,
+                result.stats.seqwish_calls,
                 result.stats.total_ms,
             );
             Ok(result.gfa)

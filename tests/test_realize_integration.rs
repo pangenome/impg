@@ -84,6 +84,8 @@ fn test_config() -> RealizeConfig {
         scoring_params: (5, 4, 6, 2, 24, 1),
         temp_dir: None,
         sort_output: false,
+        seqwish_threshold: 500,
+        debug_dir: None,
     }
 }
 
