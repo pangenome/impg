@@ -769,6 +769,8 @@ pub struct SeqwishConfig {
     pub num_mappings: String,
     /// Scaffold filter mode (e.g., "1:1", "many:many")
     pub scaffold_filter: String,
+    /// Optional directory to save intermediate debug files (FASTA, raw PAF, filtered PAF).
+    pub debug_dir: Option<String>,
 }
 
 impl Default for SeqwishConfig {
@@ -781,6 +783,7 @@ impl Default for SeqwishConfig {
             no_filter: false,
             num_mappings: "many:many".to_string(),
             scaffold_filter: "many:many".to_string(),
+            debug_dir: None,
         }
     }
 }
@@ -833,6 +836,7 @@ pub fn generate_gfa_seqwish_from_intervals(
         no_filter: config.no_filter,
         num_mappings: config.num_mappings.clone(),
         scaffold_filter: config.scaffold_filter.clone(),
+        debug_dir: config.debug_dir.clone(),
         show_progress: false,
         ..crate::commands::graph::GraphBuildConfig::default()
     };
@@ -896,6 +900,7 @@ pub fn generate_gfa_seqwish_from_sequences(
         no_filter: config.no_filter,
         num_mappings: config.num_mappings.clone(),
         scaffold_filter: config.scaffold_filter.clone(),
+        debug_dir: config.debug_dir.clone(),
         show_progress: false,
         ..crate::commands::graph::GraphBuildConfig::default()
     };

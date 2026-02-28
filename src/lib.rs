@@ -33,6 +33,8 @@ pub struct EngineOpts {
     pub recursive_config: Option<realize::RealizeConfig>,
     pub num_threads: usize,
     pub no_filter: bool,
+    /// Optional directory to save intermediate debug files (PAFs, FASTAs, etc.)
+    pub debug_dir: Option<String>,
 }
 
 /// Dispatch GFA generation to the selected engine.
@@ -63,9 +65,15 @@ pub fn dispatch_gfa_engine(
             )
         }
         GfaEngine::Seqwish => {
+            if let Some(ref dir) = engine_opts.debug_dir {
+                std::fs::create_dir_all(dir).map_err(|e| {
+                    std::io::Error::other(format!("Failed to create debug dir '{}': {}", dir, e))
+                })?;
+            }
             let config = graph::SeqwishConfig {
                 num_threads: engine_opts.num_threads,
                 no_filter: engine_opts.no_filter,
+                debug_dir: engine_opts.debug_dir.clone(),
                 ..graph::SeqwishConfig::default()
             };
             graph::generate_gfa_seqwish_from_intervals(

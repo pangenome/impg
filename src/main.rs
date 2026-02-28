@@ -1295,6 +1295,7 @@ fn run() -> io::Result<()> {
                 },
                 num_threads: common.threads.get(),
                 no_filter,
+                debug_dir: recursive_opts.recursive_debug_dir.clone(),
             };
 
             // Initialize impg after validation
@@ -1604,6 +1605,7 @@ fn run() -> io::Result<()> {
                             },
                             num_threads: common.threads.get(),
                             no_filter,
+                            debug_dir: recursive_opts.recursive_debug_dir.clone(),
                         };
                         output_results_gfa(
                             &impg,
@@ -2181,6 +2183,7 @@ fn run() -> io::Result<()> {
                         min_identity,
                         scaffold_dist,
                         min_mapping_length,
+                        debug_dir: None,
                     };
 
                     graph::run_graph_build(fasta_files, fasta_list, &output, config)?;

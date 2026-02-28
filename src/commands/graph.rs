@@ -76,6 +76,8 @@ pub struct GraphBuildConfig {
     pub scaffold_dist: u64,
     /// Minimum mapping length to include in filtering
     pub min_mapping_length: u64,
+    /// Optional directory to save intermediate files (FASTA, raw PAF, filtered PAF).
+    pub debug_dir: Option<String>,
 }
 
 impl Default for GraphBuildConfig {
@@ -104,6 +106,7 @@ impl Default for GraphBuildConfig {
             min_identity: 0.0,
             scaffold_dist: 0,      // No deviation limit by default
             min_mapping_length: 0, // No minimum mapping length by default
+            debug_dir: None,
         }
     }
 }
@@ -266,6 +269,13 @@ pub fn build_graph<W: Write>(
         );
     }
 
+    // Debug: save combined FASTA
+    if let Some(ref debug_dir) = config.debug_dir {
+        let dst = format!("{}/combined.fa", debug_dir);
+        let _ = std::fs::copy(combined_fasta.path(), &dst);
+        info!("[graph::debug] Saved combined FASTA to {}", dst);
+    }
+
     // 3) Get PAF alignments - either from input file or run FastGA
     let paf_temp: tempfile::NamedTempFile = if let Some(ref input_paf) = config.input_paf {
         // Use provided PAF file - copy to temp file to match expected type
@@ -309,6 +319,13 @@ pub fn build_graph<W: Write>(
         }
         paf_temp
     };
+
+    // Debug: save raw PAF
+    if let Some(ref debug_dir) = config.debug_dir {
+        let dst = format!("{}/raw.paf", debug_dir);
+        let _ = std::fs::copy(paf_temp.path(), &dst);
+        info!("[graph::debug] Saved raw PAF to {}", dst);
+    }
 
     // 3.5) Apply sweepga filtering to alignments (unless --no-filter)
     let filtered_paf = if config.no_filter {
@@ -398,6 +415,13 @@ pub fn build_graph<W: Write>(
 
         filtered_paf_file
     };
+
+    // Debug: save filtered PAF
+    if let Some(ref debug_dir) = config.debug_dir {
+        let dst = format!("{}/filtered.paf", debug_dir);
+        let _ = std::fs::copy(filtered_paf.path(), &dst);
+        info!("[graph::debug] Saved filtered PAF to {}", dst);
+    }
 
     // 4) Build sequence index for seqwish
     if config.show_progress {
