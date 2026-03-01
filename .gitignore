@@ -3,5 +3,6 @@
 *~
 .vscode
 .DS_Store
+.workgraph
 paper
 data

@@ -115,7 +115,7 @@ impg query -a alignments.1aln -r chr1:1000-2000 -o bedpe
 impg query -a file1.paf file2.1aln -b chr1:1000-2000 -o paf
 
 # Write output to file instead of stdout (using -O / --output-prefix)
-impg query -p alignments.paf -r chr1:1000-2000 -o bed -O results       # creates results.bed
+impg query -a alignments.paf -r chr1:1000-2000 -o bed -O results       # creates results.bed
 
 # gfa/maf/fasta output requires sequence files (--sequence-files or --sequence-list)
 impg query -a alignments.paf -r chr1:1000-2000 -o gfa --sequence-files ref.fa genomes.fa
@@ -161,6 +161,34 @@ impg query -a alignments.paf -r chr1:1000-2000 --no-merge
 
 # Force processing large regions (>10kbp) with gfa/maf output
 impg query -a alignments.paf -r chr1:1000-50000 -o gfa --sequence-files *.fa --force-large-region
+```
+
+#### GFA engine selection
+
+When outputting GFA (`-o gfa`), use `--engine` to choose the graph construction algorithm (default: `recursive`):
+
+| Engine | Algorithm | Best for |
+|--------|-----------|----------|
+| `recursive` | Recursive sweepga-guided chunking + POA per chunk + lacing | Default. Fast, compact graphs. |
+| `seqwish` | All-vs-all sweepga + transitive closure graph induction | Raw (unsmoothed) variation graphs. |
+| `poa` | Single-pass partial order alignment (SPOA) | Small regions, quick MSA-based output. |
+
+```bash
+# Choose a GFA engine (default: recursive)
+impg query -a alignments.paf -r chr1:1000-2000 -o gfa --engine recursive --sequence-files *.fa
+impg query -a alignments.paf -r chr1:1000-2000 -o gfa --engine seqwish --sequence-files *.fa
+impg query -a alignments.paf -r chr1:1000-2000 -o gfa --engine poa --sequence-files *.fa
+
+# Disable alignment filtering for seqwish (faster but may produce less clean graphs)
+impg query -a alignments.paf -r chr1:1000-2000 -o gfa --engine seqwish -N --sequence-files *.fa
+
+# Tune recursive engine parameters
+impg query -a alignments.paf -r chr1:1000-2000 -o gfa --engine recursive \
+    --recursive-poa-threshold 1000 --recursive-chunk-size 5000 --recursive-padding 100 \
+    --sequence-files *.fa
+
+# Custom POA scoring (match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2)
+impg query -a alignments.paf -r chr1:1000-2000 -o gfa --poa-scoring 5,4,6,2,24,1 --sequence-files *.fa
 ```
 
 #### Alignment visualizations
@@ -214,6 +242,10 @@ impg partition -a alignments.1aln -w 1000000 -o maf --sequence-list fastas.txt -
 impg partition -a file1.paf file2.1aln -w 1000000 -o fasta --sequence-files *.fa --separate-files --output-folder fasta_partitions
 # Works with AGC archives too
 impg partition -a alignments.paf -w 1000000 -o gfa --sequence-files genomes.agc --separate-files --output-folder gfa_partitions
+
+# GFA engine selection (same engines as query: recursive, seqwish, poa; default: recursive)
+impg partition -a alignments.paf -w 1000000 -o gfa --engine seqwish --sequence-files *.fa --separate-files
+impg partition -a alignments.paf -w 1000000 -o gfa --engine seqwish -N --sequence-files *.fa --separate-files  # no filtering
 ```
 
 ### Similarity
@@ -257,6 +289,9 @@ impg similarity -a file1.paf file2.1aln -b regions.bed --sequence-files *.fa --p
 
 # PCA with sample-guided polarization
 impg similarity -a alignments.paf -b regions.bed --sequence-files *.fa --pca --polarize-guide-samples sample1,sample2
+
+# Engine selection (poa or recursive; default: poa)
+impg similarity -a alignments.paf -r chr1:1000-2000 --sequence-files *.fa --engine recursive
 ```
 
 ### Refine
@@ -396,10 +431,10 @@ odgi unchop -i combined.fix.gfa -o - -t 16 | \
 
 ### Graph
 
-Build a pangenome graph from FASTA sequences using sweepga + seqwish:
+Build a pangenome graph directly from FASTA sequences (no pre-computed alignments needed):
 
 ```bash
-# Build graph from FASTA files
+# Build graph from FASTA files (default engine: seqwish)
 impg graph --fasta-files sequences.fa -g output.gfa -t 16
 
 # Build from multiple FASTA files
@@ -408,8 +443,33 @@ impg graph --fasta-files file1.fa file2.fa file3.fa -g output.gfa
 # Use a list file containing FASTA paths
 impg graph --fasta-list fasta_files.txt -g output.gfa
 
+# Write to stdout
+impg graph --fasta-files sequences.fa -g - | odgi build -g - -o output.og
+```
+
+#### Engine selection
+
+Use `--engine` to choose the graph construction algorithm (default: `seqwish`):
+
+```bash
+# Seqwish: sweepga alignment + transitive closure graph induction (default)
+impg graph --fasta-files sequences.fa -g output.gfa --engine seqwish
+
+# Recursive: sweepga-guided chunking + POA per chunk + lacing
+impg graph --fasta-files sequences.fa -g output.gfa --engine recursive
+
+# POA: single-pass partial order alignment (fastest for small inputs)
+impg graph --fasta-files sequences.fa -g output.gfa --engine poa
+```
+
+All engines produce sorted, unchopped GFA with consistent path names.
+
+#### Seqwish engine options
+
+The seqwish engine runs FastGA all-vs-all alignment followed by seqwish graph induction. It handles PanSN-formatted sequence names and automatically adjusts the k-mer frequency based on the number of genomes (unique SAMPLE#HAPLOTYPE prefixes).
+
+```bash
 # Adjust k-mer frequency multiplier (default: 10x number of genomes)
-# Genomes are counted as unique SAMPLE#HAPLOTYPE prefixes in PanSN naming
 impg graph --fasta-files sequences.fa -g output.gfa -f 5
 
 # Set explicit k-mer frequency
@@ -427,34 +487,65 @@ impg graph --fasta-files sequences.fa -g output.gfa --sparse-factor 0.5
 # Use disk-backed mode for very large datasets (slower but lower memory)
 impg graph --fasta-files *.fa -g output.gfa --disk-backed
 
-# Write to stdout
-impg graph --fasta-files sequences.fa -g - | odgi build -g - -o output.og
+# Skip pre-computed alignment with a PAF file
+impg graph --fasta-files sequences.fa -g output.gfa --paf-file alignments.paf
 ```
 
-#### Alignment Filtering Options
+#### Alignment filtering options (seqwish engine)
 
-By default, `impg graph` applies sweepga's plane-sweep filtering to produce clean 1:1 alignments with scaffold-based chaining. This removes spurious cross-chromosome alignments (e.g., from repetitive elements like TEs, telomeres, or rDNA).
+By default, `impg graph` applies sweepga's plane-sweep filtering to produce clean alignments with scaffold-based chaining. This removes spurious cross-chromosome alignments (e.g., from repetitive elements like TEs, telomeres, or rDNA).
 
 ```bash
-# Disable filtering entirely (keep all alignments)
-impg graph --fasta-files sequences.fa -g output.gfa --no-filter
+# Disable filtering entirely (much faster, but may produce less clean graphs)
+impg graph --fasta-files sequences.fa -g output.gfa -N
 
-# Control mapping cardinality (default: 1:1 for clean orthology)
-impg graph --fasta-files sequences.fa -g output.gfa --num-mappings 1:1    # 1:1 (strictest)
-impg graph --fasta-files sequences.fa -g output.gfa --num-mappings 1:n    # 1:many
-impg graph --fasta-files sequences.fa -g output.gfa --num-mappings n:n    # many:many (most permissive)
+# Control mapping cardinality (default: many:many)
+impg graph --fasta-files sequences.fa -g output.gfa --num-mappings 1:1    # strictest
+impg graph --fasta-files sequences.fa -g output.gfa --num-mappings n:n    # most permissive
 
 # Scaffold-based filtering (chains alignments along diagonal)
 impg graph --fasta-files sequences.fa -g output.gfa --scaffold-jump 50000   # Max gap between chained alignments
 impg graph --fasta-files sequences.fa -g output.gfa --scaffold-mass 10000   # Min total aligned bases in scaffold
-impg graph --fasta-files sequences.fa -g output.gfa --scaffold-filter 1:1   # Scaffold cardinality (1:1, 1:n, or n:n)
+impg graph --fasta-files sequences.fa -g output.gfa --scaffold-filter 1:1   # Scaffold cardinality
 
 # Overlap and identity thresholds
 impg graph --fasta-files sequences.fa -g output.gfa --overlap 0.95      # Max overlap between alignments (0.0-1.0)
 impg graph --fasta-files sequences.fa -g output.gfa --min-identity 0.9  # Min alignment identity (0.0-1.0)
 ```
 
-The `impg graph` command integrates FastGA (via sweepga) for alignment and seqwish for graph induction to build variation graphs from collections of sequences. It handles PanSN-formatted sequence names and automatically adjusts the k-mer frequency based on the number of genomes (unique SAMPLE#HAPLOTYPE prefixes) rather than the total number of sequences.
+#### Recursive and POA engine options
+
+```bash
+# Tune recursive engine parameters
+impg graph --fasta-files sequences.fa -g output.gfa --engine recursive \
+    --recursive-poa-threshold 1000 --recursive-chunk-size 5000
+
+# Custom POA scoring (match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2)
+impg graph --fasta-files sequences.fa -g output.gfa --engine poa --poa-scoring 5,4,6,2,24,1
+```
+
+#### Temporary files
+
+FastGA writes large intermediate files (k-mer indices, alignment scratch) during graph construction. By default these go to `$TMPDIR` or the current working directory.
+
+```bash
+# Use a specific directory for temp files
+impg graph --fasta-files sequences.fa -g output.gfa --temp-dir /scratch/tmp
+
+# Use RAM-backed storage for faster I/O (requires enough free RAM)
+impg graph --fasta-files sequences.fa -g output.gfa --temp-dir ramdisk
+```
+
+The `ramdisk` shortcut maps to `/dev/shm` on Linux. Use it only when you have sufficient free memory, as temp files can be several GB for large inputs.
+
+#### query vs graph
+
+Both `query -o gfa` and `graph` share the same engine implementations. The difference is only in how sequences are obtained:
+
+- **`query -o gfa`**: extracts subsequences from an IMPG index + sequence files for a target region, then builds a graph.
+- **`graph`**: reads FASTA files directly and builds a graph (no alignments or index needed).
+
+A common two-step workflow is to extract sequences with `query -o fasta`, then build a graph with `graph` for full control over seqwish filtering parameters.
 
 ### Index
 
@@ -528,7 +619,7 @@ For GFA/MAF/FASTA output and similarity computation:
 
 - `--sequence-files`: List of sequence files (FASTA or AGC*)
 - `--sequence-list`: Text file listing sequence files (FASTA or AGC*) (one per line)
-- `--poa-scoring`: POA scoring parameters as `match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2` (default: `1,4,6,2,26,1`)
+- `--poa-scoring`: POA scoring parameters as `match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2` (default: `5,4,6,2,24,1`)
 - `--reverse-complement`: Reverse complement sequences on the reverse strand (for FASTA output)
 
 *AGC files are only supported in the full installation (default features). For FASTA-only support, install with `--no-default-features`.

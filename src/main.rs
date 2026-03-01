@@ -42,6 +42,8 @@ fn parse_size(s: &str) -> Result<u64, String> {
         .map_err(|e| format!("invalid number '{}': {}", num_str, e))
 }
 
+use impg::{GfaEngine, EngineOpts};
+
 /// Index mode.
 #[derive(Clone, Debug, Default, clap::ValueEnum)]
 enum IndexMode {
@@ -192,7 +194,7 @@ struct GfaMafFastaOpts {
 
     /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for 'gfa' and 'maf')
     #[arg(help_heading = "Alignment options")]
-    #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
+    #[clap(long, value_parser, default_value = "5,4,6,2,24,1")]
     poa_scoring: String,
 
     /// Reverse complement reverse strand sequences (for 'fasta' output)
@@ -209,28 +211,7 @@ struct GfaMafFastaOpts {
 impl GfaMafFastaOpts {
     /// Parse POA scoring parameters
     fn parse_poa_scoring(&self) -> io::Result<(u8, u8, u8, u8, u8, u8)> {
-        let parts: Vec<&str> = self.poa_scoring.split(',').collect();
-        if parts.len() != 6 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "POA scoring format should be 'match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2'",
-            ));
-        }
-
-        let parse_u8 = |s: &str, name: &str| {
-            s.parse::<u8>().map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid {name} value"))
-            })
-        };
-
-        Ok((
-            parse_u8(parts[0], "match score")?,
-            parse_u8(parts[1], "mismatch cost")?,
-            parse_u8(parts[2], "gap opening 1 cost")?,
-            parse_u8(parts[3], "gap extension 1 cost")?,
-            parse_u8(parts[4], "gap opening 2 cost")?,
-            parse_u8(parts[5], "gap extension 2 cost")?,
-        ))
+        parse_poa_scoring_string(&self.poa_scoring)
     }
 
     /// Helper to validate and setup POA/sequence resources for a given output format, including sequence index for PAF with original coordinates or for 1aln files
@@ -255,11 +236,11 @@ impl GfaMafFastaOpts {
 
         let needs_sequence_mandatory = matches!(
             output_format,
-            "gfa" | "gfa-seqwish" | "gfa-poa" | "maf" | "fasta" | "fasta-aln" | "fasta+paf"
+            "gfa" | "maf" | "fasta" | "fasta-aln" | "fasta+paf"
         ) || tracepoint_needs_sequences;
         let needs_sequence_optional = output_format == "paf" && original_sequence_coordinates;
-        // POA is only needed for gfa-poa, maf, and fasta-aln (not for gfa/gfa-seqwish which use seqwish)
-        let needs_poa = matches!(output_format, "gfa-poa" | "maf" | "fasta-aln");
+        // POA scoring is needed for gfa (all engines may use it), maf, and fasta-aln
+        let needs_poa = matches!(output_format, "gfa" | "maf" | "fasta-aln");
 
         let scoring_params = if needs_poa {
             Some(self.parse_poa_scoring()?)
@@ -286,6 +267,68 @@ impl GfaMafFastaOpts {
         };
 
         Ok((sequence_index, scoring_params))
+    }
+}
+
+/// Options for the recursive engine (used with --engine recursive)
+#[derive(Parser, Debug)]
+#[command(next_help_heading = "Recursive engine options")]
+struct RecursiveOpts {
+    /// POA threshold: regions at or below this size (bp) go directly to POA
+    #[clap(long, value_parser, default_value_t = 1000)]
+    recursive_poa_threshold: usize,
+
+    /// Target chunk size (bp) for partitioning large regions
+    #[clap(long, value_parser, default_value_t = 5000)]
+    recursive_chunk_size: usize,
+
+    /// Boundary padding (bp) added on each side of POA regions
+    #[clap(long, value_parser, default_value_t = 100)]
+    recursive_padding: usize,
+
+    /// Maximum recursion depth for the recursive engine
+    #[clap(long, value_parser, default_value_t = 10)]
+    recursive_max_depth: usize,
+
+    /// Whether to sort the final GFA output using gfasort
+    #[clap(long, action, default_value_t = true)]
+    recursive_sort: bool,
+
+    /// Use seqwish instead of POA when sequence count exceeds this threshold.
+    /// POA is O(N*L) in memory and becomes impractical for many sequences.
+    #[clap(long, value_parser, default_value_t = 500)]
+    recursive_seqwish_threshold: usize,
+
+    /// Save intermediate debug files (PAFs, FASTAs, sub-GFAs, chunk info) to this directory.
+    #[clap(long, value_parser)]
+    recursive_debug_dir: Option<String>,
+}
+
+impl RecursiveOpts {
+    /// Build a RealizeConfig from the CLI options.
+    fn build_config(
+        &self,
+        num_threads: usize,
+        scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
+        temp_dir: Option<String>,
+    ) -> io::Result<impg::realize::RealizeConfig> {
+        if let Some(ref dir) = self.recursive_debug_dir {
+            std::fs::create_dir_all(dir).map_err(|e| {
+                io::Error::other(format!("Failed to create debug dir '{}': {}", dir, e))
+            })?;
+        }
+        Ok(impg::realize::RealizeConfig {
+            poa_threshold: self.recursive_poa_threshold,
+            chunk_size: self.recursive_chunk_size,
+            padding: self.recursive_padding,
+            max_depth: self.recursive_max_depth,
+            num_threads,
+            scoring_params: scoring_params.unwrap_or((5, 4, 6, 2, 24, 1)),
+            temp_dir,
+            sort_output: self.recursive_sort,
+            seqwish_threshold: self.recursive_seqwish_threshold,
+            debug_dir: self.recursive_debug_dir.clone(),
+        })
     }
 }
 
@@ -602,7 +645,7 @@ enum Args {
         #[clap(flatten)]
         sequence: SequenceOpts,
 
-        /// Directory for temporary files
+        /// Directory for temporary files [default: $TMPDIR or cwd; use "ramdisk" for /dev/shm]
         #[clap(long, value_parser)]
         temp_dir: Option<String>,
 
@@ -628,6 +671,16 @@ enum Args {
         #[clap(short = 'o', long, value_parser, default_value = "bed")]
         output_format: String,
 
+        /// GFA engine: 'recursive' (sweepga+POA+lacing, default), 'seqwish' (sweepga+seqwish, unsmoothed), or 'poa' (single-pass POA)
+        #[arg(help_heading = "Output options")]
+        #[clap(long, value_enum, default_value_t = GfaEngine::Recursive)]
+        engine: GfaEngine,
+
+        /// Disable alignment filtering for seqwish engine (faster but may produce broken graphs)
+        #[arg(help_heading = "Output options")]
+        #[clap(short = 'N', long, action)]
+        no_filter: bool,
+
         /// Output folder for partition files (default: current directory)
         #[arg(help_heading = "Output options")]
         #[clap(long, value_parser)]
@@ -635,6 +688,9 @@ enum Args {
 
         #[clap(flatten)]
         gfa_maf_fasta: GfaMafFastaOpts,
+
+        #[clap(flatten)]
+        recursive_opts: RecursiveOpts,
 
         /// Maximum distance between regions to merge
         #[arg(help_heading = "Filtering and merging")]
@@ -699,10 +755,20 @@ enum Args {
         #[clap(flatten)]
         query: QueryOpts,
 
-        /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', 'gfa' (v1.0), 'maf', 'fasta', or 'fasta+paf' ('gfa', 'maf', 'fasta', and 'fasta+paf' require --sequence-files or --sequence-list)
+        /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', 'gfa', 'maf', 'fasta', or 'fasta+paf' ('gfa', 'maf', 'fasta', and 'fasta+paf' require --sequence-files or --sequence-list)
         #[arg(help_heading = "Output options")]
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
+
+        /// GFA engine: 'recursive' (sweepga+POA+lacing), 'seqwish' (sweepga+seqwish, unsmoothed), or 'poa' (single-pass POA)
+        #[arg(help_heading = "Output options")]
+        #[clap(long, value_enum, default_value_t = GfaEngine::Recursive)]
+        engine: GfaEngine,
+
+        /// Disable alignment filtering for seqwish engine (faster but may produce broken graphs)
+        #[arg(help_heading = "Output options")]
+        #[clap(short = 'N', long, action)]
+        no_filter: bool,
 
         /// Prefix for output file (automatically appends the extension based on format)
         #[clap(short = 'O', long, value_parser, default_value = None)]
@@ -710,6 +776,14 @@ enum Args {
 
         #[clap(flatten)]
         gfa_maf_fasta: GfaMafFastaOpts,
+
+        #[clap(flatten)]
+        recursive_opts: RecursiveOpts,
+
+        /// Directory for temporary files [default: $TMPDIR or cwd; use "ramdisk" for /dev/shm] [default: $TMPDIR or cwd; use "ramdisk" for /dev/shm]
+        #[arg(help_heading = "Output options")]
+        #[clap(long, value_parser)]
+        temp_dir: Option<String>,
 
         #[clap(flatten)]
         common: CommonOpts,
@@ -792,6 +866,14 @@ enum Args {
         #[clap(long, value_parser, requires = "pca", default_value = "jaccard")]
         pca_measure: String,
 
+        /// GFA engine: 'poa' (single-pass POA, default) or 'recursive' (sweepga+POA+lacing)
+        #[arg(help_heading = "Engine options")]
+        #[clap(long, value_enum, default_value_t = GfaEngine::Poa)]
+        engine: GfaEngine,
+
+        #[clap(flatten)]
+        recursive_opts: RecursiveOpts,
+
         #[clap(flatten)]
         common: CommonOpts,
     },
@@ -866,7 +948,7 @@ enum Args {
         #[clap(long, action)]
         disk_backed: bool,
 
-        /// Directory for temporary files
+        /// Directory for temporary files [default: $TMPDIR or cwd; use "ramdisk" for /dev/shm]
         #[clap(long, value_parser)]
         temp_dir: Option<String>,
 
@@ -876,7 +958,7 @@ enum Args {
         no_filter: bool,
 
         /// n:m-best mappings kept in query:target dimensions (e.g., "1:1", "many:many")
-        #[clap(short = 'n', long, value_parser, default_value = "1:1")]
+        #[clap(short = 'n', long, value_parser, default_value = "many:many")]
         num_mappings: String,
 
         /// Scaffold jump/gap distance in bp (0 = disable scaffolding). Accepts k/m/g suffixes.
@@ -888,7 +970,7 @@ enum Args {
         scaffold_mass: u64,
 
         /// Scaffold filter mode (e.g., "1:1", "many:many", "inf:inf" for no filtering)
-        #[clap(short = 'm', long, value_parser, default_value = "1:1")]
+        #[clap(short = 'm', long, value_parser, default_value = "many:many")]
         scaffold_filter: String,
 
         /// Maximum overlap ratio for plane sweep filtering (0.0-1.0)
@@ -906,6 +988,17 @@ enum Args {
         /// Minimum mapping length to include in filtering. Accepts k/m/g suffixes.
         #[clap(short = 'b', long = "min-mapping-length", value_parser = parse_size, default_value = "0")]
         min_mapping_length: u64,
+
+        /// GFA engine: 'seqwish' (sweepga+seqwish, unsmoothed; default), 'recursive' (sweepga+POA+lacing), or 'poa' (single-pass POA)
+        #[clap(long, value_enum, default_value_t = GfaEngine::Seqwish)]
+        engine: GfaEngine,
+
+        /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for recursive/poa engines)
+        #[clap(long, value_parser, default_value = "5,4,6,2,24,1")]
+        poa_scoring: String,
+
+        #[clap(flatten)]
+        recursive_opts: RecursiveOpts,
 
         #[clap(flatten)]
         common: CommonOpts,
@@ -951,7 +1044,7 @@ enum Args {
         no_filter: bool,
 
         /// n:m-best mappings kept in query:target dimensions (e.g., "1:1", "many:many")
-        #[clap(short = 'n', long, value_parser, default_value = "1:1")]
+        #[clap(short = 'n', long, value_parser, default_value = "many:many")]
         num_mappings: String,
 
         /// Scaffold jump/gap distance in bp (0 = disable scaffolding). Accepts k/m/g suffixes.
@@ -963,7 +1056,7 @@ enum Args {
         scaffold_mass: u64,
 
         /// Scaffold filter mode (e.g., "1:1", "many:many", "inf:inf" for no filtering)
-        #[clap(short = 'm', long, value_parser, default_value = "1:1")]
+        #[clap(short = 'm', long, value_parser, default_value = "many:many")]
         scaffold_filter: String,
 
         /// Maximum overlap ratio for plane sweep filtering (0.0-1.0)
@@ -985,6 +1078,7 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
     },
+
 }
 
 fn main() {
@@ -1116,8 +1210,11 @@ fn run() -> io::Result<()> {
             alignment,
             window_size,
             output_format,
+            engine,
+            no_filter,
             output_folder,
             gfa_maf_fasta,
+            recursive_opts,
             merge_distance,
             min_identity,
             transitive_opts,
@@ -1131,7 +1228,7 @@ fn run() -> io::Result<()> {
             initialize_threads_and_log(&common);
 
             validate_selection_mode(&selection_mode)?;
-            validate_output_format(&output_format, &["bed", "gfa", "maf", "fasta", "fasta-aln"])?;
+            validate_output_format(&output_format, &["bed", "gfa", "maf", "fasta"])?;
 
             // Validate --approximate mode compatibility
             if approximate {
@@ -1148,10 +1245,16 @@ fn run() -> io::Result<()> {
                 // Partition always uses transitive queries
             }
 
+            // For size validation, flat POA on "gfa" needs the same limit as "gfa-poa"
+            let size_check_format = if output_format == "gfa" && engine == GfaEngine::Poa {
+                "gfa-poa"
+            } else {
+                &output_format
+            };
             validate_region_size(
                 0,
                 window_size as i32,
-                &output_format,
+                size_check_format,
                 merge_distance,
                 gfa_maf_fasta.force_large_region,
             )?;
@@ -1182,6 +1285,19 @@ fn run() -> io::Result<()> {
                 approximate,
             )?;
 
+            // Build engine config
+            let engine_config = EngineOpts {
+                engine,
+                recursive_config: if output_format == "gfa" && engine == GfaEngine::Recursive {
+                    Some(recursive_opts.build_config(common.threads.get(), scoring_params, None)?)
+                } else {
+                    None
+                },
+                num_threads: common.threads.get(),
+                no_filter,
+                debug_dir: recursive_opts.recursive_debug_dir.clone(),
+            };
+
             // Initialize impg after validation
             let impg = initialize_index(
                 &common,
@@ -1211,6 +1327,7 @@ fn run() -> io::Result<()> {
                 common.verbose > 1,
                 separate_files,
                 approximate,
+                &engine_config,
             )?;
         }
         Args::Query {
@@ -1218,10 +1335,28 @@ fn run() -> io::Result<()> {
             alignment,
             query,
             output_format,
+            engine,
+            no_filter,
             output_prefix,
             gfa_maf_fasta,
+            recursive_opts,
+            temp_dir,
         } => {
             initialize_threads_and_log(&common);
+
+            // Migration errors for removed format strings
+            if output_format == "gfa-poa" {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Format 'gfa-poa' has been removed. Use '-o gfa --engine poa' instead.",
+                ));
+            }
+            if output_format == "gfa-seqwish" {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Format 'gfa-seqwish' has been removed. Use '-o gfa --engine seqwish' instead.",
+                ));
+            }
 
             validate_output_format(
                 &output_format,
@@ -1231,8 +1366,6 @@ fn run() -> io::Result<()> {
                     "bedpe",
                     "paf",
                     "gfa",
-                    "gfa-seqwish",
-                    "gfa-poa",
                     "maf",
                     "fasta",
                     "fasta+paf",
@@ -1289,6 +1422,13 @@ fn run() -> io::Result<()> {
                 sequence_files_for_impg,
             )?;
 
+            // For size validation, flat POA on "gfa" needs the same limit as the old "gfa-poa"
+            let size_check_format = if output_format == "gfa" && engine == GfaEngine::Poa {
+                "gfa-poa"
+            } else {
+                &output_format
+            };
+
             // Parse and validate all target ranges, tracking which parameter was used
             let (target_ranges, from_range_param) = if let Some(target_range_str) =
                 &query.target_range
@@ -1329,7 +1469,7 @@ fn run() -> io::Result<()> {
                 validate_region_size(
                     target_range.0,
                     target_range.1,
-                    &output_format,
+                    size_check_format,
                     query.effective_merge_distance(),
                     gfa_maf_fasta.force_large_region,
                 )?;
@@ -1348,7 +1488,7 @@ fn run() -> io::Result<()> {
                     validate_region_size(
                         *start,
                         *end,
-                        &output_format,
+                        size_check_format,
                         query.effective_merge_distance(),
                         gfa_maf_fasta.force_large_region,
                     )?;
@@ -1451,8 +1591,22 @@ fn run() -> io::Result<()> {
                             sequence_index.as_ref(),
                         )?;
                     }
-                    "gfa" | "gfa-seqwish" => {
-                        // Default GFA mode is seqwish (variation graph)
+                    "gfa" => {
+                        let engine_opts = EngineOpts {
+                            engine,
+                            recursive_config: if engine == GfaEngine::Recursive {
+                                Some(recursive_opts.build_config(
+                                    common.threads.get(),
+                                    scoring_params,
+                                    temp_dir.clone(),
+                                )?)
+                            } else {
+                                None
+                            },
+                            num_threads: common.threads.get(),
+                            no_filter,
+                            debug_dir: recursive_opts.recursive_debug_dir.clone(),
+                        };
                         output_results_gfa(
                             &impg,
                             &mut results,
@@ -1462,23 +1616,7 @@ fn run() -> io::Result<()> {
                             query.effective_merge_distance(),
                             query.merge_strands_for_output("gfa"),
                             scoring_params,
-                            GfaMode::Seqwish,
-                            common.threads.get(),
-                        )?;
-                    }
-                    "gfa-poa" => {
-                        // POA-based GFA (partial order alignment graph)
-                        output_results_gfa(
-                            &impg,
-                            &mut results,
-                            &mut find_output_stream(&output_prefix, "gfa")?,
-                            sequence_index.as_ref().unwrap(),
-                            &name,
-                            query.effective_merge_distance(),
-                            query.merge_strands_for_output("gfa"),
-                            scoring_params,
-                            GfaMode::Poa,
-                            common.threads.get(),
+                            &engine_opts,
                         )?;
                     }
                     "maf" => {
@@ -1726,6 +1864,8 @@ fn run() -> io::Result<()> {
             pca_measure,
             polarize_n_prev,
             polarize_guide_samples,
+            engine,
+            recursive_opts,
         } => {
             initialize_threads_and_log(&common);
 
@@ -1765,6 +1905,13 @@ fn run() -> io::Result<()> {
                 ));
             }
 
+            if engine == GfaEngine::Seqwish {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "The 'seqwish' engine is not supported for the similarity command (it doesn't produce an MSA). Use 'poa' or 'recursive'.",
+                ));
+            }
+
             // Resolve alignment files once (supports process substitution inputs)
             let alignment_files = resolve_alignment_files(&alignment)?;
 
@@ -1774,13 +1921,13 @@ fn run() -> io::Result<()> {
 
             // Setup POA/sequence resources (always required for similarity)
             let (sequence_index, scoring_params) = gfa_maf_fasta.setup_output_resources(
-                "gfa-poa",
+                "gfa",
                 false,
                 alignment_files.as_slice(),
                 false,
             )?;
-            let sequence_index = sequence_index.unwrap(); // Safe since "gfa-poa" always requires sequence files
-            let scoring_params = scoring_params.unwrap(); // Safe since "gfa-poa" always requires POA
+            let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
+            let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA scoring
 
             let subset_filter = load_subset_filter_if_provided(&query.subset_sequence_list)?;
 
@@ -1895,6 +2042,13 @@ fn run() -> io::Result<()> {
                 all_query_data.push((query_intervals, region_label));
             }
 
+            // Build recursive config if engine is Recursive
+            let recursive_config = if engine == GfaEngine::Recursive {
+                Some(recursive_opts.build_config(common.threads.into(), Some(scoring_params), None)?)
+            } else {
+                None
+            };
+
             // Process all regions in parallel
             similarity::compute_and_output_similarities(
                 &impg,
@@ -1910,6 +2064,7 @@ fn run() -> io::Result<()> {
                 &pca_measure,
                 polarize_n_prev,
                 polarize_guide_samples.as_deref(),
+                recursive_config.as_ref(),
             )?;
         }
         Args::Stats {
@@ -1958,6 +2113,9 @@ fn run() -> io::Result<()> {
             min_identity,
             scaffold_dist,
             min_mapping_length,
+            engine,
+            poa_scoring,
+            recursive_opts,
             common,
         } => {
             initialize_threads_and_log(&common);
@@ -1970,32 +2128,67 @@ fn run() -> io::Result<()> {
                 ));
             }
 
-            let config = graph::GraphBuildConfig {
-                num_threads: common.threads.get(),
-                frequency_multiplier,
-                frequency,
-                min_alignment_length,
-                repeat_max,
-                min_repeat_dist,
-                min_match_len,
-                sparse_factor,
-                transclose_batch,
-                use_in_memory: !disk_backed,
-                show_progress: common.verbose > 0,
-                temp_dir,
-                input_paf: paf_file,
-                no_filter,
-                num_mappings,
-                scaffold_jump,
-                scaffold_mass,
-                scaffold_filter,
-                overlap,
-                min_identity,
-                scaffold_dist,
-                min_mapping_length,
-            };
+            match engine {
+                GfaEngine::Recursive => {
+                    // Parse scoring for the recursive engine
+                    let scoring = parse_poa_scoring_string(&poa_scoring)?;
+                    let recursive_config = recursive_opts.build_config(
+                        common.threads.get(),
+                        Some(scoring),
+                        temp_dir.clone(),
+                    )?;
 
-            graph::run_graph_build(fasta_files, fasta_list, &output, config)?;
+                    if output == "-" {
+                        let stdout = io::stdout();
+                        let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
+                        graph::run_graph_build_realize(fasta_files, fasta_list, &mut out, &recursive_config)?;
+                    } else {
+                        let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
+                        graph::run_graph_build_realize(fasta_files, fasta_list, &mut out, &recursive_config)?;
+                    }
+                }
+                GfaEngine::Poa => {
+                    let scoring = parse_poa_scoring_string(&poa_scoring)?;
+
+                    if output == "-" {
+                        let stdout = io::stdout();
+                        let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
+                        graph::run_graph_build_poa(fasta_files, fasta_list, &mut out, scoring, common.threads.get())?;
+                    } else {
+                        let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
+                        graph::run_graph_build_poa(fasta_files, fasta_list, &mut out, scoring, common.threads.get())?;
+                    }
+                }
+                GfaEngine::Seqwish => {
+                    let config = graph::GraphBuildConfig {
+                        num_threads: common.threads.get(),
+                        frequency_multiplier,
+                        frequency,
+                        min_alignment_length,
+                        repeat_max,
+                        min_repeat_dist,
+                        min_match_len,
+                        sparse_factor,
+                        transclose_batch,
+                        use_in_memory: !disk_backed,
+                        show_progress: common.verbose > 0,
+                        temp_dir,
+                        input_paf: paf_file,
+                        no_filter,
+                        num_mappings,
+                        scaffold_jump,
+                        scaffold_mass,
+                        scaffold_filter,
+                        overlap,
+                        min_identity,
+                        scaffold_dist,
+                        min_mapping_length,
+                        debug_dir: None,
+                    };
+
+                    graph::run_graph_build(fasta_files, fasta_list, &output, config)?;
+                }
+            }
         }
         Args::Align {
             fasta_files,
@@ -2119,6 +2312,30 @@ fn validate_selection_mode(mode: &str) -> io::Result<()> {
     }
 }
 
+/// Parse POA scoring string "match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2"
+fn parse_poa_scoring_string(s: &str) -> io::Result<(u8, u8, u8, u8, u8, u8)> {
+    let parts: Vec<&str> = s.split(',').collect();
+    if parts.len() != 6 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "POA scoring format should be 'match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2'",
+        ));
+    }
+    let parse_u8 = |s: &str, name: &str| {
+        s.parse::<u8>().map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid {name} value"))
+        })
+    };
+    Ok((
+        parse_u8(parts[0], "match score")?,
+        parse_u8(parts[1], "mismatch cost")?,
+        parse_u8(parts[2], "gap opening 1 cost")?,
+        parse_u8(parts[3], "gap extension 1 cost")?,
+        parse_u8(parts[4], "gap opening 2 cost")?,
+        parse_u8(parts[5], "gap extension 2 cost")?,
+    ))
+}
+
 fn validate_output_format(format: &str, valid_formats: &[&str]) -> io::Result<()> {
     if valid_formats.contains(&format) {
         Ok(())
@@ -2203,7 +2420,7 @@ fn validate_region_size(
     const SIZE_LIMIT: u64 = 10_000; // 10kbp limit
     const MERGE_DISTANCE_LIMIT: i32 = 1000; // 1k limit
 
-    // Check if this is a maf/gfa-poa output format that uses SPOA (not gfa/gfa-seqwish which use seqwish)
+    // Check if this is a format that uses flat single-pass SPOA (may be slow/OOM on large regions)
     let uses_spoa = matches!(output_format, "maf" | "gfa-poa" | "fasta-aln");
 
     if uses_spoa && !force_large_region {
@@ -3251,15 +3468,6 @@ fn output_results_paf(
     Ok(())
 }
 
-/// GFA generation mode
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum GfaMode {
-    /// POA-based GFA (partial order alignment graph)
-    Poa,
-    /// Seqwish-based GFA (variation graph via graph induction)
-    Seqwish,
-}
-
 fn output_results_gfa(
     impg: &impl ImpgIndex,
     results: &mut Vec<AdjustedInterval>,
@@ -3269,8 +3477,7 @@ fn output_results_gfa(
     merge_distance: i32,
     merge_strands: bool,
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
-    gfa_mode: GfaMode,
-    num_threads: usize,
+    engine_opts: &EngineOpts,
 ) -> io::Result<()> {
     // Merge intervals if needed
     merge_query_adjusted_intervals(results, merge_distance, merge_strands);
@@ -3281,31 +3488,13 @@ fn output_results_gfa(
         .map(|(query_interval, _, _)| query_interval)
         .collect();
 
-    let gfa_output = match gfa_mode {
-        GfaMode::Poa => {
-            let params = scoring_params.ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "POA scoring parameters required for gfa-poa mode",
-                )
-            })?;
-            impg::graph::generate_gfa_from_intervals(impg, &query_intervals, sequence_index, params)
-        }
-        GfaMode::Seqwish => {
-            let config = impg::graph::SeqwishConfig {
-                num_threads,
-                frequency_multiplier: 10,
-                min_alignment_length: 100,
-                temp_dir: None,
-            };
-            impg::graph::generate_gfa_seqwish_from_intervals(
-                impg,
-                &query_intervals,
-                sequence_index,
-                &config,
-            )?
-        }
-    };
+    let gfa_output = impg::dispatch_gfa_engine(
+        impg,
+        &query_intervals,
+        sequence_index,
+        scoring_params,
+        engine_opts,
+    )?;
     writeln!(out, "{gfa_output}")?;
 
     Ok(())

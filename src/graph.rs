@@ -3,23 +3,12 @@ use crate::sequence_index::{SequenceIndex, UnifiedSequenceIndex};
 use coitrees::Interval;
 use spoa_rs::{AlignmentEngine, AlignmentType as SpoaAlignmentType, Graph as SpoaGraph};
 use std::io::{self, BufWriter, Write};
-use std::sync::{Arc, Mutex, RwLock};
 
 // Gfasort imports for graph sorting
 use gfasort::gfa_parser::load_gfa;
-use gfasort::ygs::{ygs_sort, YgsParams};
+use gfasort::ygs::{unchop_only, ygs_sort, YgsParams};
 
-// Seqwish imports for graph induction
-use bitvec::prelude::*;
-use seqwish::alignments::unpack_paf_alignments;
-use seqwish::compact::compact_nodes;
-use seqwish::gfa::emit_gfa;
-use seqwish::intervaltree::{AdaptiveTree, IntervalTree};
-use seqwish::links::{derive_links, RankSelectBitVector};
-use seqwish::seqindex::SeqIndex;
-use seqwish::transclosure::compute_transitive_closures;
-use sweepga::fastga_integration::FastGAIntegration;
-
+#[derive(Clone)]
 pub struct SequenceMetadata {
     pub name: String,
     pub start: i32,
@@ -28,67 +17,74 @@ pub struct SequenceMetadata {
     pub total_length: usize,
 }
 
+impl SequenceMetadata {
+    /// Canonical GFA path name in forward-strand coordinates: `name:fwd_start-fwd_end`.
+    ///
+    /// For `+` strand this is `name:start-(start+size)`.
+    /// For `-` strand this converts from MAF-style RC-frame coordinates back to
+    /// forward-strand: `name:(total-start-size)-(total-start)`.
+    pub fn path_name(&self) -> String {
+        let (fwd_start, fwd_end) = if self.strand == '+' {
+            (self.start, self.start + self.size)
+        } else {
+            (
+                (self.total_length as i32) - self.start - self.size,
+                (self.total_length as i32) - self.start,
+            )
+        };
+        format!("{}:{}-{}", self.name, fwd_start, fwd_end)
+    }
+
+    /// Name used in FASTA headers for alignment tools (sweepga/FastGA).
+    /// Includes strand to distinguish orientations: `name:start-end(strand)`.
+    /// Uses raw metadata coordinates (MAF-style for `-` strand).
+    pub fn alignment_name(&self) -> String {
+        format!(
+            "{}:{}-{}({})",
+            self.name,
+            self.start,
+            self.start + self.size,
+            self.strand
+        )
+    }
+}
+
 pub fn generate_gfa_from_intervals(
     impg: &impl ImpgIndex,
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
-) -> String {
-    // Prepare POA graph and sequences
+    num_threads: usize,
+) -> io::Result<String> {
     let (graph, sequence_metadata) =
         prepare_poa_graph_and_sequences(impg, results, sequence_index, scoring_params).unwrap();
-
-    // Generate headers for GFA
-    let headers: Vec<String> = sequence_metadata
-        .iter()
-        .map(|meta| {
-            format!(
-                "{}:{}-{}",
-                meta.name,
-                if meta.strand == '+' {
-                    meta.start
-                } else {
-                    (meta.total_length as i32) - meta.start - meta.size
-                },
-                if meta.strand == '+' {
-                    meta.start + meta.size
-                } else {
-                    (meta.total_length as i32) - meta.start
-                }
-            )
-        })
-        .collect();
-
-    // Generate GFA directly from the graph
-    let gfa_output = graph.generate_gfa(&headers, false);
-
-    // Post-process GFA to handle strand information
-    post_process_gfa_for_strands(gfa_output, &sequence_metadata)
+    spoa_graph_to_sorted_gfa(graph, &sequence_metadata, num_threads)
 }
 
-fn post_process_gfa_for_strands(gfa: String, sequence_metadata: &[SequenceMetadata]) -> String {
+/// Convert an SPOA graph + metadata into a sorted GFA string.
+///
+/// Shared pipeline: generate GFA → post-process strands → unchop + sort.
+pub(crate) fn spoa_graph_to_sorted_gfa(
+    graph: SpoaGraph,
+    sequence_metadata: &[SequenceMetadata],
+    num_threads: usize,
+) -> io::Result<String> {
+    let headers: Vec<String> = sequence_metadata
+        .iter()
+        .map(|meta| meta.path_name())
+        .collect();
+    let gfa_output = graph.generate_gfa(&headers, false);
+    let gfa_output = post_process_gfa_for_strands(gfa_output, sequence_metadata);
+    sort_gfa(&gfa_output, num_threads)
+}
+
+pub fn post_process_gfa_for_strands(gfa: String, sequence_metadata: &[SequenceMetadata]) -> String {
     let mut output = String::new();
 
     // Create a map of sequence names to their strand information
     let strand_map: std::collections::HashMap<String, char> = sequence_metadata
         .iter()
-        .map(|meta| {
-            let header = format!(
-                "{}:{}-{}",
-                meta.name,
-                if meta.strand == '+' {
-                    meta.start
-                } else {
-                    (meta.total_length as i32) - meta.start - meta.size
-                },
-                if meta.strand == '+' {
-                    meta.start + meta.size
-                } else {
-                    (meta.total_length as i32) - meta.start
-                }
-            );
-            (header, meta.strand)
-        })
+        .map(|meta| (meta.path_name(), meta.strand))
         .collect();
 
     // Process each line
@@ -114,7 +110,7 @@ fn post_process_gfa_for_strands(gfa: String, sequence_metadata: &[SequenceMetada
                                 } else if let Some(seg_stripped) = seg.strip_suffix('-') {
                                     format!("{seg_stripped}+")
                                 } else {
-                                    panic!("Missing segment orientation in path: {path_name}");
+                                    seg.to_string()
                                 }
                             })
                             .collect();
@@ -156,6 +152,39 @@ pub fn generate_maf_from_intervals(
     format_maf_from_msa(&msa, &sequence_metadata, None)
 }
 
+/// Find the first and last non-gap columns in an MSA, returning `(left, right)` where
+/// `right` is exclusive. If the MSA is empty or all-gap, returns `(0, msa_len)`.
+fn find_msa_trim_bounds(msa: &[String]) -> (usize, usize) {
+    let msa_len = msa.first().map(|s| s.len()).unwrap_or(0);
+    if msa_len == 0 {
+        return (0, 0);
+    }
+    let mut left = 0usize;
+    let mut right = msa_len;
+
+    'find_left: for i in 0..msa_len {
+        for s in msa {
+            if s.as_bytes()[i] != b'-' {
+                left = i;
+                break 'find_left;
+            }
+        }
+    }
+    'find_right: for i in (0..msa_len).rev() {
+        for s in msa {
+            if s.as_bytes()[i] != b'-' {
+                right = i + 1;
+                break 'find_right;
+            }
+        }
+    }
+    if right < left {
+        (0, msa_len)
+    } else {
+        (left, right)
+    }
+}
+
 fn format_maf_from_msa(
     msa: &[String],
     sequence_metadata: &[SequenceMetadata],
@@ -169,30 +198,7 @@ fn format_maf_from_msa(
         output.push_str(&format!("# {name}\n"));
     }
 
-    // Find trimming positions (remove all-gap columns at start and end)
-    let msa_len = msa.first().map(|s| s.len()).unwrap_or(0);
-    let mut start_trim = 0;
-    let mut end_trim = msa_len;
-
-    // Find first non-gap column
-    'outer: for pos in 0..msa_len {
-        for seq in msa {
-            if seq.chars().nth(pos).unwrap_or('-') != '-' {
-                start_trim = pos;
-                break 'outer;
-            }
-        }
-    }
-
-    // Find last non-gap column
-    'outer2: for pos in (0..msa_len).rev() {
-        for seq in msa {
-            if seq.chars().nth(pos).unwrap_or('-') != '-' {
-                end_trim = pos + 1;
-                break 'outer2;
-            }
-        }
-    }
+    let (start_trim, end_trim) = find_msa_trim_bounds(msa);
 
     // Write alignment block
     output.push('\n'); // blank line before block
@@ -249,32 +255,11 @@ fn format_fasta_alignment_from_msa(
 
     // Determine trimming window (remove all-gap columns at the ends)
     let aln_len = msa.first().map(|s| s.len()).unwrap_or(0);
-    let (mut left, mut right) = (0usize, aln_len);
-
-    if trim_all_gap && aln_len > 0 {
-        // first non-gap column
-        'left: for i in 0..aln_len {
-            for s in msa {
-                if s.as_bytes()[i] != b'-' {
-                    left = i;
-                    break 'left;
-                }
-            }
-        }
-        // last non-gap column (exclusive)
-        'right: for i in (0..aln_len).rev() {
-            for s in msa {
-                if s.as_bytes()[i] != b'-' {
-                    right = i + 1;
-                    break 'right;
-                }
-            }
-        }
-        if right < left {
-            left = 0;
-            right = aln_len;
-        }
-    }
+    let (left, right) = if trim_all_gap && aln_len > 0 {
+        find_msa_trim_bounds(msa)
+    } else {
+        (0, aln_len)
+    };
 
     // Emit aligned FASTA:
     // Header encodes original label + coordinates consistent with MAF logic:
@@ -319,106 +304,61 @@ fn format_fasta_alignment_from_msa(
     out
 }
 
+/// Build a new SPOA graph and alignment engine with the given scoring parameters.
+pub(crate) fn build_spoa_engine(
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+) -> (SpoaGraph, AlignmentEngine) {
+    let (match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2) = scoring_params;
+    let graph = SpoaGraph::new();
+    let engine = AlignmentEngine::new_convex(
+        SpoaAlignmentType::kSW,
+        match_score as i8,
+        -(mismatch as i8),
+        -(gap_open1 as i8),
+        -(gap_extend1 as i8),
+        -(gap_open2 as i8),
+        -(gap_extend2 as i8),
+    );
+    (graph, engine)
+}
+
+/// Add sequences to a SPOA graph via `engine`. Skips empty sequences.
+pub(crate) fn feed_sequences_to_graph(
+    engine: &mut AlignmentEngine,
+    graph: &mut SpoaGraph,
+    sequences: impl Iterator<Item = impl AsRef<str>>,
+) {
+    for seq in sequences {
+        let seq = seq.as_ref();
+        if seq.is_empty() {
+            continue;
+        }
+        let weights = vec![1u32; seq.len()];
+        let (_, alignment) = engine.align(seq, graph);
+        graph.add_alignment_with_weights(alignment, seq, &weights);
+    }
+}
+
 pub fn prepare_poa_graph_and_sequences(
     impg: &impl ImpgIndex,
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> io::Result<(SpoaGraph, Vec<SequenceMetadata>)> {
-    use rayon::prelude::*;
+    let mut processed_sequences = prepare_sequences(impg, results, sequence_index)?;
+    // SPOA benefits from longest-first feeding order
+    processed_sequences.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
 
-    // Create scoring parameters for alignment
-    let (match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2) = scoring_params;
+    let (mut graph, mut engine) = build_spoa_engine(scoring_params);
 
-    // Parallelize sequence fetching and processing
-    let mut processed_sequences: Vec<(String, SequenceMetadata)> = results
-        .par_iter()
-        .map(|interval| -> io::Result<(String, SequenceMetadata)> {
-            let seq_name = impg
-                .seq_index()
-                .get_name(interval.metadata)
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("Sequence name not found for ID {}", interval.metadata),
-                    )
-                })?;
-
-            // Get total sequence length
-            let total_length = impg
-                .seq_index()
-                .get_len_from_id(interval.metadata)
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("Sequence length not found for ID {}", interval.metadata),
-                    )
-                })?;
-
-            // Determine actual start and end based on orientation
-            let (start, end, strand) = if interval.first <= interval.last {
-                (interval.first, interval.last, '+')
-            } else {
-                (interval.last, interval.first, '-')
-            };
-
-            // Fetch the sequence
-            let sequence = sequence_index.fetch_sequence(seq_name, start, end)?;
-
-            // If reverse strand, reverse complement the sequence
-            let sequence = if strand == '-' {
-                reverse_complement(&sequence)
-            } else {
-                sequence
-            };
-
-            let sequence_str = String::from_utf8_lossy(&sequence).to_string();
-            let seq_size = end - start;
-
-            // For MAF format, if strand is "-", start is relative to reverse-complemented sequence
-            let maf_start = if strand == '-' {
-                (total_length as i32) - end
-            } else {
-                start
-            };
-            let metadata = SequenceMetadata {
-                name: seq_name.to_string(),
-                start: maf_start,
-                size: seq_size,
-                strand,
-                total_length,
-            };
-
-            Ok((sequence_str, metadata))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // Sort sequences by length in descending order (longest first)
-    processed_sequences.par_sort_by(|a, b| b.0.len().cmp(&a.0.len()));
-
-    // Create a SPOA graph
-    let mut graph = SpoaGraph::new();
-    // Create an alignment engine with affine gap penalties
-    let mut engine = AlignmentEngine::new_convex(
-        SpoaAlignmentType::kSW, // Local alignment (Smith-Waterman)
-        match_score as i8,      // match score (positive)
-        -(mismatch as i8),      // mismatch penalty (negative)
-        -(gap_open1 as i8),     // gap open penalty (negative)
-        -(gap_extend1 as i8),   // gap extend penalty (negative)
-        -(gap_open2 as i8),     // gap open penalty (negative)
-        -(gap_extend2 as i8),   // gap extend penalty (negative)
+    // Collect metadata and feed sequences to SPOA graph (SPOA is not thread-safe)
+    let sequence_metadata: Vec<SequenceMetadata> =
+        processed_sequences.iter().map(|(_, m)| m.clone()).collect();
+    feed_sequences_to_graph(
+        &mut engine,
+        &mut graph,
+        processed_sequences.iter().map(|(s, _)| s.as_str()),
     );
-
-    // Sequentially add sequences to SPOA graph (SPOA is not thread-safe)
-    let mut sequence_metadata = Vec::with_capacity(processed_sequences.len());
-    for (sequence_str, metadata) in processed_sequences {
-        sequence_metadata.push(metadata);
-
-        // Add to SPOA graph
-        let weights = vec![1u32; sequence_str.len()];
-        let (_, alignment) = engine.align(&sequence_str, &graph);
-        graph.add_alignment_with_weights(alignment, &sequence_str, &weights);
-    }
 
     Ok((graph, sequence_metadata))
 }
@@ -431,7 +371,7 @@ pub fn prepare_sequences(
     use rayon::prelude::*;
 
     // Fetch, strand-normalize, and annotate each interval
-    let mut pairs: Vec<(String, SequenceMetadata)> = results
+    let pairs: Vec<(String, SequenceMetadata)> = results
         .par_iter()
         .map(|interval| -> std::io::Result<(String, SequenceMetadata)> {
             // Resolve sequence name
@@ -496,10 +436,107 @@ pub fn prepare_sequences(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Keep longest-first ordering (matches SPOA feeding order)
-    pairs.par_sort_by(|a, b| b.0.len().cmp(&a.0.len()));
-
     Ok(pairs)
+}
+
+/// Extract a multiple sequence alignment (MSA) from a GFA graph string.
+///
+/// Parses segment (S) and path (P) lines from the GFA. Uses the sorted segment
+/// order as the column order. For each path, outputs the segment sequence at
+/// positions the path visits, or a gap string of equal length where it doesn't.
+///
+/// Returns a vector of (path_name, msa_string) pairs, in the order paths appear
+/// in the GFA.
+pub fn gfa_to_msa(gfa: &str) -> Vec<(String, String)> {
+    use std::collections::HashMap;
+
+    // Parse segments: id -> sequence
+    let mut segments: HashMap<String, String> = HashMap::new();
+    // Ordered list of segment IDs (preserving GFA order for column layout)
+    let mut segment_order: Vec<String> = Vec::new();
+    // Parse paths: name -> vec of (segment_id, orientation)
+    let mut paths: Vec<(String, Vec<(String, char)>)> = Vec::new();
+
+    for line in gfa.lines() {
+        if line.starts_with("S\t") {
+            let fields: Vec<&str> = line.splitn(4, '\t').collect();
+            if fields.len() >= 3 {
+                let id = fields[1].to_string();
+                let seq = fields[2].to_string();
+                if !segments.contains_key(&id) {
+                    segment_order.push(id.clone());
+                }
+                segments.insert(id, seq);
+            }
+        } else if line.starts_with("P\t") {
+            let fields: Vec<&str> = line.splitn(4, '\t').collect();
+            if fields.len() >= 3 {
+                let path_name = fields[1].to_string();
+                let steps: Vec<(String, char)> = fields[2]
+                    .split(',')
+                    .map(|step| {
+                        if let Some(stripped) = step.strip_suffix('+') {
+                            (stripped.to_string(), '+')
+                        } else if let Some(stripped) = step.strip_suffix('-') {
+                            (stripped.to_string(), '-')
+                        } else {
+                            (step.to_string(), '+')
+                        }
+                    })
+                    .collect();
+                paths.push((path_name, steps));
+            }
+        }
+    }
+
+    if segments.is_empty() || paths.is_empty() {
+        return Vec::new();
+    }
+
+    // For each path, build a set of visited segments
+    // Then construct the MSA row
+    let mut result = Vec::with_capacity(paths.len());
+
+    for (path_name, steps) in &paths {
+        // Track which segments this path visits and in what order
+        let mut visited: HashMap<&str, char> = HashMap::new();
+        for (seg_id, orient) in steps {
+            visited.insert(seg_id.as_str(), *orient);
+        }
+
+        let mut msa_row = String::new();
+        for seg_id in &segment_order {
+            let seq = &segments[seg_id];
+            if let Some(&orient) = visited.get(seg_id.as_str()) {
+                if orient == '-' {
+                    // Reverse complement
+                    let rc: String = seq
+                        .bytes()
+                        .rev()
+                        .map(|b| match b {
+                            b'A' | b'a' => 'T',
+                            b'T' | b't' => 'A',
+                            b'C' | b'c' => 'G',
+                            b'G' | b'g' => 'C',
+                            _ => 'N',
+                        })
+                        .collect();
+                    msa_row.push_str(&rc);
+                } else {
+                    msa_row.push_str(seq);
+                }
+            } else {
+                // Gap: same length as segment
+                for _ in 0..seq.len() {
+                    msa_row.push('-');
+                }
+            }
+        }
+
+        result.push((path_name.clone(), msa_row));
+    }
+
+    result
 }
 
 /// Given a raw GFAv1.1 string and a `Write` target, convert it to GFAv1.0:
@@ -693,6 +730,9 @@ pub fn sort_gfa(gfa_content: &str, num_threads: usize) -> io::Result<String> {
         return Ok(gfa_content.to_string());
     }
 
+    // Compact single-base nodes into longer segments (unchop)
+    unchop_only(&mut graph, 0);
+
     // Create Ygs parameters from the graph
     let params = YgsParams::from_graph(&graph, 0, num_threads);
 
@@ -723,6 +763,14 @@ pub struct SeqwishConfig {
     pub min_alignment_length: u64,
     /// Optional temp directory for intermediate files
     pub temp_dir: Option<String>,
+    /// Skip PAF filtering (faster but may produce broken graphs)
+    pub no_filter: bool,
+    /// n:m-best mappings kept in query:target dimensions (e.g., "1:1", "many:many")
+    pub num_mappings: String,
+    /// Scaffold filter mode (e.g., "1:1", "many:many")
+    pub scaffold_filter: String,
+    /// Optional directory to save intermediate debug files (FASTA, raw PAF, filtered PAF).
+    pub debug_dir: Option<String>,
 }
 
 impl Default for SeqwishConfig {
@@ -732,24 +780,26 @@ impl Default for SeqwishConfig {
             frequency_multiplier: 10,
             min_alignment_length: 100,
             temp_dir: None,
+            no_filter: false,
+            num_mappings: "many:many".to_string(),
+            scaffold_filter: "many:many".to_string(),
+            debug_dir: None,
         }
     }
 }
 
-/// Generate GFA from intervals using sweepga+seqwish (variation graph induction)
+/// Generate a variation graph from intervals using sweepga+seqwish (graph induction
+/// via transitive closure). The resulting graph is raw (unsmoothed).
 ///
-/// This produces a proper variation graph where shared sequence is collapsed into
-/// single nodes, unlike POA which creates a partial order alignment graph.
+/// Delegates to `commands::graph::build_graph()` so that query and graph
+/// subcommands use exactly the same alignment, filtering, and graph-building
+/// pipeline.
 pub fn generate_gfa_seqwish_from_intervals(
     impg: &impl ImpgIndex,
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
     config: &SeqwishConfig,
 ) -> io::Result<String> {
-    // Temp directory is now controlled by the caller via TMPDIR environment variable
-    // or seqwish::tempfile::set_dir(). Default is system temp (/tmp).
-    // For better I/O performance, callers can set --temp-dir /dev/shm
-
     if results.is_empty() {
         return Ok(String::from("H\tVN:Z:1.0\n"));
     }
@@ -761,9 +811,6 @@ pub fn generate_gfa_seqwish_from_intervals(
         return Ok(String::from("H\tVN:Z:1.0\n"));
     }
 
-    let num_sequences = sequences.len();
-    let kmer_frequency = num_sequences * config.frequency_multiplier;
-
     // 2) Write sequences to a temp FASTA file
     let combined_fasta = tempfile::Builder::new()
         .suffix(".fa")
@@ -773,143 +820,173 @@ pub fn generate_gfa_seqwish_from_intervals(
     {
         let mut writer = BufWriter::new(&combined_fasta);
         for (seq, meta) in &sequences {
-            // Use a unique name for each sequence that includes coordinates
-            let header = format!(
-                ">{}:{}-{}({})",
-                meta.name,
-                meta.start,
-                meta.start + meta.size,
-                meta.strand
-            );
+            let header = format!(">{}", meta.path_name());
             writeln!(writer, "{}", header)?;
             writeln!(writer, "{}", seq)?;
         }
         writer.flush()?;
     }
 
-    // 3) Run sweepga/FastGA alignment
-    let fastga = FastGAIntegration::new(
-        Some(kmer_frequency),
-        config.num_threads,
-        config.min_alignment_length,
-        config.temp_dir.clone(),
-    );
+    // 3) Build graph using the same pipeline as `graph --engine seqwish`
+    let graph_config = crate::commands::graph::GraphBuildConfig {
+        num_threads: config.num_threads,
+        frequency_multiplier: config.frequency_multiplier,
+        min_alignment_length: config.min_alignment_length,
+        temp_dir: config.temp_dir.clone(),
+        no_filter: config.no_filter,
+        num_mappings: config.num_mappings.clone(),
+        scaffold_filter: config.scaffold_filter.clone(),
+        debug_dir: config.debug_dir.clone(),
+        show_progress: false,
+        ..crate::commands::graph::GraphBuildConfig::default()
+    };
 
-    let paf_temp = fastga
-        .align_to_temp_paf(combined_fasta.path(), combined_fasta.path())
-        .map_err(|e| io::Error::other(format!("FastGA alignment failed: {}", e)))?;
+    let fasta_path = combined_fasta
+        .path()
+        .to_str()
+        .ok_or_else(|| io::Error::other("Temp FASTA path is not valid UTF-8"))?
+        .to_string();
 
-    // 4) Build seqwish sequence index
-    let mut seqidx = SeqIndex::new();
-    seqidx
-        .build_index(combined_fasta.path().to_str().unwrap())
-        .map_err(io::Error::other)?;
-    let seqidx = Arc::new(seqidx);
-
-    // 5) Index alignments into interval tree (in-memory for small datasets)
-    let _aln_iitree_idx = seqwish::tempfile::create("seqwish-", ".sqa")?;
-    let mut aln_iitree_obj = AdaptiveTree::new_memory()?;
-    aln_iitree_obj.open_writer()?;
-    let aln_iitree = Arc::new(Mutex::new(aln_iitree_obj));
-
-    unpack_paf_alignments(
-        paf_temp.path().to_str().unwrap(),
-        Arc::clone(&aln_iitree),
-        Arc::clone(&seqidx),
-        0,   // min_match_len
-        0.0, // sparse_factor
-        config.num_threads,
-    )?;
-
-    aln_iitree.lock().unwrap().index()?;
-
-    // Unwrap Mutex - alignment tree is read-only during graph construction
-    let aln_iitree_readonly = Arc::new(
-        Arc::try_unwrap(aln_iitree)
-            .map_err(|_| io::Error::other("Failed to unwrap alignment tree Arc"))?
-            .into_inner()
-            .unwrap(),
-    );
-
-    // 6) Compute transitive closures
-    let seq_v_file = seqwish::tempfile::create("seqwish-", ".sqs")?;
-    let _node_iitree_idx = seqwish::tempfile::create("seqwish-", ".sqn")?;
-    let _path_iitree_idx = seqwish::tempfile::create("seqwish-", ".sqp")?;
-
-    let mut node_iitree_obj = AdaptiveTree::new_memory()?;
-    node_iitree_obj.open_writer()?;
-    let node_iitree = Arc::new(RwLock::new(node_iitree_obj));
-
-    let mut path_iitree_obj = AdaptiveTree::new_memory()?;
-    path_iitree_obj.open_writer()?;
-    let path_iitree = Arc::new(RwLock::new(path_iitree_obj));
-
-    let graph_length = compute_transitive_closures(
-        Arc::clone(&seqidx),
-        Arc::clone(&aln_iitree_readonly),
-        seq_v_file.to_str().unwrap(),
-        Arc::clone(&node_iitree),
-        Arc::clone(&path_iitree),
-        0,         // repeat_max
-        0,         // min_repeat_dist
-        1_000_000, // transclose_batch
-        false,     // show_progress
-        config.num_threads,
-    )?;
-
-    // 7) Compact nodes
-    let mut seq_id_bv = BitVec::<u64, Lsb0>::repeat(false, graph_length + 1);
-
-    compact_nodes(
-        Arc::clone(&seqidx),
-        graph_length,
-        Arc::clone(&node_iitree),
-        Arc::clone(&path_iitree),
-        &mut seq_id_bv,
-        config.num_threads,
-    )?;
-
-    // Build rank/select structure
-    let seq_id_cbv =
-        RankSelectBitVector::from_bitvec(&seq_id_bv.iter().by_vals().collect::<Vec<bool>>());
-    drop(seq_id_bv);
-
-    // 8) Derive links between nodes
-    let link_set = derive_links(
-        Arc::clone(&seqidx),
-        Arc::clone(&node_iitree),
-        Arc::clone(&path_iitree),
-        &seq_id_cbv,
-        config.num_threads,
-    )?;
-
-    // 9) Emit GFA output to string
     let mut gfa_output = Vec::new();
-    {
-        let mut writer = BufWriter::new(&mut gfa_output);
-        emit_gfa(
-            &mut writer,
-            graph_length,
-            seq_v_file.to_str().unwrap(),
-            Arc::clone(&node_iitree),
-            Arc::clone(&path_iitree),
-            &seq_id_cbv,
-            Arc::clone(&seqidx),
-            link_set.links(),
-            config.num_threads,
-        )?;
-    }
+    crate::commands::graph::build_graph(
+        &[fasta_path],
+        &mut gfa_output,
+        &graph_config,
+    )?;
 
-    let gfa_string = String::from_utf8(gfa_output).map_err(|e| {
+    String::from_utf8(gfa_output).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("Invalid UTF-8 in GFA: {}", e),
         )
-    })?;
+    })
+}
 
-    // Clean up seqwish temp files before returning
-    seqwish::tempfile::cleanup();
+/// Generate a variation graph from pre-extracted sequences using sweepga+seqwish.
+///
+/// Unlike `generate_gfa_seqwish_from_intervals` which extracts sequences from
+/// an IMPG index, this function takes sequences directly. Used by the recursive
+/// engine as a memory-efficient alternative to POA when the number of sequences
+/// is too large for SPOA.
+pub fn generate_gfa_seqwish_from_sequences(
+    sequences: &[(String, SequenceMetadata)],
+    config: &SeqwishConfig,
+) -> io::Result<String> {
+    if sequences.is_empty() {
+        return Ok(String::from("H\tVN:Z:1.0\n"));
+    }
 
-    // Sort the GFA using gfasort's Ygs pipeline (path-guided SGD + grooming + topological sort)
-    sort_gfa(&gfa_string, config.num_threads)
+    // Write sequences to a temp FASTA file
+    let combined_fasta = tempfile::Builder::new()
+        .suffix(".fa")
+        .tempfile()
+        .map_err(|e| io::Error::other(format!("Failed to create temp file: {}", e)))?;
+
+    {
+        let mut writer = BufWriter::new(&combined_fasta);
+        for (seq, meta) in sequences {
+            writeln!(writer, ">{}", meta.path_name())?;
+            writeln!(writer, "{}", seq)?;
+        }
+        writer.flush()?;
+    }
+
+    // Build graph using the same pipeline as `graph --engine seqwish`
+    let graph_config = crate::commands::graph::GraphBuildConfig {
+        num_threads: config.num_threads,
+        frequency_multiplier: config.frequency_multiplier,
+        min_alignment_length: config.min_alignment_length,
+        temp_dir: config.temp_dir.clone(),
+        no_filter: config.no_filter,
+        num_mappings: config.num_mappings.clone(),
+        scaffold_filter: config.scaffold_filter.clone(),
+        debug_dir: config.debug_dir.clone(),
+        show_progress: false,
+        ..crate::commands::graph::GraphBuildConfig::default()
+    };
+
+    let fasta_path = combined_fasta
+        .path()
+        .to_str()
+        .ok_or_else(|| io::Error::other("Temp FASTA path is not valid UTF-8"))?
+        .to_string();
+
+    let mut gfa_output = Vec::new();
+    crate::commands::graph::build_graph(&[fasta_path], &mut gfa_output, &graph_config)?;
+
+    String::from_utf8(gfa_output).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Invalid UTF-8 in GFA: {}", e),
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gfa_to_msa_basic() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tACGT
+S\t2\tTG
+S\t3\tAATT
+P\tseq1:0-10\t1+,2+,3+\t*
+P\tseq2:0-8\t1+,3+\t*
+";
+        let msa = gfa_to_msa(gfa);
+        assert_eq!(msa.len(), 2);
+        assert_eq!(msa[0].0, "seq1:0-10");
+        assert_eq!(msa[0].1, "ACGTTGAATT");
+        assert_eq!(msa[1].0, "seq2:0-8");
+        assert_eq!(msa[1].1, "ACGT--AATT");
+    }
+
+    #[test]
+    fn test_gfa_to_msa_empty() {
+        let gfa = "H\tVN:Z:1.0\n";
+        let msa = gfa_to_msa(gfa);
+        assert!(msa.is_empty());
+    }
+
+    #[test]
+    fn test_gfa_to_msa_single_path() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tACGT
+P\tseq1:0-4\t1+\t*
+";
+        let msa = gfa_to_msa(gfa);
+        assert_eq!(msa.len(), 1);
+        assert_eq!(msa[0].1, "ACGT");
+    }
+
+    #[test]
+    fn test_gfa_to_msa_reverse_orient() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tACGT
+P\tseq1:0-4\t1-\t*
+";
+        let msa = gfa_to_msa(gfa);
+        assert_eq!(msa.len(), 1);
+        // Reverse complement of ACGT is ACGT
+        assert_eq!(msa[0].1, "ACGT");
+    }
+
+    #[test]
+    fn test_gfa_to_msa_reverse_orient_asymmetric() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tACG
+P\tseq1:0-3\t1+\t*
+P\tseq2:0-3\t1-\t*
+";
+        let msa = gfa_to_msa(gfa);
+        assert_eq!(msa.len(), 2);
+        assert_eq!(msa[0].1, "ACG"); // forward
+        assert_eq!(msa[1].1, "CGT"); // reverse complement of ACG
+    }
 }

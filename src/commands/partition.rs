@@ -1,3 +1,4 @@
+use crate::EngineOpts;
 use crate::impg::CigarOp;
 use crate::impg::SortedRanges;
 use crate::impg_index::ImpgIndex;
@@ -47,6 +48,7 @@ pub fn partition_alignments(
     debug: bool,
     separate_files: bool,
     approximate_mode: bool,
+    engine_config: &EngineOpts,
 ) -> io::Result<()> {
     // Initialize windows from starting sequences if provided
     let mut windows = Vec::<(u32, i32, i32)>::new();
@@ -486,6 +488,7 @@ pub fn partition_alignments(
                     sequence_index,
                     scoring_params,
                     reverse_complement,
+                    engine_config,
                 )?;
 
                 // Delete temporary BED file
@@ -1226,6 +1229,7 @@ fn write_partition(
     sequence_index: Option<&UnifiedSequenceIndex>,
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
     reverse_complement: bool,
+    engine_config: &EngineOpts,
 ) -> io::Result<()> {
     info!(
         "Writing partition {} with {} intervals in {} format",
@@ -1243,12 +1247,6 @@ fn write_partition(
                     "FASTA index required for GFA output",
                 )
             })?;
-            let scoring_params = scoring_params.ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "POA scoring parameters required for GFA output",
-                )
-            })?;
             write_partition_gfa(
                 partition_num,
                 query_intervals,
@@ -1256,6 +1254,7 @@ fn write_partition(
                 output_folder,
                 sequence_index,
                 scoring_params,
+                engine_config,
             )
         }
         "maf" => {
@@ -1344,15 +1343,16 @@ fn write_partition_gfa(
     impg: &impl ImpgIndex,
     output_folder: Option<&str>,
     sequence_index: &UnifiedSequenceIndex,
-    scoring_params: (u8, u8, u8, u8, u8, u8),
+    scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
+    engine_config: &EngineOpts,
 ) -> io::Result<()> {
-    // Generate a GFA-formatted string from the list of intervals
-    let gfa_output = crate::graph::generate_gfa_from_intervals(
+    let gfa_output = crate::dispatch_gfa_engine(
         impg,
         query_intervals,
         sequence_index,
         scoring_params,
-    );
+        engine_config,
+    )?;
 
     // Create output file
     let filename = format!("partition{partition_num}.gfa");

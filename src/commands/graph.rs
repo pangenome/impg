@@ -76,6 +76,8 @@ pub struct GraphBuildConfig {
     pub scaffold_dist: u64,
     /// Minimum mapping length to include in filtering
     pub min_mapping_length: u64,
+    /// Optional directory to save intermediate files (FASTA, raw PAF, filtered PAF).
+    pub debug_dir: Option<String>,
 }
 
 impl Default for GraphBuildConfig {
@@ -96,60 +98,27 @@ impl Default for GraphBuildConfig {
             input_paf: None,
             // Filtering options
             no_filter: false,
-            num_mappings: "1:1".to_string(),
+            num_mappings: "many:many".to_string(),
             scaffold_jump: 50_000,              // 50kb default scaffold gap
             scaffold_mass: 10_000,              // 10kb minimum scaffold length
-            scaffold_filter: "1:1".to_string(), // 1:1 scaffold filtering (now fixed in sweepga 608547a)
+            scaffold_filter: "many:many".to_string(),
             overlap: 0.95,
             min_identity: 0.0,
             scaffold_dist: 0,      // No deviation limit by default
             min_mapping_length: 0, // No minimum mapping length by default
+            debug_dir: None,
         }
     }
 }
 
-/// Count sequences and genomes in FASTA files
-/// Returns (num_sequences, num_genomes)
-/// For PanSN-spec names like SAMPLE#HAPLOTYPE#CONTIG, genomes are unique SAMPLE#HAPLOTYPE prefixes
+/// Count sequences and genomes in FASTA files.
+/// Returns `(num_sequences, num_genomes)` using PanSN naming convention.
 fn count_sequences_and_genomes_in_fasta(fasta_paths: &[String]) -> io::Result<(usize, usize)> {
-    use std::collections::HashSet;
-    let mut seq_count = 0;
-    let mut genome_prefixes: HashSet<String> = HashSet::new();
-
-    for path in fasta_paths {
-        let file = File::open(path)?;
-        // Use niffler to auto-detect compression
-        let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
-            io::Error::other(format!("Failed to open reader for '{}': {}", path, e))
-        })?;
-        let reader = BufReader::new(reader);
-
-        for line in reader.lines() {
-            let line: String = line?;
-            if line.starts_with('>') {
-                seq_count += 1;
-                // Extract genome prefix: everything before the last # for PanSN names
-                // For ">SAMPLE#HAPLOTYPE#CONTIG", prefix is "SAMPLE#HAPLOTYPE"
-                let name = line[1..].split_whitespace().next().unwrap_or("");
-                let parts: Vec<&str> = name.split('#').collect();
-                let prefix = if parts.len() >= 2 {
-                    // PanSN format: use SAMPLE#HAPLOTYPE (first two parts)
-                    format!("{}#{}", parts[0], parts[1])
-                } else {
-                    // Not PanSN: use whole name as prefix
-                    name.to_string()
-                };
-                genome_prefixes.insert(prefix);
-            }
-        }
-    }
-
-    let genome_count = genome_prefixes.len().max(1); // At least 1 genome
-    Ok((seq_count, genome_count))
+    crate::commands::count_sequences_and_genomes(fasta_paths)
 }
 
 /// Parse filter mode string (e.g., "1:1", "many:many", "5:3") into FilterMode and limits
-fn parse_filter_mode(s: &str) -> (FilterMode, Option<usize>, Option<usize>) {
+pub fn parse_filter_mode(s: &str) -> (FilterMode, Option<usize>, Option<usize>) {
     let s_lower = s.to_lowercase();
     if s_lower == "many:many" || s_lower == "n:n" {
         return (FilterMode::ManyToMany, None, None);
@@ -265,6 +234,7 @@ pub fn build_graph<W: Write>(
     // sweepga's FastGA needs a single combined FASTA file for all-vs-all alignment
     // FastGA requires .fa extension to recognize the file format
     let combined_fasta = tempfile::Builder::new().suffix(".fa").tempfile()?;
+    let mut total_bases: u64 = 0;
     {
         let mut writer = BufWriter::new(&combined_fasta);
         for path in fasta_files {
@@ -276,17 +246,34 @@ pub fn build_graph<W: Write>(
             let reader = BufReader::new(reader);
             for line in reader.lines() {
                 let line: String = line?;
+                if !line.starts_with('>') {
+                    total_bases += line.trim().len() as u64;
+                }
                 writeln!(writer, "{}", line)?;
             }
         }
         writer.flush()?;
     }
 
+    let avg_seq_len = if num_sequences > 0 {
+        total_bases / num_sequences as u64
+    } else {
+        0
+    };
+
     if config.show_progress {
         info!(
-            "[graph::combine] {:.3}s Combined FASTA files for alignment",
-            start_time.elapsed().as_secs_f64()
+            "[graph::combine] {:.3}s Combined FASTA files for alignment (avg seq len: {} bp)",
+            start_time.elapsed().as_secs_f64(),
+            avg_seq_len
         );
+    }
+
+    // Debug: save combined FASTA
+    if let Some(ref debug_dir) = config.debug_dir {
+        let dst = format!("{}/combined.fa", debug_dir);
+        let _ = std::fs::copy(combined_fasta.path(), &dst);
+        info!("[graph::debug] Saved combined FASTA to {}", dst);
     }
 
     // 3) Get PAF alignments - either from input file or run FastGA
@@ -333,6 +320,13 @@ pub fn build_graph<W: Write>(
         paf_temp
     };
 
+    // Debug: save raw PAF
+    if let Some(ref debug_dir) = config.debug_dir {
+        let dst = format!("{}/raw.paf", debug_dir);
+        let _ = std::fs::copy(paf_temp.path(), &dst);
+        info!("[graph::debug] Saved raw PAF to {}", dst);
+    }
+
     // 3.5) Apply sweepga filtering to alignments (unless --no-filter)
     let filtered_paf = if config.no_filter {
         if config.show_progress {
@@ -343,22 +337,38 @@ pub fn build_graph<W: Write>(
         }
         paf_temp
     } else {
-        if config.show_progress {
-            info!(
-                "[graph::filter] {:.3}s Filtering alignments with sweepga (n={}, scaffold_jump={}, scaffold_mass={}, scaffold_filter={})",
-                start_time.elapsed().as_secs_f64(),
-                config.num_mappings,
-                config.scaffold_jump,
-                config.scaffold_mass,
-                config.scaffold_filter
-            );
-        }
-
         // Parse filter modes
         let (mapping_mode, mapping_per_query, mapping_per_target) =
             parse_filter_mode(&config.num_mappings);
         let (scaffold_mode, scaffold_per_query, scaffold_per_target) =
             parse_filter_mode(&config.scaffold_filter);
+
+        // Auto-adapt scaffold parameters to input sequence sizes.
+        // Defaults (scaffold_mass=10kb, scaffold_jump=50kb) are tuned for
+        // whole-genome alignments. For short sequences (e.g. 1kb excerpts
+        // from `impg query -o fasta`), these thresholds would filter out
+        // every alignment. Clamp to 80% of the average sequence length.
+        let scaffold_mass = if avg_seq_len > 0 {
+            config.scaffold_mass.min(avg_seq_len * 4 / 5)
+        } else {
+            config.scaffold_mass
+        };
+        let scaffold_jump = if avg_seq_len > 0 {
+            config.scaffold_jump.min(avg_seq_len * 10)
+        } else {
+            config.scaffold_jump
+        };
+
+        if config.show_progress {
+            info!(
+                "[graph::filter] {:.3}s Filtering alignments with sweepga (n={}, scaffold_jump={}, scaffold_mass={}, scaffold_filter={})",
+                start_time.elapsed().as_secs_f64(),
+                config.num_mappings,
+                scaffold_jump,
+                scaffold_mass,
+                config.scaffold_filter
+            );
+        }
 
         // Create filter configuration
         let filter_config = FilterConfig {
@@ -374,8 +384,8 @@ pub fn build_graph<W: Write>(
             overlap_threshold: config.overlap,
             sparsity: 1.0,
             no_merge: true,
-            scaffold_gap: config.scaffold_jump,
-            min_scaffold_length: config.scaffold_mass,
+            scaffold_gap: scaffold_jump,
+            min_scaffold_length: scaffold_mass,
             scaffold_overlap_threshold: 0.5,
             scaffold_max_deviation: config.scaffold_dist,
             prefix_delimiter: '#',
@@ -405,6 +415,13 @@ pub fn build_graph<W: Write>(
 
         filtered_paf_file
     };
+
+    // Debug: save filtered PAF
+    if let Some(ref debug_dir) = config.debug_dir {
+        let dst = format!("{}/filtered.paf", debug_dir);
+        let _ = std::fs::copy(filtered_paf.path(), &dst);
+        info!("[graph::debug] Saved filtered PAF to {}", dst);
+    }
 
     // 4) Build sequence index for seqwish
     if config.show_progress {
@@ -667,60 +684,209 @@ pub fn run_graph_build(
     Ok(())
 }
 
+/// Build a pangenome graph from FASTA sequences using the recursive realize engine
+///
+/// Instead of the seqwish graph induction pipeline, this uses the recursive
+/// realize engine (sweepga + POA with lacing) to build the variation graph.
+pub fn run_graph_build_realize<W: Write>(
+    fasta_files: Vec<String>,
+    fasta_list: Option<String>,
+    output: &mut W,
+    config: &crate::realize::RealizeConfig,
+) -> io::Result<()> {
+    let start_time = Instant::now();
+
+    // Resolve FASTA files
+    let fasta_files = resolve_fasta_files(fasta_files, fasta_list)?;
+
+    if fasta_files.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "No FASTA files specified. Use --fasta-files or --fasta-list",
+        ));
+    }
+
+    info!(
+        "Building graph from {} FASTA file(s) using realize engine",
+        fasta_files.len()
+    );
+
+    // Read all sequences from FASTA files into memory
+    let sequences = read_fasta_sequences(&fasta_files)?;
+
+    info!(
+        "[realize] {:.3}s Loaded {} sequences from FASTA files",
+        start_time.elapsed().as_secs_f64(),
+        sequences.len()
+    );
+
+    if sequences.is_empty() {
+        output.write_all(b"H\tVN:Z:1.0\n")?;
+        return Ok(());
+    }
+
+    // Run the realize engine
+    let result = crate::realize::realize_from_sequences(&sequences, config)?;
+
+    info!(
+        "[realize] {:.3}s Realize complete: {} sequences, max_depth={}, poa_calls={}, sweepga_calls={}, seqwish_calls={}, {}ms",
+        start_time.elapsed().as_secs_f64(),
+        result.stats.num_sequences,
+        result.stats.max_depth_reached,
+        result.stats.poa_calls,
+        result.stats.sweepga_calls,
+        result.stats.seqwish_calls,
+        result.stats.total_ms,
+    );
+
+    output.write_all(result.gfa.as_bytes())?;
+
+    Ok(())
+}
+
+/// Build a POA graph from FASTA sequences.
+///
+/// Reads all sequences, runs single-pass SPOA, emits GFA, then sorts.
+pub fn run_graph_build_poa<W: Write>(
+    fasta_files: Vec<String>,
+    fasta_list: Option<String>,
+    output: &mut W,
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+    num_threads: usize,
+) -> io::Result<()> {
+    // Resolve FASTA files
+    let fasta_files = resolve_fasta_files(fasta_files, fasta_list)?;
+
+    if fasta_files.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "No FASTA files specified. Use --fasta-files or --fasta-list",
+        ));
+    }
+
+    info!(
+        "Building graph from {} FASTA file(s) using poa engine",
+        fasta_files.len()
+    );
+
+    let sequences = read_fasta_sequences(&fasta_files)?;
+
+    info!("Loaded {} sequences from FASTA files", sequences.len());
+
+    if sequences.is_empty() {
+        output.write_all(b"H\tVN:Z:1.0\n")?;
+        return Ok(());
+    }
+
+    // Build SPOA graph
+    let (mut graph, mut engine) = crate::graph::build_spoa_engine(scoring_params);
+    let metadata: Vec<crate::graph::SequenceMetadata> =
+        sequences.iter().map(|(_, m)| m.clone()).collect();
+    crate::graph::feed_sequences_to_graph(
+        &mut engine,
+        &mut graph,
+        sequences.iter().map(|(s, _)| s.as_str()),
+    );
+
+    // Generate GFA, post-process strands, sort
+    let sorted = crate::graph::spoa_graph_to_sorted_gfa(graph, &metadata, num_threads)?;
+    output.write_all(sorted.as_bytes())?;
+
+    Ok(())
+}
+
+/// Read sequences from FASTA files into (sequence, metadata) pairs for the realize engine.
+fn read_fasta_sequences(
+    fasta_paths: &[String],
+) -> io::Result<Vec<(String, crate::graph::SequenceMetadata)>> {
+    let mut sequences = Vec::new();
+
+    for path in fasta_paths {
+        let file = File::open(path)?;
+        // Use niffler to auto-detect compression
+        let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
+            io::Error::other(format!("Failed to open reader for '{}': {}", path, e))
+        })?;
+        let reader = BufReader::new(reader);
+
+        let mut current_name = String::new();
+        let mut current_seq = String::new();
+
+        for line in reader.lines() {
+            let line = line?;
+            if line.starts_with('>') {
+                // Save previous sequence if any
+                if !current_name.is_empty() && !current_seq.is_empty() {
+                    let seq_len = current_seq.len();
+                    sequences.push((
+                        std::mem::take(&mut current_seq),
+                        metadata_from_fasta_header(&current_name, seq_len),
+                    ));
+                }
+                // Start new sequence
+                current_name = line[1..]
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                current_seq.clear();
+            } else {
+                current_seq.push_str(line.trim());
+            }
+        }
+
+        // Don't forget the last sequence
+        if !current_name.is_empty() && !current_seq.is_empty() {
+            let seq_len = current_seq.len();
+            sequences.push((current_seq, metadata_from_fasta_header(&current_name, seq_len)));
+        }
+    }
+
+    // Sort by length descending (expected by realize engine)
+    sequences.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+
+    Ok(sequences)
+}
+
+/// Parse a FASTA header into SequenceMetadata.
+///
+/// If the header contains a `name:start-end` suffix (e.g. from a prior
+/// `impg query -o fasta`), parse the coordinates so that `path_name()`
+/// reproduces the original name without double-encoding.
+/// Otherwise, treat the whole header as the name with start=0.
+fn metadata_from_fasta_header(header: &str, seq_len: usize) -> crate::graph::SequenceMetadata {
+    // Try to parse trailing :start-end
+    if let Some(last_colon) = header.rfind(':') {
+        let (key, range_str) = header.split_at(last_colon);
+        let range_str = &range_str[1..]; // skip ':'
+        if let Some((start_str, end_str)) = range_str.split_once('-') {
+            if let (Ok(start), Ok(end)) = (start_str.parse::<i32>(), end_str.parse::<i32>()) {
+                if end > start {
+                    return crate::graph::SequenceMetadata {
+                        name: key.to_string(),
+                        start,
+                        size: seq_len as i32,
+                        strand: '+',
+                        total_length: (start + seq_len as i32) as usize,
+                    };
+                }
+            }
+        }
+    }
+    // Fallback: treat whole header as name
+    crate::graph::SequenceMetadata {
+        name: header.to_string(),
+        start: 0,
+        size: seq_len as i32,
+        strand: '+',
+        total_length: seq_len,
+    }
+}
+
 /// Resolve FASTA files from either direct list or file list
 fn resolve_fasta_files(
     fasta_files: Vec<String>,
     fasta_list: Option<String>,
 ) -> io::Result<Vec<String>> {
-    match (fasta_files.is_empty(), fasta_list) {
-        (false, None) => {
-            // Validate all files exist
-            for file in &fasta_files {
-                if !Path::new(file).exists() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("FASTA file '{}' not found", file),
-                    ));
-                }
-            }
-            Ok(fasta_files)
-        }
-        (true, Some(list_file)) => {
-            let file = File::open(&list_file)?;
-            let reader = std::io::BufReader::new(file);
-            let mut files = Vec::new();
-
-            use std::io::BufRead;
-            for line in reader.lines() {
-                let line = line?;
-                let trimmed = line.trim();
-                if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                    if !Path::new(trimmed).exists() {
-                        return Err(io::Error::new(
-                            io::ErrorKind::NotFound,
-                            format!("FASTA file '{}' not found", trimmed),
-                        ));
-                    }
-                    files.push(trimmed.to_string());
-                }
-            }
-
-            if files.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("No valid FASTA files found in list file: {}", list_file),
-                ));
-            }
-
-            Ok(files)
-        }
-        (true, None) => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Either --fasta-files or --fasta-list must be provided",
-        )),
-        (false, Some(_)) => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Cannot specify both --fasta-files and --fasta-list",
-        )),
-    }
+    crate::commands::resolve_file_list(fasta_files, fasta_list, "FASTA")
 }
