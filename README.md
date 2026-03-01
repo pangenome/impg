@@ -524,6 +524,20 @@ impg graph --fasta-files sequences.fa -g output.gfa --engine recursive \
 impg graph --fasta-files sequences.fa -g output.gfa --engine poa --poa-scoring 5,4,6,2,24,1
 ```
 
+#### Temporary files
+
+FastGA writes large intermediate files (k-mer indices, alignment scratch) during graph construction. By default these go to `$TMPDIR` or the current working directory.
+
+```bash
+# Use a specific directory for temp files
+impg graph --fasta-files sequences.fa -g output.gfa --temp-dir /scratch/tmp
+
+# Use RAM-backed storage for faster I/O (requires enough free RAM)
+impg graph --fasta-files sequences.fa -g output.gfa --temp-dir ramdisk
+```
+
+The `ramdisk` shortcut maps to `/dev/shm` on Linux. Use it only when you have sufficient free memory, as temp files can be several GB for large inputs.
+
 #### query vs graph
 
 Both `query -o gfa` and `graph` share the same engine implementations. The difference is only in how sequences are obtained:

@@ -645,7 +645,7 @@ enum Args {
         #[clap(flatten)]
         sequence: SequenceOpts,
 
-        /// Directory for temporary files
+        /// Directory for temporary files [default: $TMPDIR or cwd; use "ramdisk" for /dev/shm]
         #[clap(long, value_parser)]
         temp_dir: Option<String>,
 
@@ -780,7 +780,7 @@ enum Args {
         #[clap(flatten)]
         recursive_opts: RecursiveOpts,
 
-        /// Directory for temporary files (default: system TMPDIR)
+        /// Directory for temporary files [default: $TMPDIR or cwd; use "ramdisk" for /dev/shm] [default: $TMPDIR or cwd; use "ramdisk" for /dev/shm]
         #[arg(help_heading = "Output options")]
         #[clap(long, value_parser)]
         temp_dir: Option<String>,
@@ -948,7 +948,7 @@ enum Args {
         #[clap(long, action)]
         disk_backed: bool,
 
-        /// Directory for temporary files
+        /// Directory for temporary files [default: $TMPDIR or cwd; use "ramdisk" for /dev/shm]
         #[clap(long, value_parser)]
         temp_dir: Option<String>,
 
