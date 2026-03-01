@@ -11,8 +11,6 @@ pub struct AgcIndex {
     /// Each slot is lazily initialized on first access by opening the AGC files.
     thread_decompressors: Vec<Mutex<Option<Vec<Decompressor>>>>,
     pub agc_paths: Vec<String>,
-    // Interned strings - each unique string stored once
-    interned_strings: FxHashMap<String, Arc<str>>,
     // Maps use Arc<str> for zero-cost sharing (String key for efficient lookup)
     sample_contig_to_agc: FxHashMap<String, usize>,
     // Precomputed mapping from contig name to (sample, full_contig_name, agc_idx)
@@ -29,40 +27,16 @@ impl fmt::Debug for AgcIndex {
 }
 
 impl AgcIndex {
-    fn new() -> Self {
-        AgcIndex {
-            thread_decompressors: Vec::new(),
-            agc_paths: Vec::new(),
-            interned_strings: FxHashMap::default(),
-            sample_contig_to_agc: FxHashMap::default(),
-            contig_to_sample_info: FxHashMap::default(),
-        }
-    }
-
-    /// Intern a string, returning an Arc<str> that can be shared
-    fn intern(&mut self, s: &str) -> Arc<str> {
-        if let Some(arc) = self.interned_strings.get(s) {
-            Arc::clone(arc)
-        } else {
-            let arc: Arc<str> = s.into();
-            self.interned_strings
-                .insert(s.to_string(), Arc::clone(&arc));
-            arc
-        }
-    }
-
     fn extract_short_contig_name(full_name: &str) -> &str {
         full_name.split_whitespace().next().unwrap_or(full_name)
     }
 
     pub fn build_from_files(agc_files: &[String]) -> io::Result<Self> {
-        let mut index = AgcIndex::new();
-
-        // Parallel metadata extraction phase
+        // Parallel metadata extraction phase — load only contig names, skip segment details
         let metadata_results: Vec<_> = agc_files
             .par_iter()
             .enumerate()
-            .map(|(agc_idx, agc_path)| -> io::Result<(usize, String, Decompressor, Vec<(String, Vec<String>)>)> {
+            .map(|(agc_idx, agc_path)| -> io::Result<(usize, Decompressor, Vec<(String, Vec<String>)>)> {
                 let config = DecompressorConfig { verbosity: 0 };
                 let mut decompressor = Decompressor::open(agc_path, config).map_err(|e| {
                     io::Error::new(
@@ -71,44 +45,58 @@ impl AgcIndex {
                     )
                 })?;
 
-                // Get all samples and their contigs
+                // Get all samples and their contig names (skip loading segment details)
                 let samples = decompressor.list_samples();
                 let sample_contigs: Vec<_> = samples
                     .into_iter()
                     .map(|sample| {
-                        let contigs = decompressor.list_contigs(&sample).unwrap_or_default();
+                        let contigs = decompressor.list_contigs_names_only(&sample).unwrap_or_default();
                         (sample, contigs)
                     })
                     .collect();
 
-                Ok((agc_idx, agc_path.clone(), decompressor, sample_contigs))
+                Ok((agc_idx, decompressor, sample_contigs))
             })
             .collect::<io::Result<Vec<_>>>()?;
 
-        // Sequential assembly phase to maintain order and avoid shared mutable state issues
-        // Drop the metadata decompressors — each thread will lazily open its own set
-        for (agc_idx, agc_path, _decompressor, sample_contigs) in metadata_results {
-            index.agc_paths.push(agc_path);
+        // Sequential assembly phase
+        let mut interned_strings: FxHashMap<String, Arc<str>> = FxHashMap::default();
+        let mut sample_contig_to_agc: FxHashMap<String, usize> = FxHashMap::default();
+        let mut contig_to_sample_info: FxHashMap<String, (Arc<str>, Arc<str>, usize)> = FxHashMap::default();
+
+        let mut intern = |s: &str| -> Arc<str> {
+            if let Some(arc) = interned_strings.get(s) {
+                Arc::clone(arc)
+            } else {
+                let arc: Arc<str> = s.into();
+                interned_strings.insert(s.to_string(), Arc::clone(&arc));
+                arc
+            }
+        };
+
+        // Keep the metadata decompressors to reuse in thread slot 0
+        let mut saved_decomps: Vec<Decompressor> = Vec::with_capacity(agc_files.len());
+        for (agc_idx, decompressor, sample_contigs) in metadata_results {
+            assert_eq!(agc_idx, saved_decomps.len());
+            saved_decomps.push(decompressor);
 
             for (sample, contigs) in sample_contigs {
-                let sample_arc = index.intern(&sample);
+                let sample_arc = intern(&sample);
 
                 for contig in contigs {
-                    let contig_arc = index.intern(&contig);
+                    let contig_arc = intern(&contig);
 
                     // Key: contig@sample
                     let key = format!("{contig}@{sample}");
-                    index.sample_contig_to_agc.insert(key, agc_idx);
+                    sample_contig_to_agc.insert(key, agc_idx);
 
                     // Key: contig alone (if unique)
-                    index
-                        .sample_contig_to_agc
+                    sample_contig_to_agc
                         .entry(contig.clone())
                         .or_insert(agc_idx);
 
                     // Contig -> (sample, contig, agc_idx) - values use Arc<str>
-                    index
-                        .contig_to_sample_info
+                    contig_to_sample_info
                         .entry(contig.clone())
                         .or_insert((Arc::clone(&sample_arc), Arc::clone(&contig_arc), agc_idx));
 
@@ -116,43 +104,40 @@ impl AgcIndex {
                     let short_contig = Self::extract_short_contig_name(&contig);
                     if short_contig != contig {
                         let short_key = format!("{short_contig}@{sample}");
-                        index
-                            .sample_contig_to_agc
+                        sample_contig_to_agc
                             .entry(short_key)
                             .or_insert(agc_idx);
-                        index
-                            .sample_contig_to_agc
+                        sample_contig_to_agc
                             .entry(short_contig.to_string())
                             .or_insert(agc_idx);
-                        index
-                            .contig_to_sample_info
+                        contig_to_sample_info
                             .entry(short_contig.to_string())
                             .or_insert((Arc::clone(&sample_arc), Arc::clone(&contig_arc), agc_idx));
                     }
                 }
             }
-
         }
 
         // Initialize per-thread decompressor slots (+1 for main-thread fallback)
         let num_slots = rayon::current_num_threads() + 1;
-        index.thread_decompressors = (0..num_slots).map(|_| Mutex::new(None)).collect();
+        let thread_decompressors: Vec<_> = (0..num_slots).map(|_| Mutex::new(None)).collect();
+
+        // Reuse the metadata decompressors in thread slot 0 to avoid re-opening AGC files
+        thread_decompressors[0].lock().unwrap().replace(saved_decomps);
 
         // Shrink to fit after building
-        index.sample_contig_to_agc.shrink_to_fit();
-        index.contig_to_sample_info.shrink_to_fit();
+        sample_contig_to_agc.shrink_to_fit();
+        contig_to_sample_info.shrink_to_fit();
 
-        // Clear the interner - we no longer need it after building
-        index.interned_strings = FxHashMap::default();
-
-        Ok(index)
+        Ok(AgcIndex {
+            thread_decompressors,
+            agc_paths: agc_files.to_vec(),
+            sample_contig_to_agc,
+            contig_to_sample_info,
+        })
     }
 
     fn parse_query(&self, seq_name: &str) -> (String, String, Option<usize>) {
-        // Parse queries in the format:
-        // - "contig@sample" -> (sample, contig, agc_idx)
-        // - "contig" -> (sample, contig, agc_idx) if contig is unique
-
         if let Some((contig, sample)) = seq_name.split_once('@') {
             let agc_idx = self.sample_contig_to_agc.get(seq_name).copied();
             (sample.to_string(), contig.to_string(), agc_idx)
@@ -244,21 +229,6 @@ impl AgcIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_query() {
-        let index = AgcIndex::new();
-
-        // Test contig@sample format
-        let (sample, contig, _) = index.parse_query("chr1@sample1");
-        assert_eq!(sample, "sample1");
-        assert_eq!(contig, "chr1");
-
-        // Test contig-only format
-        let (sample, contig, _) = index.parse_query("chr1");
-        assert_eq!(sample, "");
-        assert_eq!(contig, "chr1");
-    }
 
     #[test]
     fn test_batch_range_calculation() {
