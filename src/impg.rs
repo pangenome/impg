@@ -42,8 +42,8 @@ thread_local! {
     static EDIT_ALIGNER: RefCell<Option<AffineWavefronts>> = const { RefCell::new(None) };
     static GAP_AFFINE_ALIGNER: RefCell<Option<AffineWavefronts>> = const { RefCell::new(None) };
     static GAP_AFFINE2P_ALIGNER: RefCell<Option<AffineWavefronts>> = const { RefCell::new(None) };
-    static ONEALN_HANDLE: RefCell<Option<(usize, OneFile)>> = const { RefCell::new(None) };
-    static TPA_HANDLE: RefCell<Option<(usize, tpa::TpaReader)>> = const { RefCell::new(None) };
+    static ONEALN_HANDLE: RefCell<Option<(String, OneFile)>> = const { RefCell::new(None) };
+    static TPA_HANDLE: RefCell<Option<(String, tpa::TpaReader)>> = const { RefCell::new(None) };
     static TARGET_SEQ_CACHE: RefCell<Option<((u32, i32, i32, bool), Vec<u8>)>> = const { RefCell::new(None) };
 }
 
@@ -438,7 +438,7 @@ impl Impg {
         ONEALN_HANDLE.with(|handle_cell| {
             let mut slot = handle_cell.borrow_mut();
             let needs_open = match slot.as_ref() {
-                Some((idx, _)) => *idx != file_index,
+                Some((cached_path, _)) => cached_path != file_path,
                 None => true,
             };
 
@@ -446,7 +446,7 @@ impl Impg {
                 *slot = None;
                 let file = OneFile::open_read(file_path, None, None, 1)
                     .map_err(|e| format!("Failed to open 1aln file '{}': {}", file_path, e))?;
-                *slot = Some((file_index, file));
+                *slot = Some((file_path.clone(), file));
             }
 
             let (_, handle) = slot
@@ -578,7 +578,7 @@ impl Impg {
         TPA_HANDLE.with(|handle_cell| {
             let mut slot = handle_cell.borrow_mut();
             let needs_open = match slot.as_ref() {
-                Some((idx, _)) => *idx != file_index,
+                Some((cached_path, _)) => cached_path != file_path,
                 None => true,
             };
 
@@ -589,7 +589,7 @@ impl Impg {
                 reader
                     .load_string_table()
                     .map_err(|e| format!("Failed to load TPA string table '{}': {}", file_path, e))?;
-                *slot = Some((file_index, reader));
+                *slot = Some((file_path.clone(), reader));
             }
 
             let (_, handle) = slot
