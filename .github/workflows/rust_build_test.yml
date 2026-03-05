@@ -36,11 +36,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake zlib1g-dev libzstd-dev libbz2-dev liblzma-dev libcurl4-openssl-dev
         elif [[ "${{ runner.os }}" == "macOS" ]]; then
-          brew install zstd cmake xz gcc
-          # Set paths for homebrew zstd
-          echo "CFLAGS=-I$(brew --prefix zstd)/include" >> $GITHUB_ENV
-          echo "LDFLAGS=-L$(brew --prefix zstd)/lib" >> $GITHUB_ENV
-          echo "CPPFLAGS=-I$(brew --prefix zstd)/include" >> $GITHUB_ENV
+          brew install zstd cmake xz gcc libomp
+          # Set paths for homebrew zstd and libomp
+          echo "CFLAGS=-I$(brew --prefix zstd)/include -I$(brew --prefix libomp)/include" >> $GITHUB_ENV
+          echo "LDFLAGS=-L$(brew --prefix zstd)/lib -L$(brew --prefix libomp)/lib" >> $GITHUB_ENV
+          echo "CPPFLAGS=-I$(brew --prefix zstd)/include -I$(brew --prefix libomp)/include" >> $GITHUB_ENV
         fi
 
     - name: Build
