@@ -1664,6 +1664,7 @@ q2\t1000\t0\t1000\t+\tq2\t1000\t0\t1000\t1000\t1000\t255
     }
 
     #[test]
+    #[cfg_attr(target_os = "macos", ignore)] // FastGA crashes on macOS
     fn test_recursive_path_triggers_sweepga() {
         // Sequences larger than poa_threshold trigger the sweepga path.
         // Use 5000bp pseudorandom sequences — FastGA needs sufficient length for
@@ -1720,6 +1721,7 @@ q2\t1000\t0\t1000\t+\tq2\t1000\t0\t1000\t1000\t1000\t255
     }
 
     #[test]
+    #[cfg_attr(target_os = "macos", ignore)] // FastGA crashes on macOS
     fn test_recursive_path_multi_sequence() {
         // Three similar 5kb sequences → sweepga + partition + lace.
         let base = make_random_dna(5000, 42);
@@ -1757,6 +1759,7 @@ q2\t1000\t0\t1000\t+\tq2\t1000\t0\t1000\t1000\t1000\t255
     }
 
     #[test]
+    #[cfg_attr(target_os = "macos", ignore)] // FastGA crashes on macOS
     fn test_recursive_max_depth_forces_poa() {
         // With max_depth=1, depth 0 uses sweepga, chunks at depth 1 must use POA
         // even though they exceed poa_threshold.
@@ -1803,6 +1806,7 @@ q2\t1000\t0\t1000\t+\tq2\t1000\t0\t1000\t1000\t1000\t255
     }
 
     #[test]
+    #[cfg_attr(target_os = "macos", ignore)] // FastGA crashes on macOS
     fn test_recursive_stats_depth_tracking() {
         // Verify that depth tracking works correctly in the recursive case.
         let base = make_random_dna(5000, 42);
@@ -1836,6 +1840,7 @@ q2\t1000\t0\t1000\t+\tq2\t1000\t0\t1000\t1000\t1000\t255
     }
 
     #[test]
+    #[cfg_attr(target_os = "macos", ignore)] // FastGA crashes on macOS
     fn test_recursive_gfa_paths_cover_sequences() {
         // Verify that all input sequences appear as paths in the output GFA
         // and every path step references a valid segment.
@@ -1889,6 +1894,7 @@ q2\t1000\t0\t1000\t+\tq2\t1000\t0\t1000\t1000\t1000\t255
     }
 
     #[test]
+    #[cfg_attr(target_os = "macos", ignore)] // FastGA crashes on macOS
     fn test_recursive_links_reference_valid_segments() {
         // Verify that all links reference segments that exist.
         let base = make_random_dna(5000, 42);
@@ -1936,6 +1942,7 @@ q2\t1000\t0\t1000\t+\tq2\t1000\t0\t1000\t1000\t1000\t255
     }
 
     #[test]
+    #[cfg_attr(target_os = "macos", ignore)] // FastGA crashes on macOS
     fn test_sweepga_empty_alignment_falls_back_to_poa() {
         // When sequences are too small/repetitive for sweepga to produce
         // usable alignments, the engine should gracefully fall back to POA.
