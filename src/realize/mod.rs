@@ -66,6 +66,9 @@ pub struct RealizeConfig {
     /// Optional directory for saving intermediate debug files (PAFs, sub-GFAs, FASTAs).
     /// When set, each recursive step saves its inputs and outputs.
     pub debug_dir: Option<String>,
+
+    /// Aligner backend: "wfmash" or "fastga"
+    pub aligner: String,
 }
 
 impl Default for RealizeConfig {
@@ -81,6 +84,7 @@ impl Default for RealizeConfig {
             sort_output: true,
             seqwish_threshold: 500,
             debug_dir: None,
+            aligner: "wfmash".to_string(),
         }
     }
 }
@@ -483,6 +487,8 @@ fn build_sweepga_config(config: &RealizeConfig, num_sequences: usize) -> Sweepga
         min_mapping_length: 0,
         temp_dir: config.temp_dir.clone(),
         sparsification: SparsificationStrategy::None, // Always all-vs-all for realize
+        aligner: config.aligner.clone(),
+        map_pct_identity: Some("90".to_string()), // Override wfmash ANI auto-estimation
     }
 }
 

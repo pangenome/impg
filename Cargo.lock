@@ -2609,7 +2609,7 @@ dependencies = [
 [[package]]
 name = "sweepga"
 version = "0.1.1"
-source = "git+https://github.com/pangenome/sweepga?rev=f5918434c1abadfad594b40392ad7c43e0da4af8#f5918434c1abadfad594b40392ad7c43e0da4af8"
+source = "git+https://github.com/pangenome/sweepga?rev=f9fbd0d#f9fbd0d5349f274b71e9e1eb934488d189ac1ee8"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -2627,6 +2627,7 @@ dependencies = [
  "rand 0.8.5",
  "rayon",
  "tempfile",
+ "wfmash-rs",
 ]
 
 [[package]]
@@ -3057,6 +3058,18 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "wfmash-rs"
+version = "0.1.0"
+source = "git+https://github.com/pangenome/wfmash-rs?rev=ec8a4172#ec8a41724ccb89a28e9f0cc3918d8d36985c9e11"
+dependencies = [
+ "anyhow",
+ "num_cpus",
+ "tempfile",
+ "thiserror 1.0.69",
+ "which",
 ]
 
 [[package]]

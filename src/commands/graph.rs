@@ -16,8 +16,10 @@ use bitvec::prelude::*;
 use crate::graph::sort_gfa;
 
 // Import from sweepga
-use sweepga::fastga_integration::FastGAIntegration;
+use sweepga::aligner::Aligner;
 use sweepga::paf_filter::{FilterConfig, FilterMode, PafFilter, ScoringFunction};
+
+use crate::commands::create_aligner;
 
 // Import from seqwish
 use seqwish::alignments::unpack_paf_alignments;
@@ -56,6 +58,8 @@ pub struct GraphBuildConfig {
     pub temp_dir: Option<String>,
     /// Input PAF file (skip alignment if provided)
     pub input_paf: Option<String>,
+    /// Aligner backend: "wfmash" or "fastga"
+    pub aligner: String,
 
     // Sweepga filtering options
     /// Disable all filtering (default: filtering enabled)
@@ -96,6 +100,7 @@ impl Default for GraphBuildConfig {
             show_progress: true,
             temp_dir: None,
             input_paf: None,
+            aligner: "wfmash".to_string(),
             // Filtering options
             no_filter: false,
             num_mappings: "many:many".to_string(),
@@ -276,7 +281,14 @@ pub fn build_graph<W: Write>(
         info!("[graph::debug] Saved combined FASTA to {}", dst);
     }
 
-    // 3) Get PAF alignments - either from input file or run FastGA
+    // Create FASTA index (.fai) — required by wfmash
+    if config.aligner == "wfmash" {
+        rust_htslib::faidx::Reader::from_path(combined_fasta.path()).map_err(|e| {
+            io::Error::other(format!("Failed to create FASTA index: {e}"))
+        })?;
+    }
+
+    // 3) Get PAF alignments - either from input file or run aligner
     let paf_temp: tempfile::NamedTempFile = if let Some(ref input_paf) = config.input_paf {
         // Use provided PAF file - copy to temp file to match expected type
         if config.show_progress {
@@ -290,26 +302,29 @@ pub fn build_graph<W: Write>(
         std::fs::copy(input_paf, paf_temp.path())?;
         paf_temp
     } else {
-        // Run sweepga/FastGA alignment
+        // Run alignment
         if config.show_progress {
             info!(
-                "[graph::align] {:.3}s Running FastGA alignment with -f {}",
+                "[graph::align] {:.3}s Running {} alignment (f={})",
                 start_time.elapsed().as_secs_f64(),
+                config.aligner,
                 kmer_frequency
             );
         }
 
-        let fastga = FastGAIntegration::new(
-            Some(kmer_frequency),
+        let aligner: Box<dyn Aligner> = create_aligner(
+            &config.aligner,
+            kmer_frequency,
             config.num_threads,
             config.min_alignment_length,
+            Some("90".to_string()),
             config.temp_dir.clone(),
-        );
+        )?;
 
         // Run all-vs-all alignment (query = target = combined FASTA)
-        let paf_temp = fastga
+        let paf_temp = aligner
             .align_to_temp_paf(combined_fasta.path(), combined_fasta.path())
-            .map_err(|e| io::Error::other(format!("FastGA alignment failed: {}", e)))?;
+            .map_err(|e| io::Error::other(format!("{} alignment failed: {}", config.aligner, e)))?;
 
         if config.show_progress {
             info!(

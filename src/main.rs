@@ -311,6 +311,7 @@ impl RecursiveOpts {
         num_threads: usize,
         scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
         temp_dir: Option<String>,
+        aligner: String,
     ) -> io::Result<impg::realize::RealizeConfig> {
         if let Some(ref dir) = self.recursive_debug_dir {
             std::fs::create_dir_all(dir).map_err(|e| {
@@ -328,6 +329,7 @@ impl RecursiveOpts {
             sort_output: self.recursive_sort,
             seqwish_threshold: self.recursive_seqwish_threshold,
             debug_dir: self.recursive_debug_dir.clone(),
+            aligner,
         })
     }
 }
@@ -920,9 +922,13 @@ enum Args {
         #[clap(long, value_parser)]
         frequency: Option<usize>,
 
-        /// Minimum alignment length for FastGA
+        /// Minimum alignment length
         #[clap(long, value_parser, default_value_t = 100)]
         min_alignment_length: u64,
+
+        /// Aligner backend for FASTA alignment
+        #[clap(long, value_parser = ["fastga", "wfmash"], default_value = "wfmash")]
+        aligner: String,
 
         /// Maximum repeat count for transitive closure (0 = no limit)
         #[clap(short = 'r', long, value_parser, default_value_t = 0)]
@@ -1030,9 +1036,13 @@ enum Args {
         #[clap(long, value_parser)]
         frequency: Option<usize>,
 
-        /// Minimum alignment length for FastGA
+        /// Minimum alignment length
         #[clap(short = 'l', long, value_parser, default_value_t = 100)]
         min_alignment_length: u64,
+
+        /// Aligner backend for FASTA alignment
+        #[clap(long, value_parser = ["fastga", "wfmash"], default_value = "wfmash")]
+        aligner: String,
 
         /// Output format: paf, 1aln, or joblist
         #[clap(long, value_parser, default_value = "joblist")]
@@ -1289,7 +1299,7 @@ fn run() -> io::Result<()> {
             let engine_config = EngineOpts {
                 engine,
                 recursive_config: if output_format == "gfa" && engine == GfaEngine::Recursive {
-                    Some(recursive_opts.build_config(common.threads.get(), scoring_params, None)?)
+                    Some(recursive_opts.build_config(common.threads.get(), scoring_params, None, "wfmash".to_string())?)
                 } else {
                     None
                 },
@@ -1599,6 +1609,7 @@ fn run() -> io::Result<()> {
                                     common.threads.get(),
                                     scoring_params,
                                     temp_dir.clone(),
+                                    "wfmash".to_string(),
                                 )?)
                             } else {
                                 None
@@ -2044,7 +2055,7 @@ fn run() -> io::Result<()> {
 
             // Build recursive config if engine is Recursive
             let recursive_config = if engine == GfaEngine::Recursive {
-                Some(recursive_opts.build_config(common.threads.into(), Some(scoring_params), None)?)
+                Some(recursive_opts.build_config(common.threads.into(), Some(scoring_params), None, "wfmash".to_string())?)
             } else {
                 None
             };
@@ -2097,6 +2108,7 @@ fn run() -> io::Result<()> {
             frequency_multiplier,
             frequency,
             min_alignment_length,
+            aligner,
             repeat_max,
             min_repeat_dist,
             min_match_len,
@@ -2136,6 +2148,7 @@ fn run() -> io::Result<()> {
                         common.threads.get(),
                         Some(scoring),
                         temp_dir.clone(),
+                        aligner.clone(),
                     )?;
 
                     if output == "-" {
@@ -2174,6 +2187,7 @@ fn run() -> io::Result<()> {
                         show_progress: common.verbose > 0,
                         temp_dir,
                         input_paf: paf_file,
+                        aligner,
                         no_filter,
                         num_mappings,
                         scaffold_jump,
@@ -2198,6 +2212,7 @@ fn run() -> io::Result<()> {
             frequency_multiplier,
             frequency,
             min_alignment_length,
+            aligner,
             format,
             no_filter,
             num_mappings,
@@ -2247,6 +2262,7 @@ fn run() -> io::Result<()> {
                 min_alignment_length,
                 output_format,
                 show_progress: common.verbose > 0,
+                aligner,
                 no_filter,
                 num_mappings,
                 scaffold_jump,

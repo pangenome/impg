@@ -8,6 +8,43 @@ pub mod similarity;
 use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 
+use sweepga::aligner::Aligner;
+use sweepga::fastga_integration::FastGAIntegration;
+use sweepga::wfmash_integration::WfmashIntegration;
+
+/// Create an aligner backend based on the name ("wfmash" or "fastga").
+pub fn create_aligner(
+    aligner_name: &str,
+    kmer_frequency: usize,
+    num_threads: usize,
+    min_alignment_length: u64,
+    map_pct_identity: Option<String>,
+    temp_dir: Option<String>,
+) -> io::Result<Box<dyn Aligner>> {
+    match aligner_name {
+        "wfmash" => {
+            let block_len = if min_alignment_length > 0 {
+                Some(min_alignment_length)
+            } else {
+                None
+            };
+            let wfmash = WfmashIntegration::new(num_threads, block_len, map_pct_identity, temp_dir)
+                .map_err(|e| io::Error::other(format!("Failed to create wfmash aligner: {e}")))?;
+            Ok(Box::new(wfmash))
+        }
+        "fastga" => Ok(Box::new(FastGAIntegration::new(
+            Some(kmer_frequency),
+            num_threads,
+            min_alignment_length,
+            temp_dir,
+        ))),
+        _ => Err(io::Error::other(format!(
+            "Unknown aligner: {}. Valid options: wfmash, fastga",
+            aligner_name
+        ))),
+    }
+}
+
 /// Resolve a list of files from either a direct `Vec` or a list file.
 ///
 /// - If `files` is non-empty and `list` is `None`: validate all files exist and return them.
