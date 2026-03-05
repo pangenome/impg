@@ -86,7 +86,7 @@ fn test_config() -> RealizeConfig {
         sort_output: false,
         seqwish_threshold: 500,
         debug_dir: None,
-        aligner: "wfmash".to_string(),
+        aligner: "fastga".to_string(),
     }
 }
 

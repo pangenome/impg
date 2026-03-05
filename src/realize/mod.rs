@@ -84,7 +84,7 @@ impl Default for RealizeConfig {
             sort_output: true,
             seqwish_threshold: 500,
             debug_dir: None,
-            aligner: "wfmash".to_string(),
+            aligner: "fastga".to_string(),
         }
     }
 }
