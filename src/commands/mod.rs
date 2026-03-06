@@ -21,6 +21,27 @@ pub fn create_aligner(
     map_pct_identity: Option<String>,
     temp_dir: Option<String>,
 ) -> io::Result<Box<dyn Aligner>> {
+    create_aligner_adaptive(
+        aligner_name, kmer_frequency, num_threads, min_alignment_length,
+        map_pct_identity, temp_dir, None, None, None,
+    )
+}
+
+/// Create an aligner backend with adaptive wfmash parameters.
+///
+/// `segment_length`: wfmash window size. None = default (1000).
+/// `avg_seq_len`: average input sequence length, used to adapt scaffold mass.
+pub fn create_aligner_adaptive(
+    aligner_name: &str,
+    kmer_frequency: usize,
+    num_threads: usize,
+    min_alignment_length: u64,
+    map_pct_identity: Option<String>,
+    temp_dir: Option<String>,
+    segment_length: Option<u64>,
+    avg_seq_len: Option<u64>,
+    sparsify: Option<f64>,
+) -> io::Result<Box<dyn Aligner>> {
     match aligner_name {
         "wfmash" => {
             let block_len = if min_alignment_length > 0 {
@@ -28,8 +49,10 @@ pub fn create_aligner(
             } else {
                 None
             };
-            let wfmash = WfmashIntegration::new(num_threads, block_len, map_pct_identity, temp_dir)
-                .map_err(|e| io::Error::other(format!("Failed to create wfmash aligner: {e}")))?;
+            let wfmash = WfmashIntegration::adaptive(
+                num_threads, block_len, map_pct_identity, temp_dir, segment_length, avg_seq_len, sparsify,
+            )
+            .map_err(|e| io::Error::other(format!("Failed to create wfmash aligner: {e}")))?;
             Ok(Box::new(wfmash))
         }
         "fastga" => Ok(Box::new(FastGAIntegration::new(

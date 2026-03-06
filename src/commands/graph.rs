@@ -19,7 +19,7 @@ use crate::graph::sort_gfa;
 use sweepga::aligner::Aligner;
 use sweepga::paf_filter::{FilterConfig, FilterMode, PafFilter, ScoringFunction};
 
-use crate::commands::create_aligner;
+use crate::commands::create_aligner_adaptive;
 
 // Import from seqwish
 use seqwish::alignments::unpack_paf_alignments;
@@ -82,6 +82,8 @@ pub struct GraphBuildConfig {
     pub min_mapping_length: u64,
     /// Optional directory to save intermediate files (FASTA, raw PAF, filtered PAF).
     pub debug_dir: Option<String>,
+    /// Wfmash mapping sparsification fraction (0.0-1.0). None = keep all.
+    pub sparsify: Option<f64>,
 }
 
 impl Default for GraphBuildConfig {
@@ -112,6 +114,7 @@ impl Default for GraphBuildConfig {
             scaffold_dist: 0,      // No deviation limit by default
             min_mapping_length: 0, // No minimum mapping length by default
             debug_dir: None,
+            sparsify: None,
         }
     }
 }
@@ -312,13 +315,31 @@ pub fn build_graph<W: Write>(
             );
         }
 
-        let aligner: Box<dyn Aligner> = create_aligner(
+        // Adapt wfmash segment length to input sequence sizes.
+        // Default window is 1000bp; sequences shorter than that get skipped.
+        let segment_length = if config.aligner == "wfmash" && avg_seq_len < 1000 && avg_seq_len > 0 {
+            let w = (avg_seq_len / 2).max(100);
+            if config.show_progress {
+                info!(
+                    "[graph::align] {:.3}s Adapting wfmash segment length to {} (avg seq len {} < 1000)",
+                    start_time.elapsed().as_secs_f64(), w, avg_seq_len
+                );
+            }
+            Some(w)
+        } else {
+            None
+        };
+
+        let aligner: Box<dyn Aligner> = create_aligner_adaptive(
             &config.aligner,
             kmer_frequency,
             config.num_threads,
             config.min_alignment_length,
             Some("90".to_string()),
             config.temp_dir.clone(),
+            segment_length,
+            Some(avg_seq_len),
+            config.sparsify,
         )?;
 
         // Run all-vs-all alignment (query = target = combined FASTA)

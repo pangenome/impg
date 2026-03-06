@@ -489,6 +489,7 @@ fn build_sweepga_config(config: &RealizeConfig, num_sequences: usize) -> Sweepga
         sparsification: SparsificationStrategy::None, // Always all-vs-all for realize
         aligner: config.aligner.clone(),
         map_pct_identity: Some("90".to_string()), // Override wfmash ANI auto-estimation
+        sparsify: None,
     }
 }
 

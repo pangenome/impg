@@ -995,6 +995,10 @@ enum Args {
         #[clap(short = 'b', long = "min-mapping-length", value_parser = parse_size, default_value = "0")]
         min_mapping_length: u64,
 
+        /// Wfmash mapping sparsification: keep this fraction of mappings (0.0-1.0, default: no sparsification)
+        #[clap(short = 'x', long)]
+        sparsify: Option<f64>,
+
         /// GFA engine: 'seqwish' (sweepga+seqwish, unsmoothed; default), 'recursive' (sweepga+POA+lacing), or 'poa' (single-pass POA)
         #[clap(long, value_enum, default_value_t = GfaEngine::Seqwish)]
         engine: GfaEngine,
@@ -2125,6 +2129,7 @@ fn run() -> io::Result<()> {
             min_identity,
             scaffold_dist,
             min_mapping_length,
+            sparsify,
             engine,
             poa_scoring,
             recursive_opts,
@@ -2198,6 +2203,7 @@ fn run() -> io::Result<()> {
                         scaffold_dist,
                         min_mapping_length,
                         debug_dir: None,
+                        sparsify,
                     };
 
                     graph::run_graph_build(fasta_files, fasta_list, &output, config)?;

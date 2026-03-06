@@ -16,7 +16,7 @@ use std::time::Instant;
 use sweepga::aligner::Aligner;
 use sweepga::paf_filter::{FilterConfig, PafFilter, ScoringFunction};
 
-use crate::commands::create_aligner;
+use crate::commands::{create_aligner, create_aligner_adaptive};
 
 /// Sparsification strategy for pair selection
 #[derive(Clone, Debug)]
@@ -995,6 +995,8 @@ pub struct SweepgaAlignConfig {
     pub aligner: String,
     /// Minimum mapping identity for wfmash (e.g. "70"). None = wfmash auto-estimates.
     pub map_pct_identity: Option<String>,
+    /// Wfmash mapping sparsification fraction (0.0-1.0). None = keep all.
+    pub sparsify: Option<f64>,
 }
 
 impl Default for SweepgaAlignConfig {
@@ -1016,6 +1018,7 @@ impl Default for SweepgaAlignConfig {
             sparsification: SparsificationStrategy::None,
             aligner: "wfmash".to_string(),
             map_pct_identity: None,
+            sparsify: None,
         }
     }
 }
@@ -1119,13 +1122,30 @@ fn sweepga_align_all_vs_all(
         })?;
     }
 
-    let aligner: Box<dyn Aligner> = create_aligner(
+    // Adapt wfmash parameters to input sequence sizes.
+    let avg_len = if !sequences.is_empty() {
+        Some(sequences.iter().map(|(_, s)| s.len() as u64).sum::<u64>() / sequences.len() as u64)
+    } else {
+        None
+    };
+
+    // Reduce window size when sequences are shorter than default (1000bp)
+    let segment_length = match avg_len {
+        Some(avg) if config.aligner == "wfmash" && avg < 1000 && avg > 0 =>
+            Some((avg / 2).max(100)),
+        _ => None,
+    };
+
+    let aligner: Box<dyn Aligner> = create_aligner_adaptive(
         &config.aligner,
         config.kmer_frequency,
         config.num_threads,
         config.min_alignment_length,
         config.map_pct_identity.clone(),
         config.temp_dir.clone(),
+        segment_length,
+        avg_len,
+        config.sparsify,
     )?;
 
     aligner
@@ -1140,13 +1160,30 @@ fn sweepga_align_pairwise(
     pairs: &[(usize, usize)],
     config: &SweepgaAlignConfig,
 ) -> io::Result<tempfile::NamedTempFile> {
-    let aligner: Box<dyn Aligner> = create_aligner(
+    // Adapt wfmash parameters to input sequence sizes.
+    let avg_len = if !sequences.is_empty() {
+        Some(sequences.iter().map(|(_, s)| s.len() as u64).sum::<u64>() / sequences.len() as u64)
+    } else {
+        None
+    };
+
+    // Reduce window size when sequences are shorter than default (1000bp)
+    let segment_length = match avg_len {
+        Some(avg) if config.aligner == "wfmash" && avg < 1000 && avg > 0 =>
+            Some((avg / 2).max(100)),
+        _ => None,
+    };
+
+    let aligner: Box<dyn Aligner> = create_aligner_adaptive(
         &config.aligner,
         config.kmer_frequency,
         config.num_threads,
         config.min_alignment_length,
         config.map_pct_identity.clone(),
         config.temp_dir.clone(),
+        segment_length,
+        avg_len,
+        config.sparsify,
     )?;
 
     let mut combined_paf = tempfile::Builder::new().suffix(".paf").tempfile()?;
