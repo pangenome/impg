@@ -34,12 +34,15 @@ jobs:
       run: |
         if [[ "${{ runner.os }}" == "Linux" ]]; then
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake zlib1g-dev libzstd-dev libbz2-dev liblzma-dev libcurl4-openssl-dev libhts-dev libgsl-dev libjemalloc-dev
+          sudo apt-get install -y build-essential cmake zlib1g-dev libzstd-dev libbz2-dev liblzma-dev libcurl4-gnutls-dev libhts-dev libgsl-dev libjemalloc-dev
         elif [[ "${{ runner.os }}" == "macOS" ]]; then
           brew install zstd cmake xz gcc libomp htslib gsl jemalloc
           echo "CFLAGS=-I$(brew --prefix zstd)/include -I$(brew --prefix libomp)/include -I$(brew --prefix htslib)/include -I$(brew --prefix gsl)/include -I$(brew --prefix jemalloc)/include" >> $GITHUB_ENV
           echo "LDFLAGS=-L$(brew --prefix zstd)/lib -L$(brew --prefix libomp)/lib -L$(brew --prefix htslib)/lib -L$(brew --prefix gsl)/lib -L$(brew --prefix jemalloc)/lib" >> $GITHUB_ENV
           echo "CPPFLAGS=-I$(brew --prefix zstd)/include -I$(brew --prefix libomp)/include -I$(brew --prefix htslib)/include -I$(brew --prefix gsl)/include -I$(brew --prefix jemalloc)/include" >> $GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix htslib);$(brew --prefix gsl);$(brew --prefix jemalloc);$(brew --prefix libomp);$(brew --prefix zstd)" >> $GITHUB_ENV
+          echo "CMAKE_INCLUDE_PATH=$(brew --prefix htslib)/include:$(brew --prefix gsl)/include:$(brew --prefix jemalloc)/include:$(brew --prefix libomp)/include" >> $GITHUB_ENV
+          echo "CMAKE_LIBRARY_PATH=$(brew --prefix htslib)/lib:$(brew --prefix gsl)/lib:$(brew --prefix jemalloc)/lib:$(brew --prefix libomp)/lib" >> $GITHUB_ENV
         fi
 
     - name: Build
