@@ -87,6 +87,7 @@ fn test_config() -> RealizeConfig {
         seqwish_threshold: 500,
         debug_dir: None,
         aligner: "fastga".to_string(),
+        sparsify: None,
     }
 }
 

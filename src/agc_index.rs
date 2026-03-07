@@ -228,8 +228,6 @@ impl AgcIndex {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_batch_range_calculation() {
         // Test the min-max range calculation logic

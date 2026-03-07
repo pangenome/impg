@@ -40,14 +40,6 @@ cd impg
 cargo install --force --path .
 ```
 
-To install without AGC support (using only FASTA files):
-
-```bash
-git clone https://github.com/pangenome/impg.git
-cd impg
-cargo install --force --path . --no-default-features
-```
-
 ### Troubleshooting
 
 If you encounter issues related to `libclang` during the build process, you may need to set specific environment variables to point to your LLVM installation. 
@@ -103,7 +95,7 @@ impg query -a file1.paf file2.1aln -b regions.bed
 # Enable transitive overlap search
 impg query -a alignments.paf -r chr1:1000-2000 -x
 
-# Set maximum transitive depth (default: 0 = unlimited)
+# Set maximum transitive depth (default: 2)
 impg query -a alignments.1aln -r chr1:1000-2000 -x -m 3
 
 # Filter by minimum gap-compressed identity
@@ -161,6 +153,9 @@ impg query -a alignments.paf -r chr1:1000-2000 --no-merge
 
 # Force processing large regions (>10kbp) with gfa/maf output
 impg query -a alignments.paf -r chr1:1000-50000 -o gfa --sequence-files *.fa --force-large-region
+
+# Sparsify wfmash mappings for GFA output (auto or explicit fraction)
+impg query -a alignments.paf -r chr1:1000-2000 -o gfa --sequence-files *.fa --sparsify auto
 ```
 
 #### GFA engine selection
@@ -263,7 +258,7 @@ impg similarity -a alignments.1aln -b regions.bed --sequence-files *.fa
 impg similarity -a file1.paf file2.1aln -r chr1:1000-2000 --sequence-files *.fa --distances
 
 # Include all pairs (even those with zero similarity)
-impg similarity -a alignments.paf -r chr1:1000-2000 --sequence-files *.fa -a
+impg similarity -a alignments.paf -r chr1:1000-2000 --sequence-files *.fa --all
 
 # Restrict analysis to sequences listed in a file (one name per line)
 # Entries may be full contig names or sample identifiers (e.g., HG00097 or HG00097_hap1)
@@ -466,7 +461,7 @@ All engines produce sorted, unchopped GFA with consistent path names.
 
 #### Seqwish engine options
 
-The seqwish engine runs FastGA all-vs-all alignment followed by seqwish graph induction. It handles PanSN-formatted sequence names and automatically adjusts the k-mer frequency based on the number of genomes (unique SAMPLE#HAPLOTYPE prefixes).
+The seqwish engine runs all-vs-all alignment (using wfmash by default, or fastga with `--aligner fastga`) followed by seqwish graph induction. It handles PanSN-formatted sequence names and automatically adjusts the k-mer frequency based on the number of genomes (unique SAMPLE#HAPLOTYPE prefixes).
 
 ```bash
 # Adjust k-mer frequency multiplier (default: 10x number of genomes)
@@ -489,6 +484,12 @@ impg graph --fasta-files *.fa -g output.gfa --disk-backed
 
 # Skip pre-computed alignment with a PAF file
 impg graph --fasta-files sequences.fa -g output.gfa --paf-file alignments.paf
+
+# Choose aligner backend (default: wfmash)
+impg graph --fasta-files sequences.fa -g output.gfa --aligner fastga
+
+# Sparsify wfmash mappings (auto or explicit fraction)
+impg graph --fasta-files sequences.fa -g output.gfa --sparsify auto
 ```
 
 #### Alignment filtering options (seqwish engine)
@@ -526,7 +527,7 @@ impg graph --fasta-files sequences.fa -g output.gfa --engine poa --poa-scoring 5
 
 #### Temporary files
 
-FastGA writes large intermediate files (k-mer indices, alignment scratch) during graph construction. By default these go to `$TMPDIR` or the current working directory.
+The aligner writes large intermediate files during graph construction. By default these go to `$TMPDIR` or the current working directory.
 
 ```bash
 # Use a specific directory for temp files
@@ -546,6 +547,34 @@ Both `query -o gfa` and `graph` share the same engine implementations. The diffe
 - **`graph`**: reads FASTA files directly and builds a graph (no alignments or index needed).
 
 A common two-step workflow is to extract sequences with `query -o fasta`, then build a graph with `graph` for full control over seqwish filtering parameters.
+
+### Align
+
+Generate pairwise alignment jobs with sparsification strategies for large cohorts:
+
+```bash
+# Default: giant-component sparsification (99% edge probability)
+impg align --fasta-files sequences.fa -o alignments -t 16
+
+# No sparsification (all-vs-all)
+impg align --fasta-files sequences.fa -o alignments -p none
+
+# Random sparsification (keep 50% of pairs)
+impg align --fasta-files sequences.fa -o alignments -p random:0.5
+
+# Tree-based sparsification
+impg align --fasta-files sequences.fa -o alignments -p tree:3:1:0.1
+
+# Output as PAF or 1ALN instead of joblists
+impg align --fasta-files sequences.fa -o alignments --format paf
+impg align --fasta-files sequences.fa -o alignments --format 1aln
+
+# Choose aligner backend (default: wfmash)
+impg align --fasta-files sequences.fa -o alignments --aligner fastga
+
+# With alignment filtering
+impg align --fasta-files sequences.fa -o alignments --num-mappings 1:1 --scaffold-filter 1:1
+```
 
 ### Index
 
@@ -617,12 +646,10 @@ All commands support these options:
 
 For GFA/MAF/FASTA output and similarity computation:
 
-- `--sequence-files`: List of sequence files (FASTA or AGC*)
-- `--sequence-list`: Text file listing sequence files (FASTA or AGC*) (one per line)
+- `--sequence-files`: List of sequence files (FASTA or AGC)
+- `--sequence-list`: Text file listing sequence files (FASTA or AGC) (one per line)
 - `--poa-scoring`: POA scoring parameters as `match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2` (default: `5,4,6,2,24,1`)
 - `--reverse-complement`: Reverse complement sequences on the reverse strand (for FASTA output)
-
-*AGC files are only supported in the full installation (default features). For FASTA-only support, install with `--no-default-features`.
 
 ### Merging behaviour
 
