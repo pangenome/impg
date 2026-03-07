@@ -197,7 +197,7 @@ impl Default for AlignConfig {
             sparsification: SparsificationStrategy::Connectivity(0.99),
             frequency_multiplier: 10,
             frequency: None,
-            min_alignment_length: 100,
+            min_alignment_length: 0,
             output_format: AlignOutputFormat::Paf,
             show_progress: true,
             aligner: "wfmash".to_string(),
@@ -1004,7 +1004,7 @@ impl Default for SweepgaAlignConfig {
         SweepgaAlignConfig {
             num_threads: 4,
             kmer_frequency: 10,
-            min_alignment_length: 100,
+            min_alignment_length: 0,
             no_filter: false,
             num_mappings: "1:1".to_string(),
             scaffold_jump: 50_000,
@@ -1122,18 +1122,11 @@ fn sweepga_align_all_vs_all(
         })?;
     }
 
-    // Adapt wfmash parameters to input sequence sizes.
+    // Compute avg sequence length for adaptive wfmash parameters
     let avg_len = if !sequences.is_empty() {
         Some(sequences.iter().map(|(_, s)| s.len() as u64).sum::<u64>() / sequences.len() as u64)
     } else {
         None
-    };
-
-    // Reduce window size when sequences are shorter than default (1000bp)
-    let segment_length = match avg_len {
-        Some(avg) if config.aligner == "wfmash" && avg < 1000 && avg > 0 =>
-            Some((avg / 2).max(100)),
-        _ => None,
     };
 
     let aligner: Box<dyn Aligner> = create_aligner_adaptive(
@@ -1143,9 +1136,10 @@ fn sweepga_align_all_vs_all(
         config.min_alignment_length,
         config.map_pct_identity.clone(),
         config.temp_dir.clone(),
-        segment_length,
+        None, // segment_length: let sweepga adapt from avg_len
         avg_len,
         config.sparsify,
+        None, // num_mappings: use wfmash default (-n 1)
     )?;
 
     aligner
@@ -1167,13 +1161,6 @@ fn sweepga_align_pairwise(
         None
     };
 
-    // Reduce window size when sequences are shorter than default (1000bp)
-    let segment_length = match avg_len {
-        Some(avg) if config.aligner == "wfmash" && avg < 1000 && avg > 0 =>
-            Some((avg / 2).max(100)),
-        _ => None,
-    };
-
     let aligner: Box<dyn Aligner> = create_aligner_adaptive(
         &config.aligner,
         config.kmer_frequency,
@@ -1181,9 +1168,10 @@ fn sweepga_align_pairwise(
         config.min_alignment_length,
         config.map_pct_identity.clone(),
         config.temp_dir.clone(),
-        segment_length,
+        None, // segment_length: let sweepga adapt from avg_len
         avg_len,
         config.sparsify,
+        None, // pairwise: only 2 sequences per call
     )?;
 
     let mut combined_paf = tempfile::Builder::new().suffix(".paf").tempfile()?;

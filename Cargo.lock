@@ -2428,7 +2428,7 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 [[package]]
 name = "seqwish"
 version = "0.1.3"
-source = "git+https://github.com/pangenome/seqwish?rev=15e524b#15e524b5d8d344c35d39afd0fb8119712bea6e67"
+source = "git+https://github.com/pangenome/seqwish?branch=rust-2#5c80b1c833e08fc40b86d2e17a2f2c2807d8b4e0"
 dependencies = [
  "bitvec",
  "cbindgen",
@@ -2615,7 +2615,7 @@ dependencies = [
 [[package]]
 name = "sweepga"
 version = "0.1.1"
-source = "git+https://github.com/pangenome/sweepga#4b1d610724afcace6258f74e4984ae6803c1afa7"
+source = "git+https://github.com/pangenome/sweepga#51876f421695d06e0f80186479eb7ecdaff73fa5"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -3069,7 +3069,7 @@ dependencies = [
 [[package]]
 name = "wfmash-rs"
 version = "0.1.0"
-source = "git+https://github.com/pangenome/wfmash-rs#cedc501885de80c422b2941bc6d7c729e4b4c624"
+source = "git+https://github.com/pangenome/wfmash-rs#40a6c0e2c86967c566e74ccfd495b1724f861370"
 dependencies = [
  "anyhow",
  "num_cpus",

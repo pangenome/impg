@@ -922,8 +922,8 @@ enum Args {
         #[clap(long, value_parser)]
         frequency: Option<usize>,
 
-        /// Minimum alignment length
-        #[clap(long, value_parser, default_value_t = 100)]
+        /// Minimum alignment length (0 = adaptive)
+        #[clap(long, value_parser, default_value_t = 0)]
         min_alignment_length: u64,
 
         /// Aligner backend for FASTA alignment
@@ -1040,8 +1040,8 @@ enum Args {
         #[clap(long, value_parser)]
         frequency: Option<usize>,
 
-        /// Minimum alignment length
-        #[clap(short = 'l', long, value_parser, default_value_t = 100)]
+        /// Minimum alignment length (0 = adaptive)
+        #[clap(short = 'l', long, value_parser, default_value_t = 0)]
         min_alignment_length: u64,
 
         /// Aligner backend for FASTA alignment

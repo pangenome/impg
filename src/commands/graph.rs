@@ -12,6 +12,24 @@ use std::time::Instant;
 
 use bitvec::prelude::*;
 
+/// Round a value to a "nice" multiple based on its magnitude:
+/// ≤500 → multiple of 50, ≤1000 → 100, ≤3000 → 200, >3000 → 500.
+fn round_nice(v: u64) -> u64 {
+    if v == 0 {
+        return 0;
+    }
+    let step = if v <= 500 {
+        50
+    } else if v <= 1000 {
+        100
+    } else if v <= 3000 {
+        200
+    } else {
+        500
+    };
+    ((v + step / 2) / step * step).max(step)
+}
+
 // Import gfasort for graph sorting
 use crate::graph::sort_gfa;
 
@@ -92,7 +110,7 @@ impl Default for GraphBuildConfig {
             num_threads: 4,
             frequency_multiplier: 10,
             frequency: None,
-            min_alignment_length: 100,
+            min_alignment_length: 0,
             repeat_max: 0,
             min_repeat_dist: 0,
             min_match_len: 0,
@@ -315,20 +333,8 @@ pub fn build_graph<W: Write>(
             );
         }
 
-        // Adapt wfmash segment length to input sequence sizes.
-        // Default window is 1000bp; sequences shorter than that get skipped.
-        let segment_length = if config.aligner == "wfmash" && avg_seq_len < 1000 && avg_seq_len > 0 {
-            let w = (avg_seq_len / 2).max(100);
-            if config.show_progress {
-                info!(
-                    "[graph::align] {:.3}s Adapting wfmash segment length to {} (avg seq len {} < 1000)",
-                    start_time.elapsed().as_secs_f64(), w, avg_seq_len
-                );
-            }
-            Some(w)
-        } else {
-            None
-        };
+        // Segment length is adapted automatically by sweepga from avg_seq_len.
+        let segment_length = None;
 
         let aligner: Box<dyn Aligner> = create_aligner_adaptive(
             &config.aligner,
@@ -340,6 +346,7 @@ pub fn build_graph<W: Write>(
             segment_length,
             Some(avg_seq_len),
             config.sparsify,
+            None, // num_mappings: use wfmash default (-n 1)
         )?;
 
         // Run all-vs-all alignment (query = target = combined FASTA)
@@ -385,7 +392,7 @@ pub fn build_graph<W: Write>(
         // from `impg query -o fasta`), these thresholds would filter out
         // every alignment. Clamp to 80% of the average sequence length.
         let scaffold_mass = if avg_seq_len > 0 {
-            config.scaffold_mass.min(avg_seq_len * 4 / 5)
+            round_nice(config.scaffold_mass.min(avg_seq_len * 3 / 5))
         } else {
             config.scaffold_mass
         };

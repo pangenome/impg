@@ -778,7 +778,7 @@ impl Default for SeqwishConfig {
         SeqwishConfig {
             num_threads: 4,
             frequency_multiplier: 10,
-            min_alignment_length: 100,
+            min_alignment_length: 0,
             temp_dir: None,
             no_filter: false,
             num_mappings: "many:many".to_string(),

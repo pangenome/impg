@@ -14,7 +14,6 @@ use crate::sequence_index::UnifiedSequenceIndex;
 use coitrees::Interval;
 use handlegraph::handle::{Handle, NodeId};
 use log::{info, warn};
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::io::{self, BufRead, BufReader};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -399,9 +398,10 @@ fn realize_recursive(
         }
     }
 
-    // Recurse on each chunk in parallel.
+    // Recurse on each chunk sequentially so that each sub-alignment
+    // can use all available threads without oversubscription.
     let sub_gfa_results: Vec<Option<io::Result<String>>> = chunks
-        .par_iter()
+        .iter()
         .enumerate()
         .map(|(ci, chunk)| {
             if chunk.sequences.is_empty() {
@@ -475,7 +475,7 @@ fn build_sweepga_config(config: &RealizeConfig, num_sequences: usize) -> Sweepga
     SweepgaAlignConfig {
         num_threads: config.num_threads,
         kmer_frequency,
-        min_alignment_length: 100,
+        min_alignment_length: 0,
         no_filter: true,
         num_mappings: "1:1".to_string(),
         scaffold_jump: 50_000,
