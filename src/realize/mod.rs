@@ -68,6 +68,9 @@ pub struct RealizeConfig {
 
     /// Aligner backend: "wfmash" or "fastga"
     pub aligner: String,
+
+    /// Wfmash mapping sparsification: "auto" or a float string like "0.1".
+    pub sparsify: Option<String>,
 }
 
 impl Default for RealizeConfig {
@@ -84,6 +87,7 @@ impl Default for RealizeConfig {
             seqwish_threshold: 500,
             debug_dir: None,
             aligner: "fastga".to_string(),
+            sparsify: None,
         }
     }
 }
@@ -326,10 +330,29 @@ fn realize_recursive(
     sweepga_calls.fetch_add(1, Ordering::Relaxed);
 
     // Always use all-vs-all alignment in the realize engine.
-    // FastGA is efficient when run all-vs-all on a combined FASTA (indexes once).
-    // Sparsification is for the top-level `impg align` CLI with hundreds of genomes,
-    // not for the small sequence sets inside recursive chunks.
-    let align_config = build_sweepga_config(config, sequences.len());
+    // Sparsification only at the top level (depth 0) where we have many sequences;
+    // recursive sub-chunks have few sequences and don't benefit from sparsification.
+    let mut align_config = build_sweepga_config(config, sequences.len());
+    if depth == 0 {
+        align_config.sparsify = match config.sparsify.as_deref() {
+            Some("auto") => {
+                // Count unique genome prefixes (SAMPLE#HAPLOTYPE) to match build_graph behaviour
+                let mut prefixes = std::collections::HashSet::new();
+                for (_, meta) in sequences.iter() {
+                    let parts: Vec<&str> = meta.name.split('#').collect();
+                    let prefix = if parts.len() >= 2 {
+                        format!("{}#{}", parts[0], parts[1])
+                    } else {
+                        meta.name.clone()
+                    };
+                    prefixes.insert(prefix);
+                }
+                sweepga::wfmash_integration::auto_sparsify(prefixes.len().max(1))
+            }
+            Some(val) => val.parse::<f64>().ok(),
+            None => None,
+        };
+    }
     let named_seqs: Vec<(String, &[u8])> = sequences
         .iter()
         .map(|(seq, meta)| (meta.alignment_name(), seq.as_bytes()))
@@ -489,7 +512,7 @@ fn build_sweepga_config(config: &RealizeConfig, num_sequences: usize) -> Sweepga
         sparsification: SparsificationStrategy::None, // Always all-vs-all for realize
         aligner: config.aligner.clone(),
         map_pct_identity: Some("90".to_string()), // Override wfmash ANI auto-estimation
-        sparsify: None,
+        sparsify: None, // Resolved per-call in realize_recursive (top-level only)
     }
 }
 

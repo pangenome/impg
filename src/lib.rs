@@ -35,6 +35,8 @@ pub struct EngineOpts {
     pub no_filter: bool,
     /// Optional directory to save intermediate debug files (PAFs, FASTAs, etc.)
     pub debug_dir: Option<String>,
+    /// Wfmash mapping sparsification: "auto" or a float string like "0.1".
+    pub sparsify: Option<String>,
 }
 
 /// Dispatch GFA generation to the selected engine.
@@ -74,6 +76,7 @@ pub fn dispatch_gfa_engine(
                 num_threads: engine_opts.num_threads,
                 no_filter: engine_opts.no_filter,
                 debug_dir: engine_opts.debug_dir.clone(),
+                sparsify: engine_opts.sparsify.clone(),
                 ..graph::SeqwishConfig::default()
             };
             graph::generate_gfa_seqwish_from_intervals(

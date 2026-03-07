@@ -101,7 +101,7 @@ pub struct GraphBuildConfig {
     /// Optional directory to save intermediate files (FASTA, raw PAF, filtered PAF).
     pub debug_dir: Option<String>,
     /// Wfmash mapping sparsification fraction (0.0-1.0). None = keep all.
-    pub sparsify: Option<f64>,
+    pub sparsify: Option<String>,
 }
 
 impl Default for GraphBuildConfig {
@@ -336,6 +336,26 @@ pub fn build_graph<W: Write>(
         // Segment length is adapted automatically by sweepga from avg_seq_len.
         let segment_length = None;
 
+        // Resolve sparsification: "auto" → pggb heuristic, float → use directly
+        let sparsify = match config.sparsify.as_deref() {
+            Some("auto") => {
+                let frac = sweepga::wfmash_integration::auto_sparsify(num_genomes);
+                if config.show_progress {
+                    if let Some(f) = frac {
+                        info!(
+                            "[graph::align] {:.3}s Auto-sparsification: keeping {:.1}% of mappings ({} genomes)",
+                            start_time.elapsed().as_secs_f64(), f * 100.0, num_genomes
+                        );
+                    }
+                }
+                frac
+            }
+            Some(val) => Some(val.parse::<f64>().map_err(|_| {
+                io::Error::other(format!("Invalid --sparsify value '{}': expected 'auto' or a float 0.0-1.0", val))
+            })?),
+            None => None,
+        };
+
         let aligner: Box<dyn Aligner> = create_aligner_adaptive(
             &config.aligner,
             kmer_frequency,
@@ -345,7 +365,7 @@ pub fn build_graph<W: Write>(
             config.temp_dir.clone(),
             segment_length,
             Some(avg_seq_len),
-            config.sparsify,
+            sparsify,
             None, // num_mappings: use wfmash default (-n 1)
         )?;
 
