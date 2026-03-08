@@ -2615,7 +2615,7 @@ dependencies = [
 [[package]]
 name = "sweepga"
 version = "0.1.1"
-source = "git+https://github.com/pangenome/sweepga?branch=fix%2Fremove-cargo-home-side-effects#38dbb57894d0de4e065b42fbbb282db31670abb0"
+source = "git+https://github.com/pangenome/sweepga#9611bbe36ad92fd9aca4e554424cc181ed68ebfa"
 dependencies = [
  "anyhow",
  "byteorder",
