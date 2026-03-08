@@ -311,6 +311,8 @@ impl RecursiveOpts {
         num_threads: usize,
         scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
         temp_dir: Option<String>,
+        aligner: String,
+        sparsify: Option<String>,
     ) -> io::Result<impg::realize::RealizeConfig> {
         if let Some(ref dir) = self.recursive_debug_dir {
             std::fs::create_dir_all(dir).map_err(|e| {
@@ -328,6 +330,8 @@ impl RecursiveOpts {
             sort_output: self.recursive_sort,
             seqwish_threshold: self.recursive_seqwish_threshold,
             debug_dir: self.recursive_debug_dir.clone(),
+            aligner,
+            sparsify,
         })
     }
 }
@@ -681,6 +685,11 @@ enum Args {
         #[clap(short = 'N', long, action)]
         no_filter: bool,
 
+        /// Wfmash mapping sparsification: 'auto' (pggb heuristic) or a fraction 0.0-1.0 (default: no sparsification)
+        #[arg(help_heading = "Output options")]
+        #[clap(short = 'x', long)]
+        sparsify: Option<String>,
+
         /// Output folder for partition files (default: current directory)
         #[arg(help_heading = "Output options")]
         #[clap(long, value_parser)]
@@ -769,6 +778,11 @@ enum Args {
         #[arg(help_heading = "Output options")]
         #[clap(short = 'N', long, action)]
         no_filter: bool,
+
+        /// Wfmash mapping sparsification: 'auto' (pggb heuristic) or a fraction 0.0-1.0 (default: no sparsification)
+        #[arg(help_heading = "Output options")]
+        #[clap(short = 'x', long)]
+        sparsify: Option<String>,
 
         /// Prefix for output file (automatically appends the extension based on format)
         #[clap(short = 'O', long, value_parser, default_value = None)]
@@ -920,9 +934,13 @@ enum Args {
         #[clap(long, value_parser)]
         frequency: Option<usize>,
 
-        /// Minimum alignment length for FastGA
-        #[clap(long, value_parser, default_value_t = 100)]
+        /// Minimum alignment length (0 = adaptive)
+        #[clap(long, value_parser, default_value_t = 0)]
         min_alignment_length: u64,
+
+        /// Aligner backend for FASTA alignment
+        #[clap(long, value_parser = ["fastga", "wfmash"], default_value = "wfmash")]
+        aligner: String,
 
         /// Maximum repeat count for transitive closure (0 = no limit)
         #[clap(short = 'r', long, value_parser, default_value_t = 0)]
@@ -989,6 +1007,10 @@ enum Args {
         #[clap(short = 'b', long = "min-mapping-length", value_parser = parse_size, default_value = "0")]
         min_mapping_length: u64,
 
+        /// Wfmash mapping sparsification: 'auto' (pggb heuristic) or a fraction 0.0-1.0 (default: no sparsification)
+        #[clap(short = 'x', long)]
+        sparsify: Option<String>,
+
         /// GFA engine: 'seqwish' (sweepga+seqwish, unsmoothed; default), 'recursive' (sweepga+POA+lacing), or 'poa' (single-pass POA)
         #[clap(long, value_enum, default_value_t = GfaEngine::Seqwish)]
         engine: GfaEngine,
@@ -1030,9 +1052,13 @@ enum Args {
         #[clap(long, value_parser)]
         frequency: Option<usize>,
 
-        /// Minimum alignment length for FastGA
-        #[clap(short = 'l', long, value_parser, default_value_t = 100)]
+        /// Minimum alignment length (0 = adaptive)
+        #[clap(short = 'l', long, value_parser, default_value_t = 0)]
         min_alignment_length: u64,
+
+        /// Aligner backend for FASTA alignment
+        #[clap(long, value_parser = ["fastga", "wfmash"], default_value = "wfmash")]
+        aligner: String,
 
         /// Output format: paf, 1aln, or joblist
         #[clap(long, value_parser, default_value = "joblist")]
@@ -1212,6 +1238,7 @@ fn run() -> io::Result<()> {
             output_format,
             engine,
             no_filter,
+            sparsify,
             output_folder,
             gfa_maf_fasta,
             recursive_opts,
@@ -1289,13 +1316,14 @@ fn run() -> io::Result<()> {
             let engine_config = EngineOpts {
                 engine,
                 recursive_config: if output_format == "gfa" && engine == GfaEngine::Recursive {
-                    Some(recursive_opts.build_config(common.threads.get(), scoring_params, None)?)
+                    Some(recursive_opts.build_config(common.threads.get(), scoring_params, None, "wfmash".to_string(), sparsify.clone())?)
                 } else {
                     None
                 },
                 num_threads: common.threads.get(),
                 no_filter,
                 debug_dir: recursive_opts.recursive_debug_dir.clone(),
+                sparsify: sparsify.clone(),
             };
 
             // Initialize impg after validation
@@ -1337,6 +1365,7 @@ fn run() -> io::Result<()> {
             output_format,
             engine,
             no_filter,
+            sparsify,
             output_prefix,
             gfa_maf_fasta,
             recursive_opts,
@@ -1599,6 +1628,8 @@ fn run() -> io::Result<()> {
                                     common.threads.get(),
                                     scoring_params,
                                     temp_dir.clone(),
+                                    "wfmash".to_string(),
+                                    sparsify.clone(),
                                 )?)
                             } else {
                                 None
@@ -1606,6 +1637,7 @@ fn run() -> io::Result<()> {
                             num_threads: common.threads.get(),
                             no_filter,
                             debug_dir: recursive_opts.recursive_debug_dir.clone(),
+                            sparsify: sparsify.clone(),
                         };
                         output_results_gfa(
                             &impg,
@@ -2044,7 +2076,7 @@ fn run() -> io::Result<()> {
 
             // Build recursive config if engine is Recursive
             let recursive_config = if engine == GfaEngine::Recursive {
-                Some(recursive_opts.build_config(common.threads.into(), Some(scoring_params), None)?)
+                Some(recursive_opts.build_config(common.threads.into(), Some(scoring_params), None, "wfmash".to_string(), None)?)
             } else {
                 None
             };
@@ -2097,6 +2129,7 @@ fn run() -> io::Result<()> {
             frequency_multiplier,
             frequency,
             min_alignment_length,
+            aligner,
             repeat_max,
             min_repeat_dist,
             min_match_len,
@@ -2113,6 +2146,7 @@ fn run() -> io::Result<()> {
             min_identity,
             scaffold_dist,
             min_mapping_length,
+            sparsify,
             engine,
             poa_scoring,
             recursive_opts,
@@ -2136,6 +2170,8 @@ fn run() -> io::Result<()> {
                         common.threads.get(),
                         Some(scoring),
                         temp_dir.clone(),
+                        aligner.clone(),
+                        sparsify.clone(),
                     )?;
 
                     if output == "-" {
@@ -2174,6 +2210,7 @@ fn run() -> io::Result<()> {
                         show_progress: common.verbose > 0,
                         temp_dir,
                         input_paf: paf_file,
+                        aligner,
                         no_filter,
                         num_mappings,
                         scaffold_jump,
@@ -2184,6 +2221,7 @@ fn run() -> io::Result<()> {
                         scaffold_dist,
                         min_mapping_length,
                         debug_dir: None,
+                        sparsify,
                     };
 
                     graph::run_graph_build(fasta_files, fasta_list, &output, config)?;
@@ -2198,6 +2236,7 @@ fn run() -> io::Result<()> {
             frequency_multiplier,
             frequency,
             min_alignment_length,
+            aligner,
             format,
             no_filter,
             num_mappings,
@@ -2247,6 +2286,7 @@ fn run() -> io::Result<()> {
                 min_alignment_length,
                 output_format,
                 show_progress: common.verbose > 0,
+                aligner,
                 no_filter,
                 num_mappings,
                 scaffold_jump,

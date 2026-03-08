@@ -13,8 +13,10 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 // Import sweepga for direct alignment execution
-use sweepga::fastga_integration::FastGAIntegration;
+use sweepga::aligner::Aligner;
 use sweepga::paf_filter::{FilterConfig, PafFilter, ScoringFunction};
+
+use crate::commands::{create_aligner, create_aligner_adaptive};
 
 /// Sparsification strategy for pair selection
 #[derive(Clone, Debug)]
@@ -174,6 +176,8 @@ pub struct AlignConfig {
     pub min_alignment_length: u64,
     pub output_format: AlignOutputFormat,
     pub show_progress: bool,
+    /// Aligner backend: "wfmash" or "fastga"
+    pub aligner: String,
     // Sweepga filtering options
     pub no_filter: bool,
     pub num_mappings: String,
@@ -193,9 +197,10 @@ impl Default for AlignConfig {
             sparsification: SparsificationStrategy::Connectivity(0.99),
             frequency_multiplier: 10,
             frequency: None,
-            min_alignment_length: 100,
+            min_alignment_length: 0,
             output_format: AlignOutputFormat::Paf,
             show_progress: true,
+            aligner: "wfmash".to_string(),
             // Filtering defaults - match graph command
             no_filter: false,
             num_mappings: "1:1".to_string(),
@@ -799,13 +804,15 @@ fn run_alignments(
         );
     }
 
-    // Create FastGA integration
-    let fastga = FastGAIntegration::new(
-        Some(kmer_frequency),
+    // Create aligner
+    let aligner: Box<dyn Aligner> = create_aligner(
+        &config.aligner,
+        kmer_frequency,
         config.num_threads,
         config.min_alignment_length,
+        Some("90".to_string()),
         None, // temp_dir uses system default
-    );
+    )?;
 
     // Run alignments for each unique file pair
     let paf_output_path = format!("{}/alignments.paf", output_dir);
@@ -832,12 +839,12 @@ fn run_alignments(
         match config.output_format {
             AlignOutputFormat::OneAln => {
                 // For 1aln format, use align_to_temp_1aln and copy to output
-                let temp_aln = fastga
+                let temp_aln = aligner
                     .align_to_temp_1aln(Path::new(query_path), Path::new(target_path))
                     .map_err(|e| {
                         io::Error::other(format!(
-                            "FastGA alignment failed for {} vs {}: {}",
-                            query_path, target_path, e
+                            "{} alignment failed for {} vs {}: {}",
+                            config.aligner, query_path, target_path, e
                         ))
                     })?;
 
@@ -855,12 +862,12 @@ fn run_alignments(
             }
             AlignOutputFormat::Paf => {
                 // Run alignment to temp PAF
-                let paf_temp = fastga
+                let paf_temp = aligner
                     .align_to_temp_paf(Path::new(query_path), Path::new(target_path))
                     .map_err(|e| {
                         io::Error::other(format!(
-                            "FastGA alignment failed for {} vs {}: {}",
-                            query_path, target_path, e
+                            "{} alignment failed for {} vs {}: {}",
+                            config.aligner, query_path, target_path, e
                         ))
                     })?;
 
@@ -984,6 +991,12 @@ pub struct SweepgaAlignConfig {
     /// Sparsification strategy for pair selection.
     /// When not None, only alignments between selected pairs are retained.
     pub sparsification: SparsificationStrategy,
+    /// Aligner backend: "wfmash" or "fastga"
+    pub aligner: String,
+    /// Minimum mapping identity for wfmash (e.g. "70"). None = wfmash auto-estimates.
+    pub map_pct_identity: Option<String>,
+    /// Wfmash mapping sparsification fraction (0.0-1.0). None = keep all.
+    pub sparsify: Option<f64>,
 }
 
 impl Default for SweepgaAlignConfig {
@@ -991,7 +1004,7 @@ impl Default for SweepgaAlignConfig {
         SweepgaAlignConfig {
             num_threads: 4,
             kmer_frequency: 10,
-            min_alignment_length: 100,
+            min_alignment_length: 0,
             no_filter: false,
             num_mappings: "1:1".to_string(),
             scaffold_jump: 50_000,
@@ -1003,6 +1016,9 @@ impl Default for SweepgaAlignConfig {
             min_mapping_length: 0,
             temp_dir: None,
             sparsification: SparsificationStrategy::None,
+            aligner: "wfmash".to_string(),
+            map_pct_identity: None,
+            sparsify: None,
         }
     }
 }
@@ -1068,6 +1084,7 @@ pub fn sweepga_align(
             min_alignment_length: config.min_alignment_length,
             output_format: AlignOutputFormat::Paf,
             show_progress: false,
+            aligner: config.aligner.clone(),
             no_filter: config.no_filter,
             num_mappings: config.num_mappings.clone(),
             scaffold_jump: config.scaffold_jump,
@@ -1098,16 +1115,36 @@ fn sweepga_align_all_vs_all(
         writer.flush()?;
     }
 
-    let fastga = FastGAIntegration::new(
-        Some(config.kmer_frequency),
+    // Create FASTA index (.fai) — required by wfmash
+    if config.aligner == "wfmash" {
+        rust_htslib::faidx::Reader::from_path(combined_fasta.path()).map_err(|e| {
+            io::Error::other(format!("Failed to create FASTA index: {e}"))
+        })?;
+    }
+
+    // Compute avg sequence length for adaptive wfmash parameters
+    let avg_len = if !sequences.is_empty() {
+        Some(sequences.iter().map(|(_, s)| s.len() as u64).sum::<u64>() / sequences.len() as u64)
+    } else {
+        None
+    };
+
+    let aligner: Box<dyn Aligner> = create_aligner_adaptive(
+        &config.aligner,
+        config.kmer_frequency,
         config.num_threads,
         config.min_alignment_length,
+        config.map_pct_identity.clone(),
         config.temp_dir.clone(),
-    );
+        None, // segment_length: let sweepga adapt from avg_len
+        avg_len,
+        config.sparsify,
+        None, // num_mappings: use wfmash default (-n 1)
+    )?;
 
-    fastga
+    aligner
         .align_to_temp_paf(combined_fasta.path(), combined_fasta.path())
-        .map_err(|e| io::Error::other(format!("FastGA alignment failed: {}", e)))
+        .map_err(|e| io::Error::other(format!("{} alignment failed: {}", config.aligner, e)))
 }
 
 /// Pairwise alignment: write individual FASTA files per pair, align each pair,
@@ -1117,12 +1154,25 @@ fn sweepga_align_pairwise(
     pairs: &[(usize, usize)],
     config: &SweepgaAlignConfig,
 ) -> io::Result<tempfile::NamedTempFile> {
-    let fastga = FastGAIntegration::new(
-        Some(config.kmer_frequency),
+    // Adapt wfmash parameters to input sequence sizes.
+    let avg_len = if !sequences.is_empty() {
+        Some(sequences.iter().map(|(_, s)| s.len() as u64).sum::<u64>() / sequences.len() as u64)
+    } else {
+        None
+    };
+
+    let aligner: Box<dyn Aligner> = create_aligner_adaptive(
+        &config.aligner,
+        config.kmer_frequency,
         config.num_threads,
         config.min_alignment_length,
+        config.map_pct_identity.clone(),
         config.temp_dir.clone(),
-    );
+        None, // segment_length: let sweepga adapt from avg_len
+        avg_len,
+        config.sparsify,
+        None, // pairwise: only 2 sequences per call
+    )?;
 
     let mut combined_paf = tempfile::Builder::new().suffix(".paf").tempfile()?;
 
@@ -1140,12 +1190,18 @@ fn sweepga_align_pairwise(
             writeln!(writer)?;
             writer.flush()?;
         }
+        // Create FASTA index (.fai) — required by wfmash
+        if config.aligner == "wfmash" {
+            rust_htslib::faidx::Reader::from_path(fasta.path()).map_err(|e| {
+                io::Error::other(format!("Failed to create FASTA index: {e}"))
+            })?;
+        }
         fasta_files.insert(idx, fasta);
     }
 
     for &(i, j) in pairs {
         // Align this pair using pre-written FASTA files
-        match fastga.align_to_temp_paf(fasta_files[&i].path(), fasta_files[&j].path()) {
+        match aligner.align_to_temp_paf(fasta_files[&i].path(), fasta_files[&j].path()) {
             Ok(pair_paf) => {
                 // Append this pair's PAF to the combined output
                 let contents = std::fs::read(pair_paf.path())?;

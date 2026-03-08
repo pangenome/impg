@@ -2,60 +2,52 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, welcome-wfmash ]
   pull_request:
     branches: [ main ]
 
 env:
   CARGO_TERM_COLOR: always
+  WFMASH_PORTABLE: 1
 
 jobs:
   test:
-    name: Test
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest]
-        rust: [stable]
-    
+        os: [ubuntu-latest, macos-latest]
     steps:
-    - uses: actions/checkout@v3
-      with:
-        submodules: recursive
-    
-    - name: Install Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: ${{ matrix.rust }}
-        override: true
-    
-    - name: Install dependencies (Ubuntu)
-      if: matrix.os == 'ubuntu-latest'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential cmake zlib1g-dev
-    
-    # - name: Install dependencies (macOS)
-    #   if: matrix.os == 'macos-latest'
-    #   run: |
-    #     brew install cmake zlib gcc make zstd
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-    #       # Set up environment for GCC
-    #       echo "CC=/opt/homebrew/opt/gcc@13/bin/gcc-13" >> $GITHUB_ENV
-    #       echo "CXX=/opt/homebrew/opt/gcc@13/bin/g++-13" >> $GITHUB_ENV
-          
-    #       # Add GCC libraries to linker path
-    #       echo "LIBRARY_PATH=/opt/homebrew/opt/gcc@13/lib/gcc/13:/opt/homebrew/opt/gcc@13/lib:$LIBRARY_PATH" >> $GITHUB_ENV
-    #       echo "LD_LIBRARY_PATH=/opt/homebrew/opt/gcc@13/lib/gcc/13:/opt/homebrew/opt/gcc@13/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
-          
-    #       # Set RUSTFLAGS to include GCC runtime libraries
-    #       echo "RUSTFLAGS=-C link-arg=-L/opt/homebrew/opt/gcc@13/lib/gcc/13 -C link-arg=-lgcc_s.1 -C link-arg=-lgcc" >> $GITHUB_ENV
-          
-    #       # Use GNU make
-    #       echo "/opt/homebrew/opt/make/libexec/gnubin" >> $GITHUB_PATH
+      - name: Install dependencies
+        run: |
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y build-essential cmake zlib1g-dev libzstd-dev libbz2-dev liblzma-dev libcurl4-gnutls-dev libhts-dev libgsl-dev libjemalloc-dev
+          elif [[ "${{ runner.os }}" == "macOS" ]]; then
+            brew install zstd cmake xz gcc libomp htslib gsl jemalloc
+            echo "CFLAGS=-I$(brew --prefix zstd)/include -I$(brew --prefix libomp)/include -I$(brew --prefix htslib)/include -I$(brew --prefix gsl)/include -I$(brew --prefix jemalloc)/include" >> $GITHUB_ENV
+            echo "LDFLAGS=-L$(brew --prefix zstd)/lib -L$(brew --prefix libomp)/lib -L$(brew --prefix htslib)/lib -L$(brew --prefix gsl)/lib -L$(brew --prefix jemalloc)/lib" >> $GITHUB_ENV
+            echo "CPPFLAGS=-I$(brew --prefix zstd)/include -I$(brew --prefix libomp)/include -I$(brew --prefix htslib)/include -I$(brew --prefix gsl)/include -I$(brew --prefix jemalloc)/include" >> $GITHUB_ENV
+            echo "CMAKE_PREFIX_PATH=$(brew --prefix htslib);$(brew --prefix gsl);$(brew --prefix jemalloc);$(brew --prefix libomp);$(brew --prefix zstd)" >> $GITHUB_ENV
+            echo "CMAKE_INCLUDE_PATH=$(brew --prefix htslib)/include:$(brew --prefix gsl)/include:$(brew --prefix jemalloc)/include:$(brew --prefix libomp)/include" >> $GITHUB_ENV
+            echo "CMAKE_LIBRARY_PATH=$(brew --prefix htslib)/lib:$(brew --prefix gsl)/lib:$(brew --prefix jemalloc)/lib:$(brew --prefix libomp)/lib" >> $GITHUB_ENV
+          fi
 
-    - name: Build
-      run: cargo build --verbose
-    
-    - name: Run tests
-      run: cargo test --verbose
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Test
+        run: |
+          export TMPDIR="${{ runner.temp }}"
+          cargo test --release -- --test-threads=1

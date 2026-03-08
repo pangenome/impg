@@ -12,12 +12,42 @@ use std::time::Instant;
 
 use bitvec::prelude::*;
 
+/// PGGB-style auto-sparsification heuristic: ln(n)/n * 10.
+pub(crate) fn auto_sparsify(n_haps: usize) -> Option<f64> {
+    if n_haps <= 1 {
+        return None;
+    }
+    let n = n_haps as f64;
+    let frac = n.ln() / n * 10.0;
+    if frac >= 1.0 { None } else { Some(frac) }
+}
+
+/// Round a value to a "nice" multiple based on its magnitude:
+/// ≤500 → multiple of 50, ≤1000 → 100, ≤3000 → 200, >3000 → 500.
+fn round_nice(v: u64) -> u64 {
+    if v == 0 {
+        return 0;
+    }
+    let step = if v <= 500 {
+        50
+    } else if v <= 1000 {
+        100
+    } else if v <= 3000 {
+        200
+    } else {
+        500
+    };
+    ((v + step / 2) / step * step).max(step)
+}
+
 // Import gfasort for graph sorting
 use crate::graph::sort_gfa;
 
 // Import from sweepga
-use sweepga::fastga_integration::FastGAIntegration;
+use sweepga::aligner::Aligner;
 use sweepga::paf_filter::{FilterConfig, FilterMode, PafFilter, ScoringFunction};
+
+use crate::commands::create_aligner_adaptive;
 
 // Import from seqwish
 use seqwish::alignments::unpack_paf_alignments;
@@ -56,6 +86,8 @@ pub struct GraphBuildConfig {
     pub temp_dir: Option<String>,
     /// Input PAF file (skip alignment if provided)
     pub input_paf: Option<String>,
+    /// Aligner backend: "wfmash" or "fastga"
+    pub aligner: String,
 
     // Sweepga filtering options
     /// Disable all filtering (default: filtering enabled)
@@ -78,6 +110,8 @@ pub struct GraphBuildConfig {
     pub min_mapping_length: u64,
     /// Optional directory to save intermediate files (FASTA, raw PAF, filtered PAF).
     pub debug_dir: Option<String>,
+    /// Wfmash mapping sparsification fraction (0.0-1.0). None = keep all.
+    pub sparsify: Option<String>,
 }
 
 impl Default for GraphBuildConfig {
@@ -86,7 +120,7 @@ impl Default for GraphBuildConfig {
             num_threads: 4,
             frequency_multiplier: 10,
             frequency: None,
-            min_alignment_length: 100,
+            min_alignment_length: 0,
             repeat_max: 0,
             min_repeat_dist: 0,
             min_match_len: 0,
@@ -96,6 +130,7 @@ impl Default for GraphBuildConfig {
             show_progress: true,
             temp_dir: None,
             input_paf: None,
+            aligner: "wfmash".to_string(),
             // Filtering options
             no_filter: false,
             num_mappings: "many:many".to_string(),
@@ -107,6 +142,7 @@ impl Default for GraphBuildConfig {
             scaffold_dist: 0,      // No deviation limit by default
             min_mapping_length: 0, // No minimum mapping length by default
             debug_dir: None,
+            sparsify: None,
         }
     }
 }
@@ -276,7 +312,14 @@ pub fn build_graph<W: Write>(
         info!("[graph::debug] Saved combined FASTA to {}", dst);
     }
 
-    // 3) Get PAF alignments - either from input file or run FastGA
+    // Create FASTA index (.fai) — required by wfmash
+    if config.aligner == "wfmash" {
+        rust_htslib::faidx::Reader::from_path(combined_fasta.path()).map_err(|e| {
+            io::Error::other(format!("Failed to create FASTA index: {e}"))
+        })?;
+    }
+
+    // 3) Get PAF alignments - either from input file or run aligner
     let paf_temp: tempfile::NamedTempFile = if let Some(ref input_paf) = config.input_paf {
         // Use provided PAF file - copy to temp file to match expected type
         if config.show_progress {
@@ -290,26 +333,56 @@ pub fn build_graph<W: Write>(
         std::fs::copy(input_paf, paf_temp.path())?;
         paf_temp
     } else {
-        // Run sweepga/FastGA alignment
+        // Run alignment
         if config.show_progress {
             info!(
-                "[graph::align] {:.3}s Running FastGA alignment with -f {}",
+                "[graph::align] {:.3}s Running {} alignment (f={})",
                 start_time.elapsed().as_secs_f64(),
+                config.aligner,
                 kmer_frequency
             );
         }
 
-        let fastga = FastGAIntegration::new(
-            Some(kmer_frequency),
+        // Segment length is adapted automatically by sweepga from avg_seq_len.
+        let segment_length = None;
+
+        // Resolve sparsification: "auto" → pggb heuristic, float → use directly
+        let sparsify = match config.sparsify.as_deref() {
+            Some("auto") => {
+                let frac = auto_sparsify(num_genomes);
+                if config.show_progress {
+                    if let Some(f) = frac {
+                        info!(
+                            "[graph::align] {:.3}s Auto-sparsification: keeping {:.1}% of mappings ({} genomes)",
+                            start_time.elapsed().as_secs_f64(), f * 100.0, num_genomes
+                        );
+                    }
+                }
+                frac
+            }
+            Some(val) => Some(val.parse::<f64>().map_err(|_| {
+                io::Error::other(format!("Invalid --sparsify value '{}': expected 'auto' or a float 0.0-1.0", val))
+            })?),
+            None => None,
+        };
+
+        let aligner: Box<dyn Aligner> = create_aligner_adaptive(
+            &config.aligner,
+            kmer_frequency,
             config.num_threads,
             config.min_alignment_length,
+            Some("90".to_string()),
             config.temp_dir.clone(),
-        );
+            segment_length,
+            Some(avg_seq_len),
+            sparsify,
+            None, // num_mappings: use wfmash default (-n 1)
+        )?;
 
         // Run all-vs-all alignment (query = target = combined FASTA)
-        let paf_temp = fastga
+        let paf_temp = aligner
             .align_to_temp_paf(combined_fasta.path(), combined_fasta.path())
-            .map_err(|e| io::Error::other(format!("FastGA alignment failed: {}", e)))?;
+            .map_err(|e| io::Error::other(format!("{} alignment failed: {}", config.aligner, e)))?;
 
         if config.show_progress {
             info!(
@@ -349,7 +422,7 @@ pub fn build_graph<W: Write>(
         // from `impg query -o fasta`), these thresholds would filter out
         // every alignment. Clamp to 80% of the average sequence length.
         let scaffold_mass = if avg_seq_len > 0 {
-            config.scaffold_mass.min(avg_seq_len * 4 / 5)
+            round_nice(config.scaffold_mass.min(avg_seq_len * 3 / 5))
         } else {
             config.scaffold_mass
         };

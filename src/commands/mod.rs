@@ -8,6 +8,68 @@ pub mod similarity;
 use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 
+use sweepga::aligner::Aligner;
+use sweepga::fastga_integration::FastGAIntegration;
+use sweepga::wfmash_integration::WfmashIntegration;
+
+/// Create an aligner backend based on the name ("wfmash" or "fastga").
+pub fn create_aligner(
+    aligner_name: &str,
+    kmer_frequency: usize,
+    num_threads: usize,
+    min_alignment_length: u64,
+    map_pct_identity: Option<String>,
+    temp_dir: Option<String>,
+) -> io::Result<Box<dyn Aligner>> {
+    create_aligner_adaptive(
+        aligner_name, kmer_frequency, num_threads, min_alignment_length,
+        map_pct_identity, temp_dir, None, None, None, None,
+    )
+}
+
+/// Create an aligner backend with adaptive wfmash parameters.
+///
+/// `segment_length`: wfmash segment length (-s). None = adaptive.
+/// `avg_seq_len`: average input sequence length, used to adapt parameters.
+/// `num_mappings`: wfmash -n flag. None = wfmash default (1).
+pub fn create_aligner_adaptive(
+    aligner_name: &str,
+    kmer_frequency: usize,
+    num_threads: usize,
+    min_alignment_length: u64,
+    map_pct_identity: Option<String>,
+    temp_dir: Option<String>,
+    segment_length: Option<u64>,
+    avg_seq_len: Option<u64>,
+    sparsify: Option<f64>,
+    num_mappings: Option<usize>,
+) -> io::Result<Box<dyn Aligner>> {
+    match aligner_name {
+        "wfmash" => {
+            let block_len = if min_alignment_length > 0 {
+                Some(min_alignment_length)
+            } else {
+                None
+            };
+            let wfmash = WfmashIntegration::adaptive(
+                num_threads, block_len, map_pct_identity, temp_dir, segment_length, avg_seq_len, sparsify, num_mappings,
+            )
+            .map_err(|e| io::Error::other(format!("Failed to create wfmash aligner: {e}")))?;
+            Ok(Box::new(wfmash))
+        }
+        "fastga" => Ok(Box::new(FastGAIntegration::new(
+            Some(kmer_frequency),
+            num_threads,
+            min_alignment_length,
+            temp_dir,
+        ))),
+        _ => Err(io::Error::other(format!(
+            "Unknown aligner: {}. Valid options: wfmash, fastga",
+            aligner_name
+        ))),
+    }
+}
+
 /// Resolve a list of files from either a direct `Vec` or a list file.
 ///
 /// - If `files` is non-empty and `list` is `None`: validate all files exist and return them.
