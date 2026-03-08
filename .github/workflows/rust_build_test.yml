@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  WFMASH_PORTABLE: 1
 
 jobs:
   test:
@@ -45,4 +46,6 @@ jobs:
         run: cargo build --release
 
       - name: Test
-        run: cargo test --release
+        run: |
+          export TMPDIR="${{ runner.temp }}"
+          cargo test --release -- --test-threads=1
