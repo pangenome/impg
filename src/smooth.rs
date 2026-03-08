@@ -4,7 +4,7 @@
 //! runs SPOA partial-order alignment on each block, and reassembles the smoothed
 //! graph via lacing.
 
-use crate::graph::{build_spoa_engine, feed_sequences_to_graph, reverse_complement, sort_gfa};
+use crate::graph::{build_spoa_engine, feed_sequences_to_graph, reverse_complement, sort_gfa, unchop_gfa};
 use bitvec::{bitvec, prelude::BitVec};
 use log::info;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -36,6 +36,8 @@ pub struct SmoothConfig {
     pub num_threads: usize,
     /// Optional temp directory for intermediate files.
     pub temp_dir: Option<String>,
+    /// Skip the initial unchop+sort step (use when input is already unchoped and sorted).
+    pub pre_sorted: bool,
 }
 
 impl SmoothConfig {
@@ -54,6 +56,7 @@ impl SmoothConfig {
             scoring_params: (1, 4, 6, 2, 26, 1),
             num_threads: 4,
             temp_dir: None,
+            pre_sorted: false,
         }
     }
 }
@@ -149,9 +152,13 @@ impl UnionFind {
 ///
 /// Pipeline: sort → chop → block decompose → break long blocks → per-block SPOA → lace.
 pub fn smooth_gfa(gfa_content: &str, config: &SmoothConfig) -> io::Result<String> {
-    // Step 1: Sort input GFA (gives a 1D layout for block decomposition)
-    info!("[smooth] Sorting input GFA for 1D layout...");
-    let sorted_gfa = sort_gfa(gfa_content, config.num_threads)?;
+    // Step 1: Unchop then sort input GFA (gives a 1D layout for block decomposition)
+    let sorted_gfa = if config.pre_sorted {
+        gfa_content.to_string()
+    } else {
+        info!("[smooth] Unchopping and sorting input GFA for 1D layout...");
+        sort_gfa(&unchop_gfa(gfa_content)?, config.num_threads)?
+    };
 
     // Step 2: Parse sorted GFA
     let mut graph = parse_gfa(&sorted_gfa);

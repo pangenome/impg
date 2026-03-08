@@ -128,6 +128,7 @@ pub fn dispatch_gfa_engine(
             let n_haps = query_intervals.len().max(1);
             let smooth_config = smooth::SmoothConfig {
                 num_threads: engine_opts.num_threads,
+                pre_sorted: true,
                 ..smooth::SmoothConfig::new(n_haps)
             };
             let smoothed = smooth::smooth_gfa(&raw_gfa, &smooth_config)?;

@@ -75,7 +75,8 @@ pub(crate) fn spoa_graph_to_sorted_gfa(
         .collect();
     let gfa_output = graph.generate_gfa(&headers, false);
     let gfa_output = post_process_gfa_for_strands(gfa_output, sequence_metadata);
-    sort_gfa(&gfa_output, num_threads)
+    let unchopped = unchop_gfa(&gfa_output)?;
+    sort_gfa(&unchopped, num_threads)
 }
 
 pub fn post_process_gfa_for_strands(gfa: String, sequence_metadata: &[SequenceMetadata]) -> String {
@@ -761,14 +762,6 @@ pub fn sort_gfa(gfa_content: &str, num_threads: usize) -> io::Result<String> {
     if node_count <= 1 {
         return Ok(gfa_content.to_string());
     }
-
-    log::debug!("[sort_gfa] unchopping {} nodes...", node_count);
-
-    // Compact single-base nodes into longer segments (unchop)
-    unchop_only(&mut graph, 0);
-
-    let unchopped_count = graph.nodes.iter().filter(|n| n.is_some()).count();
-    log::debug!("[sort_gfa] {} → {} nodes after unchop, sorting...", node_count, unchopped_count);
 
     // Create Ygs parameters from the graph
     let params = YgsParams::from_graph(&graph, 0, num_threads);

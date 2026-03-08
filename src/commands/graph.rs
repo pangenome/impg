@@ -41,7 +41,7 @@ fn round_nice(v: u64) -> u64 {
 }
 
 // Import gfasort for graph sorting
-use crate::graph::sort_gfa;
+use crate::graph::{sort_gfa, unchop_gfa};
 
 // Import from sweepga
 use sweepga::aligner::Aligner;
@@ -706,7 +706,7 @@ pub fn build_graph<W: Write>(
         );
     }
 
-    let sorted_gfa = sort_gfa(&gfa_string, config.num_threads)?;
+    let sorted_gfa = sort_gfa(&unchop_gfa(&gfa_string)?, config.num_threads)?;
 
     // Write sorted GFA to output
     output.write_all(sorted_gfa.as_bytes())?;
@@ -924,6 +924,7 @@ pub fn run_graph_build_pggb<W: Write>(
         poa_padding_fraction,
         num_threads: config.num_threads,
         temp_dir: config.temp_dir.clone(),
+        pre_sorted: true,
         ..crate::smooth::SmoothConfig::new(n_haps)
     };
     let smoothed = crate::smooth::smooth_gfa(&raw_gfa, &smooth_config)?;
