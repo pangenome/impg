@@ -12,6 +12,16 @@ use std::time::Instant;
 
 use bitvec::prelude::*;
 
+/// PGGB-style auto-sparsification heuristic: ln(n)/n * 10.
+pub(crate) fn auto_sparsify(n_haps: usize) -> Option<f64> {
+    if n_haps <= 1 {
+        return None;
+    }
+    let n = n_haps as f64;
+    let frac = n.ln() / n * 10.0;
+    if frac >= 1.0 { None } else { Some(frac) }
+}
+
 /// Round a value to a "nice" multiple based on its magnitude:
 /// ≤500 → multiple of 50, ≤1000 → 100, ≤3000 → 200, >3000 → 500.
 fn round_nice(v: u64) -> u64 {
@@ -339,7 +349,7 @@ pub fn build_graph<W: Write>(
         // Resolve sparsification: "auto" → pggb heuristic, float → use directly
         let sparsify = match config.sparsify.as_deref() {
             Some("auto") => {
-                let frac = sweepga::wfmash_integration::auto_sparsify(num_genomes);
+                let frac = auto_sparsify(num_genomes);
                 if config.show_progress {
                     if let Some(f) = frac {
                         info!(

@@ -347,7 +347,7 @@ fn realize_recursive(
                     };
                     prefixes.insert(prefix);
                 }
-                sweepga::wfmash_integration::auto_sparsify(prefixes.len().max(1))
+                crate::commands::graph::auto_sparsify(prefixes.len().max(1))
             }
             Some(val) => val.parse::<f64>().ok(),
             None => None,
