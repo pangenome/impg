@@ -41,6 +41,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
 
       - name: Build
         run: cargo build --release
