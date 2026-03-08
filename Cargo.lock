@@ -870,7 +870,7 @@ dependencies = [
 [[package]]
 name = "fastga-rs"
 version = "0.1.2"
-source = "git+https://github.com/pangenome/fastga-rs?rev=e7a6d93#e7a6d93621e53d141df5fbecb47651564555d43b"
+source = "git+https://github.com/pangenome/fastga-rs?rev=eacb79b#eacb79b343a74c22c2b3f642b23a07cc98fe7b94"
 dependencies = [
  "anyhow",
  "cc",
@@ -2615,7 +2615,7 @@ dependencies = [
 [[package]]
 name = "sweepga"
 version = "0.1.1"
-source = "git+https://github.com/pangenome/sweepga#ae4a202198d20331cca7950c72d39054aa0b60a2"
+source = "git+https://github.com/pangenome/sweepga#198bfd427d6827a0c3838489d29b2ec77aa1d84f"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -3069,7 +3069,7 @@ dependencies = [
 [[package]]
 name = "wfmash-rs"
 version = "0.1.0"
-source = "git+https://github.com/pangenome/wfmash-rs#3aa5054dc667981afe096b4d97621eb5f231d943"
+source = "git+https://github.com/pangenome/wfmash-rs#e66d8909d67ec1a4a3b877aac3e9577f7a4a0be0"
 dependencies = [
  "anyhow",
  "num_cpus",
