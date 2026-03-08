@@ -706,10 +706,10 @@ pub fn build_graph<W: Write>(
         );
     }
 
-    let sorted_gfa = sort_gfa(&unchop_gfa(&gfa_string)?, config.num_threads)?;
+    let unchopped_gfa = unchop_gfa(&gfa_string)?;
 
-    // Write sorted GFA to output
-    output.write_all(sorted_gfa.as_bytes())?;
+    // Write unchopped GFA to output (caller applies gfaffix+sort via normalize_and_sort)
+    output.write_all(unchopped_gfa.as_bytes())?;
 
     if config.show_progress {
         info!(
@@ -744,14 +744,20 @@ pub fn run_graph_build(
 
     info!("Building graph from {} FASTA file(s)", fasta_files.len());
 
-    // Build graph with output
+    // Build graph, then normalize (gfaffix) and sort
+    let mut gfa_buf: Vec<u8> = Vec::new();
+    build_graph(&fasta_files, &mut gfa_buf, &config)?;
+    let gfa = String::from_utf8(gfa_buf)
+        .map_err(|e| io::Error::other(format!("seqwish GFA is not valid UTF-8: {}", e)))?;
+    let final_gfa = crate::graph::normalize_and_sort(gfa, config.num_threads)?;
+
     if output == "-" {
         let stdout = io::stdout();
         let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
-        build_graph(&fasta_files, &mut out, &config)?;
+        out.write_all(final_gfa.as_bytes())?;
     } else {
         let mut out = BufWriter::with_capacity(1024 * 1024, File::create(output)?);
-        build_graph(&fasta_files, &mut out, &config)?;
+        out.write_all(final_gfa.as_bytes())?;
     }
 
     Ok(())
@@ -812,7 +818,8 @@ pub fn run_graph_build_realize<W: Write>(
         result.stats.total_ms,
     );
 
-    output.write_all(result.gfa.as_bytes())?;
+    let final_gfa = crate::graph::normalize_and_sort(result.gfa, config.num_threads)?;
+    output.write_all(final_gfa.as_bytes())?;
 
     Ok(())
 }
@@ -861,9 +868,10 @@ pub fn run_graph_build_poa<W: Write>(
         sequences.iter().map(|(s, _)| s.as_str()),
     );
 
-    // Generate GFA, post-process strands, sort
-    let sorted = crate::graph::spoa_graph_to_sorted_gfa(graph, &metadata, num_threads)?;
-    output.write_all(sorted.as_bytes())?;
+    // Generate GFA, post-process strands, unchop, then gfaffix+sort
+    let unchopped = crate::graph::spoa_graph_to_unchoped_gfa(graph, &metadata)?;
+    let final_gfa = crate::graph::normalize_and_sort(unchopped, num_threads)?;
+    output.write_all(final_gfa.as_bytes())?;
 
     Ok(())
 }
@@ -901,11 +909,14 @@ pub fn run_graph_build_pggb<W: Write>(
     let (_num_sequences, num_genomes) = count_sequences_and_genomes_in_fasta(&fasta_files)?;
     let n_haps = num_genomes.max(1);
 
-    // Step 1: Run the seqwish pipeline, capturing the raw GFA
+    // Step 1: Run the seqwish pipeline, capturing the raw (unchoped) GFA
     let mut gfa_buffer: Vec<u8> = Vec::new();
     build_graph(&fasta_files, &mut gfa_buffer, config)?;
     let raw_gfa = String::from_utf8(gfa_buffer)
         .map_err(|e| io::Error::other(format!("seqwish GFA is not valid UTF-8: {}", e)))?;
+
+    // Sort for 1D layout (required by smoothxg block decomposition)
+    let raw_gfa = sort_gfa(&raw_gfa, config.num_threads)?;
 
     info!(
         "[pggb] {:.3}s Seqwish done, smoothing (n_haps={}, target_poa_length={})",
@@ -934,15 +945,8 @@ pub fn run_graph_build_pggb<W: Write>(
         start_time.elapsed().as_secs_f64()
     );
 
-    // Step 3: gfaffix normalization (optional, graceful fallback if binary not found)
-    let normalized = crate::graph::run_gfaffix(&smoothed, config.num_threads)
-        .unwrap_or_else(|e| {
-            log::warn!("[pggb] gfaffix not available ({}), skipping normalization", e);
-            smoothed
-        });
-
-    // Step 4: Final sort
-    let sorted = sort_gfa(&normalized, config.num_threads)?;
+    // Step 3: gfaffix normalization + final sort
+    let sorted = crate::graph::normalize_and_sort(smoothed, config.num_threads)?;
 
     info!(
         "[pggb] {:.3}s Done",

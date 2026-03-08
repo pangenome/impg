@@ -6,7 +6,7 @@ use crate::commands::lace::{
     split_path_name, trim_range_overlaps,
 };
 use crate::graph::{
-    prepare_sequences, sort_gfa, unchop_gfa, SequenceMetadata,
+    prepare_sequences, unchop_gfa, SequenceMetadata,
 };
 use crate::impg_index::ImpgIndex;
 use crate::realize::poa::padded_poa_from_sequences;
@@ -197,7 +197,7 @@ pub fn realize_from_sequences(
     let gfa = realize_recursive(sequences, config, 0, &poa_calls, &sweepga_calls, &seqwish_calls, &max_depth_reached)?;
 
     let gfa = if config.sort_output {
-        sort_gfa(&unchop_gfa(&gfa)?, config.num_threads)?
+        unchop_gfa(&gfa)?
     } else {
         gfa
     };
@@ -438,13 +438,13 @@ fn realize_recursive(
                 sweepga_calls,
                 seqwish_calls,
                 max_depth_reached,
-            ).map(|gfa| {
+            ).and_then(|gfa| {
                 // Debug: save each sub-GFA
                 if let Some(ref debug_dir) = config.debug_dir {
                     let gfa_path = format!("{}/depth{}_chunk{}.gfa", debug_dir, depth, ci);
                     let _ = std::fs::write(&gfa_path, &gfa);
                 }
-                gfa
+                unchop_gfa(&gfa)
             }))
         })
         .collect();

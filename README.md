@@ -160,16 +160,18 @@ impg query -a alignments.paf -r chr1:1000-2000 -o gfa --sequence-files *.fa --sp
 
 #### GFA engine selection
 
-When outputting GFA (`-o gfa`), use `--engine` to choose the graph construction algorithm (default: `recursive`):
+When outputting GFA (`-o gfa`), use `--engine` to choose the graph construction algorithm (default: `pggb`):
 
 | Engine | Algorithm | Best for |
 |--------|-----------|----------|
-| `recursive` | Recursive sweepga-guided chunking + POA per chunk + lacing | Default. Fast, compact graphs. |
+| `pggb` | seqwish + smoothxg-style smoothing + gfaffix normalization | Default. Smoothed, normalized variation graphs. |
+| `recursive` | Recursive sweepga-guided chunking + POA per chunk + lacing | Fast, compact graphs for mid-size regions. |
 | `seqwish` | All-vs-all sweepga + transitive closure graph induction | Raw (unsmoothed) variation graphs. |
 | `poa` | Single-pass partial order alignment (SPOA) | Small regions, quick MSA-based output. |
 
 ```bash
-# Choose a GFA engine (default: recursive)
+# Choose a GFA engine (default: pggb)
+impg query -a alignments.paf -r chr1:1000-2000 -o gfa --engine pggb --sequence-files *.fa
 impg query -a alignments.paf -r chr1:1000-2000 -o gfa --engine recursive --sequence-files *.fa
 impg query -a alignments.paf -r chr1:1000-2000 -o gfa --engine seqwish --sequence-files *.fa
 impg query -a alignments.paf -r chr1:1000-2000 -o gfa --engine poa --sequence-files *.fa
@@ -238,7 +240,8 @@ impg partition -a file1.paf file2.1aln -w 1000000 -o fasta --sequence-files *.fa
 # Works with AGC archives too
 impg partition -a alignments.paf -w 1000000 -o gfa --sequence-files genomes.agc --separate-files --output-folder gfa_partitions
 
-# GFA engine selection (same engines as query: recursive, seqwish, poa; default: recursive)
+# GFA engine selection (same engines as query: pggb, recursive, seqwish, poa; default: pggb)
+impg partition -a alignments.paf -w 1000000 -o gfa --engine pggb --sequence-files *.fa --separate-files
 impg partition -a alignments.paf -w 1000000 -o gfa --engine seqwish --sequence-files *.fa --separate-files
 impg partition -a alignments.paf -w 1000000 -o gfa --engine seqwish -N --sequence-files *.fa --separate-files  # no filtering
 ```
@@ -444,10 +447,13 @@ impg graph --fasta-files sequences.fa -g - | odgi build -g - -o output.og
 
 #### Engine selection
 
-Use `--engine` to choose the graph construction algorithm (default: `seqwish`):
+Use `--engine` to choose the graph construction algorithm (default: `pggb`):
 
 ```bash
-# Seqwish: sweepga alignment + transitive closure graph induction (default)
+# Pggb: seqwish + smoothxg-style smoothing + gfaffix normalization (default)
+impg graph --fasta-files sequences.fa -g output.gfa --engine pggb
+
+# Seqwish: sweepga alignment + transitive closure graph induction (raw, unsmoothed)
 impg graph --fasta-files sequences.fa -g output.gfa --engine seqwish
 
 # Recursive: sweepga-guided chunking + POA per chunk + lacing
@@ -712,7 +718,7 @@ This creates one FASTA file per partition (e.g., `partitions/partition0.fasta`, 
 
 ### Step 3: Build Graphs for Each Partition
 
-Use `impg graph` to build a GFA for each partition. By default, `impg graph` applies 1:1 alignment filtering with scaffold-based chaining to remove spurious cross-chromosome alignments from repetitive elements:
+Use `impg graph` to build a GFA for each partition. By default, `impg graph` uses the `pggb` engine (seqwish + smoothing + gfaffix normalization) with 1:1 alignment filtering and scaffold-based chaining to remove spurious cross-chromosome alignments from repetitive elements:
 
 ```bash
 # Create output directory

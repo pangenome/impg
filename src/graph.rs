@@ -58,16 +58,16 @@ pub fn generate_gfa_from_intervals(
 ) -> io::Result<String> {
     let (graph, sequence_metadata) =
         prepare_poa_graph_and_sequences(impg, results, sequence_index, scoring_params).unwrap();
-    spoa_graph_to_sorted_gfa(graph, &sequence_metadata, num_threads)
+    spoa_graph_to_unchoped_gfa(graph, &sequence_metadata)
 }
 
-/// Convert an SPOA graph + metadata into a sorted GFA string.
+/// Convert an SPOA graph + metadata into an unchopped GFA string.
 ///
-/// Shared pipeline: generate GFA → post-process strands → unchop + sort.
-pub(crate) fn spoa_graph_to_sorted_gfa(
+/// Pipeline: generate GFA → post-process strands → unchop.
+/// Callers apply gfaffix + sort via normalize_and_sort.
+pub(crate) fn spoa_graph_to_unchoped_gfa(
     graph: SpoaGraph,
     sequence_metadata: &[SequenceMetadata],
-    num_threads: usize,
 ) -> io::Result<String> {
     let headers: Vec<String> = sequence_metadata
         .iter()
@@ -75,8 +75,7 @@ pub(crate) fn spoa_graph_to_sorted_gfa(
         .collect();
     let gfa_output = graph.generate_gfa(&headers, false);
     let gfa_output = post_process_gfa_for_strands(gfa_output, sequence_metadata);
-    let unchopped = unchop_gfa(&gfa_output)?;
-    sort_gfa(&unchopped, num_threads)
+    unchop_gfa(&gfa_output)
 }
 
 pub fn post_process_gfa_for_strands(gfa: String, sequence_metadata: &[SequenceMetadata]) -> String {
@@ -741,6 +740,15 @@ pub(crate) fn unchop_gfa(gfa_content: &str) -> io::Result<String> {
             format!("unchop: invalid UTF-8 in output: {}", e),
         )
     })
+}
+
+/// Apply gfaffix normalization then SGD sort.
+///
+/// Shared final step for all engines. Fails with an error if gfaffix is not
+/// found or exits non-zero — callers must ensure the binary is available.
+pub fn normalize_and_sort(gfa: String, num_threads: usize) -> io::Result<String> {
+    let normalized = run_gfaffix(&gfa, num_threads)?;
+    sort_gfa(&normalized, num_threads)
 }
 
 pub fn sort_gfa(gfa_content: &str, num_threads: usize) -> io::Result<String> {

@@ -61,13 +61,14 @@ pub fn dispatch_gfa_engine(
                     "POA scoring parameters required for poa engine",
                 )
             })?;
-            graph::generate_gfa_from_intervals(
+            let gfa = graph::generate_gfa_from_intervals(
                 impg,
                 query_intervals,
                 sequence_index,
                 params,
                 engine_opts.num_threads,
-            )
+            )?;
+            graph::normalize_and_sort(gfa, engine_opts.num_threads)
         }
         GfaEngine::Seqwish => {
             if let Some(ref dir) = engine_opts.debug_dir {
@@ -82,12 +83,13 @@ pub fn dispatch_gfa_engine(
                 sparsify: engine_opts.sparsify.clone(),
                 ..graph::SeqwishConfig::default()
             };
-            graph::generate_gfa_seqwish_from_intervals(
+            let gfa = graph::generate_gfa_seqwish_from_intervals(
                 impg,
                 query_intervals,
                 sequence_index,
                 &config,
-            )
+            )?;
+            graph::normalize_and_sort(gfa, engine_opts.num_threads)
         }
         GfaEngine::Recursive => {
             let config = engine_opts.recursive_config.as_ref().ok_or_else(|| {
@@ -106,7 +108,7 @@ pub fn dispatch_gfa_engine(
                 result.stats.seqwish_calls,
                 result.stats.total_ms,
             );
-            Ok(result.gfa)
+            graph::normalize_and_sort(result.gfa, engine_opts.num_threads)
         }
         GfaEngine::Pggb => {
             // Step 1: run seqwish pipeline
@@ -124,6 +126,9 @@ pub fn dispatch_gfa_engine(
                 &seqwish_config,
             )?;
 
+            // Sort for 1D layout (required by smoothxg block decomposition)
+            let raw_gfa = graph::sort_gfa(&raw_gfa, engine_opts.num_threads)?;
+
             // Step 2: smooth
             let n_haps = query_intervals.len().max(1);
             let smooth_config = smooth::SmoothConfig {
@@ -133,15 +138,8 @@ pub fn dispatch_gfa_engine(
             };
             let smoothed = smooth::smooth_gfa(&raw_gfa, &smooth_config)?;
 
-            // Step 3: gfaffix normalization (optional, graceful fallback)
-            let normalized = graph::run_gfaffix(&smoothed, engine_opts.num_threads)
-                .unwrap_or_else(|e| {
-                    log::debug!("[pggb] gfaffix skipped: {}", e);
-                    smoothed
-                });
-
-            // Step 4: final sort
-            graph::sort_gfa(&normalized, engine_opts.num_threads)
+            // Step 3: gfaffix + sort
+            graph::normalize_and_sort(smoothed, engine_opts.num_threads)
         }
     }
 }

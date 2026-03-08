@@ -233,14 +233,12 @@ pub fn smooth_gfa(gfa_content: &str, config: &SmoothConfig) -> io::Result<String
     }
 
     // Step 9: Lace block GFAs together
+    // Per-block gfaffix already normalized each block; the caller's normalize_and_sort
+    // (gfaffix + sort) handles any remaining redundancies introduced at lacing boundaries.
     let laced = crate::realize::lace_subgraphs(&block_gfas, config.temp_dir.as_deref())?;
     info!("[smooth] Lacing complete");
 
-    // Step 10: Final unchop — merges consecutive nodes at block boundaries
-    let unchopped = crate::graph::unchop_gfa(&laced)?;
-    info!("[smooth] Unchop complete");
-
-    Ok(unchopped)
+    Ok(laced)
 }
 
 // ---------------------------------------------------------------------------
@@ -1036,7 +1034,7 @@ fn smooth_block(
         // No padding — generate GFA directly
         let headers: Vec<String> = entries.iter().map(|e| e.path_name.clone()).collect();
         let gfa = spoa_graph.generate_gfa(&headers, false);
-        return crate::graph::unchop_gfa(&gfa);
+        return unchop_gfa(&gfa);
     }
 
     // With padding: use MSA-based trimming approach
@@ -1074,7 +1072,7 @@ fn smooth_block(
 
     let headers: Vec<String> = entries.iter().take(nseqs).map(|e| e.path_name.clone()).collect();
     let gfa = graph2.generate_gfa(&headers, false);
-    crate::graph::unchop_gfa(&gfa)
+    unchop_gfa(&gfa)
 }
 
 /// Find the MSA column range corresponding to the core (non-padding) region.

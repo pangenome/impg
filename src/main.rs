@@ -675,9 +675,9 @@ enum Args {
         #[clap(short = 'o', long, value_parser, default_value = "bed")]
         output_format: String,
 
-        /// GFA engine: 'recursive' (sweepga+POA+lacing, default), 'seqwish' (sweepga+seqwish, unsmoothed), or 'poa' (single-pass POA)
+        /// GFA engine: 'pggb' (seqwish+smoothing+gfaffix, default), 'recursive' (sweepga+POA+lacing), 'seqwish' (unsmoothed), or 'poa' (single-pass POA)
         #[arg(help_heading = "Output options")]
-        #[clap(long, value_enum, default_value_t = GfaEngine::Recursive)]
+        #[clap(long, value_enum, default_value_t = GfaEngine::Pggb)]
         engine: GfaEngine,
 
         /// Disable alignment filtering for seqwish engine (faster but may produce broken graphs)
@@ -769,9 +769,9 @@ enum Args {
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
 
-        /// GFA engine: 'recursive' (sweepga+POA+lacing), 'seqwish' (sweepga+seqwish, unsmoothed), or 'poa' (single-pass POA)
+        /// GFA engine: 'pggb' (seqwish+smoothing+gfaffix, default), 'recursive' (sweepga+POA+lacing), 'seqwish' (unsmoothed), or 'poa' (single-pass POA)
         #[arg(help_heading = "Output options")]
-        #[clap(long, value_enum, default_value_t = GfaEngine::Recursive)]
+        #[clap(long, value_enum, default_value_t = GfaEngine::Pggb)]
         engine: GfaEngine,
 
         /// Disable alignment filtering for seqwish engine (faster but may produce broken graphs)
@@ -1011,9 +1011,9 @@ enum Args {
         #[clap(short = 'x', long)]
         sparsify: Option<String>,
 
-        /// GFA engine: 'seqwish' (raw graph induction; default), 'pggb' (seqwish + smoothing + gfaffix),
+        /// GFA engine: 'pggb' (seqwish+smoothing+gfaffix, default), 'seqwish' (raw graph induction),
         /// 'recursive' (sweepga+POA+lacing), or 'poa' (single-pass POA)
-        #[clap(long, value_enum, default_value_t = GfaEngine::Seqwish)]
+        #[clap(long, value_enum, default_value_t = GfaEngine::Pggb)]
         engine: GfaEngine,
 
         /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for recursive/poa engines)

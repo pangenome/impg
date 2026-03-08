@@ -840,12 +840,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "env_home"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7f84e12ccf0a7ddc17a6c41c93326024c42920d7ee630d04950e6926645c0fe"
-
-[[package]]
 name = "env_logger"
 version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -888,7 +882,7 @@ dependencies = [
  "pkg-config",
  "tempfile",
  "thiserror 1.0.69",
- "which 6.0.3",
+ "which",
 ]
 
 [[package]]
@@ -1385,7 +1379,6 @@ dependencies = [
  "tempfile",
  "tpa",
  "tracepoints",
- "which 7.0.3",
  "zstd",
 ]
 
@@ -3109,7 +3102,7 @@ dependencies = [
  "num_cpus",
  "tempfile",
  "thiserror 1.0.69",
- "which 6.0.3",
+ "which",
 ]
 
 [[package]]
@@ -3121,18 +3114,6 @@ dependencies = [
  "either",
  "home",
  "rustix 0.38.44",
- "winsafe",
-]
-
-[[package]]
-name = "which"
-version = "7.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24d643ce3fd3e5b54854602a080f34fb10ab75e0b813ee32d00ca2b44fa74762"
-dependencies = [
- "either",
- "env_home",
- "rustix 1.1.4",
  "winsafe",
 ]
 
