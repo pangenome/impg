@@ -123,9 +123,9 @@ impl Default for GraphBuildConfig {
             min_alignment_length: 0,
             repeat_max: 0,
             min_repeat_dist: 0,
-            min_match_len: 0,
+            min_match_len: 23,
             sparse_factor: 0.0,
-            transclose_batch: 1_000_000,
+            transclose_batch: 10_000_000,
             use_in_memory: true,
             show_progress: true,
             temp_dir: None,
@@ -865,6 +865,90 @@ pub fn run_graph_build_poa<W: Write>(
     let sorted = crate::graph::spoa_graph_to_sorted_gfa(graph, &metadata, num_threads)?;
     output.write_all(sorted.as_bytes())?;
 
+    Ok(())
+}
+
+/// Build a pangenome graph using the PGGB pipeline: sweepga + seqwish + smoothxg + gfaffix.
+///
+/// Equivalent to running `--engine seqwish` followed by graph smoothing (smoothxg-style
+/// block decomposition + per-block POA) and optional gfaffix normalization.
+pub fn run_graph_build_pggb<W: Write>(
+    fasta_files: Vec<String>,
+    fasta_list: Option<String>,
+    output: &mut W,
+    config: &GraphBuildConfig,
+    target_poa_length: usize,
+    max_node_length: usize,
+    poa_padding_fraction: f64,
+) -> io::Result<()> {
+    let start_time = Instant::now();
+
+    let fasta_files = resolve_fasta_files(fasta_files, fasta_list)?;
+
+    if fasta_files.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "No FASTA files specified. Use --fasta-files or --fasta-list",
+        ));
+    }
+
+    info!(
+        "[pggb] Building graph from {} FASTA file(s)",
+        fasta_files.len()
+    );
+
+    // Count genomes to set n_haps for smoothing
+    let (_num_sequences, num_genomes) = count_sequences_and_genomes_in_fasta(&fasta_files)?;
+    let n_haps = num_genomes.max(1);
+
+    // Step 1: Run the seqwish pipeline, capturing the raw GFA
+    let mut gfa_buffer: Vec<u8> = Vec::new();
+    build_graph(&fasta_files, &mut gfa_buffer, config)?;
+    let raw_gfa = String::from_utf8(gfa_buffer)
+        .map_err(|e| io::Error::other(format!("seqwish GFA is not valid UTF-8: {}", e)))?;
+
+    info!(
+        "[pggb] {:.3}s Seqwish done, smoothing (n_haps={}, target_poa_length={})",
+        start_time.elapsed().as_secs_f64(),
+        n_haps,
+        target_poa_length
+    );
+
+    // Step 2: Smooth
+    let smooth_config = crate::smooth::SmoothConfig {
+        n_haps,
+        target_poa_length,
+        max_block_weight: target_poa_length * n_haps,
+        max_poa_length: 2 * target_poa_length,
+        max_node_length,
+        poa_padding_fraction,
+        num_threads: config.num_threads,
+        temp_dir: config.temp_dir.clone(),
+        ..crate::smooth::SmoothConfig::new(n_haps)
+    };
+    let smoothed = crate::smooth::smooth_gfa(&raw_gfa, &smooth_config)?;
+
+    info!(
+        "[pggb] {:.3}s Smoothing done",
+        start_time.elapsed().as_secs_f64()
+    );
+
+    // Step 3: gfaffix normalization (optional, graceful fallback if binary not found)
+    let normalized = crate::graph::run_gfaffix(&smoothed, config.num_threads)
+        .unwrap_or_else(|e| {
+            log::warn!("[pggb] gfaffix not available ({}), skipping normalization", e);
+            smoothed
+        });
+
+    // Step 4: Final sort
+    let sorted = sort_gfa(&normalized, config.num_threads)?;
+
+    info!(
+        "[pggb] {:.3}s Done",
+        start_time.elapsed().as_secs_f64()
+    );
+
+    output.write_all(sorted.as_bytes())?;
     Ok(())
 }
 

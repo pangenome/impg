@@ -11,6 +11,7 @@ pub mod multi_impg;
 pub mod onealn;
 pub mod paf;
 pub mod realize;
+pub mod smooth;
 pub mod tpa_parser;
 pub mod seqidx;
 pub mod sequence_index;
@@ -25,6 +26,8 @@ pub enum GfaEngine {
     Seqwish,
     /// Flat single-pass partial order alignment
     Poa,
+    /// Seqwish + smoothxg-style smoothing + gfaffix normalization
+    Pggb,
 }
 
 /// Resolved engine configuration passed to subcommand functions.
@@ -104,6 +107,40 @@ pub fn dispatch_gfa_engine(
                 result.stats.total_ms,
             );
             Ok(result.gfa)
+        }
+        GfaEngine::Pggb => {
+            // Step 1: run seqwish pipeline
+            let seqwish_config = graph::SeqwishConfig {
+                num_threads: engine_opts.num_threads,
+                no_filter: engine_opts.no_filter,
+                debug_dir: engine_opts.debug_dir.clone(),
+                sparsify: engine_opts.sparsify.clone(),
+                ..graph::SeqwishConfig::default()
+            };
+            let raw_gfa = graph::generate_gfa_seqwish_from_intervals(
+                impg,
+                query_intervals,
+                sequence_index,
+                &seqwish_config,
+            )?;
+
+            // Step 2: smooth
+            let n_haps = query_intervals.len().max(1);
+            let smooth_config = smooth::SmoothConfig {
+                num_threads: engine_opts.num_threads,
+                ..smooth::SmoothConfig::new(n_haps)
+            };
+            let smoothed = smooth::smooth_gfa(&raw_gfa, &smooth_config)?;
+
+            // Step 3: gfaffix normalization (optional, graceful fallback)
+            let normalized = graph::run_gfaffix(&smoothed, engine_opts.num_threads)
+                .unwrap_or_else(|e| {
+                    log::debug!("[pggb] gfaffix skipped: {}", e);
+                    smoothed
+                });
+
+            // Step 4: final sort
+            graph::sort_gfa(&normalized, engine_opts.num_threads)
         }
     }
 }

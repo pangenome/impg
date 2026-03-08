@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "vendor/gfaffix"]
+default-members = [".", "vendor/gfaffix"]
+
 [package]
 name = "impg"
 version = "0.4.1"
@@ -63,5 +67,9 @@ default = []
 [patch."https://github.com/ekg/ragc"]
 ragc-core = { git = "https://github.com/AndreaGuarracino/ragc", rev = "e9e4a6f" }
 ragc-common = { git = "https://github.com/AndreaGuarracino/ragc", rev = "e9e4a6f" }
+
+# Redirect gfaffix's handlegraph = "0.7.0-alpha.9" to impg's pinned git rev (same API, 3 additive commits newer)
+[patch.crates-io]
+handlegraph = { git = "https://github.com/chfi/rs-handlegraph", rev = "3ac575e4216ce16a16667503a8875e469a40a97a" }
 
 

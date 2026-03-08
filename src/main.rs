@@ -951,7 +951,7 @@ enum Args {
         min_repeat_dist: u64,
 
         /// Minimum match length filter for alignments
-        #[clap(short = 'k', long, value_parser, default_value_t = 0)]
+        #[clap(short = 'k', long, value_parser, default_value_t = 23)]
         min_match_len: u64,
 
         /// Sparse factor for input matches (0.0 = keep all)
@@ -959,7 +959,7 @@ enum Args {
         sparse_factor: f32,
 
         /// Batch size for transitive closure computation
-        #[clap(short = 'B', long, value_parser, default_value_t = 1_000_000)]
+        #[clap(short = 'B', long, value_parser, default_value_t = 10_000_000)]
         transclose_batch: u64,
 
         /// Use disk-backed interval trees (slower but lower memory)
@@ -1011,13 +1011,26 @@ enum Args {
         #[clap(short = 'x', long)]
         sparsify: Option<String>,
 
-        /// GFA engine: 'seqwish' (sweepga+seqwish, unsmoothed; default), 'recursive' (sweepga+POA+lacing), or 'poa' (single-pass POA)
+        /// GFA engine: 'seqwish' (raw graph induction; default), 'pggb' (seqwish + smoothing + gfaffix),
+        /// 'recursive' (sweepga+POA+lacing), or 'poa' (single-pass POA)
         #[clap(long, value_enum, default_value_t = GfaEngine::Seqwish)]
         engine: GfaEngine,
 
         /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for recursive/poa engines)
         #[clap(long, value_parser, default_value = "5,4,6,2,24,1")]
         poa_scoring: String,
+
+        /// Target POA block length in bp (pggb engine; default: 700)
+        #[clap(long, value_parser, default_value_t = 700)]
+        target_poa_length: usize,
+
+        /// Maximum node length before chopping (pggb engine; default: 100)
+        #[clap(long, value_parser, default_value_t = 100)]
+        max_node_length: usize,
+
+        /// Fraction of avg block length to use as POA padding (pggb engine; default: 0.001)
+        #[clap(long, value_parser, default_value_t = 0.001)]
+        poa_padding_fraction: f64,
 
         #[clap(flatten)]
         recursive_opts: RecursiveOpts,
@@ -1937,10 +1950,10 @@ fn run() -> io::Result<()> {
                 ));
             }
 
-            if engine == GfaEngine::Seqwish {
+            if engine == GfaEngine::Seqwish || engine == GfaEngine::Pggb {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "The 'seqwish' engine is not supported for the similarity command (it doesn't produce an MSA). Use 'poa' or 'recursive'.",
+                    "The 'seqwish' and 'pggb' engines are not supported for the similarity command (they don't produce an MSA). Use 'poa' or 'recursive'.",
                 ));
             }
 
@@ -2149,6 +2162,9 @@ fn run() -> io::Result<()> {
             sparsify,
             engine,
             poa_scoring,
+            target_poa_length,
+            max_node_length,
+            poa_padding_fraction,
             recursive_opts,
             common,
         } => {
@@ -2225,6 +2241,60 @@ fn run() -> io::Result<()> {
                     };
 
                     graph::run_graph_build(fasta_files, fasta_list, &output, config)?;
+                }
+                GfaEngine::Pggb => {
+                    let config = graph::GraphBuildConfig {
+                        num_threads: common.threads.get(),
+                        frequency_multiplier,
+                        frequency,
+                        min_alignment_length,
+                        repeat_max,
+                        min_repeat_dist,
+                        min_match_len,
+                        sparse_factor,
+                        transclose_batch,
+                        use_in_memory: !disk_backed,
+                        show_progress: common.verbose > 0,
+                        temp_dir,
+                        input_paf: paf_file,
+                        aligner,
+                        no_filter,
+                        num_mappings,
+                        scaffold_jump,
+                        scaffold_mass,
+                        scaffold_filter,
+                        overlap,
+                        min_identity,
+                        scaffold_dist,
+                        min_mapping_length,
+                        debug_dir: None,
+                        sparsify,
+                    };
+
+                    if output == "-" {
+                        let stdout = io::stdout();
+                        let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
+                        graph::run_graph_build_pggb(
+                            fasta_files,
+                            fasta_list,
+                            &mut out,
+                            &config,
+                            target_poa_length,
+                            max_node_length,
+                            poa_padding_fraction,
+                        )?;
+                    } else {
+                        let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
+                        graph::run_graph_build_pggb(
+                            fasta_files,
+                            fasta_list,
+                            &mut out,
+                            &config,
+                            target_poa_length,
+                            max_node_length,
+                            poa_padding_fraction,
+                        )?;
+                    }
                 }
             }
         }

@@ -711,6 +711,37 @@ pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
 ///
 /// This is equivalent to running `gfasort -p Ygs` on the command line.
 /// It produces a well-ordered graph with nodes arranged to minimize path distances.
+/// Compact consecutive nodes (unchop) without sorting.
+/// Reduces 1-bp SPOA nodes into longer segments early, shrinking the graph for downstream steps.
+pub(crate) fn unchop_gfa(gfa_content: &str) -> io::Result<String> {
+    let temp_gfa = tempfile::Builder::new()
+        .suffix(".gfa")
+        .tempfile()
+        .map_err(|e| io::Error::other(format!("unchop: failed to create temp file: {}", e)))?;
+    std::fs::write(temp_gfa.path(), gfa_content)
+        .map_err(|e| io::Error::other(format!("unchop: failed to write temp file: {}", e)))?;
+
+    let mut graph = load_gfa(temp_gfa.path())
+        .map_err(|e| io::Error::other(format!("unchop: failed to load GFA: {}", e)))?;
+
+    if graph.nodes.iter().filter(|n| n.is_some()).count() <= 1 {
+        return Ok(gfa_content.to_string());
+    }
+
+    unchop_only(&mut graph, 0);
+
+    let mut output = Vec::new();
+    graph
+        .write_gfa(&mut output)
+        .map_err(|e| io::Error::other(format!("unchop: failed to write GFA: {}", e)))?;
+    String::from_utf8(output).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unchop: invalid UTF-8 in output: {}", e),
+        )
+    })
+}
+
 pub fn sort_gfa(gfa_content: &str, num_threads: usize) -> io::Result<String> {
     // Write GFA to temp file (gfasort's load_gfa requires a file path)
     let temp_gfa = tempfile::Builder::new()
@@ -726,12 +757,18 @@ pub fn sort_gfa(gfa_content: &str, num_threads: usize) -> io::Result<String> {
         .map_err(|e| io::Error::other(format!("Failed to load GFA for sorting: {}", e)))?;
 
     // Skip sorting for trivial graphs (0 or 1 node)
-    if graph.nodes.iter().filter(|n| n.is_some()).count() <= 1 {
+    let node_count = graph.nodes.iter().filter(|n| n.is_some()).count();
+    if node_count <= 1 {
         return Ok(gfa_content.to_string());
     }
 
+    log::debug!("[sort_gfa] unchopping {} nodes...", node_count);
+
     // Compact single-base nodes into longer segments (unchop)
     unchop_only(&mut graph, 0);
+
+    let unchopped_count = graph.nodes.iter().filter(|n| n.is_some()).count();
+    log::debug!("[sort_gfa] {} → {} nodes after unchop, sorting...", node_count, unchopped_count);
 
     // Create Ygs parameters from the graph
     let params = YgsParams::from_graph(&graph, 0, num_threads);
@@ -751,6 +788,72 @@ pub fn sort_gfa(gfa_content: &str, num_threads: usize) -> io::Result<String> {
             format!("Invalid UTF-8 in sorted GFA: {}", e),
         )
     })
+}
+
+/// Run gfaffix graph normalization on a GFA string.
+///
+/// Searches for the `gfaffix` binary in PATH first, then next to the current executable
+/// (so it works when both are built together in `target/release/`).
+/// Returns an error if the binary is not found, allowing callers to fall back gracefully.
+pub fn run_gfaffix(gfa_content: &str, _num_threads: usize) -> io::Result<String> {
+    use std::process::Command;
+
+    // Resolve binary: sibling of current exe first (e.g. target/release/gfaffix),
+    // then fall back to PATH lookup.
+    let gfaffix_bin = std::env::current_exe()
+        .ok()
+        .map(|exe| exe.with_file_name("gfaffix"))
+        .filter(|p| p.exists())
+        .or_else(|| {
+            std::env::var_os("PATH").and_then(|paths| {
+                std::env::split_paths(&paths)
+                    .map(|dir| dir.join("gfaffix"))
+                    .find(|p| p.exists())
+            })
+        })
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "gfaffix binary not found in PATH or next to impg executable",
+            )
+        })?;
+
+    // Write input GFA to temp file
+    let input_file = tempfile::Builder::new()
+        .suffix(".gfa")
+        .tempfile()
+        .map_err(|e| io::Error::other(format!("gfaffix: failed to create temp input: {}", e)))?;
+    std::fs::write(input_file.path(), gfa_content.as_bytes())
+        .map_err(|e| io::Error::other(format!("gfaffix: failed to write temp input: {}", e)))?;
+
+    // Output GFA temp file
+    let output_file = tempfile::Builder::new()
+        .suffix(".gfa")
+        .tempfile()
+        .map_err(|e| io::Error::other(format!("gfaffix: failed to create temp output: {}", e)))?;
+
+    // Run gfaffix
+    let status = Command::new(&gfaffix_bin)
+        .arg(input_file.path())
+        .arg("-o")
+        .arg(output_file.path())
+        .status()
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("gfaffix failed to start: {}", e),
+            )
+        })?;
+
+    if !status.success() {
+        return Err(io::Error::other(format!(
+            "gfaffix exited with non-zero status: {:?}",
+            status.code()
+        )));
+    }
+
+    std::fs::read_to_string(output_file.path())
+        .map_err(|e| io::Error::other(format!("gfaffix: failed to read output: {}", e)))
 }
 
 /// Configuration for seqwish-based GFA generation

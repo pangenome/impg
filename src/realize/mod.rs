@@ -773,7 +773,7 @@ fn project_window_to_sequence(
 /// 4. Link contiguous ranges.
 /// 5. Remove unused nodes and compact IDs.
 /// 6. Emit the final GFA as a string.
-fn lace_subgraphs(sub_gfas: &[String], temp_dir: Option<&str>) -> io::Result<String> {
+pub(crate) fn lace_subgraphs(sub_gfas: &[String], temp_dir: Option<&str>) -> io::Result<String> {
     if sub_gfas.is_empty() {
         return Ok(String::from("H\tVN:Z:1.0\n"));
     }
