@@ -101,7 +101,6 @@ pub fn dispatch_gfa_engine(
                 query_intervals,
                 sequence_index,
                 params,
-                engine_opts.num_threads,
             )?;
             graph::normalize_and_sort(gfa, engine_opts.num_threads)
         }

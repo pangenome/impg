@@ -451,10 +451,8 @@ fn realize_recursive(
 
     // Collect results, propagating any errors.
     let mut sub_gfas: Vec<String> = Vec::with_capacity(sub_gfa_results.len());
-    for result in sub_gfa_results {
-        if let Some(gfa_result) = result {
-            sub_gfas.push(gfa_result?);
-        }
+    for gfa_result in sub_gfa_results.into_iter().flatten() {
+        sub_gfas.push(gfa_result?);
     }
 
     if sub_gfas.is_empty() {
@@ -640,7 +638,7 @@ fn partition_into_chunks(
     let mut windows: Vec<(usize, usize)> = Vec::new();
     let mut pos = 0;
     while pos < anchor_len {
-        let win_start = if pos > padding { pos - padding } else { 0 };
+        let win_start = pos.saturating_sub(padding);
         let win_end = (pos + chunk_size + padding).min(anchor_len);
         windows.push((win_start, win_end));
         pos += chunk_size;

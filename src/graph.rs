@@ -54,7 +54,6 @@ pub fn generate_gfa_from_intervals(
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
     scoring_params: (u8, u8, u8, u8, u8, u8),
-    num_threads: usize,
 ) -> io::Result<String> {
     let (graph, sequence_metadata) =
         prepare_poa_graph_and_sequences(impg, results, sequence_index, scoring_params).unwrap();

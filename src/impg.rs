@@ -655,9 +655,7 @@ impl Impg {
         //   scan_dir: always +1; project_dir: +1 (+strand) or -1 (-strand)
         let scan_dir: i32 = if is_reversed_entry {
             1
-        } else {
-            if is_reverse { -1 } else { 1 }
-        };
+        } else if is_reverse { -1 } else { 1 };
         let project_dir: i32 = if is_reversed_entry {
             if is_reverse { -1 } else { 1 }
         } else {
@@ -667,9 +665,7 @@ impl Impg {
         // Initialize scan position (along range axis)
         let mut scan_pos = if is_reversed_entry {
             metadata.target_start // = orig query_start, always scan forward
-        } else {
-            if is_reverse { metadata.target_end } else { metadata.target_start }
-        };
+        } else if is_reverse { metadata.target_end } else { metadata.target_start };
 
         // Initialize project position (along output axis)
         let mut project_pos = if is_reversed_entry {

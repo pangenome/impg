@@ -984,7 +984,8 @@ fn read_fasta_sequences(
                     ));
                 }
                 // Start new sequence
-                current_name = line[1..]
+                current_name = line.strip_prefix('>')
+                    .unwrap_or("")
                     .split_whitespace()
                     .next()
                     .unwrap_or("")
