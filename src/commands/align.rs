@@ -367,11 +367,9 @@ pub fn generate_pairs_for_sequences(
     }
 
     match strategy {
-        SparsificationStrategy::None => {
-            (0..n)
-                .flat_map(|i| ((i + 1)..n).map(move |j| (i, j)))
-                .collect()
-        }
+        SparsificationStrategy::None => (0..n)
+            .flat_map(|i| ((i + 1)..n).map(move |j| (i, j)))
+            .collect(),
 
         SparsificationStrategy::Random(fraction) => {
             use std::collections::hash_map::DefaultHasher;
@@ -393,10 +391,7 @@ pub fn generate_pairs_for_sequences(
 
         SparsificationStrategy::Connectivity(prob) => {
             let keep_fraction = compute_connectivity_probability(n, *prob);
-            generate_pairs_for_sequences(
-                sequences,
-                &SparsificationStrategy::Random(keep_fraction),
-            )
+            generate_pairs_for_sequences(sequences, &SparsificationStrategy::Random(keep_fraction))
         }
 
         SparsificationStrategy::TreeSampling {
@@ -1117,9 +1112,8 @@ fn sweepga_align_all_vs_all(
 
     // Create FASTA index (.fai) — required by wfmash
     if config.aligner == "wfmash" {
-        rust_htslib::faidx::Reader::from_path(combined_fasta.path()).map_err(|e| {
-            io::Error::other(format!("Failed to create FASTA index: {e}"))
-        })?;
+        rust_htslib::faidx::Reader::from_path(combined_fasta.path())
+            .map_err(|e| io::Error::other(format!("Failed to create FASTA index: {e}")))?;
     }
 
     // Compute avg sequence length for adaptive wfmash parameters
@@ -1192,9 +1186,8 @@ fn sweepga_align_pairwise(
         }
         // Create FASTA index (.fai) — required by wfmash
         if config.aligner == "wfmash" {
-            rust_htslib::faidx::Reader::from_path(fasta.path()).map_err(|e| {
-                io::Error::other(format!("Failed to create FASTA index: {e}"))
-            })?;
+            rust_htslib::faidx::Reader::from_path(fasta.path())
+                .map_err(|e| io::Error::other(format!("Failed to create FASTA index: {e}")))?;
         }
         fasta_files.insert(idx, fasta);
     }

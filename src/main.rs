@@ -6,10 +6,10 @@ use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::impg_index::{ImpgIndex, ImpgWrapper};
 use impg::multi_impg::MultiImpg;
 use impg::onealn::OneAlnParser;
-use impg::tpa_parser::TpaParser;
 use impg::seqidx::SequenceIndex;
 use impg::sequence_index::{SequenceIndex as SeqIndexTrait, UnifiedSequenceIndex};
 use impg::subset_filter::{apply_subset_filter, load_subset_filter, SubsetFilter};
+use impg::tpa_parser::TpaParser;
 use log::{debug, error, info, warn};
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
@@ -42,7 +42,7 @@ fn parse_size(s: &str) -> Result<u64, String> {
         .map_err(|e| format!("invalid number '{}': {}", num_str, e))
 }
 
-use impg::{GfaEngine, EngineOpts};
+use impg::{EngineOpts, GfaEngine};
 
 /// Index mode.
 #[derive(Clone, Debug, Default, clap::ValueEnum)]
@@ -1134,7 +1134,6 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
     },
-
 }
 
 fn main() {
@@ -1348,7 +1347,13 @@ fn run() -> io::Result<()> {
             let engine_config = EngineOpts {
                 engine,
                 recursive_config: if output_format == "gfa" && engine == GfaEngine::Recursive {
-                    Some(recursive_opts.build_config(common.threads.get(), scoring_params, None, "wfmash".to_string(), sparsify.clone())?)
+                    Some(recursive_opts.build_config(
+                        common.threads.get(),
+                        scoring_params,
+                        None,
+                        "wfmash".to_string(),
+                        sparsify.clone(),
+                    )?)
                 } else {
                     None
                 },
@@ -2128,7 +2133,13 @@ fn run() -> io::Result<()> {
 
             // Build recursive config if engine is Recursive
             let recursive_config = if engine == GfaEngine::Recursive {
-                Some(recursive_opts.build_config(common.threads.into(), Some(scoring_params), None, "wfmash".to_string(), None)?)
+                Some(recursive_opts.build_config(
+                    common.threads.into(),
+                    Some(scoring_params),
+                    None,
+                    "wfmash".to_string(),
+                    None,
+                )?)
             } else {
                 None
             };
@@ -2262,10 +2273,20 @@ fn run() -> io::Result<()> {
                     if output == "-" {
                         let stdout = io::stdout();
                         let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
-                        graph::run_graph_build_realize(fasta_files, fasta_list, &mut out, &recursive_config)?;
+                        graph::run_graph_build_realize(
+                            fasta_files,
+                            fasta_list,
+                            &mut out,
+                            &recursive_config,
+                        )?;
                     } else {
                         let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
-                        graph::run_graph_build_realize(fasta_files, fasta_list, &mut out, &recursive_config)?;
+                        graph::run_graph_build_realize(
+                            fasta_files,
+                            fasta_list,
+                            &mut out,
+                            &recursive_config,
+                        )?;
                     }
                 }
                 GfaEngine::Poa => {
@@ -2274,10 +2295,22 @@ fn run() -> io::Result<()> {
                     if output == "-" {
                         let stdout = io::stdout();
                         let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
-                        graph::run_graph_build_poa(fasta_files, fasta_list, &mut out, scoring, common.threads.get())?;
+                        graph::run_graph_build_poa(
+                            fasta_files,
+                            fasta_list,
+                            &mut out,
+                            scoring,
+                            common.threads.get(),
+                        )?;
                     } else {
                         let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
-                        graph::run_graph_build_poa(fasta_files, fasta_list, &mut out, scoring, common.threads.get())?;
+                        graph::run_graph_build_poa(
+                            fasta_files,
+                            fasta_list,
+                            &mut out,
+                            scoring,
+                            common.threads.get(),
+                        )?;
                     }
                 }
                 GfaEngine::Seqwish => {
@@ -2783,11 +2816,18 @@ fn load_or_build_per_file_index(
             .collect()
     };
 
-    let direction = if bidirectional { "bidirectional" } else { "unidirectional" };
+    let direction = if bidirectional {
+        "bidirectional"
+    } else {
+        "unidirectional"
+    };
     let total = alignment_files.len();
     let to_build = indices_to_build.len();
     if to_build == 0 {
-        info!("Using per-file indexing mode ({} {} index file(s) up to date)", total, direction);
+        info!(
+            "Using per-file indexing mode ({} {} index file(s) up to date)",
+            total, direction
+        );
     } else if force_reindex {
         info!("Using per-file indexing mode (force rebuild)");
         info!(
@@ -2798,7 +2838,10 @@ fn load_or_build_per_file_index(
         info!("Using per-file indexing mode");
         info!(
             "Building {} of {} {} index file(s) ({} already up to date)...",
-            to_build, total, direction, total - to_build
+            to_build,
+            total,
+            direction,
+            total - to_build
         );
     }
 
@@ -2942,7 +2985,11 @@ fn load_or_build_single_index(
 ) -> io::Result<Impg> {
     let index_file = get_combined_index_filename(alignment_files, custom_index);
 
-    let direction = if bidirectional { "bidirectional" } else { "unidirectional" };
+    let direction = if bidirectional {
+        "bidirectional"
+    } else {
+        "unidirectional"
+    };
     let per_file_hint = if custom_index.is_some() && alignment_files.len() >= 100 {
         format!(
             " (drop -i or use --index-mode per-file for per-file indexing with {} files)",
@@ -2953,7 +3000,10 @@ fn load_or_build_single_index(
     };
 
     if force_reindex {
-        info!("Using single indexing mode (force rebuild){}", per_file_hint);
+        info!(
+            "Using single indexing mode (force rebuild){}",
+            per_file_hint
+        );
         info!(
             "Building 1 {} index file processing {} alignment file(s)...",
             direction,
@@ -3109,19 +3159,20 @@ fn build_single_index(
                             })?
                         }
                         AlignmentFormat::Tpa => {
-                            let parser =
-                                TpaParser::new(aln_file.clone()).map_err(|e| {
-                                    io::Error::new(
-                                        io::ErrorKind::InvalidData,
-                                        format!("Failed to create TPA parser: {}", e),
-                                    )
-                                })?;
-                            parser.parse_alignments(&mut local_seq_index, threads.get()).map_err(|e| {
+                            let parser = TpaParser::new(aln_file.clone()).map_err(|e| {
                                 io::Error::new(
                                     io::ErrorKind::InvalidData,
-                                    format!("Failed to parse TPA records: {}", e),
+                                    format!("Failed to create TPA parser: {}", e),
                                 )
-                            })?
+                            })?;
+                            parser
+                                .parse_alignments(&mut local_seq_index, threads.get())
+                                .map_err(|e| {
+                                    io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        format!("Failed to parse TPA records: {}", e),
+                                    )
+                                })?
                         }
                     };
                     debug!(

@@ -136,8 +136,13 @@ fn run_poa_on_padded_sequences(
 
     let msa = graph.generate_msa();
     let (core_start, core_end) = find_core_column_range(&msa, &padded_sequences);
-    let trimmed_gfa =
-        build_trimmed_gfa(&msa, &padded_sequences, core_start, core_end, scoring_params)?;
+    let trimmed_gfa = build_trimmed_gfa(
+        &msa,
+        &padded_sequences,
+        core_start,
+        core_end,
+        scoring_params,
+    )?;
     let metadata: Vec<SequenceMetadata> =
         padded_sequences.into_iter().map(|ps| ps.metadata).collect();
 
@@ -356,15 +361,21 @@ fn build_trimmed_gfa(
 
     // Build fresh SPOA graph from core sequences (keep original longest-first order)
     let (mut graph, mut engine) = build_spoa_engine(scoring_params);
-    feed_sequences_to_graph(&mut engine, &mut graph, core_sequences.iter().map(|s| s.as_str()));
+    feed_sequences_to_graph(
+        &mut engine,
+        &mut graph,
+        core_sequences.iter().map(|s| s.as_str()),
+    );
 
     // Generate GFA with headers matching the original (unpadded) metadata
     let headers = make_headers(padded_sequences);
     let gfa = graph.generate_gfa(&headers, false);
 
     // Post-process for strand information
-    let metadata: Vec<SequenceMetadata> =
-        padded_sequences.iter().map(|ps| ps.metadata.clone()).collect();
+    let metadata: Vec<SequenceMetadata> = padded_sequences
+        .iter()
+        .map(|ps| ps.metadata.clone())
+        .collect();
     Ok(post_process_gfa_for_strands(gfa, &metadata))
 }
 
@@ -375,7 +386,6 @@ fn make_headers(padded_sequences: &[PaddedSequence]) -> Vec<String> {
         .map(|ps| ps.metadata.path_name())
         .collect()
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -892,7 +902,10 @@ mod tests {
         }];
         let result = post_process_gfa_for_strands(gfa, &metadata);
         // Path should be reversed: 2-,1-
-        assert!(result.contains("2-,1-"), "Expected reversed path, got: {result}");
+        assert!(
+            result.contains("2-,1-"),
+            "Expected reversed path, got: {result}"
+        );
     }
 
     #[test]

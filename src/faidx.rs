@@ -41,9 +41,8 @@ impl ReaderCache {
             self.entries.remove(&lru_key);
         }
 
-        let reader = faidx::Reader::from_path(fasta_path).unwrap_or_else(|e| {
-            panic!("Failed to open FASTA '{}': {}", fasta_path.display(), e)
-        });
+        let reader = faidx::Reader::from_path(fasta_path)
+            .unwrap_or_else(|e| panic!("Failed to open FASTA '{}': {}", fasta_path.display(), e));
         self.entries.insert(fasta_idx, (reader, counter));
         &mut self.entries.get_mut(&fasta_idx).unwrap().0
     }
@@ -170,8 +169,7 @@ impl FastaIndex {
 
         let fasta_path = Path::new(&self.fasta_paths[fasta_idx]);
 
-        let thread_idx = rayon::current_thread_index()
-            .unwrap_or(self.thread_readers.len() - 1);
+        let thread_idx = rayon::current_thread_index().unwrap_or(self.thread_readers.len() - 1);
         let mut slot = self.thread_readers[thread_idx].lock().unwrap();
         let cache = slot.get_or_insert_with(|| ReaderCache::new(self.readers_per_thread));
         let reader = cache.get_or_open(fasta_idx, fasta_path);
@@ -180,9 +178,7 @@ impl FastaIndex {
         // but fetch_seq expects 0-based inclusive end coordinate
         let mut seq_vec = reader
             .fetch_seq(seq_name, start as usize, (end - 1) as usize)
-            .map_err(|e| {
-                io::Error::other(format!("Failed to fetch sequence for {seq_name}: {e}"))
-            })?
+            .map_err(|e| io::Error::other(format!("Failed to fetch sequence for {seq_name}: {e}")))?
             .to_vec();
         seq_vec
             .iter_mut()

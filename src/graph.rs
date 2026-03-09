@@ -979,11 +979,7 @@ pub fn generate_gfa_seqwish_from_intervals(
         .to_string();
 
     let mut gfa_output = Vec::new();
-    crate::commands::graph::build_graph(
-        &[fasta_path],
-        &mut gfa_output,
-        &graph_config,
-    )?;
+    crate::commands::graph::build_graph(&[fasta_path], &mut gfa_output, &graph_config)?;
 
     String::from_utf8(gfa_output).map_err(|e| {
         io::Error::new(

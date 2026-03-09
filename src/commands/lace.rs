@@ -674,7 +674,10 @@ pub(crate) fn sort_and_filter_ranges(ranges: &mut Vec<RangeInfo>) {
     // }
 }
 
-pub(crate) fn trim_range_overlaps(ranges: &mut [RangeInfo], graph_mutex: &Arc<Mutex<CompactGraph>>) {
+pub(crate) fn trim_range_overlaps(
+    ranges: &mut [RangeInfo],
+    graph_mutex: &Arc<Mutex<CompactGraph>>,
+) {
     debug!("  Trimming overlapping ranges");
 
     for i in 1..ranges.len() {

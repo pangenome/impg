@@ -11,11 +11,11 @@ pub mod multi_impg;
 pub mod onealn;
 pub mod paf;
 pub mod realize;
-pub mod smooth;
-pub mod tpa_parser;
 pub mod seqidx;
 pub mod sequence_index;
+pub mod smooth;
 pub mod subset_filter;
+pub mod tpa_parser;
 
 /// GFA engine selection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -96,12 +96,8 @@ pub fn dispatch_gfa_engine(
                     "POA scoring parameters required for poa engine",
                 )
             })?;
-            let gfa = graph::generate_gfa_from_intervals(
-                impg,
-                query_intervals,
-                sequence_index,
-                params,
-            )?;
+            let gfa =
+                graph::generate_gfa_from_intervals(impg, query_intervals, sequence_index, params)?;
             graph::normalize_and_sort(gfa, engine_opts.num_threads)
         }
         GfaEngine::Seqwish => {

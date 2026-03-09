@@ -22,8 +22,16 @@ pub fn create_aligner(
     temp_dir: Option<String>,
 ) -> io::Result<Box<dyn Aligner>> {
     create_aligner_adaptive(
-        aligner_name, kmer_frequency, num_threads, min_alignment_length,
-        map_pct_identity, temp_dir, None, None, None, None,
+        aligner_name,
+        kmer_frequency,
+        num_threads,
+        min_alignment_length,
+        map_pct_identity,
+        temp_dir,
+        None,
+        None,
+        None,
+        None,
     )
 }
 
@@ -52,7 +60,14 @@ pub fn create_aligner_adaptive(
                 None
             };
             let wfmash = WfmashIntegration::adaptive(
-                num_threads, block_len, map_pct_identity, temp_dir, segment_length, avg_seq_len, sparsify, num_mappings,
+                num_threads,
+                block_len,
+                map_pct_identity,
+                temp_dir,
+                segment_length,
+                avg_seq_len,
+                sparsify,
+                num_mappings,
             )
             .map_err(|e| io::Error::other(format!("Failed to create wfmash aligner: {e}")))?;
             Ok(Box::new(wfmash))
@@ -124,18 +139,14 @@ pub fn resolve_file_list(
             let label_lower = label.to_lowercase();
             Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!(
-                    "Either --{label_lower}-files or --{label_lower}-list must be provided"
-                ),
+                format!("Either --{label_lower}-files or --{label_lower}-list must be provided"),
             ))
         }
         (false, Some(_)) => {
             let label_lower = label.to_lowercase();
             Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!(
-                    "Cannot specify both --{label_lower}-files and --{label_lower}-list"
-                ),
+                format!("Cannot specify both --{label_lower}-files and --{label_lower}-list"),
             ))
         }
     }
@@ -164,7 +175,12 @@ pub fn count_sequences_and_genomes(fasta_files: &[String]) -> io::Result<(usize,
             let line: String = line?;
             if line.starts_with('>') {
                 seq_count += 1;
-                let name = line.strip_prefix('>').unwrap_or("").split_whitespace().next().unwrap_or("");
+                let name = line
+                    .strip_prefix('>')
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("");
                 let parts: Vec<&str> = name.split('#').collect();
                 let prefix = if parts.len() >= 2 {
                     format!("{}#{}", parts[0], parts[1])

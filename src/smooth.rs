@@ -4,7 +4,9 @@
 //! runs SPOA partial-order alignment on each block, and reassembles the smoothed
 //! graph via lacing.
 
-use crate::graph::{build_spoa_engine, feed_sequences_to_graph, reverse_complement, sort_gfa, unchop_gfa};
+use crate::graph::{
+    build_spoa_engine, feed_sequences_to_graph, reverse_complement, sort_gfa, unchop_gfa,
+};
 use bitvec::{bitvec, prelude::BitVec};
 use log::info;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -226,7 +228,12 @@ fn smooth_gfa_pass(
     let path_positions = compute_path_positions(&graph);
 
     // Step 6: Block decomposition
-    let mut blocks = smoothable_blocks(&graph, &node_step_index, max_block_weight, target_poa_length);
+    let mut blocks = smoothable_blocks(
+        &graph,
+        &node_step_index,
+        max_block_weight,
+        target_poa_length,
+    );
     info!("[smooth] Decomposed into {} blocks", blocks.len());
 
     // Step 7: Break long blocks
@@ -247,23 +254,20 @@ fn smooth_gfa_pass(
         blocks
             .par_iter()
             .enumerate()
-            .filter_map(|(i, block)| {
-                match smooth_block(block, &graph, config, &path_positions) {
+            .filter_map(
+                |(i, block)| match smooth_block(block, &graph, config, &path_positions) {
                     Ok(gfa) if !gfa.is_empty() => Some(gfa),
                     Ok(_) => None,
                     Err(e) => {
                         log::warn!("[smooth] Block {} failed: {}", i, e);
                         None
                     }
-                }
-            })
+                },
+            )
             .collect()
     });
 
-    info!(
-        "[smooth] Smoothed {} blocks successfully",
-        block_gfas.len()
-    );
+    info!("[smooth] Smoothed {} blocks successfully", block_gfas.len());
 
     if block_gfas.is_empty() {
         return Ok(String::from("H\tVN:Z:1.0\n"));
@@ -327,14 +331,13 @@ fn parse_gfa(gfa: &str) -> SmoothGraph {
                     let steps: Vec<(usize, bool)> = fields[2]
                         .split(',')
                         .filter_map(|step| {
-                            let (id_str, is_rev) =
-                                if let Some(stripped) = step.strip_suffix('+') {
-                                    (stripped, false)
-                                } else if let Some(stripped) = step.strip_suffix('-') {
-                                    (stripped, true)
-                                } else {
-                                    (step, false)
-                                };
+                            let (id_str, is_rev) = if let Some(stripped) = step.strip_suffix('+') {
+                                (stripped, false)
+                            } else if let Some(stripped) = step.strip_suffix('-') {
+                                (stripped, true)
+                            } else {
+                                (step, false)
+                            };
                             let node_id: u64 = id_str.parse().ok()?;
                             let idx = *node_id_to_idx.get(&node_id)?;
                             Some((idx, is_rev))
@@ -606,8 +609,7 @@ fn finalize_block(
     for &(path_idx, step_idx) in traversals.iter().skip(1) {
         if path_idx != range_path || step_idx != prev_step + 1 {
             // Finalize current range
-            let length =
-                compute_range_length(graph, range_path, range_begin, prev_step + 1);
+            let length = compute_range_length(graph, range_path, range_begin, prev_step + 1);
             if length > 0 {
                 path_ranges.push(PathRange {
                     path_idx: range_path,
@@ -735,7 +737,6 @@ fn topological_split(path_ranges: Vec<PathRange>, graph: &SmoothGraph) -> Vec<Bl
 // ---------------------------------------------------------------------------
 
 fn break_blocks(blocks: &mut Vec<Block>, graph: &SmoothGraph, max_poa_length: usize) {
-
     let mut new_blocks: Vec<Block> = Vec::with_capacity(blocks.len());
 
     for block in blocks.drain(..) {
@@ -1030,8 +1031,7 @@ fn smooth_block(
         let actual_right_pad = right_pad_seq.len();
 
         // Combine: left_pad + core + right_pad
-        let mut full_seq =
-            Vec::with_capacity(actual_left_pad + core_seq.len() + actual_right_pad);
+        let mut full_seq = Vec::with_capacity(actual_left_pad + core_seq.len() + actual_right_pad);
         full_seq.extend_from_slice(&left_pad_seq);
         full_seq.extend_from_slice(&core_seq);
         full_seq.extend_from_slice(&right_pad_seq);
@@ -1107,7 +1107,11 @@ fn smooth_block(
         core_sequences.iter().map(|s| s.as_str()),
     );
 
-    let headers: Vec<String> = entries.iter().take(nseqs).map(|e| e.path_name.clone()).collect();
+    let headers: Vec<String> = entries
+        .iter()
+        .take(nseqs)
+        .map(|e| e.path_name.clone())
+        .collect();
     let gfa = graph2.generate_gfa(&headers, false);
     unchop_gfa(&gfa)
 }
@@ -1204,10 +1208,7 @@ mod tests {
 
     #[test]
     fn test_parse_path_coords() {
-        assert_eq!(
-            parse_path_coords("chr1:100-200"),
-            ("chr1".to_string(), 100)
-        );
+        assert_eq!(parse_path_coords("chr1:100-200"), ("chr1".to_string(), 100));
         assert_eq!(
             parse_path_coords("sample#1#chr1:0-5000"),
             ("sample#1#chr1".to_string(), 0)

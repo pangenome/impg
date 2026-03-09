@@ -139,9 +139,7 @@ impl OneAlnParser {
                 'T' => {
                     alignment.tracepoints = file.int_list().map(|v| v.to_vec()).unwrap_or_default()
                 }
-                'X' => {
-                    trace_diffs = file.int_list().map(|v| v.to_vec()).unwrap_or_default()
-                }
+                'X' => trace_diffs = file.int_list().map(|v| v.to_vec()).unwrap_or_default(),
                 'A' | 'a' | 'g' | '^' | '\0' => break,
                 _ => {}
             }
@@ -773,10 +771,7 @@ impl OneAlnParser {
 #[derive(Debug)]
 pub enum TracepointModeData {
     /// FASTGA: fixed query spacing, stores per-segment difference counts
-    Fastga {
-        diffs: Vec<i64>,
-        trace_spacing: i64,
-    },
+    Fastga { diffs: Vec<i64>, trace_spacing: i64 },
     /// Standard: variable query deltas, max_complexity bounds per-segment diffs
     Standard {
         query_deltas: Vec<i64>,

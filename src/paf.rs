@@ -73,7 +73,9 @@ pub fn read_cigar_data(alignment_file: &str, offset: u64, buffer: &mut [u8]) -> 
     let handle = if is_compressed {
         let mut file = File::open(alignment_file)
             .map_err(|e| format!("Failed to open compressed file '{}': {}", alignment_file, e))?;
-        if !is_bgzf(&mut file).map_err(|e| format!("Failed to read header of '{}': {}", alignment_file, e))? {
+        if !is_bgzf(&mut file)
+            .map_err(|e| format!("Failed to read header of '{}': {}", alignment_file, e))?
+        {
             return Err(format!(
                 "'{}' is regular gzip, not BGZF. Convert with: zcat '{}' | bgzip > output.paf.gz",
                 alignment_file, alignment_file

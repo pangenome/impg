@@ -62,7 +62,8 @@ impl AgcIndex {
         // Sequential assembly phase
         let mut interned_strings: FxHashMap<String, Arc<str>> = FxHashMap::default();
         let mut sample_contig_to_agc: FxHashMap<String, usize> = FxHashMap::default();
-        let mut contig_to_sample_info: FxHashMap<String, (Arc<str>, Arc<str>, usize)> = FxHashMap::default();
+        let mut contig_to_sample_info: FxHashMap<String, (Arc<str>, Arc<str>, usize)> =
+            FxHashMap::default();
 
         let mut intern = |s: &str| -> Arc<str> {
             if let Some(arc) = interned_strings.get(s) {
@@ -96,17 +97,17 @@ impl AgcIndex {
                         .or_insert(agc_idx);
 
                     // Contig -> (sample, contig, agc_idx) - values use Arc<str>
-                    contig_to_sample_info
-                        .entry(contig.clone())
-                        .or_insert((Arc::clone(&sample_arc), Arc::clone(&contig_arc), agc_idx));
+                    contig_to_sample_info.entry(contig.clone()).or_insert((
+                        Arc::clone(&sample_arc),
+                        Arc::clone(&contig_arc),
+                        agc_idx,
+                    ));
 
                     // Handle short contig name if different
                     let short_contig = Self::extract_short_contig_name(&contig);
                     if short_contig != contig {
                         let short_key = format!("{short_contig}@{sample}");
-                        sample_contig_to_agc
-                            .entry(short_key)
-                            .or_insert(agc_idx);
+                        sample_contig_to_agc.entry(short_key).or_insert(agc_idx);
                         sample_contig_to_agc
                             .entry(short_contig.to_string())
                             .or_insert(agc_idx);
@@ -123,7 +124,10 @@ impl AgcIndex {
         let thread_decompressors: Vec<_> = (0..num_slots).map(|_| Mutex::new(None)).collect();
 
         // Reuse the metadata decompressors in thread slot 0 to avoid re-opening AGC files
-        thread_decompressors[0].lock().unwrap().replace(saved_decomps);
+        thread_decompressors[0]
+            .lock()
+            .unwrap()
+            .replace(saved_decomps);
 
         // Shrink to fit after building
         sample_contig_to_agc.shrink_to_fit();
@@ -161,8 +165,8 @@ impl AgcIndex {
         })?;
 
         // Use per-thread decompressors to avoid mutex contention
-        let thread_idx = rayon::current_thread_index()
-            .unwrap_or(self.thread_decompressors.len() - 1);
+        let thread_idx =
+            rayon::current_thread_index().unwrap_or(self.thread_decompressors.len() - 1);
         let mut slot = self.thread_decompressors[thread_idx].lock().unwrap();
         let decomps = slot.get_or_insert_with(|| {
             self.agc_paths
@@ -204,8 +208,8 @@ impl AgcIndex {
             )
         })?;
 
-        let thread_idx = rayon::current_thread_index()
-            .unwrap_or(self.thread_decompressors.len() - 1);
+        let thread_idx =
+            rayon::current_thread_index().unwrap_or(self.thread_decompressors.len() - 1);
         let mut slot = self.thread_decompressors[thread_idx].lock().unwrap();
         let decomps = slot.get_or_insert_with(|| {
             self.agc_paths

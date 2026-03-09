@@ -252,7 +252,14 @@ fn compute_similarities_for_region(
     let (groups, msa_chars) = if let Some(rc) = realize_config {
         prepare_groups_and_msa_realize(impg, results, sequence_index, rc, delim, delim_pos)?
     } else {
-        prepare_groups_and_msa(impg, results, sequence_index, scoring_params, delim, delim_pos)?
+        prepare_groups_and_msa(
+            impg,
+            results,
+            sequence_index,
+            scoring_params,
+            delim,
+            delim_pos,
+        )?
     };
 
     // Parse region once
@@ -331,7 +338,14 @@ fn compute_pca_for_region(
     let (groups, msa_chars) = if let Some(rc) = realize_config {
         prepare_groups_and_msa_realize(impg, results, sequence_index, rc, delim, delim_pos)?
     } else {
-        prepare_groups_and_msa(impg, results, sequence_index, scoring_params, delim, delim_pos)?
+        prepare_groups_and_msa(
+            impg,
+            results,
+            sequence_index,
+            scoring_params,
+            delim,
+            delim_pos,
+        )?
     };
 
     // Collect all similarities for PCA
