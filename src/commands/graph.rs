@@ -885,7 +885,7 @@ pub fn run_graph_build_pggb<W: Write>(
     fasta_list: Option<String>,
     output: &mut W,
     config: &GraphBuildConfig,
-    target_poa_length: usize,
+    target_poa_lengths: Vec<usize>,
     max_node_length: usize,
     poa_padding_fraction: f64,
 ) -> io::Result<()> {
@@ -919,18 +919,16 @@ pub fn run_graph_build_pggb<W: Write>(
     let raw_gfa = sort_gfa(&raw_gfa, config.num_threads)?;
 
     info!(
-        "[pggb] {:.3}s Seqwish done, smoothing (n_haps={}, target_poa_length={})",
+        "[pggb] {:.3}s Seqwish done, smoothing (n_haps={}, target_poa_lengths={:?})",
         start_time.elapsed().as_secs_f64(),
         n_haps,
-        target_poa_length
+        target_poa_lengths
     );
 
     // Step 2: Smooth
     let smooth_config = crate::smooth::SmoothConfig {
         n_haps,
-        target_poa_length,
-        max_block_weight: target_poa_length * n_haps,
-        max_poa_length: 2 * target_poa_length,
+        target_poa_lengths,
         max_node_length,
         poa_padding_fraction,
         num_threads: config.num_threads,

@@ -191,9 +191,9 @@ impg query -a alignments.paf -r chr1:1000-2000 -o gfa --poa-scoring 5,4,6,2,24,1
 impg query -a alignments.paf -r chr1:1000-50000 -o gfa --engine seqwish --sequence-files *.fa \
     --min-match-len 50 --transclose-batch 5000000 --sparse-factor 0.5
 
-# Tune smoothxg-style smoothing (pggb engine only)
+# Tune smoothxg-style smoothing (pggb engine, default: two passes at 700,1100 bp)
 impg query -a alignments.paf -r chr1:1000-50000 -o gfa --engine pggb --sequence-files *.fa \
-    --target-poa-length 1000 --max-node-length 200 --poa-padding-fraction 0.001
+    --target-poa-length 700,1100 --max-node-length 200 --poa-padding-fraction 0.001
 ```
 
 #### Alignment visualizations
@@ -257,9 +257,9 @@ impg partition -a alignments.paf -w 1000000 -o gfa --engine seqwish -N --sequenc
 impg partition -a alignments.paf -w 1000000 -o gfa --engine seqwish --sequence-files *.fa --separate-files \
     --min-match-len 50 --transclose-batch 5000000
 
-# Tune smoothxg-style smoothing (pggb engine only)
+# Tune smoothxg-style smoothing (pggb engine, default: two passes at 700,1100 bp)
 impg partition -a alignments.paf -w 1000000 -o gfa --engine pggb --sequence-files *.fa --separate-files \
-    --target-poa-length 1000 --max-node-length 200
+    --target-poa-length 700,1100 --max-node-length 200
 ```
 
 ### Similarity
@@ -534,9 +534,17 @@ impg graph --fasta-files sequences.fa -g output.gfa --repeat-max 1000 --min-repe
 
 These options control the per-block POA smoothing step in the `pggb` engine. They are available in `graph`, `query -o gfa`, and `partition -o gfa`.
 
+The `--target-poa-length` parameter accepts a comma-separated list of values, one per smoothing pass (matching pggb's `-G` flag). The default `700,1100` runs two passes: first resolving variation up to ~700 bp, then a second pass resolving up to ~1100 bp. Each pass feeds its output into the next, progressively smoothing longer variation.
+
 ```bash
-# Target POA block length in bp (default: 700)
-impg graph --fasta-files sequences.fa -g output.gfa --engine pggb --target-poa-length 1000
+# Two-pass smoothing with custom lengths (default: "700,1100")
+impg graph --fasta-files sequences.fa -g output.gfa --engine pggb --target-poa-length 700,1100
+
+# Single-pass smoothing
+impg graph --fasta-files sequences.fa -g output.gfa --engine pggb --target-poa-length 700
+
+# Three-pass smoothing for very diverse regions
+impg graph --fasta-files sequences.fa -g output.gfa --engine pggb --target-poa-length 700,1100,1500
 
 # Maximum node length before chopping (default: 100)
 impg graph --fasta-files sequences.fa -g output.gfa --engine pggb --max-node-length 200

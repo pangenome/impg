@@ -16,14 +16,12 @@ use std::io;
 
 /// Configuration for graph smoothing.
 pub struct SmoothConfig {
-    /// Number of haplotypes (used for max_block_weight default).
+    /// Number of haplotypes (used for per-pass max_block_weight = target * n_haps).
     pub n_haps: usize,
-    /// Target POA length in bp (default: 700).
-    pub target_poa_length: usize,
-    /// Max total sequence bytes in a block (default: target_poa_length * n_haps).
-    pub max_block_weight: usize,
-    /// Max path range length before cutting (default: 2 * target_poa_length).
-    pub max_poa_length: usize,
+    /// Target POA length(s) in bp — one value per smoothing pass (default: [700, 1100],
+    /// matching pggb's default `-G 700,1100`).  Each pass re-decomposes the graph with
+    /// that target length and feeds its output into the next pass.
+    pub target_poa_lengths: Vec<usize>,
     /// Chop nodes to this maximum length (default: 100).
     pub max_node_length: usize,
     /// Flanking sequence fraction for POA padding (default: 0.001).
@@ -36,20 +34,18 @@ pub struct SmoothConfig {
     pub num_threads: usize,
     /// Optional temp directory for intermediate files.
     pub temp_dir: Option<String>,
-    /// Skip the initial unchop+sort step (use when input is already unchoped and sorted).
+    /// Skip the initial unchop+sort step (use when input is already unchopped and sorted).
     pub pre_sorted: bool,
 }
 
 impl SmoothConfig {
     /// Create a new SmoothConfig with defaults derived from n_haps.
-    /// Defaults match pggb's smoothxg invocation (asm20 POA params, pad_max_depth=100).
+    /// Defaults match pggb's smoothxg invocation: two passes at 700 bp then 1100 bp
+    /// (`-G 700,1100`), asm20 POA params, pad_max_depth=100.
     pub fn new(n_haps: usize) -> Self {
-        let target_poa_length = 700;
         SmoothConfig {
             n_haps,
-            target_poa_length,
-            max_block_weight: target_poa_length * n_haps,
-            max_poa_length: 2 * target_poa_length,
+            target_poa_lengths: vec![700, 1100],
             max_node_length: 100,
             poa_padding_fraction: 0.001,
             max_block_depth_for_padding_more: 100,
@@ -150,13 +146,54 @@ impl UnionFind {
 
 /// Smooth a GFA graph using smoothxg-style block decomposition and POA.
 ///
-/// Pipeline: sort → chop → block decompose → break long blocks → per-block SPOA → lace.
+/// Runs one pass per entry in `config.target_poa_lengths` (default: `[700, 1100]`,
+/// matching pggb's `-G 700,1100`).  Each pass feeds its output into the next pass,
+/// progressively resolving longer variation.
+///
+/// Per-pass pipeline: unchop+sort → chop → block decompose → break long blocks →
+/// per-block SPOA → lace.
 pub fn smooth_gfa(gfa_content: &str, config: &SmoothConfig) -> io::Result<String> {
+    let n_passes = config.target_poa_lengths.len();
+    if n_passes == 0 {
+        return Ok(gfa_content.to_string());
+    }
+
+    let mut current = gfa_content.to_string();
+    for (pass_idx, &target_poa_length) in config.target_poa_lengths.iter().enumerate() {
+        let is_first = pass_idx == 0;
+        info!(
+            "[smooth] Pass {}/{} (target_poa_length={}bp)",
+            pass_idx + 1,
+            n_passes,
+            target_poa_length
+        );
+        current = smooth_gfa_pass(
+            &current,
+            target_poa_length,
+            is_first && config.pre_sorted,
+            config,
+        )?;
+    }
+    Ok(current)
+}
+
+/// Run a single smoothing pass on a (not yet sorted) GFA string.
+///
+/// `pre_sorted` — skip the unchop+sort step (true only for the first pass when the
+/// caller guarantees the input is already sorted).
+fn smooth_gfa_pass(
+    gfa_content: &str,
+    target_poa_length: usize,
+    pre_sorted: bool,
+    config: &SmoothConfig,
+) -> io::Result<String> {
+    let max_block_weight = target_poa_length * config.n_haps.max(1);
+    let max_poa_length = 2 * target_poa_length;
+
     // Step 1: Unchop then sort input GFA (gives a 1D layout for block decomposition)
-    let sorted_gfa = if config.pre_sorted {
+    let sorted_gfa = if pre_sorted {
         gfa_content.to_string()
     } else {
-        info!("[smooth] Unchopping and sorting input GFA for 1D layout...");
         sort_gfa(&unchop_gfa(gfa_content)?, config.num_threads)?
     };
 
@@ -189,11 +226,11 @@ pub fn smooth_gfa(gfa_content: &str, config: &SmoothConfig) -> io::Result<String
     let path_positions = compute_path_positions(&graph);
 
     // Step 6: Block decomposition
-    let mut blocks = smoothable_blocks(&graph, &node_step_index, config);
+    let mut blocks = smoothable_blocks(&graph, &node_step_index, max_block_weight, target_poa_length);
     info!("[smooth] Decomposed into {} blocks", blocks.len());
 
     // Step 7: Break long blocks
-    break_blocks(&mut blocks, &graph, config);
+    break_blocks(&mut blocks, &graph, max_poa_length);
     info!(
         "[smooth] After breaking: {} blocks, {} total path ranges",
         blocks.len(),
@@ -448,7 +485,8 @@ fn compute_path_positions(graph: &SmoothGraph) -> Vec<Vec<usize>> {
 fn smoothable_blocks(
     graph: &SmoothGraph,
     node_step_index: &[Vec<(usize, usize)>],
-    config: &SmoothConfig,
+    max_block_weight: usize,
+    target_poa_length: usize,
 ) -> Vec<Block> {
     let mut seen_steps: Vec<BitVec> = graph
         .paths
@@ -495,8 +533,8 @@ fn smoothable_blocks(
 
         // Check if current block should be finalized
         let should_finalize = !block_node_indices.is_empty()
-            && (total_path_length + sequence_to_add > config.max_block_weight
-                || max_path_length > config.target_poa_length);
+            && (total_path_length + sequence_to_add > max_block_weight
+                || max_path_length > target_poa_length);
 
         if should_finalize {
             let new_blocks =
@@ -696,8 +734,7 @@ fn topological_split(path_ranges: Vec<PathRange>, graph: &SmoothGraph) -> Vec<Bl
 // Block breaking (smoothxg break_blocks)
 // ---------------------------------------------------------------------------
 
-fn break_blocks(blocks: &mut Vec<Block>, graph: &SmoothGraph, config: &SmoothConfig) {
-    let max_poa_length = config.max_poa_length;
+fn break_blocks(blocks: &mut Vec<Block>, graph: &SmoothGraph, max_poa_length: usize) {
 
     let mut new_blocks: Vec<Block> = Vec::with_capacity(blocks.len());
 
@@ -1297,7 +1334,9 @@ P\tseq2:0-6\t1+,2+\t*
         let graph = parse_gfa(gfa);
         let index = build_node_step_index(&graph);
         let config = SmoothConfig::new(2);
-        let blocks = smoothable_blocks(&graph, &index, &config);
+        let target_poa_length = config.target_poa_lengths[0];
+        let max_block_weight = target_poa_length * config.n_haps.max(1);
+        let blocks = smoothable_blocks(&graph, &index, max_block_weight, target_poa_length);
 
         // Should produce 1 block (total weight is small)
         assert_eq!(blocks.len(), 1);

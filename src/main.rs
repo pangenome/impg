@@ -164,9 +164,10 @@ struct SeqwishOpts {
 #[derive(Parser, Debug, Clone)]
 #[command(next_help_heading = "Graph smoothing (pggb engine)")]
 struct SmoothOpts {
-    /// Target POA block length in bp (default: 700)
-    #[clap(long, value_parser, default_value_t = 700)]
-    target_poa_length: usize,
+    /// Comma-separated target POA block lengths in bp, one per smoothing pass
+    /// (default: "700,1100" matching pggb's `-G 700,1100`)
+    #[clap(long, value_parser, default_value = "700,1100")]
+    target_poa_length: String,
 
     /// Maximum node length before chopping (default: 100)
     #[clap(long, value_parser, default_value_t = 100)]
@@ -175,6 +176,26 @@ struct SmoothOpts {
     /// Fraction of avg block length to use as POA padding (default: 0.001)
     #[clap(long, value_parser, default_value_t = 0.001)]
     poa_padding_fraction: f64,
+}
+
+impl SmoothOpts {
+    /// Parse `--target-poa-length` into a `Vec<usize>`.
+    fn parse_target_poa_lengths(&self) -> io::Result<Vec<usize>> {
+        self.target_poa_length
+            .split(',')
+            .map(|s| {
+                s.trim().parse::<usize>().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "--target-poa-length: '{}' is not a valid positive integer",
+                            s.trim()
+                        ),
+                    )
+                })
+            })
+            .collect()
+    }
 }
 
 /// Alignment file and index options for commands that work with alignments
@@ -1341,7 +1362,7 @@ fn run() -> io::Result<()> {
                 sparse_factor: seqwish.sparse_factor,
                 transclose_batch: seqwish.transclose_batch,
                 disk_backed: seqwish.disk_backed,
-                target_poa_length: smooth.target_poa_length,
+                target_poa_lengths: smooth.parse_target_poa_lengths()?,
                 max_node_length: smooth.max_node_length,
                 poa_padding_fraction: smooth.poa_padding_fraction,
             };
@@ -1666,7 +1687,7 @@ fn run() -> io::Result<()> {
                             sparse_factor: seqwish.sparse_factor,
                             transclose_batch: seqwish.transclose_batch,
                             disk_backed: seqwish.disk_backed,
-                            target_poa_length: smooth.target_poa_length,
+                            target_poa_lengths: smooth.parse_target_poa_lengths()?,
                             max_node_length: smooth.max_node_length,
                             poa_padding_fraction: smooth.poa_padding_fraction,
                         };
@@ -2263,6 +2284,7 @@ fn run() -> io::Result<()> {
                     graph::run_graph_build(fasta_files, fasta_list, &output, graph_config)?;
                 }
                 GfaEngine::Pggb => {
+                    let target_poa_lengths = smooth.parse_target_poa_lengths()?;
                     if output == "-" {
                         let stdout = io::stdout();
                         let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
@@ -2271,7 +2293,7 @@ fn run() -> io::Result<()> {
                             fasta_list,
                             &mut out,
                             &graph_config,
-                            smooth.target_poa_length,
+                            target_poa_lengths,
                             smooth.max_node_length,
                             smooth.poa_padding_fraction,
                         )?;
@@ -2282,7 +2304,7 @@ fn run() -> io::Result<()> {
                             fasta_list,
                             &mut out,
                             &graph_config,
-                            smooth.target_poa_length,
+                            target_poa_lengths,
                             smooth.max_node_length,
                             smooth.poa_padding_fraction,
                         )?;

@@ -48,7 +48,8 @@ pub struct EngineOpts {
     pub transclose_batch: u64,
     pub disk_backed: bool,
     // Smoothxg-style smoothing parameters (pggb engine)
-    pub target_poa_length: usize,
+    /// Target POA length(s) per pass — one value per smoothing pass (default: [700, 1100]).
+    pub target_poa_lengths: Vec<usize>,
     pub max_node_length: usize,
     pub poa_padding_fraction: f64,
 }
@@ -148,9 +149,7 @@ pub fn dispatch_gfa_engine(
             let n_haps = query_intervals.len().max(1);
             let smooth_config = smooth::SmoothConfig {
                 num_threads: engine_opts.num_threads,
-                target_poa_length: engine_opts.target_poa_length,
-                max_block_weight: engine_opts.target_poa_length * n_haps,
-                max_poa_length: 2 * engine_opts.target_poa_length,
+                target_poa_lengths: engine_opts.target_poa_lengths.clone(),
                 max_node_length: engine_opts.max_node_length,
                 poa_padding_fraction: engine_opts.poa_padding_fraction,
                 pre_sorted: true,
