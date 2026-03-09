@@ -54,6 +54,21 @@ Alternatively, install from Bioconda:
 conda install -c bioconda impg
 ```
 
+### Docker
+
+To simplify installation and versioning, we have an automated GitHub action that pushes the current docker build to [dockerhub](https://hub.docker.com/r/pangenome/impg).
+To use it, pull the docker image:
+
+```shell
+docker pull pangenome/impg
+```
+
+Then, you can run `impg` with:
+
+```shell
+docker run pangenome/impg
+```
+
 ## Building with GNU Guix
 
 **NOTE**: All paths are relative to the repository root. If you are not working
