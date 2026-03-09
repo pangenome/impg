@@ -8,7 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  WFMASH_PORTABLE: 1
+  PORTABLE: 1
 
 jobs:
   test:
