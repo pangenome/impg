@@ -40,6 +40,17 @@ pub struct EngineOpts {
     pub debug_dir: Option<String>,
     /// Wfmash mapping sparsification: "auto" or a float string like "0.1".
     pub sparsify: Option<String>,
+    // Seqwish graph induction parameters
+    pub repeat_max: u64,
+    pub min_repeat_dist: u64,
+    pub min_match_len: u64,
+    pub sparse_factor: f32,
+    pub transclose_batch: u64,
+    pub disk_backed: bool,
+    // Smoothxg-style smoothing parameters (pggb engine)
+    pub target_poa_length: usize,
+    pub max_node_length: usize,
+    pub poa_padding_fraction: f64,
 }
 
 /// Dispatch GFA generation to the selected engine.
@@ -53,6 +64,29 @@ pub fn dispatch_gfa_engine(
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
     engine_opts: &EngineOpts,
 ) -> std::io::Result<String> {
+    // Create debug dir once — needed by both seqwish and pggb pipelines.
+    if let Some(ref dir) = engine_opts.debug_dir {
+        std::fs::create_dir_all(dir).map_err(|e| {
+            std::io::Error::other(format!("Failed to create debug dir '{}': {}", dir, e))
+        })?;
+    }
+
+    // Shared seqwish config — identical for the seqwish and pggb engines; built
+    // once here so neither arm repeats the field list.
+    let seqwish_config = graph::SeqwishConfig {
+        num_threads: engine_opts.num_threads,
+        no_filter: engine_opts.no_filter,
+        debug_dir: engine_opts.debug_dir.clone(),
+        sparsify: engine_opts.sparsify.clone(),
+        repeat_max: engine_opts.repeat_max,
+        min_repeat_dist: engine_opts.min_repeat_dist,
+        min_match_len: engine_opts.min_match_len,
+        sparse_factor: engine_opts.sparse_factor,
+        transclose_batch: engine_opts.transclose_batch,
+        use_in_memory: !engine_opts.disk_backed,
+        ..graph::SeqwishConfig::default()
+    };
+
     match engine_opts.engine {
         GfaEngine::Poa => {
             let params = scoring_params.ok_or_else(|| {
@@ -71,23 +105,11 @@ pub fn dispatch_gfa_engine(
             graph::normalize_and_sort(gfa, engine_opts.num_threads)
         }
         GfaEngine::Seqwish => {
-            if let Some(ref dir) = engine_opts.debug_dir {
-                std::fs::create_dir_all(dir).map_err(|e| {
-                    std::io::Error::other(format!("Failed to create debug dir '{}': {}", dir, e))
-                })?;
-            }
-            let config = graph::SeqwishConfig {
-                num_threads: engine_opts.num_threads,
-                no_filter: engine_opts.no_filter,
-                debug_dir: engine_opts.debug_dir.clone(),
-                sparsify: engine_opts.sparsify.clone(),
-                ..graph::SeqwishConfig::default()
-            };
             let gfa = graph::generate_gfa_seqwish_from_intervals(
                 impg,
                 query_intervals,
                 sequence_index,
-                &config,
+                &seqwish_config,
             )?;
             graph::normalize_and_sort(gfa, engine_opts.num_threads)
         }
@@ -111,14 +133,7 @@ pub fn dispatch_gfa_engine(
             graph::normalize_and_sort(result.gfa, engine_opts.num_threads)
         }
         GfaEngine::Pggb => {
-            // Step 1: run seqwish pipeline
-            let seqwish_config = graph::SeqwishConfig {
-                num_threads: engine_opts.num_threads,
-                no_filter: engine_opts.no_filter,
-                debug_dir: engine_opts.debug_dir.clone(),
-                sparsify: engine_opts.sparsify.clone(),
-                ..graph::SeqwishConfig::default()
-            };
+            // Step 1: seqwish graph induction (shared config, same as seqwish engine)
             let raw_gfa = graph::generate_gfa_seqwish_from_intervals(
                 impg,
                 query_intervals,
@@ -133,6 +148,11 @@ pub fn dispatch_gfa_engine(
             let n_haps = query_intervals.len().max(1);
             let smooth_config = smooth::SmoothConfig {
                 num_threads: engine_opts.num_threads,
+                target_poa_length: engine_opts.target_poa_length,
+                max_block_weight: engine_opts.target_poa_length * n_haps,
+                max_poa_length: 2 * engine_opts.target_poa_length,
+                max_node_length: engine_opts.max_node_length,
+                poa_padding_fraction: engine_opts.poa_padding_fraction,
                 pre_sorted: true,
                 ..smooth::SmoothConfig::new(n_haps)
             };

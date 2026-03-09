@@ -186,6 +186,14 @@ impg query -a alignments.paf -r chr1:1000-2000 -o gfa --engine recursive \
 
 # Custom POA scoring (match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2)
 impg query -a alignments.paf -r chr1:1000-2000 -o gfa --poa-scoring 5,4,6,2,24,1 --sequence-files *.fa
+
+# Tune seqwish graph induction parameters (seqwish and pggb engines)
+impg query -a alignments.paf -r chr1:1000-50000 -o gfa --engine seqwish --sequence-files *.fa \
+    --min-match-len 50 --transclose-batch 5000000 --sparse-factor 0.5
+
+# Tune smoothxg-style smoothing (pggb engine only)
+impg query -a alignments.paf -r chr1:1000-50000 -o gfa --engine pggb --sequence-files *.fa \
+    --target-poa-length 1000 --max-node-length 200 --poa-padding-fraction 0.001
 ```
 
 #### Alignment visualizations
@@ -244,6 +252,14 @@ impg partition -a alignments.paf -w 1000000 -o gfa --sequence-files genomes.agc 
 impg partition -a alignments.paf -w 1000000 -o gfa --engine pggb --sequence-files *.fa --separate-files
 impg partition -a alignments.paf -w 1000000 -o gfa --engine seqwish --sequence-files *.fa --separate-files
 impg partition -a alignments.paf -w 1000000 -o gfa --engine seqwish -N --sequence-files *.fa --separate-files  # no filtering
+
+# Tune seqwish graph induction parameters (seqwish and pggb engines)
+impg partition -a alignments.paf -w 1000000 -o gfa --engine seqwish --sequence-files *.fa --separate-files \
+    --min-match-len 50 --transclose-batch 5000000
+
+# Tune smoothxg-style smoothing (pggb engine only)
+impg partition -a alignments.paf -w 1000000 -o gfa --engine pggb --sequence-files *.fa --separate-files \
+    --target-poa-length 1000 --max-node-length 200
 ```
 
 ### Similarity
@@ -465,37 +481,68 @@ impg graph --fasta-files sequences.fa -g output.gfa --engine poa
 
 All engines produce sorted, unchopped GFA with consistent path names.
 
-#### Seqwish engine options
+#### Alignment backend options
 
-The seqwish engine runs all-vs-all alignment (using wfmash by default, or fastga with `--aligner fastga`) followed by seqwish graph induction. It handles PanSN-formatted sequence names and automatically adjusts the k-mer frequency based on the number of genomes (unique SAMPLE#HAPLOTYPE prefixes).
+The seqwish, pggb, and recursive engines run all-vs-all alignment internally. The aligner can be selected with `--aligner` (default: `wfmash`; alternative: `fastga`). PanSN-formatted sequence names are handled automatically, and the k-mer frequency is scaled by the number of genomes.
+
+> **Aligner compatibility:**
+> - `--sparsify` is **wfmash-only** — combining `--aligner fastga` with `--sparsify` is an error.
+> - `--frequency` / `-f` (k-mer frequency) is **fastga-only** — combining `--aligner wfmash` with `--frequency` is an error.
 
 ```bash
-# Adjust k-mer frequency multiplier (default: 10x number of genomes)
-impg graph --fasta-files sequences.fa -g output.gfa -f 5
+# Choose aligner backend (default: wfmash)
+impg graph --fasta-files sequences.fa -g output.gfa --aligner fastga
 
-# Set explicit k-mer frequency
-impg graph --fasta-files sequences.fa -g output.gfa --frequency 100
+# Adjust k-mer frequency multiplier for fastga (default: 10x number of genomes)
+impg graph --fasta-files sequences.fa -g output.gfa --aligner fastga -f 5
+
+# Set explicit k-mer frequency for fastga
+impg graph --fasta-files sequences.fa -g output.gfa --aligner fastga --frequency 100
 
 # Filter alignments by minimum length
 impg graph --fasta-files sequences.fa -g output.gfa --min-alignment-length 500
 
-# Filter alignments by minimum match length
-impg graph --fasta-files sequences.fa -g output.gfa -k 50
+# Sparsify wfmash mappings (auto or explicit fraction; wfmash only)
+impg graph --fasta-files sequences.fa -g output.gfa --sparsify auto
 
-# Use sparse factor to reduce alignment density (0.0 = keep all)
+# Skip pre-computed alignment step with a PAF file
+impg graph --fasta-files sequences.fa -g output.gfa --paf-file alignments.paf
+```
+
+#### Seqwish graph induction options
+
+These options control the transitive closure step used by the `seqwish` and `pggb` engines. They are available in `graph`, `query -o gfa`, and `partition -o gfa`.
+
+```bash
+# Minimum match length for alignments (default: 23)
+impg graph --fasta-files sequences.fa -g output.gfa --min-match-len 50
+
+# Batch size for transitive closure (default: 10000000; reduce for lower memory)
+impg graph --fasta-files sequences.fa -g output.gfa --transclose-batch 5000000
+
+# Use sparse factor to reduce alignment density (0.0 = keep all; default: 0.0)
 impg graph --fasta-files sequences.fa -g output.gfa --sparse-factor 0.5
 
-# Use disk-backed mode for very large datasets (slower but lower memory)
+# Use disk-backed interval trees for very large datasets (slower but lower memory)
 impg graph --fasta-files *.fa -g output.gfa --disk-backed
 
-# Skip pre-computed alignment with a PAF file
-impg graph --fasta-files sequences.fa -g output.gfa --paf-file alignments.paf
+# Repeat filtering (suppress paths through repeats that appear too many times)
+impg graph --fasta-files sequences.fa -g output.gfa --repeat-max 1000 --min-repeat-dist 500
+```
 
-# Choose aligner backend (default: wfmash)
-impg graph --fasta-files sequences.fa -g output.gfa --aligner fastga
+#### Smoothxg-style smoothing options (pggb engine)
 
-# Sparsify wfmash mappings (auto or explicit fraction)
-impg graph --fasta-files sequences.fa -g output.gfa --sparsify auto
+These options control the per-block POA smoothing step in the `pggb` engine. They are available in `graph`, `query -o gfa`, and `partition -o gfa`.
+
+```bash
+# Target POA block length in bp (default: 700)
+impg graph --fasta-files sequences.fa -g output.gfa --engine pggb --target-poa-length 1000
+
+# Maximum node length before chopping (default: 100)
+impg graph --fasta-files sequences.fa -g output.gfa --engine pggb --max-node-length 200
+
+# POA padding fraction of average block length (default: 0.001)
+impg graph --fasta-files sequences.fa -g output.gfa --engine pggb --poa-padding-fraction 0.01
 ```
 
 #### Alignment filtering options (seqwish engine)
@@ -547,12 +594,12 @@ The `ramdisk` shortcut maps to `/dev/shm` on Linux. Use it only when you have su
 
 #### query vs graph
 
-Both `query -o gfa` and `graph` share the same engine implementations. The difference is only in how sequences are obtained:
+Both `query -o gfa` and `graph` share the same engine implementations and parameter sets. The difference is only in how sequences are obtained:
 
 - **`query -o gfa`**: extracts subsequences from an IMPG index + sequence files for a target region, then builds a graph.
 - **`graph`**: reads FASTA files directly and builds a graph (no alignments or index needed).
 
-A common two-step workflow is to extract sequences with `query -o fasta`, then build a graph with `graph` for full control over seqwish filtering parameters.
+All seqwish graph induction options (`--min-match-len`, `--transclose-batch`, `--sparse-factor`, `--disk-backed`, `--repeat-max`, `--min-repeat-dist`) and smoothxg smoothing options (`--target-poa-length`, `--max-node-length`, `--poa-padding-fraction`) are available in both `graph` and `query -o gfa` (and `partition -o gfa`).
 
 ### Align
 
@@ -577,6 +624,10 @@ impg align --fasta-files sequences.fa -o alignments --format 1aln
 
 # Choose aligner backend (default: wfmash)
 impg align --fasta-files sequences.fa -o alignments --aligner fastga
+
+# fastga-specific: adjust k-mer frequency multiplier (ignored by wfmash)
+impg align --fasta-files sequences.fa -o alignments --aligner fastga -f 5
+impg align --fasta-files sequences.fa -o alignments --aligner fastga --frequency 100
 
 # With alignment filtering
 impg align --fasta-files sequences.fa -o alignments --num-mappings 1:1 --scaffold-filter 1:1

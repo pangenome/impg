@@ -877,6 +877,18 @@ pub struct SeqwishConfig {
     pub debug_dir: Option<String>,
     /// Wfmash mapping sparsification: "auto" or a float string like "0.1".
     pub sparsify: Option<String>,
+    /// Maximum repeat count for transitive closure (0 = no limit)
+    pub repeat_max: u64,
+    /// Minimum distance between repeats
+    pub min_repeat_dist: u64,
+    /// Minimum match length filter for alignments
+    pub min_match_len: u64,
+    /// Sparse factor for input matches (0.0 = keep all)
+    pub sparse_factor: f32,
+    /// Batch size for transitive closure computation
+    pub transclose_batch: u64,
+    /// Use in-memory interval trees (false = disk-backed, slower but lower memory)
+    pub use_in_memory: bool,
 }
 
 impl Default for SeqwishConfig {
@@ -891,6 +903,12 @@ impl Default for SeqwishConfig {
             scaffold_filter: "many:many".to_string(),
             debug_dir: None,
             sparsify: None,
+            repeat_max: 0,
+            min_repeat_dist: 0,
+            min_match_len: 23,
+            sparse_factor: 0.0,
+            transclose_batch: 10_000_000,
+            use_in_memory: true,
         }
     }
 }
@@ -945,6 +963,12 @@ pub fn generate_gfa_seqwish_from_intervals(
         scaffold_filter: config.scaffold_filter.clone(),
         debug_dir: config.debug_dir.clone(),
         sparsify: config.sparsify.clone(),
+        repeat_max: config.repeat_max,
+        min_repeat_dist: config.min_repeat_dist,
+        min_match_len: config.min_match_len,
+        sparse_factor: config.sparse_factor,
+        transclose_batch: config.transclose_batch,
+        use_in_memory: config.use_in_memory,
         show_progress: false,
         ..crate::commands::graph::GraphBuildConfig::default()
     };
@@ -1010,6 +1034,12 @@ pub fn generate_gfa_seqwish_from_sequences(
         scaffold_filter: config.scaffold_filter.clone(),
         debug_dir: config.debug_dir.clone(),
         sparsify: config.sparsify.clone(),
+        repeat_max: config.repeat_max,
+        min_repeat_dist: config.min_repeat_dist,
+        min_match_len: config.min_match_len,
+        sparse_factor: config.sparse_factor,
+        transclose_batch: config.transclose_batch,
+        use_in_memory: config.use_in_memory,
         show_progress: false,
         ..crate::commands::graph::GraphBuildConfig::default()
     };
