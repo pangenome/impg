@@ -87,7 +87,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -98,7 +98,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -865,7 +865,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1415,7 +1415,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1535,7 +1535,7 @@ dependencies = [
 [[package]]
 name = "lib_wfa2"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/lib_wfa2?rev=0fe1ebfb7a364226f3d8d7b84b703611168435c6#0fe1ebfb7a364226f3d8d7b84b703611168435c6"
+source = "git+https://github.com/AndreaGuarracino/lib_wfa2?rev=8859b6a214141968f37d9bcb22552408318adda0#8859b6a214141968f37d9bcb22552408318adda0"
 
 [[package]]
 name = "libc"
@@ -2386,7 +2386,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2572,7 +2572,7 @@ dependencies = [
 [[package]]
 name = "spoa_rs"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/spoa-rs.git#6f4f1024cc09959b926d4616991672693013ed3e"
+source = "git+https://github.com/AndreaGuarracino/spoa-rs.git#a036c882a952df9c3dccb4482e45f96b2e21e7fd"
 dependencies = [
  "cmake",
  "cxx",
@@ -2691,7 +2691,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2837,7 +2837,7 @@ checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 [[package]]
 name = "tpa"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/tpa?rev=301dc3ff53482d993c065217dbcd8abb6ffff2d9#301dc3ff53482d993c065217dbcd8abb6ffff2d9"
+source = "git+https://github.com/AndreaGuarracino/tpa?rev=0020ca2479252ff17446f03c434c4efa56810cfd#0020ca2479252ff17446f03c434c4efa56810cfd"
 dependencies = [
  "bgzip",
  "env_logger",
@@ -2853,7 +2853,7 @@ dependencies = [
 [[package]]
 name = "tracepoints"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/tracepoints?rev=b73773433561fb36f21136776a7297c5877ab593#b73773433561fb36f21136776a7297c5877ab593"
+source = "git+https://github.com/AndreaGuarracino/tracepoints?rev=66a5511b0b84d8502f9d7c99efd150616ff2cae3#66a5511b0b84d8502f9d7c99efd150616ff2cae3"
 dependencies = [
  "lib_wfa2",
 ]
@@ -3096,7 +3096,7 @@ dependencies = [
 [[package]]
 name = "wfmash-rs"
 version = "0.1.0"
-source = "git+https://github.com/pangenome/wfmash-rs#e66d8909d67ec1a4a3b877aac3e9577f7a4a0be0"
+source = "git+https://github.com/pangenome/wfmash-rs#34783838c3202acd851a432e5fc62666d5888655"
 dependencies = [
  "anyhow",
  "num_cpus",
@@ -3149,7 +3149,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
