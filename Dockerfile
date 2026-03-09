@@ -25,6 +25,7 @@ RUN apt-get update \
                        libhts-dev \
                        libgsl-dev \
                        libjemalloc-dev \
+                       libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Rust
