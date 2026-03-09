@@ -3,7 +3,6 @@
 //! These tests exercise `realize_from_sequences` with various inputs
 //! and configurations, validating GFA output structure and statistics.
 
-
 use impg::graph::SequenceMetadata;
 use impg::realize::{realize_from_sequences, RealizeConfig, RealizeResult};
 
@@ -51,7 +50,9 @@ fn make_dna(len: usize, seed: u64) -> String {
     let mut state = seed;
     for _ in 0..len {
         // Simple LCG
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         out.push(bases[((state >> 33) % 4) as usize]);
     }
     String::from_utf8(out).unwrap()
@@ -299,10 +300,7 @@ fn test_realize_two_sequences_with_snp() {
     seq2_bytes[12] = b'T'; // G→T at position 12
     let seq2 = String::from_utf8(seq2_bytes).unwrap();
 
-    let seqs = vec![
-        make_seq("s1", seq1, 0, 100),
-        make_seq("s2", &seq2, 0, 100),
-    ];
+    let seqs = vec![make_seq("s1", seq1, 0, 100), make_seq("s2", &seq2, 0, 100)];
 
     let result = realize_from_sequences(&seqs, &config).unwrap();
     validate_gfa(&result);
@@ -345,7 +343,10 @@ fn test_realize_three_sequences_with_indel() {
     assert_eq!(names.len(), 3);
 
     // Each path should spell its original sequence.
-    for (name, expected_seq) in names.iter().zip(["AAAAACCCCCGGGGG", "AAAAACCCTTCCCGGGGG", "AAAAAGGGGG"].iter()) {
+    for (name, expected_seq) in names
+        .iter()
+        .zip(["AAAAACCCCCGGGGG", "AAAAACCCTTCCCGGGGG", "AAAAAGGGGG"].iter())
+    {
         let spelled = spell_path(&result.gfa, name).unwrap();
         assert_eq!(
             &spelled, expected_seq,
@@ -409,8 +410,14 @@ fn test_realize_max_depth_zero_forces_poa() {
     let result = realize_from_sequences(&seqs, &config).unwrap();
     validate_gfa(&result);
 
-    assert_eq!(result.stats.sweepga_calls, 0, "max_depth=0 should skip sweepga");
-    assert!(result.stats.poa_calls >= 1, "Should have at least 1 POA call");
+    assert_eq!(
+        result.stats.sweepga_calls, 0,
+        "max_depth=0 should skip sweepga"
+    );
+    assert!(
+        result.stats.poa_calls >= 1,
+        "Should have at least 1 POA call"
+    );
 }
 
 #[test]
@@ -448,7 +455,6 @@ fn test_realize_large_region_triggers_sweepga() {
     config.chunk_size = 300;
     config.padding = 50;
     config.max_depth = 5;
-
 
     // Generate a 2kb sequence and a variant with ~2% divergence.
     let base_seq = make_dna(2000, 77);
@@ -495,7 +501,6 @@ fn test_realize_three_sequences_large_region() {
     config.padding = 30;
     config.max_depth = 5;
 
-
     let base = make_dna(1500, 99);
     let var1 = mutate_snps(&base, 40);
     let var2 = mutate_snps(&base, 60);
@@ -514,15 +519,27 @@ fn test_realize_three_sequences_large_region() {
     // With overlap-trimming lace, non-contiguous ranges for a path key produce
     // separate path lines (e.g. s1:0-280, s1:530-1500). So we check that all 3
     // sequence keys are represented, not that there are exactly 3 path lines.
-    assert!(names.len() >= 3, "Expected at least 3 paths, got {}: {:?}", names.len(), names);
+    assert!(
+        names.len() >= 3,
+        "Expected at least 3 paths, got {}: {:?}",
+        names.len(),
+        names
+    );
     for key in &["s1", "s2", "s3"] {
-        assert!(names.iter().any(|n| n.contains(key)),
-            "Expected a path for {key}, got: {:?}", names);
+        assert!(
+            names.iter().any(|n| n.contains(key)),
+            "Expected a path for {key}, got: {:?}",
+            names
+        );
     }
 
     // Segments should exist and paths should reference them.
     let segments = count_gfa_lines(&result.gfa, "S\t");
-    assert!(segments >= 2, "Expected multiple segments, got {}", segments);
+    assert!(
+        segments >= 2,
+        "Expected multiple segments, got {}",
+        segments
+    );
 }
 
 // ===========================================================================
@@ -574,7 +591,6 @@ fn test_realize_stats_consistency() {
     config.chunk_size = 200;
     config.padding = 20;
     config.max_depth = 3;
-
 
     let base = make_dna(1000, 55);
     let var = mutate_snps(&base, 30);
@@ -640,10 +656,7 @@ fn test_realize_five_sequences_poa() {
 fn test_realize_very_short_sequences() {
     // Sequences at the minimum viable length for POA.
     let config = test_config();
-    let seqs = vec![
-        make_seq("s1", "ACGT", 0, 10),
-        make_seq("s2", "ACGT", 0, 10),
-    ];
+    let seqs = vec![make_seq("s1", "ACGT", 0, 10), make_seq("s2", "ACGT", 0, 10)];
     let result = realize_from_sequences(&seqs, &config).unwrap();
     validate_gfa(&result);
     assert_eq!(result.stats.num_sequences, 2);
@@ -689,4 +702,3 @@ fn test_realize_repeated_sequence_content() {
         );
     }
 }
-

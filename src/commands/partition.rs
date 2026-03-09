@@ -1,8 +1,8 @@
-use crate::EngineOpts;
 use crate::impg::CigarOp;
 use crate::impg::SortedRanges;
 use crate::impg_index::ImpgIndex;
 use crate::sequence_index::{SequenceIndex, UnifiedSequenceIndex};
+use crate::EngineOpts;
 use coitrees::Interval;
 use log::{debug, info};
 use rayon::prelude::*;

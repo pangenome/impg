@@ -6,7 +6,7 @@ use crate::alignment_record::{AlignmentRecord, Strand};
 use crate::onealn::{OneAlnAlignment, TracepointModeData};
 use crate::seqidx::SequenceIndex;
 use log::debug;
-use tpa::{TracepointData, TpaReader};
+use tpa::{TpaReader, TracepointData};
 
 /// TPA file parser
 pub struct TpaParser {
@@ -36,7 +36,7 @@ impl TpaParser {
 
     /// Read trace spacing from TPA header (max_complexity)
     pub fn read_trace_spacing(file_path: &str) -> Result<i64, ParseErr> {
-        let reader = TpaReader::new(file_path).map_err(|e| {
+        let reader = TpaReader::new_shallow(file_path).map_err(|e| {
             ParseErr::InvalidFormat(format!("Failed to open TPA file '{}': {}", file_path, e))
         })?;
         Ok(reader.header().max_complexity() as i64)
@@ -49,21 +49,15 @@ impl TpaParser {
         seq_index: &mut SequenceIndex,
         threads: usize,
     ) -> Result<Vec<AlignmentRecord>, ParseErr> {
-        let mut reader = TpaReader::new(&self.file_path).map_err(|e| {
-            ParseErr::InvalidFormat(format!("Failed to open TPA file: {}", e))
-        })?;
+        let reader = TpaReader::new_streaming(&self.file_path)
+            .map_err(|e| ParseErr::InvalidFormat(format!("Failed to open TPA file: {}", e)))?;
 
-        reader.load_string_table().map_err(|e| {
-            ParseErr::InvalidFormat(format!("Failed to load string table: {}", e))
-        })?;
-
-        let num_records = reader.len();
+        let num_records = reader.num_records();
         let mut records = Vec::with_capacity(num_records);
 
         // Use sequential iteration (much faster than per-record random access)
-        let string_table = reader.string_table().map_err(|e| {
-            ParseErr::InvalidFormat(format!("Failed to get string table: {}", e))
-        })?;
+        // String table is already loaded by new_streaming()
+        let string_table = reader.string_table_ref();
 
         // Pre-register all sequences from the string table to avoid lookups in the loop
         let mut name_id_to_seq_id: Vec<Option<(u32, usize)>> = vec![None; string_table.len()];
@@ -120,7 +114,7 @@ impl TpaParser {
                 target_start,
                 target_end,
                 strand_and_data_offset: record_id as u64, // Store record ID for O(1) seeking
-                data_bytes: 0, // Tracepoints not loaded during indexing
+                data_bytes: 0,                            // Tracepoints not loaded during indexing
             };
             record.set_strand(strand);
 

@@ -146,11 +146,11 @@ fn test_agc_subsequence_extraction() -> io::Result<()> {
 
     // Test various ranges within the sequence bounds
     let ranges = vec![
-        (0, 1),                    // Single base at start
-        (0, full_len as i32),      // Full sequence
+        (0, 1),                                 // Single base at start
+        (0, full_len as i32),                   // Full sequence
         (full_len as i32 - 1, full_len as i32), // Single base at end
-        (5, 10),                   // Middle range
-        (0, full_len as i32 / 2),  // First half
+        (5, 10),                                // Middle range
+        (0, full_len as i32 / 2),               // First half
         (full_len as i32 / 2, full_len as i32), // Second half
     ];
 

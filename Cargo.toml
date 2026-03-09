@@ -36,7 +36,7 @@ ragc-core = { git = "https://github.com/AndreaGuarracino/ragc", rev = "e9e4a6f" 
 onecode = { git = "https://github.com/pangenome/onecode-rs", rev = "38182c7acf7cccc53509176b1d11001ae6ff2642"}
 # Dependencies for TPA format (for alignments) support
 #tpa = { path = "/home/guarracino/git/tpa" }
-tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "0020ca2479252ff17446f03c434c4efa56810cfd" }
+tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "49f1801f9e0108c211571fa2614e517009446afe" }
 # Dependencies for 1ALN and TPA formats (for alignments) support
 lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2", rev = "8859b6a214141968f37d9bcb22552408318adda0" }
 #lib_wfa2 = { path = "/home/guarracino/Dropbox/git//lib_wfa2"}

@@ -19,7 +19,11 @@ pub(crate) fn auto_sparsify(n_haps: usize) -> Option<f64> {
     }
     let n = n_haps as f64;
     let frac = n.ln() / n * 10.0;
-    if frac >= 1.0 { None } else { Some(frac) }
+    if frac >= 1.0 {
+        None
+    } else {
+        Some(frac)
+    }
 }
 
 /// Round a value to a "nice" multiple based on its magnitude:
@@ -134,8 +138,8 @@ impl Default for GraphBuildConfig {
             // Filtering options
             no_filter: false,
             num_mappings: "many:many".to_string(),
-            scaffold_jump: 50_000,              // 50kb default scaffold gap
-            scaffold_mass: 10_000,              // 10kb minimum scaffold length
+            scaffold_jump: 50_000, // 50kb default scaffold gap
+            scaffold_mass: 10_000, // 10kb minimum scaffold length
             scaffold_filter: "many:many".to_string(),
             overlap: 0.95,
             min_identity: 0.0,
@@ -314,9 +318,8 @@ pub fn build_graph<W: Write>(
 
     // Create FASTA index (.fai) — required by wfmash
     if config.aligner == "wfmash" {
-        rust_htslib::faidx::Reader::from_path(combined_fasta.path()).map_err(|e| {
-            io::Error::other(format!("Failed to create FASTA index: {e}"))
-        })?;
+        rust_htslib::faidx::Reader::from_path(combined_fasta.path())
+            .map_err(|e| io::Error::other(format!("Failed to create FASTA index: {e}")))?;
     }
 
     // 3) Get PAF alignments - either from input file or run aligner
@@ -361,7 +364,10 @@ pub fn build_graph<W: Write>(
                 frac
             }
             Some(val) => Some(val.parse::<f64>().map_err(|_| {
-                io::Error::other(format!("Invalid --sparsify value '{}': expected 'auto' or a float 0.0-1.0", val))
+                io::Error::other(format!(
+                    "Invalid --sparsify value '{}': expected 'auto' or a float 0.0-1.0",
+                    val
+                ))
             })?),
             None => None,
         };
@@ -946,10 +952,7 @@ pub fn run_graph_build_pggb<W: Write>(
     // Step 3: gfaffix normalization + final sort
     let sorted = crate::graph::normalize_and_sort(smoothed, config.num_threads)?;
 
-    info!(
-        "[pggb] {:.3}s Done",
-        start_time.elapsed().as_secs_f64()
-    );
+    info!("[pggb] {:.3}s Done", start_time.elapsed().as_secs_f64());
 
     output.write_all(sorted.as_bytes())?;
     Ok(())
@@ -984,7 +987,8 @@ fn read_fasta_sequences(
                     ));
                 }
                 // Start new sequence
-                current_name = line.strip_prefix('>')
+                current_name = line
+                    .strip_prefix('>')
                     .unwrap_or("")
                     .split_whitespace()
                     .next()
@@ -999,7 +1003,10 @@ fn read_fasta_sequences(
         // Don't forget the last sequence
         if !current_name.is_empty() && !current_seq.is_empty() {
             let seq_len = current_seq.len();
-            sequences.push((current_seq, metadata_from_fasta_header(&current_name, seq_len)));
+            sequences.push((
+                current_seq,
+                metadata_from_fasta_header(&current_name, seq_len),
+            ));
         }
     }
 
