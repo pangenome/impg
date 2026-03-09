@@ -6,7 +6,7 @@ use crate::commands::lace::{
     split_path_name, trim_range_overlaps,
 };
 use crate::graph::{
-    prepare_sequences, sort_gfa, SequenceMetadata,
+    prepare_sequences, unchop_gfa, SequenceMetadata,
 };
 use crate::impg_index::ImpgIndex;
 use crate::realize::poa::padded_poa_from_sequences;
@@ -197,7 +197,7 @@ pub fn realize_from_sequences(
     let gfa = realize_recursive(sequences, config, 0, &poa_calls, &sweepga_calls, &seqwish_calls, &max_depth_reached)?;
 
     let gfa = if config.sort_output {
-        sort_gfa(&gfa, config.num_threads)?
+        unchop_gfa(&gfa)?
     } else {
         gfa
     };
@@ -438,23 +438,21 @@ fn realize_recursive(
                 sweepga_calls,
                 seqwish_calls,
                 max_depth_reached,
-            ).map(|gfa| {
+            ).and_then(|gfa| {
                 // Debug: save each sub-GFA
                 if let Some(ref debug_dir) = config.debug_dir {
                     let gfa_path = format!("{}/depth{}_chunk{}.gfa", debug_dir, depth, ci);
                     let _ = std::fs::write(&gfa_path, &gfa);
                 }
-                gfa
+                unchop_gfa(&gfa)
             }))
         })
         .collect();
 
     // Collect results, propagating any errors.
     let mut sub_gfas: Vec<String> = Vec::with_capacity(sub_gfa_results.len());
-    for result in sub_gfa_results {
-        if let Some(gfa_result) = result {
-            sub_gfas.push(gfa_result?);
-        }
+    for gfa_result in sub_gfa_results.into_iter().flatten() {
+        sub_gfas.push(gfa_result?);
     }
 
     if sub_gfas.is_empty() {
@@ -640,7 +638,7 @@ fn partition_into_chunks(
     let mut windows: Vec<(usize, usize)> = Vec::new();
     let mut pos = 0;
     while pos < anchor_len {
-        let win_start = if pos > padding { pos - padding } else { 0 };
+        let win_start = pos.saturating_sub(padding);
         let win_end = (pos + chunk_size + padding).min(anchor_len);
         windows.push((win_start, win_end));
         pos += chunk_size;
@@ -773,7 +771,7 @@ fn project_window_to_sequence(
 /// 4. Link contiguous ranges.
 /// 5. Remove unused nodes and compact IDs.
 /// 6. Emit the final GFA as a string.
-fn lace_subgraphs(sub_gfas: &[String], temp_dir: Option<&str>) -> io::Result<String> {
+pub(crate) fn lace_subgraphs(sub_gfas: &[String], temp_dir: Option<&str>) -> io::Result<String> {
     if sub_gfas.is_empty() {
         return Ok(String::from("H\tVN:Z:1.0\n"));
     }

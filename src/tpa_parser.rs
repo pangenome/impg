@@ -74,11 +74,10 @@ impl TpaParser {
             }
         }
 
-        let mut record_id: u64 = 0;
         let metadata_iter = reader.iter_record_metadata(threads).map_err(|e| {
             ParseErr::InvalidFormat(format!("Failed to create metadata iterator: {}", e))
         })?;
-        for result in metadata_iter {
+        for (record_id, result) in metadata_iter.enumerate() {
             let compact = result.map_err(|e| {
                 ParseErr::InvalidFormat(format!(
                     "Failed to read record metadata {}: {}",
@@ -120,13 +119,12 @@ impl TpaParser {
                 target_id,
                 target_start,
                 target_end,
-                strand_and_data_offset: record_id, // Store record ID for O(1) seeking
+                strand_and_data_offset: record_id as u64, // Store record ID for O(1) seeking
                 data_bytes: 0, // Tracepoints not loaded during indexing
             };
             record.set_strand(strand);
 
             records.push(record);
-            record_id += 1;
         }
 
         debug!(

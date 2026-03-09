@@ -1,0 +1,3 @@
+[submodule "vendor/gfaffix"]
+	path = vendor/gfaffix
+	url = https://github.com/marschall-lab/GFAffix

@@ -69,6 +69,135 @@ struct CommonOpts {
     verbose: u8,
 }
 
+/// Alignment backend options shared by the `graph` and `align` commands.
+#[derive(Parser, Debug, Clone)]
+#[command(next_help_heading = "Alignment backend")]
+struct AlignmentBackendOpts {
+    /// Aligner backend for FASTA alignment
+    #[clap(long, value_parser = ["fastga", "wfmash"], default_value = "wfmash")]
+    aligner: String,
+
+    /// K-mer frequency multiplier (frequency = num_sequences * multiplier)
+    #[clap(short = 'f', long, value_parser, default_value_t = 10)]
+    frequency_multiplier: usize,
+
+    /// Explicit k-mer frequency (overrides --frequency-multiplier)
+    #[clap(long, value_parser)]
+    frequency: Option<usize>,
+
+    /// Minimum alignment length (0 = adaptive)
+    #[clap(long, value_parser, default_value_t = 0)]
+    min_alignment_length: u64,
+}
+
+/// Sweepga alignment filtering options shared by the `graph` and `align` commands.
+#[derive(Parser, Debug, Clone)]
+#[command(next_help_heading = "Alignment filtering")]
+struct FilterOpts {
+    /// Disable all alignment filtering
+    #[clap(short = 'N', long, action)]
+    no_filter: bool,
+
+    /// n:m-best mappings kept in query:target dimensions (e.g., "1:1", "many:many")
+    #[clap(short = 'n', long, value_parser, default_value = "many:many")]
+    num_mappings: String,
+
+    /// Scaffold jump/gap distance in bp (0 = disable scaffolding). Accepts k/m/g suffixes.
+    #[clap(short = 'j', long, value_parser = parse_size, default_value = "50000")]
+    scaffold_jump: u64,
+
+    /// Minimum scaffold chain length in bp. Accepts k/m/g suffixes.
+    #[clap(short = 's', long, value_parser = parse_size, default_value = "10000")]
+    scaffold_mass: u64,
+
+    /// Scaffold filter mode (e.g., "1:1", "many:many", "inf:inf" for no filtering)
+    #[clap(short = 'm', long, value_parser, default_value = "many:many")]
+    scaffold_filter: String,
+
+    /// Maximum overlap ratio for plane sweep filtering (0.0-1.0)
+    #[clap(long, value_parser, default_value_t = 0.95)]
+    overlap: f64,
+
+    /// Minimum identity threshold (0.0-1.0)
+    #[clap(short = 'i', long, value_parser, default_value_t = 0.0)]
+    min_identity: f64,
+
+    /// Maximum scaffold deviation distance (0 = no limit). Accepts k/m/g suffixes.
+    #[clap(short = 'D', long, value_parser = parse_size, default_value = "0")]
+    scaffold_dist: u64,
+
+    /// Minimum mapping length to include in filtering. Accepts k/m/g suffixes.
+    #[clap(short = 'b', long = "min-mapping-length", value_parser = parse_size, default_value = "0")]
+    min_mapping_length: u64,
+}
+
+/// Seqwish graph induction options shared by the `graph`, `query`, and `partition` commands.
+#[derive(Parser, Debug, Clone)]
+#[command(next_help_heading = "Graph induction (seqwish)")]
+struct SeqwishOpts {
+    /// Maximum repeat count for transitive closure (0 = no limit)
+    #[clap(long, value_parser, default_value_t = 0)]
+    repeat_max: u64,
+
+    /// Minimum distance between repeats
+    #[clap(long, value_parser, default_value_t = 0)]
+    min_repeat_dist: u64,
+
+    /// Minimum match length filter for alignments
+    #[clap(long, value_parser, default_value_t = 23)]
+    min_match_len: u64,
+
+    /// Sparse factor for input matches (0.0 = keep all)
+    #[clap(long, value_parser, default_value_t = 0.0)]
+    sparse_factor: f32,
+
+    /// Batch size for transitive closure computation
+    #[clap(long, value_parser, default_value_t = 10_000_000)]
+    transclose_batch: u64,
+
+    /// Use disk-backed interval trees (slower but lower memory)
+    #[clap(long, action)]
+    disk_backed: bool,
+}
+
+/// Smoothxg-style graph smoothing options shared by the `graph`, `query`, and `partition` commands.
+#[derive(Parser, Debug, Clone)]
+#[command(next_help_heading = "Graph smoothing (pggb engine)")]
+struct SmoothOpts {
+    /// Comma-separated target POA block lengths in bp, one per smoothing pass
+    /// (default: "700,1100" matching pggb's `-G 700,1100`)
+    #[clap(long, value_parser, default_value = "700,1100")]
+    target_poa_length: String,
+
+    /// Maximum node length before chopping (default: 100)
+    #[clap(long, value_parser, default_value_t = 100)]
+    max_node_length: usize,
+
+    /// Fraction of avg block length to use as POA padding (default: 0.001)
+    #[clap(long, value_parser, default_value_t = 0.001)]
+    poa_padding_fraction: f64,
+}
+
+impl SmoothOpts {
+    /// Parse `--target-poa-length` into a `Vec<usize>`.
+    fn parse_target_poa_lengths(&self) -> io::Result<Vec<usize>> {
+        self.target_poa_length
+            .split(',')
+            .map(|s| {
+                s.trim().parse::<usize>().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "--target-poa-length: '{}' is not a valid positive integer",
+                            s.trim()
+                        ),
+                    )
+                })
+            })
+            .collect()
+    }
+}
+
 /// Alignment file and index options for commands that work with alignments
 #[derive(Parser, Debug)]
 struct AlignmentOpts {
@@ -675,9 +804,9 @@ enum Args {
         #[clap(short = 'o', long, value_parser, default_value = "bed")]
         output_format: String,
 
-        /// GFA engine: 'recursive' (sweepga+POA+lacing, default), 'seqwish' (sweepga+seqwish, unsmoothed), or 'poa' (single-pass POA)
+        /// GFA engine: 'pggb' (seqwish+smoothing+gfaffix, default), 'recursive' (sweepga+POA+lacing), 'seqwish' (unsmoothed), or 'poa' (single-pass POA)
         #[arg(help_heading = "Output options")]
-        #[clap(long, value_enum, default_value_t = GfaEngine::Recursive)]
+        #[clap(long, value_enum, default_value_t = GfaEngine::Pggb)]
         engine: GfaEngine,
 
         /// Disable alignment filtering for seqwish engine (faster but may produce broken graphs)
@@ -700,6 +829,12 @@ enum Args {
 
         #[clap(flatten)]
         recursive_opts: RecursiveOpts,
+
+        #[clap(flatten)]
+        seqwish: SeqwishOpts,
+
+        #[clap(flatten)]
+        smooth: SmoothOpts,
 
         /// Maximum distance between regions to merge
         #[arg(help_heading = "Filtering and merging")]
@@ -769,9 +904,9 @@ enum Args {
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
 
-        /// GFA engine: 'recursive' (sweepga+POA+lacing), 'seqwish' (sweepga+seqwish, unsmoothed), or 'poa' (single-pass POA)
+        /// GFA engine: 'pggb' (seqwish+smoothing+gfaffix, default), 'recursive' (sweepga+POA+lacing), 'seqwish' (unsmoothed), or 'poa' (single-pass POA)
         #[arg(help_heading = "Output options")]
-        #[clap(long, value_enum, default_value_t = GfaEngine::Recursive)]
+        #[clap(long, value_enum, default_value_t = GfaEngine::Pggb)]
         engine: GfaEngine,
 
         /// Disable alignment filtering for seqwish engine (faster but may produce broken graphs)
@@ -794,7 +929,13 @@ enum Args {
         #[clap(flatten)]
         recursive_opts: RecursiveOpts,
 
-        /// Directory for temporary files [default: $TMPDIR or cwd; use "ramdisk" for /dev/shm] [default: $TMPDIR or cwd; use "ramdisk" for /dev/shm]
+        #[clap(flatten)]
+        seqwish: SeqwishOpts,
+
+        #[clap(flatten)]
+        smooth: SmoothOpts,
+
+        /// Directory for temporary files [default: $TMPDIR or cwd; use "ramdisk" for /dev/shm]
         #[arg(help_heading = "Output options")]
         #[clap(long, value_parser)]
         temp_dir: Option<String>,
@@ -926,98 +1067,34 @@ enum Args {
         #[clap(short = 'g', long, value_parser, default_value = "-")]
         output: String,
 
-        /// K-mer frequency multiplier (frequency = num_sequences * multiplier)
-        #[clap(short = 'f', long, value_parser, default_value_t = 10)]
-        frequency_multiplier: usize,
-
-        /// Explicit k-mer frequency (overrides --frequency-multiplier)
-        #[clap(long, value_parser)]
-        frequency: Option<usize>,
-
-        /// Minimum alignment length (0 = adaptive)
-        #[clap(long, value_parser, default_value_t = 0)]
-        min_alignment_length: u64,
-
-        /// Aligner backend for FASTA alignment
-        #[clap(long, value_parser = ["fastga", "wfmash"], default_value = "wfmash")]
-        aligner: String,
-
-        /// Maximum repeat count for transitive closure (0 = no limit)
-        #[clap(short = 'r', long, value_parser, default_value_t = 0)]
-        repeat_max: u64,
-
-        /// Minimum distance between repeats
-        #[clap(short = 'l', long, value_parser, default_value_t = 0)]
-        min_repeat_dist: u64,
-
-        /// Minimum match length filter for alignments
-        #[clap(short = 'k', long, value_parser, default_value_t = 0)]
-        min_match_len: u64,
-
-        /// Sparse factor for input matches (0.0 = keep all)
-        #[clap(long, value_parser, default_value_t = 0.0)]
-        sparse_factor: f32,
-
-        /// Batch size for transitive closure computation
-        #[clap(short = 'B', long, value_parser, default_value_t = 1_000_000)]
-        transclose_batch: u64,
-
-        /// Use disk-backed interval trees (slower but lower memory)
-        #[clap(long, action)]
-        disk_backed: bool,
-
-        /// Directory for temporary files [default: $TMPDIR or cwd; use "ramdisk" for /dev/shm]
-        #[clap(long, value_parser)]
-        temp_dir: Option<String>,
-
-        // Sweepga filtering options
-        /// Disable all alignment filtering
-        #[clap(short = 'N', long, action)]
-        no_filter: bool,
-
-        /// n:m-best mappings kept in query:target dimensions (e.g., "1:1", "many:many")
-        #[clap(short = 'n', long, value_parser, default_value = "many:many")]
-        num_mappings: String,
-
-        /// Scaffold jump/gap distance in bp (0 = disable scaffolding). Accepts k/m/g suffixes.
-        #[clap(short = 'j', long, value_parser = parse_size, default_value = "50000")]
-        scaffold_jump: u64,
-
-        /// Minimum scaffold chain length in bp. Accepts k/m/g suffixes.
-        #[clap(short = 's', long, value_parser = parse_size, default_value = "10000")]
-        scaffold_mass: u64,
-
-        /// Scaffold filter mode (e.g., "1:1", "many:many", "inf:inf" for no filtering)
-        #[clap(short = 'm', long, value_parser, default_value = "many:many")]
-        scaffold_filter: String,
-
-        /// Maximum overlap ratio for plane sweep filtering (0.0-1.0)
-        #[clap(short = 'o', long, value_parser, default_value_t = 0.95)]
-        overlap: f64,
-
-        /// Minimum identity threshold (0.0-1.0)
-        #[clap(short = 'i', long, value_parser, default_value_t = 0.0)]
-        min_identity: f64,
-
-        /// Maximum scaffold deviation distance (0 = no limit). Accepts k/m/g suffixes.
-        #[clap(short = 'D', long, value_parser = parse_size, default_value = "0")]
-        scaffold_dist: u64,
-
-        /// Minimum mapping length to include in filtering. Accepts k/m/g suffixes.
-        #[clap(short = 'b', long = "min-mapping-length", value_parser = parse_size, default_value = "0")]
-        min_mapping_length: u64,
-
         /// Wfmash mapping sparsification: 'auto' (pggb heuristic) or a fraction 0.0-1.0 (default: no sparsification)
         #[clap(short = 'x', long)]
         sparsify: Option<String>,
 
-        /// GFA engine: 'seqwish' (sweepga+seqwish, unsmoothed; default), 'recursive' (sweepga+POA+lacing), or 'poa' (single-pass POA)
-        #[clap(long, value_enum, default_value_t = GfaEngine::Seqwish)]
+        /// GFA engine: 'pggb' (seqwish+smoothing+gfaffix, default), 'seqwish' (raw graph induction),
+        /// 'recursive' (sweepga+POA+lacing), or 'poa' (single-pass POA)
+        #[clap(long, value_enum, default_value_t = GfaEngine::Pggb)]
         engine: GfaEngine,
 
         /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for recursive/poa engines)
         #[clap(long, value_parser, default_value = "5,4,6,2,24,1")]
         poa_scoring: String,
+
+        /// Directory for temporary files [default: $TMPDIR or cwd; use "ramdisk" for /dev/shm]
+        #[clap(long, value_parser)]
+        temp_dir: Option<String>,
+
+        #[clap(flatten)]
+        alignment_backend: AlignmentBackendOpts,
+
+        #[clap(flatten)]
+        filter: FilterOpts,
+
+        #[clap(flatten)]
+        seqwish: SeqwishOpts,
+
+        #[clap(flatten)]
+        smooth: SmoothOpts,
 
         #[clap(flatten)]
         recursive_opts: RecursiveOpts,
@@ -1044,62 +1121,15 @@ enum Args {
         #[clap(short = 'p', long, value_parser, default_value = "giant:0.99")]
         sparsification: String,
 
-        /// K-mer frequency multiplier (frequency = num_sequences * multiplier)
-        #[clap(short = 'f', long, value_parser, default_value_t = 10)]
-        frequency_multiplier: usize,
-
-        /// Explicit k-mer frequency (overrides --frequency-multiplier)
-        #[clap(long, value_parser)]
-        frequency: Option<usize>,
-
-        /// Minimum alignment length (0 = adaptive)
-        #[clap(short = 'l', long, value_parser, default_value_t = 0)]
-        min_alignment_length: u64,
-
-        /// Aligner backend for FASTA alignment
-        #[clap(long, value_parser = ["fastga", "wfmash"], default_value = "wfmash")]
-        aligner: String,
-
         /// Output format: paf, 1aln, or joblist
         #[clap(long, value_parser, default_value = "joblist")]
         format: String,
 
-        // Sweepga filtering options
-        /// Disable all alignment filtering
-        #[clap(short = 'N', long, action)]
-        no_filter: bool,
+        #[clap(flatten)]
+        alignment_backend: AlignmentBackendOpts,
 
-        /// n:m-best mappings kept in query:target dimensions (e.g., "1:1", "many:many")
-        #[clap(short = 'n', long, value_parser, default_value = "many:many")]
-        num_mappings: String,
-
-        /// Scaffold jump/gap distance in bp (0 = disable scaffolding). Accepts k/m/g suffixes.
-        #[clap(short = 'j', long, value_parser = parse_size, default_value = "50000")]
-        scaffold_jump: u64,
-
-        /// Minimum scaffold chain length in bp. Accepts k/m/g suffixes.
-        #[clap(short = 's', long, value_parser = parse_size, default_value = "10000")]
-        scaffold_mass: u64,
-
-        /// Scaffold filter mode (e.g., "1:1", "many:many", "inf:inf" for no filtering)
-        #[clap(short = 'm', long, value_parser, default_value = "many:many")]
-        scaffold_filter: String,
-
-        /// Maximum overlap ratio for plane sweep filtering (0.0-1.0)
-        #[clap(long, value_parser, default_value_t = 0.95)]
-        overlap: f64,
-
-        /// Minimum identity threshold (0.0-1.0)
-        #[clap(short = 'i', long, value_parser, default_value_t = 0.0)]
-        min_identity: f64,
-
-        /// Maximum scaffold deviation distance (0 = no limit). Accepts k/m/g suffixes.
-        #[clap(short = 'D', long, value_parser = parse_size, default_value = "0")]
-        scaffold_dist: u64,
-
-        /// Minimum mapping length to include in filtering. Accepts k/m/g suffixes.
-        #[clap(short = 'b', long = "min-mapping-length", value_parser = parse_size, default_value = "0")]
-        min_mapping_length: u64,
+        #[clap(flatten)]
+        filter: FilterOpts,
 
         #[clap(flatten)]
         common: CommonOpts,
@@ -1242,6 +1272,8 @@ fn run() -> io::Result<()> {
             output_folder,
             gfa_maf_fasta,
             recursive_opts,
+            seqwish,
+            smooth,
             merge_distance,
             min_identity,
             transitive_opts,
@@ -1324,6 +1356,15 @@ fn run() -> io::Result<()> {
                 no_filter,
                 debug_dir: recursive_opts.recursive_debug_dir.clone(),
                 sparsify: sparsify.clone(),
+                repeat_max: seqwish.repeat_max,
+                min_repeat_dist: seqwish.min_repeat_dist,
+                min_match_len: seqwish.min_match_len,
+                sparse_factor: seqwish.sparse_factor,
+                transclose_batch: seqwish.transclose_batch,
+                disk_backed: seqwish.disk_backed,
+                target_poa_lengths: smooth.parse_target_poa_lengths()?,
+                max_node_length: smooth.max_node_length,
+                poa_padding_fraction: smooth.poa_padding_fraction,
             };
 
             // Initialize impg after validation
@@ -1369,6 +1410,8 @@ fn run() -> io::Result<()> {
             output_prefix,
             gfa_maf_fasta,
             recursive_opts,
+            seqwish,
+            smooth,
             temp_dir,
         } => {
             initialize_threads_and_log(&common);
@@ -1638,6 +1681,15 @@ fn run() -> io::Result<()> {
                             no_filter,
                             debug_dir: recursive_opts.recursive_debug_dir.clone(),
                             sparsify: sparsify.clone(),
+                            repeat_max: seqwish.repeat_max,
+                            min_repeat_dist: seqwish.min_repeat_dist,
+                            min_match_len: seqwish.min_match_len,
+                            sparse_factor: seqwish.sparse_factor,
+                            transclose_batch: seqwish.transclose_batch,
+                            disk_backed: seqwish.disk_backed,
+                            target_poa_lengths: smooth.parse_target_poa_lengths()?,
+                            max_node_length: smooth.max_node_length,
+                            poa_padding_fraction: smooth.poa_padding_fraction,
                         };
                         output_results_gfa(
                             &impg,
@@ -1937,10 +1989,10 @@ fn run() -> io::Result<()> {
                 ));
             }
 
-            if engine == GfaEngine::Seqwish {
+            if engine == GfaEngine::Seqwish || engine == GfaEngine::Pggb {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "The 'seqwish' engine is not supported for the similarity command (it doesn't produce an MSA). Use 'poa' or 'recursive'.",
+                    "The 'seqwish' and 'pggb' engines are not supported for the similarity command (they don't produce an MSA). Use 'poa' or 'recursive'.",
                 ));
             }
 
@@ -2126,29 +2178,14 @@ fn run() -> io::Result<()> {
             fasta_list,
             paf_file,
             output,
-            frequency_multiplier,
-            frequency,
-            min_alignment_length,
-            aligner,
-            repeat_max,
-            min_repeat_dist,
-            min_match_len,
-            sparse_factor,
-            transclose_batch,
-            disk_backed,
-            temp_dir,
-            no_filter,
-            num_mappings,
-            scaffold_jump,
-            scaffold_mass,
-            scaffold_filter,
-            overlap,
-            min_identity,
-            scaffold_dist,
-            min_mapping_length,
             sparsify,
             engine,
             poa_scoring,
+            temp_dir,
+            alignment_backend,
+            filter,
+            seqwish,
+            smooth,
             recursive_opts,
             common,
         } => {
@@ -2162,16 +2199,64 @@ fn run() -> io::Result<()> {
                 ));
             }
 
+            // Validate aligner-parameter compatibility
+            if alignment_backend.aligner == "fastga" && sparsify.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--sparsify is only supported with --aligner wfmash; fastga does not support wfmash-style sparsification",
+                ));
+            }
+            if alignment_backend.aligner == "wfmash" && alignment_backend.frequency.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--frequency is only supported with --aligner fastga; wfmash uses its own frequency estimation",
+                ));
+            }
+
+            // Pre-clone values needed by the recursive engine before they are consumed by graph_config.
+            let aligner_for_recursive = alignment_backend.aligner.clone();
+            let sparsify_for_recursive = sparsify.clone();
+            let temp_dir_for_recursive = temp_dir.clone();
+
+            // Shared graph build config — identical for the seqwish and pggb engines; built
+            // once here so neither arm repeats the field list.
+            let graph_config = graph::GraphBuildConfig {
+                num_threads: common.threads.get(),
+                frequency_multiplier: alignment_backend.frequency_multiplier,
+                frequency: alignment_backend.frequency,
+                min_alignment_length: alignment_backend.min_alignment_length,
+                repeat_max: seqwish.repeat_max,
+                min_repeat_dist: seqwish.min_repeat_dist,
+                min_match_len: seqwish.min_match_len,
+                sparse_factor: seqwish.sparse_factor,
+                transclose_batch: seqwish.transclose_batch,
+                use_in_memory: !seqwish.disk_backed,
+                show_progress: common.verbose > 0,
+                temp_dir,
+                input_paf: paf_file,
+                aligner: alignment_backend.aligner,
+                no_filter: filter.no_filter,
+                num_mappings: filter.num_mappings,
+                scaffold_jump: filter.scaffold_jump,
+                scaffold_mass: filter.scaffold_mass,
+                scaffold_filter: filter.scaffold_filter,
+                overlap: filter.overlap,
+                min_identity: filter.min_identity,
+                scaffold_dist: filter.scaffold_dist,
+                min_mapping_length: filter.min_mapping_length,
+                debug_dir: None,
+                sparsify,
+            };
+
             match engine {
                 GfaEngine::Recursive => {
-                    // Parse scoring for the recursive engine
                     let scoring = parse_poa_scoring_string(&poa_scoring)?;
                     let recursive_config = recursive_opts.build_config(
                         common.threads.get(),
                         Some(scoring),
-                        temp_dir.clone(),
-                        aligner.clone(),
-                        sparsify.clone(),
+                        temp_dir_for_recursive,
+                        aligner_for_recursive,
+                        sparsify_for_recursive,
                     )?;
 
                     if output == "-" {
@@ -2196,35 +2281,34 @@ fn run() -> io::Result<()> {
                     }
                 }
                 GfaEngine::Seqwish => {
-                    let config = graph::GraphBuildConfig {
-                        num_threads: common.threads.get(),
-                        frequency_multiplier,
-                        frequency,
-                        min_alignment_length,
-                        repeat_max,
-                        min_repeat_dist,
-                        min_match_len,
-                        sparse_factor,
-                        transclose_batch,
-                        use_in_memory: !disk_backed,
-                        show_progress: common.verbose > 0,
-                        temp_dir,
-                        input_paf: paf_file,
-                        aligner,
-                        no_filter,
-                        num_mappings,
-                        scaffold_jump,
-                        scaffold_mass,
-                        scaffold_filter,
-                        overlap,
-                        min_identity,
-                        scaffold_dist,
-                        min_mapping_length,
-                        debug_dir: None,
-                        sparsify,
-                    };
-
-                    graph::run_graph_build(fasta_files, fasta_list, &output, config)?;
+                    graph::run_graph_build(fasta_files, fasta_list, &output, graph_config)?;
+                }
+                GfaEngine::Pggb => {
+                    let target_poa_lengths = smooth.parse_target_poa_lengths()?;
+                    if output == "-" {
+                        let stdout = io::stdout();
+                        let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
+                        graph::run_graph_build_pggb(
+                            fasta_files,
+                            fasta_list,
+                            &mut out,
+                            &graph_config,
+                            target_poa_lengths,
+                            smooth.max_node_length,
+                            smooth.poa_padding_fraction,
+                        )?;
+                    } else {
+                        let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
+                        graph::run_graph_build_pggb(
+                            fasta_files,
+                            fasta_list,
+                            &mut out,
+                            &graph_config,
+                            target_poa_lengths,
+                            smooth.max_node_length,
+                            smooth.poa_padding_fraction,
+                        )?;
+                    }
                 }
             }
         }
@@ -2233,20 +2317,9 @@ fn run() -> io::Result<()> {
             fasta_list,
             output_dir,
             sparsification,
-            frequency_multiplier,
-            frequency,
-            min_alignment_length,
-            aligner,
             format,
-            no_filter,
-            num_mappings,
-            scaffold_jump,
-            scaffold_mass,
-            scaffold_filter,
-            overlap,
-            min_identity,
-            scaffold_dist,
-            min_mapping_length,
+            alignment_backend,
+            filter,
             common,
         } => {
             initialize_threads_and_log(&common);
@@ -2256,6 +2329,13 @@ fn run() -> io::Result<()> {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "Either --fasta-files or --fasta-list must be provided",
+                ));
+            }
+
+            if alignment_backend.aligner == "wfmash" && alignment_backend.frequency.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--frequency is only supported with --aligner fastga; wfmash uses its own frequency estimation",
                 ));
             }
 
@@ -2281,21 +2361,21 @@ fn run() -> io::Result<()> {
             let config = align::AlignConfig {
                 num_threads: common.threads.get(),
                 sparsification: strategy,
-                frequency_multiplier,
-                frequency,
-                min_alignment_length,
+                frequency_multiplier: alignment_backend.frequency_multiplier,
+                frequency: alignment_backend.frequency,
+                min_alignment_length: alignment_backend.min_alignment_length,
                 output_format,
                 show_progress: common.verbose > 0,
-                aligner,
-                no_filter,
-                num_mappings,
-                scaffold_jump,
-                scaffold_mass,
-                scaffold_filter,
-                overlap,
-                min_identity,
-                scaffold_dist,
-                min_mapping_length,
+                aligner: alignment_backend.aligner,
+                no_filter: filter.no_filter,
+                num_mappings: filter.num_mappings,
+                scaffold_jump: filter.scaffold_jump,
+                scaffold_mass: filter.scaffold_mass,
+                scaffold_filter: filter.scaffold_filter,
+                overlap: filter.overlap,
+                min_identity: filter.min_identity,
+                scaffold_dist: filter.scaffold_dist,
+                min_mapping_length: filter.min_mapping_length,
             };
 
             align::run_align(fasta_files, fasta_list, &output_dir, config)?;

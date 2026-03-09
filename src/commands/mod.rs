@@ -164,7 +164,7 @@ pub fn count_sequences_and_genomes(fasta_files: &[String]) -> io::Result<(usize,
             let line: String = line?;
             if line.starts_with('>') {
                 seq_count += 1;
-                let name = line[1..].split_whitespace().next().unwrap_or("");
+                let name = line.strip_prefix('>').unwrap_or("").split_whitespace().next().unwrap_or("");
                 let parts: Vec<&str> = name.split('#').collect();
                 let prefix = if parts.len() >= 2 {
                     format!("{}#{}", parts[0], parts[1])
