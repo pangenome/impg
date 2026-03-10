@@ -6,7 +6,7 @@ pub mod refine;
 pub mod similarity;
 
 use std::io::{self, BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sweepga::aligner::Aligner;
 use sweepga::fastga_integration::FastGAIntegration;
@@ -33,6 +33,7 @@ pub fn create_aligner(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -52,6 +53,7 @@ pub fn create_aligner_adaptive(
     avg_seq_len: Option<u64>,
     sparsify: Option<f64>,
     num_mappings: Option<usize>,
+    pairs_file: Option<PathBuf>,
 ) -> io::Result<Box<dyn Aligner>> {
     match aligner_name {
         "wfmash" => {
@@ -69,6 +71,7 @@ pub fn create_aligner_adaptive(
                 avg_seq_len,
                 sparsify,
                 num_mappings,
+                pairs_file,
             )
             .map_err(|e| io::Error::other(format!("Failed to create wfmash aligner: {e}")))?;
             Ok(Box::new(wfmash))

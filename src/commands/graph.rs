@@ -317,6 +317,7 @@ pub fn build_graph<W: Write>(
                     Some(avg_seq_len),
                     wfmash_density,
                     None, // num_mappings: use wfmash default (-n 1)
+                    None, // pairs_file
                 )?;
 
                 // Run all-vs-all alignment (query = target = combined FASTA)
@@ -889,6 +890,8 @@ fn read_sequences_from_fasta(path: &Path) -> io::Result<Vec<(String, Vec<u8>)>> 
     if !current_name.is_empty() {
         sequences.push((current_name, current_seq));
     }
+    // Sort by name for reproducibility — must match load_sequences() in align.rs
+    sequences.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(sequences)
 }
 

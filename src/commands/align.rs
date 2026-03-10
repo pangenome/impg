@@ -324,15 +324,20 @@ fn run_alignments(
         );
     }
 
+    // Check if pairs are a proper subset (sparsified) vs all-vs-all
+    let total_possible = sequences.len() * (sequences.len() - 1) / 2;
+    let is_sparsified = pairs.len() < total_possible;
+
     // Collect unique file pairs
     let file_pairs = collect_file_pairs(pairs, sequences);
 
     if config.show_progress {
         info!(
-            "[align] {:.3}s Running {} pairwise alignments ({} unique file pairs)",
+            "[align] {:.3}s Running {} pairwise alignments ({} unique file pairs{})",
             start_time.elapsed().as_secs_f64(),
             pairs.len(),
-            file_pairs.len()
+            file_pairs.len(),
+            if is_sparsified { ", using --pairs-file" } else { "" },
         );
     }
 
@@ -360,6 +365,27 @@ fn run_alignments(
         sequences.len(),
     );
 
+    // When sparsified and using wfmash, write a pairs TSV so wfmash filters at L1
+    // instead of running unfiltered all-vs-all per file pair.
+    let pairs_file: Option<tempfile::NamedTempFile> =
+        if is_sparsified && config.aligner == "wfmash" {
+            let mut pairs_tsv = tempfile::Builder::new().suffix(".pairs.tsv").tempfile()?;
+            {
+                let mut writer = BufWriter::new(&mut pairs_tsv);
+                writeln!(writer, "# query_name\ttarget_name")?;
+                for &(i, j) in pairs {
+                    writeln!(writer, "{}\t{}", sequences[i].name, sequences[j].name)?;
+                    writeln!(writer, "{}\t{}", sequences[j].name, sequences[i].name)?;
+                }
+                writer.flush()?;
+            }
+            Some(pairs_tsv)
+        } else {
+            None
+        };
+
+    let pairs_file_path = pairs_file.as_ref().map(|f| f.path().to_path_buf());
+
     // Create aligner with adaptive parameters
     let aligner: Box<dyn Aligner> = create_aligner_adaptive(
         &config.aligner,
@@ -372,6 +398,7 @@ fn run_alignments(
         avg_len,
         wfmash_density,
         None, // num_mappings: use wfmash default
+        pairs_file_path,
     )?;
 
     // Run alignments for each unique file pair
@@ -445,6 +472,9 @@ fn run_alignments(
             AlignOutputFormat::JobList => unreachable!(),
         }
     }
+
+    // Keep pairs_file alive until all alignments are done
+    drop(pairs_file);
 
     combined_writer.flush()?;
 
@@ -695,6 +725,7 @@ fn sweepga_align_all_vs_all(
         avg_len,
         wfmash_density,
         None, // num_mappings: use wfmash default (-n 1)
+        None, // pairs_file
     )?;
 
     aligner
@@ -702,8 +733,9 @@ fn sweepga_align_all_vs_all(
         .map_err(|e| io::Error::other(format!("{} alignment failed: {}", config.aligner, e)))
 }
 
-/// Pairwise alignment: write individual FASTA files per pair, align each pair,
-/// and combine results into a single PAF.
+/// Pairwise alignment: for wfmash, write all sequences to a single FASTA and
+/// use --pairs-file to restrict which pairs are aligned (single invocation).
+/// For other aligners, fall back to per-pair alignment.
 fn sweepga_align_pairwise(
     sequences: &[(String, &[u8])],
     pairs: &[(usize, usize)],
@@ -722,6 +754,61 @@ fn sweepga_align_pairwise(
         sequences.len(),
     );
 
+    if config.aligner == "wfmash" {
+        // Optimized path: single wfmash invocation with --pairs-file
+        sweepga_align_pairwise_wfmash(sequences, pairs, config, avg_len, wfmash_density)
+    } else {
+        // Fallback: per-pair alignment for aligners without pairs-file support
+        sweepga_align_pairwise_generic(sequences, pairs, config, avg_len, wfmash_density)
+    }
+}
+
+/// Optimized pairwise alignment using wfmash --pairs-file:
+/// write all sequences to one FASTA, write pairs to a TSV, single wfmash call.
+fn sweepga_align_pairwise_wfmash(
+    sequences: &[(String, &[u8])],
+    pairs: &[(usize, usize)],
+    config: &SweepgaAlignConfig,
+    avg_len: Option<u64>,
+    wfmash_density: Option<f64>,
+) -> io::Result<tempfile::NamedTempFile> {
+    // 1. Write all sequences to a single combined FASTA
+    let mut combined_fasta = tempfile::Builder::new().suffix(".fa").tempfile()?;
+    {
+        let mut writer = BufWriter::new(&mut combined_fasta);
+        for (name, seq) in sequences {
+            writeln!(writer, ">{}", name)?;
+            writer.write_all(seq)?;
+            writeln!(writer)?;
+        }
+        writer.flush()?;
+    }
+
+    // Create FASTA index (.fai) — required by wfmash
+    rust_htslib::faidx::Reader::from_path(combined_fasta.path())
+        .map_err(|e| io::Error::other(format!("Failed to create FASTA index: {e}")))?;
+
+    // 2. Write pairs to a temp TSV file (both directions for bidirectional alignment)
+    let mut pairs_tsv = tempfile::Builder::new().suffix(".pairs.tsv").tempfile()?;
+    {
+        let mut writer = BufWriter::new(&mut pairs_tsv);
+        writeln!(writer, "# query_name\ttarget_name")?;
+        for &(i, j) in pairs {
+            // Write both directions so wfmash aligns A→B and B→A
+            writeln!(writer, "{}\t{}", sequences[i].0, sequences[j].0)?;
+            writeln!(writer, "{}\t{}", sequences[j].0, sequences[i].0)?;
+        }
+        writer.flush()?;
+    }
+
+    log::info!(
+        "sweepga: wfmash batch alignment: {} sequences, {} pairs, pairs file: {}",
+        sequences.len(),
+        pairs.len(),
+        pairs_tsv.path().display()
+    );
+
+    // 3. Create aligner with pairs_file set
     let aligner: Box<dyn Aligner> = create_aligner_adaptive(
         &config.aligner,
         config.kmer_frequency,
@@ -732,7 +819,36 @@ fn sweepga_align_pairwise(
         None, // segment_length: let sweepga adapt from avg_len
         avg_len,
         wfmash_density,
-        None, // pairwise: only 2 sequences per call
+        None, // num_mappings: use wfmash default
+        Some(pairs_tsv.path().to_path_buf()),
+    )?;
+
+    // 4. Single alignment call: combined FASTA against itself, filtered by pairs
+    aligner
+        .align_to_temp_paf(combined_fasta.path(), combined_fasta.path())
+        .map_err(|e| io::Error::other(format!("wfmash batch alignment failed: {}", e)))
+}
+
+/// Fallback per-pair alignment for aligners without --pairs-file support.
+fn sweepga_align_pairwise_generic(
+    sequences: &[(String, &[u8])],
+    pairs: &[(usize, usize)],
+    config: &SweepgaAlignConfig,
+    avg_len: Option<u64>,
+    wfmash_density: Option<f64>,
+) -> io::Result<tempfile::NamedTempFile> {
+    let aligner: Box<dyn Aligner> = create_aligner_adaptive(
+        &config.aligner,
+        config.kmer_frequency,
+        config.num_threads,
+        config.min_aln_length,
+        config.map_pct_identity.clone(),
+        config.temp_dir.clone(),
+        None,
+        avg_len,
+        wfmash_density,
+        None,
+        None, // no pairs_file
     )?;
 
     let mut combined_paf = tempfile::Builder::new().suffix(".paf").tempfile()?;

@@ -4,14 +4,15 @@ set -euo pipefail
 # Demo: validate that "impg query -o gfa", "impg graph", and "impg align + impg graph --input-paf"
 # produce equivalent GFA graphs across all sparsification strategies.
 #
-# Tests region sizes: 1k, 2k, 5k
+# Tests region sizes: 1k, 2k, 5k, 10k
 # Tests engines: seqwish, pggb
-# Tests sparsification: none, random:0.5, giant:0.95, tree:3:1:0.1, wfmash:auto, wfmash:0.5
+# Tests sparsification: none, random:0.5, giant:0.95, tree:3:1:0.1, wfmash:auto
 # Three command paths per (region, engine, strategy):
 #   1. query -o gfa --sparsify
 #   2. graph --sparsify
 #   3. align --sparsify → PAF, then graph --input-paf
 # Compares graph structure via odgi stats -S across all three paths
+# Saves performance TSV and validation TSV to OUTDIR for later analysis.
 #
 # Usage:
 #   cd data/human-pangenome-tpas
@@ -25,13 +26,21 @@ TIME="/usr/bin/time"
 
 mkdir -p "$OUTDIR"
 
+# Output TSV files for performance and validation data
+PERF_TSV="$OUTDIR/performance.tsv"
+VAL_TSV="$OUTDIR/validation.tsv"
+
+printf "Region\tCommand\tWall_s\tMem_MB\tSegments\tLinks\tPaths\tAvgSegBp\tStatus\n" > "$PERF_TSV"
+printf "Region\tEngine\tStrategy\tComparison\tResult\tDetail\n" > "$VAL_TSV"
+
 # -------------------------------------------------------------------------
-# Region definitions: 1k, 2k, 5k
+# Region definitions: 1k, 2k, 5k, 10k
 # -------------------------------------------------------------------------
 REGIONS=(
-    "CHM13#0#chr6:29000000-29001000"
-    "CHM13#0#chr6:29000000-29002000"
-    "CHM13#0#chr6:29000000-29005000"
+    #"CHM13#0#chr6:29000000-29001000"
+    #"CHM13#0#chr6:29000000-29002000"
+    #"CHM13#0#chr6:29000000-29005000"
+    "CHM13#0#chr6:29000000-29010000"
 )
 
 ENGINES=(seqwish pggb)
@@ -141,6 +150,9 @@ record() {
     SUM_L[$IDX]="${7:-}"
     SUM_P[$IDX]="${8:-}"
     SUM_AVG[$IDX]="${9:-}"
+    # Append to TSV
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+        "$1" "$2" "$3" "$4" "${6:-}" "${7:-}" "${8:-}" "${9:-}" "$5" >> "$PERF_TSV"
     IDX=$((IDX + 1))
 }
 
@@ -155,6 +167,9 @@ record_validation() {
     VAL_PAIR[$VIDX]="$4"
     VAL_RESULT[$VIDX]="$5"
     VAL_DETAIL[$VIDX]="${6:-}"
+    # Append to TSV
+    printf "%s\t%s\t%s\t%s\t%s\t%s\n" \
+        "$1" "$2" "$3" "$4" "$5" "${6:-}" >> "$VAL_TSV"
     VIDX=$((VIDX + 1))
 }
 
@@ -393,3 +408,8 @@ elif [ "$PASS_COUNT" -eq 0 ]; then
 else
     echo "All graphs equivalent across query / graph / align+graph paths."
 fi
+
+echo ""
+echo "TSV files saved:"
+echo "  Performance: $PERF_TSV"
+echo "  Validation:  $VAL_TSV"
