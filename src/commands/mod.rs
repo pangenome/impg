@@ -17,7 +17,7 @@ pub fn create_aligner(
     aligner_name: &str,
     kmer_frequency: usize,
     num_threads: usize,
-    min_alignment_length: u64,
+    min_aln_length: u64,
     map_pct_identity: Option<String>,
     temp_dir: Option<String>,
 ) -> io::Result<Box<dyn Aligner>> {
@@ -25,7 +25,7 @@ pub fn create_aligner(
         aligner_name,
         kmer_frequency,
         num_threads,
-        min_alignment_length,
+        min_aln_length,
         map_pct_identity,
         temp_dir,
         None,
@@ -44,7 +44,7 @@ pub fn create_aligner_adaptive(
     aligner_name: &str,
     kmer_frequency: usize,
     num_threads: usize,
-    min_alignment_length: u64,
+    min_aln_length: u64,
     map_pct_identity: Option<String>,
     temp_dir: Option<String>,
     segment_length: Option<u64>,
@@ -54,8 +54,8 @@ pub fn create_aligner_adaptive(
 ) -> io::Result<Box<dyn Aligner>> {
     match aligner_name {
         "wfmash" => {
-            let block_len = if min_alignment_length > 0 {
-                Some(min_alignment_length)
+            let block_len = if min_aln_length > 0 {
+                Some(min_aln_length)
             } else {
                 None
             };
@@ -75,7 +75,7 @@ pub fn create_aligner_adaptive(
         "fastga" => Ok(Box::new(FastGAIntegration::new(
             Some(kmer_frequency),
             num_threads,
-            min_alignment_length,
+            min_aln_length,
             temp_dir,
         ))),
         _ => Err(io::Error::other(format!(

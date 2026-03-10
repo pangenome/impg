@@ -189,7 +189,7 @@ run_region() {
         if $fasta_ok; then
             echo "  graph          (engine=$ENGINE) ..."
             metrics=$(run_timed "${PREFIX}.graph.${TAG}.log" $IMPG graph \
-                --fasta-files "${PREFIX}.fa" \
+                --sequence-files "${PREFIX}.fa" \
                 -g "${PREFIX}.graph.${TAG}.gfa" \
                 --engine "$ENGINE" --aligner wfmash -t "$THREADS" -v 1) || true
             read -r wall mem st <<< "$metrics"

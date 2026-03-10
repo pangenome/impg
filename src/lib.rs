@@ -38,8 +38,10 @@ pub struct EngineOpts {
     pub no_filter: bool,
     /// Optional directory to save intermediate debug files (PAFs, FASTAs, etc.)
     pub debug_dir: Option<String>,
-    /// Wfmash mapping sparsification: "auto" or a float string like "0.1".
-    pub sparsify: Option<String>,
+    /// Unified sparsification strategy.
+    pub sparsify: sweepga::knn_graph::SparsificationStrategy,
+    /// Mash distance parameters for sparsification sketching.
+    pub mash_params: sweepga::knn_graph::MashParams,
     // Seqwish graph induction parameters
     pub repeat_max: u64,
     pub min_repeat_dist: u64,
@@ -79,6 +81,7 @@ pub fn dispatch_gfa_engine(
         no_filter: engine_opts.no_filter,
         debug_dir: engine_opts.debug_dir.clone(),
         sparsify: engine_opts.sparsify.clone(),
+        mash_params: engine_opts.mash_params.clone(),
         repeat_max: engine_opts.repeat_max,
         min_repeat_dist: engine_opts.min_repeat_dist,
         min_match_len: engine_opts.min_match_len,

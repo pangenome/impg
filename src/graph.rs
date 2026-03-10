@@ -863,7 +863,7 @@ pub struct SeqwishConfig {
     /// K-mer frequency multiplier (frequency = num_sequences * multiplier)
     pub frequency_multiplier: usize,
     /// Minimum alignment length for FastGA
-    pub min_alignment_length: u64,
+    pub min_aln_length: u64,
     /// Optional temp directory for intermediate files
     pub temp_dir: Option<String>,
     /// Skip PAF filtering (faster but may produce broken graphs)
@@ -874,8 +874,10 @@ pub struct SeqwishConfig {
     pub scaffold_filter: String,
     /// Optional directory to save intermediate debug files (FASTA, raw PAF, filtered PAF).
     pub debug_dir: Option<String>,
-    /// Wfmash mapping sparsification: "auto" or a float string like "0.1".
-    pub sparsify: Option<String>,
+    /// Unified sparsification strategy.
+    pub sparsify: sweepga::knn_graph::SparsificationStrategy,
+    /// Mash distance parameters for sparsification sketching.
+    pub mash_params: sweepga::knn_graph::MashParams,
     /// Maximum repeat count for transitive closure (0 = no limit)
     pub repeat_max: u64,
     /// Minimum distance between repeats
@@ -895,13 +897,14 @@ impl Default for SeqwishConfig {
         SeqwishConfig {
             num_threads: 4,
             frequency_multiplier: 10,
-            min_alignment_length: 0,
+            min_aln_length: 0,
             temp_dir: None,
             no_filter: false,
             num_mappings: "many:many".to_string(),
             scaffold_filter: "many:many".to_string(),
             debug_dir: None,
-            sparsify: None,
+            sparsify: sweepga::knn_graph::SparsificationStrategy::None,
+            mash_params: sweepga::knn_graph::MashParams::default(),
             repeat_max: 0,
             min_repeat_dist: 0,
             min_match_len: 23,
@@ -955,7 +958,7 @@ pub fn generate_gfa_seqwish_from_intervals(
     let graph_config = crate::commands::graph::GraphBuildConfig {
         num_threads: config.num_threads,
         frequency_multiplier: config.frequency_multiplier,
-        min_alignment_length: config.min_alignment_length,
+        min_aln_length: config.min_aln_length,
         temp_dir: config.temp_dir.clone(),
         no_filter: config.no_filter,
         num_mappings: config.num_mappings.clone(),
@@ -1022,7 +1025,7 @@ pub fn generate_gfa_seqwish_from_sequences(
     let graph_config = crate::commands::graph::GraphBuildConfig {
         num_threads: config.num_threads,
         frequency_multiplier: config.frequency_multiplier,
-        min_alignment_length: config.min_alignment_length,
+        min_aln_length: config.min_aln_length,
         temp_dir: config.temp_dir.clone(),
         no_filter: config.no_filter,
         num_mappings: config.num_mappings.clone(),
