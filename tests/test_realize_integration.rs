@@ -88,7 +88,8 @@ fn test_config() -> RealizeConfig {
         seqwish_threshold: 500,
         debug_dir: None,
         aligner: "fastga".to_string(),
-        sparsify: None,
+        sparsify: sweepga::knn_graph::SparsificationStrategy::None,
+        mash_params: sweepga::knn_graph::MashParams::default(),
     }
 }
 

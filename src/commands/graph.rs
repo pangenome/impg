@@ -12,46 +12,17 @@ use std::time::Instant;
 
 use bitvec::prelude::*;
 
-/// PGGB-style auto-sparsification heuristic: ln(n)/n * 10.
-pub(crate) fn auto_sparsify(n_haps: usize) -> Option<f64> {
-    if n_haps <= 1 {
-        return None;
-    }
-    let n = n_haps as f64;
-    let frac = n.ln() / n * 10.0;
-    if frac >= 1.0 {
-        None
-    } else {
-        Some(frac)
-    }
-}
-
-/// Round a value to a "nice" multiple based on its magnitude:
-/// ≤500 → multiple of 50, ≤1000 → 100, ≤3000 → 200, >3000 → 500.
-fn round_nice(v: u64) -> u64 {
-    if v == 0 {
-        return 0;
-    }
-    let step = if v <= 500 {
-        50
-    } else if v <= 1000 {
-        100
-    } else if v <= 3000 {
-        200
-    } else {
-        500
-    };
-    ((v + step / 2) / step * step).max(step)
-}
+use sweepga::knn_graph::SparsificationStrategy;
 
 // Import gfasort for graph sorting
 use crate::graph::{sort_gfa, unchop_gfa};
 
 // Import from sweepga
 use sweepga::aligner::Aligner;
-use sweepga::paf_filter::{FilterConfig, FilterMode, PafFilter, ScoringFunction};
+use sweepga::paf_filter::PafFilter;
 
-use crate::commands::create_aligner_adaptive;
+use crate::commands::align::{sweepga_align, SweepgaAlignConfig};
+use crate::commands::{build_filter_config, create_aligner_adaptive, FilterParams};
 
 // Import from seqwish
 use seqwish::alignments::unpack_paf_alignments;
@@ -70,8 +41,8 @@ pub struct GraphBuildConfig {
     pub frequency_multiplier: usize,
     /// Explicit frequency override (if set, overrides multiplier)
     pub frequency: Option<usize>,
-    /// Minimum alignment length for FastGA
-    pub min_alignment_length: u64,
+    /// Minimum alignment length passed to the aligner
+    pub min_aln_length: u64,
     /// Maximum repeat count for transitive closure
     pub repeat_max: u64,
     /// Minimum repeat distance for transitive closure
@@ -110,12 +81,14 @@ pub struct GraphBuildConfig {
     pub min_identity: f64,
     /// Maximum scaffold deviation distance (0 = no limit)
     pub scaffold_dist: u64,
-    /// Minimum mapping length to include in filtering
-    pub min_mapping_length: u64,
+    /// Minimum mapping length for post-alignment filtering
+    pub min_map_length: u64,
     /// Optional directory to save intermediate files (FASTA, raw PAF, filtered PAF).
     pub debug_dir: Option<String>,
-    /// Wfmash mapping sparsification fraction (0.0-1.0). None = keep all.
-    pub sparsify: Option<String>,
+    /// Unified sparsification strategy (pair selection + mapping density).
+    pub sparsify: SparsificationStrategy,
+    /// Mash distance parameters for sparsification sketching.
+    pub mash_params: sweepga::knn_graph::MashParams,
 }
 
 impl Default for GraphBuildConfig {
@@ -124,7 +97,7 @@ impl Default for GraphBuildConfig {
             num_threads: 4,
             frequency_multiplier: 10,
             frequency: None,
-            min_alignment_length: 0,
+            min_aln_length: 0,
             repeat_max: 0,
             min_repeat_dist: 0,
             min_match_len: 23,
@@ -144,9 +117,10 @@ impl Default for GraphBuildConfig {
             overlap: 0.95,
             min_identity: 0.0,
             scaffold_dist: 0,      // No deviation limit by default
-            min_mapping_length: 0, // No minimum mapping length by default
+            min_map_length: 0, // No minimum mapping length by default
             debug_dir: None,
-            sparsify: None,
+            sparsify: SparsificationStrategy::None,
+            mash_params: sweepga::knn_graph::MashParams::default(),
         }
     }
 }
@@ -155,48 +129,6 @@ impl Default for GraphBuildConfig {
 /// Returns `(num_sequences, num_genomes)` using PanSN naming convention.
 fn count_sequences_and_genomes_in_fasta(fasta_paths: &[String]) -> io::Result<(usize, usize)> {
     crate::commands::count_sequences_and_genomes(fasta_paths)
-}
-
-/// Parse filter mode string (e.g., "1:1", "many:many", "5:3") into FilterMode and limits
-pub fn parse_filter_mode(s: &str) -> (FilterMode, Option<usize>, Option<usize>) {
-    let s_lower = s.to_lowercase();
-    if s_lower == "many:many" || s_lower == "n:n" {
-        return (FilterMode::ManyToMany, None, None);
-    }
-
-    // Parse M:N format
-    let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() != 2 {
-        // Default to 1:1 if invalid format
-        return (FilterMode::OneToOne, Some(1), Some(1));
-    }
-
-    let query_max = if parts[0] == "many" || parts[0] == "n" {
-        None
-    } else {
-        parts[0].parse().ok()
-    };
-
-    let target_max = if parts[1] == "many" || parts[1] == "n" {
-        None
-    } else {
-        parts[1].parse().ok()
-    };
-
-    // FilterMode determines the filtering strategy:
-    // - OneToOne: enforces strict 1:1 mapping
-    // - OneToMany: 1:N (one per query, N per target)
-    // - ManyToMany: N:N (no strict filtering, uses overlap-based plane sweep)
-    // The actual limits are controlled by max_per_query/max_per_target
-    match (query_max, target_max) {
-        (Some(1), Some(1)) => (FilterMode::OneToOne, Some(1), Some(1)),
-        (Some(1), _) => (FilterMode::OneToMany, Some(1), target_max),
-        (_, Some(1)) => (FilterMode::OneToMany, query_max, Some(1)),
-        (Some(q), Some(t)) => (FilterMode::ManyToMany, Some(q), Some(t)),
-        (Some(q), None) => (FilterMode::ManyToMany, Some(q), None),
-        (None, Some(t)) => (FilterMode::ManyToMany, None, Some(t)),
-        (None, None) => (FilterMode::ManyToMany, None, None),
-    }
 }
 
 /// Build a pangenome graph from FASTA sequences
@@ -219,7 +151,7 @@ pub fn build_graph<W: Write>(
     if fasta_files.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "No FASTA files provided",
+            "No sequence files provided",
         ));
     }
 
@@ -344,51 +276,77 @@ pub fn build_graph<W: Write>(
                 config.aligner,
                 kmer_frequency
             );
+            if !matches!(config.sparsify, SparsificationStrategy::None) {
+                info!(
+                    "[graph::align] {:.3}s Sparsification: {}",
+                    start_time.elapsed().as_secs_f64(),
+                    config.sparsify.description()
+                );
+            }
         }
 
-        // Segment length is adapted automatically by sweepga from avg_seq_len.
-        let segment_length = None;
+        let paf_temp = match &config.sparsify {
+            // Fast path: all-vs-all (no pair selection needed)
+            SparsificationStrategy::None | SparsificationStrategy::WfmashDensity(_) => {
+                // Segment length is adapted automatically by sweepga from avg_seq_len.
+                let segment_length = None;
 
-        // Resolve sparsification: "auto" → pggb heuristic, float → use directly
-        let sparsify = match config.sparsify.as_deref() {
-            Some("auto") => {
-                let frac = auto_sparsify(num_genomes);
+                // Resolve wfmash mapping density from the strategy
+                let wfmash_density = sweepga::orchestrator::resolve_wfmash_density(
+                    &config.sparsify,
+                    num_genomes,
+                );
+
                 if config.show_progress {
-                    if let Some(f) = frac {
+                    if let Some(f) = wfmash_density {
                         info!(
-                            "[graph::align] {:.3}s Auto-sparsification: keeping {:.1}% of mappings ({} genomes)",
+                            "[graph::align] {:.3}s Wfmash mapping density: keeping {:.1}% of mappings ({} genomes)",
                             start_time.elapsed().as_secs_f64(), f * 100.0, num_genomes
                         );
                     }
                 }
-                frac
+
+                let aligner: Box<dyn Aligner> = create_aligner_adaptive(
+                    &config.aligner,
+                    kmer_frequency,
+                    config.num_threads,
+                    config.min_aln_length,
+                    Some("90".to_string()),
+                    config.temp_dir.clone(),
+                    segment_length,
+                    Some(avg_seq_len),
+                    wfmash_density,
+                    None, // num_mappings: use wfmash default (-n 1)
+                    None, // pairs_file
+                )?;
+
+                // Run all-vs-all alignment (query = target = combined FASTA)
+                aligner
+                    .align_to_temp_paf(combined_fasta.path(), combined_fasta.path())
+                    .map_err(|e| io::Error::other(format!("{} alignment failed: {}", config.aligner, e)))?
             }
-            Some(val) => Some(val.parse::<f64>().map_err(|_| {
-                io::Error::other(format!(
-                    "Invalid --sparsify value '{}': expected 'auto' or a float 0.0-1.0",
-                    val
-                ))
-            })?),
-            None => None,
+            // Pair selection path: read sequences, use sweepga_align()
+            _ => {
+                let sequences = read_sequences_from_fasta(combined_fasta.path())?;
+                let named_seqs: Vec<(String, &[u8])> = sequences
+                    .iter()
+                    .map(|(n, s)| (n.clone(), s.as_slice()))
+                    .collect();
+                let align_config = SweepgaAlignConfig {
+                    num_threads: config.num_threads,
+                    kmer_frequency,
+                    min_aln_length: config.min_aln_length,
+                    no_filter: true, // filtering done below by build_graph itself
+                    sparsify: config.sparsify.clone(),
+                    mash_params: config.mash_params.clone(),
+                    aligner: config.aligner.clone(),
+                    temp_dir: config.temp_dir.clone(),
+                    map_pct_identity: Some("90".to_string()),
+                    ..SweepgaAlignConfig::default()
+                };
+                sweepga_align(&named_seqs, &align_config)?
+            }
         };
-
-        let aligner: Box<dyn Aligner> = create_aligner_adaptive(
-            &config.aligner,
-            kmer_frequency,
-            config.num_threads,
-            config.min_alignment_length,
-            Some("90".to_string()),
-            config.temp_dir.clone(),
-            segment_length,
-            Some(avg_seq_len),
-            sparsify,
-            None, // num_mappings: use wfmash default (-n 1)
-        )?;
-
-        // Run all-vs-all alignment (query = target = combined FASTA)
-        let paf_temp = aligner
-            .align_to_temp_paf(combined_fasta.path(), combined_fasta.path())
-            .map_err(|e| io::Error::other(format!("{} alignment failed: {}", config.aligner, e)))?;
 
         if config.show_progress {
             info!(
@@ -416,63 +374,28 @@ pub fn build_graph<W: Write>(
         }
         paf_temp
     } else {
-        // Parse filter modes
-        let (mapping_mode, mapping_per_query, mapping_per_target) =
-            parse_filter_mode(&config.num_mappings);
-        let (scaffold_mode, scaffold_per_query, scaffold_per_target) =
-            parse_filter_mode(&config.scaffold_filter);
-
-        // Auto-adapt scaffold parameters to input sequence sizes.
-        // Defaults (scaffold_mass=10kb, scaffold_jump=50kb) are tuned for
-        // whole-genome alignments. For short sequences (e.g. 1kb excerpts
-        // from `impg query -o fasta`), these thresholds would filter out
-        // every alignment. Clamp to 80% of the average sequence length.
-        let scaffold_mass = if avg_seq_len > 0 {
-            round_nice(config.scaffold_mass.min(avg_seq_len * 3 / 5))
-        } else {
-            config.scaffold_mass
+        let filter_params = FilterParams {
+            num_mappings: config.num_mappings.clone(),
+            scaffold_jump: config.scaffold_jump,
+            scaffold_mass: config.scaffold_mass,
+            scaffold_filter: config.scaffold_filter.clone(),
+            overlap: config.overlap,
+            min_identity: config.min_identity,
+            scaffold_dist: config.scaffold_dist,
+            min_map_length: config.min_map_length,
         };
-        let scaffold_jump = if avg_seq_len > 0 {
-            config.scaffold_jump.min(avg_seq_len * 10)
-        } else {
-            config.scaffold_jump
-        };
+        let filter_config = build_filter_config(&filter_params, avg_seq_len);
 
         if config.show_progress {
             info!(
                 "[graph::filter] {:.3}s Filtering alignments with sweepga (n={}, scaffold_jump={}, scaffold_mass={}, scaffold_filter={})",
                 start_time.elapsed().as_secs_f64(),
                 config.num_mappings,
-                scaffold_jump,
-                scaffold_mass,
+                filter_config.scaffold_gap,
+                filter_config.min_scaffold_length,
                 config.scaffold_filter
             );
         }
-
-        // Create filter configuration
-        let filter_config = FilterConfig {
-            chain_gap: 0,
-            min_block_length: config.min_mapping_length,
-            mapping_filter_mode: mapping_mode,
-            mapping_max_per_query: mapping_per_query,
-            mapping_max_per_target: mapping_per_target,
-            plane_sweep_secondaries: 0,
-            scaffold_filter_mode: scaffold_mode,
-            scaffold_max_per_query: scaffold_per_query,
-            scaffold_max_per_target: scaffold_per_target,
-            overlap_threshold: config.overlap,
-            sparsity: 1.0,
-            no_merge: true,
-            scaffold_gap: scaffold_jump,
-            min_scaffold_length: scaffold_mass,
-            scaffold_overlap_threshold: 0.5,
-            scaffold_max_deviation: config.scaffold_dist,
-            prefix_delimiter: '#',
-            skip_prefix: false,
-            scoring_function: ScoringFunction::LogLengthIdentity,
-            min_identity: config.min_identity,
-            min_scaffold_identity: config.min_identity,
-        };
 
         // Create filtered PAF temp file
         let filtered_paf_file = tempfile::Builder::new()
@@ -734,17 +657,13 @@ pub fn build_graph<W: Write>(
 /// Run the graph building command
 pub fn run_graph_build(
     fasta_files: Vec<String>,
-    fasta_list: Option<String>,
     output: &str,
     config: GraphBuildConfig,
 ) -> io::Result<()> {
-    // Resolve FASTA files
-    let fasta_files = resolve_fasta_files(fasta_files, fasta_list)?;
-
     if fasta_files.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "No FASTA files specified. Use --fasta-files or --fasta-list",
+            "No sequence files specified. Use --sequence-files or --sequence-list",
         ));
     }
 
@@ -775,19 +694,15 @@ pub fn run_graph_build(
 /// realize engine (sweepga + POA with lacing) to build the variation graph.
 pub fn run_graph_build_realize<W: Write>(
     fasta_files: Vec<String>,
-    fasta_list: Option<String>,
     output: &mut W,
     config: &crate::realize::RealizeConfig,
 ) -> io::Result<()> {
     let start_time = Instant::now();
 
-    // Resolve FASTA files
-    let fasta_files = resolve_fasta_files(fasta_files, fasta_list)?;
-
     if fasta_files.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "No FASTA files specified. Use --fasta-files or --fasta-list",
+            "No sequence files specified. Use --sequence-files or --sequence-list",
         ));
     }
 
@@ -835,18 +750,14 @@ pub fn run_graph_build_realize<W: Write>(
 /// Reads all sequences, runs single-pass SPOA, emits GFA, then sorts.
 pub fn run_graph_build_poa<W: Write>(
     fasta_files: Vec<String>,
-    fasta_list: Option<String>,
     output: &mut W,
     scoring_params: (u8, u8, u8, u8, u8, u8),
     num_threads: usize,
 ) -> io::Result<()> {
-    // Resolve FASTA files
-    let fasta_files = resolve_fasta_files(fasta_files, fasta_list)?;
-
     if fasta_files.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "No FASTA files specified. Use --fasta-files or --fasta-list",
+            "No sequence files specified. Use --sequence-files or --sequence-list",
         ));
     }
 
@@ -888,7 +799,6 @@ pub fn run_graph_build_poa<W: Write>(
 /// block decomposition + per-block POA) and optional gfaffix normalization.
 pub fn run_graph_build_pggb<W: Write>(
     fasta_files: Vec<String>,
-    fasta_list: Option<String>,
     output: &mut W,
     config: &GraphBuildConfig,
     target_poa_lengths: Vec<usize>,
@@ -897,12 +807,10 @@ pub fn run_graph_build_pggb<W: Write>(
 ) -> io::Result<()> {
     let start_time = Instant::now();
 
-    let fasta_files = resolve_fasta_files(fasta_files, fasta_list)?;
-
     if fasta_files.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "No FASTA files specified. Use --fasta-files or --fasta-list",
+            "No sequence files specified. Use --sequence-files or --sequence-list",
         ));
     }
 
@@ -956,6 +864,35 @@ pub fn run_graph_build_pggb<W: Write>(
 
     output.write_all(sorted.as_bytes())?;
     Ok(())
+}
+
+/// Read sequences from a FASTA file path into `(name, sequence_bytes)` pairs.
+/// Used by the pair selection path in `build_graph()`.
+fn read_sequences_from_fasta(path: &Path) -> io::Result<Vec<(String, Vec<u8>)>> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut sequences = Vec::new();
+    let mut current_name = String::new();
+    let mut current_seq = Vec::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        if let Some(header) = line.strip_prefix('>') {
+            if !current_name.is_empty() {
+                sequences.push((std::mem::take(&mut current_name), std::mem::take(&mut current_seq)));
+            }
+            current_name = header.split_whitespace().next().unwrap_or("").to_string();
+            current_seq.clear();
+        } else {
+            current_seq.extend_from_slice(line.trim().as_bytes());
+        }
+    }
+    if !current_name.is_empty() {
+        sequences.push((current_name, current_seq));
+    }
+    // Sort by name for reproducibility — must match load_sequences() in align.rs
+    sequences.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(sequences)
 }
 
 /// Read sequences from FASTA files into (sequence, metadata) pairs for the realize engine.
@@ -1051,10 +988,3 @@ fn metadata_from_fasta_header(header: &str, seq_len: usize) -> crate::graph::Seq
     }
 }
 
-/// Resolve FASTA files from either direct list or file list
-fn resolve_fasta_files(
-    fasta_files: Vec<String>,
-    fasta_list: Option<String>,
-) -> io::Result<Vec<String>> {
-    crate::commands::resolve_file_list(fasta_files, fasta_list, "FASTA")
-}

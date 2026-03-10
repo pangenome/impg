@@ -1,12 +1,18 @@
 #!/bin/bash
 set -euo pipefail
 
-# Demo: validate that "impg query -o gfa" and "impg graph" produce identical GFA graphs
+# Demo: validate that "impg query -o gfa", "impg graph", and "impg align + impg graph --input-paf"
+# produce equivalent GFA graphs across all sparsification strategies.
 #
-# Tests region sizes: 500bp, 1k, 2k, 5k, 10k, 50k
-# Tests engines: recursive, seqwish
-# Records wall time and peak memory for each command
-# Compares full GFA output (sorted) between query and graph
+# Tests region sizes: 1k, 2k, 5k, 10k
+# Tests engines: seqwish, pggb
+# Tests sparsification: none, random:0.5, giant:0.95, tree:3:1:0.1, wfmash:auto
+# Three command paths per (region, engine, strategy):
+#   1. query -o gfa --sparsify
+#   2. graph --sparsify
+#   3. align --sparsify → PAF, then graph --input-paf
+# Compares graph structure via odgi stats -S across all three paths
+# Saves performance TSV and validation TSV to OUTDIR for later analysis.
 #
 # Usage:
 #   cd data/human-pangenome-tpas
@@ -20,16 +26,32 @@ TIME="/usr/bin/time"
 
 mkdir -p "$OUTDIR"
 
+# Output TSV files for performance and validation data
+PERF_TSV="$OUTDIR/performance.tsv"
+VAL_TSV="$OUTDIR/validation.tsv"
+
+printf "Region\tCommand\tWall_s\tMem_MB\tSegments\tLinks\tPaths\tAvgSegBp\tStatus\n" > "$PERF_TSV"
+printf "Region\tEngine\tStrategy\tComparison\tResult\tDetail\n" > "$VAL_TSV"
+
 # -------------------------------------------------------------------------
-# Region definitions: 500bp, 1k, 2k, 5k, 10k, 50k
+# Region definitions: 1k, 2k, 5k, 10k
 # -------------------------------------------------------------------------
 REGIONS=(
-    "CHM13#0#chr6:29000000-29001000"
-    "CHM13#0#chr6:29000000-29002000"
-    "CHM13#0#chr6:29000000-29005000"
+    #"CHM13#0#chr6:29000000-29001000"
+    #"CHM13#0#chr6:29000000-29002000"
+    #"CHM13#0#chr6:29000000-29005000"
+    "CHM13#0#chr6:29000000-29010000"
 )
 
-ENGINES=(poa recursive seqwish pggb)
+ENGINES=(seqwish pggb)
+
+STRATEGIES=(
+    "none"
+    "random:0.5"
+    "giant:0.95"
+    "tree:3:1:0.1"
+    "wfmash:auto"
+)
 
 # -------------------------------------------------------------------------
 # Helpers
@@ -106,6 +128,12 @@ make_label() {
     echo "${chr}_${pos_label}_${size_label}"
 }
 
+# Convert strategy string to filesystem-safe tag: replace : with _
+# e.g. "random:0.5" -> "random_0.5", "wfmash:auto" -> "wfmash_auto"
+strategy_tag() {
+    echo "${1//:/_}"
+}
+
 # -------------------------------------------------------------------------
 # Summary accumulators
 # -------------------------------------------------------------------------
@@ -122,19 +150,65 @@ record() {
     SUM_L[$IDX]="${7:-}"
     SUM_P[$IDX]="${8:-}"
     SUM_AVG[$IDX]="${9:-}"
+    # Append to TSV
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+        "$1" "$2" "$3" "$4" "${6:-}" "${7:-}" "${8:-}" "${9:-}" "$5" >> "$PERF_TSV"
     IDX=$((IDX + 1))
 }
 
 # Validation accumulators
-declare -a VAL_LABEL VAL_ENGINE VAL_RESULT VAL_DETAIL
+declare -a VAL_LABEL VAL_ENGINE VAL_STRATEGY VAL_PAIR VAL_RESULT VAL_DETAIL
 VIDX=0
 
 record_validation() {
     VAL_LABEL[$VIDX]="$1"
     VAL_ENGINE[$VIDX]="$2"
-    VAL_RESULT[$VIDX]="$3"
-    VAL_DETAIL[$VIDX]="${4:-}"
+    VAL_STRATEGY[$VIDX]="$3"
+    VAL_PAIR[$VIDX]="$4"
+    VAL_RESULT[$VIDX]="$5"
+    VAL_DETAIL[$VIDX]="${6:-}"
+    # Append to TSV
+    printf "%s\t%s\t%s\t%s\t%s\t%s\n" \
+        "$1" "$2" "$3" "$4" "$5" "${6:-}" >> "$VAL_TSV"
     VIDX=$((VIDX + 1))
+}
+
+# Compare two GFA files via odgi stats -S, record result
+compare_gfa() {
+    local label=$1 engine=$2 stag=$3 pair_name=$4 gfa_a=$5 gfa_b=$6
+
+    if [ ! -s "$gfa_a" ] || [ ! -s "$gfa_b" ]; then
+        local reason=""
+        if [ ! -s "$gfa_a" ] && [ ! -s "$gfa_b" ]; then
+            reason="both missing"
+        elif [ ! -s "$gfa_a" ]; then
+            reason="${pair_name%% vs *} missing"
+        else
+            reason="${pair_name##* vs } missing"
+        fi
+        echo "    SKIP: $engine/$stag $pair_name — $reason"
+        record_validation "$label" "$engine" "$stag" "$pair_name" "SKIP" "$reason"
+        return
+    fi
+
+    if ! command -v odgi &>/dev/null; then
+        echo "    SKIP: $engine/$stag $pair_name — odgi not found"
+        record_validation "$label" "$engine" "$stag" "$pair_name" "SKIP" "odgi not found"
+        return
+    fi
+
+    local stats_a stats_b
+    stats_a=$(odgi stats -i "$gfa_a" -S 2>/dev/null)
+    stats_b=$(odgi stats -i "$gfa_b" -S 2>/dev/null)
+    if [ "$stats_a" = "$stats_b" ]; then
+        echo "    PASS: $engine/$stag $pair_name ($stats_a)"
+        record_validation "$label" "$engine" "$stag" "$pair_name" "PASS" "$stats_a"
+    else
+        echo "    FAIL: $engine/$stag $pair_name"
+        echo "      ${pair_name%% vs *}: $stats_a"
+        echo "      ${pair_name##* vs }: $stats_b"
+        record_validation "$label" "$engine" "$stag" "$pair_name" "FAIL" "${pair_name%% vs *}=$stats_a ${pair_name##* vs }=$stats_b"
+    fi
 }
 
 # -------------------------------------------------------------------------
@@ -152,7 +226,7 @@ run_region() {
 
     local PREFIX="$OUTDIR/$LABEL"
 
-    # --- Step 1: extract FASTA via query -o fasta ---
+    # --- Step 1: extract FASTA via query -o fasta (once per region) ---
     echo "  extracting FASTA ..."
     local fasta_ok=false
     metrics=$(run_timed "${PREFIX}.fasta.log" $IMPG query \
@@ -167,73 +241,95 @@ run_region() {
         record "$LABEL" "fasta" "$wall" "$mem" "FAIL"
     fi
 
-    # --- Step 2: for each engine, run query -o gfa and graph, then compare ---
+    # --- Step 2: for each engine × strategy, run all three paths ---
     for ENGINE in "${ENGINES[@]}"; do
-        local TAG="${ENGINE}"
+        for STRATEGY in "${STRATEGIES[@]}"; do
+            local STAG
+            STAG=$(strategy_tag "$STRATEGY")
+            local TAG="${ENGINE}.${STAG}"
 
-        # --- query -o gfa ---
-        echo "  query -o gfa  (engine=$ENGINE) ..."
-        metrics=$(run_timed "${PREFIX}.query.${TAG}.log" $IMPG query \
-            --alignment-list tpa-list.txt --sequence-files "$AGC" \
-            -r "$REGION" -o gfa --engine "$ENGINE" --force-large-region \
-            -O "${PREFIX}.query.${TAG}" -t "$THREADS" -v 1) || true
-        read -r wall mem st <<< "$metrics"
-        if [ "$st" -eq 0 ] && [ -s "${PREFIX}.query.${TAG}.gfa" ]; then
-            read -r s l p avg <<< "$(gfa_stats "${PREFIX}.query.${TAG}.gfa")"
-            record "$LABEL" "q.$TAG" "$wall" "$mem" "OK" "$s" "$l" "$p" "$avg"
-        else
-            record "$LABEL" "q.$TAG" "$wall" "$mem" "FAIL"
-        fi
+            echo ""
+            echo "  --- engine=$ENGINE  sparsify=$STRATEGY ($TAG) ---"
 
-        # --- graph ---
-        if $fasta_ok; then
-            echo "  graph          (engine=$ENGINE) ..."
-            metrics=$(run_timed "${PREFIX}.graph.${TAG}.log" $IMPG graph \
-                --fasta-files "${PREFIX}.fa" \
-                -g "${PREFIX}.graph.${TAG}.gfa" \
-                --engine "$ENGINE" --aligner wfmash -t "$THREADS" -v 1) || true
+            # Build sparsify flag (omit for "none")
+            local SPARSIFY_FLAG=()
+            if [ "$STRATEGY" != "none" ]; then
+                SPARSIFY_FLAG=(--sparsify "$STRATEGY")
+            fi
+
+            # --- Path 1: query -o gfa ---
+            echo "  [1/3] query -o gfa ..."
+            local qgfa="${PREFIX}.query.${TAG}.gfa"
+            metrics=$(run_timed "${PREFIX}.query.${TAG}.log" $IMPG query \
+                --alignment-list tpa-list.txt --sequence-files "$AGC" \
+                -r "$REGION" -o gfa --engine "$ENGINE" "${SPARSIFY_FLAG[@]}" \
+                --force-large-region \
+                -O "${PREFIX}.query.${TAG}" -t "$THREADS" -v 1) || true
             read -r wall mem st <<< "$metrics"
-            if [ "$st" -eq 0 ] && [ -s "${PREFIX}.graph.${TAG}.gfa" ]; then
-                read -r s l p avg <<< "$(gfa_stats "${PREFIX}.graph.${TAG}.gfa")"
-                record "$LABEL" "g.$TAG" "$wall" "$mem" "OK" "$s" "$l" "$p" "$avg"
+            if [ "$st" -eq 0 ] && [ -s "$qgfa" ]; then
+                read -r s l p avg <<< "$(gfa_stats "$qgfa")"
+                record "$LABEL" "q.$TAG" "$wall" "$mem" "OK" "$s" "$l" "$p" "$avg"
             else
-                record "$LABEL" "g.$TAG" "$wall" "$mem" "FAIL"
+                record "$LABEL" "q.$TAG" "$wall" "$mem" "FAIL"
             fi
-        fi
 
-        # --- validate: compare graph structure via odgi stats -S ---
-        local qgfa="${PREFIX}.query.${TAG}.gfa"
-        local ggfa="${PREFIX}.graph.${TAG}.gfa"
-        if [ -s "$qgfa" ] && [ -s "$ggfa" ]; then
-            if ! command -v odgi &>/dev/null; then
-                echo "    SKIP: $ENGINE — odgi not found, skipping validation"
-                record_validation "$LABEL" "$ENGINE" "SKIP" "odgi not found"
-            else
-            local qstats gstats
-            qstats=$(odgi stats -i "$qgfa" -S 2>/dev/null)
-            gstats=$(odgi stats -i "$ggfa" -S 2>/dev/null)
-            if [ "$qstats" = "$gstats" ]; then
-                echo "    PASS: $ENGINE — same structure ($qstats)"
-                record_validation "$LABEL" "$ENGINE" "PASS" "$qstats"
-            else
-                echo "    FAIL: $ENGINE — structure differs"
-                echo "      query: $qstats"
-                echo "      graph: $gstats"
-                record_validation "$LABEL" "$ENGINE" "FAIL" "q=$qstats g=$gstats"
+            # --- Path 2: graph (aligns internally) ---
+            local ggfa="${PREFIX}.graph.${TAG}.gfa"
+            if $fasta_ok; then
+                echo "  [2/3] graph ..."
+                metrics=$(run_timed "${PREFIX}.graph.${TAG}.log" $IMPG graph \
+                    --sequence-files "${PREFIX}.fa" \
+                    -g "$ggfa" \
+                    --engine "$ENGINE" --aligner wfmash "${SPARSIFY_FLAG[@]}" \
+                    -t "$THREADS" -v 1) || true
+                read -r wall mem st <<< "$metrics"
+                if [ "$st" -eq 0 ] && [ -s "$ggfa" ]; then
+                    read -r s l p avg <<< "$(gfa_stats "$ggfa")"
+                    record "$LABEL" "g.$TAG" "$wall" "$mem" "OK" "$s" "$l" "$p" "$avg"
+                else
+                    record "$LABEL" "g.$TAG" "$wall" "$mem" "FAIL"
+                fi
             fi
+
+            # --- Path 3: align → PAF, then graph --input-paf ---
+            local align_dir="${PREFIX}.align.${TAG}"
+            local align_paf="${align_dir}/alignments.paf"
+            local agfa="${PREFIX}.align_graph.${TAG}.gfa"
+            if $fasta_ok; then
+                # Step A: align with sparsification → PAF
+                echo "  [3/3] align → graph ..."
+                metrics=$(run_timed "${PREFIX}.align.${TAG}.log" $IMPG align \
+                    --sequence-files "${PREFIX}.fa" \
+                    -o "$align_dir" --format paf \
+                    --aligner wfmash "${SPARSIFY_FLAG[@]}" \
+                    -t "$THREADS" -v 1) || true
+                read -r wall mem st <<< "$metrics"
+                if [ "$st" -eq 0 ] && [ -s "$align_paf" ]; then
+                    record "$LABEL" "a.$TAG" "$wall" "$mem" "OK"
+
+                    # Step B: build graph from pre-computed PAF (no sparsification)
+                    metrics=$(run_timed "${PREFIX}.align_graph.${TAG}.log" $IMPG graph \
+                        --sequence-files "${PREFIX}.fa" \
+                        -a "$align_paf" \
+                        -g "$agfa" \
+                        --engine "$ENGINE" -t "$THREADS" -v 1) || true
+                    read -r wall mem st <<< "$metrics"
+                    if [ "$st" -eq 0 ] && [ -s "$agfa" ]; then
+                        read -r s l p avg <<< "$(gfa_stats "$agfa")"
+                        record "$LABEL" "ag.$TAG" "$wall" "$mem" "OK" "$s" "$l" "$p" "$avg"
+                    else
+                        record "$LABEL" "ag.$TAG" "$wall" "$mem" "FAIL"
+                    fi
+                else
+                    record "$LABEL" "a.$TAG" "$wall" "$mem" "FAIL"
+                fi
             fi
-        else
-            local reason=""
-            if [ ! -s "$qgfa" ] && [ ! -s "$ggfa" ]; then
-                reason="both failed"
-            elif [ ! -s "$qgfa" ]; then
-                reason="query failed"
-            else
-                reason="graph failed"
-            fi
-            echo "    SKIP: $ENGINE — $reason"
-            record_validation "$LABEL" "$ENGINE" "SKIP" "$reason"
-        fi
+
+            # --- Validate: compare all three paths pairwise ---
+            compare_gfa "$LABEL" "$ENGINE" "$STAG" "query vs graph" "$qgfa" "$ggfa"
+            compare_gfa "$LABEL" "$ENGINE" "$STAG" "query vs align+graph" "$qgfa" "$agfa"
+            compare_gfa "$LABEL" "$ENGINE" "$STAG" "graph vs align+graph" "$ggfa" "$agfa"
+        done
     done
 }
 
@@ -252,13 +348,13 @@ echo ""
 echo "================================================================="
 echo "PERFORMANCE SUMMARY"
 echo "================================================================="
-printf "%-18s  %-14s  %7s  %7s  %6s  %6s  %6s  %6s  %s\n" \
+printf "%-18s  %-28s  %7s  %7s  %6s  %6s  %6s  %6s  %s\n" \
        "Region" "Command" "Wall(s)" "Mem(MB)" "S" "L" "P" "AvgSeg" "Status"
-printf "%-18s  %-14s  %7s  %7s  %6s  %6s  %6s  %6s  %s\n" \
-       "------------------" "--------------" "-------" "-------" "------" "------" "------" "------" "------"
+printf "%-18s  %-28s  %7s  %7s  %6s  %6s  %6s  %6s  %s\n" \
+       "------------------" "----------------------------" "-------" "-------" "------" "------" "------" "------" "------"
 
 for ((i=0; i<IDX; i++)); do
-    printf "%-18s  %-14s  %7s  %7s  %6s  %6s  %6s  %6s  %s\n" \
+    printf "%-18s  %-28s  %7s  %7s  %6s  %6s  %6s  %6s  %s\n" \
         "${SUM_LABEL[$i]}" \
         "${SUM_CMD[$i]}" \
         "${SUM_WALL[$i]}" \
@@ -271,23 +367,27 @@ for ((i=0; i<IDX; i++)); do
 done
 
 # -------------------------------------------------------------------------
-# Validation summary: query -o gfa vs graph (full GFA identity)
+# Validation summary
 # -------------------------------------------------------------------------
 echo ""
 echo "================================================================="
-echo "VALIDATION: query -o gfa vs graph (full GFA identity check)"
+echo "VALIDATION: cross-path graph structure comparison (odgi stats -S)"
 echo "================================================================="
-printf "%-18s  %-10s  %-6s  %s\n" "Region" "Engine" "Result" "Detail"
-printf "%-18s  %-10s  %-6s  %s\n" "------------------" "----------" "------" "------"
+printf "%-18s  %-10s  %-14s  %-22s  %-6s  %s\n" \
+       "Region" "Engine" "Strategy" "Comparison" "Result" "Detail"
+printf "%-18s  %-10s  %-14s  %-22s  %-6s  %s\n" \
+       "------------------" "----------" "--------------" "----------------------" "------" "------"
 
 PASS_COUNT=0
 FAIL_COUNT=0
 SKIP_COUNT=0
 
 for ((i=0; i<VIDX; i++)); do
-    printf "%-18s  %-10s  %-6s  %s\n" \
+    printf "%-18s  %-10s  %-14s  %-22s  %-6s  %s\n" \
         "${VAL_LABEL[$i]}" \
         "${VAL_ENGINE[$i]}" \
+        "${VAL_STRATEGY[$i]}" \
+        "${VAL_PAIR[$i]}" \
         "${VAL_RESULT[$i]}" \
         "${VAL_DETAIL[$i]}"
     case "${VAL_RESULT[$i]}" in
@@ -300,11 +400,16 @@ done
 echo ""
 echo "Total: $PASS_COUNT PASS, $FAIL_COUNT FAIL, $SKIP_COUNT SKIP (out of $VIDX comparisons)"
 if [ "$FAIL_COUNT" -gt 0 ]; then
-    echo "ERROR: Some graphs differ between query and graph!"
+    echo "ERROR: Some graphs differ across command paths!"
     exit 1
 elif [ "$PASS_COUNT" -eq 0 ]; then
     echo "WARNING: No successful comparisons were made."
     exit 1
 else
-    echo "All graphs identical between query -o gfa and graph."
+    echo "All graphs equivalent across query / graph / align+graph paths."
 fi
+
+echo ""
+echo "TSV files saved:"
+echo "  Performance: $PERF_TSV"
+echo "  Validation:  $VAL_TSV"

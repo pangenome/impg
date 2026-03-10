@@ -67,8 +67,10 @@ pub struct RealizeConfig {
     /// Aligner backend: "wfmash" or "fastga"
     pub aligner: String,
 
-    /// Wfmash mapping sparsification: "auto" or a float string like "0.1".
-    pub sparsify: Option<String>,
+    /// Unified sparsification strategy.
+    pub sparsify: sweepga::knn_graph::SparsificationStrategy,
+    /// Mash distance parameters for sparsification sketching.
+    pub mash_params: sweepga::knn_graph::MashParams,
 }
 
 impl Default for RealizeConfig {
@@ -85,7 +87,8 @@ impl Default for RealizeConfig {
             seqwish_threshold: 500,
             debug_dir: None,
             aligner: "fastga".to_string(),
-            sparsify: None,
+            sparsify: sweepga::knn_graph::SparsificationStrategy::None,
+            mash_params: sweepga::knn_graph::MashParams::default(),
         }
     }
 }
@@ -344,24 +347,7 @@ fn realize_recursive(
     // recursive sub-chunks have few sequences and don't benefit from sparsification.
     let mut align_config = build_sweepga_config(config, sequences.len());
     if depth == 0 {
-        align_config.sparsify = match config.sparsify.as_deref() {
-            Some("auto") => {
-                // Count unique genome prefixes (SAMPLE#HAPLOTYPE) to match build_graph behaviour
-                let mut prefixes = std::collections::HashSet::new();
-                for (_, meta) in sequences.iter() {
-                    let parts: Vec<&str> = meta.name.split('#').collect();
-                    let prefix = if parts.len() >= 2 {
-                        format!("{}#{}", parts[0], parts[1])
-                    } else {
-                        meta.name.clone()
-                    };
-                    prefixes.insert(prefix);
-                }
-                crate::commands::graph::auto_sparsify(prefixes.len().max(1))
-            }
-            Some(val) => val.parse::<f64>().ok(),
-            None => None,
-        };
+        align_config.sparsify = config.sparsify.clone();
     }
     let named_seqs: Vec<(String, &[u8])> = sequences
         .iter()
@@ -535,21 +521,21 @@ fn build_sweepga_config(config: &RealizeConfig, num_sequences: usize) -> Sweepga
     SweepgaAlignConfig {
         num_threads: config.num_threads,
         kmer_frequency,
-        min_alignment_length: 0,
+        min_aln_length: 0,
         no_filter: true,
-        num_mappings: "1:1".to_string(),
+        num_mappings: "many:many".to_string(),
         scaffold_jump: 50_000,
         scaffold_mass: 10_000,
-        scaffold_filter: "1:1".to_string(),
+        scaffold_filter: "many:many".to_string(),
         overlap: 0.95,
         min_identity: 0.0,
         scaffold_dist: 0,
-        min_mapping_length: 0,
+        min_map_length: 0,
         temp_dir: config.temp_dir.clone(),
-        sparsification: SparsificationStrategy::None, // Always all-vs-all for realize
+        sparsify: SparsificationStrategy::None, // Resolved per-call in realize_recursive (top-level only)
+        mash_params: config.mash_params.clone(),
         aligner: config.aligner.clone(),
         map_pct_identity: Some("90".to_string()), // Override wfmash ANI auto-estimation
-        sparsify: None, // Resolved per-call in realize_recursive (top-level only)
     }
 }
 

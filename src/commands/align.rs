@@ -14,170 +14,26 @@ use std::time::Instant;
 
 // Import sweepga for direct alignment execution
 use sweepga::aligner::Aligner;
-use sweepga::paf_filter::{FilterConfig, PafFilter, ScoringFunction};
+use sweepga::paf_filter::PafFilter;
 
-use crate::commands::{create_aligner, create_aligner_adaptive};
+use crate::commands::create_aligner_adaptive;
 
-/// Sparsification strategy for pair selection
-#[derive(Clone, Debug)]
-pub enum SparsificationStrategy {
-    /// Align all pairs - O(n²) complexity
-    None,
-    /// Random subsampling with given fraction (0.0-1.0)
-    Random(f64),
-    /// Random subsampling with giant component guarantee (Erdős-Rényi model)
-    /// Parameter is the probability of connectivity (e.g., 0.99)
-    Connectivity(f64),
-    /// Tree-based sampling combining k-nearest, k-farthest (stranger-joining), and random
-    /// Parameters: (k_nearest, k_farthest, random_fraction, kmer_size)
-    TreeSampling {
-        k_nearest: usize,
-        k_farthest: usize,
-        random_fraction: f64,
-        kmer_size: usize,
-    },
-}
-
-impl SparsificationStrategy {
-    /// Parse sparsification strategy from string
-    /// Formats:
-    /// - "none" or "all" - all pairs
-    /// - "random:0.5" - random 50%
-    /// - "giant:0.99" or "connectivity:0.99" - giant component with 99% probability
-    /// - "tree:2:1:0.1" or "tree:2:1:0.1:15" - k-nearest:k-farthest:random_frac[:kmer_size]
-    pub fn parse(s: &str) -> io::Result<Self> {
-        let s = s.to_lowercase();
-        let parts: Vec<&str> = s.split(':').collect();
-
-        match parts[0] {
-            "none" | "all" => Ok(SparsificationStrategy::None),
-            "random" => {
-                if parts.len() != 2 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Random format: random:<fraction> (e.g., random:0.5)",
-                    ));
-                }
-                let fraction: f64 = parts[1].parse().map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "Invalid fraction")
-                })?;
-                if !(0.0..=1.0).contains(&fraction) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Fraction must be between 0.0 and 1.0",
-                    ));
-                }
-                Ok(SparsificationStrategy::Random(fraction))
-            }
-            "giant" | "connectivity" => {
-                if parts.len() != 2 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Connectivity format: giant:<probability> (e.g., giant:0.99)",
-                    ));
-                }
-                let prob: f64 = parts[1].parse().map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "Invalid probability")
-                })?;
-                if !(0.0..1.0).contains(&prob) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Probability must be between 0.0 and 1.0 (exclusive)",
-                    ));
-                }
-                Ok(SparsificationStrategy::Connectivity(prob))
-            }
-            "tree" | "knn" => {
-                if parts.len() < 4 || parts.len() > 5 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Tree format: tree:<k_nearest>:<k_farthest>:<random_frac>[:<kmer_size>]",
-                    ));
-                }
-                let k_nearest: usize = parts[1].parse().map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "Invalid k_nearest")
-                })?;
-                let k_farthest: usize = parts[2].parse().map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "Invalid k_farthest")
-                })?;
-                let random_fraction: f64 = parts[3].parse().map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "Invalid random_fraction")
-                })?;
-                let kmer_size: usize = if parts.len() == 5 {
-                    parts[4].parse().map_err(|_| {
-                        io::Error::new(io::ErrorKind::InvalidInput, "Invalid kmer_size")
-                    })?
-                } else {
-                    15 // default
-                };
-
-                if !(0.0..=1.0).contains(&random_fraction) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Random fraction must be between 0.0 and 1.0",
-                    ));
-                }
-                if !(3..=31).contains(&kmer_size) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "K-mer size must be between 3 and 31",
-                    ));
-                }
-
-                Ok(SparsificationStrategy::TreeSampling {
-                    k_nearest,
-                    k_farthest,
-                    random_fraction,
-                    kmer_size,
-                })
-            }
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Unknown sparsification strategy: '{}'. Valid: none, random:<frac>, giant:<prob>, tree:<k_near>:<k_far>:<rand_frac>",
-                    parts[0]
-                ),
-            )),
-        }
-    }
-
-    /// Get a description of the strategy
-    pub fn description(&self) -> String {
-        match self {
-            SparsificationStrategy::None => "all pairs (no sparsification)".to_string(),
-            SparsificationStrategy::Random(f) => format!("random {:.1}%", f * 100.0),
-            SparsificationStrategy::Connectivity(p) => {
-                format!("giant component (p={:.2})", p)
-            }
-            SparsificationStrategy::TreeSampling {
-                k_nearest,
-                k_farthest,
-                random_fraction,
-                kmer_size,
-            } => {
-                format!(
-                    "tree sampling (k_near={}, k_far={}, rand={:.1}%, k={})",
-                    k_nearest,
-                    k_farthest,
-                    random_fraction * 100.0,
-                    kmer_size
-                )
-            }
-        }
-    }
-}
+pub use sweepga::knn_graph::SparsificationStrategy;
 
 /// Configuration for alignment command
 pub struct AlignConfig {
     pub num_threads: usize,
-    pub sparsification: SparsificationStrategy,
+    pub sparsify: SparsificationStrategy,
+    pub mash_params: sweepga::knn_graph::MashParams,
     pub frequency_multiplier: usize,
     pub frequency: Option<usize>,
-    pub min_alignment_length: u64,
+    pub min_aln_length: u64,
     pub output_format: AlignOutputFormat,
     pub show_progress: bool,
     /// Aligner backend: "wfmash" or "fastga"
     pub aligner: String,
+    /// Directory for temporary files
+    pub temp_dir: Option<String>,
     // Sweepga filtering options
     pub no_filter: bool,
     pub num_mappings: String,
@@ -187,30 +43,32 @@ pub struct AlignConfig {
     pub overlap: f64,
     pub min_identity: f64,
     pub scaffold_dist: u64,
-    pub min_mapping_length: u64,
+    pub min_map_length: u64,
 }
 
 impl Default for AlignConfig {
     fn default() -> Self {
         AlignConfig {
             num_threads: 4,
-            sparsification: SparsificationStrategy::Connectivity(0.99),
+            sparsify: SparsificationStrategy::Connectivity(0.99),
+            mash_params: sweepga::knn_graph::MashParams::default(),
             frequency_multiplier: 10,
             frequency: None,
-            min_alignment_length: 0,
+            min_aln_length: 0,
             output_format: AlignOutputFormat::Paf,
             show_progress: true,
             aligner: "wfmash".to_string(),
-            // Filtering defaults - match graph command
+            temp_dir: None,
+            // Filtering defaults - must match GraphBuildConfig and CLI defaults
             no_filter: false,
-            num_mappings: "1:1".to_string(),
+            num_mappings: "many:many".to_string(),
             scaffold_jump: 50_000,
             scaffold_mass: 10_000,
-            scaffold_filter: "1:1".to_string(),
+            scaffold_filter: "many:many".to_string(),
             overlap: 0.95,
             min_identity: 0.0,
             scaffold_dist: 0,
-            min_mapping_length: 0,
+            min_map_length: 0,
         }
     }
 }
@@ -226,369 +84,71 @@ pub enum AlignOutputFormat {
     JobList,
 }
 
-/// Sequence info for distance computation
+/// Sequence info for distance computation (used by align command for file-based pair selection)
 struct SequenceInfo {
     name: String,
     path: String,
-    sketch: Vec<u64>,
-}
-
-/// Compute MinHash sketch for a sequence
-fn sketch_sequence(sequence: &[u8], k: usize, sketch_size: usize) -> Vec<u64> {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hashes = Vec::new();
-
-    if sequence.len() < k {
-        return vec![];
-    }
-
-    for i in 0..=(sequence.len() - k) {
-        let kmer = &sequence[i..i + k];
-
-        // Skip k-mers with non-ACGT characters
-        if kmer
-            .iter()
-            .any(|&b| !matches!(b, b'A' | b'C' | b'G' | b'T' | b'a' | b'c' | b'g' | b't'))
-        {
-            continue;
-        }
-
-        // Compute canonical k-mer (lexicographically smaller of forward/reverse)
-        let rc_kmer: Vec<u8> = kmer
-            .iter()
-            .rev()
-            .map(|&b| match b {
-                b'A' | b'a' => b'T',
-                b'T' | b't' => b'A',
-                b'C' | b'c' => b'G',
-                b'G' | b'g' => b'C',
-                _ => b'N',
-            })
-            .collect();
-
-        let canonical = if kmer < rc_kmer.as_slice() {
-            kmer
-        } else {
-            &rc_kmer
-        };
-
-        let mut hasher = DefaultHasher::new();
-        canonical.hash(&mut hasher);
-        hashes.push(hasher.finish());
-    }
-
-    // Sort and take smallest (MinHash)
-    hashes.sort_unstable();
-    hashes.truncate(sketch_size);
-    hashes
-}
-
-/// Compute Mash distance between two sketches
-fn mash_distance(sketch1: &[u64], sketch2: &[u64], k: usize) -> f64 {
-    if sketch1.is_empty() || sketch2.is_empty() {
-        return 1.0;
-    }
-
-    // Compute Jaccard index using sorted merge
-    let mut i = 0;
-    let mut j = 0;
-    let mut intersection = 0;
-    let mut union_size = 0;
-
-    while i < sketch1.len() && j < sketch2.len() {
-        if sketch1[i] == sketch2[j] {
-            intersection += 1;
-            union_size += 1;
-            i += 1;
-            j += 1;
-        } else if sketch1[i] < sketch2[j] {
-            union_size += 1;
-            i += 1;
-        } else {
-            union_size += 1;
-            j += 1;
-        }
-    }
-    union_size += sketch1.len() - i;
-    union_size += sketch2.len() - j;
-
-    if union_size == 0 {
-        return 1.0;
-    }
-
-    let jaccard = intersection as f64 / union_size as f64;
-
-    if jaccard == 0.0 {
-        return 1.0;
-    }
-
-    // Mash distance formula
-    let mash = -1.0 / (k as f64) * (2.0 * jaccard / (1.0 + jaccard)).ln();
-    mash.clamp(0.0, 1.0)
-}
-
-/// Compute probability for giant component (Erdős-Rényi model)
-fn compute_connectivity_probability(n: usize, connectivity_prob: f64) -> f64 {
-    if n <= 1 {
-        return 1.0;
-    }
-
-    // Special cases for small n
-    match n {
-        2 => return 1.0,
-        3 => return 0.8,
-        4 => return 0.7,
-        5 => return 0.6,
-        6..=10 => return 0.5,
-        _ => {}
-    }
-
-    // p = (log n + c) / n where c = -log(-log(connectivity_prob))
-    let c = -(-connectivity_prob.ln()).ln();
-    let p = ((n as f64).ln() + c) / (n as f64);
-
-    p.clamp(0.001, 1.0)
+    sketch: sweepga::mash::KmerSketch,
 }
 
 /// Generate alignment pairs from named in-memory sequences.
-///
-/// This is the version used by the realize engine's `sweepga_align`, where
-/// sequences are provided as `(name, bytes)` pairs rather than `SequenceInfo`.
-/// For `TreeSampling`, mash sketches are computed on the fly.
 pub fn generate_pairs_for_sequences(
     sequences: &[(String, &[u8])],
     strategy: &SparsificationStrategy,
+    mash_params: &sweepga::knn_graph::MashParams,
 ) -> Vec<(usize, usize)> {
     let n = sequences.len();
     if n <= 1 {
         return vec![];
     }
 
+    // For strategies that benefit from sequence data, compute sketches
     match strategy {
-        SparsificationStrategy::None => (0..n)
-            .flat_map(|i| ((i + 1)..n).map(move |j| (i, j)))
-            .collect(),
-
-        SparsificationStrategy::Random(fraction) => {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-
-            let mut pairs = Vec::new();
-            for i in 0..n {
-                for j in (i + 1)..n {
-                    let mut hasher = DefaultHasher::new();
-                    format!("{}:{}", sequences[i].0, sequences[j].0).hash(&mut hasher);
-                    let hash = hasher.finish();
-                    if (hash as f64 / u64::MAX as f64) < *fraction {
-                        pairs.push((i, j));
-                    }
-                }
-            }
-            pairs
+        SparsificationStrategy::None | SparsificationStrategy::Random(_) | SparsificationStrategy::WfmashDensity(_) => {
+            sweepga::knn_graph::select_pairs(n, None, strategy, mash_params)
         }
-
-        SparsificationStrategy::Connectivity(prob) => {
-            let keep_fraction = compute_connectivity_probability(n, *prob);
-            generate_pairs_for_sequences(sequences, &SparsificationStrategy::Random(keep_fraction))
-        }
-
-        SparsificationStrategy::TreeSampling {
-            k_nearest,
-            k_farthest,
-            random_fraction,
-            kmer_size,
-        } => {
-            // Compute mash sketches on the fly
-            let sketches: Vec<Vec<u64>> = sequences
-                .iter()
-                .map(|(_, seq)| sketch_sequence(seq, *kmer_size, 1000))
-                .collect();
-
-            let distances: Vec<Vec<f64>> = (0..n)
-                .into_par_iter()
-                .map(|i| {
-                    (0..n)
-                        .map(|j| {
-                            if i == j {
-                                0.0
-                            } else {
-                                mash_distance(&sketches[i], &sketches[j], *kmer_size)
-                            }
-                        })
-                        .collect()
-                })
-                .collect();
-
-            let mut pairs = HashSet::new();
-
-            if *k_nearest > 0 {
-                for (i, dist_row) in distances.iter().enumerate() {
-                    let mut neighbors: Vec<(usize, f64)> = (0..n)
-                        .filter(|&j| i != j)
-                        .map(|j| (j, dist_row[j]))
-                        .collect();
-                    neighbors.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-                    for (j, _) in neighbors.iter().take(*k_nearest) {
-                        let pair = if i < *j { (i, *j) } else { (*j, i) };
-                        pairs.insert(pair);
-                    }
-                }
-            }
-
-            if *k_farthest > 0 {
-                for (i, dist_row) in distances.iter().enumerate() {
-                    let mut neighbors: Vec<(usize, f64)> = (0..n)
-                        .filter(|&j| i != j)
-                        .map(|j| (j, dist_row[j]))
-                        .collect();
-                    neighbors.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-                    for (j, _) in neighbors.iter().take(*k_farthest) {
-                        let pair = if i < *j { (i, *j) } else { (*j, i) };
-                        pairs.insert(pair);
-                    }
-                }
-            }
-
-            if *random_fraction > 0.0 {
-                let random_pairs = generate_pairs_for_sequences(
-                    sequences,
-                    &SparsificationStrategy::Random(*random_fraction),
-                );
-                for pair in random_pairs {
-                    pairs.insert(pair);
-                }
-            }
-
-            let mut result: Vec<_> = pairs.into_iter().collect();
-            result.sort_unstable();
-            result
+        _ => {
+            // Compute sketches for distance-based strategies
+            let raw_seqs: Vec<Vec<u8>> = sequences.iter().map(|(_, s)| s.to_vec()).collect();
+            let sketches = sweepga::mash::compute_sketches_parallel(
+                &raw_seqs,
+                mash_params.kmer_size,
+                mash_params.sketch_size,
+            );
+            sweepga::knn_graph::select_pairs_from_sketches(&sketches, strategy)
         }
     }
 }
 
-/// Generate pairs using specified sparsification strategy
+/// Generate pairs from pre-loaded SequenceInfo (with pre-computed sketches).
 fn generate_pairs(
     sequences: &[SequenceInfo],
     strategy: &SparsificationStrategy,
+    mash_params: &sweepga::knn_graph::MashParams,
 ) -> Vec<(usize, usize)> {
     let n = sequences.len();
     if n <= 1 {
         return vec![];
     }
 
+    // For simple strategies, no need for sketches
     match strategy {
-        SparsificationStrategy::None => {
-            // All pairs
-            (0..n)
-                .flat_map(|i| ((i + 1)..n).map(move |j| (i, j)))
-                .collect()
+        SparsificationStrategy::None | SparsificationStrategy::Random(_) | SparsificationStrategy::WfmashDensity(_) => {
+            sweepga::knn_graph::select_pairs(n, None, strategy, mash_params)
         }
-
-        SparsificationStrategy::Random(fraction) => {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-
-            let mut pairs = Vec::new();
-            for i in 0..n {
-                for j in (i + 1)..n {
-                    // Deterministic hash based on sequence names
-                    let mut hasher = DefaultHasher::new();
-                    format!("{}:{}", sequences[i].name, sequences[j].name).hash(&mut hasher);
-                    let hash = hasher.finish();
-
-                    if (hash as f64 / u64::MAX as f64) < *fraction {
-                        pairs.push((i, j));
-                    }
-                }
-            }
-            pairs
-        }
-
-        SparsificationStrategy::Connectivity(prob) => {
-            let keep_fraction = compute_connectivity_probability(n, *prob);
-            generate_pairs(sequences, &SparsificationStrategy::Random(keep_fraction))
-        }
-
-        SparsificationStrategy::TreeSampling {
-            k_nearest,
-            k_farthest,
-            random_fraction,
-            kmer_size: _,
-        } => {
-            // Compute distance matrix
-            let distances: Vec<Vec<f64>> = (0..n)
-                .into_par_iter()
-                .map(|i| {
-                    (0..n)
-                        .map(|j| {
-                            if i == j {
-                                0.0
-                            } else {
-                                mash_distance(&sequences[i].sketch, &sequences[j].sketch, 15)
-                            }
-                        })
-                        .collect()
-                })
-                .collect();
-
-            let mut pairs = HashSet::new();
-
-            // K-nearest neighbors for each sequence
-            if *k_nearest > 0 {
-                for (i, dist_row) in distances.iter().enumerate() {
-                    let mut neighbors: Vec<(usize, f64)> = (0..n)
-                        .filter(|&j| i != j)
-                        .map(|j| (j, dist_row[j]))
-                        .collect();
-                    neighbors.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-
-                    for (j, _) in neighbors.iter().take(*k_nearest) {
-                        let pair = if i < *j { (i, *j) } else { (*j, i) };
-                        pairs.insert(pair);
-                    }
-                }
-            }
-
-            // K-farthest neighbors (stranger-joining)
-            if *k_farthest > 0 {
-                for (i, dist_row) in distances.iter().enumerate() {
-                    let mut neighbors: Vec<(usize, f64)> = (0..n)
-                        .filter(|&j| i != j)
-                        .map(|j| (j, dist_row[j]))
-                        .collect();
-                    neighbors.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap()); // Descending
-
-                    for (j, _) in neighbors.iter().take(*k_farthest) {
-                        let pair = if i < *j { (i, *j) } else { (*j, i) };
-                        pairs.insert(pair);
-                    }
-                }
-            }
-
-            // Random pairs
-            if *random_fraction > 0.0 {
-                let random_pairs =
-                    generate_pairs(sequences, &SparsificationStrategy::Random(*random_fraction));
-                for pair in random_pairs {
-                    pairs.insert(pair);
-                }
-            }
-
-            let mut result: Vec<_> = pairs.into_iter().collect();
-            result.sort_unstable();
-            result
+        _ => {
+            let sketches: Vec<sweepga::mash::KmerSketch> =
+                sequences.iter().map(|s| s.sketch.clone()).collect();
+            sweepga::knn_graph::select_pairs_from_sketches(&sketches, strategy)
         }
     }
 }
 
-/// Load sequences from FASTA files and compute sketches
+/// Load sequences from FASTA files and compute sketches using sweepga's mash module
 fn load_sequences(
     fasta_files: &[String],
-    kmer_size: usize,
-    sketch_size: usize,
     show_progress: bool,
+    mash_params: &sweepga::knn_graph::MashParams,
 ) -> io::Result<Vec<SequenceInfo>> {
     let sequences = Mutex::new(Vec::new());
 
@@ -608,7 +168,11 @@ fn load_sequences(
                 if let Some(header) = line.strip_prefix('>') {
                     // Process previous sequence
                     if let Some(name) = current_name.take() {
-                        let sketch = sketch_sequence(&current_seq, kmer_size, sketch_size);
+                        let sketch = sweepga::mash::KmerSketch::from_sequence(
+                            &current_seq,
+                            mash_params.kmer_size,
+                            mash_params.sketch_size,
+                        );
                         sequences.lock().unwrap().push(SequenceInfo {
                             name,
                             path: path.clone(),
@@ -624,7 +188,11 @@ fn load_sequences(
 
             // Don't forget last sequence
             if let Some(name) = current_name {
-                let sketch = sketch_sequence(&current_seq, kmer_size, sketch_size);
+                let sketch = sweepga::mash::KmerSketch::from_sequence(
+                    &current_seq,
+                    mash_params.kmer_size,
+                    mash_params.sketch_size,
+                );
                 sequences.lock().unwrap().push(SequenceInfo {
                     name,
                     path: path.clone(),
@@ -649,37 +217,6 @@ fn load_sequences(
     result.sort_by(|a, b| a.name.cmp(&b.name));
 
     Ok(result)
-}
-
-/// Estimate pair count for a given strategy and sequence count
-#[allow(dead_code)]
-fn estimate_pair_count(n: usize, strategy: &SparsificationStrategy) -> usize {
-    if n <= 1 {
-        return 0;
-    }
-
-    let total_pairs = n * (n - 1) / 2;
-
-    match strategy {
-        SparsificationStrategy::None => total_pairs,
-        SparsificationStrategy::Random(fraction) => ((total_pairs as f64) * fraction) as usize,
-        SparsificationStrategy::Connectivity(prob) => {
-            let keep_fraction = compute_connectivity_probability(n, *prob);
-            ((total_pairs as f64) * keep_fraction) as usize
-        }
-        SparsificationStrategy::TreeSampling {
-            k_nearest,
-            k_farthest,
-            random_fraction,
-            ..
-        } => {
-            // Each sequence contributes k_nearest + k_farthest edges (with dedup)
-            let tree_pairs = n * (k_nearest + k_farthest);
-            let random_pairs = ((total_pairs as f64) * random_fraction) as usize;
-            // Rough estimate (edges can overlap)
-            (tree_pairs / 2 + random_pairs).min(total_pairs)
-        }
-    }
 }
 
 /// Write job list for cluster execution
@@ -710,7 +247,7 @@ fn write_job_list<W: Write>(
             "FastGA {} -T{} -l{} {} {} > {}",
             freq_arg,
             config.num_threads,
-            config.min_alignment_length,
+            config.min_aln_length,
             seq_i.path,
             seq_j.path,
             output_path
@@ -787,26 +324,81 @@ fn run_alignments(
         );
     }
 
+    // Check if pairs are a proper subset (sparsified) vs all-vs-all
+    let total_possible = sequences.len() * (sequences.len() - 1) / 2;
+    let is_sparsified = pairs.len() < total_possible;
+
     // Collect unique file pairs
     let file_pairs = collect_file_pairs(pairs, sequences);
 
     if config.show_progress {
         info!(
-            "[align] {:.3}s Running {} pairwise alignments ({} unique file pairs)",
+            "[align] {:.3}s Running {} pairwise alignments ({} unique file pairs{})",
             start_time.elapsed().as_secs_f64(),
             pairs.len(),
-            file_pairs.len()
+            file_pairs.len(),
+            if is_sparsified { ", using --pairs-file" } else { "" },
         );
     }
 
-    // Create aligner
-    let aligner: Box<dyn Aligner> = create_aligner(
+    // Compute average sequence length for adaptive wfmash parameters
+    let avg_len: Option<u64> = {
+        let mut total_len: u64 = 0;
+        let mut count: u64 = 0;
+        for path in unique_files.iter() {
+            if let Ok(fai) = rust_htslib::faidx::Reader::from_path(path) {
+                let n = fai.n_seqs();
+                for i in 0..n {
+                    if let Ok(name) = fai.seq_name(i as i32) {
+                        total_len += fai.fetch_seq_len(&name);
+                        count += 1;
+                    }
+                }
+            }
+        }
+        if count > 0 { Some(total_len / count) } else { None }
+    };
+
+    // Resolve wfmash mapping density from the strategy
+    let wfmash_density = sweepga::orchestrator::resolve_wfmash_density(
+        &config.sparsify,
+        sequences.len(),
+    );
+
+    // When sparsified and using wfmash, write a pairs TSV so wfmash filters at L1
+    // instead of running unfiltered all-vs-all per file pair.
+    let pairs_file: Option<tempfile::NamedTempFile> =
+        if is_sparsified && config.aligner == "wfmash" {
+            let mut pairs_tsv = tempfile::Builder::new().suffix(".pairs.tsv").tempfile()?;
+            {
+                let mut writer = BufWriter::new(&mut pairs_tsv);
+                writeln!(writer, "# query_name\ttarget_name")?;
+                for &(i, j) in pairs {
+                    writeln!(writer, "{}\t{}", sequences[i].name, sequences[j].name)?;
+                    writeln!(writer, "{}\t{}", sequences[j].name, sequences[i].name)?;
+                }
+                writer.flush()?;
+            }
+            Some(pairs_tsv)
+        } else {
+            None
+        };
+
+    let pairs_file_path = pairs_file.as_ref().map(|f| f.path().to_path_buf());
+
+    // Create aligner with adaptive parameters
+    let aligner: Box<dyn Aligner> = create_aligner_adaptive(
         &config.aligner,
         kmer_frequency,
         config.num_threads,
-        config.min_alignment_length,
+        config.min_aln_length,
         Some("90".to_string()),
-        None, // temp_dir uses system default
+        config.temp_dir.clone(),
+        None, // segment_length: let sweepga adapt from avg_len
+        avg_len,
+        wfmash_density,
+        None, // num_mappings: use wfmash default
+        pairs_file_path,
     )?;
 
     // Run alignments for each unique file pair
@@ -870,7 +462,7 @@ fn run_alignments(
                 let result_paf = if config.no_filter {
                     paf_temp
                 } else {
-                    apply_paf_filter(paf_temp, config)?
+                    apply_paf_filter(paf_temp, config, avg_len.unwrap_or(0))?
                 };
 
                 // Append to combined output
@@ -880,6 +472,9 @@ fn run_alignments(
             AlignOutputFormat::JobList => unreachable!(),
         }
     }
+
+    // Keep pairs_file alive until all alignments are done
+    drop(pairs_file);
 
     combined_writer.flush()?;
 
@@ -911,37 +506,21 @@ fn run_alignments(
 fn apply_paf_filter(
     paf_temp: tempfile::NamedTempFile,
     config: &AlignConfig,
+    avg_seq_len: u64,
 ) -> io::Result<tempfile::NamedTempFile> {
-    use super::graph::parse_filter_mode;
-
-    let (mapping_mode, mapping_per_query, mapping_per_target) =
-        parse_filter_mode(&config.num_mappings);
-    let (scaffold_mode, scaffold_per_query, scaffold_per_target) =
-        parse_filter_mode(&config.scaffold_filter);
-
-    let filter_config = FilterConfig {
-        chain_gap: 0,
-        min_block_length: config.min_mapping_length,
-        mapping_filter_mode: mapping_mode,
-        mapping_max_per_query: mapping_per_query,
-        mapping_max_per_target: mapping_per_target,
-        plane_sweep_secondaries: 0,
-        scaffold_filter_mode: scaffold_mode,
-        scaffold_max_per_query: scaffold_per_query,
-        scaffold_max_per_target: scaffold_per_target,
-        overlap_threshold: config.overlap,
-        sparsity: 1.0,
-        no_merge: true,
-        scaffold_gap: config.scaffold_jump,
-        min_scaffold_length: config.scaffold_mass,
-        scaffold_overlap_threshold: 0.5,
-        scaffold_max_deviation: config.scaffold_dist,
-        prefix_delimiter: '#',
-        skip_prefix: false,
-        scoring_function: ScoringFunction::LogLengthIdentity,
-        min_identity: config.min_identity,
-        min_scaffold_identity: config.min_identity,
-    };
+    let filter_config = super::build_filter_config(
+        &super::FilterParams {
+            num_mappings: config.num_mappings.clone(),
+            scaffold_jump: config.scaffold_jump,
+            scaffold_mass: config.scaffold_mass,
+            scaffold_filter: config.scaffold_filter.clone(),
+            overlap: config.overlap,
+            min_identity: config.min_identity,
+            scaffold_dist: config.scaffold_dist,
+            min_map_length: config.min_map_length,
+        },
+        avg_seq_len,
+    );
 
     let filtered_paf_file = tempfile::Builder::new()
         .suffix(".filtered.paf")
@@ -962,7 +541,7 @@ pub struct SweepgaAlignConfig {
     /// K-mer frequency for FastGA
     pub kmer_frequency: usize,
     /// Minimum alignment length
-    pub min_alignment_length: u64,
+    pub min_aln_length: u64,
     /// Whether to skip filtering
     pub no_filter: bool,
     /// Filter: n:m-best mappings
@@ -980,18 +559,17 @@ pub struct SweepgaAlignConfig {
     /// Filter: max scaffold deviation
     pub scaffold_dist: u64,
     /// Filter: minimum mapping length
-    pub min_mapping_length: u64,
+    pub min_map_length: u64,
     /// Optional temp directory
     pub temp_dir: Option<String>,
-    /// Sparsification strategy for pair selection.
-    /// When not None, only alignments between selected pairs are retained.
-    pub sparsification: SparsificationStrategy,
+    /// Unified sparsification strategy (pair selection + mapping density).
+    pub sparsify: SparsificationStrategy,
+    /// Mash distance parameters for sparsification sketching.
+    pub mash_params: sweepga::knn_graph::MashParams,
     /// Aligner backend: "wfmash" or "fastga"
     pub aligner: String,
     /// Minimum mapping identity for wfmash (e.g. "70"). None = wfmash auto-estimates.
     pub map_pct_identity: Option<String>,
-    /// Wfmash mapping sparsification fraction (0.0-1.0). None = keep all.
-    pub sparsify: Option<f64>,
 }
 
 impl Default for SweepgaAlignConfig {
@@ -999,21 +577,21 @@ impl Default for SweepgaAlignConfig {
         SweepgaAlignConfig {
             num_threads: 4,
             kmer_frequency: 10,
-            min_alignment_length: 0,
+            min_aln_length: 0,
             no_filter: false,
-            num_mappings: "1:1".to_string(),
+            num_mappings: "many:many".to_string(),
             scaffold_jump: 50_000,
             scaffold_mass: 10_000,
-            scaffold_filter: "1:1".to_string(),
+            scaffold_filter: "many:many".to_string(),
             overlap: 0.95,
             min_identity: 0.0,
             scaffold_dist: 0,
-            min_mapping_length: 0,
+            min_map_length: 0,
             temp_dir: None,
-            sparsification: SparsificationStrategy::None,
+            sparsify: SparsificationStrategy::None,
+            mash_params: sweepga::knn_graph::MashParams::default(),
             aligner: "wfmash".to_string(),
             map_pct_identity: None,
-            sparsify: None,
         }
     }
 }
@@ -1046,7 +624,7 @@ pub fn sweepga_align(
     }
 
     // Generate pairs based on sparsification strategy
-    let pairs = generate_pairs_for_sequences(sequences, &config.sparsification);
+    let pairs = generate_pairs_for_sequences(sequences, &config.sparsify, &config.mash_params);
     let total_possible = sequences.len() * (sequences.len() - 1) / 2;
 
     if pairs.is_empty() {
@@ -1071,15 +649,22 @@ pub fn sweepga_align(
     if config.no_filter {
         Ok(paf_temp)
     } else {
+        let avg_seq_len = if !sequences.is_empty() {
+            sequences.iter().map(|(_, s)| s.len() as u64).sum::<u64>() / sequences.len() as u64
+        } else {
+            0
+        };
         let align_config = AlignConfig {
             num_threads: config.num_threads,
-            sparsification: SparsificationStrategy::None,
+            sparsify: SparsificationStrategy::None,
+            mash_params: config.mash_params.clone(),
             frequency_multiplier: 10,
             frequency: Some(config.kmer_frequency),
-            min_alignment_length: config.min_alignment_length,
+            min_aln_length: config.min_aln_length,
             output_format: AlignOutputFormat::Paf,
             show_progress: false,
             aligner: config.aligner.clone(),
+            temp_dir: config.temp_dir.clone(),
             no_filter: config.no_filter,
             num_mappings: config.num_mappings.clone(),
             scaffold_jump: config.scaffold_jump,
@@ -1088,9 +673,9 @@ pub fn sweepga_align(
             overlap: config.overlap,
             min_identity: config.min_identity,
             scaffold_dist: config.scaffold_dist,
-            min_mapping_length: config.min_mapping_length,
+            min_map_length: config.min_map_length,
         };
-        apply_paf_filter(paf_temp, &align_config)
+        apply_paf_filter(paf_temp, &align_config, avg_seq_len)
     }
 }
 
@@ -1123,17 +708,24 @@ fn sweepga_align_all_vs_all(
         None
     };
 
+    // Resolve wfmash mapping density from the strategy
+    let wfmash_density = sweepga::orchestrator::resolve_wfmash_density(
+        &config.sparsify,
+        sequences.len(),
+    );
+
     let aligner: Box<dyn Aligner> = create_aligner_adaptive(
         &config.aligner,
         config.kmer_frequency,
         config.num_threads,
-        config.min_alignment_length,
+        config.min_aln_length,
         config.map_pct_identity.clone(),
         config.temp_dir.clone(),
         None, // segment_length: let sweepga adapt from avg_len
         avg_len,
-        config.sparsify,
+        wfmash_density,
         None, // num_mappings: use wfmash default (-n 1)
+        None, // pairs_file
     )?;
 
     aligner
@@ -1141,8 +733,9 @@ fn sweepga_align_all_vs_all(
         .map_err(|e| io::Error::other(format!("{} alignment failed: {}", config.aligner, e)))
 }
 
-/// Pairwise alignment: write individual FASTA files per pair, align each pair,
-/// and combine results into a single PAF.
+/// Pairwise alignment: for wfmash, write all sequences to a single FASTA and
+/// use --pairs-file to restrict which pairs are aligned (single invocation).
+/// For other aligners, fall back to per-pair alignment.
 fn sweepga_align_pairwise(
     sequences: &[(String, &[u8])],
     pairs: &[(usize, usize)],
@@ -1155,17 +748,107 @@ fn sweepga_align_pairwise(
         None
     };
 
+    // Resolve wfmash mapping density from the strategy
+    let wfmash_density = sweepga::orchestrator::resolve_wfmash_density(
+        &config.sparsify,
+        sequences.len(),
+    );
+
+    if config.aligner == "wfmash" {
+        // Optimized path: single wfmash invocation with --pairs-file
+        sweepga_align_pairwise_wfmash(sequences, pairs, config, avg_len, wfmash_density)
+    } else {
+        // Fallback: per-pair alignment for aligners without pairs-file support
+        sweepga_align_pairwise_generic(sequences, pairs, config, avg_len, wfmash_density)
+    }
+}
+
+/// Optimized pairwise alignment using wfmash --pairs-file:
+/// write all sequences to one FASTA, write pairs to a TSV, single wfmash call.
+fn sweepga_align_pairwise_wfmash(
+    sequences: &[(String, &[u8])],
+    pairs: &[(usize, usize)],
+    config: &SweepgaAlignConfig,
+    avg_len: Option<u64>,
+    wfmash_density: Option<f64>,
+) -> io::Result<tempfile::NamedTempFile> {
+    // 1. Write all sequences to a single combined FASTA
+    let mut combined_fasta = tempfile::Builder::new().suffix(".fa").tempfile()?;
+    {
+        let mut writer = BufWriter::new(&mut combined_fasta);
+        for (name, seq) in sequences {
+            writeln!(writer, ">{}", name)?;
+            writer.write_all(seq)?;
+            writeln!(writer)?;
+        }
+        writer.flush()?;
+    }
+
+    // Create FASTA index (.fai) — required by wfmash
+    rust_htslib::faidx::Reader::from_path(combined_fasta.path())
+        .map_err(|e| io::Error::other(format!("Failed to create FASTA index: {e}")))?;
+
+    // 2. Write pairs to a temp TSV file (both directions for bidirectional alignment)
+    let mut pairs_tsv = tempfile::Builder::new().suffix(".pairs.tsv").tempfile()?;
+    {
+        let mut writer = BufWriter::new(&mut pairs_tsv);
+        writeln!(writer, "# query_name\ttarget_name")?;
+        for &(i, j) in pairs {
+            // Write both directions so wfmash aligns A→B and B→A
+            writeln!(writer, "{}\t{}", sequences[i].0, sequences[j].0)?;
+            writeln!(writer, "{}\t{}", sequences[j].0, sequences[i].0)?;
+        }
+        writer.flush()?;
+    }
+
+    log::info!(
+        "sweepga: wfmash batch alignment: {} sequences, {} pairs, pairs file: {}",
+        sequences.len(),
+        pairs.len(),
+        pairs_tsv.path().display()
+    );
+
+    // 3. Create aligner with pairs_file set
     let aligner: Box<dyn Aligner> = create_aligner_adaptive(
         &config.aligner,
         config.kmer_frequency,
         config.num_threads,
-        config.min_alignment_length,
+        config.min_aln_length,
         config.map_pct_identity.clone(),
         config.temp_dir.clone(),
         None, // segment_length: let sweepga adapt from avg_len
         avg_len,
-        config.sparsify,
-        None, // pairwise: only 2 sequences per call
+        wfmash_density,
+        None, // num_mappings: use wfmash default
+        Some(pairs_tsv.path().to_path_buf()),
+    )?;
+
+    // 4. Single alignment call: combined FASTA against itself, filtered by pairs
+    aligner
+        .align_to_temp_paf(combined_fasta.path(), combined_fasta.path())
+        .map_err(|e| io::Error::other(format!("wfmash batch alignment failed: {}", e)))
+}
+
+/// Fallback per-pair alignment for aligners without --pairs-file support.
+fn sweepga_align_pairwise_generic(
+    sequences: &[(String, &[u8])],
+    pairs: &[(usize, usize)],
+    config: &SweepgaAlignConfig,
+    avg_len: Option<u64>,
+    wfmash_density: Option<f64>,
+) -> io::Result<tempfile::NamedTempFile> {
+    let aligner: Box<dyn Aligner> = create_aligner_adaptive(
+        &config.aligner,
+        config.kmer_frequency,
+        config.num_threads,
+        config.min_aln_length,
+        config.map_pct_identity.clone(),
+        config.temp_dir.clone(),
+        None,
+        avg_len,
+        wfmash_density,
+        None,
+        None, // no pairs_file
     )?;
 
     let mut combined_paf = tempfile::Builder::new().suffix(".paf").tempfile()?;
@@ -1220,37 +903,24 @@ fn sweepga_align_pairwise(
 /// Run alignment command
 pub fn run_align(
     fasta_files: Vec<String>,
-    fasta_list: Option<String>,
     output_dir: &str,
     config: AlignConfig,
 ) -> io::Result<()> {
-    // Resolve FASTA files
-    let fasta_files = resolve_fasta_files(fasta_files, fasta_list)?;
-
     if fasta_files.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "No FASTA files specified",
+            "No sequence files specified. Use --sequence-files or --sequence-list",
         ));
     }
 
     // Create output directory
     std::fs::create_dir_all(output_dir)?;
 
-    // Determine k-mer size for sketching
-    let kmer_size = match &config.sparsification {
-        SparsificationStrategy::TreeSampling { kmer_size, .. } => *kmer_size,
-        _ => 15, // default
-    };
-
     // Load sequences and compute sketches
     if config.show_progress {
-        info!(
-            "Loading sequences and computing sketches (k={})...",
-            kmer_size
-        );
+        info!("Loading sequences and computing sketches...");
     }
-    let sequences = load_sequences(&fasta_files, kmer_size, 1000, config.show_progress)?;
+    let sequences = load_sequences(&fasta_files, config.show_progress, &config.mash_params)?;
 
     let n = sequences.len();
     let total_pairs = n * (n - 1) / 2;
@@ -1259,10 +929,10 @@ pub fn run_align(
     if config.show_progress {
         info!(
             "Generating alignment pairs using {}...",
-            config.sparsification.description()
+            config.sparsify.description()
         );
     }
-    let pairs = generate_pairs(&sequences, &config.sparsification);
+    let pairs = generate_pairs(&sequences, &config.sparsify, &config.mash_params);
 
     if config.show_progress {
         info!(
@@ -1289,87 +959,40 @@ pub fn run_align(
     Ok(())
 }
 
-/// Resolve FASTA files from either direct list or file list
-fn resolve_fasta_files(
-    fasta_files: Vec<String>,
-    fasta_list: Option<String>,
-) -> io::Result<Vec<String>> {
-    crate::commands::resolve_file_list(fasta_files, fasta_list, "FASTA")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_parse_sparsification() {
-        // None
-        assert!(matches!(
-            SparsificationStrategy::parse("none").unwrap(),
-            SparsificationStrategy::None
-        ));
+        // Parsing is delegated to sweepga's FromStr — verify it works through the re-export
+        let s: SparsificationStrategy = "none".parse().unwrap();
+        assert_eq!(s, SparsificationStrategy::None);
 
-        // Random
-        if let SparsificationStrategy::Random(f) =
-            SparsificationStrategy::parse("random:0.5").unwrap()
-        {
-            assert!((f - 0.5).abs() < 0.001);
-        } else {
-            panic!("Expected Random");
-        }
+        let s: SparsificationStrategy = "giant:0.99".parse().unwrap();
+        assert_eq!(s, SparsificationStrategy::Connectivity(0.99));
 
-        // Connectivity
-        if let SparsificationStrategy::Connectivity(p) =
-            SparsificationStrategy::parse("giant:0.99").unwrap()
-        {
-            assert!((p - 0.99).abs() < 0.001);
-        } else {
-            panic!("Expected Connectivity");
-        }
+        let s: SparsificationStrategy = "tree:2:1:0.1".parse().unwrap();
+        assert_eq!(s, SparsificationStrategy::TreeSampling(2, 1, 0.1));
 
-        // Tree
-        if let SparsificationStrategy::TreeSampling {
-            k_nearest,
-            k_farthest,
-            random_fraction,
-            kmer_size,
-        } = SparsificationStrategy::parse("tree:2:1:0.1:15").unwrap()
-        {
-            assert_eq!(k_nearest, 2);
-            assert_eq!(k_farthest, 1);
-            assert!((random_fraction - 0.1).abs() < 0.001);
-            assert_eq!(kmer_size, 15);
-        } else {
-            panic!("Expected TreeSampling");
-        }
+        let s: SparsificationStrategy = "wfmash:auto".parse().unwrap();
+        assert_eq!(s, SparsificationStrategy::WfmashDensity(None));
     }
 
     #[test]
-    fn test_connectivity_probability() {
-        // Small n should give high probability
-        assert!(compute_connectivity_probability(2, 0.99) >= 0.9);
-        assert!(compute_connectivity_probability(5, 0.99) >= 0.5);
-
-        // Large n should give smaller probability
-        let p_100 = compute_connectivity_probability(100, 0.99);
-        let p_1000 = compute_connectivity_probability(1000, 0.99);
-        assert!(p_1000 < p_100);
-    }
-
-    #[test]
-    fn test_sketch_and_distance() {
+    fn test_mash_sketch_and_distance() {
         let seq1 = b"ACGTACGTACGTACGT";
         let seq2 = b"ACGTACGTACGTACGT";
         let seq3 = b"GGGGGGGGGGGGGGGG";
 
-        let sketch1 = sketch_sequence(seq1, 5, 100);
-        let sketch2 = sketch_sequence(seq2, 5, 100);
-        let sketch3 = sketch_sequence(seq3, 5, 100);
+        let sketch1 = sweepga::mash::KmerSketch::from_sequence(seq1, 5, 100);
+        let sketch2 = sweepga::mash::KmerSketch::from_sequence(seq2, 5, 100);
+        let sketch3 = sweepga::mash::KmerSketch::from_sequence(seq3, 5, 100);
 
         // Identical sequences should have distance 0
-        assert!(mash_distance(&sketch1, &sketch2, 5) < 0.01);
+        assert!(sketch1.mash_distance(&sketch2) < 0.01);
 
         // Different sequences should have higher distance
-        assert!(mash_distance(&sketch1, &sketch3, 5) > 0.5);
+        assert!(sketch1.mash_distance(&sketch3) > 0.5);
     }
 }

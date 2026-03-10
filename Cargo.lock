@@ -1599,9 +1599,9 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libz-ng-sys"
-version = "1.1.24"
+version = "1.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52ff028f347c6ed1b98e17cede6f36b5e2706afde598914c87d2da04f86029ba"
+checksum = "89b6bd0c289b22f4973012fa91dfed9d5f4b633567bb26f9454fbf437817b499"
 dependencies = [
  "cmake",
  "libc",
@@ -1609,9 +1609,9 @@ dependencies = [
 
 [[package]]
 name = "libz-sys"
-version = "1.1.24"
+version = "1.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4735e9cbde5aac84a5ce588f6b23a90b9b0b528f6c5a8db8a4aff300463a0839"
+checksum = "d52f4c29e2a68ac30c9087e1b772dc9f44a2b66ed44edf2266cf2be9b03dafc1"
 dependencies = [
  "cc",
  "cmake",
@@ -2633,7 +2633,7 @@ dependencies = [
 [[package]]
 name = "sweepga"
 version = "0.1.1"
-source = "git+https://github.com/pangenome/sweepga#9611bbe36ad92fd9aca4e554424cc181ed68ebfa"
+source = "git+https://github.com/pangenome/sweepga?rev=741c951f34153eeb414c3aa433fc418d9a69c347#741c951f34153eeb414c3aa433fc418d9a69c347"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -3096,7 +3096,7 @@ dependencies = [
 [[package]]
 name = "wfmash-rs"
 version = "0.1.0"
-source = "git+https://github.com/pangenome/wfmash-rs#34783838c3202acd851a432e5fc62666d5888655"
+source = "git+https://github.com/pangenome/wfmash-rs?rev=e3fb64ef#e3fb64efa040aac4e09cd5d1fd71d5d2db5e6375"
 dependencies = [
  "anyhow",
  "num_cpus",

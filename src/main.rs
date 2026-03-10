@@ -42,7 +42,35 @@ fn parse_size(s: &str) -> Result<u64, String> {
         .map_err(|e| format!("invalid number '{}': {}", num_str, e))
 }
 
+/// Resolve the `--temp-dir` value: "ramdisk" → "/dev/shm" if available.
+fn resolve_temp_dir(temp_dir: Option<String>) -> Option<String> {
+    match temp_dir.as_deref() {
+        Some("ramdisk") => {
+            let dev_shm = std::path::Path::new("/dev/shm");
+            if dev_shm.is_dir() {
+                Some("/dev/shm".to_string())
+            } else {
+                log::warn!("--temp-dir ramdisk requested but /dev/shm is not available, using system default");
+                None
+            }
+        }
+        other => other.map(|s| s.to_string()),
+    }
+}
+
 use impg::{EngineOpts, GfaEngine};
+use sweepga::knn_graph::SparsificationStrategy;
+
+/// Parse an optional sparsify string into a SparsificationStrategy.
+/// Returns `SparsificationStrategy::None` if the input is `None`.
+fn parse_sparsify(s: &Option<String>) -> io::Result<SparsificationStrategy> {
+    match s {
+        None => Ok(SparsificationStrategy::None),
+        Some(val) => val.parse::<SparsificationStrategy>().map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid --sparsify: {}", e))
+        }),
+    }
+}
 
 /// Index mode.
 #[derive(Clone, Debug, Default, clap::ValueEnum)]
@@ -69,66 +97,85 @@ struct CommonOpts {
     verbose: u8,
 }
 
-/// Alignment backend options shared by the `graph` and `align` commands.
+/// Alignment options shared by all commands that run alignments.
 #[derive(Parser, Debug, Clone)]
-#[command(next_help_heading = "Alignment backend")]
-struct AlignmentBackendOpts {
-    /// Aligner backend for FASTA alignment
+#[command(next_help_heading = "Alignment options")]
+struct AlnOpts {
+    // --- Aligner backend ---
+
+    /// Aligner
     #[clap(long, value_parser = ["fastga", "wfmash"], default_value = "wfmash")]
     aligner: String,
 
-    /// K-mer frequency multiplier (frequency = num_sequences * multiplier)
-    #[clap(short = 'f', long, value_parser, default_value_t = 10)]
-    frequency_multiplier: usize,
+    // --- General alignment options ---
 
-    /// Explicit k-mer frequency (overrides --frequency-multiplier)
-    #[clap(long, value_parser)]
-    frequency: Option<usize>,
-
-    /// Minimum alignment length (0 = adaptive)
-    #[clap(long, value_parser, default_value_t = 0)]
-    min_alignment_length: u64,
-}
-
-/// Sweepga alignment filtering options shared by the `graph` and `align` commands.
-#[derive(Parser, Debug, Clone)]
-#[command(next_help_heading = "Alignment filtering")]
-struct FilterOpts {
     /// Disable all alignment filtering
-    #[clap(short = 'N', long, action)]
+    #[clap(long, action)]
     no_filter: bool,
 
+    /// Sparsification strategy: none, auto, random:<frac>, giant:<prob>, tree:<k>:<k>:<f>, wfmash:auto, wfmash:<frac> (default: no sparsification)
+    #[clap(long)]
+    sparsify: Option<String>,
+
+    /// K-mer size for mash distance sketching (used by sparsification)
+    #[clap(long = "mash-kmer-size", value_parser, default_value_t = sweepga::mash::DEFAULT_KMER_SIZE)]
+    mash_kmer_size: usize,
+
+    /// Sketch size (number of minimizers) for mash distance (used by sparsification)
+    #[clap(long = "mash-sketch-size", value_parser, default_value_t = sweepga::mash::DEFAULT_SKETCH_SIZE)]
+    mash_sketch_size: usize,
+
+    /// Directory for temporary files [default: $TMPDIR or cwd; use "ramdisk" for /dev/shm]
+    #[clap(long, value_parser)]
+    temp_dir: Option<String>,
+
+    // --- Filtering options (post-alignment, aligner-independent) ---
+
     /// n:m-best mappings kept in query:target dimensions (e.g., "1:1", "many:many")
-    #[clap(short = 'n', long, value_parser, default_value = "many:many")]
+    #[clap(long, value_parser, default_value = "many:many")]
     num_mappings: String,
 
     /// Scaffold jump/gap distance in bp (0 = disable scaffolding). Accepts k/m/g suffixes.
-    #[clap(short = 'j', long, value_parser = parse_size, default_value = "50000")]
+    #[clap(long, value_parser = parse_size, default_value = "50000")]
     scaffold_jump: u64,
 
     /// Minimum scaffold chain length in bp. Accepts k/m/g suffixes.
-    #[clap(short = 's', long, value_parser = parse_size, default_value = "10000")]
+    #[clap(long, value_parser = parse_size, default_value = "10000")]
     scaffold_mass: u64,
 
     /// Scaffold filter mode (e.g., "1:1", "many:many", "inf:inf" for no filtering)
-    #[clap(short = 'm', long, value_parser, default_value = "many:many")]
+    #[clap(long, value_parser, default_value = "many:many")]
     scaffold_filter: String,
 
     /// Maximum overlap ratio for plane sweep filtering (0.0-1.0)
     #[clap(long, value_parser, default_value_t = 0.95)]
     overlap: f64,
 
-    /// Minimum identity threshold (0.0-1.0)
-    #[clap(short = 'i', long, value_parser, default_value_t = 0.0)]
-    min_identity: f64,
+    /// Minimum alignment identity threshold for filtering (0.0-1.0)
+    #[clap(long = "min-aln-identity", value_parser, default_value_t = 0.0)]
+    min_aln_identity: f64,
+
+    /// Minimum block length for the aligner (0 = adaptive). Accepts k/m/g suffixes.
+    #[clap(long = "min-aln-length", value_parser = parse_size, default_value = "0")]
+    min_aln_length: u64,
 
     /// Maximum scaffold deviation distance (0 = no limit). Accepts k/m/g suffixes.
-    #[clap(short = 'D', long, value_parser = parse_size, default_value = "0")]
+    #[clap(long, value_parser = parse_size, default_value = "0")]
     scaffold_dist: u64,
 
-    /// Minimum mapping length to include in filtering. Accepts k/m/g suffixes.
-    #[clap(short = 'b', long = "min-mapping-length", value_parser = parse_size, default_value = "0")]
-    min_mapping_length: u64,
+    /// Drop mappings shorter than this before plane-sweep/scaffold filtering. Accepts k/m/g suffixes.
+    #[clap(long = "min-map-length", value_parser = parse_size, default_value = "0")]
+    min_map_length: u64,
+
+    // --- fastga-specific options ---
+
+    /// [fastga] K-mer frequency multiplier (frequency = num_sequences * multiplier)
+    #[clap(long = "fastga-frequency-multiplier", value_parser, default_value_t = 10)]
+    fastga_frequency_multiplier: usize,
+
+    /// [fastga] Explicit k-mer frequency (overrides --fastga-frequency-multiplier)
+    #[clap(long = "fastga-frequency", value_parser)]
+    fastga_frequency: Option<usize>,
 }
 
 /// Seqwish graph induction options shared by the `graph`, `query`, and `partition` commands.
@@ -195,6 +242,68 @@ impl SmoothOpts {
                 })
             })
             .collect()
+    }
+}
+
+/// Engine + graph-building options shared by query, partition, similarity, and graph.
+#[derive(Parser, Debug)]
+struct EngineCliOpts {
+    /// GFA engine: 'pggb' (seqwish+smoothing+gfaffix, default), 'recursive' (sweepga+POA+lacing),
+    /// 'seqwish' (unsmoothed), or 'poa' (single-pass POA)
+    #[arg(help_heading = "Output options")]
+    #[clap(long, value_enum, default_value_t = GfaEngine::Pggb)]
+    engine: GfaEngine,
+
+    /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2
+    #[arg(help_heading = "Alignment options")]
+    #[clap(long, value_parser, default_value = "5,4,6,2,24,1")]
+    poa_scoring: String,
+
+    #[clap(flatten)]
+    aln: AlnOpts,
+
+    #[clap(flatten)]
+    seqwish: SeqwishOpts,
+
+    #[clap(flatten)]
+    smooth: SmoothOpts,
+
+    #[clap(flatten)]
+    recursive_opts: RecursiveOpts,
+}
+
+impl EngineCliOpts {
+    /// Parse POA scoring parameters.
+    fn parse_poa_scoring(&self) -> io::Result<(u8, u8, u8, u8, u8, u8)> {
+        parse_poa_scoring_string(&self.poa_scoring)
+    }
+
+    /// Resolve temp_dir ("ramdisk" → "/dev/shm") and build an `EngineOpts`.
+    fn build(
+        &self,
+        num_threads: usize,
+        build_recursive: bool,
+    ) -> io::Result<EngineOpts> {
+        let temp_dir = resolve_temp_dir(self.aln.temp_dir.clone());
+        let sparsify = parse_sparsify(&self.aln.sparsify)?;
+        let mash_params = sweepga::knn_graph::MashParams {
+            kmer_size: self.aln.mash_kmer_size,
+            sketch_size: self.aln.mash_sketch_size,
+        };
+        let scoring_params = self.parse_poa_scoring()?;
+        build_engine_opts(
+            self.engine,
+            num_threads,
+            &self.aln,
+            sparsify,
+            mash_params,
+            &self.seqwish,
+            &self.smooth,
+            &self.recursive_opts,
+            Some(scoring_params),
+            temp_dir,
+            build_recursive,
+        )
     }
 }
 
@@ -315,16 +424,11 @@ impl SequenceOpts {
     }
 }
 
-/// Common sequence and POA scoring options
+/// Common sequence and output options for GFA/MAF/FASTA output formats
 #[derive(Parser, Debug)]
 struct GfaMafFastaOpts {
     #[clap(flatten)]
     sequence: SequenceOpts,
-
-    /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for 'gfa' and 'maf')
-    #[arg(help_heading = "Alignment options")]
-    #[clap(long, value_parser, default_value = "5,4,6,2,24,1")]
-    poa_scoring: String,
 
     /// Reverse complement reverse strand sequences (for 'fasta' output)
     #[arg(help_heading = "Output options")]
@@ -338,11 +442,6 @@ struct GfaMafFastaOpts {
 }
 
 impl GfaMafFastaOpts {
-    /// Parse POA scoring parameters
-    fn parse_poa_scoring(&self) -> io::Result<(u8, u8, u8, u8, u8, u8)> {
-        parse_poa_scoring_string(&self.poa_scoring)
-    }
-
     /// Helper to validate and setup POA/sequence resources for a given output format, including sequence index for PAF with original coordinates or for 1aln files
     fn setup_output_resources(
         self,
@@ -350,6 +449,7 @@ impl GfaMafFastaOpts {
         original_sequence_coordinates: bool,
         alignment_files: &[String],
         approximate_mode: bool,
+        poa_scoring: &str,
     ) -> io::Result<(
         Option<UnifiedSequenceIndex>,
         Option<(u8, u8, u8, u8, u8, u8)>,
@@ -372,7 +472,7 @@ impl GfaMafFastaOpts {
         let needs_poa = matches!(output_format, "gfa" | "maf" | "fasta-aln");
 
         let scoring_params = if needs_poa {
-            Some(self.parse_poa_scoring()?)
+            Some(parse_poa_scoring_string(poa_scoring)?)
         } else {
             None
         };
@@ -441,7 +541,8 @@ impl RecursiveOpts {
         scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
         temp_dir: Option<String>,
         aligner: String,
-        sparsify: Option<String>,
+        sparsify: SparsificationStrategy,
+        mash_params: sweepga::knn_graph::MashParams,
     ) -> io::Result<impg::realize::RealizeConfig> {
         if let Some(ref dir) = self.recursive_debug_dir {
             std::fs::create_dir_all(dir).map_err(|e| {
@@ -461,6 +562,7 @@ impl RecursiveOpts {
             debug_dir: self.recursive_debug_dir.clone(),
             aligner,
             sparsify,
+            mash_params,
         })
     }
 }
@@ -736,12 +838,14 @@ fn get_original_sequence_length(
 enum Args {
     /// Create an IMPG index
     Index {
+        // --- Input ---
         #[clap(flatten)]
         alignment: AlignmentOpts,
 
         #[clap(flatten)]
         sequence: SequenceOpts,
 
+        // --- General ---
         #[clap(flatten)]
         common: CommonOpts,
     },
@@ -759,6 +863,13 @@ enum Args {
         #[clap(long, value_parser, default_value = "auto")]
         format: String,
 
+        #[clap(flatten)]
+        sequence: SequenceOpts,
+
+        /// Reference (FASTA or AGC) file for validating contig lengths in VCF files
+        #[clap(long, value_parser)]
+        reference: Option<String>,
+
         /// Output file path
         #[clap(short, long, value_parser)]
         output: String,
@@ -775,79 +886,25 @@ enum Args {
         #[clap(long, default_value = "false")]
         skip_validation: bool,
 
-        #[clap(flatten)]
-        sequence: SequenceOpts,
-
         /// Directory for temporary files [default: $TMPDIR or cwd; use "ramdisk" for /dev/shm]
         #[clap(long, value_parser)]
         temp_dir: Option<String>,
-
-        /// Reference (FASTA or AGC) file for validating contig lengths in VCF files
-        #[clap(long, value_parser)]
-        reference: Option<String>,
 
         #[clap(flatten)]
         common: CommonOpts,
     },
     /// Partition the alignment
     Partition {
+        // --- Input ---
         #[clap(flatten)]
         alignment: AlignmentOpts,
+
+        // --- Partition-specific ---
 
         /// Window size for partitioning
         #[arg(help_heading = "Partition options")]
         #[clap(short = 'w', long, value_parser)]
         window_size: usize,
-
-        /// Output format: 'bed', 'gfa' (v1.0), 'maf', or 'fasta' ('gfa', 'maf', and 'fasta' require --sequence-files or --sequence-list)
-        #[arg(help_heading = "Output options")]
-        #[clap(short = 'o', long, value_parser, default_value = "bed")]
-        output_format: String,
-
-        /// GFA engine: 'pggb' (seqwish+smoothing+gfaffix, default), 'recursive' (sweepga+POA+lacing), 'seqwish' (unsmoothed), or 'poa' (single-pass POA)
-        #[arg(help_heading = "Output options")]
-        #[clap(long, value_enum, default_value_t = GfaEngine::Pggb)]
-        engine: GfaEngine,
-
-        /// Disable alignment filtering for seqwish engine (faster but may produce broken graphs)
-        #[arg(help_heading = "Output options")]
-        #[clap(short = 'N', long, action)]
-        no_filter: bool,
-
-        /// Wfmash mapping sparsification: 'auto' (pggb heuristic) or a fraction 0.0-1.0 (default: no sparsification)
-        #[arg(help_heading = "Output options")]
-        #[clap(short = 'x', long)]
-        sparsify: Option<String>,
-
-        /// Output folder for partition files (default: current directory)
-        #[arg(help_heading = "Output options")]
-        #[clap(long, value_parser)]
-        output_folder: Option<String>,
-
-        #[clap(flatten)]
-        gfa_maf_fasta: GfaMafFastaOpts,
-
-        #[clap(flatten)]
-        recursive_opts: RecursiveOpts,
-
-        #[clap(flatten)]
-        seqwish: SeqwishOpts,
-
-        #[clap(flatten)]
-        smooth: SmoothOpts,
-
-        /// Maximum distance between regions to merge
-        #[arg(help_heading = "Filtering and merging")]
-        #[clap(short = 'd', long, value_parser, default_value_t = 100000)]
-        merge_distance: i32,
-
-        /// Minimum gap-compressed identity threshold (0.0-1.0)
-        #[arg(help_heading = "Filtering and merging")]
-        #[clap(long, value_parser)]
-        min_identity: Option<f64>,
-
-        #[clap(flatten)]
-        transitive_opts: TransitiveOpts,
 
         /// Path to the file with sequence names to start with (one per line)
         #[arg(help_heading = "Partition options")]
@@ -883,41 +940,66 @@ enum Args {
         #[clap(long, action)]
         separate_files: bool,
 
+        // --- Filtering and merging ---
+
+        /// Maximum distance between regions to merge
+        #[arg(help_heading = "Filtering and merging")]
+        #[clap(short = 'd', long, value_parser, default_value_t = 100000)]
+        merge_distance: i32,
+
+        /// Minimum gap-compressed identity threshold (0.0-1.0)
+        #[arg(help_heading = "Filtering and merging")]
+        #[clap(long, value_parser)]
+        min_identity: Option<f64>,
+
+        #[clap(flatten)]
+        transitive_opts: TransitiveOpts,
+
+        // --- Performance ---
+
         /// Use approximate mode for faster queries with tracepoint files (.1aln/.tpa, only bed/bedpe output)
         #[arg(help_heading = "Performance")]
         #[clap(long, action)]
         approximate: bool,
 
+        // --- Output ---
+
+        /// Output format: 'bed', 'gfa' (v1.0), 'maf', or 'fasta' ('gfa', 'maf', and 'fasta' require --sequence-files or --sequence-list)
+        #[arg(help_heading = "Output options")]
+        #[clap(short = 'o', long, value_parser, default_value = "bed")]
+        output_format: String,
+
+        /// Output folder for partition files (default: current directory)
+        #[arg(help_heading = "Output options")]
+        #[clap(long, value_parser)]
+        output_folder: Option<String>,
+
+        #[clap(flatten)]
+        gfa_maf_fasta: GfaMafFastaOpts,
+
+        #[clap(flatten)]
+        engine_cli: EngineCliOpts,
+
+        // --- General ---
         #[clap(flatten)]
         common: CommonOpts,
     },
     /// Query overlaps in the alignment
     Query {
+        // --- Input ---
         #[clap(flatten)]
         alignment: AlignmentOpts,
 
+        // --- Query-specific ---
         #[clap(flatten)]
         query: QueryOpts,
+
+        // --- Output ---
 
         /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', 'gfa', 'maf', 'fasta', or 'fasta+paf' ('gfa', 'maf', 'fasta', and 'fasta+paf' require --sequence-files or --sequence-list)
         #[arg(help_heading = "Output options")]
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
-
-        /// GFA engine: 'pggb' (seqwish+smoothing+gfaffix, default), 'recursive' (sweepga+POA+lacing), 'seqwish' (unsmoothed), or 'poa' (single-pass POA)
-        #[arg(help_heading = "Output options")]
-        #[clap(long, value_enum, default_value_t = GfaEngine::Pggb)]
-        engine: GfaEngine,
-
-        /// Disable alignment filtering for seqwish engine (faster but may produce broken graphs)
-        #[arg(help_heading = "Output options")]
-        #[clap(short = 'N', long, action)]
-        no_filter: bool,
-
-        /// Wfmash mapping sparsification: 'auto' (pggb heuristic) or a fraction 0.0-1.0 (default: no sparsification)
-        #[arg(help_heading = "Output options")]
-        #[clap(short = 'x', long)]
-        sparsify: Option<String>,
 
         /// Prefix for output file (automatically appends the extension based on format)
         #[clap(short = 'O', long, value_parser, default_value = None)]
@@ -927,43 +1009,37 @@ enum Args {
         gfa_maf_fasta: GfaMafFastaOpts,
 
         #[clap(flatten)]
-        recursive_opts: RecursiveOpts,
+        engine_cli: EngineCliOpts,
 
-        #[clap(flatten)]
-        seqwish: SeqwishOpts,
-
-        #[clap(flatten)]
-        smooth: SmoothOpts,
-
-        /// Directory for temporary files [default: $TMPDIR or cwd; use "ramdisk" for /dev/shm]
-        #[arg(help_heading = "Output options")]
-        #[clap(long, value_parser)]
-        temp_dir: Option<String>,
-
+        // --- General ---
         #[clap(flatten)]
         common: CommonOpts,
     },
     /// Refine loci to maximize the number of samples that span both ends of the region
     Refine {
+        // --- Input ---
         #[clap(flatten)]
         alignment: AlignmentOpts,
 
+        // --- Refine-specific ---
         #[clap(flatten)]
         refine: RefineOpts,
 
+        // --- General ---
         #[clap(flatten)]
         common: CommonOpts,
     },
     /// Compute pairwise similarity between sequences in a region
     Similarity {
+        // --- Input ---
         #[clap(flatten)]
         alignment: AlignmentOpts,
 
+        // --- Query-specific ---
         #[clap(flatten)]
         query: QueryOpts,
 
-        #[clap(flatten)]
-        gfa_maf_fasta: GfaMafFastaOpts,
+        // --- Output ---
 
         /// Output distances instead of similarities
         #[arg(help_heading = "Output options")]
@@ -984,6 +1060,14 @@ enum Args {
         #[arg(help_heading = "Output options")]
         #[clap(long, value_parser, default_value_t = 1)]
         delim_pos: u16,
+
+        #[clap(flatten)]
+        gfa_maf_fasta: GfaMafFastaOpts,
+
+        #[clap(flatten)]
+        engine_cli: EngineCliOpts,
+
+        // --- PCA ---
 
         /// Perform PCA/MDS dimensionality reduction on the distance matrix
         #[arg(help_heading = "PCA options")]
@@ -1021,116 +1105,76 @@ enum Args {
         #[clap(long, value_parser, requires = "pca", default_value = "jaccard")]
         pca_measure: String,
 
-        /// GFA engine: 'poa' (single-pass POA, default) or 'recursive' (sweepga+POA+lacing)
-        #[arg(help_heading = "Engine options")]
-        #[clap(long, value_enum, default_value_t = GfaEngine::Poa)]
-        engine: GfaEngine,
-
-        #[clap(flatten)]
-        recursive_opts: RecursiveOpts,
-
+        // --- General ---
         #[clap(flatten)]
         common: CommonOpts,
     },
 
     /// Print alignment statistics
     Stats {
+        // --- Input ---
         #[clap(flatten)]
         alignment: AlignmentOpts,
 
         #[clap(flatten)]
         sequence: SequenceOpts,
 
+        // --- Stats-specific ---
+
         /// List sequence names and lengths (skip overlap statistics)
         #[clap(long)]
         list_sequences: bool,
 
+        // --- General ---
         #[clap(flatten)]
         common: CommonOpts,
     },
 
     /// Build a pangenome graph from FASTA sequences using sweepga+seqwish
     Graph {
-        /// List of FASTA file paths (space-separated)
-        #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with = "fasta_list")]
-        fasta_files: Vec<String>,
-
-        /// Text file containing FASTA file paths (one per line)
-        #[clap(long, value_parser, conflicts_with = "fasta_files")]
-        fasta_list: Option<String>,
+        // --- Input ---
+        #[clap(flatten)]
+        fasta_input: SequenceOpts,
 
         /// Input PAF file (skip alignment step if provided)
         #[clap(short = 'a', long, value_parser)]
         paf_file: Option<String>,
 
+        // --- Output ---
+
         /// Output GFA file path (use "-" for stdout)
         #[clap(short = 'g', long, value_parser, default_value = "-")]
         output: String,
 
-        /// Wfmash mapping sparsification: 'auto' (pggb heuristic) or a fraction 0.0-1.0 (default: no sparsification)
-        #[clap(short = 'x', long)]
-        sparsify: Option<String>,
-
-        /// GFA engine: 'pggb' (seqwish+smoothing+gfaffix, default), 'seqwish' (raw graph induction),
-        /// 'recursive' (sweepga+POA+lacing), or 'poa' (single-pass POA)
-        #[clap(long, value_enum, default_value_t = GfaEngine::Pggb)]
-        engine: GfaEngine,
-
-        /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2 (for recursive/poa engines)
-        #[clap(long, value_parser, default_value = "5,4,6,2,24,1")]
-        poa_scoring: String,
-
-        /// Directory for temporary files [default: $TMPDIR or cwd; use "ramdisk" for /dev/shm]
-        #[clap(long, value_parser)]
-        temp_dir: Option<String>,
-
         #[clap(flatten)]
-        alignment_backend: AlignmentBackendOpts,
+        engine_cli: EngineCliOpts,
 
-        #[clap(flatten)]
-        filter: FilterOpts,
-
-        #[clap(flatten)]
-        seqwish: SeqwishOpts,
-
-        #[clap(flatten)]
-        smooth: SmoothOpts,
-
-        #[clap(flatten)]
-        recursive_opts: RecursiveOpts,
-
+        // --- General ---
         #[clap(flatten)]
         common: CommonOpts,
     },
 
     /// Generate alignment pairs with sparsification strategies
     Align {
-        /// List of FASTA file paths (space-separated)
-        #[clap(long, value_parser, num_args = 1.., value_delimiter = ' ', conflicts_with = "fasta_list")]
-        fasta_files: Vec<String>,
+        // --- Input ---
+        #[clap(flatten)]
+        fasta_input: SequenceOpts,
 
-        /// Text file containing FASTA file paths (one per line)
-        #[clap(long, value_parser, conflicts_with = "fasta_files")]
-        fasta_list: Option<String>,
+        // --- Output ---
 
         /// Output directory for alignments
         #[clap(short = 'o', long, value_parser, default_value = "alignments")]
         output_dir: String,
 
-        /// Sparsification strategy: none, random:<frac>, giant:<prob>, tree:<k_near>:<k_far>:<rand>[:<kmer>]
-        #[clap(short = 'p', long, value_parser, default_value = "giant:0.99")]
-        sparsification: String,
-
         /// Output format: paf, 1aln, or joblist
         #[clap(long, value_parser, default_value = "joblist")]
         format: String,
 
+        // --- Alignment ---
         #[clap(flatten)]
-        alignment_backend: AlignmentBackendOpts,
+        aln: AlnOpts,
 
-        #[clap(flatten)]
-        filter: FilterOpts,
-
+        // --- General ---
         #[clap(flatten)]
         common: CommonOpts,
     },
@@ -1178,6 +1222,7 @@ fn run() -> io::Result<()> {
             reference,
         } => {
             initialize_threads_and_log(&common);
+            let temp_dir = resolve_temp_dir(temp_dir);
 
             // Check that at least one input is provided
             if files.is_none() && file_list.is_none() {
@@ -1265,14 +1310,9 @@ fn run() -> io::Result<()> {
             alignment,
             window_size,
             output_format,
-            engine,
-            no_filter,
-            sparsify,
             output_folder,
             gfa_maf_fasta,
-            recursive_opts,
-            seqwish,
-            smooth,
+            engine_cli,
             merge_distance,
             min_identity,
             transitive_opts,
@@ -1304,7 +1344,7 @@ fn run() -> io::Result<()> {
             }
 
             // For size validation, flat POA on "gfa" needs the same limit as "gfa-poa"
-            let size_check_format = if output_format == "gfa" && engine == GfaEngine::Poa {
+            let size_check_format = if output_format == "gfa" && engine_cli.engine == GfaEngine::Poa {
                 "gfa-poa"
             } else {
                 &output_format
@@ -1341,36 +1381,14 @@ fn run() -> io::Result<()> {
                 false,
                 alignment_files.as_slice(),
                 approximate,
+                &engine_cli.poa_scoring,
             )?;
 
-            // Build engine config
-            let engine_config = EngineOpts {
-                engine,
-                recursive_config: if output_format == "gfa" && engine == GfaEngine::Recursive {
-                    Some(recursive_opts.build_config(
-                        common.threads.get(),
-                        scoring_params,
-                        None,
-                        "wfmash".to_string(),
-                        sparsify.clone(),
-                    )?)
-                } else {
-                    None
-                },
-                num_threads: common.threads.get(),
-                no_filter,
-                debug_dir: recursive_opts.recursive_debug_dir.clone(),
-                sparsify: sparsify.clone(),
-                repeat_max: seqwish.repeat_max,
-                min_repeat_dist: seqwish.min_repeat_dist,
-                min_match_len: seqwish.min_match_len,
-                sparse_factor: seqwish.sparse_factor,
-                transclose_batch: seqwish.transclose_batch,
-                disk_backed: seqwish.disk_backed,
-                target_poa_lengths: smooth.parse_target_poa_lengths()?,
-                max_node_length: smooth.max_node_length,
-                poa_padding_fraction: smooth.poa_padding_fraction,
-            };
+            // Build engine config (resolves temp_dir and sparsify internally)
+            let engine_config = engine_cli.build(
+                common.threads.get(),
+                output_format == "gfa",
+            )?;
 
             // Initialize impg after validation
             let impg = initialize_index(
@@ -1409,15 +1427,9 @@ fn run() -> io::Result<()> {
             alignment,
             query,
             output_format,
-            engine,
-            no_filter,
-            sparsify,
             output_prefix,
             gfa_maf_fasta,
-            recursive_opts,
-            seqwish,
-            smooth,
-            temp_dir,
+            engine_cli,
         } => {
             initialize_threads_and_log(&common);
 
@@ -1500,7 +1512,7 @@ fn run() -> io::Result<()> {
             )?;
 
             // For size validation, flat POA on "gfa" needs the same limit as the old "gfa-poa"
-            let size_check_format = if output_format == "gfa" && engine == GfaEngine::Poa {
+            let size_check_format = if output_format == "gfa" && engine_cli.engine == GfaEngine::Poa {
                 "gfa-poa"
             } else {
                 &output_format
@@ -1609,6 +1621,7 @@ fn run() -> io::Result<()> {
                 query.original_sequence_coordinates,
                 alignment_files.as_slice(),
                 query.approximate,
+                &engine_cli.poa_scoring,
             )?;
 
             // Process all target ranges in a unified loop
@@ -1669,33 +1682,10 @@ fn run() -> io::Result<()> {
                         )?;
                     }
                     "gfa" => {
-                        let engine_opts = EngineOpts {
-                            engine,
-                            recursive_config: if engine == GfaEngine::Recursive {
-                                Some(recursive_opts.build_config(
-                                    common.threads.get(),
-                                    scoring_params,
-                                    temp_dir.clone(),
-                                    "wfmash".to_string(),
-                                    sparsify.clone(),
-                                )?)
-                            } else {
-                                None
-                            },
-                            num_threads: common.threads.get(),
-                            no_filter,
-                            debug_dir: recursive_opts.recursive_debug_dir.clone(),
-                            sparsify: sparsify.clone(),
-                            repeat_max: seqwish.repeat_max,
-                            min_repeat_dist: seqwish.min_repeat_dist,
-                            min_match_len: seqwish.min_match_len,
-                            sparse_factor: seqwish.sparse_factor,
-                            transclose_batch: seqwish.transclose_batch,
-                            disk_backed: seqwish.disk_backed,
-                            target_poa_lengths: smooth.parse_target_poa_lengths()?,
-                            max_node_length: smooth.max_node_length,
-                            poa_padding_fraction: smooth.poa_padding_fraction,
-                        };
+                        let engine_opts = engine_cli.build(
+                            common.threads.get(),
+                            true,
+                        )?;
                         output_results_gfa(
                             &impg,
                             &mut results,
@@ -1953,8 +1943,7 @@ fn run() -> io::Result<()> {
             pca_measure,
             polarize_n_prev,
             polarize_guide_samples,
-            engine,
-            recursive_opts,
+            engine_cli,
         } => {
             initialize_threads_and_log(&common);
 
@@ -1994,10 +1983,10 @@ fn run() -> io::Result<()> {
                 ));
             }
 
-            if engine == GfaEngine::Seqwish || engine == GfaEngine::Pggb {
+            if engine_cli.engine == GfaEngine::Seqwish || engine_cli.engine == GfaEngine::Pggb {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "The 'seqwish' and 'pggb' engines are not supported for the similarity command (they don't produce an MSA). Use 'poa' or 'recursive'.",
+                    "The 'seqwish' and 'pggb' engines are not yet implemented for the similarity command. Use 'poa' or 'recursive'.",
                 ));
             }
 
@@ -2014,6 +2003,7 @@ fn run() -> io::Result<()> {
                 false,
                 alignment_files.as_slice(),
                 false,
+                &engine_cli.poa_scoring,
             )?;
             let sequence_index = sequence_index.unwrap(); // Safe since "gfa" always requires sequence files
             let scoring_params = scoring_params.unwrap(); // Safe since "gfa" always requires POA scoring
@@ -2131,18 +2121,12 @@ fn run() -> io::Result<()> {
                 all_query_data.push((query_intervals, region_label));
             }
 
-            // Build recursive config if engine is Recursive
-            let recursive_config = if engine == GfaEngine::Recursive {
-                Some(recursive_opts.build_config(
-                    common.threads.into(),
-                    Some(scoring_params),
-                    None,
-                    "wfmash".to_string(),
-                    None,
-                )?)
-            } else {
-                None
-            };
+            // Build engine config (resolves temp_dir and sparsify internally)
+            let engine_opts = engine_cli.build(
+                common.threads.into(),
+                true,
+            )?;
+            let recursive_config = engine_opts.recursive_config;
 
             // Process all regions in parallel
             similarity::compute_and_output_similarities(
@@ -2185,89 +2169,94 @@ fn run() -> io::Result<()> {
             }
         }
         Args::Graph {
-            fasta_files,
-            fasta_list,
+            fasta_input,
             paf_file,
             output,
-            sparsify,
-            engine,
-            poa_scoring,
-            temp_dir,
-            alignment_backend,
-            filter,
-            seqwish,
-            smooth,
-            recursive_opts,
+            engine_cli,
             common,
         } => {
             initialize_threads_and_log(&common);
+            let temp_dir = resolve_temp_dir(engine_cli.aln.temp_dir.clone());
 
-            // Check that at least one input is provided
-            if fasta_files.is_empty() && fasta_list.is_none() {
+            let fasta_files = fasta_input.resolve_sequence_files()?;
+            if fasta_files.is_empty() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "Either --fasta-files or --fasta-list must be provided",
+                    "No sequence files specified. Use --sequence-files or --sequence-list",
                 ));
             }
+
+            // Parse sparsification strategy
+            let sparsify_strategy = parse_sparsify(&engine_cli.aln.sparsify)?;
 
             // Validate aligner-parameter compatibility
-            if alignment_backend.aligner == "fastga" && sparsify.is_some() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "--sparsify is only supported with --aligner wfmash; fastga does not support wfmash-style sparsification",
-                ));
+            if let Err(e) = sweepga::orchestrator::validate_strategy_aligner(
+                &sparsify_strategy,
+                &engine_cli.aln.aligner,
+            ) {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, e));
             }
-            if alignment_backend.aligner == "wfmash" && alignment_backend.frequency.is_some() {
+            if engine_cli.aln.aligner == "wfmash" && engine_cli.aln.fastga_frequency.is_some() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "--frequency is only supported with --aligner fastga; wfmash uses its own frequency estimation",
+                    "--fastga-frequency is only supported with --aligner fastga; wfmash uses its own frequency estimation",
                 ));
             }
 
-            // Pre-clone values needed by the recursive engine before they are consumed by graph_config.
-            let aligner_for_recursive = alignment_backend.aligner.clone();
-            let sparsify_for_recursive = sparsify.clone();
+            // Parse POA scoring and pre-clone values needed by the recursive engine
+            // before they are consumed by graph_config.
+            let poa_scoring = engine_cli.parse_poa_scoring()?;
+            let aligner_for_recursive = engine_cli.aln.aligner.clone();
+            let sparsify_for_recursive = sparsify_strategy.clone();
             let temp_dir_for_recursive = temp_dir.clone();
 
             // Shared graph build config — identical for the seqwish and pggb engines; built
             // once here so neither arm repeats the field list.
             let graph_config = graph::GraphBuildConfig {
                 num_threads: common.threads.get(),
-                frequency_multiplier: alignment_backend.frequency_multiplier,
-                frequency: alignment_backend.frequency,
-                min_alignment_length: alignment_backend.min_alignment_length,
-                repeat_max: seqwish.repeat_max,
-                min_repeat_dist: seqwish.min_repeat_dist,
-                min_match_len: seqwish.min_match_len,
-                sparse_factor: seqwish.sparse_factor,
-                transclose_batch: seqwish.transclose_batch,
-                use_in_memory: !seqwish.disk_backed,
+                frequency_multiplier: engine_cli.aln.fastga_frequency_multiplier,
+                frequency: engine_cli.aln.fastga_frequency,
+                min_aln_length: engine_cli.aln.min_aln_length,
+                repeat_max: engine_cli.seqwish.repeat_max,
+                min_repeat_dist: engine_cli.seqwish.min_repeat_dist,
+                min_match_len: engine_cli.seqwish.min_match_len,
+                sparse_factor: engine_cli.seqwish.sparse_factor,
+                transclose_batch: engine_cli.seqwish.transclose_batch,
+                use_in_memory: !engine_cli.seqwish.disk_backed,
                 show_progress: common.verbose > 0,
                 temp_dir,
                 input_paf: paf_file,
-                aligner: alignment_backend.aligner,
-                no_filter: filter.no_filter,
-                num_mappings: filter.num_mappings,
-                scaffold_jump: filter.scaffold_jump,
-                scaffold_mass: filter.scaffold_mass,
-                scaffold_filter: filter.scaffold_filter,
-                overlap: filter.overlap,
-                min_identity: filter.min_identity,
-                scaffold_dist: filter.scaffold_dist,
-                min_mapping_length: filter.min_mapping_length,
+                aligner: engine_cli.aln.aligner,
+                no_filter: engine_cli.aln.no_filter,
+                num_mappings: engine_cli.aln.num_mappings,
+                scaffold_jump: engine_cli.aln.scaffold_jump,
+                scaffold_mass: engine_cli.aln.scaffold_mass,
+                scaffold_filter: engine_cli.aln.scaffold_filter,
+                overlap: engine_cli.aln.overlap,
+                min_identity: engine_cli.aln.min_aln_identity,
+                scaffold_dist: engine_cli.aln.scaffold_dist,
+                min_map_length: engine_cli.aln.min_map_length,
                 debug_dir: None,
-                sparsify,
+                sparsify: sparsify_strategy,
+                mash_params: sweepga::knn_graph::MashParams {
+                    kmer_size: engine_cli.aln.mash_kmer_size,
+                    sketch_size: engine_cli.aln.mash_sketch_size,
+                },
             };
 
-            match engine {
+            match engine_cli.engine {
                 GfaEngine::Recursive => {
-                    let scoring = parse_poa_scoring_string(&poa_scoring)?;
-                    let recursive_config = recursive_opts.build_config(
+                    let scoring = poa_scoring;
+                    let recursive_config = engine_cli.recursive_opts.build_config(
                         common.threads.get(),
                         Some(scoring),
                         temp_dir_for_recursive,
                         aligner_for_recursive,
                         sparsify_for_recursive,
+                        sweepga::knn_graph::MashParams {
+                            kmer_size: engine_cli.aln.mash_kmer_size,
+                            sketch_size: engine_cli.aln.mash_sketch_size,
+                        },
                     )?;
 
                     if output == "-" {
@@ -2275,7 +2264,6 @@ fn run() -> io::Result<()> {
                         let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
                         graph::run_graph_build_realize(
                             fasta_files,
-                            fasta_list,
                             &mut out,
                             &recursive_config,
                         )?;
@@ -2283,21 +2271,19 @@ fn run() -> io::Result<()> {
                         let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
                         graph::run_graph_build_realize(
                             fasta_files,
-                            fasta_list,
                             &mut out,
                             &recursive_config,
                         )?;
                     }
                 }
                 GfaEngine::Poa => {
-                    let scoring = parse_poa_scoring_string(&poa_scoring)?;
+                    let scoring = poa_scoring;
 
                     if output == "-" {
                         let stdout = io::stdout();
                         let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
                         graph::run_graph_build_poa(
                             fasta_files,
-                            fasta_list,
                             &mut out,
                             scoring,
                             common.threads.get(),
@@ -2306,7 +2292,6 @@ fn run() -> io::Result<()> {
                         let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
                         graph::run_graph_build_poa(
                             fasta_files,
-                            fasta_list,
                             &mut out,
                             scoring,
                             common.threads.get(),
@@ -2314,66 +2299,62 @@ fn run() -> io::Result<()> {
                     }
                 }
                 GfaEngine::Seqwish => {
-                    graph::run_graph_build(fasta_files, fasta_list, &output, graph_config)?;
+                    graph::run_graph_build(fasta_files, &output, graph_config)?;
                 }
                 GfaEngine::Pggb => {
-                    let target_poa_lengths = smooth.parse_target_poa_lengths()?;
+                    let target_poa_lengths = engine_cli.smooth.parse_target_poa_lengths()?;
                     if output == "-" {
                         let stdout = io::stdout();
                         let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
                         graph::run_graph_build_pggb(
                             fasta_files,
-                            fasta_list,
                             &mut out,
                             &graph_config,
                             target_poa_lengths,
-                            smooth.max_node_length,
-                            smooth.poa_padding_fraction,
+                            engine_cli.smooth.max_node_length,
+                            engine_cli.smooth.poa_padding_fraction,
                         )?;
                     } else {
                         let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
                         graph::run_graph_build_pggb(
                             fasta_files,
-                            fasta_list,
                             &mut out,
                             &graph_config,
                             target_poa_lengths,
-                            smooth.max_node_length,
-                            smooth.poa_padding_fraction,
+                            engine_cli.smooth.max_node_length,
+                            engine_cli.smooth.poa_padding_fraction,
                         )?;
                     }
                 }
             }
         }
         Args::Align {
-            fasta_files,
-            fasta_list,
+            fasta_input,
             output_dir,
-            sparsification,
             format,
-            alignment_backend,
-            filter,
+            aln,
             common,
         } => {
             initialize_threads_and_log(&common);
+            let temp_dir = resolve_temp_dir(aln.temp_dir);
 
-            // Check that at least one input is provided
-            if fasta_files.is_empty() && fasta_list.is_none() {
+            let fasta_files = fasta_input.resolve_sequence_files()?;
+            if fasta_files.is_empty() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "Either --fasta-files or --fasta-list must be provided",
+                    "No sequence files specified. Use --sequence-files or --sequence-list",
                 ));
             }
 
-            if alignment_backend.aligner == "wfmash" && alignment_backend.frequency.is_some() {
+            if aln.aligner == "wfmash" && aln.fastga_frequency.is_some() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "--frequency is only supported with --aligner fastga; wfmash uses its own frequency estimation",
+                    "--fastga-frequency is only supported with --aligner fastga; wfmash uses its own frequency estimation",
                 ));
             }
 
             // Parse sparsification strategy
-            let strategy = align::SparsificationStrategy::parse(&sparsification)?;
+            let strategy = parse_sparsify(&aln.sparsify)?;
 
             // Parse output format
             let output_format = match format.to_lowercase().as_str() {
@@ -2393,29 +2374,89 @@ fn run() -> io::Result<()> {
 
             let config = align::AlignConfig {
                 num_threads: common.threads.get(),
-                sparsification: strategy,
-                frequency_multiplier: alignment_backend.frequency_multiplier,
-                frequency: alignment_backend.frequency,
-                min_alignment_length: alignment_backend.min_alignment_length,
+                sparsify: strategy,
+                mash_params: sweepga::knn_graph::MashParams {
+                    kmer_size: aln.mash_kmer_size,
+                    sketch_size: aln.mash_sketch_size,
+                },
+                frequency_multiplier: aln.fastga_frequency_multiplier,
+                frequency: aln.fastga_frequency,
+                min_aln_length: aln.min_aln_length,
                 output_format,
                 show_progress: common.verbose > 0,
-                aligner: alignment_backend.aligner,
-                no_filter: filter.no_filter,
-                num_mappings: filter.num_mappings,
-                scaffold_jump: filter.scaffold_jump,
-                scaffold_mass: filter.scaffold_mass,
-                scaffold_filter: filter.scaffold_filter,
-                overlap: filter.overlap,
-                min_identity: filter.min_identity,
-                scaffold_dist: filter.scaffold_dist,
-                min_mapping_length: filter.min_mapping_length,
+                aligner: aln.aligner,
+                temp_dir,
+                no_filter: aln.no_filter,
+                num_mappings: aln.num_mappings,
+                scaffold_jump: aln.scaffold_jump,
+                scaffold_mass: aln.scaffold_mass,
+                scaffold_filter: aln.scaffold_filter,
+                overlap: aln.overlap,
+                min_identity: aln.min_aln_identity,
+                scaffold_dist: aln.scaffold_dist,
+                min_map_length: aln.min_map_length,
             };
 
-            align::run_align(fasta_files, fasta_list, &output_dir, config)?;
+            align::run_align(fasta_files, &output_dir, config)?;
         }
     }
 
     Ok(())
+}
+
+fn build_engine_opts(
+    engine: GfaEngine,
+    num_threads: usize,
+    aln: &AlnOpts,
+    sparsify: SparsificationStrategy,
+    mash_params: sweepga::knn_graph::MashParams,
+    seqwish: &SeqwishOpts,
+    smooth: &SmoothOpts,
+    recursive_opts: &RecursiveOpts,
+    scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
+    temp_dir: Option<String>,
+    build_recursive: bool,
+) -> io::Result<EngineOpts> {
+    Ok(EngineOpts {
+        engine,
+        recursive_config: if build_recursive && engine == GfaEngine::Recursive {
+            Some(recursive_opts.build_config(
+                num_threads,
+                scoring_params,
+                temp_dir,
+                aln.aligner.clone(),
+                sparsify.clone(),
+                mash_params.clone(),
+            )?)
+        } else {
+            None
+        },
+        num_threads,
+        no_filter: aln.no_filter,
+        debug_dir: recursive_opts.recursive_debug_dir.clone(),
+        sparsify,
+        mash_params,
+        aligner: aln.aligner.clone(),
+        num_mappings: aln.num_mappings.clone(),
+        scaffold_jump: aln.scaffold_jump,
+        scaffold_mass: aln.scaffold_mass,
+        scaffold_filter: aln.scaffold_filter.clone(),
+        overlap: aln.overlap,
+        min_identity: aln.min_aln_identity,
+        scaffold_dist: aln.scaffold_dist,
+        min_map_length: aln.min_map_length,
+        min_aln_length: aln.min_aln_length,
+        frequency_multiplier: aln.fastga_frequency_multiplier,
+        repeat_max: seqwish.repeat_max,
+        min_repeat_dist: seqwish.min_repeat_dist,
+        min_match_len: seqwish.min_match_len,
+        sparse_factor: seqwish.sparse_factor,
+        transclose_batch: seqwish.transclose_batch,
+        disk_backed: seqwish.disk_backed,
+        target_poa_lengths: smooth.parse_target_poa_lengths()?,
+        max_node_length: smooth.max_node_length,
+        poa_padding_fraction: smooth.poa_padding_fraction,
+    })
 }
 
 fn validate_approximate_mode_min_length(

@@ -38,8 +38,22 @@ pub struct EngineOpts {
     pub no_filter: bool,
     /// Optional directory to save intermediate debug files (PAFs, FASTAs, etc.)
     pub debug_dir: Option<String>,
-    /// Wfmash mapping sparsification: "auto" or a float string like "0.1".
-    pub sparsify: Option<String>,
+    /// Unified sparsification strategy.
+    pub sparsify: sweepga::knn_graph::SparsificationStrategy,
+    /// Mash distance parameters for sparsification sketching.
+    pub mash_params: sweepga::knn_graph::MashParams,
+    // Alignment filtering parameters (shared with graph/align commands)
+    pub aligner: String,
+    pub num_mappings: String,
+    pub scaffold_jump: u64,
+    pub scaffold_mass: u64,
+    pub scaffold_filter: String,
+    pub overlap: f64,
+    pub min_identity: f64,
+    pub scaffold_dist: u64,
+    pub min_map_length: u64,
+    pub min_aln_length: u64,
+    pub frequency_multiplier: usize,
     // Seqwish graph induction parameters
     pub repeat_max: u64,
     pub min_repeat_dist: u64,
@@ -77,8 +91,20 @@ pub fn dispatch_gfa_engine(
     let seqwish_config = graph::SeqwishConfig {
         num_threads: engine_opts.num_threads,
         no_filter: engine_opts.no_filter,
+        aligner: engine_opts.aligner.clone(),
+        num_mappings: engine_opts.num_mappings.clone(),
+        scaffold_jump: engine_opts.scaffold_jump,
+        scaffold_mass: engine_opts.scaffold_mass,
+        scaffold_filter: engine_opts.scaffold_filter.clone(),
+        overlap: engine_opts.overlap,
+        min_identity: engine_opts.min_identity,
+        scaffold_dist: engine_opts.scaffold_dist,
+        min_map_length: engine_opts.min_map_length,
+        min_aln_length: engine_opts.min_aln_length,
+        frequency_multiplier: engine_opts.frequency_multiplier,
         debug_dir: engine_opts.debug_dir.clone(),
         sparsify: engine_opts.sparsify.clone(),
+        mash_params: engine_opts.mash_params.clone(),
         repeat_max: engine_opts.repeat_max,
         min_repeat_dist: engine_opts.min_repeat_dist,
         min_match_len: engine_opts.min_match_len,
