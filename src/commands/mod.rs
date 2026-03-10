@@ -10,6 +10,7 @@ use std::path::Path;
 
 use sweepga::aligner::Aligner;
 use sweepga::fastga_integration::FastGAIntegration;
+use sweepga::paf_filter::{FilterConfig, FilterMode, ScoringFunction};
 use sweepga::wfmash_integration::WfmashIntegration;
 
 /// Create an aligner backend based on the name ("wfmash" or "fastga").
@@ -82,6 +83,119 @@ pub fn create_aligner_adaptive(
             "Unknown aligner: {}. Valid options: wfmash, fastga",
             aligner_name
         ))),
+    }
+}
+
+/// Round a value to a "nice" multiple based on its magnitude:
+/// ≤500 → multiple of 50, ≤1000 → 100, ≤3000 → 200, >3000 → 500.
+pub fn round_nice(v: u64) -> u64 {
+    if v == 0 {
+        return 0;
+    }
+    let step = if v <= 500 {
+        50
+    } else if v <= 1000 {
+        100
+    } else if v <= 3000 {
+        200
+    } else {
+        500
+    };
+    ((v + step / 2) / step * step).max(step)
+}
+
+/// Parse filter mode string (e.g., "1:1", "many:many", "5:3") into FilterMode and limits.
+pub fn parse_filter_mode(s: &str) -> (FilterMode, Option<usize>, Option<usize>) {
+    let s_lower = s.to_lowercase();
+    if s_lower == "many:many" || s_lower == "n:n" {
+        return (FilterMode::ManyToMany, None, None);
+    }
+
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 2 {
+        return (FilterMode::OneToOne, Some(1), Some(1));
+    }
+
+    let query_max = if parts[0] == "many" || parts[0] == "n" {
+        None
+    } else {
+        parts[0].parse().ok()
+    };
+
+    let target_max = if parts[1] == "many" || parts[1] == "n" {
+        None
+    } else {
+        parts[1].parse().ok()
+    };
+
+    match (query_max, target_max) {
+        (Some(1), Some(1)) => (FilterMode::OneToOne, Some(1), Some(1)),
+        (Some(1), _) => (FilterMode::OneToMany, Some(1), target_max),
+        (_, Some(1)) => (FilterMode::OneToMany, query_max, Some(1)),
+        (Some(q), Some(t)) => (FilterMode::ManyToMany, Some(q), Some(t)),
+        (Some(q), None) => (FilterMode::ManyToMany, Some(q), None),
+        (None, Some(t)) => (FilterMode::ManyToMany, None, Some(t)),
+        (None, None) => (FilterMode::ManyToMany, None, None),
+    }
+}
+
+/// Parameters for PAF alignment filtering, shared across all commands.
+pub struct FilterParams {
+    pub num_mappings: String,
+    pub scaffold_jump: u64,
+    pub scaffold_mass: u64,
+    pub scaffold_filter: String,
+    pub overlap: f64,
+    pub min_identity: f64,
+    pub scaffold_dist: u64,
+    pub min_map_length: u64,
+}
+
+/// Build a `FilterConfig` with adaptive scaffold parameters.
+///
+/// Scaffold defaults (scaffold_mass=10kb, scaffold_jump=50kb) are tuned for
+/// whole-genome alignments. For short sequences (e.g. 1kb excerpts from
+/// `impg query -o fasta`), these thresholds would filter out every alignment.
+/// This function clamps them based on `avg_seq_len`.
+pub fn build_filter_config(params: &FilterParams, avg_seq_len: u64) -> FilterConfig {
+    let (mapping_mode, mapping_per_query, mapping_per_target) =
+        parse_filter_mode(&params.num_mappings);
+    let (scaffold_mode, scaffold_per_query, scaffold_per_target) =
+        parse_filter_mode(&params.scaffold_filter);
+
+    let scaffold_mass = if avg_seq_len > 0 {
+        round_nice(params.scaffold_mass.min(avg_seq_len * 3 / 5))
+    } else {
+        params.scaffold_mass
+    };
+    let scaffold_jump = if avg_seq_len > 0 {
+        params.scaffold_jump.min(avg_seq_len * 10)
+    } else {
+        params.scaffold_jump
+    };
+
+    FilterConfig {
+        chain_gap: 0,
+        min_block_length: params.min_map_length,
+        mapping_filter_mode: mapping_mode,
+        mapping_max_per_query: mapping_per_query,
+        mapping_max_per_target: mapping_per_target,
+        plane_sweep_secondaries: 0,
+        scaffold_filter_mode: scaffold_mode,
+        scaffold_max_per_query: scaffold_per_query,
+        scaffold_max_per_target: scaffold_per_target,
+        overlap_threshold: params.overlap,
+        sparsity: 1.0,
+        no_merge: true,
+        scaffold_gap: scaffold_jump,
+        min_scaffold_length: scaffold_mass,
+        scaffold_overlap_threshold: 0.5,
+        scaffold_max_deviation: params.scaffold_dist,
+        prefix_delimiter: '#',
+        skip_prefix: false,
+        scoring_function: ScoringFunction::LogLengthIdentity,
+        min_identity: params.min_identity,
+        min_scaffold_identity: params.min_identity,
     }
 }
 

@@ -14,33 +14,15 @@ use bitvec::prelude::*;
 
 use sweepga::knn_graph::SparsificationStrategy;
 
-/// Round a value to a "nice" multiple based on its magnitude:
-/// ≤500 → multiple of 50, ≤1000 → 100, ≤3000 → 200, >3000 → 500.
-fn round_nice(v: u64) -> u64 {
-    if v == 0 {
-        return 0;
-    }
-    let step = if v <= 500 {
-        50
-    } else if v <= 1000 {
-        100
-    } else if v <= 3000 {
-        200
-    } else {
-        500
-    };
-    ((v + step / 2) / step * step).max(step)
-}
-
 // Import gfasort for graph sorting
 use crate::graph::{sort_gfa, unchop_gfa};
 
 // Import from sweepga
 use sweepga::aligner::Aligner;
-use sweepga::paf_filter::{FilterConfig, FilterMode, PafFilter, ScoringFunction};
+use sweepga::paf_filter::PafFilter;
 
 use crate::commands::align::{sweepga_align, SweepgaAlignConfig};
-use crate::commands::create_aligner_adaptive;
+use crate::commands::{build_filter_config, create_aligner_adaptive, FilterParams};
 
 // Import from seqwish
 use seqwish::alignments::unpack_paf_alignments;
@@ -147,48 +129,6 @@ impl Default for GraphBuildConfig {
 /// Returns `(num_sequences, num_genomes)` using PanSN naming convention.
 fn count_sequences_and_genomes_in_fasta(fasta_paths: &[String]) -> io::Result<(usize, usize)> {
     crate::commands::count_sequences_and_genomes(fasta_paths)
-}
-
-/// Parse filter mode string (e.g., "1:1", "many:many", "5:3") into FilterMode and limits
-pub fn parse_filter_mode(s: &str) -> (FilterMode, Option<usize>, Option<usize>) {
-    let s_lower = s.to_lowercase();
-    if s_lower == "many:many" || s_lower == "n:n" {
-        return (FilterMode::ManyToMany, None, None);
-    }
-
-    // Parse M:N format
-    let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() != 2 {
-        // Default to 1:1 if invalid format
-        return (FilterMode::OneToOne, Some(1), Some(1));
-    }
-
-    let query_max = if parts[0] == "many" || parts[0] == "n" {
-        None
-    } else {
-        parts[0].parse().ok()
-    };
-
-    let target_max = if parts[1] == "many" || parts[1] == "n" {
-        None
-    } else {
-        parts[1].parse().ok()
-    };
-
-    // FilterMode determines the filtering strategy:
-    // - OneToOne: enforces strict 1:1 mapping
-    // - OneToMany: 1:N (one per query, N per target)
-    // - ManyToMany: N:N (no strict filtering, uses overlap-based plane sweep)
-    // The actual limits are controlled by max_per_query/max_per_target
-    match (query_max, target_max) {
-        (Some(1), Some(1)) => (FilterMode::OneToOne, Some(1), Some(1)),
-        (Some(1), _) => (FilterMode::OneToMany, Some(1), target_max),
-        (_, Some(1)) => (FilterMode::OneToMany, query_max, Some(1)),
-        (Some(q), Some(t)) => (FilterMode::ManyToMany, Some(q), Some(t)),
-        (Some(q), None) => (FilterMode::ManyToMany, Some(q), None),
-        (None, Some(t)) => (FilterMode::ManyToMany, None, Some(t)),
-        (None, None) => (FilterMode::ManyToMany, None, None),
-    }
 }
 
 /// Build a pangenome graph from FASTA sequences
@@ -433,63 +373,28 @@ pub fn build_graph<W: Write>(
         }
         paf_temp
     } else {
-        // Parse filter modes
-        let (mapping_mode, mapping_per_query, mapping_per_target) =
-            parse_filter_mode(&config.num_mappings);
-        let (scaffold_mode, scaffold_per_query, scaffold_per_target) =
-            parse_filter_mode(&config.scaffold_filter);
-
-        // Auto-adapt scaffold parameters to input sequence sizes.
-        // Defaults (scaffold_mass=10kb, scaffold_jump=50kb) are tuned for
-        // whole-genome alignments. For short sequences (e.g. 1kb excerpts
-        // from `impg query -o fasta`), these thresholds would filter out
-        // every alignment. Clamp to 80% of the average sequence length.
-        let scaffold_mass = if avg_seq_len > 0 {
-            round_nice(config.scaffold_mass.min(avg_seq_len * 3 / 5))
-        } else {
-            config.scaffold_mass
+        let filter_params = FilterParams {
+            num_mappings: config.num_mappings.clone(),
+            scaffold_jump: config.scaffold_jump,
+            scaffold_mass: config.scaffold_mass,
+            scaffold_filter: config.scaffold_filter.clone(),
+            overlap: config.overlap,
+            min_identity: config.min_identity,
+            scaffold_dist: config.scaffold_dist,
+            min_map_length: config.min_map_length,
         };
-        let scaffold_jump = if avg_seq_len > 0 {
-            config.scaffold_jump.min(avg_seq_len * 10)
-        } else {
-            config.scaffold_jump
-        };
+        let filter_config = build_filter_config(&filter_params, avg_seq_len);
 
         if config.show_progress {
             info!(
                 "[graph::filter] {:.3}s Filtering alignments with sweepga (n={}, scaffold_jump={}, scaffold_mass={}, scaffold_filter={})",
                 start_time.elapsed().as_secs_f64(),
                 config.num_mappings,
-                scaffold_jump,
-                scaffold_mass,
+                filter_config.scaffold_gap,
+                filter_config.min_scaffold_length,
                 config.scaffold_filter
             );
         }
-
-        // Create filter configuration
-        let filter_config = FilterConfig {
-            chain_gap: 0,
-            min_block_length: config.min_map_length,
-            mapping_filter_mode: mapping_mode,
-            mapping_max_per_query: mapping_per_query,
-            mapping_max_per_target: mapping_per_target,
-            plane_sweep_secondaries: 0,
-            scaffold_filter_mode: scaffold_mode,
-            scaffold_max_per_query: scaffold_per_query,
-            scaffold_max_per_target: scaffold_per_target,
-            overlap_threshold: config.overlap,
-            sparsity: 1.0,
-            no_merge: true,
-            scaffold_gap: scaffold_jump,
-            min_scaffold_length: scaffold_mass,
-            scaffold_overlap_threshold: 0.5,
-            scaffold_max_deviation: config.scaffold_dist,
-            prefix_delimiter: '#',
-            skip_prefix: false,
-            scoring_function: ScoringFunction::LogLengthIdentity,
-            min_identity: config.min_identity,
-            min_scaffold_identity: config.min_identity,
-        };
 
         // Create filtered PAF temp file
         let filtered_paf_file = tempfile::Builder::new()

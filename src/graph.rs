@@ -862,16 +862,30 @@ pub struct SeqwishConfig {
     pub num_threads: usize,
     /// K-mer frequency multiplier (frequency = num_sequences * multiplier)
     pub frequency_multiplier: usize,
-    /// Minimum alignment length for FastGA
+    /// Minimum alignment length for the aligner
     pub min_aln_length: u64,
     /// Optional temp directory for intermediate files
     pub temp_dir: Option<String>,
     /// Skip PAF filtering (faster but may produce broken graphs)
     pub no_filter: bool,
+    /// Aligner backend: "wfmash" or "fastga"
+    pub aligner: String,
     /// n:m-best mappings kept in query:target dimensions (e.g., "1:1", "many:many")
     pub num_mappings: String,
+    /// Scaffold jump/gap distance (0 = disable scaffolding)
+    pub scaffold_jump: u64,
+    /// Minimum scaffold chain length
+    pub scaffold_mass: u64,
     /// Scaffold filter mode (e.g., "1:1", "many:many")
     pub scaffold_filter: String,
+    /// Maximum overlap ratio for plane sweep filtering
+    pub overlap: f64,
+    /// Minimum identity threshold (0.0-1.0)
+    pub min_identity: f64,
+    /// Maximum scaffold deviation distance (0 = no limit)
+    pub scaffold_dist: u64,
+    /// Minimum mapping length for post-alignment filtering
+    pub min_map_length: u64,
     /// Optional directory to save intermediate debug files (FASTA, raw PAF, filtered PAF).
     pub debug_dir: Option<String>,
     /// Unified sparsification strategy.
@@ -900,8 +914,15 @@ impl Default for SeqwishConfig {
             min_aln_length: 0,
             temp_dir: None,
             no_filter: false,
+            aligner: "wfmash".to_string(),
             num_mappings: "many:many".to_string(),
+            scaffold_jump: 50_000,
+            scaffold_mass: 10_000,
             scaffold_filter: "many:many".to_string(),
+            overlap: 0.95,
+            min_identity: 0.0,
+            scaffold_dist: 0,
+            min_map_length: 0,
             debug_dir: None,
             sparsify: sweepga::knn_graph::SparsificationStrategy::None,
             mash_params: sweepga::knn_graph::MashParams::default(),
@@ -961,10 +982,18 @@ pub fn generate_gfa_seqwish_from_intervals(
         min_aln_length: config.min_aln_length,
         temp_dir: config.temp_dir.clone(),
         no_filter: config.no_filter,
+        aligner: config.aligner.clone(),
         num_mappings: config.num_mappings.clone(),
+        scaffold_jump: config.scaffold_jump,
+        scaffold_mass: config.scaffold_mass,
         scaffold_filter: config.scaffold_filter.clone(),
+        overlap: config.overlap,
+        min_identity: config.min_identity,
+        scaffold_dist: config.scaffold_dist,
+        min_map_length: config.min_map_length,
         debug_dir: config.debug_dir.clone(),
         sparsify: config.sparsify.clone(),
+        mash_params: config.mash_params.clone(),
         repeat_max: config.repeat_max,
         min_repeat_dist: config.min_repeat_dist,
         min_match_len: config.min_match_len,

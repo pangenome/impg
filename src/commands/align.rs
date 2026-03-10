@@ -14,9 +14,9 @@ use std::time::Instant;
 
 // Import sweepga for direct alignment execution
 use sweepga::aligner::Aligner;
-use sweepga::paf_filter::{FilterConfig, PafFilter, ScoringFunction};
+use sweepga::paf_filter::PafFilter;
 
-use crate::commands::{create_aligner, create_aligner_adaptive};
+use crate::commands::create_aligner_adaptive;
 
 pub use sweepga::knn_graph::SparsificationStrategy;
 
@@ -59,12 +59,12 @@ impl Default for AlignConfig {
             show_progress: true,
             aligner: "wfmash".to_string(),
             temp_dir: None,
-            // Filtering defaults - match graph command
+            // Filtering defaults - must match GraphBuildConfig and CLI defaults
             no_filter: false,
-            num_mappings: "1:1".to_string(),
+            num_mappings: "many:many".to_string(),
             scaffold_jump: 50_000,
             scaffold_mass: 10_000,
-            scaffold_filter: "1:1".to_string(),
+            scaffold_filter: "many:many".to_string(),
             overlap: 0.95,
             min_identity: 0.0,
             scaffold_dist: 0,
@@ -336,14 +336,42 @@ fn run_alignments(
         );
     }
 
-    // Create aligner
-    let aligner: Box<dyn Aligner> = create_aligner(
+    // Compute average sequence length for adaptive wfmash parameters
+    let avg_len: Option<u64> = {
+        let mut total_len: u64 = 0;
+        let mut count: u64 = 0;
+        for path in unique_files.iter() {
+            if let Ok(fai) = rust_htslib::faidx::Reader::from_path(path) {
+                let n = fai.n_seqs();
+                for i in 0..n {
+                    if let Ok(name) = fai.seq_name(i as i32) {
+                        total_len += fai.fetch_seq_len(&name);
+                        count += 1;
+                    }
+                }
+            }
+        }
+        if count > 0 { Some(total_len / count) } else { None }
+    };
+
+    // Resolve wfmash mapping density from the strategy
+    let wfmash_density = sweepga::orchestrator::resolve_wfmash_density(
+        &config.sparsify,
+        sequences.len(),
+    );
+
+    // Create aligner with adaptive parameters
+    let aligner: Box<dyn Aligner> = create_aligner_adaptive(
         &config.aligner,
         kmer_frequency,
         config.num_threads,
         config.min_aln_length,
         Some("90".to_string()),
         config.temp_dir.clone(),
+        None, // segment_length: let sweepga adapt from avg_len
+        avg_len,
+        wfmash_density,
+        None, // num_mappings: use wfmash default
     )?;
 
     // Run alignments for each unique file pair
@@ -407,7 +435,7 @@ fn run_alignments(
                 let result_paf = if config.no_filter {
                     paf_temp
                 } else {
-                    apply_paf_filter(paf_temp, config)?
+                    apply_paf_filter(paf_temp, config, avg_len.unwrap_or(0))?
                 };
 
                 // Append to combined output
@@ -448,37 +476,21 @@ fn run_alignments(
 fn apply_paf_filter(
     paf_temp: tempfile::NamedTempFile,
     config: &AlignConfig,
+    avg_seq_len: u64,
 ) -> io::Result<tempfile::NamedTempFile> {
-    use super::graph::parse_filter_mode;
-
-    let (mapping_mode, mapping_per_query, mapping_per_target) =
-        parse_filter_mode(&config.num_mappings);
-    let (scaffold_mode, scaffold_per_query, scaffold_per_target) =
-        parse_filter_mode(&config.scaffold_filter);
-
-    let filter_config = FilterConfig {
-        chain_gap: 0,
-        min_block_length: config.min_map_length,
-        mapping_filter_mode: mapping_mode,
-        mapping_max_per_query: mapping_per_query,
-        mapping_max_per_target: mapping_per_target,
-        plane_sweep_secondaries: 0,
-        scaffold_filter_mode: scaffold_mode,
-        scaffold_max_per_query: scaffold_per_query,
-        scaffold_max_per_target: scaffold_per_target,
-        overlap_threshold: config.overlap,
-        sparsity: 1.0,
-        no_merge: true,
-        scaffold_gap: config.scaffold_jump,
-        min_scaffold_length: config.scaffold_mass,
-        scaffold_overlap_threshold: 0.5,
-        scaffold_max_deviation: config.scaffold_dist,
-        prefix_delimiter: '#',
-        skip_prefix: false,
-        scoring_function: ScoringFunction::LogLengthIdentity,
-        min_identity: config.min_identity,
-        min_scaffold_identity: config.min_identity,
-    };
+    let filter_config = super::build_filter_config(
+        &super::FilterParams {
+            num_mappings: config.num_mappings.clone(),
+            scaffold_jump: config.scaffold_jump,
+            scaffold_mass: config.scaffold_mass,
+            scaffold_filter: config.scaffold_filter.clone(),
+            overlap: config.overlap,
+            min_identity: config.min_identity,
+            scaffold_dist: config.scaffold_dist,
+            min_map_length: config.min_map_length,
+        },
+        avg_seq_len,
+    );
 
     let filtered_paf_file = tempfile::Builder::new()
         .suffix(".filtered.paf")
@@ -537,10 +549,10 @@ impl Default for SweepgaAlignConfig {
             kmer_frequency: 10,
             min_aln_length: 0,
             no_filter: false,
-            num_mappings: "1:1".to_string(),
+            num_mappings: "many:many".to_string(),
             scaffold_jump: 50_000,
             scaffold_mass: 10_000,
-            scaffold_filter: "1:1".to_string(),
+            scaffold_filter: "many:many".to_string(),
             overlap: 0.95,
             min_identity: 0.0,
             scaffold_dist: 0,
@@ -607,6 +619,11 @@ pub fn sweepga_align(
     if config.no_filter {
         Ok(paf_temp)
     } else {
+        let avg_seq_len = if !sequences.is_empty() {
+            sequences.iter().map(|(_, s)| s.len() as u64).sum::<u64>() / sequences.len() as u64
+        } else {
+            0
+        };
         let align_config = AlignConfig {
             num_threads: config.num_threads,
             sparsify: SparsificationStrategy::None,
@@ -628,7 +645,7 @@ pub fn sweepga_align(
             scaffold_dist: config.scaffold_dist,
             min_map_length: config.min_map_length,
         };
-        apply_paf_filter(paf_temp, &align_config)
+        apply_paf_filter(paf_temp, &align_config, avg_seq_len)
     }
 }
 

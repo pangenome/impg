@@ -110,7 +110,7 @@ struct AlnOpts {
     // --- General alignment options ---
 
     /// Disable all alignment filtering
-    #[clap(short = 'N', long, action)]
+    #[clap(long, action)]
     no_filter: bool,
 
     /// Sparsification strategy: none, auto, random:<frac>, giant:<prob>, tree:<k>:<k>:<f>, wfmash:auto, wfmash:<frac> (default: no sparsification)
@@ -294,7 +294,7 @@ impl EngineCliOpts {
         build_engine_opts(
             self.engine,
             num_threads,
-            self.aln.no_filter,
+            &self.aln,
             sparsify,
             mash_params,
             &self.seqwish,
@@ -2407,7 +2407,7 @@ fn run() -> io::Result<()> {
 fn build_engine_opts(
     engine: GfaEngine,
     num_threads: usize,
-    no_filter: bool,
+    aln: &AlnOpts,
     sparsify: SparsificationStrategy,
     mash_params: sweepga::knn_graph::MashParams,
     seqwish: &SeqwishOpts,
@@ -2424,7 +2424,7 @@ fn build_engine_opts(
                 num_threads,
                 scoring_params,
                 temp_dir,
-                "wfmash".to_string(),
+                aln.aligner.clone(),
                 sparsify.clone(),
                 mash_params.clone(),
             )?)
@@ -2432,10 +2432,21 @@ fn build_engine_opts(
             None
         },
         num_threads,
-        no_filter,
+        no_filter: aln.no_filter,
         debug_dir: recursive_opts.recursive_debug_dir.clone(),
         sparsify,
         mash_params,
+        aligner: aln.aligner.clone(),
+        num_mappings: aln.num_mappings.clone(),
+        scaffold_jump: aln.scaffold_jump,
+        scaffold_mass: aln.scaffold_mass,
+        scaffold_filter: aln.scaffold_filter.clone(),
+        overlap: aln.overlap,
+        min_identity: aln.min_aln_identity,
+        scaffold_dist: aln.scaffold_dist,
+        min_map_length: aln.min_map_length,
+        min_aln_length: aln.min_aln_length,
+        frequency_multiplier: aln.fastga_frequency_multiplier,
         repeat_max: seqwish.repeat_max,
         min_repeat_dist: seqwish.min_repeat_dist,
         min_match_len: seqwish.min_match_len,
