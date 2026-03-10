@@ -248,10 +248,10 @@ impl SmoothOpts {
 /// Engine + graph-building options shared by query, partition, similarity, and graph.
 #[derive(Parser, Debug)]
 struct EngineCliOpts {
-    /// GFA engine: 'pggb' (seqwish+smoothing+gfaffix, default), 'seqwish' (unsmoothed),
-    /// or 'poa' (single-pass POA)
+    /// GFA engine: 'pggb' (alignment+seqwish+smoothing+gfaffix, default),
+    /// 'seqwish' (alignment+seqwish+gfaffix), or 'poa' (single-pass POA)
     #[arg(help_heading = "Output options")]
-    #[clap(long, value_enum, default_value_t = GfaEngine::Pggb)]
+    #[clap(long = "gfa-engine", value_enum, default_value_t = GfaEngine::Pggb)]
     engine: GfaEngine,
 
     /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2
@@ -290,13 +290,13 @@ impl EngineCliOpts {
                 if self.aln.sparsify.is_some() {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        "--sparsify is not compatible with --engine poa (poa does not run alignment)",
+                        "--sparsify is not compatible with --gfa-engine poa (poa does not run alignment)",
                     ));
                 }
                 if self.aln.no_filter {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        "--no-filter is not compatible with --engine poa (poa does not run alignment)",
+                        "--no-filter is not compatible with --gfa-engine poa (poa does not run alignment)",
                     ));
                 }
             }
@@ -1390,13 +1390,13 @@ fn run() -> io::Result<()> {
             if output_format == "gfa-poa" {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "Format 'gfa-poa' has been removed. Use '-o gfa --engine poa' instead.",
+                    "Format 'gfa-poa' has been removed. Use '-o gfa --gfa-engine poa' instead.",
                 ));
             }
             if output_format == "gfa-seqwish" {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "Format 'gfa-seqwish' has been removed. Use '-o gfa --engine seqwish' instead.",
+                    "Format 'gfa-seqwish' has been removed. Use '-o gfa --gfa-engine seqwish' instead.",
                 ));
             }
 

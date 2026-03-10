@@ -19,12 +19,12 @@ pub mod tpa_parser;
 /// GFA engine selection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum GfaEngine {
-    /// Seqwish graph induction via transitive closure
-    Seqwish,
-    /// Flat single-pass partial order alignment
-    Poa,
-    /// Seqwish + smoothxg-style smoothing + gfaffix normalization
+    /// Alignment + seqwish graph induction + smoothing + gfaffix normalization
     Pggb,
+    /// Alignment + seqwish graph induction + gfaffix normalization (no smoothing)
+    Seqwish,
+    /// Single-pass partial order alignment (POA)
+    Poa,
 }
 
 /// Resolved engine configuration passed to subcommand functions.

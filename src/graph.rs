@@ -975,7 +975,7 @@ pub fn generate_gfa_seqwish_from_intervals(
         writer.flush()?;
     }
 
-    // 3) Build graph using the same pipeline as `graph --engine seqwish`
+    // 3) Build graph using the same pipeline as `graph --gfa-engine seqwish`
     let graph_config = crate::commands::graph::GraphBuildConfig {
         num_threads: config.num_threads,
         frequency_multiplier: config.frequency_multiplier,

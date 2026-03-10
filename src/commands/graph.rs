@@ -738,7 +738,7 @@ pub fn run_graph_build_poa<W: Write>(
 
 /// Build a pangenome graph using the PGGB pipeline: sweepga + seqwish + smoothxg + gfaffix.
 ///
-/// Equivalent to running `--engine seqwish` followed by graph smoothing (smoothxg-style
+/// Equivalent to running `--gfa-engine seqwish` followed by graph smoothing (smoothxg-style
 /// block decomposition + per-block POA) and optional gfaffix normalization.
 pub fn run_graph_build_pggb<W: Write>(
     fasta_files: Vec<String>,
