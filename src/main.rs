@@ -248,8 +248,8 @@ impl SmoothOpts {
 /// Engine + graph-building options shared by query, partition, similarity, and graph.
 #[derive(Parser, Debug)]
 struct EngineCliOpts {
-    /// GFA engine: 'pggb' (seqwish+smoothing+gfaffix, default), 'recursive' (sweepga+POA+lacing),
-    /// 'seqwish' (unsmoothed), or 'poa' (single-pass POA)
+    /// GFA engine: 'pggb' (seqwish+smoothing+gfaffix, default), 'seqwish' (unsmoothed),
+    /// or 'poa' (single-pass POA)
     #[arg(help_heading = "Output options")]
     #[clap(long, value_enum, default_value_t = GfaEngine::Pggb)]
     engine: GfaEngine,
@@ -268,8 +268,9 @@ struct EngineCliOpts {
     #[clap(flatten)]
     smooth: SmoothOpts,
 
-    #[clap(flatten)]
-    recursive_opts: RecursiveOpts,
+    /// Save intermediate debug files (PAFs, FASTAs, sub-GFAs, chunk info) to this directory.
+    #[clap(long, value_parser)]
+    debug_dir: Option<String>,
 }
 
 impl EngineCliOpts {
@@ -278,19 +279,43 @@ impl EngineCliOpts {
         parse_poa_scoring_string(&self.poa_scoring)
     }
 
+    /// Validate that CLI options are compatible with the selected engine.
+    ///
+    /// - `poa` engine: no alignment step → `--sparsify`, `--no-filter`, and
+    ///   non-default alignment/seqwish/smooth params are invalid.
+    /// - `seqwish` engine: no smoothing → non-default smooth params are invalid.
+    fn validate_engine_params(&self) -> io::Result<()> {
+        match self.engine {
+            GfaEngine::Poa => {
+                if self.aln.sparsify.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--sparsify is not compatible with --engine poa (poa does not run alignment)",
+                    ));
+                }
+                if self.aln.no_filter {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--no-filter is not compatible with --engine poa (poa does not run alignment)",
+                    ));
+                }
+            }
+            GfaEngine::Seqwish | GfaEngine::Pggb => {}
+        }
+        Ok(())
+    }
+
     /// Resolve temp_dir ("ramdisk" → "/dev/shm") and build an `EngineOpts`.
     fn build(
         &self,
         num_threads: usize,
-        build_recursive: bool,
     ) -> io::Result<EngineOpts> {
-        let temp_dir = resolve_temp_dir(self.aln.temp_dir.clone());
+        self.validate_engine_params()?;
         let sparsify = parse_sparsify(&self.aln.sparsify)?;
         let mash_params = sweepga::knn_graph::MashParams {
             kmer_size: self.aln.mash_kmer_size,
             sketch_size: self.aln.mash_sketch_size,
         };
-        let scoring_params = self.parse_poa_scoring()?;
         build_engine_opts(
             self.engine,
             num_threads,
@@ -299,10 +324,7 @@ impl EngineCliOpts {
             mash_params,
             &self.seqwish,
             &self.smooth,
-            &self.recursive_opts,
-            Some(scoring_params),
-            temp_dir,
-            build_recursive,
+            self.debug_dir.clone(),
         )
     }
 }
@@ -496,74 +518,6 @@ impl GfaMafFastaOpts {
         };
 
         Ok((sequence_index, scoring_params))
-    }
-}
-
-/// Options for the recursive engine (used with --engine recursive)
-#[derive(Parser, Debug)]
-#[command(next_help_heading = "Recursive engine options")]
-struct RecursiveOpts {
-    /// POA threshold: regions at or below this size (bp) go directly to POA
-    #[clap(long, value_parser, default_value_t = 1000)]
-    recursive_poa_threshold: usize,
-
-    /// Target chunk size (bp) for partitioning large regions
-    #[clap(long, value_parser, default_value_t = 5000)]
-    recursive_chunk_size: usize,
-
-    /// Boundary padding (bp) added on each side of POA regions
-    #[clap(long, value_parser, default_value_t = 100)]
-    recursive_padding: usize,
-
-    /// Maximum recursion depth for the recursive engine
-    #[clap(long, value_parser, default_value_t = 10)]
-    recursive_max_depth: usize,
-
-    /// Whether to sort the final GFA output using gfasort
-    #[clap(long, action, default_value_t = true)]
-    recursive_sort: bool,
-
-    /// Use seqwish instead of POA when sequence count exceeds this threshold.
-    /// POA is O(N*L) in memory and becomes impractical for many sequences.
-    #[clap(long, value_parser, default_value_t = 500)]
-    recursive_seqwish_threshold: usize,
-
-    /// Save intermediate debug files (PAFs, FASTAs, sub-GFAs, chunk info) to this directory.
-    #[clap(long, value_parser)]
-    recursive_debug_dir: Option<String>,
-}
-
-impl RecursiveOpts {
-    /// Build a RealizeConfig from the CLI options.
-    fn build_config(
-        &self,
-        num_threads: usize,
-        scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
-        temp_dir: Option<String>,
-        aligner: String,
-        sparsify: SparsificationStrategy,
-        mash_params: sweepga::knn_graph::MashParams,
-    ) -> io::Result<impg::realize::RealizeConfig> {
-        if let Some(ref dir) = self.recursive_debug_dir {
-            std::fs::create_dir_all(dir).map_err(|e| {
-                io::Error::other(format!("Failed to create debug dir '{}': {}", dir, e))
-            })?;
-        }
-        Ok(impg::realize::RealizeConfig {
-            poa_threshold: self.recursive_poa_threshold,
-            chunk_size: self.recursive_chunk_size,
-            padding: self.recursive_padding,
-            max_depth: self.recursive_max_depth,
-            num_threads,
-            scoring_params: scoring_params.unwrap_or((5, 4, 6, 2, 24, 1)),
-            temp_dir,
-            sort_output: self.recursive_sort,
-            seqwish_threshold: self.recursive_seqwish_threshold,
-            debug_dir: self.recursive_debug_dir.clone(),
-            aligner,
-            sparsify,
-            mash_params,
-        })
     }
 }
 
@@ -1387,7 +1341,6 @@ fn run() -> io::Result<()> {
             // Build engine config (resolves temp_dir and sparsify internally)
             let engine_config = engine_cli.build(
                 common.threads.get(),
-                output_format == "gfa",
             )?;
 
             // Initialize impg after validation
@@ -1684,7 +1637,6 @@ fn run() -> io::Result<()> {
                     "gfa" => {
                         let engine_opts = engine_cli.build(
                             common.threads.get(),
-                            true,
                         )?;
                         output_results_gfa(
                             &impg,
@@ -1986,9 +1938,10 @@ fn run() -> io::Result<()> {
             if engine_cli.engine == GfaEngine::Seqwish || engine_cli.engine == GfaEngine::Pggb {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "The 'seqwish' and 'pggb' engines are not yet implemented for the similarity command. Use 'poa' or 'recursive'.",
+                    "The 'seqwish' and 'pggb' engines are not yet implemented for the similarity command. Use 'poa'.",
                 ));
             }
+            engine_cli.validate_engine_params()?;
 
             // Resolve alignment files once (supports process substitution inputs)
             let alignment_files = resolve_alignment_files(&alignment)?;
@@ -2121,13 +2074,6 @@ fn run() -> io::Result<()> {
                 all_query_data.push((query_intervals, region_label));
             }
 
-            // Build engine config (resolves temp_dir and sparsify internally)
-            let engine_opts = engine_cli.build(
-                common.threads.into(),
-                true,
-            )?;
-            let recursive_config = engine_opts.recursive_config;
-
             // Process all regions in parallel
             similarity::compute_and_output_similarities(
                 &impg,
@@ -2143,7 +2089,6 @@ fn run() -> io::Result<()> {
                 &pca_measure,
                 polarize_n_prev,
                 polarize_guide_samples.as_deref(),
-                recursive_config.as_ref(),
             )?;
         }
         Args::Stats {
@@ -2176,6 +2121,7 @@ fn run() -> io::Result<()> {
             common,
         } => {
             initialize_threads_and_log(&common);
+            engine_cli.validate_engine_params()?;
             let temp_dir = resolve_temp_dir(engine_cli.aln.temp_dir.clone());
 
             let fasta_files = fasta_input.resolve_sequence_files()?;
@@ -2203,12 +2149,7 @@ fn run() -> io::Result<()> {
                 ));
             }
 
-            // Parse POA scoring and pre-clone values needed by the recursive engine
-            // before they are consumed by graph_config.
             let poa_scoring = engine_cli.parse_poa_scoring()?;
-            let aligner_for_recursive = engine_cli.aln.aligner.clone();
-            let sparsify_for_recursive = sparsify_strategy.clone();
-            let temp_dir_for_recursive = temp_dir.clone();
 
             // Shared graph build config — identical for the seqwish and pggb engines; built
             // once here so neither arm repeats the field list.
@@ -2245,37 +2186,6 @@ fn run() -> io::Result<()> {
             };
 
             match engine_cli.engine {
-                GfaEngine::Recursive => {
-                    let scoring = poa_scoring;
-                    let recursive_config = engine_cli.recursive_opts.build_config(
-                        common.threads.get(),
-                        Some(scoring),
-                        temp_dir_for_recursive,
-                        aligner_for_recursive,
-                        sparsify_for_recursive,
-                        sweepga::knn_graph::MashParams {
-                            kmer_size: engine_cli.aln.mash_kmer_size,
-                            sketch_size: engine_cli.aln.mash_sketch_size,
-                        },
-                    )?;
-
-                    if output == "-" {
-                        let stdout = io::stdout();
-                        let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
-                        graph::run_graph_build_realize(
-                            fasta_files,
-                            &mut out,
-                            &recursive_config,
-                        )?;
-                    } else {
-                        let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
-                        graph::run_graph_build_realize(
-                            fasta_files,
-                            &mut out,
-                            &recursive_config,
-                        )?;
-                    }
-                }
                 GfaEngine::Poa => {
                     let scoring = poa_scoring;
 
@@ -2412,28 +2322,13 @@ fn build_engine_opts(
     mash_params: sweepga::knn_graph::MashParams,
     seqwish: &SeqwishOpts,
     smooth: &SmoothOpts,
-    recursive_opts: &RecursiveOpts,
-    scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
-    temp_dir: Option<String>,
-    build_recursive: bool,
+    debug_dir: Option<String>,
 ) -> io::Result<EngineOpts> {
     Ok(EngineOpts {
         engine,
-        recursive_config: if build_recursive && engine == GfaEngine::Recursive {
-            Some(recursive_opts.build_config(
-                num_threads,
-                scoring_params,
-                temp_dir,
-                aln.aligner.clone(),
-                sparsify.clone(),
-                mash_params.clone(),
-            )?)
-        } else {
-            None
-        },
         num_threads,
         no_filter: aln.no_filter,
-        debug_dir: recursive_opts.recursive_debug_dir.clone(),
+        debug_dir,
         sparsify,
         mash_params,
         aligner: aln.aligner.clone(),

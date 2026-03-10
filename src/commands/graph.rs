@@ -688,63 +688,6 @@ pub fn run_graph_build(
     Ok(())
 }
 
-/// Build a pangenome graph from FASTA sequences using the recursive realize engine
-///
-/// Instead of the seqwish graph induction pipeline, this uses the recursive
-/// realize engine (sweepga + POA with lacing) to build the variation graph.
-pub fn run_graph_build_realize<W: Write>(
-    fasta_files: Vec<String>,
-    output: &mut W,
-    config: &crate::realize::RealizeConfig,
-) -> io::Result<()> {
-    let start_time = Instant::now();
-
-    if fasta_files.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "No sequence files specified. Use --sequence-files or --sequence-list",
-        ));
-    }
-
-    info!(
-        "Building graph from {} FASTA file(s) using realize engine",
-        fasta_files.len()
-    );
-
-    // Read all sequences from FASTA files into memory
-    let sequences = read_fasta_sequences(&fasta_files)?;
-
-    info!(
-        "[realize] {:.3}s Loaded {} sequences from FASTA files",
-        start_time.elapsed().as_secs_f64(),
-        sequences.len()
-    );
-
-    if sequences.is_empty() {
-        output.write_all(b"H\tVN:Z:1.0\n")?;
-        return Ok(());
-    }
-
-    // Run the realize engine
-    let result = crate::realize::realize_from_sequences(&sequences, config)?;
-
-    info!(
-        "[realize] {:.3}s Realize complete: {} sequences, max_depth={}, poa_calls={}, sweepga_calls={}, seqwish_calls={}, {}ms",
-        start_time.elapsed().as_secs_f64(),
-        result.stats.num_sequences,
-        result.stats.max_depth_reached,
-        result.stats.poa_calls,
-        result.stats.sweepga_calls,
-        result.stats.seqwish_calls,
-        result.stats.total_ms,
-    );
-
-    let final_gfa = crate::graph::normalize_and_sort(result.gfa, config.num_threads)?;
-    output.write_all(final_gfa.as_bytes())?;
-
-    Ok(())
-}
-
 /// Build a POA graph from FASTA sequences.
 ///
 /// Reads all sequences, runs single-pass SPOA, emits GFA, then sorts.
@@ -895,7 +838,7 @@ fn read_sequences_from_fasta(path: &Path) -> io::Result<Vec<(String, Vec<u8>)>> 
     Ok(sequences)
 }
 
-/// Read sequences from FASTA files into (sequence, metadata) pairs for the realize engine.
+/// Read sequences from FASTA files into (sequence, metadata) pairs.
 fn read_fasta_sequences(
     fasta_paths: &[String],
 ) -> io::Result<Vec<(String, crate::graph::SequenceMetadata)>> {
@@ -947,7 +890,7 @@ fn read_fasta_sequences(
         }
     }
 
-    // Sort by length descending (expected by realize engine)
+    // Sort by length descending
     sequences.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
 
     Ok(sequences)

@@ -534,7 +534,7 @@ fn apply_paf_filter(
     Ok(filtered_paf_file)
 }
 
-/// Configuration for in-memory sweepga alignment (used by the realize engine).
+/// Configuration for in-memory sweepga alignment.
 pub struct SweepgaAlignConfig {
     /// Number of threads for alignment
     pub num_threads: usize,
