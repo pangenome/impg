@@ -276,7 +276,7 @@ fn smooth_gfa_pass(
     // Step 9: Lace block GFAs together
     // Per-block gfaffix already normalized each block; the caller's normalize_and_sort
     // (gfaffix + sort) handles any remaining redundancies introduced at lacing boundaries.
-    let laced = crate::realize::lace_subgraphs(&block_gfas, config.temp_dir.as_deref())?;
+    let laced = crate::commands::lace::lace_subgraphs(&block_gfas, config.temp_dir.as_deref())?;
     info!("[smooth] Lacing complete");
 
     Ok(laced)

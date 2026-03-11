@@ -4,8 +4,8 @@ set -euo pipefail
 # Demo: validate that "impg query -o gfa", "impg graph", and "impg align + impg graph --input-paf"
 # produce equivalent GFA graphs across all sparsification strategies.
 #
-# Tests region sizes: 1k, 2k, 5k, 10k
-# Tests engines: seqwish, pggb
+# Tests region sizes: 1k, 2k, 10k
+# Tests engines: seqwish, pggb (all sizes) + poa (1k, 2k only)
 # Tests sparsification: none, random:0.5, giant:0.95, tree:3:1:0.1, wfmash:auto
 # Three command paths per (region, engine, strategy):
 #   1. query -o gfa --sparsify
@@ -34,16 +34,24 @@ printf "Region\tCommand\tWall_s\tMem_MB\tSegments\tLinks\tPaths\tAvgSegBp\tStatu
 printf "Region\tEngine\tStrategy\tComparison\tResult\tDetail\n" > "$VAL_TSV"
 
 # -------------------------------------------------------------------------
-# Region definitions: 1k, 2k, 5k, 10k
+# Region definitions: 1k, 2k, 10k
 # -------------------------------------------------------------------------
 REGIONS=(
-    #"CHM13#0#chr6:29000000-29001000"
-    #"CHM13#0#chr6:29000000-29002000"
-    #"CHM13#0#chr6:29000000-29005000"
+    "CHM13#0#chr6:29000000-29001000"
+    "CHM13#0#chr6:29000000-29002000"
     "CHM13#0#chr6:29000000-29010000"
 )
 
-ENGINES=(seqwish pggb)
+# Engines for a given region size (bp).
+# poa is only viable for small regions (≤2k); seqwish+pggb for all sizes.
+engines_for_size() {
+    local size_bp=$1
+    if (( size_bp <= 2000 )); then
+        echo "seqwish pggb poa"
+    else
+        echo "seqwish pggb"
+    fi
+}
 
 STRATEGIES=(
     "none"
@@ -219,9 +227,18 @@ run_region() {
     local LABEL
     LABEL=$(make_label "$REGION")
 
+    # Compute region size and select engines
+    local bare=${REGION##*#}
+    local pos_start=${bare#*:}; pos_start=${pos_start%-*}
+    local pos_end=${bare#*-}
+    local size_bp=$((pos_end - pos_start))
+    local ENGINES_STR
+    ENGINES_STR=$(engines_for_size "$size_bp")
+    read -ra REGION_ENGINES <<< "$ENGINES_STR"
+
     echo ""
     echo "================================================================="
-    echo "Region: $REGION  ($LABEL)"
+    echo "Region: $REGION  ($LABEL)  engines: ${REGION_ENGINES[*]}"
     echo "================================================================="
 
     local PREFIX="$OUTDIR/$LABEL"
@@ -242,8 +259,13 @@ run_region() {
     fi
 
     # --- Step 2: for each engine × strategy, run all three paths ---
-    for ENGINE in "${ENGINES[@]}"; do
-        for STRATEGY in "${STRATEGIES[@]}"; do
+    # poa engine does not run alignment, so --sparsify is invalid; only test "none".
+    for ENGINE in "${REGION_ENGINES[@]}"; do
+        local ENGINE_STRATEGIES=("${STRATEGIES[@]}")
+        if [ "$ENGINE" = "poa" ]; then
+            ENGINE_STRATEGIES=("none")
+        fi
+        for STRATEGY in "${ENGINE_STRATEGIES[@]}"; do
             local STAG
             STAG=$(strategy_tag "$STRATEGY")
             local TAG="${ENGINE}.${STAG}"
@@ -262,7 +284,7 @@ run_region() {
             local qgfa="${PREFIX}.query.${TAG}.gfa"
             metrics=$(run_timed "${PREFIX}.query.${TAG}.log" $IMPG query \
                 --alignment-list tpa-list.txt --sequence-files "$AGC" \
-                -r "$REGION" -o gfa --engine "$ENGINE" "${SPARSIFY_FLAG[@]}" \
+                -r "$REGION" -o gfa --gfa-engine "$ENGINE" "${SPARSIFY_FLAG[@]}" \
                 --force-large-region \
                 -O "${PREFIX}.query.${TAG}" -t "$THREADS" -v 1) || true
             read -r wall mem st <<< "$metrics"
@@ -280,7 +302,7 @@ run_region() {
                 metrics=$(run_timed "${PREFIX}.graph.${TAG}.log" $IMPG graph \
                     --sequence-files "${PREFIX}.fa" \
                     -g "$ggfa" \
-                    --engine "$ENGINE" --aligner wfmash "${SPARSIFY_FLAG[@]}" \
+                    --gfa-engine "$ENGINE" --aligner wfmash "${SPARSIFY_FLAG[@]}" \
                     -t "$THREADS" -v 1) || true
                 read -r wall mem st <<< "$metrics"
                 if [ "$st" -eq 0 ] && [ -s "$ggfa" ]; then
@@ -312,7 +334,7 @@ run_region() {
                         --sequence-files "${PREFIX}.fa" \
                         -a "$align_paf" \
                         -g "$agfa" \
-                        --engine "$ENGINE" -t "$THREADS" -v 1) || true
+                        --gfa-engine "$ENGINE" -t "$THREADS" -v 1) || true
                     read -r wall mem st <<< "$metrics"
                     if [ "$st" -eq 0 ] && [ -s "$agfa" ]; then
                         read -r s l p avg <<< "$(gfa_stats "$agfa")"

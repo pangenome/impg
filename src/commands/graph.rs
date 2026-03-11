@@ -89,6 +89,8 @@ pub struct GraphBuildConfig {
     pub sparsify: SparsificationStrategy,
     /// Mash distance parameters for sparsification sketching.
     pub mash_params: sweepga::knn_graph::MashParams,
+    /// Batch alignment: max resource usage per batch (e.g., "2G", "500M")
+    pub batch_bytes: Option<String>,
 }
 
 impl Default for GraphBuildConfig {
@@ -121,6 +123,7 @@ impl Default for GraphBuildConfig {
             debug_dir: None,
             sparsify: SparsificationStrategy::None,
             mash_params: sweepga::knn_graph::MashParams::default(),
+            batch_bytes: None,
         }
     }
 }
@@ -320,10 +323,20 @@ pub fn build_graph<W: Write>(
                     None, // pairs_file
                 )?;
 
-                // Run all-vs-all alignment (query = target = combined FASTA)
-                aligner
-                    .align_to_temp_paf(combined_fasta.path(), combined_fasta.path())
-                    .map_err(|e| io::Error::other(format!("{} alignment failed: {}", config.aligner, e)))?
+                // Run all-vs-all alignment, with optional batching
+                sweepga::align_self_paf(
+                    combined_fasta.path(),
+                    aligner.as_ref(),
+                    &config.aligner,
+                    kmer_frequency,
+                    config.num_threads,
+                    config.min_aln_length,
+                    Some("90".to_string()),
+                    config.temp_dir.clone(),
+                    config.batch_bytes.as_deref(),
+                    !config.show_progress,
+                )
+                .map_err(|e| io::Error::other(format!("{} alignment failed: {}", config.aligner, e)))?
             }
             // Pair selection path: read sequences, use sweepga_align()
             _ => {
@@ -342,6 +355,7 @@ pub fn build_graph<W: Write>(
                     aligner: config.aligner.clone(),
                     temp_dir: config.temp_dir.clone(),
                     map_pct_identity: Some("90".to_string()),
+                    batch_bytes: config.batch_bytes.clone(),
                     ..SweepgaAlignConfig::default()
                 };
                 sweepga_align(&named_seqs, &align_config)?
@@ -688,63 +702,6 @@ pub fn run_graph_build(
     Ok(())
 }
 
-/// Build a pangenome graph from FASTA sequences using the recursive realize engine
-///
-/// Instead of the seqwish graph induction pipeline, this uses the recursive
-/// realize engine (sweepga + POA with lacing) to build the variation graph.
-pub fn run_graph_build_realize<W: Write>(
-    fasta_files: Vec<String>,
-    output: &mut W,
-    config: &crate::realize::RealizeConfig,
-) -> io::Result<()> {
-    let start_time = Instant::now();
-
-    if fasta_files.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "No sequence files specified. Use --sequence-files or --sequence-list",
-        ));
-    }
-
-    info!(
-        "Building graph from {} FASTA file(s) using realize engine",
-        fasta_files.len()
-    );
-
-    // Read all sequences from FASTA files into memory
-    let sequences = read_fasta_sequences(&fasta_files)?;
-
-    info!(
-        "[realize] {:.3}s Loaded {} sequences from FASTA files",
-        start_time.elapsed().as_secs_f64(),
-        sequences.len()
-    );
-
-    if sequences.is_empty() {
-        output.write_all(b"H\tVN:Z:1.0\n")?;
-        return Ok(());
-    }
-
-    // Run the realize engine
-    let result = crate::realize::realize_from_sequences(&sequences, config)?;
-
-    info!(
-        "[realize] {:.3}s Realize complete: {} sequences, max_depth={}, poa_calls={}, sweepga_calls={}, seqwish_calls={}, {}ms",
-        start_time.elapsed().as_secs_f64(),
-        result.stats.num_sequences,
-        result.stats.max_depth_reached,
-        result.stats.poa_calls,
-        result.stats.sweepga_calls,
-        result.stats.seqwish_calls,
-        result.stats.total_ms,
-    );
-
-    let final_gfa = crate::graph::normalize_and_sort(result.gfa, config.num_threads)?;
-    output.write_all(final_gfa.as_bytes())?;
-
-    Ok(())
-}
-
 /// Build a POA graph from FASTA sequences.
 ///
 /// Reads all sequences, runs single-pass SPOA, emits GFA, then sorts.
@@ -795,7 +752,7 @@ pub fn run_graph_build_poa<W: Write>(
 
 /// Build a pangenome graph using the PGGB pipeline: sweepga + seqwish + smoothxg + gfaffix.
 ///
-/// Equivalent to running `--engine seqwish` followed by graph smoothing (smoothxg-style
+/// Equivalent to running `--gfa-engine seqwish` followed by graph smoothing (smoothxg-style
 /// block decomposition + per-block POA) and optional gfaffix normalization.
 pub fn run_graph_build_pggb<W: Write>(
     fasta_files: Vec<String>,
@@ -895,7 +852,7 @@ fn read_sequences_from_fasta(path: &Path) -> io::Result<Vec<(String, Vec<u8>)>> 
     Ok(sequences)
 }
 
-/// Read sequences from FASTA files into (sequence, metadata) pairs for the realize engine.
+/// Read sequences from FASTA files into (sequence, metadata) pairs.
 fn read_fasta_sequences(
     fasta_paths: &[String],
 ) -> io::Result<Vec<(String, crate::graph::SequenceMetadata)>> {
@@ -947,7 +904,7 @@ fn read_fasta_sequences(
         }
     }
 
-    // Sort by length descending (expected by realize engine)
+    // Sort by length descending
     sequences.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
 
     Ok(sequences)

@@ -10,7 +10,6 @@ pub mod impg_index;
 pub mod multi_impg;
 pub mod onealn;
 pub mod paf;
-pub mod realize;
 pub mod seqidx;
 pub mod sequence_index;
 pub mod smooth;
@@ -20,20 +19,17 @@ pub mod tpa_parser;
 /// GFA engine selection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum GfaEngine {
-    /// Recursive partitioning + POA + lacing
-    Recursive,
-    /// Seqwish graph induction via transitive closure
-    Seqwish,
-    /// Flat single-pass partial order alignment
-    Poa,
-    /// Seqwish + smoothxg-style smoothing + gfaffix normalization
+    /// Alignment + seqwish graph induction + smoothing + gfaffix normalization
     Pggb,
+    /// Alignment + seqwish graph induction + gfaffix normalization (no smoothing)
+    Seqwish,
+    /// Single-pass partial order alignment (POA)
+    Poa,
 }
 
 /// Resolved engine configuration passed to subcommand functions.
 pub struct EngineOpts {
     pub engine: GfaEngine,
-    pub recursive_config: Option<realize::RealizeConfig>,
     pub num_threads: usize,
     pub no_filter: bool,
     /// Optional directory to save intermediate debug files (PAFs, FASTAs, etc.)
@@ -134,25 +130,6 @@ pub fn dispatch_gfa_engine(
                 &seqwish_config,
             )?;
             graph::normalize_and_sort(gfa, engine_opts.num_threads)
-        }
-        GfaEngine::Recursive => {
-            let config = engine_opts.recursive_config.as_ref().ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "RecursiveOpts config required for recursive engine",
-                )
-            })?;
-            let result = realize::realize(impg, query_intervals, sequence_index, config)?;
-            log::info!(
-                "Recursive engine stats: {} sequences, max_depth={}, poa_calls={}, sweepga_calls={}, seqwish_calls={}, {}ms",
-                result.stats.num_sequences,
-                result.stats.max_depth_reached,
-                result.stats.poa_calls,
-                result.stats.sweepga_calls,
-                result.stats.seqwish_calls,
-                result.stats.total_ms,
-            );
-            graph::normalize_and_sort(result.gfa, engine_opts.num_threads)
         }
         GfaEngine::Pggb => {
             // Step 1: seqwish graph induction (shared config, same as seqwish engine)

@@ -871,7 +871,7 @@ dependencies = [
 [[package]]
 name = "fastga-rs"
 version = "0.1.2"
-source = "git+https://github.com/pangenome/fastga-rs?rev=c0bf620#c0bf6202506f51c77e47cf8707e58b7b61e2b621"
+source = "git+https://github.com/pangenome/fastga-rs?rev=c0bf6202506f51c77e47cf8707e58b7b61e2b621#c0bf6202506f51c77e47cf8707e58b7b61e2b621"
 dependencies = [
  "anyhow",
  "cc",
@@ -1358,6 +1358,7 @@ dependencies = [
  "gfasort",
  "gzp",
  "handlegraph",
+ "indexmap",
  "indicatif",
  "lib_wfa2",
  "log",
@@ -1390,6 +1391,7 @@ checksum = "7714e70437a7dc3ac8eb7e6f8df75fd8eb422675fc7678aff7364301092b1017"
 dependencies = [
  "equivalent",
  "hashbrown 0.16.1",
+ "rayon",
  "serde",
  "serde_core",
 ]
@@ -1927,7 +1929,7 @@ dependencies = [
 [[package]]
 name = "onecode"
 version = "0.1.0"
-source = "git+https://github.com/pangenome/onecode-rs?rev=f531f5b#f531f5b0ff54001a898ec4e0c0c761b2bd0a1f34"
+source = "git+https://github.com/pangenome/onecode-rs?rev=f531f5b0ff54001a898ec4e0c0c761b2bd0a1f34#f531f5b0ff54001a898ec4e0c0c761b2bd0a1f34"
 dependencies = [
  "cc",
  "libc",
@@ -2633,7 +2635,7 @@ dependencies = [
 [[package]]
 name = "sweepga"
 version = "0.1.1"
-source = "git+https://github.com/pangenome/sweepga?rev=741c951f34153eeb414c3aa433fc418d9a69c347#741c951f34153eeb414c3aa433fc418d9a69c347"
+source = "git+https://github.com/pangenome/sweepga?rev=c8e70ff59fd8daace1b9b0ea9c4b1d946bd7d6b5#c8e70ff59fd8daace1b9b0ea9c4b1d946bd7d6b5"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -2644,7 +2646,7 @@ dependencies = [
  "libc",
  "nom 7.1.3",
  "noodles",
- "onecode 0.1.0 (git+https://github.com/pangenome/onecode-rs?rev=f531f5b)",
+ "onecode 0.1.0 (git+https://github.com/pangenome/onecode-rs?rev=f531f5b0ff54001a898ec4e0c0c761b2bd0a1f34)",
  "ordered-float",
  "ragc-core",
  "rand 0.8.5",
@@ -2683,9 +2685,9 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "tempfile"
-version = "3.26.0"
+version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82a72c767771b47409d2345987fda8628641887d5466101319899796367354a0"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
  "getrandom 0.4.2",
@@ -3096,7 +3098,7 @@ dependencies = [
 [[package]]
 name = "wfmash-rs"
 version = "0.1.0"
-source = "git+https://github.com/pangenome/wfmash-rs?rev=e3fb64ef#e3fb64efa040aac4e09cd5d1fd71d5d2db5e6375"
+source = "git+https://github.com/pangenome/wfmash-rs?rev=e1207fc50487fb5065f4211d175b3c238fcca167#e1207fc50487fb5065f4211d175b3c238fcca167"
 dependencies = [
  "anyhow",
  "num_cpus",

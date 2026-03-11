@@ -975,7 +975,7 @@ pub fn generate_gfa_seqwish_from_intervals(
         writer.flush()?;
     }
 
-    // 3) Build graph using the same pipeline as `graph --engine seqwish`
+    // 3) Build graph using the same pipeline as `graph --gfa-engine seqwish`
     let graph_config = crate::commands::graph::GraphBuildConfig {
         num_threads: config.num_threads,
         frequency_multiplier: config.frequency_multiplier,
@@ -994,73 +994,6 @@ pub fn generate_gfa_seqwish_from_intervals(
         debug_dir: config.debug_dir.clone(),
         sparsify: config.sparsify.clone(),
         mash_params: config.mash_params.clone(),
-        repeat_max: config.repeat_max,
-        min_repeat_dist: config.min_repeat_dist,
-        min_match_len: config.min_match_len,
-        sparse_factor: config.sparse_factor,
-        transclose_batch: config.transclose_batch,
-        use_in_memory: config.use_in_memory,
-        show_progress: false,
-        ..crate::commands::graph::GraphBuildConfig::default()
-    };
-
-    let fasta_path = combined_fasta
-        .path()
-        .to_str()
-        .ok_or_else(|| io::Error::other("Temp FASTA path is not valid UTF-8"))?
-        .to_string();
-
-    let mut gfa_output = Vec::new();
-    crate::commands::graph::build_graph(&[fasta_path], &mut gfa_output, &graph_config)?;
-
-    String::from_utf8(gfa_output).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("Invalid UTF-8 in GFA: {}", e),
-        )
-    })
-}
-
-/// Generate a variation graph from pre-extracted sequences using sweepga+seqwish.
-///
-/// Unlike `generate_gfa_seqwish_from_intervals` which extracts sequences from
-/// an IMPG index, this function takes sequences directly. Used by the recursive
-/// engine as a memory-efficient alternative to POA when the number of sequences
-/// is too large for SPOA.
-pub fn generate_gfa_seqwish_from_sequences(
-    sequences: &[(String, SequenceMetadata)],
-    config: &SeqwishConfig,
-) -> io::Result<String> {
-    if sequences.is_empty() {
-        return Ok(String::from("H\tVN:Z:1.0\n"));
-    }
-
-    // Write sequences to a temp FASTA file
-    let combined_fasta = tempfile::Builder::new()
-        .suffix(".fa")
-        .tempfile()
-        .map_err(|e| io::Error::other(format!("Failed to create temp file: {}", e)))?;
-
-    {
-        let mut writer = BufWriter::new(&combined_fasta);
-        for (seq, meta) in sequences {
-            writeln!(writer, ">{}", meta.path_name())?;
-            writeln!(writer, "{}", seq)?;
-        }
-        writer.flush()?;
-    }
-
-    // Build graph using the same pipeline as `graph --engine seqwish`
-    let graph_config = crate::commands::graph::GraphBuildConfig {
-        num_threads: config.num_threads,
-        frequency_multiplier: config.frequency_multiplier,
-        min_aln_length: config.min_aln_length,
-        temp_dir: config.temp_dir.clone(),
-        no_filter: config.no_filter,
-        num_mappings: config.num_mappings.clone(),
-        scaffold_filter: config.scaffold_filter.clone(),
-        debug_dir: config.debug_dir.clone(),
-        sparsify: config.sparsify.clone(),
         repeat_max: config.repeat_max,
         min_repeat_dist: config.min_repeat_dist,
         min_match_len: config.min_match_len,

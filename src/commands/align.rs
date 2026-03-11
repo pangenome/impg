@@ -34,6 +34,8 @@ pub struct AlignConfig {
     pub aligner: String,
     /// Directory for temporary files
     pub temp_dir: Option<String>,
+    /// Batch alignment: max resource usage per batch (e.g., "2G", "500M")
+    pub batch_bytes: Option<String>,
     // Sweepga filtering options
     pub no_filter: bool,
     pub num_mappings: String,
@@ -59,6 +61,7 @@ impl Default for AlignConfig {
             show_progress: true,
             aligner: "wfmash".to_string(),
             temp_dir: None,
+            batch_bytes: None,
             // Filtering defaults - must match GraphBuildConfig and CLI defaults
             no_filter: false,
             num_mappings: "many:many".to_string(),
@@ -405,76 +408,120 @@ fn run_alignments(
     let paf_output_path = format!("{}/alignments.paf", output_dir);
     let mut combined_writer = BufWriter::new(File::create(&paf_output_path)?);
 
-    for (pair_idx, (query_path, target_path)) in file_pairs.iter().enumerate() {
+    // Self-alignment (single file pair, query==target): delegate entirely to
+    // sweepga::align_self_paf() which handles both batched and unbatched paths.
+    let is_self_alignment = file_pairs.len() == 1 && file_pairs[0].0 == file_pairs[0].1;
+
+    if is_self_alignment {
+        let fasta_path = Path::new(&file_pairs[0].0);
         if config.show_progress {
             info!(
-                "[align] {:.3}s Aligning pair {}/{}: {} vs {}",
+                "[align] {:.3}s Self-aligning {}",
                 start_time.elapsed().as_secs_f64(),
-                pair_idx + 1,
-                file_pairs.len(),
-                Path::new(query_path)
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy(),
-                Path::new(target_path)
+                fasta_path
                     .file_name()
                     .unwrap_or_default()
                     .to_string_lossy(),
             );
         }
 
-        match config.output_format {
-            AlignOutputFormat::OneAln => {
-                // For 1aln format, use align_to_temp_1aln and copy to output
-                let temp_aln = aligner
-                    .align_to_temp_1aln(Path::new(query_path), Path::new(target_path))
-                    .map_err(|e| {
-                        io::Error::other(format!(
-                            "{} alignment failed for {} vs {}: {}",
-                            config.aligner, query_path, target_path, e
-                        ))
-                    })?;
+        let paf_temp = sweepga::align_self_paf(
+            fasta_path,
+            aligner.as_ref(),
+            &config.aligner,
+            kmer_frequency,
+            config.num_threads,
+            config.min_aln_length,
+            Some("90".to_string()),
+            config.temp_dir.clone(),
+            config.batch_bytes.as_deref(),
+            !config.show_progress,
+        )
+        .map_err(|e| {
+            io::Error::other(format!("{} alignment failed: {}", config.aligner, e))
+        })?;
 
-                let query_stem = Path::new(query_path)
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy();
-                let target_stem = Path::new(target_path)
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy();
-                let output_name = format!("{}_vs_{}.1aln", query_stem, target_stem);
-                let output_path = format!("{}/{}", output_dir, output_name);
-                std::fs::copy(temp_aln.path(), &output_path)?;
+        // Apply filtering unless --no-filter
+        let result_paf = if config.no_filter {
+            paf_temp
+        } else {
+            apply_paf_filter(paf_temp, config, avg_len.unwrap_or(0))?
+        };
+
+        let paf_data = std::fs::read(result_paf.path())?;
+        combined_writer.write_all(&paf_data)?;
+    } else {
+        for (pair_idx, (query_path, target_path)) in file_pairs.iter().enumerate() {
+            if config.show_progress {
+                info!(
+                    "[align] {:.3}s Aligning pair {}/{}: {} vs {}",
+                    start_time.elapsed().as_secs_f64(),
+                    pair_idx + 1,
+                    file_pairs.len(),
+                    Path::new(query_path)
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy(),
+                    Path::new(target_path)
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy(),
+                );
             }
-            AlignOutputFormat::Paf => {
-                // Run alignment to temp PAF
-                let paf_temp = aligner
-                    .align_to_temp_paf(Path::new(query_path), Path::new(target_path))
-                    .map_err(|e| {
-                        io::Error::other(format!(
-                            "{} alignment failed for {} vs {}: {}",
-                            config.aligner, query_path, target_path, e
-                        ))
-                    })?;
 
-                // Apply filtering unless --no-filter
-                let result_paf = if config.no_filter {
-                    paf_temp
-                } else {
-                    apply_paf_filter(paf_temp, config, avg_len.unwrap_or(0))?
-                };
+            match config.output_format {
+                AlignOutputFormat::OneAln => {
+                    // For 1aln format, use align_to_temp_1aln and copy to output
+                    let temp_aln = aligner
+                        .align_to_temp_1aln(Path::new(query_path), Path::new(target_path))
+                        .map_err(|e| {
+                            io::Error::other(format!(
+                                "{} alignment failed for {} vs {}: {}",
+                                config.aligner, query_path, target_path, e
+                            ))
+                        })?;
 
-                // Append to combined output
-                let paf_data = std::fs::read(result_paf.path())?;
-                combined_writer.write_all(&paf_data)?;
+                    let query_stem = Path::new(query_path)
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    let target_stem = Path::new(target_path)
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    let output_name = format!("{}_vs_{}.1aln", query_stem, target_stem);
+                    let output_path = format!("{}/{}", output_dir, output_name);
+                    std::fs::copy(temp_aln.path(), &output_path)?;
+                }
+                AlignOutputFormat::Paf => {
+                    // Run alignment to temp PAF
+                    let paf_temp = aligner
+                        .align_to_temp_paf(Path::new(query_path), Path::new(target_path))
+                        .map_err(|e| {
+                            io::Error::other(format!(
+                                "{} alignment failed for {} vs {}: {}",
+                                config.aligner, query_path, target_path, e
+                            ))
+                        })?;
+
+                    // Apply filtering unless --no-filter
+                    let result_paf = if config.no_filter {
+                        paf_temp
+                    } else {
+                        apply_paf_filter(paf_temp, config, avg_len.unwrap_or(0))?
+                    };
+
+                    // Append to combined output
+                    let paf_data = std::fs::read(result_paf.path())?;
+                    combined_writer.write_all(&paf_data)?;
+                }
+                AlignOutputFormat::JobList => unreachable!(),
             }
-            AlignOutputFormat::JobList => unreachable!(),
         }
-    }
 
-    // Keep pairs_file alive until all alignments are done
-    drop(pairs_file);
+        // Keep pairs_file alive until all alignments are done
+        drop(pairs_file);
+    }
 
     combined_writer.flush()?;
 
@@ -534,7 +581,7 @@ fn apply_paf_filter(
     Ok(filtered_paf_file)
 }
 
-/// Configuration for in-memory sweepga alignment (used by the realize engine).
+/// Configuration for in-memory sweepga alignment.
 pub struct SweepgaAlignConfig {
     /// Number of threads for alignment
     pub num_threads: usize,
@@ -570,6 +617,8 @@ pub struct SweepgaAlignConfig {
     pub aligner: String,
     /// Minimum mapping identity for wfmash (e.g. "70"). None = wfmash auto-estimates.
     pub map_pct_identity: Option<String>,
+    /// Batch alignment: max resource usage per batch (e.g., "2G", "500M")
+    pub batch_bytes: Option<String>,
 }
 
 impl Default for SweepgaAlignConfig {
@@ -592,6 +641,7 @@ impl Default for SweepgaAlignConfig {
             mash_params: sweepga::knn_graph::MashParams::default(),
             aligner: "wfmash".to_string(),
             map_pct_identity: None,
+            batch_bytes: None,
         }
     }
 }
@@ -665,6 +715,7 @@ pub fn sweepga_align(
             show_progress: false,
             aligner: config.aligner.clone(),
             temp_dir: config.temp_dir.clone(),
+            batch_bytes: None,
             no_filter: config.no_filter,
             num_mappings: config.num_mappings.clone(),
             scaffold_jump: config.scaffold_jump,
@@ -728,9 +779,20 @@ fn sweepga_align_all_vs_all(
         None, // pairs_file
     )?;
 
-    aligner
-        .align_to_temp_paf(combined_fasta.path(), combined_fasta.path())
-        .map_err(|e| io::Error::other(format!("{} alignment failed: {}", config.aligner, e)))
+    // Run all-vs-all alignment, with optional batching
+    sweepga::align_self_paf(
+        combined_fasta.path(),
+        aligner.as_ref(),
+        &config.aligner,
+        config.kmer_frequency,
+        config.num_threads,
+        config.min_aln_length,
+        config.map_pct_identity.clone(),
+        config.temp_dir.clone(),
+        config.batch_bytes.as_deref(),
+        true, // quiet
+    )
+    .map_err(|e| io::Error::other(format!("{} alignment failed: {}", config.aligner, e)))
 }
 
 /// Pairwise alignment: for wfmash, write all sequences to a single FASTA and
