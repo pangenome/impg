@@ -204,6 +204,29 @@ impg query -a alignments.paf -r chr1:1000-50000 -o gfa --gfa-engine pggb --seque
     --target-poa-length 700,1100 --max-node-length 200 --poa-padding-fraction 0.001
 ```
 
+#### Partitioned GFA pipeline
+
+For large regions, use `--partition-size` to split the query region into windows, build a GFA per window, lace them together, and run a single final gfaffix normalization. This reduces peak memory and works with any `--gfa-engine`:
+
+```bash
+# Build a partitioned GFA for a 50kb region using 10kb windows (seqwish engine)
+impg query -a alignments.paf -r chr1:0-50000 -o gfa --gfa-engine seqwish \
+    --partition-size 10000 --sequence-files *.fa -O output
+
+# Same with pggb engine (smoothing runs per partition, then laced + normalized)
+impg query -a alignments.paf -r chr1:0-50000 -o gfa --gfa-engine pggb \
+    --partition-size 10000 --sequence-files *.fa -O output
+
+# POA engine with small windows (POA works best with small regions)
+impg query -a alignments.paf -r chr1:0-50000 -o gfa --gfa-engine poa \
+    --partition-size 5000 --sequence-files *.fa -O output
+```
+
+The `--partition-size` flag:
+- Accepts a value in bp (minimum: 1000)
+- Bypasses the `--force-large-region` requirement (each partition is small)
+- Works with `query`, `partition`, and `graph` commands
+
 #### Alignment visualizations
 
 The `scripts/faln2html.py` tool converts FASTA alignments into interactive HTML visualizations that can be viewed in any web browser. It supports [react-msa](https://github.com/GMOD/JBrowseMSA) and [ProSeqViewer](https://github.com/BioComputingUP/ProSeqViewer) as MSA viewers.
@@ -268,6 +291,11 @@ impg partition -a alignments.paf -w 1000000 -o gfa --gfa-engine seqwish --sequen
 # Tune smoothxg-style smoothing (pggb engine, default: two passes at 700,1100 bp)
 impg partition -a alignments.paf -w 1000000 -o gfa --gfa-engine pggb --sequence-files *.fa --separate-files \
     --target-poa-length 700,1100 --max-node-length 200
+
+# Partitioned GFA: build per-partition GFA, lace together, normalize in one step
+# Outputs a single partitions.gfa instead of separate files
+impg partition -a alignments.paf -w 100000 -o gfa --partition-size 10000 \
+    --sequence-files *.fa --output-folder results
 ```
 
 ### Similarity
@@ -483,6 +511,18 @@ impg graph --sequence-files sequences.fa -g output.gfa --gfa-engine poa
 ```
 
 All engines produce sorted, unchopped GFA with consistent path names.
+
+#### Partitioned graph building
+
+Use `--partition-size` to build the graph in windows, reducing peak memory for large inputs:
+
+```bash
+# Build with 10kb partitions (aligns once, then partitions + builds GFA per window)
+impg graph --sequence-files sequences.fa -g output.gfa --partition-size 10000
+
+# Works with any engine
+impg graph --sequence-files sequences.fa -g output.gfa --gfa-engine seqwish --partition-size 10000
+```
 
 #### Alignment backend options
 
