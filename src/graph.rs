@@ -792,29 +792,25 @@ pub fn sort_gfa(gfa_content: &str, num_threads: usize) -> io::Result<String> {
 
 /// Run gfaffix graph normalization on a GFA string.
 ///
-/// Searches for the `gfaffix` binary in PATH first, then next to the current executable
+/// Searches for the `gfaffix` binary next to the current executable
 /// (so it works when both are built together in `target/release/`).
+/// The system PATH is intentionally NOT searched to avoid version mismatches.
 /// Returns an error if the binary is not found, allowing callers to fall back gracefully.
 pub fn run_gfaffix(gfa_content: &str, _num_threads: usize) -> io::Result<String> {
     use std::process::Command;
 
-    // Resolve binary: sibling of current exe first (e.g. target/release/gfaffix),
-    // then fall back to PATH lookup.
+    // Resolve binary: sibling of current exe (e.g. target/release/gfaffix).
+    // The system PATH is intentionally NOT searched to avoid version mismatches.
     let gfaffix_bin = std::env::current_exe()
         .ok()
         .map(|exe| exe.with_file_name("gfaffix"))
         .filter(|p| p.exists())
-        .or_else(|| {
-            std::env::var_os("PATH").and_then(|paths| {
-                std::env::split_paths(&paths)
-                    .map(|dir| dir.join("gfaffix"))
-                    .find(|p| p.exists())
-            })
-        })
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                "gfaffix binary not found in PATH or next to impg executable",
+                "gfaffix binary not found next to impg executable. \
+                 It should have been built as a workspace member. \
+                 Try rebuilding with `cargo build --release`.",
             )
         })?;
 

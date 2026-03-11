@@ -35,7 +35,7 @@ SK1#1#chrI          52740  102721
 You need Rust (`cargo`) installed. Then:
 
 ```bash
-git clone https://github.com/pangenome/impg.git
+git clone --recursive https://github.com/pangenome/impg.git
 cd impg
 cargo install --force --path .
 ```
