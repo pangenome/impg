@@ -40,6 +40,8 @@ cd impg
 cargo install --force --path .
 ```
 
+This single command installs `impg`, `gfaffix`, and companion binaries (`wfmash`, `FastGA`, etc.) into `~/.cargo/bin/`.
+
 ### Troubleshooting
 
 If you encounter issues related to `libclang` during the build process, you may need to set specific environment variables to point to your LLVM installation. 

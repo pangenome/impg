@@ -26,5 +26,8 @@ jobs:
       - name: Test gfaffix
         run: docker run --rm --entrypoint gfaffix pangenome/impg --help
 
+      - name: Test wfmash
+        run: docker run --rm --entrypoint wfmash pangenome/impg --help
+
       - name: Push the Docker image
         run: tag=$(date +%s) && docker tag pangenome/impg:latest pangenome/impg:$tag && docker push pangenome/impg:$tag

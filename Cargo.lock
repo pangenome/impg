@@ -1051,22 +1051,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gfaffix"
-version = "0.2.1"
-dependencies = [
- "clap",
- "env_logger",
- "flate2",
- "gfa",
- "handlegraph",
- "indexmap",
- "log",
- "rayon",
- "regex",
- "rustc-hash 2.1.1",
-]
-
-[[package]]
 name = "gfasort"
 version = "0.1.0"
 source = "git+https://github.com/pangenome/gfasort?rev=e23f45e#e23f45e94e2746f2817eb17925f53e0319b1b085"
@@ -1345,6 +1329,8 @@ dependencies = [
  "clap",
  "coitrees",
  "env_logger",
+ "flate2",
+ "gfa",
  "gfasort",
  "gzp",
  "handlegraph",
