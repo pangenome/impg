@@ -62,6 +62,9 @@ pub struct EngineOpts {
     pub target_poa_lengths: Vec<usize>,
     pub max_node_length: usize,
     pub poa_padding_fraction: f64,
+    /// When set, activates the partitioned GFA pipeline: build per-partition GFA,
+    /// lace together, then run gfaffix once at the end.
+    pub partition_size: Option<usize>,
 }
 
 /// Dispatch GFA generation to the selected engine.
@@ -110,6 +113,8 @@ pub fn dispatch_gfa_engine(
         ..graph::SeqwishConfig::default()
     };
 
+    let skip_normalize = engine_opts.partition_size.is_some();
+
     match engine_opts.engine {
         GfaEngine::Poa => {
             let params = scoring_params.ok_or_else(|| {
@@ -120,7 +125,11 @@ pub fn dispatch_gfa_engine(
             })?;
             let gfa =
                 graph::generate_gfa_from_intervals(impg, query_intervals, sequence_index, params)?;
-            graph::normalize_and_sort(gfa, engine_opts.num_threads)
+            if skip_normalize {
+                Ok(gfa)
+            } else {
+                graph::normalize_and_sort(gfa, engine_opts.num_threads)
+            }
         }
         GfaEngine::Seqwish => {
             let gfa = graph::generate_gfa_seqwish_from_intervals(
@@ -129,7 +138,11 @@ pub fn dispatch_gfa_engine(
                 sequence_index,
                 &seqwish_config,
             )?;
-            graph::normalize_and_sort(gfa, engine_opts.num_threads)
+            if skip_normalize {
+                Ok(gfa)
+            } else {
+                graph::normalize_and_sort(gfa, engine_opts.num_threads)
+            }
         }
         GfaEngine::Pggb => {
             // Step 1: seqwish graph induction (shared config, same as seqwish engine)
@@ -155,8 +168,52 @@ pub fn dispatch_gfa_engine(
             };
             let smoothed = smooth::smooth_gfa(&raw_gfa, &smooth_config)?;
 
-            // Step 3: gfaffix + sort
-            graph::normalize_and_sort(smoothed, engine_opts.num_threads)
+            // Step 3: gfaffix + sort (skipped when partitioned — done once after lacing)
+            if skip_normalize {
+                Ok(smoothed)
+            } else {
+                graph::normalize_and_sort(smoothed, engine_opts.num_threads)
+            }
         }
     }
+}
+
+/// Run the partitioned GFA pipeline: build per-partition GFA (sequentially,
+/// each using all threads), lace them together, then run a single final
+/// gfaffix normalization + sort.
+pub fn partitioned_gfa_pipeline(
+    partitions: &[(usize, Vec<coitrees::Interval<u32>>)],
+    impg: &impl impg_index::ImpgIndex,
+    sequence_index: &sequence_index::UnifiedSequenceIndex,
+    scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
+    engine_opts: &EngineOpts,
+) -> std::io::Result<String> {
+    use log::info;
+
+    if partitions.is_empty() {
+        return Ok(String::from("H\tVN:Z:1.0\n"));
+    }
+
+    // 1. Generate per-partition GFAs sequentially (each partition uses all threads)
+    let mut sub_gfas: Vec<String> = Vec::with_capacity(partitions.len());
+    for (partition_num, intervals) in partitions {
+        info!(
+            "[partitioned] Building GFA for partition {} ({} intervals)",
+            partition_num,
+            intervals.len()
+        );
+        let gfa = dispatch_gfa_engine(impg, intervals, sequence_index, scoring_params, engine_opts)?;
+        sub_gfas.push(gfa);
+    }
+
+    // 2. Lace all partition GFAs together
+    info!(
+        "[partitioned] Lacing {} partition GFAs",
+        sub_gfas.len()
+    );
+    let laced = commands::lace::lace_subgraphs(&sub_gfas, None)?;
+
+    // 3. Single final gfaffix normalization + sort
+    info!("[partitioned] Running final gfaffix normalization");
+    graph::normalize_and_sort(laced, engine_opts.num_threads)
 }

@@ -910,6 +910,439 @@ fn read_fasta_sequences(
     Ok(sequences)
 }
 
+/// Result of `align_sequences()`: holds temp files that must stay alive until consumed.
+pub struct AlignmentResult {
+    pub combined_fasta: tempfile::NamedTempFile,
+    pub filtered_paf: tempfile::NamedTempFile,
+    pub num_sequences: usize,
+    pub num_genomes: usize,
+}
+
+/// Run the alignment + filtering stages of the graph pipeline, returning
+/// the combined FASTA and filtered PAF as temp files.
+///
+/// Extracted from `build_graph()` so that both `build_graph()` and
+/// `run_graph_build_partitioned()` can share this code.
+pub fn align_sequences(
+    fasta_files: &[String],
+    config: &GraphBuildConfig,
+) -> io::Result<AlignmentResult> {
+    let start_time = Instant::now();
+
+    // Validate inputs
+    if fasta_files.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "No sequence files provided",
+        ));
+    }
+
+    for path in fasta_files {
+        if !Path::new(path).exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("FASTA file not found: {}", path),
+            ));
+        }
+    }
+
+    // Set up temp directory
+    if let Some(ref temp_dir) = config.temp_dir {
+        std::env::set_var("TMPDIR", temp_dir);
+        seqwish::tempfile::set_dir(temp_dir);
+        if config.show_progress {
+            info!("[graph::temp] Using temp directory: {}", temp_dir);
+        }
+    }
+
+    // 1) Count sequences and genomes
+    if config.show_progress {
+        info!(
+            "[graph::count] {:.3}s Counting sequences in {} FASTA file(s)",
+            start_time.elapsed().as_secs_f64(),
+            fasta_files.len()
+        );
+    }
+
+    let (num_sequences, num_genomes) = count_sequences_and_genomes_in_fasta(fasta_files)?;
+    let kmer_frequency = config
+        .frequency
+        .unwrap_or(num_genomes * config.frequency_multiplier);
+
+    if config.show_progress {
+        info!(
+            "[graph::count] {:.3}s Found {} sequences in {} genomes, using k-mer frequency {}",
+            start_time.elapsed().as_secs_f64(),
+            num_sequences,
+            num_genomes,
+            kmer_frequency
+        );
+    }
+
+    // 2) Create combined FASTA
+    let combined_fasta = tempfile::Builder::new().suffix(".fa").tempfile()?;
+    let mut total_bases: u64 = 0;
+    {
+        let mut writer = BufWriter::new(&combined_fasta);
+        for path in fasta_files {
+            let file = File::open(path)?;
+            let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
+                io::Error::other(format!("Failed to open reader for '{}': {}", path, e))
+            })?;
+            let reader = BufReader::new(reader);
+            for line in reader.lines() {
+                let line: String = line?;
+                if !line.starts_with('>') {
+                    total_bases += line.trim().len() as u64;
+                }
+                writeln!(writer, "{}", line)?;
+            }
+        }
+        writer.flush()?;
+    }
+
+    let avg_seq_len = if num_sequences > 0 {
+        total_bases / num_sequences as u64
+    } else {
+        0
+    };
+
+    if config.show_progress {
+        info!(
+            "[graph::combine] {:.3}s Combined FASTA files for alignment (avg seq len: {} bp)",
+            start_time.elapsed().as_secs_f64(),
+            avg_seq_len
+        );
+    }
+
+    // Debug: save combined FASTA
+    if let Some(ref debug_dir) = config.debug_dir {
+        let dst = format!("{}/combined.fa", debug_dir);
+        let _ = std::fs::copy(combined_fasta.path(), &dst);
+        info!("[graph::debug] Saved combined FASTA to {}", dst);
+    }
+
+    // Create FASTA index (.fai) — required by wfmash
+    if config.aligner == "wfmash" {
+        rust_htslib::faidx::Reader::from_path(combined_fasta.path())
+            .map_err(|e| io::Error::other(format!("Failed to create FASTA index: {e}")))?;
+    }
+
+    // 3) Get PAF alignments
+    let paf_temp: tempfile::NamedTempFile = if let Some(ref input_paf) = config.input_paf {
+        if config.show_progress {
+            info!(
+                "[graph::align] {:.3}s Using provided PAF file: {}",
+                start_time.elapsed().as_secs_f64(),
+                input_paf
+            );
+        }
+        let paf_temp = tempfile::Builder::new().suffix(".paf").tempfile()?;
+        std::fs::copy(input_paf, paf_temp.path())?;
+        paf_temp
+    } else {
+        if config.show_progress {
+            info!(
+                "[graph::align] {:.3}s Running {} alignment (f={})",
+                start_time.elapsed().as_secs_f64(),
+                config.aligner,
+                kmer_frequency
+            );
+            if !matches!(config.sparsify, SparsificationStrategy::None) {
+                info!(
+                    "[graph::align] {:.3}s Sparsification: {}",
+                    start_time.elapsed().as_secs_f64(),
+                    config.sparsify.description()
+                );
+            }
+        }
+
+        let paf_temp = match &config.sparsify {
+            SparsificationStrategy::None | SparsificationStrategy::WfmashDensity(_) => {
+                let segment_length = None;
+                let wfmash_density = sweepga::orchestrator::resolve_wfmash_density(
+                    &config.sparsify,
+                    num_genomes,
+                );
+
+                if config.show_progress {
+                    if let Some(f) = wfmash_density {
+                        info!(
+                            "[graph::align] {:.3}s Wfmash mapping density: keeping {:.1}% of mappings ({} genomes)",
+                            start_time.elapsed().as_secs_f64(), f * 100.0, num_genomes
+                        );
+                    }
+                }
+
+                let aligner: Box<dyn Aligner> = create_aligner_adaptive(
+                    &config.aligner,
+                    kmer_frequency,
+                    config.num_threads,
+                    config.min_aln_length,
+                    Some("90".to_string()),
+                    config.temp_dir.clone(),
+                    segment_length,
+                    Some(avg_seq_len),
+                    wfmash_density,
+                    None,
+                    None,
+                )?;
+
+                sweepga::align_self_paf(
+                    combined_fasta.path(),
+                    aligner.as_ref(),
+                    &config.aligner,
+                    kmer_frequency,
+                    config.num_threads,
+                    config.min_aln_length,
+                    Some("90".to_string()),
+                    config.temp_dir.clone(),
+                    config.batch_bytes.as_deref(),
+                    !config.show_progress,
+                )
+                .map_err(|e| io::Error::other(format!("{} alignment failed: {}", config.aligner, e)))?
+            }
+            _ => {
+                let sequences = read_sequences_from_fasta(combined_fasta.path())?;
+                let named_seqs: Vec<(String, &[u8])> = sequences
+                    .iter()
+                    .map(|(n, s)| (n.clone(), s.as_slice()))
+                    .collect();
+                let align_config = SweepgaAlignConfig {
+                    num_threads: config.num_threads,
+                    kmer_frequency,
+                    min_aln_length: config.min_aln_length,
+                    no_filter: true,
+                    sparsify: config.sparsify.clone(),
+                    mash_params: config.mash_params.clone(),
+                    aligner: config.aligner.clone(),
+                    temp_dir: config.temp_dir.clone(),
+                    map_pct_identity: Some("90".to_string()),
+                    batch_bytes: config.batch_bytes.clone(),
+                    ..SweepgaAlignConfig::default()
+                };
+                sweepga_align(&named_seqs, &align_config)?
+            }
+        };
+
+        if config.show_progress {
+            info!(
+                "[graph::align] {:.3}s Alignment complete",
+                start_time.elapsed().as_secs_f64()
+            );
+        }
+        paf_temp
+    };
+
+    // Debug: save raw PAF
+    if let Some(ref debug_dir) = config.debug_dir {
+        let dst = format!("{}/raw.paf", debug_dir);
+        let _ = std::fs::copy(paf_temp.path(), &dst);
+        info!("[graph::debug] Saved raw PAF to {}", dst);
+    }
+
+    // 3.5) Apply filtering
+    let filtered_paf = if config.no_filter {
+        if config.show_progress {
+            info!(
+                "[graph::filter] {:.3}s Filtering disabled (--no-filter)",
+                start_time.elapsed().as_secs_f64()
+            );
+        }
+        paf_temp
+    } else {
+        let filter_params = FilterParams {
+            num_mappings: config.num_mappings.clone(),
+            scaffold_jump: config.scaffold_jump,
+            scaffold_mass: config.scaffold_mass,
+            scaffold_filter: config.scaffold_filter.clone(),
+            overlap: config.overlap,
+            min_identity: config.min_identity,
+            scaffold_dist: config.scaffold_dist,
+            min_map_length: config.min_map_length,
+        };
+        let filter_config = build_filter_config(&filter_params, avg_seq_len);
+
+        if config.show_progress {
+            info!(
+                "[graph::filter] {:.3}s Filtering alignments with sweepga (n={}, scaffold_jump={}, scaffold_mass={}, scaffold_filter={})",
+                start_time.elapsed().as_secs_f64(),
+                config.num_mappings,
+                filter_config.scaffold_gap,
+                filter_config.min_scaffold_length,
+                config.scaffold_filter
+            );
+        }
+
+        let filtered_paf_file = tempfile::Builder::new()
+            .suffix(".filtered.paf")
+            .tempfile()?;
+
+        let filter = PafFilter::new(filter_config).with_keep_self(false);
+        filter
+            .filter_paf(paf_temp.path(), filtered_paf_file.path())
+            .map_err(|e| io::Error::other(format!("Filtering failed: {}", e)))?;
+
+        if config.show_progress {
+            info!(
+                "[graph::filter] {:.3}s Filtering complete",
+                start_time.elapsed().as_secs_f64()
+            );
+        }
+
+        filtered_paf_file
+    };
+
+    // Debug: save filtered PAF
+    if let Some(ref debug_dir) = config.debug_dir {
+        let dst = format!("{}/filtered.paf", debug_dir);
+        let _ = std::fs::copy(filtered_paf.path(), &dst);
+        info!("[graph::debug] Saved filtered PAF to {}", dst);
+    }
+
+    Ok(AlignmentResult {
+        combined_fasta,
+        filtered_paf,
+        num_sequences,
+        num_genomes,
+    })
+}
+
+/// Build a pangenome graph using the partitioned GFA pipeline:
+/// align → build IMPG index → partition → per-partition engine → lace → gfaffix.
+pub fn run_graph_build_partitioned(
+    fasta_files: Vec<String>,
+    output: &str,
+    config: &GraphBuildConfig,
+    engine_opts: &crate::EngineOpts,
+    scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
+    partition_size: usize,
+) -> io::Result<()> {
+    use crate::alignment_record::AlignmentRecord;
+    use crate::impg::Impg;
+    use crate::impg_index::ImpgIndex;
+    use crate::seqidx::SequenceIndex;
+    use crate::sequence_index::UnifiedSequenceIndex;
+    use std::num::NonZeroUsize;
+
+    info!(
+        "[partitioned-graph] Building partitioned graph from {} FASTA file(s) with partition size {}",
+        fasta_files.len(),
+        partition_size
+    );
+
+    // 1. Align sequences
+    let aln_result = align_sequences(&fasta_files, config)?;
+
+    // 2. Parse filtered PAF into alignment records and build IMPG index
+    info!("[partitioned-graph] Building IMPG index from filtered PAF");
+    let paf_path = aln_result.filtered_paf.path().to_str().unwrap().to_string();
+    let paf_file = File::open(&paf_path)?;
+    let mut seq_index = SequenceIndex::new();
+    let records = crate::paf::parse_paf_file(
+        &paf_path,
+        paf_file,
+        NonZeroUsize::new(config.num_threads).unwrap(),
+        &mut seq_index,
+    )?;
+
+    let records_with_file: Vec<(Vec<AlignmentRecord>, String)> =
+        vec![(records, paf_path.clone())];
+    let impg = Impg::from_multi_alignment_records(&records_with_file, seq_index, None, true)?;
+
+    // 3. Build UnifiedSequenceIndex from the combined FASTA
+    let combined_fasta_path = aln_result.combined_fasta.path().to_str().unwrap().to_string();
+    let sequence_index = UnifiedSequenceIndex::from_files(&[combined_fasta_path.clone()])?;
+
+    // 4. Partition: split all sequences into windows and query each
+    info!("[partitioned-graph] Partitioning with window size {}", partition_size);
+    let mut partitions: Vec<(usize, Vec<coitrees::Interval<u32>>)> = Vec::new();
+    let seq_index = impg.seq_index();
+    let num_seqs = seq_index.len();
+    let mut partition_num = 0usize;
+
+    for seq_id in 0..num_seqs as u32 {
+        let seq_len = match seq_index.get_len_from_id(seq_id) {
+            Some(len) => len as i32,
+            None => continue,
+        };
+
+        let mut window_start = 0i32;
+        while window_start < seq_len {
+            let window_end = (window_start + partition_size as i32).min(seq_len);
+
+            // Query this window
+            let results = impg.query_transitive_bfs(
+                seq_id,
+                window_start,
+                window_end,
+                None,
+                2,    // max_depth
+                101,  // min_transitive_len
+                10,   // min_distance_between_ranges
+                None, // min_output_length
+                false, // store_cigar
+                None, // min_identity
+                Some(&sequence_index),
+                false, // approximate_mode
+                None,  // subset_filter
+            );
+
+            if !results.is_empty() {
+                let intervals: Vec<coitrees::Interval<u32>> = results
+                    .into_iter()
+                    .map(|(qi, _, _)| qi)
+                    .collect();
+                partitions.push((partition_num, intervals));
+                partition_num += 1;
+            }
+
+            window_start = window_end;
+        }
+        // Only partition the first/longest sequence to avoid duplicating work
+        // (subsequent sequences are found via transitive queries)
+        break;
+    }
+
+    if partitions.is_empty() {
+        info!("[partitioned-graph] No partitions found");
+        let empty_gfa = "H\tVN:Z:1.0\n";
+        if output == "-" {
+            io::stdout().write_all(empty_gfa.as_bytes())?;
+        } else {
+            File::create(output)?.write_all(empty_gfa.as_bytes())?;
+        }
+        return Ok(());
+    }
+
+    info!(
+        "[partitioned-graph] Created {} partitions, running pipeline",
+        partitions.len()
+    );
+
+    // 5. Run the partitioned GFA pipeline
+    let final_gfa = crate::partitioned_gfa_pipeline(
+        &partitions,
+        &impg,
+        &sequence_index,
+        scoring_params,
+        engine_opts,
+    )?;
+
+    // 6. Write output
+    if output == "-" {
+        let stdout = io::stdout();
+        let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
+        out.write_all(final_gfa.as_bytes())?;
+    } else {
+        let mut out = BufWriter::with_capacity(1024 * 1024, File::create(output)?);
+        out.write_all(final_gfa.as_bytes())?;
+    }
+
+    info!("[partitioned-graph] Done");
+    Ok(())
+}
+
 /// Parse a FASTA header into SequenceMetadata.
 ///
 /// If the header contains a `name:start-end` suffix (e.g. from a prior
