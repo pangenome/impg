@@ -1,13 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
-# Demo: validate --partition-size flag across engines, region sizes, and window sizes.
+# Demo: validate --gfa-engine ENGINE:WINDOW partitioned mode.
 #
-# For each (region, engine, partition-size) triple, compares:
-#   - Baseline: query -o gfa (no partitioning, uses --force-large-region)
-#   - Partitioned: query -o gfa --partition-size <ps>
+# For each (region, engine, window-size) triple, compares:
+#   - Baseline: query -o gfa --gfa-engine ENGINE (no partitioning, uses --force-large-region)
+#   - Partitioned: query -o gfa --gfa-engine ENGINE:WINDOW
 #
-# Also tests the `graph` command with --partition-size.
+# Also tests the `graph` command with partitioned engines.
 #
 # Regions:
 #   - 20k: CHM13#0#chr6:29000000-29020000
@@ -243,27 +243,26 @@ for i in "${!REGIONS[@]}"; do
         fi
     done
 
-    # Run partitioned for each (partition-size, engine), compare to baseline
+    # Run partitioned for each (window-size, engine), compare to baseline
     for PS in "${PARTITION_SIZES[@]}"; do
         echo ""
-        echo "  ========= partition-size=$PS ========="
+        echo "  ========= window=$PS ========="
 
         for ENGINE in "${ENGINES[@]}"; do
-            # Skip POA when partition-size > 5000
+            # Skip POA when window > 5000
             if [ "$ENGINE" = "poa" ] && [ "$PS" -gt 5000 ]; then
-                echo "  [SKIP] poa engine with partition-size=$PS (> 5000bp)"
+                echo "  [SKIP] poa engine with window=$PS (> 5000bp)"
                 continue
             fi
 
             BASELINE_GFA="${PREFIX}.baseline.${ENGINE}.gfa"
             PART_GFA="${PREFIX}.ps${PS}.${ENGINE}.gfa"
             echo ""
-            echo "  --- engine=$ENGINE, ps=$PS ---"
-            echo "  [partitioned] query -o gfa --gfa-engine $ENGINE --partition-size $PS"
+            echo "  --- engine=$ENGINE:$PS ---"
+            echo "  [partitioned] query -o gfa --gfa-engine $ENGINE:$PS"
             metrics=$(run_timed "${PREFIX}.ps${PS}.${ENGINE}.log" $IMPG query \
                 --alignment-list tpa-list.txt --sequence-files "$AGC" \
-                -r "$REGION" -o gfa --gfa-engine "$ENGINE" \
-                --partition-size "$PS" \
+                -r "$REGION" -o gfa --gfa-engine "$ENGINE:$PS" \
                 -O "${PREFIX}.ps${PS}.${ENGINE}" -t "$THREADS" -v 1) || true
             read -r wall mem st <<< "$metrics"
             if [ "$st" -eq 0 ] && [ -s "$PART_GFA" ]; then
@@ -321,14 +320,14 @@ if [ "$st" -eq 0 ] && [ -s "${GRAPH_PREFIX}.fa" ]; then
             record "$GRAPH_LABEL" "graph.baseline.$ENGINE" "$wall" "$mem" "FAIL"
         fi
 
-        # Partitioned graph for each partition size
+        # Partitioned graph for each window size
         for PS in "${PARTITION_SIZES[@]}"; do
             PART_GFA="${GRAPH_PREFIX}.graph.ps${PS}.${ENGINE}.gfa"
-            echo "  [partitioned] graph --gfa-engine $ENGINE --partition-size $PS"
+            echo "  [partitioned] graph --gfa-engine $ENGINE:$PS"
             metrics=$(run_timed "${GRAPH_PREFIX}.graph.ps${PS}.${ENGINE}.log" $IMPG graph \
                 --sequence-files "${GRAPH_PREFIX}.fa" \
                 -g "$PART_GFA" \
-                --gfa-engine "$ENGINE" --partition-size "$PS" -t "$THREADS" -v 1) || true
+                --gfa-engine "$ENGINE:$PS" -t "$THREADS" -v 1) || true
             read -r wall mem st <<< "$metrics"
             if [ "$st" -eq 0 ] && [ -s "$PART_GFA" ]; then
                 read -r s l p avg <<< "$(gfa_stats "$PART_GFA")"
@@ -354,28 +353,35 @@ echo "================================================================="
 echo "Part 3: Error case validation"
 echo "================================================================="
 
-# partition-size too small
-echo -n "  partition-size < 1000: "
-if $IMPG query --alignment-list tpa-list.txt --sequence-files "$AGC" \
-    -r "${REGIONS[0]}" -o gfa --partition-size 500 -t "$THREADS" -v 0 2>&1 | grep -q "must be at least 1000"; then
+# window size too small
+echo -n "  window < 1000 (pggb:500): "
+if $IMPG graph --sequence-files "$AGC" -g /dev/null --gfa-engine "pggb:500" -t "$THREADS" -v 0 2>&1 | grep -q "must be at least 1000"; then
     echo "PASS (correctly rejected)"
 else
     echo "FAIL (should have been rejected)"
 fi
 
-# partition-size + separate-files
-echo -n "  partition-size + separate-files: "
+# bare colon
+echo -n "  bare colon (pggb:): "
+if $IMPG graph --sequence-files "$AGC" -g /dev/null --gfa-engine "pggb:" -t "$THREADS" -v 0 2>&1 | grep -q "expected a window size"; then
+    echo "PASS (correctly rejected)"
+else
+    echo "FAIL (should have been rejected)"
+fi
+
+# partitioned + separate-files
+echo -n "  partitioned + separate-files: "
 if $IMPG partition --alignment-list tpa-list.txt --sequence-files "$AGC" \
-    -w 10000 --partition-size 10000 --separate-files -o gfa -t "$THREADS" -v 0 2>&1 | grep -q "mutually exclusive"; then
+    -w 10000 --gfa-engine "pggb:10000" --separate-files -o gfa -t "$THREADS" -v 0 2>&1 | grep -q "mutually exclusive"; then
     echo "PASS (correctly rejected)"
 else
     echo "FAIL (should have been rejected)"
 fi
 
-# similarity + partition-size
-echo -n "  similarity + partition-size: "
+# similarity + partitioned
+echo -n "  similarity + partitioned: "
 if $IMPG similarity --alignment-list tpa-list.txt --sequence-files "$AGC" \
-    -r "${REGIONS[0]}" --partition-size 10000 -t "$THREADS" -v 0 2>&1 | grep -q "not yet supported"; then
+    -r "${REGIONS[0]}" --gfa-engine "poa:5000" -t "$THREADS" -v 0 2>&1 | grep -q "not yet supported"; then
     echo "PASS (correctly rejected)"
 else
     echo "FAIL (should have been rejected)"

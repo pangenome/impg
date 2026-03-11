@@ -254,11 +254,12 @@ impl SmoothOpts {
 /// Engine + graph-building options shared by query, partition, similarity, and graph.
 #[derive(Parser, Debug)]
 struct EngineCliOpts {
-    /// GFA engine: 'pggb' (alignment+seqwish+smoothing+gfaffix, default),
-    /// 'seqwish' (alignment+seqwish+gfaffix), or 'poa' (single-pass POA)
+    /// GFA engine: 'pggb' (default), 'seqwish', or 'poa'.
+    /// Append ':WINDOW' to enable partitioned mode, e.g. 'pggb:10000'
+    /// splits into 10kb windows, builds per-window, laces, and normalizes.
     #[arg(help_heading = "Output options")]
-    #[clap(long = "gfa-engine", value_enum, default_value_t = GfaEngine::Pggb)]
-    engine: GfaEngine,
+    #[clap(long = "gfa-engine", default_value = "pggb", value_name = "ENGINE[:WINDOW]")]
+    engine_raw: String,
 
     /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2
     #[arg(help_heading = "Alignment options")]
@@ -277,27 +278,76 @@ struct EngineCliOpts {
     /// Save intermediate debug files (PAFs, FASTAs, sub-GFAs, chunk info) to this directory.
     #[clap(long, value_parser)]
     debug_dir: Option<String>,
-
-    /// Partition input into windows of this size (bp), build GFA per partition,
-    /// lace together, and run gfaffix. Works with any --gfa-engine.
-    #[arg(help_heading = "Output options")]
-    #[clap(long, value_parser)]
-    partition_size: Option<usize>,
 }
 
 impl EngineCliOpts {
+    /// Parse `--gfa-engine` value into (GfaEngine, Option<partition_size>).
+    ///
+    /// Accepted forms: `pggb`, `seqwish`, `poa`, `pggb:10000`, `seqwish:5000`, etc.
+    /// A bare colon (`pggb:`) is an error.
+    fn parse_engine(&self) -> io::Result<(GfaEngine, Option<usize>)> {
+        let raw = self.engine_raw.trim();
+        let (name, partition_size) = if let Some(idx) = raw.find(':') {
+            let engine_str = &raw[..idx];
+            let ps_str = &raw[idx + 1..];
+            if ps_str.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Invalid --gfa-engine '{}': expected a window size after ':', e.g. '{}:10000'",
+                        raw, engine_str
+                    ),
+                ));
+            }
+            let ps: usize = ps_str.parse().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Invalid --gfa-engine '{}': '{}' is not a valid window size (expected integer)",
+                        raw, ps_str
+                    ),
+                )
+            })?;
+            if ps < 1_000 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Invalid --gfa-engine '{}': window size must be at least 1000 bp",
+                        raw
+                    ),
+                ));
+            }
+            (engine_str, Some(ps))
+        } else {
+            (raw, None)
+        };
+
+        let engine = match name {
+            "pggb" => GfaEngine::Pggb,
+            "seqwish" => GfaEngine::Seqwish,
+            "poa" => GfaEngine::Poa,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Unknown GFA engine '{}'. Valid engines: pggb, seqwish, poa",
+                        name
+                    ),
+                ));
+            }
+        };
+
+        Ok((engine, partition_size))
+    }
+
     /// Parse POA scoring parameters.
     fn parse_poa_scoring(&self) -> io::Result<(u8, u8, u8, u8, u8, u8)> {
         parse_poa_scoring_string(&self.poa_scoring)
     }
 
     /// Validate that CLI options are compatible with the selected engine.
-    ///
-    /// - `poa` engine: no alignment step → `--sparsify`, `--no-filter`, and
-    ///   non-default alignment/seqwish/smooth params are invalid.
-    /// - `seqwish` engine: no smoothing → non-default smooth params are invalid.
-    fn validate_engine_params(&self) -> io::Result<()> {
-        match self.engine {
+    fn validate_engine_params(&self, engine: GfaEngine) -> io::Result<()> {
+        match engine {
             GfaEngine::Poa => {
                 if self.aln.sparsify.is_some() {
                     return Err(io::Error::new(
@@ -317,22 +367,13 @@ impl EngineCliOpts {
         Ok(())
     }
 
-    /// Resolve temp_dir ("ramdisk" → "/dev/shm") and build an `EngineOpts`.
+    /// Resolve and build an `EngineOpts`.
     fn build(
         &self,
         num_threads: usize,
     ) -> io::Result<EngineOpts> {
-        self.validate_engine_params()?;
-
-        // Validate partition_size minimum
-        if let Some(ps) = self.partition_size {
-            if ps < 1_000 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "partition-size must be at least 1000 bp for the partitioned GFA pipeline",
-                ));
-            }
-        }
+        let (engine, partition_size) = self.parse_engine()?;
+        self.validate_engine_params(engine)?;
 
         let sparsify = parse_sparsify(&self.aln.sparsify)?;
         let mash_params = sweepga::knn_graph::MashParams {
@@ -340,7 +381,7 @@ impl EngineCliOpts {
             sketch_size: self.aln.mash_sketch_size,
         };
         build_engine_opts(
-            self.engine,
+            engine,
             num_threads,
             &self.aln,
             sparsify,
@@ -348,7 +389,7 @@ impl EngineCliOpts {
             &self.seqwish,
             &self.smooth,
             self.debug_dir.clone(),
-            self.partition_size,
+            partition_size,
         )
     }
 }
@@ -1321,22 +1362,25 @@ fn run() -> io::Result<()> {
                 // Partition always uses transitive queries
             }
 
-            // Validate --partition-size + --separate-files are mutually exclusive
-            if engine_cli.partition_size.is_some() && separate_files {
+            // Parse engine spec early (engine + optional partition size)
+            let (parsed_engine, parsed_partition_size) = engine_cli.parse_engine()?;
+
+            // Validate partitioned mode + --separate-files are mutually exclusive
+            if parsed_partition_size.is_some() && separate_files {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "--partition-size and --separate-files are mutually exclusive",
+                    "Partitioned --gfa-engine (e.g. 'pggb:10000') and --separate-files are mutually exclusive",
                 ));
             }
 
             // For size validation, flat POA on "gfa" needs the same limit as "gfa-poa"
-            let size_check_format = if output_format == "gfa" && engine_cli.engine == GfaEngine::Poa {
+            let size_check_format = if output_format == "gfa" && parsed_engine == GfaEngine::Poa {
                 "gfa-poa"
             } else {
                 &output_format
             };
-            // Skip region size validation when --partition-size is set
-            if engine_cli.partition_size.is_none() {
+            // Skip region size validation when partitioned mode is active
+            if parsed_partition_size.is_none() {
                 validate_region_size(
                     0,
                     window_size as i32,
@@ -1347,8 +1391,8 @@ fn run() -> io::Result<()> {
             }
 
             // Validate single-file output compatibility
-            // When --partition-size is set, single-file GFA output is allowed (laced together)
-            if !separate_files && output_format != "bed" && engine_cli.partition_size.is_none() {
+            // When partitioned mode is active, single-file GFA output is allowed (laced together)
+            if !separate_files && output_format != "bed" && parsed_partition_size.is_none() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
@@ -1500,8 +1544,11 @@ fn run() -> io::Result<()> {
                 sequence_files_for_impg,
             )?;
 
+            // Parse engine spec early (engine + optional partition size)
+            let (parsed_engine, parsed_partition_size) = engine_cli.parse_engine()?;
+
             // For size validation, flat POA on "gfa" needs the same limit as the old "gfa-poa"
-            let size_check_format = if output_format == "gfa" && engine_cli.engine == GfaEngine::Poa {
+            let size_check_format = if output_format == "gfa" && parsed_engine == GfaEngine::Poa {
                 "gfa-poa"
             } else {
                 &output_format
@@ -1545,7 +1592,7 @@ fn run() -> io::Result<()> {
                     query.transitive_opts.effective_min_transitive_len(),
                 )?;
                 // Skip region size validation when --partition-size is set (each sub-window is within limits)
-                if engine_cli.partition_size.is_none() {
+                if parsed_partition_size.is_none() {
                     validate_region_size(
                         target_range.0,
                         target_range.1,
@@ -1567,7 +1614,7 @@ fn run() -> io::Result<()> {
                         query.transitive_opts.effective_min_transitive_len(),
                     )?;
                     // Skip region size validation when --partition-size is set
-                    if engine_cli.partition_size.is_none() {
+                    if parsed_partition_size.is_none() {
                         validate_region_size(
                             *start,
                             *end,
@@ -1993,20 +2040,23 @@ fn run() -> io::Result<()> {
                 ));
             }
 
-            if engine_cli.partition_size.is_some() {
+            // Parse engine spec early
+            let (parsed_engine, parsed_partition_size) = engine_cli.parse_engine()?;
+
+            if parsed_partition_size.is_some() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "Partitioned mode is not yet supported for the similarity command",
                 ));
             }
 
-            if engine_cli.engine == GfaEngine::Seqwish || engine_cli.engine == GfaEngine::Pggb {
+            if parsed_engine == GfaEngine::Seqwish || parsed_engine == GfaEngine::Pggb {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "The 'seqwish' and 'pggb' engines are not yet implemented for the similarity command. Use 'poa'.",
                 ));
             }
-            engine_cli.validate_engine_params()?;
+            engine_cli.validate_engine_params(parsed_engine)?;
 
             // Resolve alignment files once (supports process substitution inputs)
             let alignment_files = resolve_alignment_files(&alignment)?;
@@ -2186,7 +2236,8 @@ fn run() -> io::Result<()> {
             common,
         } => {
             initialize_threads_and_log(&common);
-            engine_cli.validate_engine_params()?;
+            let (parsed_engine, parsed_partition_size) = engine_cli.parse_engine()?;
+            engine_cli.validate_engine_params(parsed_engine)?;
             let temp_dir = resolve_temp_dir(engine_cli.aln.temp_dir.clone());
 
             let fasta_files = fasta_input.resolve_sequence_files()?;
@@ -2216,7 +2267,7 @@ fn run() -> io::Result<()> {
 
             let poa_scoring = engine_cli.parse_poa_scoring()?;
 
-            if let Some(ps) = engine_cli.partition_size {
+            if let Some(ps) = parsed_partition_size {
                 // Partitioned mode: align → IMPG → partition → per-partition engine → lace → gfaffix
                 // Build engine_opts before consuming engine_cli fields
                 let engine_opts = engine_cli.build(common.threads.get())?;
@@ -2298,7 +2349,7 @@ fn run() -> io::Result<()> {
                     batch_bytes: engine_cli.aln.batch_bytes,
                 };
 
-                match engine_cli.engine {
+                match parsed_engine {
                     GfaEngine::Poa => {
                         let scoring = poa_scoring;
 
