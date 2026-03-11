@@ -23,6 +23,7 @@ log = "0.4"
 env_logger = "0.11"
 natord = "1.0"
 rustc-hash = "2.1"
+indexmap = { version = "2", features = ["rayon"] }
 nalgebra = "0.33"
 indicatif = "0.18"
 spoa_rs = { git = "https://github.com/AndreaGuarracino/spoa-rs.git" }
@@ -52,7 +53,7 @@ zstd = { version = "0.13.3", features = ["zstdmt"] }
 gzp = "1.0.1"
 
 # Dependencies for graph building (sweepga + seqwish integration)
-sweepga = { git = "https://github.com/pangenome/sweepga", rev = "741c951f34153eeb414c3aa433fc418d9a69c347", default-features = false }
+sweepga = { git = "https://github.com/pangenome/sweepga", rev = "c8e70ff59fd8daace1b9b0ea9c4b1d946bd7d6b5", default-features = false }
 seqwish = { git = "https://github.com/pangenome/seqwish", branch = "rust-2" }
 
 # Dependencies for graph sorting

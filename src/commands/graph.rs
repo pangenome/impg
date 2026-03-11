@@ -89,6 +89,8 @@ pub struct GraphBuildConfig {
     pub sparsify: SparsificationStrategy,
     /// Mash distance parameters for sparsification sketching.
     pub mash_params: sweepga::knn_graph::MashParams,
+    /// Batch alignment: max resource usage per batch (e.g., "2G", "500M")
+    pub batch_bytes: Option<String>,
 }
 
 impl Default for GraphBuildConfig {
@@ -121,6 +123,7 @@ impl Default for GraphBuildConfig {
             debug_dir: None,
             sparsify: SparsificationStrategy::None,
             mash_params: sweepga::knn_graph::MashParams::default(),
+            batch_bytes: None,
         }
     }
 }
@@ -320,10 +323,20 @@ pub fn build_graph<W: Write>(
                     None, // pairs_file
                 )?;
 
-                // Run all-vs-all alignment (query = target = combined FASTA)
-                aligner
-                    .align_to_temp_paf(combined_fasta.path(), combined_fasta.path())
-                    .map_err(|e| io::Error::other(format!("{} alignment failed: {}", config.aligner, e)))?
+                // Run all-vs-all alignment, with optional batching
+                sweepga::align_self_paf(
+                    combined_fasta.path(),
+                    aligner.as_ref(),
+                    &config.aligner,
+                    kmer_frequency,
+                    config.num_threads,
+                    config.min_aln_length,
+                    Some("90".to_string()),
+                    config.temp_dir.clone(),
+                    config.batch_bytes.as_deref(),
+                    !config.show_progress,
+                )
+                .map_err(|e| io::Error::other(format!("{} alignment failed: {}", config.aligner, e)))?
             }
             // Pair selection path: read sequences, use sweepga_align()
             _ => {
@@ -342,6 +355,7 @@ pub fn build_graph<W: Write>(
                     aligner: config.aligner.clone(),
                     temp_dir: config.temp_dir.clone(),
                     map_pct_identity: Some("90".to_string()),
+                    batch_bytes: config.batch_bytes.clone(),
                     ..SweepgaAlignConfig::default()
                 };
                 sweepga_align(&named_seqs, &align_config)?

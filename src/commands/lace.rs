@@ -10,6 +10,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, error, info, warn};
 use niffler::compression::Format;
 use rayon::prelude::*;
+use indexmap::IndexMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
@@ -329,10 +330,10 @@ fn read_gfa_files(
     gfa_list: &[String],
     temp_dir: Option<&str>,
     skip_validation: bool,
-) -> io::Result<(CompactGraph, FxHashMap<String, Vec<RangeInfo>>)> {
+) -> io::Result<(CompactGraph, IndexMap<String, Vec<RangeInfo>>)> {
     let combined_graph = Arc::new(Mutex::new(CompactGraph::new(temp_dir)?));
-    let path_key_ranges: Arc<Mutex<FxHashMap<String, Vec<RangeInfo>>>> =
-        Arc::new(Mutex::new(FxHashMap::default()));
+    let path_key_ranges: Arc<Mutex<IndexMap<String, Vec<RangeInfo>>>> =
+        Arc::new(Mutex::new(IndexMap::default()));
 
     let num_path_ranges = AtomicUsize::new(0);
     let num_path_range_steps = AtomicUsize::new(0);
@@ -913,7 +914,7 @@ pub(crate) fn link_contiguous_ranges(ranges: &[RangeInfo], graph_mutex: &Arc<Mut
 
 pub(crate) fn mark_nodes_for_removal(
     node_count: u64,
-    path_key_ranges: &FxHashMap<String, Vec<RangeInfo>>,
+    path_key_ranges: &IndexMap<String, Vec<RangeInfo>>,
 ) -> BitVec {
     // Create a bitvector with all nodes initially marked for removal
     let mut nodes_to_remove = bitvec![1; node_count as usize + 1]; // +1 to account for 0-indexing
@@ -932,7 +933,7 @@ pub(crate) fn mark_nodes_for_removal(
 
 fn write_graph_to_gfa(
     combined_graph: &mut CompactGraph,
-    path_key_ranges: &FxHashMap<String, Vec<RangeInfo>>,
+    path_key_ranges: &IndexMap<String, Vec<RangeInfo>>,
     output_path: &str,
     compression_format: Format,
     fill_gaps: u8,
@@ -1030,7 +1031,7 @@ fn write_graph_to_gfa(
 fn write_gfa_content<W: Write>(
     file: &mut BufWriter<W>,
     combined_graph: &mut CompactGraph,
-    path_key_ranges: &FxHashMap<String, Vec<RangeInfo>>,
+    path_key_ranges: &IndexMap<String, Vec<RangeInfo>>,
     nodes_to_remove: &BitVec,
     fill_gaps: u8,
     sequence_index: Option<&UnifiedSequenceIndex>,
@@ -1078,8 +1079,7 @@ fn write_gfa_content<W: Write>(
 
     // Write paths by processing ranges directly
     info!("Writing paths by merging contiguous path ranges");
-    let mut path_key_vec: Vec<_> = path_key_ranges.keys().collect();
-    path_key_vec.par_sort_unstable(); // Sort path keys for consistent output (for path keys, the order of equal elements doesn't matter since they're unique)
+    let path_key_vec: Vec<_> = path_key_ranges.keys().collect();
 
     let mut start_gaps = 0;
     let mut middle_gaps = 0;
@@ -1907,7 +1907,7 @@ pub fn lace_subgraphs(sub_gfas: &[String], temp_dir: Option<&str>) -> io::Result
 
     // 1. Build CompactGraph + path_key_ranges from in-memory GFA strings
     let mut graph = CompactGraph::new(temp_dir)?;
-    let mut path_key_ranges: FxHashMap<String, Vec<RangeInfo>> = FxHashMap::default();
+    let mut path_key_ranges: IndexMap<String, Vec<RangeInfo>> = IndexMap::default();
 
     for gfa_str in sub_gfas {
         let mut id_translation: FxHashMap<NodeId, NodeId> = FxHashMap::default();
@@ -2100,9 +2100,8 @@ pub fn lace_subgraphs(sub_gfas: &[String], temp_dir: Option<&str>) -> io::Result
         }
     }
 
-    // Write P lines: merge contiguous ranges per path key
-    let mut path_keys: Vec<&String> = path_key_ranges.keys().collect();
-    path_keys.sort();
+    // Write P lines: merge contiguous ranges per path key (preserving insertion order)
+    let path_keys: Vec<&String> = path_key_ranges.keys().collect();
 
     for path_key in path_keys {
         let ranges = &path_key_ranges[path_key];

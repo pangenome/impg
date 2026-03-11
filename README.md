@@ -508,6 +508,9 @@ impg graph --sequence-files sequences.fa -g output.gfa --min-aln-length 500
 # Sparsify wfmash mappings (auto or explicit fraction; wfmash only)
 impg graph --sequence-files sequences.fa -g output.gfa --sparsify auto
 
+# Batch alignment to limit per-batch resource usage (FastGA: disk, wfmash: memory)
+impg graph --sequence-files sequences.fa -g output.gfa --batch-bytes 2G
+
 # Skip pre-computed alignment step with a PAF file
 impg graph --sequence-files sequences.fa -g output.gfa --paf-file alignments.paf
 ```
@@ -635,6 +638,9 @@ impg align --sequence-files sequences.fa -o alignments --aligner fastga
 # fastga-specific: adjust k-mer frequency multiplier (ignored by wfmash)
 impg align --sequence-files sequences.fa -o alignments --aligner fastga --fastga-frequency-multiplier 5
 impg align --sequence-files sequences.fa -o alignments --aligner fastga --fastga-frequency 100
+
+# Batch alignment to limit per-batch resource usage (FastGA: disk, wfmash: memory)
+impg align --sequence-files sequences.fa -o alignments --batch-bytes 2G
 
 # With alignment filtering
 impg align --sequence-files sequences.fa -o alignments --num-mappings 1:1 --scaffold-filter 1:1

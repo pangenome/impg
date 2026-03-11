@@ -129,6 +129,12 @@ struct AlnOpts {
     #[clap(long, value_parser)]
     temp_dir: Option<String>,
 
+    /// Batch genome alignment to limit resource usage per batch.
+    /// Accepts an explicit size (e.g., "2G", "500M").
+    /// FastGA: limits disk. Wfmash: limits memory.
+    #[clap(long = "batch-bytes", value_parser)]
+    batch_bytes: Option<String>,
+
     // --- Filtering options (post-alignment, aligner-independent) ---
 
     /// n:m-best mappings kept in query:target dimensions (e.g., "1:1", "many:many")
@@ -2183,6 +2189,7 @@ fn run() -> io::Result<()> {
                     kmer_size: engine_cli.aln.mash_kmer_size,
                     sketch_size: engine_cli.aln.mash_sketch_size,
                 },
+                batch_bytes: engine_cli.aln.batch_bytes,
             };
 
             match engine_cli.engine {
@@ -2296,6 +2303,7 @@ fn run() -> io::Result<()> {
                 show_progress: common.verbose > 0,
                 aligner: aln.aligner,
                 temp_dir,
+                batch_bytes: aln.batch_bytes,
                 no_filter: aln.no_filter,
                 num_mappings: aln.num_mappings,
                 scaffold_jump: aln.scaffold_jump,
