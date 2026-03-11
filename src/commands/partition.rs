@@ -391,6 +391,10 @@ pub fn partition_alignments(
                             // Collect BED partitions
                             collected_partitions.push((partition_num, query_intervals.clone()));
                         }
+                        "gfa" if engine_config.partition_size.is_some() => {
+                            // Partitioned GFA mode: collect intervals for later pipeline
+                            collected_partitions.push((partition_num, query_intervals.clone()));
+                        }
                         "gfa" | "maf" | "fasta" => {
                             return Err(io::Error::new(
                                 io::ErrorKind::InvalidInput,
@@ -500,12 +504,39 @@ pub fn partition_alignments(
 
     // Write collected partitions as single file if not using separate files
     if !separate_files && !collected_partitions.is_empty() {
-        info!(
-            "Writing {} partitions to single {} file",
-            collected_partitions.len(),
-            output_format
-        );
-        write_single_partition_file(&collected_partitions, impg, output_format, output_folder)?;
+        if output_format == "gfa" && engine_config.partition_size.is_some() {
+            // Partitioned GFA mode: run the partitioned pipeline
+            info!(
+                "Running partitioned GFA pipeline with {} partitions",
+                collected_partitions.len()
+            );
+            let seq_idx = sequence_index.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Sequence files required for partitioned GFA output",
+                )
+            })?;
+            let final_gfa = crate::partitioned_gfa_pipeline(
+                &collected_partitions,
+                impg,
+                seq_idx,
+                scoring_params,
+                engine_config,
+            )?;
+
+            // Write to output file
+            let output_path = create_output_path(output_folder, "partitions.gfa")?;
+            let mut out = std::io::BufWriter::new(File::create(&output_path)?);
+            out.write_all(final_gfa.as_bytes())?;
+            info!("Wrote partitioned GFA to {}", output_path);
+        } else {
+            info!(
+                "Writing {} partitions to single {} file",
+                collected_partitions.len(),
+                output_format
+            );
+            write_single_partition_file(&collected_partitions, impg, output_format, output_folder)?;
+        }
     }
 
     // Calculate final percentage
