@@ -6,11 +6,11 @@ use gzp::{
     Compression,
 };
 use handlegraph::handle::{Handle, NodeId};
+use indexmap::IndexMap;
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, error, info, warn};
 use niffler::compression::Format;
 use rayon::prelude::*;
-use indexmap::IndexMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};

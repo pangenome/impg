@@ -67,7 +67,10 @@ fn parse_sparsify(s: &Option<String>) -> io::Result<SparsificationStrategy> {
     match s {
         None => Ok(SparsificationStrategy::None),
         Some(val) => val.parse::<SparsificationStrategy>().map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid --sparsify: {}", e))
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Invalid --sparsify: {}", e),
+            )
         }),
     }
 }
@@ -102,13 +105,11 @@ struct CommonOpts {
 #[command(next_help_heading = "Alignment options")]
 struct AlnOpts {
     // --- Aligner backend ---
-
     /// Aligner
     #[clap(long, value_parser = ["fastga", "wfmash"], default_value = "wfmash")]
     aligner: String,
 
     // --- General alignment options ---
-
     /// Disable all alignment filtering
     #[clap(long, action)]
     no_filter: bool,
@@ -136,7 +137,6 @@ struct AlnOpts {
     batch_bytes: Option<String>,
 
     // --- Filtering options (post-alignment, aligner-independent) ---
-
     /// n:m-best mappings kept in query:target dimensions (e.g., "1:1", "many:many")
     #[clap(long, value_parser, default_value = "many:many")]
     num_mappings: String,
@@ -174,9 +174,12 @@ struct AlnOpts {
     min_map_length: u64,
 
     // --- fastga-specific options ---
-
     /// [fastga] K-mer frequency multiplier (frequency = num_sequences * multiplier)
-    #[clap(long = "fastga-frequency-multiplier", value_parser, default_value_t = 10)]
+    #[clap(
+        long = "fastga-frequency-multiplier",
+        value_parser,
+        default_value_t = 10
+    )]
     fastga_frequency_multiplier: usize,
 
     /// [fastga] Explicit k-mer frequency (overrides --fastga-frequency-multiplier)
@@ -312,10 +315,7 @@ impl EngineCliOpts {
     }
 
     /// Resolve temp_dir ("ramdisk" → "/dev/shm") and build an `EngineOpts`.
-    fn build(
-        &self,
-        num_threads: usize,
-    ) -> io::Result<EngineOpts> {
+    fn build(&self, num_threads: usize) -> io::Result<EngineOpts> {
         self.validate_engine_params()?;
         let sparsify = parse_sparsify(&self.aln.sparsify)?;
         let mash_params = sweepga::knn_graph::MashParams {
@@ -860,7 +860,6 @@ enum Args {
         alignment: AlignmentOpts,
 
         // --- Partition-specific ---
-
         /// Window size for partitioning
         #[arg(help_heading = "Partition options")]
         #[clap(short = 'w', long, value_parser)]
@@ -901,7 +900,6 @@ enum Args {
         separate_files: bool,
 
         // --- Filtering and merging ---
-
         /// Maximum distance between regions to merge
         #[arg(help_heading = "Filtering and merging")]
         #[clap(short = 'd', long, value_parser, default_value_t = 100000)]
@@ -916,14 +914,12 @@ enum Args {
         transitive_opts: TransitiveOpts,
 
         // --- Performance ---
-
         /// Use approximate mode for faster queries with tracepoint files (.1aln/.tpa, only bed/bedpe output)
         #[arg(help_heading = "Performance")]
         #[clap(long, action)]
         approximate: bool,
 
         // --- Output ---
-
         /// Output format: 'bed', 'gfa' (v1.0), 'maf', or 'fasta' ('gfa', 'maf', and 'fasta' require --sequence-files or --sequence-list)
         #[arg(help_heading = "Output options")]
         #[clap(short = 'o', long, value_parser, default_value = "bed")]
@@ -955,7 +951,6 @@ enum Args {
         query: QueryOpts,
 
         // --- Output ---
-
         /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', 'gfa', 'maf', 'fasta', or 'fasta+paf' ('gfa', 'maf', 'fasta', and 'fasta+paf' require --sequence-files or --sequence-list)
         #[arg(help_heading = "Output options")]
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
@@ -1000,7 +995,6 @@ enum Args {
         query: QueryOpts,
 
         // --- Output ---
-
         /// Output distances instead of similarities
         #[arg(help_heading = "Output options")]
         #[clap(long, action)]
@@ -1028,7 +1022,6 @@ enum Args {
         engine_cli: EngineCliOpts,
 
         // --- PCA ---
-
         /// Perform PCA/MDS dimensionality reduction on the distance matrix
         #[arg(help_heading = "PCA options")]
         #[clap(long, action)]
@@ -1080,7 +1073,6 @@ enum Args {
         sequence: SequenceOpts,
 
         // --- Stats-specific ---
-
         /// List sequence names and lengths (skip overlap statistics)
         #[clap(long)]
         list_sequences: bool,
@@ -1101,7 +1093,6 @@ enum Args {
         paf_file: Option<String>,
 
         // --- Output ---
-
         /// Output GFA file path (use "-" for stdout)
         #[clap(short = 'g', long, value_parser, default_value = "-")]
         output: String,
@@ -1121,7 +1112,6 @@ enum Args {
         fasta_input: SequenceOpts,
 
         // --- Output ---
-
         /// Output directory for alignments
         #[clap(short = 'o', long, value_parser, default_value = "alignments")]
         output_dir: String,
@@ -1304,7 +1294,8 @@ fn run() -> io::Result<()> {
             }
 
             // For size validation, flat POA on "gfa" needs the same limit as "gfa-poa"
-            let size_check_format = if output_format == "gfa" && engine_cli.engine == GfaEngine::Poa {
+            let size_check_format = if output_format == "gfa" && engine_cli.engine == GfaEngine::Poa
+            {
                 "gfa-poa"
             } else {
                 &output_format
@@ -1345,9 +1336,7 @@ fn run() -> io::Result<()> {
             )?;
 
             // Build engine config (resolves temp_dir and sparsify internally)
-            let engine_config = engine_cli.build(
-                common.threads.get(),
-            )?;
+            let engine_config = engine_cli.build(common.threads.get())?;
 
             // Initialize impg after validation
             let impg = initialize_index(
@@ -1471,7 +1460,8 @@ fn run() -> io::Result<()> {
             )?;
 
             // For size validation, flat POA on "gfa" needs the same limit as the old "gfa-poa"
-            let size_check_format = if output_format == "gfa" && engine_cli.engine == GfaEngine::Poa {
+            let size_check_format = if output_format == "gfa" && engine_cli.engine == GfaEngine::Poa
+            {
                 "gfa-poa"
             } else {
                 &output_format
@@ -1641,9 +1631,7 @@ fn run() -> io::Result<()> {
                         )?;
                     }
                     "gfa" => {
-                        let engine_opts = engine_cli.build(
-                            common.threads.get(),
-                        )?;
+                        let engine_opts = engine_cli.build(common.threads.get())?;
                         output_results_gfa(
                             &impg,
                             &mut results,

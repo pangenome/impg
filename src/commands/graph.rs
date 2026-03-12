@@ -118,7 +118,7 @@ impl Default for GraphBuildConfig {
             scaffold_filter: "many:many".to_string(),
             overlap: 0.95,
             min_identity: 0.0,
-            scaffold_dist: 0,      // No deviation limit by default
+            scaffold_dist: 0,  // No deviation limit by default
             min_map_length: 0, // No minimum mapping length by default
             debug_dir: None,
             sparsify: SparsificationStrategy::None,
@@ -295,10 +295,8 @@ pub fn build_graph<W: Write>(
                 let segment_length = None;
 
                 // Resolve wfmash mapping density from the strategy
-                let wfmash_density = sweepga::orchestrator::resolve_wfmash_density(
-                    &config.sparsify,
-                    num_genomes,
-                );
+                let wfmash_density =
+                    sweepga::orchestrator::resolve_wfmash_density(&config.sparsify, num_genomes);
 
                 if config.show_progress {
                     if let Some(f) = wfmash_density {
@@ -336,7 +334,9 @@ pub fn build_graph<W: Write>(
                     config.batch_bytes.as_deref(),
                     !config.show_progress,
                 )
-                .map_err(|e| io::Error::other(format!("{} alignment failed: {}", config.aligner, e)))?
+                .map_err(|e| {
+                    io::Error::other(format!("{} alignment failed: {}", config.aligner, e))
+                })?
             }
             // Pair selection path: read sequences, use sweepga_align()
             _ => {
@@ -836,7 +836,10 @@ fn read_sequences_from_fasta(path: &Path) -> io::Result<Vec<(String, Vec<u8>)>> 
         let line = line?;
         if let Some(header) = line.strip_prefix('>') {
             if !current_name.is_empty() {
-                sequences.push((std::mem::take(&mut current_name), std::mem::take(&mut current_seq)));
+                sequences.push((
+                    std::mem::take(&mut current_name),
+                    std::mem::take(&mut current_seq),
+                ));
             }
             current_name = header.split_whitespace().next().unwrap_or("").to_string();
             current_seq.clear();
@@ -944,4 +947,3 @@ fn metadata_from_fasta_header(header: &str, seq_len: usize) -> crate::graph::Seq
         total_length: seq_len,
     }
 }
-

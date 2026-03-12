@@ -107,7 +107,9 @@ pub fn generate_pairs_for_sequences(
 
     // For strategies that benefit from sequence data, compute sketches
     match strategy {
-        SparsificationStrategy::None | SparsificationStrategy::Random(_) | SparsificationStrategy::WfmashDensity(_) => {
+        SparsificationStrategy::None
+        | SparsificationStrategy::Random(_)
+        | SparsificationStrategy::WfmashDensity(_) => {
             sweepga::knn_graph::select_pairs(n, None, strategy, mash_params)
         }
         _ => {
@@ -136,7 +138,9 @@ fn generate_pairs(
 
     // For simple strategies, no need for sketches
     match strategy {
-        SparsificationStrategy::None | SparsificationStrategy::Random(_) | SparsificationStrategy::WfmashDensity(_) => {
+        SparsificationStrategy::None
+        | SparsificationStrategy::Random(_)
+        | SparsificationStrategy::WfmashDensity(_) => {
             sweepga::knn_graph::select_pairs(n, None, strategy, mash_params)
         }
         _ => {
@@ -340,7 +344,11 @@ fn run_alignments(
             start_time.elapsed().as_secs_f64(),
             pairs.len(),
             file_pairs.len(),
-            if is_sparsified { ", using --pairs-file" } else { "" },
+            if is_sparsified {
+                ", using --pairs-file"
+            } else {
+                ""
+            },
         );
     }
 
@@ -359,33 +367,35 @@ fn run_alignments(
                 }
             }
         }
-        if count > 0 { Some(total_len / count) } else { None }
+        if count > 0 {
+            Some(total_len / count)
+        } else {
+            None
+        }
     };
 
     // Resolve wfmash mapping density from the strategy
-    let wfmash_density = sweepga::orchestrator::resolve_wfmash_density(
-        &config.sparsify,
-        sequences.len(),
-    );
+    let wfmash_density =
+        sweepga::orchestrator::resolve_wfmash_density(&config.sparsify, sequences.len());
 
     // When sparsified and using wfmash, write a pairs TSV so wfmash filters at L1
     // instead of running unfiltered all-vs-all per file pair.
-    let pairs_file: Option<tempfile::NamedTempFile> =
-        if is_sparsified && config.aligner == "wfmash" {
-            let mut pairs_tsv = tempfile::Builder::new().suffix(".pairs.tsv").tempfile()?;
-            {
-                let mut writer = BufWriter::new(&mut pairs_tsv);
-                writeln!(writer, "# query_name\ttarget_name")?;
-                for &(i, j) in pairs {
-                    writeln!(writer, "{}\t{}", sequences[i].name, sequences[j].name)?;
-                    writeln!(writer, "{}\t{}", sequences[j].name, sequences[i].name)?;
-                }
-                writer.flush()?;
+    let pairs_file: Option<tempfile::NamedTempFile> = if is_sparsified && config.aligner == "wfmash"
+    {
+        let mut pairs_tsv = tempfile::Builder::new().suffix(".pairs.tsv").tempfile()?;
+        {
+            let mut writer = BufWriter::new(&mut pairs_tsv);
+            writeln!(writer, "# query_name\ttarget_name")?;
+            for &(i, j) in pairs {
+                writeln!(writer, "{}\t{}", sequences[i].name, sequences[j].name)?;
+                writeln!(writer, "{}\t{}", sequences[j].name, sequences[i].name)?;
             }
-            Some(pairs_tsv)
-        } else {
-            None
-        };
+            writer.flush()?;
+        }
+        Some(pairs_tsv)
+    } else {
+        None
+    };
 
     let pairs_file_path = pairs_file.as_ref().map(|f| f.path().to_path_buf());
 
@@ -418,10 +428,7 @@ fn run_alignments(
             info!(
                 "[align] {:.3}s Self-aligning {}",
                 start_time.elapsed().as_secs_f64(),
-                fasta_path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy(),
+                fasta_path.file_name().unwrap_or_default().to_string_lossy(),
             );
         }
 
@@ -437,9 +444,7 @@ fn run_alignments(
             config.batch_bytes.as_deref(),
             !config.show_progress,
         )
-        .map_err(|e| {
-            io::Error::other(format!("{} alignment failed: {}", config.aligner, e))
-        })?;
+        .map_err(|e| io::Error::other(format!("{} alignment failed: {}", config.aligner, e)))?;
 
         // Apply filtering unless --no-filter
         let result_paf = if config.no_filter {
@@ -760,10 +765,8 @@ fn sweepga_align_all_vs_all(
     };
 
     // Resolve wfmash mapping density from the strategy
-    let wfmash_density = sweepga::orchestrator::resolve_wfmash_density(
-        &config.sparsify,
-        sequences.len(),
-    );
+    let wfmash_density =
+        sweepga::orchestrator::resolve_wfmash_density(&config.sparsify, sequences.len());
 
     let aligner: Box<dyn Aligner> = create_aligner_adaptive(
         &config.aligner,
@@ -811,10 +814,8 @@ fn sweepga_align_pairwise(
     };
 
     // Resolve wfmash mapping density from the strategy
-    let wfmash_density = sweepga::orchestrator::resolve_wfmash_density(
-        &config.sparsify,
-        sequences.len(),
-    );
+    let wfmash_density =
+        sweepga::orchestrator::resolve_wfmash_density(&config.sparsify, sequences.len());
 
     if config.aligner == "wfmash" {
         // Optimized path: single wfmash invocation with --pairs-file

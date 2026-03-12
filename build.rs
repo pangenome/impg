@@ -41,7 +41,10 @@ fn copy_dep_binary(build_dir: &Path, prefix: &str, binary_name: &str, dest_dir: 
     let dest = dest_dir.join(binary_name);
     if !dest.exists() {
         if let Err(e) = fs::copy(&src, &dest) {
-            eprintln!("cargo:warning=Failed to copy {binary_name} to {}: {e}", dest.display());
+            eprintln!(
+                "cargo:warning=Failed to copy {binary_name} to {}: {e}",
+                dest.display()
+            );
         } else {
             set_executable(&dest);
         }
