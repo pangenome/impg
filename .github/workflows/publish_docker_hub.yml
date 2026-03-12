@@ -31,7 +31,7 @@ jobs:
 
       - name: Test wfmash
         run: |
-          zcat tests/test_data/yeast.chrV.fa.gz > /tmp/yeast.chrV.fa
+          gunzip -c tests/test_data/yeast.chrV.fa.gz > /tmp/yeast.chrV.fa
           docker run --rm -v /tmp:/data --entrypoint wfmash pangenome/impg /data/yeast.chrV.fa -X -s5000 > /tmp/wfmash.paf
           test $(wc -l < /tmp/wfmash.paf) -gt 0 && echo "wfmash OK: produced $(wc -l < /tmp/wfmash.paf) alignments"
 

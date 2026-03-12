@@ -69,7 +69,7 @@ jobs:
 
       - name: Smoke test wfmash
         run: |
-          zcat tests/test_data/yeast.chrV.fa.gz > /tmp/yeast.chrV.fa
+          gunzip -c tests/test_data/yeast.chrV.fa.gz > /tmp/yeast.chrV.fa
           if [[ "${{ runner.os }}" == "Linux" ]]; then
             export LD_LIBRARY_PATH="target/release:$LD_LIBRARY_PATH"
           else
