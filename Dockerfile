@@ -41,12 +41,20 @@ RUN cd impg \
     && cargo build --release \
     && cp target/release/impg /usr/local/bin/impg \
     && cp target/release/gfaffix /usr/local/bin/gfaffix \
+    && cp target/release/wfmash /usr/local/bin/wfmash || true \
+    && for bin in FastGA FAtoGDB GIXmake GIXrm ALNtoPAF PAFtoALN ONEview; do \
+         cp target/release/$bin /usr/local/bin/$bin 2>/dev/null || true; \
+       done \
     && rm -rf target .git \
     && rustup self uninstall -y \
     && apt-get clean \
     && apt-get purge \
     && rm -rf /var/lib/apt/lists/* /tmp/* /root/.cargo
 
-RUN chmod 777 /usr/local/bin/impg /usr/local/bin/gfaffix
+RUN chmod 777 /usr/local/bin/impg /usr/local/bin/gfaffix \
+    && chmod 777 /usr/local/bin/wfmash 2>/dev/null || true \
+    && for bin in FastGA FAtoGDB GIXmake GIXrm ALNtoPAF PAFtoALN ONEview; do \
+         chmod 777 /usr/local/bin/$bin 2>/dev/null || true; \
+       done
 
 ENTRYPOINT ["impg"]

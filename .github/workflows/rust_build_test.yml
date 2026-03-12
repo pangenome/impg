@@ -47,6 +47,20 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      - name: Verify companion binaries
+        run: |
+          echo "Checking companion binaries in target/release/..."
+          for bin in gfaffix wfmash FastGA FAtoGDB GIXmake GIXrm ALNtoPAF PAFtoALN ONEview; do
+            if [ -f "target/release/$bin" ]; then
+              echo "  OK: $bin"
+            else
+              echo "  MISSING: $bin"
+            fi
+          done
+          # gfaffix and wfmash are required
+          test -f target/release/gfaffix || (echo "FAIL: gfaffix not found" && exit 1)
+          test -f target/release/wfmash || (echo "FAIL: wfmash not found" && exit 1)
+
       - name: Test
         run: |
           export TMPDIR="${{ runner.temp }}"
