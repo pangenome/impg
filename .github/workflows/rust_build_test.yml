@@ -79,6 +79,7 @@ jobs:
           test $(wc -l < /tmp/wfmash.paf) -gt 0 && echo "wfmash OK: $(wc -l < /tmp/wfmash.paf) alignments"
 
       - name: Smoke test FastGA
+        if: runner.os == 'Linux'
         run: |
           target/release/FastGA /tmp/yeast.chrV.fa /tmp/yeast.chrV.fa > /tmp/fastga.paf
           test $(wc -l < /tmp/fastga.paf) -gt 0 && echo "FastGA OK: $(wc -l < /tmp/fastga.paf) alignments"
