@@ -61,7 +61,34 @@ jobs:
           test -f target/release/gfaffix || (echo "FAIL: gfaffix not found" && exit 1)
           test -f target/release/wfmash || (echo "FAIL: wfmash not found" && exit 1)
 
+      - name: Smoke test gfaffix
+        run: |
+          printf "H\tVN:Z:1.0\nS\t1\tACGT\nS\t2\tACGT\nS\t3\tTTTT\nL\t1\t+\t3\t+\t0M\nL\t2\t+\t3\t+\t0M\n" > /tmp/test.gfa
+          target/release/gfaffix /tmp/test.gfa -o /tmp/out.gfa
+          grep -q "^S" /tmp/out.gfa && echo "gfaffix OK"
+
+      - name: Smoke test wfmash
+        run: |
+          zcat tests/test_data/yeast.chrV.fa.gz > /tmp/yeast.chrV.fa
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            export LD_LIBRARY_PATH="target/release:$LD_LIBRARY_PATH"
+          else
+            export DYLD_LIBRARY_PATH="target/release:$DYLD_LIBRARY_PATH"
+          fi
+          target/release/wfmash /tmp/yeast.chrV.fa -X -s5000 > /tmp/wfmash.paf
+          test $(wc -l < /tmp/wfmash.paf) -gt 0 && echo "wfmash OK: $(wc -l < /tmp/wfmash.paf) alignments"
+
+      - name: Smoke test FastGA
+        run: |
+          target/release/FastGA /tmp/yeast.chrV.fa /tmp/yeast.chrV.fa > /tmp/fastga.paf
+          test $(wc -l < /tmp/fastga.paf) -gt 0 && echo "FastGA OK: $(wc -l < /tmp/fastga.paf) alignments"
+
       - name: Test
         run: |
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            export LD_LIBRARY_PATH="target/release:$LD_LIBRARY_PATH"
+          else
+            export DYLD_LIBRARY_PATH="target/release:$DYLD_LIBRARY_PATH"
+          fi
           export TMPDIR="${{ runner.temp }}"
           cargo test --release -- --test-threads=1

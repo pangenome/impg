@@ -24,10 +24,21 @@ jobs:
         run: docker run --rm pangenome/impg --help
 
       - name: Test gfaffix
-        run: docker run --rm --entrypoint gfaffix pangenome/impg --help
+        run: |
+          printf "H\tVN:Z:1.0\nS\t1\tACGT\nS\t2\tACGT\nS\t3\tTTTT\nL\t1\t+\t3\t+\t0M\nL\t2\t+\t3\t+\t0M\n" > /tmp/test.gfa
+          docker run --rm -v /tmp:/data --entrypoint gfaffix pangenome/impg /data/test.gfa -o /data/out.gfa
+          grep -q "^S" /tmp/out.gfa && echo "gfaffix OK: produced GFA output"
 
       - name: Test wfmash
-        run: docker run --rm --entrypoint wfmash pangenome/impg --help
+        run: |
+          zcat tests/test_data/yeast.chrV.fa.gz > /tmp/yeast.chrV.fa
+          docker run --rm -v /tmp:/data --entrypoint wfmash pangenome/impg /data/yeast.chrV.fa -X -s5000 > /tmp/wfmash.paf
+          test $(wc -l < /tmp/wfmash.paf) -gt 0 && echo "wfmash OK: produced $(wc -l < /tmp/wfmash.paf) alignments"
+
+      - name: Test FastGA
+        run: |
+          docker run --rm -v /tmp:/data --entrypoint FastGA pangenome/impg /data/yeast.chrV.fa /data/yeast.chrV.fa > /tmp/fastga.paf
+          test $(wc -l < /tmp/fastga.paf) -gt 0 && echo "FastGA OK: produced $(wc -l < /tmp/fastga.paf) alignments"
 
       - name: Push the Docker image
         run: tag=$(date +%s) && docker tag pangenome/impg:latest pangenome/impg:$tag && docker push pangenome/impg:$tag
