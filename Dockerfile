@@ -41,7 +41,8 @@ RUN cd impg \
     && cargo build --release \
     && cp target/release/impg /usr/local/bin/impg \
     && cp target/release/gfaffix /usr/local/bin/gfaffix \
-    && cp target/release/wfmash /usr/local/bin/wfmash || true \
+    && cp target/release/wfmash /usr/local/bin/wfmash 2>/dev/null || true \
+    && cp target/release/libwfa2*.so* /usr/local/lib/ 2>/dev/null || true \
     && for bin in FastGA FAtoGDB GIXmake GIXrm ALNtoPAF PAFtoALN ONEview; do \
          cp target/release/$bin /usr/local/bin/$bin 2>/dev/null || true; \
        done \
@@ -51,7 +52,8 @@ RUN cd impg \
     && apt-get purge \
     && rm -rf /var/lib/apt/lists/* /tmp/* /root/.cargo
 
-RUN chmod 777 /usr/local/bin/impg /usr/local/bin/gfaffix \
+RUN ldconfig \
+    && chmod 777 /usr/local/bin/impg /usr/local/bin/gfaffix \
     && chmod 777 /usr/local/bin/wfmash 2>/dev/null || true \
     && for bin in FastGA FAtoGDB GIXmake GIXrm ALNtoPAF PAFtoALN ONEview; do \
          chmod 777 /usr/local/bin/$bin 2>/dev/null || true; \
