@@ -2,6 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn main() {
+    init_gfaffix_submodule();
+
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
 
     // Derive the profile directory (e.g. target/release/) from OUT_DIR.
@@ -26,6 +28,31 @@ fn main() {
     ];
     for name in &fastga_binaries {
         copy_dep_binary(&build_dir, "fastga-rs-", name, &profile_dir);
+    }
+}
+
+/// Ensure vendor/gfaffix submodule is initialized so its src/main.rs is present.
+fn init_gfaffix_submodule() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let gfaffix_main = PathBuf::from(&manifest_dir).join("vendor/gfaffix/src/main.rs");
+
+    if !gfaffix_main.exists() {
+        eprintln!("cargo:warning=vendor/gfaffix submodule not initialized — running `git submodule update --init vendor/gfaffix`");
+        match std::process::Command::new("git")
+            .args(["submodule", "update", "--init", "vendor/gfaffix"])
+            .current_dir(&manifest_dir)
+            .status()
+        {
+            Ok(s) if s.success() => {}
+            Ok(s) => panic!(
+                "`git submodule update --init vendor/gfaffix` exited with {s}\n\
+                 Please run it manually before building."
+            ),
+            Err(e) => panic!(
+                "Failed to run git: {e}\n\
+                 Please run `git submodule update --init vendor/gfaffix` manually."
+            ),
+        }
     }
 }
 
