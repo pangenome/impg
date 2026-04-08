@@ -1,5 +1,7 @@
 // lib.rs
 pub mod agc_index;
+pub mod syng_ffi;
+pub mod syng;
 pub mod alignment_record;
 pub mod commands;
 pub mod faidx;

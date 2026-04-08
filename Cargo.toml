@@ -25,6 +25,7 @@ log = "0.4"
 env_logger = "0.11"
 natord = "1.0"
 rustc-hash = "2.1"
+libc = "0.2"
 indexmap = { version = "2", features = ["rayon"] }
 nalgebra = "0.33"
 indicatif = "0.18"
@@ -60,6 +61,9 @@ seqwish = { git = "https://github.com/pangenome/seqwish", branch = "rust-2" }
 
 # Dependencies for graph sorting
 gfasort = { git = "https://github.com/pangenome/gfasort", rev = "b5fdb1d" }
+
+[build-dependencies]
+cc = "1"
 
 [dev-dependencies]
 

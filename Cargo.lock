@@ -1326,6 +1326,7 @@ version = "0.4.1"
 dependencies = [
  "bincode 2.0.1",
  "bitvec",
+ "cc",
  "clap",
  "coitrees",
  "env_logger",
@@ -1337,6 +1338,7 @@ dependencies = [
  "indexmap",
  "indicatif",
  "lib_wfa2",
+ "libc",
  "log",
  "nalgebra",
  "natord",
