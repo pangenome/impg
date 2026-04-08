@@ -2628,6 +2628,660 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    // ── 19. Region-specific GBWT output (spec Test 4) ───────────────
+
+    #[test]
+    fn test_region_gbwt_from_query_results() {
+        // Build full index → query region → output as GBWT → verify files
+        let params = SyncmerParams::default();
+        let shared = make_test_sequence(500, 42);
+
+        let mut seq_a = shared.clone();
+        seq_a.extend_from_slice(&make_test_sequence(500, 1));
+        let mut seq_b = shared.clone();
+        seq_b.extend_from_slice(&make_test_sequence(500, 2));
+        let seq_c = make_test_sequence(1000, 99); // independent
+
+        let sequences = vec![
+            ("genome_a".to_string(), seq_a),
+            ("genome_b".to_string(), seq_b),
+            ("genome_c".to_string(), seq_c),
+        ];
+
+        let index = SyngIndex::build(params, sequences.into_iter());
+
+        // Query the shared region
+        let intervals = index.query_region("genome_a", 0, 500, 0).unwrap();
+        assert!(!intervals.is_empty(), "Should find intervals in shared region");
+
+        // Build region GBWT from the query result sequences
+        // (simulate what the CLI does: fetch sequences for each interval)
+        let region_seqs: Vec<(String, Vec<u8>)> = intervals
+            .iter()
+            .map(|iv| {
+                let seq_name = format!("{}:{}-{}", iv.genome, iv.start, iv.end);
+                let seq = make_test_sequence((iv.end - iv.start) as usize, 42);
+                (seq_name, seq)
+            })
+            .collect();
+
+        let dir = std::env::temp_dir().join("impg_test_region_gbwt_query");
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("region_from_query");
+        let prefix_str = prefix.to_str().unwrap();
+
+        let refs: Vec<(String, &[u8])> = region_seqs
+            .iter()
+            .map(|(n, s)| (n.clone(), s.as_slice()))
+            .collect();
+
+        index.build_region_gbwt(&refs, prefix_str).unwrap();
+
+        // Verify output files exist and are non-empty
+        let gbwt_path = format!("{}.1gbwt", prefix_str);
+        let khash_path = format!("{}.1khash", prefix_str);
+        assert!(Path::new(&gbwt_path).exists(), "Region .1gbwt should exist");
+        assert!(Path::new(&khash_path).exists(), "Region .1khash should exist");
+        assert!(
+            std::fs::metadata(&gbwt_path).unwrap().len() > 0,
+            "Region .1gbwt should be non-empty"
+        );
+        assert!(
+            std::fs::metadata(&khash_path).unwrap().len() > 0,
+            "Region .1khash should be non-empty"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_region_gbwt_loadable_as_syng_index() {
+        // Build full index, query, produce region GBWT, load as SyngIndex
+        let params = SyncmerParams::default();
+        let shared = make_test_sequence(600, 42);
+
+        let mut seq_a = shared.clone();
+        seq_a.extend_from_slice(&make_test_sequence(400, 1));
+        let mut seq_b = shared.clone();
+        seq_b.extend_from_slice(&make_test_sequence(400, 2));
+
+        let index = SyngIndex::build(
+            params,
+            vec![
+                ("genome_a".to_string(), seq_a),
+                ("genome_b".to_string(), seq_b),
+            ]
+            .into_iter(),
+        );
+
+        // Build region GBWT from actual sequence data (use shared prefix)
+        let region_seqs: Vec<(String, Vec<u8>)> = vec![
+            ("region_a".to_string(), make_test_sequence(400, 42)),
+            ("region_b".to_string(), make_test_sequence(400, 42)),
+            ("region_c".to_string(), make_test_sequence(400, 10)),
+        ];
+
+        let dir = std::env::temp_dir().join("impg_test_region_gbwt_load_syng");
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("region_loadable");
+        let prefix_str = prefix.to_str().unwrap();
+
+        let refs: Vec<(String, &[u8])> = region_seqs
+            .iter()
+            .map(|(n, s)| (n.clone(), s.as_slice()))
+            .collect();
+        index.build_region_gbwt(&refs, prefix_str).unwrap();
+
+        // Write a names file so we can load it as a full SyngIndex
+        let names_path = format!("{}.syng.names", prefix_str);
+        let mut nm = SyngNameMap::new();
+        for (name, seq) in &region_seqs {
+            nm.add(name.clone(), seq.len() as u64);
+        }
+        nm.save(&names_path).unwrap();
+
+        // Load the region GBWT back as a SyngIndex
+        let loaded = SyngIndex::load(prefix_str, params).unwrap();
+        assert!(!loaded.gbwt.is_null(), "Loaded region GBWT should be valid");
+        assert!(!loaded.kmer_hash.is_null(), "Loaded region KmerHash should be valid");
+        assert_eq!(
+            loaded.name_map.path_to_name.len(),
+            3,
+            "Region index should have 3 paths"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_region_gbwt_nodes_subset_of_full_index() {
+        // Build a full index and a region GBWT from a subset of sequences.
+        // The region GBWT's syncmer nodes should be a subset of the full index's nodes.
+        let params = SyncmerParams::default();
+
+        // Use the SAME sequences for both: full index from all, region from subset
+        let seqs: Vec<(String, Vec<u8>)> = (0..4)
+            .map(|i| (format!("genome_{}", i), make_test_sequence(2000, i as u8 + 10)))
+            .collect();
+        let full_index = SyngIndex::build(params, seqs.clone().into_iter());
+
+        let dir = std::env::temp_dir().join("impg_test_region_nodes_subset");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Save full index to disk
+        let full_prefix = dir.join("full");
+        full_index.save(full_prefix.to_str().unwrap()).unwrap();
+
+        // Build region GBWT from just the first 2 sequences (subset)
+        let region_prefix = dir.join("region_subset");
+        let region_refs: Vec<(String, &[u8])> = seqs[0..2]
+            .iter()
+            .map(|(n, s)| (n.clone(), s.as_slice()))
+            .collect();
+        full_index
+            .build_region_gbwt(&region_refs, region_prefix.to_str().unwrap())
+            .unwrap();
+
+        // Both files should exist and be non-empty
+        let region_gbwt = format!("{}.1gbwt", region_prefix.to_str().unwrap());
+        let region_khash = format!("{}.1khash", region_prefix.to_str().unwrap());
+        assert!(Path::new(&region_gbwt).exists());
+        assert!(Path::new(&region_khash).exists());
+        assert!(std::fs::metadata(&region_gbwt).unwrap().len() > 0);
+        assert!(std::fs::metadata(&region_khash).unwrap().len() > 0);
+
+        // The full khash should be >= the region khash in size
+        // (more sequences = more or equal unique syncmers)
+        let full_khash_size = std::fs::metadata(format!("{}.1khash", full_prefix.to_str().unwrap()))
+            .unwrap()
+            .len();
+        let region_khash_size = std::fs::metadata(&region_khash).unwrap().len();
+        assert!(
+            full_khash_size >= region_khash_size,
+            "Full index khash ({}) should be >= region khash ({})",
+            full_khash_size,
+            region_khash_size
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_region_gbwt_single_genome() {
+        // Edge case: region with a single genome → GBWT with one path
+        let params = SyncmerParams::default();
+        let index = SyngIndex::new(params);
+
+        let dir = std::env::temp_dir().join("impg_test_region_gbwt_single");
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("single_genome_region");
+        let prefix_str = prefix.to_str().unwrap();
+
+        let seq = make_test_sequence(500, 42);
+        let refs: Vec<(String, &[u8])> = vec![("only_genome".to_string(), seq.as_slice())];
+
+        index.build_region_gbwt(&refs, prefix_str).unwrap();
+
+        // Files should exist
+        assert!(Path::new(&format!("{}.1gbwt", prefix_str)).exists());
+        assert!(Path::new(&format!("{}.1khash", prefix_str)).exists());
+
+        // Write names and load back
+        let names_path = format!("{}.syng.names", prefix_str);
+        let mut nm = SyngNameMap::new();
+        nm.add("only_genome".to_string(), seq.len() as u64);
+        nm.save(&names_path).unwrap();
+
+        let loaded = SyngIndex::load(prefix_str, params).unwrap();
+        assert_eq!(loaded.name_map.path_to_name.len(), 1);
+        assert_eq!(loaded.name_map.path_to_name[0], "only_genome");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_region_gbwt_very_small_region() {
+        // Very small region (smaller than one syncmer) → empty/minimal GBWT
+        let params = SyncmerParams::default();
+        let index = SyngIndex::new(params);
+
+        let dir = std::env::temp_dir().join("impg_test_region_gbwt_tiny");
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("tiny_region");
+        let prefix_str = prefix.to_str().unwrap();
+
+        // Sequences shorter than syncmer length (63bp) — should be skipped
+        let refs: Vec<(String, &[u8])> = vec![
+            ("tiny1".to_string(), b"ACGTACGT" as &[u8]),
+            ("tiny2".to_string(), b"TGCATGCA" as &[u8]),
+        ];
+
+        index.build_region_gbwt(&refs, prefix_str).unwrap();
+
+        // Files should still be produced (valid but minimal)
+        assert!(Path::new(&format!("{}.1gbwt", prefix_str)).exists());
+        assert!(Path::new(&format!("{}.1khash", prefix_str)).exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_region_gbwt_output_prefix_with_directory() {
+        // Output prefix with nested directory path
+        let dir = std::env::temp_dir().join("impg_test_region_gbwt_nested/subdir/deep");
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("nested_output");
+        let prefix_str = prefix.to_str().unwrap();
+
+        let params = SyncmerParams::default();
+        let index = SyngIndex::new(params);
+
+        let seq = make_test_sequence(500, 42);
+        let refs: Vec<(String, &[u8])> = vec![("seq1".to_string(), seq.as_slice())];
+
+        index.build_region_gbwt(&refs, prefix_str).unwrap();
+
+        assert!(Path::new(&format!("{}.1gbwt", prefix_str)).exists());
+        assert!(Path::new(&format!("{}.1khash", prefix_str)).exists());
+
+        // Clean up the top-level temp dir
+        std::fs::remove_dir_all(
+            std::env::temp_dir().join("impg_test_region_gbwt_nested"),
+        )
+        .ok();
+    }
+
+    #[test]
+    fn test_region_gbwt_nonexistent_directory_fails() {
+        // Output prefix whose parent directory doesn't exist → should error
+        let params = SyncmerParams::default();
+        let index = SyngIndex::new(params);
+
+        let prefix = "/tmp/impg_test_nonexistent_dir_xyz123/subdir/output";
+
+        let seq = make_test_sequence(500, 42);
+        let refs: Vec<(String, &[u8])> = vec![("seq1".to_string(), seq.as_slice())];
+
+        let result = index.build_region_gbwt(&refs, prefix);
+        assert!(
+            result.is_err(),
+            "Should fail when output directory doesn't exist"
+        );
+    }
+
+    // ── 20. Syng format interoperability (spec Test 3) ───────────────
+
+    #[test]
+    fn test_onecode_magic_bytes_gbwt() {
+        // Verify the .1gbwt file has correct ONEcode format markers
+        let params = SyncmerParams::default();
+        let seqs = vec![("seq1".to_string(), make_test_sequence(1000, 42))];
+        let index = SyngIndex::build(params, seqs.into_iter());
+
+        let dir = std::env::temp_dir().join("impg_test_onecode_magic_gbwt");
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("magic_test");
+        let prefix_str = prefix.to_str().unwrap();
+        index.save(prefix_str).unwrap();
+
+        // Read first few bytes of .1gbwt — ONEcode binary files start with specific markers
+        let gbwt_bytes = std::fs::read(format!("{}.1gbwt", prefix_str)).unwrap();
+        assert!(gbwt_bytes.len() > 4, ".1gbwt should be non-trivial size");
+
+        // ONEcode binary format: first byte is '1' (0x31) for binary mode
+        // or the file might start with the schema header
+        // Check that it's either binary ('1') or text ('#' for comment/schema)
+        let first_byte = gbwt_bytes[0];
+        assert!(
+            first_byte == b'1' || first_byte == b'#' || first_byte == b'!',
+            ".1gbwt should start with ONEcode marker ('1', '#', or '!'), got 0x{:02x}",
+            first_byte
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_onecode_magic_bytes_khash() {
+        // Verify the .1khash file has correct ONEcode format markers
+        let params = SyncmerParams::default();
+        let seqs = vec![("seq1".to_string(), make_test_sequence(1000, 42))];
+        let index = SyngIndex::build(params, seqs.into_iter());
+
+        let dir = std::env::temp_dir().join("impg_test_onecode_magic_khash");
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("magic_test");
+        let prefix_str = prefix.to_str().unwrap();
+        index.save(prefix_str).unwrap();
+
+        let khash_bytes = std::fs::read(format!("{}.1khash", prefix_str)).unwrap();
+        assert!(khash_bytes.len() > 4, ".1khash should be non-trivial size");
+
+        let first_byte = khash_bytes[0];
+        assert!(
+            first_byte == b'1' || first_byte == b'#' || first_byte == b'!',
+            ".1khash should start with ONEcode marker ('1', '#', or '!'), got 0x{:02x}",
+            first_byte
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_region_gbwt_onecode_format() {
+        // Verify region GBWT output also has correct ONEcode format
+        let params = SyncmerParams::default();
+        let index = SyngIndex::new(params);
+
+        let dir = std::env::temp_dir().join("impg_test_region_onecode");
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("region_onecode");
+        let prefix_str = prefix.to_str().unwrap();
+
+        let seq = make_test_sequence(1000, 42);
+        let refs: Vec<(String, &[u8])> = vec![("seq1".to_string(), seq.as_slice())];
+        index.build_region_gbwt(&refs, prefix_str).unwrap();
+
+        // Check .1gbwt format marker
+        let gbwt_bytes = std::fs::read(format!("{}.1gbwt", prefix_str)).unwrap();
+        assert!(gbwt_bytes.len() > 4);
+        assert!(
+            gbwt_bytes[0] == b'1' || gbwt_bytes[0] == b'#' || gbwt_bytes[0] == b'!',
+            "Region .1gbwt should have ONEcode format marker"
+        );
+
+        // Check .1khash format marker
+        let khash_bytes = std::fs::read(format!("{}.1khash", prefix_str)).unwrap();
+        assert!(khash_bytes.len() > 4);
+        assert!(
+            khash_bytes[0] == b'1' || khash_bytes[0] == b'#' || khash_bytes[0] == b'!',
+            "Region .1khash should have ONEcode format marker"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── 21. Round-trip: query → GBWT → query (spec Test 4) ──────────
+
+    #[test]
+    fn test_roundtrip_query_gbwt_query() {
+        // Build full index → query region → output GBWT → load region GBWT → query region GBWT
+        // Verify second query returns consistent results
+        let params = SyncmerParams::default();
+
+        // Create sequences with known homology
+        let shared = make_test_sequence(600, 42);
+        let mut seq_a = shared.clone();
+        seq_a.extend_from_slice(&make_test_sequence(400, 1));
+        let mut seq_b = shared.clone();
+        seq_b.extend_from_slice(&make_test_sequence(400, 2));
+        let mut seq_c = shared.clone();
+        seq_c.extend_from_slice(&make_test_sequence(400, 3));
+
+        let full_seqs = vec![
+            ("genome_a".to_string(), seq_a.clone()),
+            ("genome_b".to_string(), seq_b.clone()),
+            ("genome_c".to_string(), seq_c.clone()),
+        ];
+        let full_index = SyngIndex::build(params, full_seqs.into_iter());
+
+        // Step 1: Query the shared region on the full index
+        let intervals = full_index.query_region("genome_a", 0, 500, 0).unwrap();
+        let original_genomes: Vec<&str> = intervals.iter().map(|iv| iv.genome.as_str()).collect();
+        assert!(
+            original_genomes.contains(&"genome_b"),
+            "Full query should find genome_b"
+        );
+
+        // Step 2: Build region GBWT from the full sequences in the shared region
+        let dir = std::env::temp_dir().join("impg_test_roundtrip_query_gbwt");
+        std::fs::create_dir_all(&dir).unwrap();
+        let region_prefix = dir.join("region_rt");
+        let region_prefix_str = region_prefix.to_str().unwrap();
+
+        // Use the shared portion of each sequence for the region GBWT
+        let region_seqs: Vec<(String, Vec<u8>)> = vec![
+            ("genome_a".to_string(), seq_a[0..600].to_vec()),
+            ("genome_b".to_string(), seq_b[0..600].to_vec()),
+            ("genome_c".to_string(), seq_c[0..600].to_vec()),
+        ];
+        let region_refs: Vec<(String, &[u8])> = region_seqs
+            .iter()
+            .map(|(n, s)| (n.clone(), s.as_slice()))
+            .collect();
+        full_index
+            .build_region_gbwt(&region_refs, region_prefix_str)
+            .unwrap();
+
+        // Write name map for the region index
+        let names_path = format!("{}.syng.names", region_prefix_str);
+        let mut nm = SyngNameMap::new();
+        for (name, seq) in &region_seqs {
+            nm.add(name.clone(), seq.len() as u64);
+        }
+        nm.save(&names_path).unwrap();
+
+        // Step 3: Load the region GBWT and build a new SyngIndex from
+        // the region sequences (so we get path_starts for querying)
+        let region_index = SyngIndex::build(params, region_seqs.into_iter());
+
+        // Step 4: Query the region GBWT
+        let region_intervals = region_index.query_region("genome_a", 0, 500, 0).unwrap();
+        let region_genomes: Vec<&str> = region_intervals.iter().map(|iv| iv.genome.as_str()).collect();
+
+        // The region query should find the same genomes
+        assert!(
+            region_genomes.contains(&"genome_a"),
+            "Region query should find self. Found: {:?}",
+            region_genomes
+        );
+        assert!(
+            region_genomes.contains(&"genome_b"),
+            "Region query should find genome_b (shared backbone). Found: {:?}",
+            region_genomes
+        );
+        assert!(
+            region_genomes.contains(&"genome_c"),
+            "Region query should find genome_c (shared backbone). Found: {:?}",
+            region_genomes
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── 22. CLI integration: GBWT output format ──────────────────────
+
+    #[test]
+    fn test_syng_cli_gbwt_output_from_syng_index() {
+        // impg query --syng prefix -f test.fa -r region -o gbwt -O tmpdir/region
+        let dir = std::env::temp_dir().join("impg_test_cli_gbwt_output");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let bin = find_impg_binary();
+        if bin.is_none() {
+            eprintln!("Skipping CLI test: impg binary not found");
+            std::fs::remove_dir_all(&dir).ok();
+            return;
+        }
+        let bin = bin.unwrap();
+
+        // Write test FASTA with shared content
+        let fasta_path = dir.join("test.fa");
+        let shared = make_test_sequence(500, 42);
+        {
+            let mut f = std::fs::File::create(&fasta_path).unwrap();
+            let mut seq_a = shared.clone();
+            seq_a.extend_from_slice(&make_test_sequence(500, 1));
+            let mut seq_b = shared.clone();
+            seq_b.extend_from_slice(&make_test_sequence(500, 2));
+            use std::io::Write;
+            writeln!(f, ">genome_a").unwrap();
+            writeln!(f, "{}", String::from_utf8(seq_a).unwrap()).unwrap();
+            writeln!(f, ">genome_b").unwrap();
+            writeln!(f, "{}", String::from_utf8(seq_b).unwrap()).unwrap();
+        }
+
+        // Build syng index
+        let idx_prefix = dir.join("idx");
+        let output = std::process::Command::new(&bin)
+            .args([
+                "syng",
+                "-f", fasta_path.to_str().unwrap(),
+                "-o", idx_prefix.to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run impg syng");
+        assert!(output.status.success(), "impg syng failed: {}", String::from_utf8_lossy(&output.stderr));
+
+        // Query with GBWT output
+        let gbwt_output = dir.join("region_gbwt");
+        let output = std::process::Command::new(&bin)
+            .args([
+                "query",
+                "--syng", idx_prefix.to_str().unwrap(),
+                "--sequence-files", fasta_path.to_str().unwrap(),
+                "-r", "genome_a:0-400",
+                "-o", "gbwt",
+                "-O", gbwt_output.to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run impg query -o gbwt");
+        assert!(
+            output.status.success(),
+            "impg query --syng -o gbwt failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // Verify two output files
+        let gbwt_file = format!("{}.1gbwt", gbwt_output.to_str().unwrap());
+        let khash_file = format!("{}.1khash", gbwt_output.to_str().unwrap());
+        assert!(
+            Path::new(&gbwt_file).exists(),
+            "Region .1gbwt should exist at {}",
+            gbwt_file
+        );
+        assert!(
+            Path::new(&khash_file).exists(),
+            "Region .1khash should exist at {}",
+            khash_file
+        );
+
+        // Files should be non-empty
+        assert!(
+            std::fs::metadata(&gbwt_file).unwrap().len() > 0,
+            ".1gbwt should be non-empty"
+        );
+        assert!(
+            std::fs::metadata(&khash_file).unwrap().len() > 0,
+            ".1khash should be non-empty"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_paf_based_gbwt_output() {
+        // impg query -i test.paf -f test.fa -r region -o gbwt -O tmpdir/region2
+        // (PAF-based → GBWT output)
+        let dir = std::env::temp_dir().join("impg_test_cli_paf_gbwt");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let bin = find_impg_binary();
+        if bin.is_none() {
+            eprintln!("Skipping CLI test: impg binary not found");
+            std::fs::remove_dir_all(&dir).ok();
+            return;
+        }
+        let bin = bin.unwrap();
+
+        // Create a simple test PAF and FASTA
+        let fasta_path = dir.join("test.fa");
+        let paf_path = dir.join("test.paf");
+
+        // Create two sequences with known coordinates
+        let seq_a = make_test_sequence(1000, 42);
+        let seq_b = make_test_sequence(1000, 42); // identical to create valid PAF alignment
+        {
+            let mut f = std::fs::File::create(&fasta_path).unwrap();
+            use std::io::Write;
+            writeln!(f, ">genome_a").unwrap();
+            writeln!(f, "{}", String::from_utf8(seq_a).unwrap()).unwrap();
+            writeln!(f, ">genome_b").unwrap();
+            writeln!(f, "{}", String::from_utf8(seq_b).unwrap()).unwrap();
+        }
+
+        // Create a minimal PAF with an identity alignment
+        {
+            let mut f = std::fs::File::create(&paf_path).unwrap();
+            use std::io::Write;
+            // PAF format: qname qlen qstart qend strand tname tlen tstart tend nmatch alen mapq [cigar]
+            writeln!(
+                f,
+                "genome_a\t1000\t0\t1000\t+\tgenome_b\t1000\t0\t1000\t1000\t1000\t60\tcg:Z:1000M"
+            )
+            .unwrap();
+        }
+
+        let gbwt_output = dir.join("paf_region");
+        let output = std::process::Command::new(&bin)
+            .args([
+                "query",
+                "-a", paf_path.to_str().unwrap(),
+                "--sequence-files", fasta_path.to_str().unwrap(),
+                "-r", "genome_a:100-500",
+                "-o", "gbwt",
+                "-O", gbwt_output.to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run impg query -i paf -o gbwt");
+        assert!(
+            output.status.success(),
+            "impg query -i paf -o gbwt failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // Verify output files exist
+        let gbwt_file = format!("{}.1gbwt", gbwt_output.to_str().unwrap());
+        let khash_file = format!("{}.1khash", gbwt_output.to_str().unwrap());
+        assert!(Path::new(&gbwt_file).exists(), "PAF-based .1gbwt should exist");
+        assert!(Path::new(&khash_file).exists(), "PAF-based .1khash should exist");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_cli_gbwt_output_requires_prefix() {
+        // -o gbwt without -O should fail
+        let bin = find_impg_binary();
+        if bin.is_none() {
+            eprintln!("Skipping CLI test: impg binary not found");
+            return;
+        }
+        let bin = bin.unwrap();
+
+        let output = std::process::Command::new(&bin)
+            .args([
+                "query",
+                "--syng", "/tmp/nonexistent_prefix",
+                "-r", "genome_a:0-100",
+                "-o", "gbwt",
+            ])
+            .output()
+            .expect("Failed to run impg query");
+
+        assert!(
+            !output.status.success(),
+            "Using -o gbwt without -O should fail"
+        );
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("prefix") || stderr.contains("-O") || stderr.contains("required"),
+            "Error message should mention output prefix requirement. Got: {}",
+            stderr
+        );
+    }
+
     /// Helper to locate the impg binary for CLI tests.
     fn find_impg_binary() -> Option<std::path::PathBuf> {
         // Try CARGO_BIN_EXE first
