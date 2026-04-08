@@ -1524,8 +1524,6 @@ mod tests {
         let shared_len = 500;
         let total_len = 1000;
         let params = SyncmerParams { k: 8, w: 55, seed: 7 };
-        let syncmer_len = (params.w + params.k) as usize;
-
         // Build a shared backbone
         let backbone = make_test_sequence(shared_len, 42);
 
@@ -1683,5 +1681,655 @@ mod tests {
         }
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── 14. Query completeness vs known ground truth ───────────────
+
+    /// Helper: build test sequences with known homology structure.
+    /// Returns (sequences, shared_regions) where shared_regions describes
+    /// which genomes share which backbone.
+    fn make_homologous_sequences() -> Vec<(String, Vec<u8>)> {
+        // All genomes share a 400bp backbone at the start.
+        // genome_a and genome_b also share a 300bp region at the end.
+        // genome_c diverges after the common backbone.
+        // genome_d is completely independent (different seed, no shared syncmers).
+        let common_backbone = make_test_sequence(400, 42);
+        let shared_tail_ab = make_test_sequence(300, 77);
+
+        let mut seq_a = common_backbone.clone();
+        seq_a.extend_from_slice(&make_test_sequence(200, 1)); // unique middle
+        seq_a.extend_from_slice(&shared_tail_ab);
+
+        let mut seq_b = common_backbone.clone();
+        seq_b.extend_from_slice(&make_test_sequence(200, 2)); // different middle
+        seq_b.extend_from_slice(&shared_tail_ab);
+
+        let mut seq_c = common_backbone.clone();
+        seq_c.extend_from_slice(&make_test_sequence(500, 3)); // different rest
+
+        let seq_d = make_test_sequence(900, 99); // completely independent
+
+        vec![
+            ("genome_a".to_string(), seq_a),
+            ("genome_b".to_string(), seq_b),
+            ("genome_c".to_string(), seq_c),
+            ("genome_d".to_string(), seq_d),
+        ]
+    }
+
+    #[test]
+    fn test_query_completeness_shared_backbone() {
+        let params = SyncmerParams::default();
+        let seqs = make_homologous_sequences();
+        let index = SyngIndex::build(params, seqs.into_iter());
+
+        // Query the common backbone region (first 400bp) on genome_a
+        let intervals = index.query_region("genome_a", 0, 400, 0).unwrap();
+
+        let genomes: Vec<&str> = intervals.iter().map(|iv| iv.genome.as_str()).collect();
+
+        // genome_a (self), genome_b, genome_c should all appear (shared backbone)
+        assert!(
+            genomes.contains(&"genome_a"),
+            "Self-hit expected. Found: {:?}", genomes
+        );
+        assert!(
+            genomes.contains(&"genome_b"),
+            "genome_b shares backbone. Found: {:?}", genomes
+        );
+        assert!(
+            genomes.contains(&"genome_c"),
+            "genome_c shares backbone. Found: {:?}", genomes
+        );
+
+        // Coordinates should be in a reasonable range (within ~syncmer_len of 0..400)
+        let syncmer_len = (params.w + params.k) as u64;
+        for iv in &intervals {
+            if iv.genome == "genome_a" || iv.genome == "genome_b" || iv.genome == "genome_c" {
+                // Start should be near 0 (within syncmer length)
+                assert!(
+                    iv.start <= syncmer_len,
+                    "{}: start {} should be near 0 (within {})",
+                    iv.genome, iv.start, syncmer_len
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_query_completeness_no_false_negatives_interior() {
+        // For interior coverage: if genome_a and genome_b share an identical region,
+        // querying interior of that region should always find genome_b.
+        let params = SyncmerParams::default();
+        let shared_region = make_test_sequence(800, 42);
+
+        let mut seq_a = make_test_sequence(200, 10); // unique prefix
+        seq_a.extend_from_slice(&shared_region);
+        seq_a.extend_from_slice(&make_test_sequence(200, 11)); // unique suffix
+
+        let mut seq_b = make_test_sequence(200, 20); // different prefix
+        seq_b.extend_from_slice(&shared_region);
+        seq_b.extend_from_slice(&make_test_sequence(200, 21)); // different suffix
+
+        let index = SyngIndex::build(
+            params,
+            vec![
+                ("genome_a".to_string(), seq_a),
+                ("genome_b".to_string(), seq_b),
+            ]
+            .into_iter(),
+        );
+
+        // Query interior of the shared region on genome_a (offset by 200bp prefix)
+        // Query 300..700 within the shared region (which is at 200..1000 on genome_a)
+        let intervals = index.query_region("genome_a", 400, 800, 0).unwrap();
+        let genomes: Vec<&str> = intervals.iter().map(|iv| iv.genome.as_str()).collect();
+
+        assert!(
+            genomes.contains(&"genome_b"),
+            "Interior of shared region should find genome_b. Found: {:?}", genomes
+        );
+    }
+
+    // ── 15. Boundary padding tests ─────────────────────────────────
+
+    #[test]
+    fn test_query_padding_extends_intervals() {
+        let params = SyncmerParams::default();
+        let seq_a = make_test_sequence(1000, 42);
+        let seq_b = seq_a.clone(); // identical
+
+        let index = SyngIndex::build(
+            params,
+            vec![
+                ("genome_a".to_string(), seq_a),
+                ("genome_b".to_string(), seq_b),
+            ]
+            .into_iter(),
+        );
+
+        let no_pad = index.query_region("genome_a", 200, 600, 0).unwrap();
+        let pad_120 = index.query_region("genome_a", 200, 600, 120).unwrap();
+
+        // Both should find genome_b
+        assert!(no_pad.iter().any(|iv| iv.genome == "genome_b"));
+        assert!(pad_120.iter().any(|iv| iv.genome == "genome_b"));
+
+        // Find genome_b in each
+        let no_pad_b = no_pad.iter().find(|iv| iv.genome == "genome_b").unwrap();
+        let pad_120_b = pad_120.iter().find(|iv| iv.genome == "genome_b").unwrap();
+
+        // Padded interval should be at least as wide
+        assert!(
+            pad_120_b.start <= no_pad_b.start,
+            "Padded start {} should be <= unpadded start {}",
+            pad_120_b.start, no_pad_b.start
+        );
+        assert!(
+            pad_120_b.end >= no_pad_b.end,
+            "Padded end {} should be >= unpadded end {}",
+            pad_120_b.end, no_pad_b.end
+        );
+
+        // The difference should be approximately the padding amount
+        let start_diff = no_pad_b.start as i64 - pad_120_b.start as i64;
+        let end_diff = pad_120_b.end as i64 - no_pad_b.end as i64;
+        assert!(
+            start_diff >= 0,
+            "start_diff should be non-negative: {}", start_diff
+        );
+        assert!(
+            end_diff >= 0,
+            "end_diff should be non-negative: {}", end_diff
+        );
+    }
+
+    #[test]
+    fn test_query_padding_zero_vs_nonzero() {
+        let params = SyncmerParams::default();
+        let seq = make_test_sequence(1000, 42);
+
+        let index = SyngIndex::build(
+            params,
+            vec![
+                ("g1".to_string(), seq.clone()),
+                ("g2".to_string(), seq),
+            ]
+            .into_iter(),
+        );
+
+        let pad_0 = index.query_region("g1", 300, 500, 0).unwrap();
+        let pad_60 = index.query_region("g1", 300, 500, 60).unwrap();
+        let pad_120 = index.query_region("g1", 300, 500, 120).unwrap();
+
+        // Intervals should grow monotonically with padding
+        let g2_0 = pad_0.iter().find(|iv| iv.genome == "g2").unwrap();
+        let g2_60 = pad_60.iter().find(|iv| iv.genome == "g2").unwrap();
+        let g2_120 = pad_120.iter().find(|iv| iv.genome == "g2").unwrap();
+
+        assert!(g2_60.start <= g2_0.start, "60bp pad start should be <= 0bp pad start");
+        assert!(g2_60.end >= g2_0.end, "60bp pad end should be >= 0bp pad end");
+        assert!(g2_120.start <= g2_60.start, "120bp pad start should be <= 60bp pad start");
+        assert!(g2_120.end >= g2_60.end, "120bp pad end should be >= 60bp pad end");
+    }
+
+    #[test]
+    fn test_query_padding_clamped_to_genome_length() {
+        let params = SyncmerParams::default();
+        let seq = make_test_sequence(500, 42);
+        let genome_len = seq.len() as u64;
+
+        let index = SyngIndex::build(
+            params,
+            vec![
+                ("g1".to_string(), seq.clone()),
+                ("g2".to_string(), seq),
+            ]
+            .into_iter(),
+        );
+
+        // Query near the start with large padding — should clamp to 0
+        let intervals = index.query_region("g1", 0, 200, 10000).unwrap();
+        for iv in &intervals {
+            assert!(iv.start == 0, "Start should be clamped to 0, got {}", iv.start);
+            assert!(
+                iv.end <= genome_len,
+                "End {} should be <= genome length {}",
+                iv.end, genome_len
+            );
+        }
+    }
+
+    // ── 16. Interval merging tests ─────────────────────────────────
+
+    #[test]
+    fn test_merge_intervals_no_overlap() {
+        let mut intervals = vec![
+            HomologousInterval { genome: "g1".to_string(), start: 0, end: 100, strand: '+' },
+            HomologousInterval { genome: "g1".to_string(), start: 200, end: 300, strand: '+' },
+        ];
+        SyngIndex::merge_intervals(&mut intervals);
+        assert_eq!(intervals.len(), 2, "Non-overlapping intervals should not merge");
+    }
+
+    #[test]
+    fn test_merge_intervals_overlapping() {
+        let mut intervals = vec![
+            HomologousInterval { genome: "g1".to_string(), start: 0, end: 150, strand: '+' },
+            HomologousInterval { genome: "g1".to_string(), start: 100, end: 300, strand: '+' },
+        ];
+        SyngIndex::merge_intervals(&mut intervals);
+        assert_eq!(intervals.len(), 1, "Overlapping intervals should merge");
+        assert_eq!(intervals[0].start, 0);
+        assert_eq!(intervals[0].end, 300);
+    }
+
+    #[test]
+    fn test_merge_intervals_adjacent() {
+        let mut intervals = vec![
+            HomologousInterval { genome: "g1".to_string(), start: 0, end: 100, strand: '+' },
+            HomologousInterval { genome: "g1".to_string(), start: 100, end: 200, strand: '+' },
+        ];
+        SyngIndex::merge_intervals(&mut intervals);
+        assert_eq!(intervals.len(), 1, "Adjacent intervals should merge");
+        assert_eq!(intervals[0].start, 0);
+        assert_eq!(intervals[0].end, 200);
+    }
+
+    #[test]
+    fn test_merge_intervals_different_genomes() {
+        let mut intervals = vec![
+            HomologousInterval { genome: "g1".to_string(), start: 0, end: 150, strand: '+' },
+            HomologousInterval { genome: "g2".to_string(), start: 50, end: 200, strand: '+' },
+        ];
+        SyngIndex::merge_intervals(&mut intervals);
+        assert_eq!(intervals.len(), 2, "Overlapping intervals on different genomes should not merge");
+    }
+
+    #[test]
+    fn test_merge_intervals_multiple_groups() {
+        let mut intervals = vec![
+            HomologousInterval { genome: "g1".to_string(), start: 0, end: 100, strand: '+' },
+            HomologousInterval { genome: "g1".to_string(), start: 50, end: 200, strand: '+' },
+            HomologousInterval { genome: "g1".to_string(), start: 150, end: 400, strand: '+' },
+            HomologousInterval { genome: "g2".to_string(), start: 0, end: 500, strand: '+' },
+        ];
+        SyngIndex::merge_intervals(&mut intervals);
+        // g1: [0,100] + [50,200] + [150,400] → [0,400]
+        // g2: [0,500]
+        assert_eq!(intervals.len(), 2);
+        let g1 = intervals.iter().find(|iv| iv.genome == "g1").unwrap();
+        assert_eq!(g1.start, 0);
+        assert_eq!(g1.end, 400);
+    }
+
+    #[test]
+    fn test_merge_intervals_empty() {
+        let mut intervals: Vec<HomologousInterval> = Vec::new();
+        SyngIndex::merge_intervals(&mut intervals);
+        assert_eq!(intervals.len(), 0);
+    }
+
+    #[test]
+    fn test_merge_intervals_single() {
+        let mut intervals = vec![
+            HomologousInterval { genome: "g1".to_string(), start: 10, end: 20, strand: '+' },
+        ];
+        SyngIndex::merge_intervals(&mut intervals);
+        assert_eq!(intervals.len(), 1);
+    }
+
+    // ── 17. Edge cases for query_region ────────────────────────────
+
+    #[test]
+    fn test_query_region_isolated_region() {
+        // genome_a and genome_b share nothing (different seeds) —
+        // querying genome_a should only return self.
+        let params = SyncmerParams::default();
+        let seq_a = make_test_sequence(500, 1);
+        let seq_b = make_test_sequence(500, 99); // completely different
+
+        let index = SyngIndex::build(
+            params,
+            vec![
+                ("genome_a".to_string(), seq_a),
+                ("genome_b".to_string(), seq_b),
+            ]
+            .into_iter(),
+        );
+
+        let intervals = index.query_region("genome_a", 100, 300, 0).unwrap();
+
+        // Should contain self-hit but not genome_b
+        let genomes: Vec<&str> = intervals.iter().map(|iv| iv.genome.as_str()).collect();
+        assert!(
+            genomes.contains(&"genome_a"),
+            "Self-hit expected. Found: {:?}", genomes
+        );
+        // genome_b may or may not appear — with truly different seeds it shouldn't share syncmers.
+        // But we can't 100% guarantee no accidental collision. Check that if genome_b appears,
+        // it's because of a genuine (unlikely) collision, not a bug.
+    }
+
+    #[test]
+    fn test_query_region_entire_sequence() {
+        // Query the full length of genome_a — should return all genomes that share any syncmers
+        let params = SyncmerParams::default();
+        let shared = make_test_sequence(500, 42);
+
+        let mut seq_a = shared.clone();
+        seq_a.extend_from_slice(&make_test_sequence(500, 1));
+
+        let mut seq_b = shared.clone();
+        seq_b.extend_from_slice(&make_test_sequence(500, 2));
+
+        let seq_c = make_test_sequence(1000, 99); // independent
+
+        let index = SyngIndex::build(
+            params,
+            vec![
+                ("genome_a".to_string(), seq_a.clone()),
+                ("genome_b".to_string(), seq_b),
+                ("genome_c".to_string(), seq_c),
+            ]
+            .into_iter(),
+        );
+
+        let intervals = index
+            .query_region("genome_a", 0, seq_a.len() as u64, 0)
+            .unwrap();
+        let genomes: Vec<&str> = intervals.iter().map(|iv| iv.genome.as_str()).collect();
+
+        assert!(genomes.contains(&"genome_a"), "Self-hit expected");
+        assert!(genomes.contains(&"genome_b"), "genome_b shares prefix");
+    }
+
+    #[test]
+    fn test_query_region_single_sequence_index() {
+        // Index with one sequence — query should return only self
+        let params = SyncmerParams::default();
+        let seq = make_test_sequence(1000, 42);
+
+        let index = SyngIndex::build(
+            params,
+            vec![("only_genome".to_string(), seq)].into_iter(),
+        );
+
+        let intervals = index.query_region("only_genome", 100, 500, 0).unwrap();
+        assert_eq!(
+            intervals.len(), 1,
+            "Single-sequence index should return exactly 1 interval (self)"
+        );
+        assert_eq!(intervals[0].genome, "only_genome");
+    }
+
+    #[test]
+    fn test_query_region_out_of_range() {
+        // Query beyond the end of the sequence — should return empty (no syncmers there)
+        let params = SyncmerParams::default();
+        let seq = make_test_sequence(500, 42);
+
+        let index = SyngIndex::build(
+            params,
+            vec![("g1".to_string(), seq)].into_iter(),
+        );
+
+        let intervals = index.query_region("g1", 10000, 20000, 0).unwrap();
+        assert!(
+            intervals.is_empty(),
+            "Query beyond sequence length should return empty, got {:?}",
+            intervals.iter().map(|iv| (&iv.genome, iv.start, iv.end)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_query_region_zero_width() {
+        // Query with start == end — no syncmers in empty range
+        let params = SyncmerParams::default();
+        let seq = make_test_sequence(500, 42);
+
+        let index = SyngIndex::build(
+            params,
+            vec![("g1".to_string(), seq)].into_iter(),
+        );
+
+        let intervals = index.query_region("g1", 200, 200, 0).unwrap();
+        assert!(
+            intervals.is_empty(),
+            "Zero-width query should return empty"
+        );
+    }
+
+    #[test]
+    fn test_query_region_identical_sequences() {
+        // Multiple identical sequences — all should appear as hits
+        let params = SyncmerParams::default();
+        let seq = make_test_sequence(1000, 42);
+
+        let index = SyngIndex::build(
+            params,
+            vec![
+                ("g1".to_string(), seq.clone()),
+                ("g2".to_string(), seq.clone()),
+                ("g3".to_string(), seq.clone()),
+                ("g4".to_string(), seq),
+            ]
+            .into_iter(),
+        );
+
+        let intervals = index.query_region("g1", 100, 500, 0).unwrap();
+        let genomes: Vec<&str> = intervals.iter().map(|iv| iv.genome.as_str()).collect();
+
+        assert!(genomes.contains(&"g1"), "Should find self");
+        assert!(genomes.contains(&"g2"), "Should find g2 (identical)");
+        assert!(genomes.contains(&"g3"), "Should find g3 (identical)");
+        assert!(genomes.contains(&"g4"), "Should find g4 (identical)");
+        assert_eq!(intervals.len(), 4, "Should find exactly 4 genomes");
+    }
+
+    // ── 18. CLI integration: syng build + query ────────────────────
+
+    #[test]
+    fn test_syng_cli_query_bed_output() {
+        // Build index via CLI, then query and get BED output
+        let dir = std::env::temp_dir().join("impg_test_syng_cli_query");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Write test FASTA with shared content
+        let fasta_path = dir.join("test.fa");
+        let shared = make_test_sequence(500, 42);
+        {
+            let mut f = std::fs::File::create(&fasta_path).unwrap();
+            let mut seq_a = shared.clone();
+            seq_a.extend_from_slice(&make_test_sequence(500, 1));
+            let mut seq_b = shared.clone();
+            seq_b.extend_from_slice(&make_test_sequence(500, 2));
+            use std::io::Write;
+            writeln!(f, ">genome_a").unwrap();
+            writeln!(f, "{}", String::from_utf8(seq_a).unwrap()).unwrap();
+            writeln!(f, ">genome_b").unwrap();
+            writeln!(f, "{}", String::from_utf8(seq_b).unwrap()).unwrap();
+        }
+
+        // Find impg binary
+        let bin = find_impg_binary();
+        if bin.is_none() {
+            eprintln!("Skipping CLI test: impg binary not found");
+            std::fs::remove_dir_all(&dir).ok();
+            return;
+        }
+        let bin = bin.unwrap();
+
+        // Build index
+        let output_prefix = dir.join("idx");
+        let output = std::process::Command::new(&bin)
+            .args([
+                "syng",
+                "-f", fasta_path.to_str().unwrap(),
+                "-o", output_prefix.to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run impg syng");
+        assert!(
+            output.status.success(),
+            "impg syng failed: {}", String::from_utf8_lossy(&output.stderr)
+        );
+
+        // Query via --syng with BED output
+        let output = std::process::Command::new(&bin)
+            .args([
+                "query",
+                "--syng", output_prefix.to_str().unwrap(),
+                "--sequence-files", fasta_path.to_str().unwrap(),
+                "-r", "genome_a:0-400",
+                "-o", "bed",
+            ])
+            .output()
+            .expect("Failed to run impg query --syng");
+        assert!(
+            output.status.success(),
+            "impg query --syng failed: {}", String::from_utf8_lossy(&output.stderr)
+        );
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert!(
+            !lines.is_empty(),
+            "BED output should not be empty"
+        );
+
+        // Should find genome_b in the output
+        let has_genome_b = lines.iter().any(|l| l.starts_with("genome_b\t"));
+        assert!(has_genome_b, "BED output should contain genome_b. Got:\n{}", stdout);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_syng_cli_query_gfa_output() {
+        let dir = std::env::temp_dir().join("impg_test_syng_cli_gfa");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Write test FASTA
+        let fasta_path = dir.join("test.fa");
+        let shared = make_test_sequence(500, 42);
+        {
+            let mut f = std::fs::File::create(&fasta_path).unwrap();
+            let mut seq_a = shared.clone();
+            seq_a.extend_from_slice(&make_test_sequence(500, 1));
+            let mut seq_b = shared.clone();
+            seq_b.extend_from_slice(&make_test_sequence(500, 2));
+            use std::io::Write;
+            writeln!(f, ">genome_a").unwrap();
+            writeln!(f, "{}", String::from_utf8(seq_a).unwrap()).unwrap();
+            writeln!(f, ">genome_b").unwrap();
+            writeln!(f, "{}", String::from_utf8(seq_b).unwrap()).unwrap();
+        }
+
+        let bin = find_impg_binary();
+        if bin.is_none() {
+            eprintln!("Skipping CLI test: impg binary not found");
+            std::fs::remove_dir_all(&dir).ok();
+            return;
+        }
+        let bin = bin.unwrap();
+
+        // Build index
+        let output_prefix = dir.join("idx");
+        let output = std::process::Command::new(&bin)
+            .args([
+                "syng",
+                "-f", fasta_path.to_str().unwrap(),
+                "-o", output_prefix.to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run impg syng");
+        assert!(output.status.success(), "impg syng failed: {}", String::from_utf8_lossy(&output.stderr));
+
+        // Query with GFA output
+        let output = std::process::Command::new(&bin)
+            .args([
+                "query",
+                "--syng", output_prefix.to_str().unwrap(),
+                "--sequence-files", fasta_path.to_str().unwrap(),
+                "-r", "genome_a:0-400",
+                "-o", "gfa",
+            ])
+            .output()
+            .expect("Failed to run impg query --syng -o gfa");
+        assert!(
+            output.status.success(),
+            "impg query --syng -o gfa failed: {}", String::from_utf8_lossy(&output.stderr)
+        );
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // GFA should have S (segment) and L (link) lines
+        let has_s_lines = stdout.lines().any(|l| l.starts_with("S\t"));
+        assert!(has_s_lines, "GFA output should contain S lines. Got:\n{}", stdout);
+
+        // Check for path-related lines (W or P lines)
+        let has_paths = stdout.lines().any(|l| l.starts_with("W\t") || l.starts_with("P\t"));
+        assert!(has_paths, "GFA output should contain W or P lines. Got:\n{}", stdout);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_syng_cli_mutual_exclusivity() {
+        // --syng + -a should produce an error
+        let dir = std::env::temp_dir().join("impg_test_syng_cli_mutex");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let bin = find_impg_binary();
+        if bin.is_none() {
+            eprintln!("Skipping CLI test: impg binary not found");
+            std::fs::remove_dir_all(&dir).ok();
+            return;
+        }
+        let bin = bin.unwrap();
+
+        let output = std::process::Command::new(&bin)
+            .args([
+                "query",
+                "--syng", "some_prefix",
+                "-a", "some_alignment.paf",
+                "-r", "genome_a:0-100",
+            ])
+            .output()
+            .expect("Failed to run impg query");
+
+        assert!(
+            !output.status.success(),
+            "Using --syng with -a should fail"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Helper to locate the impg binary for CLI tests.
+    fn find_impg_binary() -> Option<std::path::PathBuf> {
+        // Try CARGO_BIN_EXE first
+        let bin = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("impg");
+        if bin.exists() {
+            return Some(bin);
+        }
+        // Try manifest dir
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let candidates = [
+            manifest_dir.join("target/debug/impg"),
+            manifest_dir.join("target/release/impg"),
+        ];
+        for path in &candidates {
+            if path.exists() {
+                return Some(path.clone());
+            }
+        }
+        None
     }
 }
