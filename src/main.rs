@@ -1131,6 +1131,43 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
     },
+
+    /// Build a GBWT syncmer index from sequences
+    Syng {
+        // --- Input (one required) ---
+        /// AGC archive input
+        #[clap(long, value_parser, conflicts_with = "fasta")]
+        agc: Option<String>,
+
+        /// FASTA input file
+        #[clap(short = 'f', long, value_parser, conflicts_with = "agc")]
+        fasta: Option<String>,
+
+        // --- Output ---
+        /// Output file prefix (produces .1khash, .1gbwt, .syng.names)
+        #[clap(short = 'o', long, value_parser)]
+        output: String,
+
+        // --- Syncmer parameters ---
+        /// Inner k-mer length for syncmer extraction
+        #[arg(help_heading = "Syncmer parameters")]
+        #[clap(long, value_parser, default_value_t = 8)]
+        syncmer_k: u32,
+
+        /// Window length for syncmer extraction (total syncmer length = w + k)
+        #[arg(help_heading = "Syncmer parameters")]
+        #[clap(long, value_parser, default_value_t = 55)]
+        syncmer_w: u32,
+
+        /// Hash function seed for syncmer extraction
+        #[arg(help_heading = "Syncmer parameters")]
+        #[clap(long, value_parser, default_value_t = 7)]
+        syncmer_seed: u32,
+
+        // --- General ---
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
 }
 
 fn main() {
@@ -2307,6 +2344,156 @@ fn run() -> io::Result<()> {
             };
 
             align::run_align(fasta_files, &output_dir, config)?;
+        }
+        Args::Syng {
+            agc,
+            fasta,
+            output,
+            syncmer_k,
+            syncmer_w,
+            syncmer_seed,
+            common,
+        } => {
+            initialize_threads_and_log(&common);
+
+            if agc.is_none() && fasta.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Either --agc or --fasta must be provided",
+                ));
+            }
+
+            let params = impg::syng::SyncmerParams {
+                k: syncmer_k,
+                w: syncmer_w,
+                seed: syncmer_seed,
+            };
+
+            info!(
+                "Building syng index with syncmer params: k={}, w={}, seed={} (syncmer length={})",
+                syncmer_k,
+                syncmer_w,
+                syncmer_seed,
+                syncmer_k + syncmer_w,
+            );
+
+            let index = if let Some(agc_path) = agc {
+                // Stream sequences from AGC
+                info!("Reading sequences from AGC: {}", agc_path);
+                let config = ragc_core::DecompressorConfig { verbosity: 0 };
+                let mut decompressor =
+                    ragc_core::Decompressor::open(&agc_path, config).map_err(|e| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Failed to open AGC file '{}': {}", agc_path, e),
+                        )
+                    })?;
+
+                let samples = decompressor.list_samples();
+                let mut sequences: Vec<(String, Vec<u8>)> = Vec::new();
+                for sample in &samples {
+                    let contigs = decompressor
+                        .list_contigs_names_only(sample)
+                        .unwrap_or_default();
+                    for contig in &contigs {
+                        let contig_data =
+                            decompressor.get_contig(sample, contig).map_err(|e| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!(
+                                        "Failed to decompress contig '{}@{}': {}",
+                                        contig, sample, e
+                                    ),
+                                )
+                            })?;
+
+                        let seq: Vec<u8> = contig_data
+                            .iter()
+                            .map(|&b| match b {
+                                0 => b'A',
+                                1 => b'C',
+                                2 => b'G',
+                                3 => b'T',
+                                _ => b'N',
+                            })
+                            .collect();
+
+                        let name = format!("{}@{}", contig, sample);
+                        info!("  Processing {} ({} bp)", name, seq.len());
+                        sequences.push((name, seq));
+                    }
+                }
+
+                info!("Building index from {} sequences...", sequences.len());
+                impg::syng::SyngIndex::build(params, sequences.into_iter())
+            } else if let Some(fasta_path) = fasta {
+                // Read sequences from FASTA
+                info!("Reading sequences from FASTA: {}", fasta_path);
+
+                let file = File::open(&fasta_path)?;
+                let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
+                    io::Error::other(format!(
+                        "Failed to open reader for '{}': {}",
+                        fasta_path, e
+                    ))
+                })?;
+                let reader = BufReader::new(reader);
+
+                let mut sequences: Vec<(String, Vec<u8>)> = Vec::new();
+                let mut current_name = String::new();
+                let mut current_seq = Vec::new();
+
+                for line in reader.lines() {
+                    let line = line?;
+                    if line.starts_with('>') {
+                        if !current_name.is_empty() && !current_seq.is_empty() {
+                            info!(
+                                "  Processing {} ({} bp)",
+                                current_name,
+                                current_seq.len()
+                            );
+                            sequences.push((
+                                std::mem::take(&mut current_name),
+                                std::mem::take(&mut current_seq),
+                            ));
+                        }
+                        current_name = line
+                            .strip_prefix('>')
+                            .unwrap_or("")
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("")
+                            .to_string();
+                        current_seq.clear();
+                    } else {
+                        current_seq.extend(line.trim().as_bytes());
+                    }
+                }
+                if !current_name.is_empty() && !current_seq.is_empty() {
+                    info!(
+                        "  Processing {} ({} bp)",
+                        current_name,
+                        current_seq.len()
+                    );
+                    sequences.push((current_name, current_seq));
+                }
+
+                info!("Building index from {} sequences...", sequences.len());
+                impg::syng::SyngIndex::build(params, sequences.into_iter())
+            } else {
+                unreachable!()
+            };
+
+            info!("Saving index to prefix: {}", output);
+            index.save(&output)?;
+            info!(
+                "Index saved: {}.1khash, {}.1gbwt, {}.syng.names",
+                output, output, output,
+            );
+            info!(
+                "Name map contains {} sequences",
+                index.name_map.path_to_name.len()
+            );
         }
     }
 

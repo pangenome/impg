@@ -285,9 +285,10 @@ extern "C" {
     pub fn timeUpdate(f: *mut c_void);
     pub fn timeTotal(f: *mut c_void);
 
-    // --- syng.h schema text (accessed as a global) ---
-    // We reference syngSchemaText via a helper since it's a static in the header.
-    // Instead, we'll define it in Rust.
+    // --- impg_syng_helpers.c (wrappers for static-inline functions) ---
+
+    pub fn impg_seqhashIteratorDestroy(si: *mut SeqhashIterator);
+    pub fn impg_seqhashDestroy(sh: *mut Seqhash);
 }
 
 /// The syng ONEcode schema text, replicated from syng.h.

@@ -191,6 +191,7 @@ fn compile_syng() {
         "array.c",
         "hash.c",
         "dict.c",
+        "impg_syng_helpers.c",
     ];
 
     let mut build = cc::Build::new();
