@@ -496,7 +496,7 @@ impl GfaMafFastaOpts {
 
         let needs_sequence_mandatory = matches!(
             output_format,
-            "gfa" | "maf" | "fasta" | "fasta-aln" | "fasta+paf"
+            "gfa" | "maf" | "fasta" | "fasta-aln" | "fasta+paf" | "gbwt"
         ) || tracepoint_needs_sequences;
         let needs_sequence_optional = output_format == "paf" && original_sequence_coordinates;
         // POA scoring is needed for gfa (all engines may use it), maf, and fasta-aln
@@ -964,12 +964,12 @@ enum Args {
         query: QueryOpts,
 
         // --- Output ---
-        /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', 'gfa', 'maf', 'fasta', or 'fasta+paf' ('gfa', 'maf', 'fasta', and 'fasta+paf' require --sequence-files or --sequence-list)
+        /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', 'gfa', 'maf', 'fasta', 'fasta+paf', or 'gbwt' (region-specific GBWT, requires --sequence-files)
         #[arg(help_heading = "Output options")]
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
 
-        /// Prefix for output file (automatically appends the extension based on format)
+        /// Prefix for output file (automatically appends the extension based on format; required for 'gbwt' output)
         #[clap(short = 'O', long, value_parser, default_value = None)]
         output_prefix: Option<String>,
 
@@ -1459,6 +1459,7 @@ fn run() -> io::Result<()> {
                     "fasta",
                     "fasta+paf",
                     "fasta-aln",
+                    "gbwt",
                 ],
             )?;
 
@@ -1475,13 +1476,13 @@ fn run() -> io::Result<()> {
                 // Validate that alignment files are NOT also provided
                 // (conflicts_with_all handles this at clap level, but be explicit)
 
-                // Only bed and gfa output are supported for syng queries
+                // Only bed, gfa, fasta, and gbwt output are supported for syng queries
                 let resolved_format = if output_format == "auto" { "bed" } else { output_format.as_str() };
-                if !matches!(resolved_format, "bed" | "gfa" | "fasta") {
+                if !matches!(resolved_format, "bed" | "gfa" | "fasta" | "gbwt") {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "--syng queries currently support 'bed', 'gfa', and 'fasta' output formats, not '{}'",
+                            "--syng queries currently support 'bed', 'gfa', 'fasta', and 'gbwt' output formats, not '{}'",
                             resolved_format
                         ),
                     ));
@@ -1516,8 +1517,8 @@ fn run() -> io::Result<()> {
                     unreachable!();
                 };
 
-                // Setup output resources for GFA/FASTA (need sequence files)
-                let needs_sequences = matches!(resolved_format, "gfa" | "fasta");
+                // Setup output resources for GFA/FASTA/GBWT (need sequence files)
+                let needs_sequences = matches!(resolved_format, "gfa" | "fasta" | "gbwt");
                 let sequence_index = if needs_sequences {
                     let si = gfa_maf_fasta.sequence.build_sequence_index()?;
                     if si.is_none() {
@@ -1530,6 +1531,14 @@ fn run() -> io::Result<()> {
                 } else {
                     None
                 };
+
+                // Validate that -O is provided for gbwt output
+                if resolved_format == "gbwt" && output_prefix.is_none() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Output prefix (-O) is required for 'gbwt' output format",
+                    ));
+                }
 
                 let scoring_params = if resolved_format == "gfa" {
                     Some(parse_poa_scoring_string(&engine_cli.poa_scoring)?)
@@ -1591,6 +1600,28 @@ fn run() -> io::Result<()> {
                                 out.write_all(&sequence)?;
                                 writeln!(out)?;
                             }
+                        }
+                        "gbwt" => {
+                            let seq_idx = sequence_index.as_ref().unwrap();
+                            let gbwt_prefix = output_prefix.as_ref().unwrap();
+
+                            // Fetch sequences for all intervals
+                            let fetched: Vec<(String, Vec<u8>)> = intervals
+                                .iter()
+                                .map(|iv| {
+                                    let sequence = seq_idx.fetch_sequence(&iv.genome, iv.start as i32, iv.end as i32)?;
+                                    let seq_name = format!("{}:{}-{}({})", iv.genome, iv.start, iv.end, iv.strand);
+                                    Ok((seq_name, sequence))
+                                })
+                                .collect::<io::Result<Vec<_>>>()?;
+
+                            let seq_refs: Vec<(String, &[u8])> = fetched
+                                .iter()
+                                .map(|(name, seq)| (name.clone(), seq.as_slice()))
+                                .collect();
+
+                            syng_index.build_region_gbwt(&seq_refs, gbwt_prefix)?;
+                            info!("Wrote region GBWT: {}.1gbwt + {}.1khash", gbwt_prefix, gbwt_prefix);
                         }
                         _ => unreachable!(),
                     }
@@ -1742,6 +1773,14 @@ fn run() -> io::Result<()> {
                 ));
             }
 
+            // Validate gbwt output requires -O prefix
+            if resolved_output_format == "gbwt" && output_prefix.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Output prefix (-O) is required for 'gbwt' output format",
+                ));
+            }
+
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
 
@@ -1882,6 +1921,48 @@ fn run() -> io::Result<()> {
                             query.merge_strands_for_output("fasta-aln"),
                             scoring_params.unwrap(),
                         )?;
+                    }
+                    "gbwt" => {
+                        let seq_idx = sequence_index.as_ref().unwrap();
+                        let gbwt_prefix = output_prefix.as_ref().ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "Output prefix (-O) is required for 'gbwt' output format",
+                            )
+                        })?;
+
+                        // Merge intervals before fetching
+                        merge_query_adjusted_intervals(
+                            &mut results,
+                            query.effective_merge_distance(),
+                            query.merge_strands_for_output("gbwt"),
+                        );
+
+                        // Fetch sequences for all result intervals
+                        let fetched: Vec<(String, Vec<u8>)> = results
+                            .iter()
+                            .map(|(qi, _, _)| {
+                                let qname = impg.seq_index().get_name(qi.metadata).unwrap();
+                                let (start, end, strand) = if qi.first <= qi.last {
+                                    (qi.first, qi.last, '+')
+                                } else {
+                                    (qi.last, qi.first, '-')
+                                };
+                                let sequence = seq_idx.fetch_sequence(qname, start, end)?;
+                                let seq_name = format!("{}:{}-{}({})", qname, start, end, strand);
+                                Ok((seq_name, sequence))
+                            })
+                            .collect::<io::Result<Vec<_>>>()?;
+
+                        let seq_refs: Vec<(String, &[u8])> = fetched
+                            .iter()
+                            .map(|(name, seq)| (name.clone(), seq.as_slice()))
+                            .collect();
+
+                        // Build region GBWT using default syncmer params
+                        let region_index = impg::syng::SyngIndex::new(impg::syng::SyncmerParams::default());
+                        region_index.build_region_gbwt(&seq_refs, gbwt_prefix)?;
+                        info!("Wrote region GBWT: {}.1gbwt + {}.1khash", gbwt_prefix, gbwt_prefix);
                     }
                     _ => {
                         return Err(io::Error::new(

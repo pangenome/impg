@@ -717,6 +717,210 @@ impl SyngIndex {
         Ok(all_intervals)
     }
 
+    /// Build a region-specific GBWT from fetched sequences.
+    ///
+    /// Creates a fresh KmerHash and SyngBWT from the given sequences,
+    /// extracting syncmers and building GBWT paths. Writes standard
+    /// syng-compatible `.1khash` and `.1gbwt` files at the given prefix.
+    ///
+    /// Uses the same syncmer parameters as this index (or default if
+    /// called on a freshly constructed index).
+    pub fn build_region_gbwt(
+        &self,
+        sequences: &[(String, &[u8])],
+        prefix: &str,
+    ) -> io::Result<()> {
+        let syncmer_len = (self.params.w + self.params.k) as i32;
+
+        // Create fresh structures for this region
+        let region_gbwt = unsafe { syng_ffi::syngBWTcreate(syncmer_len, 0) };
+        let region_kh = unsafe { syng_ffi::kmerHashCreate(1024, syncmer_len) };
+        let region_sh = unsafe {
+            syng_ffi::seqhashCreate(
+                self.params.k as i32,
+                self.params.w as i32,
+                self.params.seed as i32,
+            )
+        };
+
+        let syncmer_len_usize = syncmer_len as usize;
+
+        for (_name, seq) in sequences {
+            if seq.len() < syncmer_len_usize {
+                continue;
+            }
+
+            // Normalize to lowercase ASCII DNA
+            let mut seq_buf: Vec<u8> = seq
+                .iter()
+                .map(|&b| match b {
+                    b'a' | b'A' => b'a',
+                    b'c' | b'C' => b'c',
+                    b'g' | b'G' => b'g',
+                    b't' | b'T' => b't',
+                    0 => b'a',
+                    1 => b'c',
+                    2 => b'g',
+                    3 => b't',
+                    _ => b'a',
+                })
+                .collect();
+            seq_buf.push(0); // null terminator
+
+            // Extract syncmers
+            let mut syncmers: Vec<(i64, i32)> = Vec::new();
+            unsafe {
+                let sit = syng_ffi::syncmerIterator(
+                    region_sh,
+                    seq_buf.as_mut_ptr() as *mut i8,
+                    seq.len() as i32,
+                );
+
+                let mut pos: i32 = 0;
+                while syng_ffi::syncmerNext(
+                    sit,
+                    std::ptr::null_mut(),
+                    &mut pos,
+                    std::ptr::null_mut(),
+                ) {
+                    let mut kmer_index: i64 = 0;
+                    syng_ffi::kmerHashAdd(
+                        region_kh,
+                        seq_buf.as_mut_ptr().add(pos as usize) as *mut i8,
+                        &mut kmer_index,
+                    );
+                    syncmers.push((kmer_index, pos));
+                }
+
+                syng_ffi::impg_seqhashIteratorDestroy(sit);
+            }
+
+            if syncmers.is_empty() {
+                continue;
+            }
+
+            // Build forward GBWT path
+            unsafe {
+                let first_sync = syncmers[0].0 as i32;
+                let sbp = syng_ffi::syngBWTpathStartNew(region_gbwt, first_sync);
+                for i in 1..syncmers.len() {
+                    let next_sync = syncmers[i].0 as i32;
+                    let offset = (syncmers[i].1 - syncmers[i - 1].1) as u32;
+                    syng_ffi::syngBWTpathAdd(sbp, next_sync, offset);
+                }
+                syng_ffi::syngBWTpathFinish(sbp);
+            }
+
+            // Build reverse complement GBWT path
+            unsafe {
+                let n = syncmers.len();
+                let first_sync_rc = -(syncmers[n - 1].0 as i32);
+                let sbp = syng_ffi::syngBWTpathStartNew(region_gbwt, first_sync_rc);
+                for i in (0..n - 1).rev() {
+                    let next_sync_rc = -(syncmers[i].0 as i32);
+                    let offset = (syncmers[i + 1].1 - syncmers[i].1) as u32;
+                    syng_ffi::syngBWTpathAdd(sbp, next_sync_rc, offset);
+                }
+                syng_ffi::syngBWTpathFinish(sbp);
+            }
+        }
+
+        // Write .1gbwt
+        let schema_text = syng_ffi::syng_schema_text();
+        let gbwt_path = format!("{}.1gbwt", prefix);
+        let gbwt_cpath = CString::new(gbwt_path.as_str())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let gbwt_type = CString::new("gbwt").unwrap();
+        unsafe {
+            let schema = syng_ffi::oneSchemaCreateFromText(schema_text.as_ptr());
+            if schema.is_null() {
+                syng_ffi::syngBWTdestroy(region_gbwt);
+                syng_ffi::kmerHashDestroy(region_kh);
+                syng_ffi::impg_seqhashDestroy(region_sh);
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "Failed to create ONEcode schema for region gbwt",
+                ));
+            }
+            let of = syng_ffi::oneFileOpenWriteNew(
+                gbwt_cpath.as_ptr(),
+                schema,
+                gbwt_type.as_ptr(),
+                true,
+                1,
+            );
+            if of.is_null() {
+                syng_ffi::oneSchemaDestroy(schema);
+                syng_ffi::syngBWTdestroy(region_gbwt);
+                syng_ffi::kmerHashDestroy(region_kh);
+                syng_ffi::impg_seqhashDestroy(region_sh);
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Failed to open {} for writing", gbwt_path),
+                ));
+            }
+            syng_ffi::syngBWTwrite(of, region_gbwt);
+            syng_ffi::oneFileClose(of);
+            syng_ffi::oneSchemaDestroy(schema);
+        }
+
+        // Write .1khash
+        let khash_path = format!("{}.1khash", prefix);
+        let khash_cpath = CString::new(khash_path.as_str())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let khash_type = CString::new("khash").unwrap();
+        unsafe {
+            let schema = syng_ffi::oneSchemaCreateFromText(schema_text.as_ptr());
+            if schema.is_null() {
+                syng_ffi::syngBWTdestroy(region_gbwt);
+                syng_ffi::kmerHashDestroy(region_kh);
+                syng_ffi::impg_seqhashDestroy(region_sh);
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "Failed to create ONEcode schema for region khash",
+                ));
+            }
+            let of = syng_ffi::oneFileOpenWriteNew(
+                khash_cpath.as_ptr(),
+                schema,
+                khash_type.as_ptr(),
+                true,
+                1,
+            );
+            if of.is_null() {
+                syng_ffi::oneSchemaDestroy(schema);
+                syng_ffi::syngBWTdestroy(region_gbwt);
+                syng_ffi::kmerHashDestroy(region_kh);
+                syng_ffi::impg_seqhashDestroy(region_sh);
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Failed to open {} for writing", khash_path),
+                ));
+            }
+            let ok = syng_ffi::kmerHashWriteOneFile(region_kh, of);
+            syng_ffi::oneFileClose(of);
+            syng_ffi::oneSchemaDestroy(schema);
+            if !ok {
+                syng_ffi::syngBWTdestroy(region_gbwt);
+                syng_ffi::kmerHashDestroy(region_kh);
+                syng_ffi::impg_seqhashDestroy(region_sh);
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "kmerHashWriteOneFile failed for region khash",
+                ));
+            }
+        }
+
+        // Clean up C allocations
+        unsafe {
+            syng_ffi::syngBWTdestroy(region_gbwt);
+            syng_ffi::kmerHashDestroy(region_kh);
+            syng_ffi::impg_seqhashDestroy(region_sh);
+        }
+
+        Ok(())
+    }
+
     /// Merge overlapping or adjacent intervals that share the same genome and strand.
     fn merge_intervals(intervals: &mut Vec<HomologousInterval>) {
         if intervals.len() <= 1 {
@@ -2302,6 +2506,124 @@ mod tests {
             !output.status.success(),
             "Using --syng with -a should fail"
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── build_region_gbwt tests ───────────────────────────────────
+
+    #[test]
+    fn test_build_region_gbwt_produces_files() {
+        // Build an index, then build a region GBWT from some sequences
+        let seqs: Vec<(String, Vec<u8>)> = (0..3)
+            .map(|i| (format!("seq_{}", i), make_test_sequence(2000, i as u8 + 30)))
+            .collect();
+        let params = SyncmerParams::default();
+        let index = SyngIndex::build(params, seqs.into_iter());
+
+        let dir = std::env::temp_dir().join("impg_test_region_gbwt");
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("region");
+        let prefix_str = prefix.to_str().unwrap();
+
+        // Build region GBWT from a subset of sequences
+        let region_seqs: Vec<(String, Vec<u8>)> = (0..2)
+            .map(|i| (format!("region_seq_{}", i), make_test_sequence(500, i as u8 + 50)))
+            .collect();
+        let refs: Vec<(String, &[u8])> = region_seqs
+            .iter()
+            .map(|(n, s)| (n.clone(), s.as_slice()))
+            .collect();
+
+        index.build_region_gbwt(&refs, prefix_str).unwrap();
+
+        assert!(
+            std::path::Path::new(&format!("{}.1gbwt", prefix_str)).exists(),
+            "Region .1gbwt file should exist"
+        );
+        assert!(
+            std::path::Path::new(&format!("{}.1khash", prefix_str)).exists(),
+            "Region .1khash file should exist"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_build_region_gbwt_empty_sequences() {
+        let index = SyngIndex::new(SyncmerParams::default());
+
+        let dir = std::env::temp_dir().join("impg_test_region_gbwt_empty");
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("empty_region");
+        let prefix_str = prefix.to_str().unwrap();
+
+        // Empty sequence list should still produce valid files
+        let refs: Vec<(String, &[u8])> = Vec::new();
+        index.build_region_gbwt(&refs, prefix_str).unwrap();
+
+        assert!(std::path::Path::new(&format!("{}.1gbwt", prefix_str)).exists());
+        assert!(std::path::Path::new(&format!("{}.1khash", prefix_str)).exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_build_region_gbwt_short_sequences_skipped() {
+        let index = SyngIndex::new(SyncmerParams::default());
+
+        let dir = std::env::temp_dir().join("impg_test_region_gbwt_short");
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("short_region");
+        let prefix_str = prefix.to_str().unwrap();
+
+        // All sequences shorter than syncmer length (63) should be skipped
+        let short_seqs = vec![
+            ("short1".to_string(), b"ACGT" as &[u8]),
+            ("short2".to_string(), b"ACGTACGTACGT" as &[u8]),
+        ];
+        index.build_region_gbwt(&short_seqs, prefix_str).unwrap();
+
+        // Files should still be produced (empty but valid)
+        assert!(std::path::Path::new(&format!("{}.1gbwt", prefix_str)).exists());
+        assert!(std::path::Path::new(&format!("{}.1khash", prefix_str)).exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_build_region_gbwt_loadable() {
+        // Build a region GBWT and verify it can be loaded back
+        let params = SyncmerParams::default();
+        let index = SyngIndex::new(params);
+
+        let dir = std::env::temp_dir().join("impg_test_region_gbwt_load");
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("loadable_region");
+        let prefix_str = prefix.to_str().unwrap();
+
+        let region_seqs: Vec<(String, Vec<u8>)> = (0..3)
+            .map(|i| (format!("reg_{}", i), make_test_sequence(1000, i as u8 + 70)))
+            .collect();
+        let refs: Vec<(String, &[u8])> = region_seqs
+            .iter()
+            .map(|(n, s)| (n.clone(), s.as_slice()))
+            .collect();
+
+        index.build_region_gbwt(&refs, prefix_str).unwrap();
+
+        // Write a names file so we can load it
+        let names_path = format!("{}.syng.names", prefix_str);
+        let mut nm = SyngNameMap::new();
+        for (name, seq) in &region_seqs {
+            nm.add(name.clone(), seq.len() as u64);
+        }
+        nm.save(&names_path).unwrap();
+
+        // Should be loadable
+        let loaded = SyngIndex::load(prefix_str, params).unwrap();
+        assert!(!loaded.gbwt.is_null());
+        assert!(!loaded.kmer_hash.is_null());
 
         std::fs::remove_dir_all(&dir).ok();
     }
