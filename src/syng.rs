@@ -42,6 +42,17 @@ impl SyncmerParams {
     }
 }
 
+/// Information needed to walk a genome's forward path through the GBWT.
+#[derive(Debug, Clone)]
+pub struct GbwtPathStart {
+    /// First syncmer node ID of the forward path.
+    pub start_node: i32,
+    /// Index among all paths starting at start_node.
+    pub start_count: u32,
+    /// Number of syncmer nodes in the forward path.
+    pub num_syncmers: u32,
+}
+
 /// Maps between GBWT path numbers and sequence names/lengths.
 pub struct SyngNameMap {
     /// GBWT path number → sequence name.
@@ -50,6 +61,9 @@ pub struct SyngNameMap {
     pub path_to_length: Vec<u64>,
     /// Sequence name → GBWT path number.
     pub name_to_path: FxHashMap<String, u32>,
+    /// Per-path GBWT forward-path start info (for walking paths during query).
+    /// None if loaded from an old-format file that lacks this info.
+    pub path_starts: Vec<Option<GbwtPathStart>>,
 }
 
 impl SyngNameMap {
@@ -59,6 +73,7 @@ impl SyngNameMap {
             path_to_name: Vec::new(),
             path_to_length: Vec::new(),
             name_to_path: FxHashMap::default(),
+            path_starts: Vec::new(),
         }
     }
 
@@ -68,27 +83,41 @@ impl SyngNameMap {
         self.name_to_path.insert(name.clone(), path_num);
         self.path_to_name.push(name);
         self.path_to_length.push(length);
+        self.path_starts.push(None);
         path_num
     }
 
+    /// Set the GBWT forward-path start info for a given path.
+    pub fn set_path_start(&mut self, path_num: u32, info: GbwtPathStart) {
+        self.path_starts[path_num as usize] = Some(info);
+    }
+
     /// Save to a `.syng.names` file.
-    /// Format: one line per path, tab-separated: `path_number\tsequence_name\tlength`
+    /// Format: one line per path, tab-separated:
+    /// `path_number\tname\tlength\tstart_node\tstart_count\tnum_syncmers`
+    /// (last three columns are 0 if path start info is unavailable)
     pub fn save(&self, path: &str) -> io::Result<()> {
         let file = std::fs::File::create(path)?;
         let mut writer = BufWriter::new(file);
-        for (i, (name, &length)) in self
+        for (i, ((name, &length), start)) in self
             .path_to_name
             .iter()
             .zip(self.path_to_length.iter())
+            .zip(self.path_starts.iter())
             .enumerate()
         {
-            writeln!(writer, "{}\t{}\t{}", i, name, length)?;
+            let (sn, sc, ns) = match start {
+                Some(info) => (info.start_node, info.start_count, info.num_syncmers),
+                None => (0, 0, 0),
+            };
+            writeln!(writer, "{}\t{}\t{}\t{}\t{}\t{}", i, name, length, sn, sc, ns)?;
         }
         writer.flush()?;
         Ok(())
     }
 
     /// Load from a `.syng.names` file.
+    /// Supports both old 3-column format and new 6-column format.
     pub fn load(path: &str) -> io::Result<Self> {
         let file = std::fs::File::open(path)?;
         let reader = BufReader::new(file);
@@ -99,11 +128,11 @@ impl SyngNameMap {
             if line.is_empty() {
                 continue;
             }
-            let parts: Vec<&str> = line.splitn(3, '\t').collect();
-            if parts.len() != 3 {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() < 3 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("Invalid name map line: {}", line),
+                    format!("Invalid name map line (need >= 3 columns): {}", line),
                 ));
             }
             let _path_num: u32 = parts[0].parse().map_err(|e| {
@@ -119,7 +148,24 @@ impl SyngNameMap {
                     format!("Invalid length '{}': {}", parts[2], e),
                 )
             })?;
-            name_map.add(name, length);
+            let path_num = name_map.add(name, length);
+
+            // Parse optional path start info (columns 3-5)
+            if parts.len() >= 6 {
+                let start_node: i32 = parts[3].parse().unwrap_or(0);
+                let start_count: u32 = parts[4].parse().unwrap_or(0);
+                let num_syncmers: u32 = parts[5].parse().unwrap_or(0);
+                if num_syncmers > 0 {
+                    name_map.set_path_start(
+                        path_num,
+                        GbwtPathStart {
+                            start_node,
+                            start_count,
+                            num_syncmers,
+                        },
+                    );
+                }
+            }
         }
         Ok(name_map)
     }
@@ -254,10 +300,15 @@ impl SyngIndex {
                 continue;
             }
 
-            // Build forward GBWT path
+            // Build forward GBWT path and capture start info
+            let fwd_start_node;
+            let fwd_start_count;
             unsafe {
                 let first_sync = syncmers[0].0 as i32;
                 let sbp = syng_ffi::syngBWTpathStartNew(index.gbwt, first_sync);
+                // Capture start info before any path additions modify it
+                fwd_start_node = first_sync;
+                fwd_start_count = (*sbp).j_last;
                 for i in 1..syncmers.len() {
                     let next_sync = syncmers[i].0 as i32;
                     let offset = (syncmers[i].1 - syncmers[i - 1].1) as u32;
@@ -282,8 +333,16 @@ impl SyngIndex {
                 syng_ffi::syngBWTpathFinish(sbp);
             }
 
-            // Record in name map
-            index.name_map.add(name, seq_len as u64);
+            // Record in name map with path start info
+            let path_num = index.name_map.add(name, seq_len as u64);
+            index.name_map.set_path_start(
+                path_num,
+                GbwtPathStart {
+                    start_node: fwd_start_node,
+                    start_count: fwd_start_count,
+                    num_syncmers: syncmers.len() as u32,
+                },
+            );
         }
 
         index
@@ -516,6 +575,173 @@ impl SyngIndex {
     /// Returns the raw Seqhash pointer (for advanced C interop).
     pub fn seqhash_ptr(&self) -> *mut syng_ffi::Seqhash {
         self.seqhash
+    }
+
+    /// Build a SequenceIndex from the name map (for interop with graph engines).
+    pub fn build_seq_index(&self) -> crate::seqidx::SequenceIndex {
+        let mut seq_index = crate::seqidx::SequenceIndex::new();
+        for (name, &length) in self
+            .name_map
+            .path_to_name
+            .iter()
+            .zip(self.name_map.path_to_length.iter())
+        {
+            seq_index.get_or_insert_id(name, Some(length as usize));
+        }
+        seq_index
+    }
+
+    /// Walk a genome's forward GBWT path, returning (node_id, accumulated_position)
+    /// for each syncmer in the path.
+    fn walk_path(&self, start: &GbwtPathStart) -> Vec<(i32, u64)> {
+        let mut nodes = Vec::with_capacity(start.num_syncmers as usize);
+        unsafe {
+            let sbp =
+                syng_ffi::syngBWTpathStartOld(self.gbwt, start.start_node, start.start_count);
+            // First node position is 0 (relative — actual genomic position comes from syncmer pos)
+            // We track accumulated offset from path start
+            let mut acc_pos: u64 = 0;
+            nodes.push((start.start_node, acc_pos));
+
+            let mut next_node: i32 = 0;
+            let mut offset: u32 = 0;
+            while syng_ffi::syngBWTpathNext(sbp, &mut next_node, &mut offset) {
+                acc_pos += offset as u64;
+                nodes.push((next_node, acc_pos));
+            }
+            syng_ffi::syngBWTpathDestroy(sbp);
+        }
+        nodes
+    }
+
+    /// Query: find all homologous sequences for a genomic region.
+    ///
+    /// Returns intervals on other genomes that share syncmer nodes with the
+    /// query region `[start, end)` on `genome`. Results are padded outward
+    /// by `padding` bp.
+    pub fn query_region(
+        &self,
+        genome: &str,
+        start: u64,
+        end: u64,
+        padding: u64,
+    ) -> Result<Vec<HomologousInterval>, io::Error> {
+        // Suppress C debug output from syngBWTnext
+        unsafe { syng_ffi::impg_syng_suppress_debug() };
+
+        // 1. Look up the query genome's path
+        let query_path_num = self
+            .name_map
+            .name_to_path
+            .get(genome)
+            .copied()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Genome '{}' not found in syng index", genome),
+                )
+            })?;
+
+        let query_start = self.name_map.path_starts[query_path_num as usize]
+            .as_ref()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "No GBWT path start info for genome '{}' — index may need rebuilding",
+                        genome
+                    ),
+                )
+            })?;
+
+        // 2. Walk the query genome's path, find nodes in [start, end]
+        let query_nodes = self.walk_path(query_start);
+        let mut query_node_set = rustc_hash::FxHashSet::default();
+        for &(node_id, pos) in &query_nodes {
+            if pos >= start && pos < end {
+                // Use absolute node ID (positive) so both strands match
+                query_node_set.insert(node_id.unsigned_abs());
+            }
+        }
+
+        if query_node_set.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // 3. Walk all genomes' forward paths, find overlapping nodes
+        let num_genomes = self.name_map.path_to_name.len();
+        let mut all_intervals: Vec<HomologousInterval> = Vec::new();
+
+        for genome_idx in 0..num_genomes {
+            let path_start = match &self.name_map.path_starts[genome_idx] {
+                Some(ps) => ps,
+                None => continue,
+            };
+
+            let genome_name = &self.name_map.path_to_name[genome_idx];
+            let genome_len = self.name_map.path_to_length[genome_idx];
+            let nodes = self.walk_path(path_start);
+
+            // Find min/max positions of matching nodes on this genome
+            let mut min_pos: Option<u64> = None;
+            let mut max_pos: Option<u64> = None;
+
+            for &(node_id, pos) in &nodes {
+                if query_node_set.contains(&node_id.unsigned_abs()) {
+                    min_pos = Some(min_pos.map_or(pos, |m: u64| m.min(pos)));
+                    max_pos = Some(max_pos.map_or(pos, |m: u64| m.max(pos)));
+                }
+            }
+
+            if let (Some(min_p), Some(max_p)) = (min_pos, max_pos) {
+                // Add syncmer length to max_pos to get the end of the last syncmer
+                let syncmer_len = (self.params.w + self.params.k) as u64;
+                let interval_end = max_p + syncmer_len;
+
+                // Apply padding
+                let padded_start = min_p.saturating_sub(padding);
+                let padded_end = (interval_end + padding).min(genome_len);
+
+                all_intervals.push(HomologousInterval {
+                    genome: genome_name.clone(),
+                    start: padded_start,
+                    end: padded_end,
+                    strand: '+',
+                });
+            }
+        }
+
+        // 4. Merge overlapping intervals per genome
+        Self::merge_intervals(&mut all_intervals);
+
+        Ok(all_intervals)
+    }
+
+    /// Merge overlapping or adjacent intervals that share the same genome and strand.
+    fn merge_intervals(intervals: &mut Vec<HomologousInterval>) {
+        if intervals.len() <= 1 {
+            return;
+        }
+
+        // Sort by (genome, strand, start)
+        intervals.sort_by(|a, b| {
+            a.genome
+                .cmp(&b.genome)
+                .then(a.strand.cmp(&b.strand))
+                .then(a.start.cmp(&b.start))
+        });
+
+        let mut merged: Vec<HomologousInterval> = Vec::new();
+        for iv in intervals.drain(..) {
+            if let Some(last) = merged.last_mut() {
+                if last.genome == iv.genome && last.strand == iv.strand && iv.start <= last.end {
+                    last.end = last.end.max(iv.end);
+                    continue;
+                }
+            }
+            merged.push(iv);
+        }
+        *intervals = merged;
     }
 }
 
@@ -1285,5 +1511,177 @@ mod tests {
     fn test_syng_load_missing_files() {
         let result = SyngIndex::load("/tmp/nonexistent_prefix_xyz123", SyncmerParams::default());
         assert!(result.is_err(), "Loading from nonexistent files should fail");
+    }
+
+    // ── 13. query_region tests ─────────────────────────────────────
+
+    /// Build an index from sequences that share some content, then query a region.
+    #[test]
+    fn test_query_region_basic() {
+        // Create sequences that share a common prefix/suffix (to get shared syncmer nodes)
+        // Use the same random seed for a shared backbone of ~500bp,
+        // then diverge in the middle.
+        let shared_len = 500;
+        let total_len = 1000;
+        let params = SyncmerParams { k: 8, w: 55, seed: 7 };
+        let syncmer_len = (params.w + params.k) as usize;
+
+        // Build a shared backbone
+        let backbone = make_test_sequence(shared_len, 42);
+
+        // genome_a: backbone + unique_a
+        let unique_a = make_test_sequence(total_len - shared_len, 1);
+        let mut seq_a = backbone.clone();
+        seq_a.extend_from_slice(&unique_a);
+
+        // genome_b: backbone + unique_b (different from unique_a)
+        let unique_b = make_test_sequence(total_len - shared_len, 2);
+        let mut seq_b = backbone.clone();
+        seq_b.extend_from_slice(&unique_b);
+
+        // genome_c: completely different sequence (should NOT share nodes)
+        let seq_c = make_test_sequence(total_len, 99);
+
+        let sequences = vec![
+            ("genome_a".to_string(), seq_a),
+            ("genome_b".to_string(), seq_b),
+            ("genome_c".to_string(), seq_c),
+        ];
+
+        let index = SyngIndex::build(params, sequences.into_iter());
+
+        // Verify path starts were recorded
+        for i in 0..3 {
+            assert!(
+                index.name_map.path_starts[i].is_some(),
+                "path_starts[{}] should be Some",
+                i
+            );
+        }
+
+        // Query the shared region on genome_a
+        let intervals = index.query_region("genome_a", 0, shared_len as u64, 0).unwrap();
+
+        // genome_a should appear (self-hit)
+        let has_self = intervals.iter().any(|iv| iv.genome == "genome_a");
+        assert!(has_self, "query_region should return self-hit for genome_a");
+
+        // genome_b should appear (shares the backbone)
+        let has_b = intervals.iter().any(|iv| iv.genome == "genome_b");
+        assert!(
+            has_b,
+            "query_region should find genome_b (shared backbone). Only found: {:?}",
+            intervals.iter().map(|iv| &iv.genome).collect::<Vec<_>>()
+        );
+
+        // All intervals should have valid coordinates
+        for iv in &intervals {
+            assert!(iv.end > iv.start, "interval end should be > start: {:?}", iv);
+            assert!(
+                iv.end <= index.name_map.path_to_length[
+                    *index.name_map.name_to_path.get(&iv.genome).unwrap() as usize
+                ],
+                "interval end should be <= genome length"
+            );
+        }
+    }
+
+    #[test]
+    fn test_query_region_unknown_genome() {
+        let params = SyncmerParams::default();
+        let seq = make_test_sequence(500, 42);
+        let index = SyngIndex::build(params, vec![("seq1".to_string(), seq)].into_iter());
+
+        let result = index.query_region("nonexistent", 0, 100, 0);
+        assert!(result.is_err(), "Should error for unknown genome");
+    }
+
+    #[test]
+    fn test_query_region_padding() {
+        let params = SyncmerParams { k: 8, w: 55, seed: 7 };
+        let seq_a = make_test_sequence(1000, 42);
+        let seq_b = seq_a.clone(); // identical => fully shared
+
+        let index = SyngIndex::build(
+            params,
+            vec![
+                ("genome_a".to_string(), seq_a),
+                ("genome_b".to_string(), seq_b),
+            ]
+            .into_iter(),
+        );
+
+        // Query without padding
+        let no_pad = index.query_region("genome_a", 200, 400, 0).unwrap();
+        // Query with 120bp padding
+        let with_pad = index.query_region("genome_a", 200, 400, 120).unwrap();
+
+        // With padding, intervals should be at least as wide as without
+        for (np, wp) in no_pad.iter().zip(with_pad.iter()) {
+            if np.genome == wp.genome {
+                assert!(
+                    wp.start <= np.start && wp.end >= np.end,
+                    "Padded interval should be >= unpadded: {:?} vs {:?}", wp, np
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_query_region_no_path_start_info() {
+        // Build an index, then manually clear path_starts to simulate old format
+        let params = SyncmerParams::default();
+        let seq = make_test_sequence(500, 42);
+        let mut index = SyngIndex::build(params, vec![("seq1".to_string(), seq)].into_iter());
+        index.name_map.path_starts[0] = None;
+
+        let result = index.query_region("seq1", 0, 100, 0);
+        assert!(result.is_err(), "Should error when path_starts is missing");
+    }
+
+    #[test]
+    fn test_query_region_save_load_roundtrip() {
+        // Build, save, load, then query — results should match
+        let params = SyncmerParams { k: 8, w: 55, seed: 7 };
+        let seq_a = make_test_sequence(800, 10);
+        let seq_b = seq_a.clone(); // identical
+
+        let index = SyngIndex::build(
+            params,
+            vec![
+                ("genome_a".to_string(), seq_a),
+                ("genome_b".to_string(), seq_b),
+            ]
+            .into_iter(),
+        );
+
+        // Save and reload
+        let dir = std::env::temp_dir().join("impg_test_query_rt");
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("test");
+        let prefix_str = prefix.to_str().unwrap();
+        index.save(prefix_str).unwrap();
+        let loaded = SyngIndex::load(prefix_str, params).unwrap();
+
+        // Check that path_starts survived the roundtrip
+        for i in 0..2 {
+            let orig = index.name_map.path_starts[i].as_ref().unwrap();
+            let load = loaded.name_map.path_starts[i].as_ref().unwrap();
+            assert_eq!(orig.start_node, load.start_node);
+            assert_eq!(orig.start_count, load.start_count);
+            assert_eq!(orig.num_syncmers, load.num_syncmers);
+        }
+
+        // Query results should match
+        let orig_intervals = index.query_region("genome_a", 100, 500, 120).unwrap();
+        let loaded_intervals = loaded.query_region("genome_a", 100, 500, 120).unwrap();
+        assert_eq!(orig_intervals.len(), loaded_intervals.len());
+        for (o, l) in orig_intervals.iter().zip(loaded_intervals.iter()) {
+            assert_eq!(o.genome, l.genome);
+            assert_eq!(o.start, l.start);
+            assert_eq!(o.end, l.end);
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

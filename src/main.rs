@@ -949,6 +949,16 @@ enum Args {
         #[clap(flatten)]
         alignment: AlignmentOpts,
 
+        /// Syng index prefix (mutually exclusive with -a/--alignment-files)
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, value_parser, conflicts_with_all = ["alignment_files", "alignment_list"])]
+        syng: Option<String>,
+
+        /// Boundary padding in bp for syng queries (default: 120 = 2× syncmer length)
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, value_parser, default_value_t = 120)]
+        syng_padding: u64,
+
         // --- Query-specific ---
         #[clap(flatten)]
         query: QueryOpts,
@@ -1413,6 +1423,8 @@ fn run() -> io::Result<()> {
         Args::Query {
             common,
             alignment,
+            syng,
+            syng_padding,
             query,
             output_format,
             output_prefix,
@@ -1457,6 +1469,135 @@ fn run() -> io::Result<()> {
                     "Either --target-range or --target-bed must be provided",
                 ));
             }
+
+            // ─── Syng query path ──────────────────────────────────────────
+            if let Some(ref syng_prefix) = syng {
+                // Validate that alignment files are NOT also provided
+                // (conflicts_with_all handles this at clap level, but be explicit)
+
+                // Only bed and gfa output are supported for syng queries
+                let resolved_format = if output_format == "auto" { "bed" } else { output_format.as_str() };
+                if !matches!(resolved_format, "bed" | "gfa" | "fasta") {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "--syng queries currently support 'bed', 'gfa', and 'fasta' output formats, not '{}'",
+                            resolved_format
+                        ),
+                    ));
+                }
+
+                info!("Loading syng index from prefix: {}", syng_prefix);
+                let syng_index = impg::syng::SyngIndex::load(syng_prefix, impg::syng::SyncmerParams::default())?;
+                let seq_index = syng_index.build_seq_index();
+
+                // Parse target ranges
+                let target_ranges: Vec<(String, (i32, i32), String)> = if let Some(ref target_range_str) = query.target_range {
+                    if target_range_str.contains(':') {
+                        vec![partition::parse_target_range(target_range_str)?]
+                    } else {
+                        // Whole sequence
+                        let seq_name = target_range_str.as_str();
+                        let seq_len = seq_index
+                            .get_id(seq_name)
+                            .and_then(|id| seq_index.get_len_from_id(id))
+                            .ok_or_else(|| {
+                                io::Error::new(
+                                    io::ErrorKind::NotFound,
+                                    format!("Sequence '{}' not found in syng index", seq_name),
+                                )
+                            })? as i32;
+                        let name = format!("{}:{}-{}", seq_name, 0, seq_len);
+                        vec![(seq_name.to_string(), (0, seq_len), name)]
+                    }
+                } else if let Some(ref target_bed) = query.target_bed {
+                    partition::parse_bed_file(target_bed)?
+                } else {
+                    unreachable!();
+                };
+
+                // Setup output resources for GFA/FASTA (need sequence files)
+                let needs_sequences = matches!(resolved_format, "gfa" | "fasta");
+                let sequence_index = if needs_sequences {
+                    let si = gfa_maf_fasta.sequence.build_sequence_index()?;
+                    if si.is_none() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Sequence files are required for '{}' output with --syng. Use --sequence-files or --sequence-list", resolved_format),
+                        ));
+                    }
+                    si
+                } else {
+                    None
+                };
+
+                let scoring_params = if resolved_format == "gfa" {
+                    Some(parse_poa_scoring_string(&engine_cli.poa_scoring)?)
+                } else {
+                    None
+                };
+
+                // Process each target range
+                for (target_name, (range_start, range_end), name) in &target_ranges {
+                    info!("Syng query: {} ({}:{}-{})", name, target_name, range_start, range_end);
+
+                    let intervals = syng_index.query_region(
+                        target_name,
+                        *range_start as u64,
+                        *range_end as u64,
+                        syng_padding,
+                    )?;
+
+                    match resolved_format {
+                        "bed" => {
+                            let mut out = find_output_stream(&output_prefix, "bed")?;
+                            for iv in &intervals {
+                                writeln!(out, "{}\t{}\t{}\t{}", iv.genome, iv.start, iv.end, iv.strand)?;
+                            }
+                        }
+                        "gfa" => {
+                            // Convert HomologousInterval → coitrees::Interval<u32>
+                            let query_intervals: Vec<coitrees::Interval<u32>> = intervals
+                                .iter()
+                                .filter_map(|iv| {
+                                    let id = seq_index.get_id(&iv.genome)?;
+                                    Some(Interval::new(iv.start as i32, iv.end as i32, id))
+                                })
+                                .collect();
+
+                            if query_intervals.is_empty() {
+                                let mut out = find_output_stream(&output_prefix, "gfa")?;
+                                writeln!(out, "H\tVN:Z:1.0")?;
+                                continue;
+                            }
+
+                            let engine_opts = engine_cli.build(common.threads.get())?;
+                            let gfa_output = impg::dispatch_gfa_engine_with_seq_index(
+                                &seq_index,
+                                &query_intervals,
+                                sequence_index.as_ref().unwrap(),
+                                scoring_params,
+                                &engine_opts,
+                            )?;
+                            let mut out = find_output_stream(&output_prefix, "gfa")?;
+                            writeln!(out, "{gfa_output}")?;
+                        }
+                        "fasta" => {
+                            let mut out = find_output_stream(&output_prefix, "fa")?;
+                            let seq_idx = sequence_index.as_ref().unwrap();
+                            for iv in &intervals {
+                                let sequence = seq_idx.fetch_sequence(&iv.genome, iv.start as i32, iv.end as i32)?;
+                                writeln!(out, ">{}:{}-{}({})", iv.genome, iv.start, iv.end, iv.strand)?;
+                                out.write_all(&sequence)?;
+                                writeln!(out)?;
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                // Skip the rest of the normal query path
+            } else {
+            // ─── Normal (alignment-based) query path ──────────────────────
 
             // Resolve alignment files once (handles process substitution inputs)
             let alignment_files = resolve_alignment_files(&alignment)?;
@@ -1750,6 +1891,7 @@ fn run() -> io::Result<()> {
                     }
                 }
             }
+            } // end of else (normal query path)
         }
         Args::Refine {
             alignment,

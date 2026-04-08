@@ -289,6 +289,9 @@ extern "C" {
 
     pub fn impg_seqhashIteratorDestroy(si: *mut SeqhashIterator);
     pub fn impg_seqhashDestroy(sh: *mut Seqhash);
+
+    /// Suppress syngBWT debug output by setting pathCount to a non-zero value.
+    pub fn impg_syng_suppress_debug();
 }
 
 /// The syng ONEcode schema text, replicated from syng.h.

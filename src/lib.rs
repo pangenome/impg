@@ -68,6 +68,94 @@ pub struct EngineOpts {
     pub poa_padding_fraction: f64,
 }
 
+/// Minimal ImpgIndex wrapper around a SequenceIndex for syng query path.
+/// Only `seq_index()` is functional; query methods are not called.
+struct SeqIndexWrapper {
+    seq_index: seqidx::SequenceIndex,
+}
+
+impl impg_index::ImpgIndex for SeqIndexWrapper {
+    fn seq_index(&self) -> &seqidx::SequenceIndex {
+        &self.seq_index
+    }
+
+    fn query(
+        &self, _: u32, _: i32, _: i32, _: bool, _: Option<f64>,
+        _: Option<&sequence_index::UnifiedSequenceIndex>, _: bool,
+    ) -> Vec<impg::AdjustedInterval> {
+        unimplemented!("not used in syng path")
+    }
+
+    fn query_with_cache(
+        &self, _: u32, _: i32, _: i32, _: bool, _: Option<f64>,
+        _: Option<&sequence_index::UnifiedSequenceIndex>,
+        _: &rustc_hash::FxHashMap<(u32, u64), Vec<impg::CigarOp>>,
+    ) -> Vec<impg::AdjustedInterval> {
+        unimplemented!("not used in syng path")
+    }
+
+    fn populate_cigar_cache(
+        &self, _: u32, _: i32, _: i32, _: Option<f64>,
+        _: Option<&sequence_index::UnifiedSequenceIndex>,
+        _: &mut rustc_hash::FxHashMap<(u32, u64), Vec<impg::CigarOp>>,
+    ) {
+        unimplemented!("not used in syng path")
+    }
+
+    fn query_transitive_dfs(
+        &self, _: u32, _: i32, _: i32,
+        _: Option<&rustc_hash::FxHashMap<u32, impg::SortedRanges>>,
+        _: u16, _: i32, _: i32, _: Option<i32>, _: bool, _: Option<f64>,
+        _: Option<&sequence_index::UnifiedSequenceIndex>, _: bool,
+        _: Option<&subset_filter::SubsetFilter>,
+    ) -> Vec<impg::AdjustedInterval> {
+        unimplemented!("not used in syng path")
+    }
+
+    fn query_transitive_bfs(
+        &self, _: u32, _: i32, _: i32,
+        _: Option<&rustc_hash::FxHashMap<u32, impg::SortedRanges>>,
+        _: u16, _: i32, _: i32, _: Option<i32>, _: bool, _: Option<f64>,
+        _: Option<&sequence_index::UnifiedSequenceIndex>, _: bool,
+        _: Option<&subset_filter::SubsetFilter>,
+    ) -> Vec<impg::AdjustedInterval> {
+        unimplemented!("not used in syng path")
+    }
+
+    fn get_or_load_tree(&self, _: u32) -> Option<std::sync::Arc<coitrees::BasicCOITree<impg::QueryMetadata, u32>>> {
+        unimplemented!("not used in syng path")
+    }
+
+    fn target_ids(&self) -> Vec<u32> {
+        unimplemented!("not used in syng path")
+    }
+
+    fn remove_cached_tree(&self, _: u32) {
+        unimplemented!("not used in syng path")
+    }
+
+    fn sequence_files(&self) -> &[String] {
+        &[]
+    }
+}
+
+/// Dispatch GFA generation using a SequenceIndex directly (for syng queries).
+///
+/// This avoids needing a full ImpgIndex when the intervals come from syng
+/// rather than from alignment-based queries.
+pub fn dispatch_gfa_engine_with_seq_index(
+    seq_index: &seqidx::SequenceIndex,
+    query_intervals: &[coitrees::Interval<u32>],
+    sequence_index: &sequence_index::UnifiedSequenceIndex,
+    scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
+    engine_opts: &EngineOpts,
+) -> std::io::Result<String> {
+    let wrapper = SeqIndexWrapper {
+        seq_index: seq_index.clone(),
+    };
+    dispatch_gfa_engine(&wrapper, query_intervals, sequence_index, scoring_params, engine_opts)
+}
+
 /// Dispatch GFA generation to the selected engine.
 ///
 /// Shared by `query -o gfa` and `partition -o gfa` so the engine match
