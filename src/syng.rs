@@ -792,4 +792,498 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    // ── 7. Round-trip: build → save → load → verify (spec Test 1) ──
+
+    #[test]
+    fn test_syng_roundtrip_path_count_preserved() {
+        // Build from multiple sequences, save, reload, verify same number
+        // of paths recorded in the name map.
+        let seqs: Vec<(String, Vec<u8>)> = (0..5)
+            .map(|i| {
+                (
+                    format!("sample{}#hap{}#chr1", i / 2, i % 2),
+                    make_test_sequence(3000, i as u8 + 50),
+                )
+            })
+            .collect();
+        let params = SyncmerParams::default();
+        let original = SyngIndex::build(params, seqs.into_iter());
+
+        let dir = std::env::temp_dir().join("impg_test_syng_rt_paths");
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("rt_paths");
+        let prefix_str = prefix.to_str().unwrap();
+
+        original.save(prefix_str).unwrap();
+        let loaded = SyngIndex::load(prefix_str, params).unwrap();
+
+        // Same number of paths
+        assert_eq!(
+            loaded.name_map.path_to_name.len(),
+            original.name_map.path_to_name.len(),
+            "Path count must be preserved after round-trip"
+        );
+
+        // Same names in the same order
+        assert_eq!(loaded.name_map.path_to_name, original.name_map.path_to_name);
+
+        // Same lengths
+        assert_eq!(
+            loaded.name_map.path_to_length,
+            original.name_map.path_to_length
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_syng_roundtrip_names_match() {
+        // Use PanSN-style names and verify they survive round-trip.
+        let names = vec![
+            "HG002#1#chr1",
+            "HG002#2#chr1",
+            "HG005#1#chrX",
+            "GRCh38#0#chr22",
+        ];
+        let seqs: Vec<(String, Vec<u8>)> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.to_string(), make_test_sequence(2000, i as u8 + 10)))
+            .collect();
+        let params = SyncmerParams::default();
+        let original = SyngIndex::build(params, seqs.into_iter());
+
+        let dir = std::env::temp_dir().join("impg_test_syng_rt_names");
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("rt_names");
+        let prefix_str = prefix.to_str().unwrap();
+
+        original.save(prefix_str).unwrap();
+        let loaded = SyngIndex::load(prefix_str, params).unwrap();
+
+        for name in &names {
+            assert!(
+                loaded.name_map.name_to_path.contains_key(*name),
+                "Name '{}' should be present in loaded name map",
+                name
+            );
+            let orig_path = original.name_map.name_to_path[*name];
+            let load_path = loaded.name_map.name_to_path[*name];
+            assert_eq!(
+                orig_path, load_path,
+                "Path number for '{}' should match after round-trip",
+                name
+            );
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_syng_roundtrip_lengths_match() {
+        // Build with varying-length sequences, verify lengths preserved.
+        let lengths = [100, 500, 1000, 5000, 10000];
+        let seqs: Vec<(String, Vec<u8>)> = lengths
+            .iter()
+            .enumerate()
+            .map(|(i, &len)| (format!("seq_len_{}", len), make_test_sequence(len, i as u8)))
+            .collect();
+        let params = SyncmerParams::default();
+        let original = SyngIndex::build(params, seqs.into_iter());
+
+        let dir = std::env::temp_dir().join("impg_test_syng_rt_lengths");
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("rt_lengths");
+        let prefix_str = prefix.to_str().unwrap();
+
+        original.save(prefix_str).unwrap();
+        let loaded = SyngIndex::load(prefix_str, params).unwrap();
+
+        for (i, &expected_len) in lengths.iter().enumerate() {
+            assert_eq!(
+                loaded.name_map.path_to_length[i], expected_len as u64,
+                "Length for seq {} should be {} after round-trip",
+                i, expected_len
+            );
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── 8. SyngNameMap serialization with special characters ────────
+
+    #[test]
+    fn test_name_map_pansn_format() {
+        // PanSN format: SAMPLE#HAP#CONTIG — verify # chars survive serialization
+        let mut nm = SyngNameMap::new();
+        nm.add("HG002#1#chr1".to_string(), 248956422);
+        nm.add("HG002#2#chr1".to_string(), 248956422);
+        nm.add("GRCh38#0#chrX".to_string(), 156040895);
+        nm.add("NA12878#1#chr22_random".to_string(), 50818468);
+
+        let dir = std::env::temp_dir().join("impg_test_name_map_pansn");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pansn.syng.names");
+        let path_str = path.to_str().unwrap();
+
+        nm.save(path_str).unwrap();
+        let loaded = SyngNameMap::load(path_str).unwrap();
+
+        assert_eq!(loaded.path_to_name, nm.path_to_name);
+        assert_eq!(loaded.path_to_length, nm.path_to_length);
+        for (k, v) in &nm.name_to_path {
+            assert_eq!(
+                loaded.name_to_path.get(k),
+                Some(v),
+                "PanSN name '{}' should survive round-trip",
+                k
+            );
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_name_map_special_characters() {
+        // Names with dots, underscores, dashes, and PanSN separators
+        let mut nm = SyngNameMap::new();
+        let names = vec![
+            ("chr1.1_paternal-v2", 100000u64),
+            ("sample.HG002#hap1#contig_123", 200000),
+            ("ref-genome_v3.0", 300000),
+            ("a", 1),
+        ];
+        for (name, len) in &names {
+            nm.add(name.to_string(), *len);
+        }
+
+        let dir = std::env::temp_dir().join("impg_test_name_map_special");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("special.syng.names");
+        let path_str = path.to_str().unwrap();
+
+        nm.save(path_str).unwrap();
+        let loaded = SyngNameMap::load(path_str).unwrap();
+
+        for (name, len) in &names {
+            let idx = *loaded.name_to_path.get(*name).unwrap_or_else(|| {
+                panic!("Name '{}' missing from loaded name map", name)
+            });
+            assert_eq!(loaded.path_to_length[idx as usize], *len);
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── 9. Syncmer parameter variations ─────────────────────────────
+
+    #[test]
+    fn test_syng_different_params_different_syncmer_counts() {
+        // Building with different params should yield different numbers of syncmers
+        // (reflected by different KmerHash contents). We verify indirectly: the
+        // serialized .1khash files should differ in size.
+        let seq = make_test_sequence(5000, 99);
+
+        let dir = std::env::temp_dir().join("impg_test_syng_params_var");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Default params: k=8, w=55 (syncmer_len=63)
+        let params_default = SyncmerParams::default();
+        let idx_default = SyngIndex::build(
+            params_default,
+            vec![("seq".to_string(), seq.clone())].into_iter(),
+        );
+        let prefix_default = dir.join("default");
+        idx_default.save(prefix_default.to_str().unwrap()).unwrap();
+
+        // Different params: k=6, w=31 (syncmer_len=37) — more syncmers (shorter, denser)
+        let params_short = SyncmerParams {
+            k: 6,
+            w: 31,
+            seed: 7,
+        };
+        let idx_short = SyngIndex::build(
+            params_short,
+            vec![("seq".to_string(), seq.clone())].into_iter(),
+        );
+        let prefix_short = dir.join("short");
+        idx_short.save(prefix_short.to_str().unwrap()).unwrap();
+
+        // Different seed with same k/w — different sampling
+        let params_alt_seed = SyncmerParams {
+            k: 8,
+            w: 55,
+            seed: 42,
+        };
+        let idx_alt = SyngIndex::build(
+            params_alt_seed,
+            vec![("seq".to_string(), seq)].into_iter(),
+        );
+        let prefix_alt = dir.join("alt_seed");
+        idx_alt.save(prefix_alt.to_str().unwrap()).unwrap();
+
+        // Verify files exist for all three
+        for name in &["default", "short", "alt_seed"] {
+            let khash = dir.join(format!("{}.1khash", name));
+            assert!(khash.exists(), "{}.1khash should exist", name);
+            let gbwt = dir.join(format!("{}.1gbwt", name));
+            assert!(gbwt.exists(), "{}.1gbwt should exist", name);
+        }
+
+        // Shorter syncmers (k=6,w=30) should yield a different-sized khash than
+        // default (k=8,w=55). With a 36bp syncmer vs 63bp, the shorter one extracts
+        // more syncmers.
+        let size_default = std::fs::metadata(dir.join("default.1khash"))
+            .unwrap()
+            .len();
+        let size_short = std::fs::metadata(dir.join("short.1khash"))
+            .unwrap()
+            .len();
+        assert_ne!(
+            size_default, size_short,
+            "Different syncmer params should produce different khash sizes"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_syng_default_params_build_and_reload() {
+        // Build with default params, save, reload with same params — should work
+        let params = SyncmerParams::default();
+        let seqs = vec![
+            ("s1".to_string(), make_test_sequence(2000, 1)),
+            ("s2".to_string(), make_test_sequence(2000, 2)),
+        ];
+        let index = SyngIndex::build(params, seqs.into_iter());
+
+        let dir = std::env::temp_dir().join("impg_test_syng_default_reload");
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("idx");
+        let prefix_str = prefix.to_str().unwrap();
+
+        index.save(prefix_str).unwrap();
+        let loaded = SyngIndex::load(prefix_str, params).unwrap();
+
+        assert_eq!(loaded.name_map.path_to_name.len(), 2);
+        assert_eq!(loaded.params.k, 8);
+        assert_eq!(loaded.params.w, 55);
+        assert_eq!(loaded.params.seed, 7);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── 10. Empty and edge cases ────────────────────────────────────
+
+    #[test]
+    fn test_syng_build_empty_sequence() {
+        // A 0-length sequence should be handled gracefully (no panic)
+        let seqs = vec![("empty".to_string(), Vec::new())];
+        let index = SyngIndex::build(SyncmerParams::default(), seqs.into_iter());
+        assert_eq!(index.name_map.path_to_name.len(), 1);
+        assert_eq!(index.name_map.path_to_name[0], "empty");
+        assert_eq!(index.name_map.path_to_length[0], 0);
+    }
+
+    #[test]
+    fn test_syng_build_sequence_shorter_than_syncmer() {
+        // 50bp < 63bp (default syncmer length) — should record but skip extraction
+        let seq = make_test_sequence(50, 77);
+        let seqs = vec![("too_short".to_string(), seq)];
+        let index = SyngIndex::build(SyncmerParams::default(), seqs.into_iter());
+        assert_eq!(index.name_map.path_to_name.len(), 1);
+        assert_eq!(index.name_map.path_to_name[0], "too_short");
+        assert_eq!(index.name_map.path_to_length[0], 50);
+    }
+
+    #[test]
+    fn test_syng_build_exactly_syncmer_length() {
+        // Sequence exactly syncmer length (63bp) — borderline, should not panic
+        let seq = make_test_sequence(63, 88);
+        let seqs = vec![("exact".to_string(), seq)];
+        let index = SyngIndex::build(SyncmerParams::default(), seqs.into_iter());
+        assert_eq!(index.name_map.path_to_name.len(), 1);
+        assert_eq!(index.name_map.path_to_length[0], 63);
+    }
+
+    #[test]
+    fn test_syng_build_single_path_in_gbwt() {
+        // Single sequence should produce exactly one entry in name map
+        let seq = make_test_sequence(1000, 33);
+        let seqs = vec![("single".to_string(), seq)];
+        let params = SyncmerParams::default();
+        let index = SyngIndex::build(params, seqs.into_iter());
+        assert_eq!(index.name_map.path_to_name.len(), 1);
+
+        // Save and reload to verify the single path survives
+        let dir = std::env::temp_dir().join("impg_test_syng_single_path");
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("single");
+        let prefix_str = prefix.to_str().unwrap();
+
+        index.save(prefix_str).unwrap();
+        let loaded = SyngIndex::load(prefix_str, params).unwrap();
+        assert_eq!(loaded.name_map.path_to_name.len(), 1);
+        assert_eq!(loaded.name_map.path_to_name[0], "single");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_syng_build_mixed_lengths() {
+        // Mix of empty, short, and long sequences — all should be recorded
+        let seqs = vec![
+            ("empty".to_string(), Vec::new()),
+            ("short_10bp".to_string(), make_test_sequence(10, 1)),
+            ("borderline_62bp".to_string(), make_test_sequence(62, 2)),
+            ("borderline_63bp".to_string(), make_test_sequence(63, 3)),
+            ("normal_500bp".to_string(), make_test_sequence(500, 4)),
+            ("long_10000bp".to_string(), make_test_sequence(10000, 5)),
+        ];
+        let index = SyngIndex::build(SyncmerParams::default(), seqs.into_iter());
+        assert_eq!(index.name_map.path_to_name.len(), 6);
+        assert_eq!(index.name_map.path_to_length[0], 0);
+        assert_eq!(index.name_map.path_to_length[1], 10);
+        assert_eq!(index.name_map.path_to_length[2], 62);
+        assert_eq!(index.name_map.path_to_length[3], 63);
+        assert_eq!(index.name_map.path_to_length[4], 500);
+        assert_eq!(index.name_map.path_to_length[5], 10000);
+    }
+
+    #[test]
+    fn test_syng_save_load_with_edge_cases() {
+        // Build with mix of edge-case sequences, round-trip through disk
+        let seqs = vec![
+            ("empty".to_string(), Vec::new()),
+            ("tiny".to_string(), b"ACG".to_vec()),
+            ("normal".to_string(), make_test_sequence(2000, 42)),
+        ];
+        let params = SyncmerParams::default();
+        let index = SyngIndex::build(params, seqs.into_iter());
+
+        let dir = std::env::temp_dir().join("impg_test_syng_edge_rt");
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("edge");
+        let prefix_str = prefix.to_str().unwrap();
+
+        index.save(prefix_str).unwrap();
+        let loaded = SyngIndex::load(prefix_str, params).unwrap();
+
+        assert_eq!(loaded.name_map.path_to_name.len(), 3);
+        assert_eq!(loaded.name_map.path_to_name[0], "empty");
+        assert_eq!(loaded.name_map.path_to_length[0], 0);
+        assert_eq!(loaded.name_map.path_to_name[1], "tiny");
+        assert_eq!(loaded.name_map.path_to_length[1], 3);
+        assert_eq!(loaded.name_map.path_to_name[2], "normal");
+        assert_eq!(loaded.name_map.path_to_length[2], 2000);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── 11. CLI integration test ────────────────────────────────────
+
+    #[test]
+    fn test_syng_cli_fasta_roundtrip() {
+        // Run `impg syng -f <fasta> -o <prefix>` via Command,
+        // verify output files exist.
+        let dir = std::env::temp_dir().join("impg_test_syng_cli");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Write a small synthetic FASTA
+        let fasta_path = dir.join("test_cli.fa");
+        {
+            let mut f = std::fs::File::create(&fasta_path).unwrap();
+            // Need sequences >= 63bp (default syncmer length)
+            let seq1 = String::from_utf8(make_test_sequence(500, 200)).unwrap();
+            let seq2 = String::from_utf8(make_test_sequence(500, 201)).unwrap();
+            let seq3 = String::from_utf8(make_test_sequence(300, 202)).unwrap();
+            use std::io::Write;
+            writeln!(f, ">HG002#1#chr1").unwrap();
+            writeln!(f, "{}", seq1).unwrap();
+            writeln!(f, ">HG002#2#chr1").unwrap();
+            writeln!(f, "{}", seq2).unwrap();
+            writeln!(f, ">GRCh38#0#chrX").unwrap();
+            writeln!(f, "{}", seq3).unwrap();
+        }
+
+        let output_prefix = dir.join("cli_output");
+        let output_prefix_str = output_prefix.to_str().unwrap();
+
+        // Find the impg binary
+        let bin = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("impg");
+
+        // If the binary doesn't exist, try cargo bin path
+        let bin = if bin.exists() {
+            bin
+        } else {
+            // Fall back to looking in target/debug or target/release
+            let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            manifest_dir.join("target/debug/impg")
+        };
+
+        if !bin.exists() {
+            // Skip if binary not built yet — cargo test --lib won't build the binary
+            eprintln!(
+                "Skipping CLI test: impg binary not found at {:?}",
+                bin
+            );
+            std::fs::remove_dir_all(&dir).ok();
+            return;
+        }
+
+        let output = std::process::Command::new(&bin)
+            .args([
+                "syng",
+                "-f",
+                fasta_path.to_str().unwrap(),
+                "-o",
+                output_prefix_str,
+            ])
+            .output()
+            .expect("Failed to run impg syng");
+
+        assert!(
+            output.status.success(),
+            "impg syng should succeed. stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // Verify output files
+        assert!(
+            std::path::Path::new(&format!("{}.1khash", output_prefix_str)).exists(),
+            ".1khash file should exist after CLI run"
+        );
+        assert!(
+            std::path::Path::new(&format!("{}.1gbwt", output_prefix_str)).exists(),
+            ".1gbwt file should exist after CLI run"
+        );
+        assert!(
+            std::path::Path::new(&format!("{}.syng.names", output_prefix_str)).exists(),
+            ".syng.names file should exist after CLI run"
+        );
+
+        // Load and verify content
+        let loaded = SyngIndex::load(output_prefix_str, SyncmerParams::default()).unwrap();
+        assert_eq!(loaded.name_map.path_to_name.len(), 3);
+        assert_eq!(loaded.name_map.path_to_name[0], "HG002#1#chr1");
+        assert_eq!(loaded.name_map.path_to_name[1], "HG002#2#chr1");
+        assert_eq!(loaded.name_map.path_to_name[2], "GRCh38#0#chrX");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── 12. Load error cases ────────────────────────────────────────
+
+    #[test]
+    fn test_syng_load_missing_files() {
+        let result = SyngIndex::load("/tmp/nonexistent_prefix_xyz123", SyncmerParams::default());
+        assert!(result.is_err(), "Loading from nonexistent files should fail");
+    }
 }
