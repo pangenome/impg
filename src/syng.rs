@@ -159,6 +159,55 @@ impl Drop for SyngIndex {
 mod tests {
     use super::*;
 
+    // ── 1. FFI smoke tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_syng_ffi_seqhash_create_destroy() {
+        // Create a Seqhash with default params (k=8, w=55, seed=7), verify non-null, free it.
+        let sh = unsafe { syng_ffi::seqhashCreate(8, 55, 7) };
+        assert!(!sh.is_null(), "seqhashCreate returned null for valid params");
+        unsafe { libc::free(sh as *mut libc::c_void) };
+    }
+
+    #[test]
+    fn test_syng_ffi_kmerhash_create_destroy() {
+        // Create a KmerHash, verify non-null, destroy it.
+        let syncmer_len = 55 + 8; // w + k = 63
+        let kh = unsafe { syng_ffi::kmerHashCreate(1024, syncmer_len) };
+        assert!(!kh.is_null(), "kmerHashCreate returned null");
+        unsafe { syng_ffi::kmerHashDestroy(kh) };
+    }
+
+    #[test]
+    fn test_syng_ffi_syngbwt_create_destroy() {
+        // Create a SyngBWT, verify non-null, destroy it.
+        let syncmer_len = 63;
+        let sb = unsafe { syng_ffi::syngBWTcreate(syncmer_len, 0) };
+        assert!(!sb.is_null(), "syngBWTcreate returned null");
+        unsafe { syng_ffi::syngBWTdestroy(sb) };
+    }
+
+    // ── 2. SyncmerParams defaults ───────────────────────────────────
+
+    #[test]
+    fn test_syncmer_params_default() {
+        let params = SyncmerParams::default();
+        assert_eq!(params.k, 8);
+        assert_eq!(params.w, 55);
+        assert_eq!(params.seed, 7);
+    }
+
+    #[test]
+    fn test_syncmer_params_to_c() {
+        let params = SyncmerParams::default();
+        let c_params = params.to_c();
+        assert_eq!(c_params.k, 8);
+        assert_eq!(c_params.w, 55);
+        assert_eq!(c_params.seed, 7);
+    }
+
+    // ── 3. SyngIndex lifecycle ──────────────────────────────────────
+
     #[test]
     fn test_syng_index_create_drop() {
         // Verify we can create and drop without crashing
@@ -171,16 +220,44 @@ mod tests {
     }
 
     #[test]
-    fn test_syncmer_params_default() {
-        let params = SyncmerParams::default();
-        assert_eq!(params.k, 8);
-        assert_eq!(params.w, 55);
-        assert_eq!(params.seed, 7);
+    fn test_syng_index_custom_params() {
+        // Non-default params should also produce valid pointers
+        let params = SyncmerParams { k: 11, w: 40, seed: 42 };
+        let index = SyngIndex::new(params);
+        assert!(!index.gbwt.is_null());
+        assert!(!index.kmer_hash.is_null());
+        assert!(!index.seqhash.is_null());
+        assert_eq!(index.params.k, 11);
+        assert_eq!(index.params.w, 40);
+        assert_eq!(index.params.seed, 42);
     }
+
+    #[test]
+    fn test_syng_index_accessors() {
+        let index = SyngIndex::new(SyncmerParams::default());
+        // Accessor methods should return the same non-null pointers
+        assert_eq!(index.gbwt_ptr(), index.gbwt);
+        assert_eq!(index.kmer_hash_ptr(), index.kmer_hash);
+        assert_eq!(index.seqhash_ptr(), index.seqhash);
+        assert!(!index.gbwt_ptr().is_null());
+        assert!(!index.kmer_hash_ptr().is_null());
+        assert!(!index.seqhash_ptr().is_null());
+    }
+
+    // ── 4. SyngNameMap ──────────────────────────────────────────────
 
     #[test]
     fn test_name_map_new() {
         let nm = SyngNameMap::new();
+        assert!(nm.path_to_name.is_empty());
+        assert!(nm.path_to_length.is_empty());
+        assert!(nm.name_to_path.is_empty());
+    }
+
+    #[test]
+    fn test_name_map_default() {
+        // Default trait should produce the same as new()
+        let nm = SyngNameMap::default();
         assert!(nm.path_to_name.is_empty());
         assert!(nm.path_to_length.is_empty());
         assert!(nm.name_to_path.is_empty());
