@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::type_complexity)]
 use clap::Parser;
 use coitrees::{Interval, IntervalTree};
 use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};

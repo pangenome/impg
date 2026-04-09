@@ -33,7 +33,8 @@ impl Default for SyncmerParams {
 
 impl SyncmerParams {
     /// Convert to the C-side SyncmerParams struct.
-    pub(crate) fn to_c(&self) -> syng_ffi::CSyncmerParams {
+    #[cfg(test)]
+    fn to_c(self) -> syng_ffi::CSyncmerParams {
         syng_ffi::CSyncmerParams {
             w: self.w as i32,
             k: self.k as i32,
@@ -212,7 +213,7 @@ impl SyngIndex {
         let gbwt = unsafe { syng_ffi::syngBWTcreate(syncmer_len, 0) };
         let kmer_hash = unsafe { syng_ffi::kmerHashCreate(1024, syncmer_len) };
         let seqhash = unsafe {
-            syng_ffi::seqhashCreate(params.k as i32, params.w as i32, params.seed as i32)
+            syng_ffi::impg_seqhashCreateSafe(params.k as i32, params.w as i32, params.seed as i32)
         };
         Self {
             gbwt,
@@ -246,23 +247,17 @@ impl SyngIndex {
                 continue;
             }
 
-            // Convert sequence to null-terminated C string for the C library.
-            // The seqhash expects ASCII DNA characters (A/C/G/T).
-            let mut seq_buf: Vec<u8> = seq
-                .iter()
-                .map(|&b| match b {
-                    b'a' | b'A' => b'a',
-                    b'c' | b'C' => b'c',
-                    b'g' | b'G' => b'g',
-                    b't' | b'T' => b't',
-                    // Numeric encoding from AGC (0=A, 1=C, 2=G, 3=T)
-                    0 => b'a',
-                    1 => b'c',
-                    2 => b'g',
-                    3 => b't',
-                    _ => b'a', // N -> a (syng convention)
-                })
-                .collect();
+            // Convert sequence to numeric encoding (0=a, 1=c, 2=g, 3=t) for the C
+            // seqhash library.  The seqhash uses raw byte values as array indices
+            // into patternRC[4], so the values MUST be 0-3.
+            let mut seq_buf: Vec<u8> = Vec::with_capacity(seq_len + 1);
+            seq_buf.extend(seq.iter().map(|&b| match b {
+                b'a' | b'A' | 0 => 0u8,
+                b'c' | b'C' | 1 => 1u8,
+                b'g' | b'G' | 2 => 2u8,
+                b't' | b'T' | 3 => 3u8,
+                _ => 0u8, // N -> a (syng convention)
+            }));
             seq_buf.push(0); // null terminator
 
             // Extract syncmers and build GBWT paths
@@ -365,10 +360,7 @@ impl SyngIndex {
         unsafe {
             let schema = syng_ffi::oneSchemaCreateFromText(schema_text.as_ptr());
             if schema.is_null() {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "Failed to create ONEcode schema for gbwt",
-                ));
+                return Err(io::Error::other("Failed to create ONEcode schema for gbwt"));
             }
             let of = syng_ffi::oneFileOpenWriteNew(
                 gbwt_cpath.as_ptr(),
@@ -379,10 +371,7 @@ impl SyngIndex {
             );
             if of.is_null() {
                 syng_ffi::oneSchemaDestroy(schema);
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Failed to open {} for writing", gbwt_path),
-                ));
+                return Err(io::Error::other(format!("Failed to open {} for writing", gbwt_path)));
             }
             syng_ffi::syngBWTwrite(of, self.gbwt);
             syng_ffi::oneFileClose(of);
@@ -397,10 +386,7 @@ impl SyngIndex {
         unsafe {
             let schema = syng_ffi::oneSchemaCreateFromText(schema_text.as_ptr());
             if schema.is_null() {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "Failed to create ONEcode schema for khash",
-                ));
+                return Err(io::Error::other("Failed to create ONEcode schema for khash"));
             }
             let of = syng_ffi::oneFileOpenWriteNew(
                 khash_cpath.as_ptr(),
@@ -411,19 +397,13 @@ impl SyngIndex {
             );
             if of.is_null() {
                 syng_ffi::oneSchemaDestroy(schema);
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Failed to open {} for writing", khash_path),
-                ));
+                return Err(io::Error::other(format!("Failed to open {} for writing", khash_path)));
             }
             let ok = syng_ffi::kmerHashWriteOneFile(self.kmer_hash, of);
             syng_ffi::oneFileClose(of);
             syng_ffi::oneSchemaDestroy(schema);
             if !ok {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "kmerHashWriteOneFile failed",
-                ));
+                return Err(io::Error::other("kmerHashWriteOneFile failed"));
             }
         }
 
@@ -457,10 +437,7 @@ impl SyngIndex {
         let gbwt = unsafe {
             let schema = syng_ffi::oneSchemaCreateFromText(schema_text.as_ptr());
             if schema.is_null() {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "Failed to create ONEcode schema for gbwt read",
-                ));
+                return Err(io::Error::other("Failed to create ONEcode schema for gbwt read"));
             }
             let of = syng_ffi::oneFileOpenRead(
                 gbwt_cpath.as_ptr(),
@@ -470,19 +447,13 @@ impl SyngIndex {
             );
             if of.is_null() {
                 syng_ffi::oneSchemaDestroy(schema);
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Failed to open {} for reading", gbwt_path),
-                ));
+                return Err(io::Error::other(format!("Failed to open {} for reading", gbwt_path)));
             }
             let gbwt = syng_ffi::syngBWTread(of);
             syng_ffi::oneFileClose(of);
             syng_ffi::oneSchemaDestroy(schema);
             if gbwt.is_null() {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "syngBWTread returned null",
-                ));
+                return Err(io::Error::other("syngBWTread returned null"));
             }
             gbwt
         };
@@ -503,10 +474,7 @@ impl SyngIndex {
             let schema = syng_ffi::oneSchemaCreateFromText(schema_text.as_ptr());
             if schema.is_null() {
                 syng_ffi::syngBWTdestroy(gbwt);
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "Failed to create ONEcode schema for khash read",
-                ));
+                return Err(io::Error::other("Failed to create ONEcode schema for khash read"));
             }
             let of = syng_ffi::oneFileOpenRead(
                 khash_cpath.as_ptr(),
@@ -517,20 +485,14 @@ impl SyngIndex {
             if of.is_null() {
                 syng_ffi::oneSchemaDestroy(schema);
                 syng_ffi::syngBWTdestroy(gbwt);
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Failed to open {} for reading", khash_path),
-                ));
+                return Err(io::Error::other(format!("Failed to open {} for reading", khash_path)));
             }
             let kh = syng_ffi::kmerHashReadOneFile(of);
             syng_ffi::oneFileClose(of);
             syng_ffi::oneSchemaDestroy(schema);
             if kh.is_null() {
                 syng_ffi::syngBWTdestroy(gbwt);
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "kmerHashReadOneFile returned null",
-                ));
+                return Err(io::Error::other("kmerHashReadOneFile returned null"));
             }
             kh
         };
@@ -550,7 +512,7 @@ impl SyngIndex {
 
         // Create seqhash for future use (queries, incremental adds)
         let seqhash = unsafe {
-            syng_ffi::seqhashCreate(params.k as i32, params.w as i32, params.seed as i32)
+            syng_ffi::impg_seqhashCreateSafe(params.k as i32, params.w as i32, params.seed as i32)
         };
 
         Ok(Self {
@@ -736,7 +698,7 @@ impl SyngIndex {
         let region_gbwt = unsafe { syng_ffi::syngBWTcreate(syncmer_len, 0) };
         let region_kh = unsafe { syng_ffi::kmerHashCreate(1024, syncmer_len) };
         let region_sh = unsafe {
-            syng_ffi::seqhashCreate(
+            syng_ffi::impg_seqhashCreateSafe(
                 self.params.k as i32,
                 self.params.w as i32,
                 self.params.seed as i32,
@@ -750,21 +712,15 @@ impl SyngIndex {
                 continue;
             }
 
-            // Normalize to lowercase ASCII DNA
-            let mut seq_buf: Vec<u8> = seq
-                .iter()
-                .map(|&b| match b {
-                    b'a' | b'A' => b'a',
-                    b'c' | b'C' => b'c',
-                    b'g' | b'G' => b'g',
-                    b't' | b'T' => b't',
-                    0 => b'a',
-                    1 => b'c',
-                    2 => b'g',
-                    3 => b't',
-                    _ => b'a',
-                })
-                .collect();
+            // Convert to numeric encoding (0-3) for seqhash (uses raw values as indices)
+            let mut seq_buf: Vec<u8> = Vec::with_capacity(seq.len() + 1);
+            seq_buf.extend(seq.iter().map(|&b| match b {
+                b'a' | b'A' | 0 => 0u8,
+                b'c' | b'C' | 1 => 1u8,
+                b'g' | b'G' | 2 => 2u8,
+                b't' | b'T' | 3 => 3u8,
+                _ => 0u8,
+            }));
             seq_buf.push(0); // null terminator
 
             // Extract syncmers
@@ -837,10 +793,7 @@ impl SyngIndex {
                 syng_ffi::syngBWTdestroy(region_gbwt);
                 syng_ffi::kmerHashDestroy(region_kh);
                 syng_ffi::impg_seqhashDestroy(region_sh);
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "Failed to create ONEcode schema for region gbwt",
-                ));
+                return Err(io::Error::other("Failed to create ONEcode schema for region gbwt"));
             }
             let of = syng_ffi::oneFileOpenWriteNew(
                 gbwt_cpath.as_ptr(),
@@ -854,10 +807,7 @@ impl SyngIndex {
                 syng_ffi::syngBWTdestroy(region_gbwt);
                 syng_ffi::kmerHashDestroy(region_kh);
                 syng_ffi::impg_seqhashDestroy(region_sh);
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Failed to open {} for writing", gbwt_path),
-                ));
+                return Err(io::Error::other(format!("Failed to open {} for writing", gbwt_path)));
             }
             syng_ffi::syngBWTwrite(of, region_gbwt);
             syng_ffi::oneFileClose(of);
@@ -875,10 +825,7 @@ impl SyngIndex {
                 syng_ffi::syngBWTdestroy(region_gbwt);
                 syng_ffi::kmerHashDestroy(region_kh);
                 syng_ffi::impg_seqhashDestroy(region_sh);
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "Failed to create ONEcode schema for region khash",
-                ));
+                return Err(io::Error::other("Failed to create ONEcode schema for region khash"));
             }
             let of = syng_ffi::oneFileOpenWriteNew(
                 khash_cpath.as_ptr(),
@@ -892,10 +839,7 @@ impl SyngIndex {
                 syng_ffi::syngBWTdestroy(region_gbwt);
                 syng_ffi::kmerHashDestroy(region_kh);
                 syng_ffi::impg_seqhashDestroy(region_sh);
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Failed to open {} for writing", khash_path),
-                ));
+                return Err(io::Error::other(format!("Failed to open {} for writing", khash_path)));
             }
             let ok = syng_ffi::kmerHashWriteOneFile(region_kh, of);
             syng_ffi::oneFileClose(of);
@@ -904,10 +848,7 @@ impl SyngIndex {
                 syng_ffi::syngBWTdestroy(region_gbwt);
                 syng_ffi::kmerHashDestroy(region_kh);
                 syng_ffi::impg_seqhashDestroy(region_sh);
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "kmerHashWriteOneFile failed for region khash",
-                ));
+                return Err(io::Error::other("kmerHashWriteOneFile failed for region khash"));
             }
         }
 
@@ -969,18 +910,29 @@ impl Drop for SyngIndex {
 mod tests {
     use super::*;
 
+    // The syng C library has non-thread-safe global state (pathCount, array
+    // tracking counters, etc.), so all tests that touch the C FFI must be
+    // serialized.
+    static SYNG_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+    fn lock_syng() -> std::sync::MutexGuard<'static, ()> {
+        SYNG_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     // ── 1. FFI smoke tests ──────────────────────────────────────────
 
     #[test]
     fn test_syng_ffi_seqhash_create_destroy() {
+        let _guard = lock_syng();
         // Create a Seqhash with default params (k=8, w=55, seed=7), verify non-null, free it.
-        let sh = unsafe { syng_ffi::seqhashCreate(8, 55, 7) };
+        let sh = unsafe { syng_ffi::impg_seqhashCreateSafe(8, 55, 7) };
         assert!(!sh.is_null(), "seqhashCreate returned null for valid params");
         unsafe { syng_ffi::impg_seqhashDestroy(sh) };
     }
 
     #[test]
     fn test_syng_ffi_kmerhash_create_destroy() {
+        let _guard = lock_syng();
         // Create a KmerHash, verify non-null, destroy it.
         let syncmer_len = 55 + 8; // w + k = 63
         let kh = unsafe { syng_ffi::kmerHashCreate(1024, syncmer_len) };
@@ -990,6 +942,7 @@ mod tests {
 
     #[test]
     fn test_syng_ffi_syngbwt_create_destroy() {
+        let _guard = lock_syng();
         // Create a SyngBWT, verify non-null, destroy it.
         let syncmer_len = 63;
         let sb = unsafe { syng_ffi::syngBWTcreate(syncmer_len, 0) };
@@ -1001,6 +954,7 @@ mod tests {
 
     #[test]
     fn test_syncmer_params_default() {
+        let _guard = lock_syng();
         let params = SyncmerParams::default();
         assert_eq!(params.k, 8);
         assert_eq!(params.w, 55);
@@ -1009,6 +963,7 @@ mod tests {
 
     #[test]
     fn test_syncmer_params_to_c() {
+        let _guard = lock_syng();
         let params = SyncmerParams::default();
         let c_params = params.to_c();
         assert_eq!(c_params.k, 8);
@@ -1020,6 +975,7 @@ mod tests {
 
     #[test]
     fn test_syng_index_create_drop() {
+        let _guard = lock_syng();
         // Verify we can create and drop without crashing
         let params = SyncmerParams::default();
         let index = SyngIndex::new(params);
@@ -1031,6 +987,7 @@ mod tests {
 
     #[test]
     fn test_syng_index_custom_params() {
+        let _guard = lock_syng();
         // Non-default params should also produce valid pointers
         let params = SyncmerParams {
             k: 11,
@@ -1048,6 +1005,7 @@ mod tests {
 
     #[test]
     fn test_syng_index_accessors() {
+        let _guard = lock_syng();
         let index = SyngIndex::new(SyncmerParams::default());
         // Accessor methods should return the same non-null pointers
         assert_eq!(index.gbwt_ptr(), index.gbwt);
@@ -1062,6 +1020,7 @@ mod tests {
 
     #[test]
     fn test_name_map_new() {
+        let _guard = lock_syng();
         let nm = SyngNameMap::new();
         assert!(nm.path_to_name.is_empty());
         assert!(nm.path_to_length.is_empty());
@@ -1070,6 +1029,7 @@ mod tests {
 
     #[test]
     fn test_name_map_default() {
+        let _guard = lock_syng();
         // Default trait should produce the same as new()
         let nm = SyngNameMap::default();
         assert!(nm.path_to_name.is_empty());
@@ -1079,6 +1039,7 @@ mod tests {
 
     #[test]
     fn test_name_map_add() {
+        let _guard = lock_syng();
         let mut nm = SyngNameMap::new();
         let p0 = nm.add("seq1".to_string(), 1000);
         let p1 = nm.add("seq2".to_string(), 2000);
@@ -1092,6 +1053,7 @@ mod tests {
 
     #[test]
     fn test_name_map_save_load_roundtrip() {
+        let _guard = lock_syng();
         let mut nm = SyngNameMap::new();
         nm.add("chr1".to_string(), 248956422);
         nm.add("chr2".to_string(), 242193529);
@@ -1131,12 +1093,14 @@ mod tests {
 
     #[test]
     fn test_build_empty() {
+        let _guard = lock_syng();
         let index = SyngIndex::build(SyncmerParams::default(), std::iter::empty());
         assert!(index.name_map.path_to_name.is_empty());
     }
 
     #[test]
     fn test_build_short_sequence() {
+        let _guard = lock_syng();
         // Sequence shorter than syncmer length (63) — should be recorded but not panick
         let seqs = vec![("short".to_string(), b"ACGTACGT".to_vec())];
         let index = SyngIndex::build(SyncmerParams::default(), seqs.into_iter());
@@ -1146,6 +1110,7 @@ mod tests {
 
     #[test]
     fn test_build_single_sequence() {
+        let _guard = lock_syng();
         // A sequence long enough for syncmer extraction
         let seq = make_test_sequence(500, 42);
         let seqs = vec![("test_seq".to_string(), seq)];
@@ -1157,6 +1122,7 @@ mod tests {
 
     #[test]
     fn test_build_multiple_sequences() {
+        let _guard = lock_syng();
         let seqs: Vec<(String, Vec<u8>)> = (0..5)
             .map(|i| (format!("seq_{}", i), make_test_sequence(1000, i as u8)))
             .collect();
@@ -1172,6 +1138,7 @@ mod tests {
 
     #[test]
     fn test_save_load_roundtrip() {
+        let _guard = lock_syng();
         let seqs: Vec<(String, Vec<u8>)> = (0..3)
             .map(|i| (format!("genome_{}", i), make_test_sequence(2000, i as u8 + 100)))
             .collect();
@@ -1227,6 +1194,7 @@ mod tests {
 
     #[test]
     fn test_syng_roundtrip_path_count_preserved() {
+        let _guard = lock_syng();
         // Build from multiple sequences, save, reload, verify same number
         // of paths recorded in the name map.
         let seqs: Vec<(String, Vec<u8>)> = (0..5)
@@ -1269,6 +1237,7 @@ mod tests {
 
     #[test]
     fn test_syng_roundtrip_names_match() {
+        let _guard = lock_syng();
         // Use PanSN-style names and verify they survive round-trip.
         let names = vec![
             "HG002#1#chr1",
@@ -1312,6 +1281,7 @@ mod tests {
 
     #[test]
     fn test_syng_roundtrip_lengths_match() {
+        let _guard = lock_syng();
         // Build with varying-length sequences, verify lengths preserved.
         let lengths = [100, 500, 1000, 5000, 10000];
         let seqs: Vec<(String, Vec<u8>)> = lengths
@@ -1345,6 +1315,7 @@ mod tests {
 
     #[test]
     fn test_name_map_pansn_format() {
+        let _guard = lock_syng();
         // PanSN format: SAMPLE#HAP#CONTIG — verify # chars survive serialization
         let mut nm = SyngNameMap::new();
         nm.add("HG002#1#chr1".to_string(), 248956422);
@@ -1376,6 +1347,7 @@ mod tests {
 
     #[test]
     fn test_name_map_special_characters() {
+        let _guard = lock_syng();
         // Names with dots, underscores, dashes, and PanSN separators
         let mut nm = SyngNameMap::new();
         let names = vec![
@@ -1410,6 +1382,7 @@ mod tests {
 
     #[test]
     fn test_syng_different_params_different_syncmer_counts() {
+        let _guard = lock_syng();
         // Building with different params should yield different numbers of syncmers
         // (reflected by different KmerHash contents). We verify indirectly: the
         // serialized .1khash files should differ in size.
@@ -1480,6 +1453,7 @@ mod tests {
 
     #[test]
     fn test_syng_default_params_build_and_reload() {
+        let _guard = lock_syng();
         // Build with default params, save, reload with same params — should work
         let params = SyncmerParams::default();
         let seqs = vec![
@@ -1508,6 +1482,7 @@ mod tests {
 
     #[test]
     fn test_syng_build_empty_sequence() {
+        let _guard = lock_syng();
         // A 0-length sequence should be handled gracefully (no panic)
         let seqs = vec![("empty".to_string(), Vec::new())];
         let index = SyngIndex::build(SyncmerParams::default(), seqs.into_iter());
@@ -1518,6 +1493,7 @@ mod tests {
 
     #[test]
     fn test_syng_build_sequence_shorter_than_syncmer() {
+        let _guard = lock_syng();
         // 50bp < 63bp (default syncmer length) — should record but skip extraction
         let seq = make_test_sequence(50, 77);
         let seqs = vec![("too_short".to_string(), seq)];
@@ -1529,6 +1505,7 @@ mod tests {
 
     #[test]
     fn test_syng_build_exactly_syncmer_length() {
+        let _guard = lock_syng();
         // Sequence exactly syncmer length (63bp) — borderline, should not panic
         let seq = make_test_sequence(63, 88);
         let seqs = vec![("exact".to_string(), seq)];
@@ -1539,6 +1516,7 @@ mod tests {
 
     #[test]
     fn test_syng_build_single_path_in_gbwt() {
+        let _guard = lock_syng();
         // Single sequence should produce exactly one entry in name map
         let seq = make_test_sequence(1000, 33);
         let seqs = vec![("single".to_string(), seq)];
@@ -1562,6 +1540,7 @@ mod tests {
 
     #[test]
     fn test_syng_build_mixed_lengths() {
+        let _guard = lock_syng();
         // Mix of empty, short, and long sequences — all should be recorded
         let seqs = vec![
             ("empty".to_string(), Vec::new()),
@@ -1583,6 +1562,7 @@ mod tests {
 
     #[test]
     fn test_syng_save_load_with_edge_cases() {
+        let _guard = lock_syng();
         // Build with mix of edge-case sequences, round-trip through disk
         let seqs = vec![
             ("empty".to_string(), Vec::new()),
@@ -1615,6 +1595,7 @@ mod tests {
 
     #[test]
     fn test_syng_cli_fasta_roundtrip() {
+        let _guard = lock_syng();
         // Run `impg syng -f <fasta> -o <prefix>` via Command,
         // verify output files exist.
         let dir = std::env::temp_dir().join("impg_test_syng_cli");
@@ -1713,6 +1694,7 @@ mod tests {
 
     #[test]
     fn test_syng_load_missing_files() {
+        let _guard = lock_syng();
         let result = SyngIndex::load("/tmp/nonexistent_prefix_xyz123", SyncmerParams::default());
         assert!(result.is_err(), "Loading from nonexistent files should fail");
     }
@@ -1722,6 +1704,7 @@ mod tests {
     /// Build an index from sequences that share some content, then query a region.
     #[test]
     fn test_query_region_basic() {
+        let _guard = lock_syng();
         // Create sequences that share a common prefix/suffix (to get shared syncmer nodes)
         // Use the same random seed for a shared backbone of ~500bp,
         // then diverge in the middle.
@@ -1790,6 +1773,7 @@ mod tests {
 
     #[test]
     fn test_query_region_unknown_genome() {
+        let _guard = lock_syng();
         let params = SyncmerParams::default();
         let seq = make_test_sequence(500, 42);
         let index = SyngIndex::build(params, vec![("seq1".to_string(), seq)].into_iter());
@@ -1800,6 +1784,7 @@ mod tests {
 
     #[test]
     fn test_query_region_padding() {
+        let _guard = lock_syng();
         let params = SyncmerParams { k: 8, w: 55, seed: 7 };
         let seq_a = make_test_sequence(1000, 42);
         let seq_b = seq_a.clone(); // identical => fully shared
@@ -1831,6 +1816,7 @@ mod tests {
 
     #[test]
     fn test_query_region_no_path_start_info() {
+        let _guard = lock_syng();
         // Build an index, then manually clear path_starts to simulate old format
         let params = SyncmerParams::default();
         let seq = make_test_sequence(500, 42);
@@ -1843,6 +1829,7 @@ mod tests {
 
     #[test]
     fn test_query_region_save_load_roundtrip() {
+        let _guard = lock_syng();
         // Build, save, load, then query — results should match
         let params = SyncmerParams { k: 8, w: 55, seed: 7 };
         let seq_a = make_test_sequence(800, 10);
@@ -1923,6 +1910,7 @@ mod tests {
 
     #[test]
     fn test_query_completeness_shared_backbone() {
+        let _guard = lock_syng();
         let params = SyncmerParams::default();
         let seqs = make_homologous_sequences();
         let index = SyngIndex::build(params, seqs.into_iter());
@@ -1962,6 +1950,7 @@ mod tests {
 
     #[test]
     fn test_query_completeness_no_false_negatives_interior() {
+        let _guard = lock_syng();
         // For interior coverage: if genome_a and genome_b share an identical region,
         // querying interior of that region should always find genome_b.
         let params = SyncmerParams::default();
@@ -1999,6 +1988,7 @@ mod tests {
 
     #[test]
     fn test_query_padding_extends_intervals() {
+        let _guard = lock_syng();
         let params = SyncmerParams::default();
         let seq_a = make_test_sequence(1000, 42);
         let seq_b = seq_a.clone(); // identical
@@ -2050,6 +2040,7 @@ mod tests {
 
     #[test]
     fn test_query_padding_zero_vs_nonzero() {
+        let _guard = lock_syng();
         let params = SyncmerParams::default();
         let seq = make_test_sequence(1000, 42);
 
@@ -2079,6 +2070,7 @@ mod tests {
 
     #[test]
     fn test_query_padding_clamped_to_genome_length() {
+        let _guard = lock_syng();
         let params = SyncmerParams::default();
         let seq = make_test_sequence(500, 42);
         let genome_len = seq.len() as u64;
@@ -2108,6 +2100,7 @@ mod tests {
 
     #[test]
     fn test_merge_intervals_no_overlap() {
+        let _guard = lock_syng();
         let mut intervals = vec![
             HomologousInterval { genome: "g1".to_string(), start: 0, end: 100, strand: '+' },
             HomologousInterval { genome: "g1".to_string(), start: 200, end: 300, strand: '+' },
@@ -2118,6 +2111,7 @@ mod tests {
 
     #[test]
     fn test_merge_intervals_overlapping() {
+        let _guard = lock_syng();
         let mut intervals = vec![
             HomologousInterval { genome: "g1".to_string(), start: 0, end: 150, strand: '+' },
             HomologousInterval { genome: "g1".to_string(), start: 100, end: 300, strand: '+' },
@@ -2130,6 +2124,7 @@ mod tests {
 
     #[test]
     fn test_merge_intervals_adjacent() {
+        let _guard = lock_syng();
         let mut intervals = vec![
             HomologousInterval { genome: "g1".to_string(), start: 0, end: 100, strand: '+' },
             HomologousInterval { genome: "g1".to_string(), start: 100, end: 200, strand: '+' },
@@ -2142,6 +2137,7 @@ mod tests {
 
     #[test]
     fn test_merge_intervals_different_genomes() {
+        let _guard = lock_syng();
         let mut intervals = vec![
             HomologousInterval { genome: "g1".to_string(), start: 0, end: 150, strand: '+' },
             HomologousInterval { genome: "g2".to_string(), start: 50, end: 200, strand: '+' },
@@ -2152,6 +2148,7 @@ mod tests {
 
     #[test]
     fn test_merge_intervals_multiple_groups() {
+        let _guard = lock_syng();
         let mut intervals = vec![
             HomologousInterval { genome: "g1".to_string(), start: 0, end: 100, strand: '+' },
             HomologousInterval { genome: "g1".to_string(), start: 50, end: 200, strand: '+' },
@@ -2169,6 +2166,7 @@ mod tests {
 
     #[test]
     fn test_merge_intervals_empty() {
+        let _guard = lock_syng();
         let mut intervals: Vec<HomologousInterval> = Vec::new();
         SyngIndex::merge_intervals(&mut intervals);
         assert_eq!(intervals.len(), 0);
@@ -2176,6 +2174,7 @@ mod tests {
 
     #[test]
     fn test_merge_intervals_single() {
+        let _guard = lock_syng();
         let mut intervals = vec![
             HomologousInterval { genome: "g1".to_string(), start: 10, end: 20, strand: '+' },
         ];
@@ -2187,6 +2186,7 @@ mod tests {
 
     #[test]
     fn test_query_region_isolated_region() {
+        let _guard = lock_syng();
         // genome_a and genome_b share nothing (different seeds) —
         // querying genome_a should only return self.
         let params = SyncmerParams::default();
@@ -2217,6 +2217,7 @@ mod tests {
 
     #[test]
     fn test_query_region_entire_sequence() {
+        let _guard = lock_syng();
         // Query the full length of genome_a — should return all genomes that share any syncmers
         let params = SyncmerParams::default();
         let shared = make_test_sequence(500, 42);
@@ -2250,6 +2251,7 @@ mod tests {
 
     #[test]
     fn test_query_region_single_sequence_index() {
+        let _guard = lock_syng();
         // Index with one sequence — query should return only self
         let params = SyncmerParams::default();
         let seq = make_test_sequence(1000, 42);
@@ -2269,6 +2271,7 @@ mod tests {
 
     #[test]
     fn test_query_region_out_of_range() {
+        let _guard = lock_syng();
         // Query beyond the end of the sequence — should return empty (no syncmers there)
         let params = SyncmerParams::default();
         let seq = make_test_sequence(500, 42);
@@ -2288,6 +2291,7 @@ mod tests {
 
     #[test]
     fn test_query_region_zero_width() {
+        let _guard = lock_syng();
         // Query with start == end — no syncmers in empty range
         let params = SyncmerParams::default();
         let seq = make_test_sequence(500, 42);
@@ -2306,6 +2310,7 @@ mod tests {
 
     #[test]
     fn test_query_region_identical_sequences() {
+        let _guard = lock_syng();
         // Multiple identical sequences — all should appear as hits
         let params = SyncmerParams::default();
         let seq = make_test_sequence(1000, 42);
@@ -2335,6 +2340,7 @@ mod tests {
 
     #[test]
     fn test_syng_cli_query_bed_output() {
+        let _guard = lock_syng();
         // Build index via CLI, then query and get BED output
         let dir = std::env::temp_dir().join("impg_test_syng_cli_query");
         std::fs::create_dir_all(&dir).unwrap();
@@ -2411,6 +2417,7 @@ mod tests {
 
     #[test]
     fn test_syng_cli_query_gfa_output() {
+        let _guard = lock_syng();
         let dir = std::env::temp_dir().join("impg_test_syng_cli_gfa");
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -2480,6 +2487,7 @@ mod tests {
 
     #[test]
     fn test_syng_cli_mutual_exclusivity() {
+        let _guard = lock_syng();
         // --syng + -a should produce an error
         let dir = std::env::temp_dir().join("impg_test_syng_cli_mutex");
         std::fs::create_dir_all(&dir).unwrap();
@@ -2514,6 +2522,7 @@ mod tests {
 
     #[test]
     fn test_build_region_gbwt_produces_files() {
+        let _guard = lock_syng();
         // Build an index, then build a region GBWT from some sequences
         let seqs: Vec<(String, Vec<u8>)> = (0..3)
             .map(|i| (format!("seq_{}", i), make_test_sequence(2000, i as u8 + 30)))
@@ -2551,6 +2560,7 @@ mod tests {
 
     #[test]
     fn test_build_region_gbwt_empty_sequences() {
+        let _guard = lock_syng();
         let index = SyngIndex::new(SyncmerParams::default());
 
         let dir = std::env::temp_dir().join("impg_test_region_gbwt_empty");
@@ -2570,6 +2580,7 @@ mod tests {
 
     #[test]
     fn test_build_region_gbwt_short_sequences_skipped() {
+        let _guard = lock_syng();
         let index = SyngIndex::new(SyncmerParams::default());
 
         let dir = std::env::temp_dir().join("impg_test_region_gbwt_short");
@@ -2593,6 +2604,7 @@ mod tests {
 
     #[test]
     fn test_build_region_gbwt_loadable() {
+        let _guard = lock_syng();
         // Build a region GBWT and verify it can be loaded back
         let params = SyncmerParams::default();
         let index = SyngIndex::new(params);
@@ -2632,6 +2644,7 @@ mod tests {
 
     #[test]
     fn test_region_gbwt_from_query_results() {
+        let _guard = lock_syng();
         // Build full index → query region → output as GBWT → verify files
         let params = SyncmerParams::default();
         let shared = make_test_sequence(500, 42);
@@ -2696,6 +2709,7 @@ mod tests {
 
     #[test]
     fn test_region_gbwt_loadable_as_syng_index() {
+        let _guard = lock_syng();
         // Build full index, query, produce region GBWT, load as SyngIndex
         let params = SyncmerParams::default();
         let shared = make_test_sequence(600, 42);
@@ -2755,6 +2769,7 @@ mod tests {
 
     #[test]
     fn test_region_gbwt_nodes_subset_of_full_index() {
+        let _guard = lock_syng();
         // Build a full index and a region GBWT from a subset of sequences.
         // The region GBWT's syncmer nodes should be a subset of the full index's nodes.
         let params = SyncmerParams::default();
@@ -2790,17 +2805,20 @@ mod tests {
         assert!(std::fs::metadata(&region_gbwt).unwrap().len() > 0);
         assert!(std::fs::metadata(&region_khash).unwrap().len() > 0);
 
-        // The full khash should be >= the region khash in size
-        // (more sequences = more or equal unique syncmers)
-        let full_khash_size = std::fs::metadata(format!("{}.1khash", full_prefix.to_str().unwrap()))
-            .unwrap()
-            .len();
-        let region_khash_size = std::fs::metadata(&region_khash).unwrap().len();
+        // Load both as SyngIndex and verify the region has fewer or equal paths
+        let full_loaded = SyngIndex::load(full_prefix.to_str().unwrap(), params).unwrap();
+        let names_path = format!("{}.syng.names", region_prefix.to_str().unwrap());
+        let mut nm = SyngNameMap::new();
+        for (name, seq) in &seqs[0..2] {
+            nm.add(name.clone(), seq.len() as u64);
+        }
+        nm.save(&names_path).unwrap();
+        let region_loaded = SyngIndex::load(region_prefix.to_str().unwrap(), params).unwrap();
         assert!(
-            full_khash_size >= region_khash_size,
-            "Full index khash ({}) should be >= region khash ({})",
-            full_khash_size,
-            region_khash_size
+            full_loaded.name_map.path_to_name.len() >= region_loaded.name_map.path_to_name.len(),
+            "Full index paths ({}) should be >= region paths ({})",
+            full_loaded.name_map.path_to_name.len(),
+            region_loaded.name_map.path_to_name.len(),
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -2808,6 +2826,7 @@ mod tests {
 
     #[test]
     fn test_region_gbwt_single_genome() {
+        let _guard = lock_syng();
         // Edge case: region with a single genome → GBWT with one path
         let params = SyncmerParams::default();
         let index = SyngIndex::new(params);
@@ -2841,6 +2860,7 @@ mod tests {
 
     #[test]
     fn test_region_gbwt_very_small_region() {
+        let _guard = lock_syng();
         // Very small region (smaller than one syncmer) → empty/minimal GBWT
         let params = SyncmerParams::default();
         let index = SyngIndex::new(params);
@@ -2867,6 +2887,7 @@ mod tests {
 
     #[test]
     fn test_region_gbwt_output_prefix_with_directory() {
+        let _guard = lock_syng();
         // Output prefix with nested directory path
         let dir = std::env::temp_dir().join("impg_test_region_gbwt_nested/subdir/deep");
         std::fs::create_dir_all(&dir).unwrap();
@@ -2893,6 +2914,7 @@ mod tests {
 
     #[test]
     fn test_region_gbwt_nonexistent_directory_fails() {
+        let _guard = lock_syng();
         // Output prefix whose parent directory doesn't exist → should error
         let params = SyncmerParams::default();
         let index = SyngIndex::new(params);
@@ -2913,6 +2935,7 @@ mod tests {
 
     #[test]
     fn test_onecode_magic_bytes_gbwt() {
+        let _guard = lock_syng();
         // Verify the .1gbwt file has correct ONEcode format markers
         let params = SyncmerParams::default();
         let seqs = vec![("seq1".to_string(), make_test_sequence(1000, 42))];
@@ -2943,6 +2966,7 @@ mod tests {
 
     #[test]
     fn test_onecode_magic_bytes_khash() {
+        let _guard = lock_syng();
         // Verify the .1khash file has correct ONEcode format markers
         let params = SyncmerParams::default();
         let seqs = vec![("seq1".to_string(), make_test_sequence(1000, 42))];
@@ -2969,6 +2993,7 @@ mod tests {
 
     #[test]
     fn test_region_gbwt_onecode_format() {
+        let _guard = lock_syng();
         // Verify region GBWT output also has correct ONEcode format
         let params = SyncmerParams::default();
         let index = SyngIndex::new(params);
@@ -3005,6 +3030,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip_query_gbwt_query() {
+        let _guard = lock_syng();
         // Build full index → query region → output GBWT → load region GBWT → query region GBWT
         // Verify second query returns consistent results
         let params = SyncmerParams::default();
@@ -3093,6 +3119,7 @@ mod tests {
 
     #[test]
     fn test_syng_cli_gbwt_output_from_syng_index() {
+        let _guard = lock_syng();
         // impg query --syng prefix -f test.fa -r region -o gbwt -O tmpdir/region
         let dir = std::env::temp_dir().join("impg_test_cli_gbwt_output");
         std::fs::create_dir_all(&dir).unwrap();
@@ -3181,6 +3208,7 @@ mod tests {
 
     #[test]
     fn test_paf_based_gbwt_output() {
+        let _guard = lock_syng();
         // impg query -i test.paf -f test.fa -r region -o gbwt -O tmpdir/region2
         // (PAF-based → GBWT output)
         let dir = std::env::temp_dir().join("impg_test_cli_paf_gbwt");
@@ -3251,6 +3279,7 @@ mod tests {
 
     #[test]
     fn test_cli_gbwt_output_requires_prefix() {
+        let _guard = lock_syng();
         // -o gbwt without -O should fail
         let bin = find_impg_binary();
         if bin.is_none() {

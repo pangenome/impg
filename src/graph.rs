@@ -5,7 +5,7 @@ use spoa_rs::{AlignmentEngine, AlignmentType as SpoaAlignmentType, Graph as Spoa
 use std::io::{self, BufWriter, Write};
 
 // Gfasort imports for graph sorting
-use gfasort::gfa_parser::{load_gfa, load_gfa_from_str};
+use gfasort::gfa_parser::load_gfa_from_str;
 use gfasort::ygs::{unchop_only, ygs_sort, YgsParams};
 
 #[derive(Clone)]

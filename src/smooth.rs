@@ -1090,8 +1090,8 @@ fn smooth_block(
     let msa_bytes: Vec<&[u8]> = msa.iter().map(|s| s.as_bytes()).collect();
 
     let mut core_sequences: Vec<String> = Vec::with_capacity(nseqs);
-    for i in 0..nseqs {
-        let core_seq: String = msa_bytes[i][core_start..core_end]
+    for row in &msa_bytes[..nseqs] {
+        let core_seq: String = row[core_start..core_end]
             .iter()
             .filter(|&&b| b != b'-')
             .map(|&b| b as char)
@@ -1117,6 +1117,7 @@ fn smooth_block(
 }
 
 /// Find the MSA column range corresponding to the core (non-padding) region.
+#[allow(clippy::needless_range_loop)]
 fn find_core_column_range(msa: &[String], entries: &[SeqEntry]) -> (usize, usize) {
     let ncols = msa.first().map(|s| s.len()).unwrap_or(0);
     if ncols == 0 {

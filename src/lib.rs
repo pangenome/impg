@@ -1,4 +1,6 @@
 // lib.rs
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::type_complexity)]
 pub mod agc_index;
 pub mod syng_ffi;
 pub mod syng;
@@ -205,7 +207,6 @@ pub fn dispatch_gfa_engine(
         transclose_batch: engine_opts.transclose_batch,
         use_in_memory: !engine_opts.disk_backed,
         temp_dir: engine_opts.temp_dir.clone(),
-        ..graph::SeqwishConfig::default()
     };
 
     match engine_opts.engine {

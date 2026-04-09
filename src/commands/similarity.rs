@@ -552,6 +552,7 @@ fn calculate_pairwise_intersection(seq_a: &[char], seq_b: &[char]) -> usize {
 }
 
 // General case for comparing groups of sequences
+#[allow(clippy::needless_range_loop)]
 fn calculate_group_intersection(
     msa_chars: &[Vec<char>],
     group_a_indices: &[usize],

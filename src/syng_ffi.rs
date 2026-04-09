@@ -217,6 +217,8 @@ extern "C" {
     // --- Seqhash (seqhash.h) ---
 
     pub fn seqhashCreate(k: c_int, w: c_int, seed: c_int) -> *mut Seqhash;
+    /// Thread-safe variant — locks around srandom/random calls.
+    pub fn impg_seqhashCreateSafe(k: c_int, w: c_int, seed: c_int) -> *mut Seqhash;
 
     pub fn seqhashWrite(sh: *mut Seqhash, f: *mut c_void);
     pub fn seqhashRead(f: *mut c_void) -> *mut Seqhash;
