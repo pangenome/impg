@@ -44,22 +44,83 @@ fn parse_size(s: &str) -> Result<u64, String> {
         .map_err(|e| format!("invalid number '{}': {}", num_str, e))
 }
 
-/// Resolve the `--temp-dir` value: "ramdisk" → "/dev/shm" if available.
-/// When no value is provided, defaults to the current working directory.
-fn resolve_temp_dir(temp_dir: Option<String>) -> Option<String> {
-    match temp_dir.as_deref() {
+/// Resolve the `--temp-dir` value to an absolute path.
+///
+/// - `None` → current working directory (absolute).
+/// - `Some("ramdisk")` → `/dev/shm` if available, else cwd.
+/// - `Some(path)` → `path` (created if it doesn't exist), canonicalized to absolute.
+///
+/// The returned path is guaranteed to exist and to be absolute, so downstream
+/// code can treat it as a stable, process-wide temp root.
+fn resolve_temp_dir(temp_dir: Option<String>) -> io::Result<String> {
+    let raw = match temp_dir.as_deref() {
         Some("ramdisk") => {
             let dev_shm = std::path::Path::new("/dev/shm");
             if dev_shm.is_dir() {
-                Some("/dev/shm".to_string())
+                "/dev/shm".to_string()
             } else {
-                log::warn!("--temp-dir ramdisk requested but /dev/shm is not available, using current directory");
-                Some(".".to_string())
+                log::warn!(
+                    "--temp-dir ramdisk requested but /dev/shm is not available, using current directory"
+                );
+                std::env::current_dir()?.to_string_lossy().into_owned()
             }
         }
-        Some(other) => Some(other.to_string()),
-        None => Some(".".to_string()),
+        Some(other) => other.to_string(),
+        None => std::env::current_dir()?.to_string_lossy().into_owned(),
+    };
+
+    // Ensure the directory exists before canonicalizing.
+    let p = std::path::Path::new(&raw);
+    if !p.exists() {
+        std::fs::create_dir_all(p).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("failed to create --temp-dir '{}': {}", raw, e),
+            )
+        })?;
+    } else if !p.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("--temp-dir '{}' exists but is not a directory", raw),
+        ));
     }
+
+    let abs = std::fs::canonicalize(p).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("failed to canonicalize --temp-dir '{}': {}", raw, e),
+        )
+    })?;
+    Ok(abs.to_string_lossy().into_owned())
+}
+
+/// Install `temp_dir` as the process-wide temp root for every tool that
+/// reads `TMPDIR` (FastGA/GIXmake via fastga-rs, wfmash, gfaffix, Rust's
+/// `tempfile` crate) **and** for seqwish's internal tempfile state.
+fn setup_temp_dir(temp_dir: &str) -> io::Result<()> {
+    // Sanity check
+    let p = std::path::Path::new(temp_dir);
+    if !p.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "setup_temp_dir: '{}' does not exist or is not a directory",
+                temp_dir
+            ),
+        ));
+    }
+
+    // 1. Environment: picked up by Rust's tempfile crate, FastGA-rs
+    //    (which calls tempfile::Builder::new().tempdir() when no explicit
+    //    temp_dir is passed), wfmash, and anything else that honors TMPDIR.
+    std::env::set_var("TMPDIR", temp_dir);
+
+    // 2. Seqwish has its own process-wide tempfile directory that must be
+    //    configured separately — setting TMPDIR alone is not sufficient.
+    seqwish::tempfile::set_dir(temp_dir);
+
+    log::info!("[temp] Using temp directory: {}", temp_dir);
+    Ok(())
 }
 
 use impg::{EngineOpts, GfaEngine};
@@ -261,11 +322,12 @@ impl SmoothOpts {
 /// Engine + graph-building options shared by query, partition, similarity, and graph.
 #[derive(Parser, Debug)]
 struct EngineCliOpts {
-    /// GFA engine: 'pggb' (alignment+seqwish+smoothing+gfaffix, default),
-    /// 'seqwish' (alignment+seqwish+gfaffix), or 'poa' (single-pass POA)
+    /// GFA engine: 'pggb' (default), 'seqwish', or 'poa'.
+    /// Append ':WINDOW' to enable partitioned mode, e.g. 'pggb:10000'
+    /// splits into 10kb windows, builds per-window, laces, and normalizes.
     #[arg(help_heading = "Output options")]
-    #[clap(long = "gfa-engine", value_enum, default_value_t = GfaEngine::Pggb)]
-    engine: GfaEngine,
+    #[clap(long = "gfa-engine", default_value = "pggb", value_name = "ENGINE[:WINDOW]")]
+    engine_raw: String,
 
     /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2
     #[arg(help_heading = "Alignment options")]
@@ -287,18 +349,73 @@ struct EngineCliOpts {
 }
 
 impl EngineCliOpts {
+    /// Parse `--gfa-engine` value into (GfaEngine, Option<partition_size>).
+    ///
+    /// Accepted forms: `pggb`, `seqwish`, `poa`, `pggb:10000`, `seqwish:5000`, etc.
+    /// A bare colon (`pggb:`) is an error.
+    fn parse_engine(&self) -> io::Result<(GfaEngine, Option<usize>)> {
+        let raw = self.engine_raw.trim();
+        let (name, partition_size) = if let Some(idx) = raw.find(':') {
+            let engine_str = &raw[..idx];
+            let ps_str = &raw[idx + 1..];
+            if ps_str.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Invalid --gfa-engine '{}': expected a window size after ':', e.g. '{}:10000'",
+                        raw, engine_str
+                    ),
+                ));
+            }
+            let ps: usize = ps_str.parse().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Invalid --gfa-engine '{}': '{}' is not a valid window size (expected integer)",
+                        raw, ps_str
+                    ),
+                )
+            })?;
+            if ps < 1_000 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Invalid --gfa-engine '{}': window size must be at least 1000 bp",
+                        raw
+                    ),
+                ));
+            }
+            (engine_str, Some(ps))
+        } else {
+            (raw, None)
+        };
+
+        let engine = match name {
+            "pggb" => GfaEngine::Pggb,
+            "seqwish" => GfaEngine::Seqwish,
+            "poa" => GfaEngine::Poa,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Unknown GFA engine '{}'. Valid engines: pggb, seqwish, poa",
+                        name
+                    ),
+                ));
+            }
+        };
+
+        Ok((engine, partition_size))
+    }
+
     /// Parse POA scoring parameters.
     fn parse_poa_scoring(&self) -> io::Result<(u8, u8, u8, u8, u8, u8)> {
         parse_poa_scoring_string(&self.poa_scoring)
     }
 
     /// Validate that CLI options are compatible with the selected engine.
-    ///
-    /// - `poa` engine: no alignment step → `--sparsify`, `--no-filter`, and
-    ///   non-default alignment/seqwish/smooth params are invalid.
-    /// - `seqwish` engine: no smoothing → non-default smooth params are invalid.
-    fn validate_engine_params(&self) -> io::Result<()> {
-        match self.engine {
+    fn validate_engine_params(&self, engine: GfaEngine) -> io::Result<()> {
+        match engine {
             GfaEngine::Poa => {
                 if self.aln.sparsify.is_some() {
                     return Err(io::Error::new(
@@ -318,16 +435,23 @@ impl EngineCliOpts {
         Ok(())
     }
 
-    /// Resolve temp_dir ("ramdisk" → "/dev/shm") and build an `EngineOpts`.
-    fn build(&self, num_threads: usize) -> io::Result<EngineOpts> {
-        self.validate_engine_params()?;
+    /// Resolve and build an `EngineOpts`.
+    fn build(
+        &self,
+        num_threads: usize,
+    ) -> io::Result<EngineOpts> {
+        let (engine, partition_size) = self.parse_engine()?;
+        self.validate_engine_params(engine)?;
+
         let sparsify = parse_sparsify(&self.aln.sparsify)?;
         let mash_params = sweepga::knn_graph::MashParams {
             kmer_size: self.aln.mash_kmer_size,
             sketch_size: self.aln.mash_sketch_size,
         };
+        let temp_dir = resolve_temp_dir(self.aln.temp_dir.clone())?;
+        setup_temp_dir(&temp_dir)?;
         build_engine_opts(
-            self.engine,
+            engine,
             num_threads,
             &self.aln,
             sparsify,
@@ -335,7 +459,8 @@ impl EngineCliOpts {
             &self.seqwish,
             &self.smooth,
             self.debug_dir.clone(),
-            resolve_temp_dir(self.aln.temp_dir.clone()),
+            Some(temp_dir),
+            partition_size,
         )
     }
 }
@@ -1224,7 +1349,8 @@ fn run() -> io::Result<()> {
             reference,
         } => {
             initialize_threads_and_log(&common);
-            let temp_dir = resolve_temp_dir(temp_dir);
+            let temp_dir = resolve_temp_dir(temp_dir)?;
+            setup_temp_dir(&temp_dir)?;
 
             // Check that at least one input is provided
             if files.is_none() && file_list.is_none() {
@@ -1301,7 +1427,7 @@ fn run() -> io::Result<()> {
                     &compress,
                     fill_gaps,
                     skip_validation,
-                    temp_dir,
+                    Some(temp_dir),
                     sequence_index.as_ref(),
                     common.verbose,
                 )?;
@@ -1345,23 +1471,37 @@ fn run() -> io::Result<()> {
                 // Partition always uses transitive queries
             }
 
+            // Parse engine spec early (engine + optional partition size)
+            let (parsed_engine, parsed_partition_size) = engine_cli.parse_engine()?;
+
+            // Validate partitioned mode + --separate-files are mutually exclusive
+            if parsed_partition_size.is_some() && separate_files {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Partitioned --gfa-engine (e.g. 'pggb:10000') and --separate-files are mutually exclusive",
+                ));
+            }
+
             // For size validation, flat POA on "gfa" needs the same limit as "gfa-poa"
-            let size_check_format = if output_format == "gfa" && engine_cli.engine == GfaEngine::Poa
-            {
+            let size_check_format = if output_format == "gfa" && parsed_engine == GfaEngine::Poa {
                 "gfa-poa"
             } else {
                 &output_format
             };
-            validate_region_size(
-                0,
-                window_size as i32,
-                size_check_format,
-                merge_distance,
-                gfa_maf_fasta.force_large_region,
-            )?;
+            // Skip region size validation when partitioned mode is active
+            if parsed_partition_size.is_none() {
+                validate_region_size(
+                    0,
+                    window_size as i32,
+                    size_check_format,
+                    merge_distance,
+                    gfa_maf_fasta.force_large_region,
+                )?;
+            }
 
             // Validate single-file output compatibility
-            if !separate_files && output_format != "bed" {
+            // When partitioned mode is active, single-file GFA output is allowed (laced together)
+            if !separate_files && output_format != "bed" && parsed_partition_size.is_none() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
@@ -1673,9 +1813,11 @@ fn run() -> io::Result<()> {
                 sequence_files_for_impg,
             )?;
 
+            // Parse engine spec early (engine + optional partition size)
+            let (parsed_engine, parsed_partition_size) = engine_cli.parse_engine()?;
+
             // For size validation, flat POA on "gfa" needs the same limit as the old "gfa-poa"
-            let size_check_format = if output_format == "gfa" && engine_cli.engine == GfaEngine::Poa
-            {
+            let size_check_format = if output_format == "gfa" && parsed_engine == GfaEngine::Poa {
                 "gfa-poa"
             } else {
                 &output_format
@@ -1718,13 +1860,16 @@ fn run() -> io::Result<()> {
                     &name,
                     query.transitive_opts.effective_min_transitive_len(),
                 )?;
-                validate_region_size(
-                    target_range.0,
-                    target_range.1,
-                    size_check_format,
-                    query.effective_merge_distance(),
-                    gfa_maf_fasta.force_large_region,
-                )?;
+                // Skip region size validation when --partition-size is set (each sub-window is within limits)
+                if parsed_partition_size.is_none() {
+                    validate_region_size(
+                        target_range.0,
+                        target_range.1,
+                        size_check_format,
+                        query.effective_merge_distance(),
+                        gfa_maf_fasta.force_large_region,
+                    )?;
+                }
                 (vec![(target_name, target_range, name)], true)
             } else if let Some(target_bed) = &query.target_bed {
                 let targets = partition::parse_bed_file(target_bed)?;
@@ -1737,13 +1882,16 @@ fn run() -> io::Result<()> {
                         name,
                         query.transitive_opts.effective_min_transitive_len(),
                     )?;
-                    validate_region_size(
-                        *start,
-                        *end,
-                        size_check_format,
-                        query.effective_merge_distance(),
-                        gfa_maf_fasta.force_large_region,
-                    )?;
+                    // Skip region size validation when --partition-size is set
+                    if parsed_partition_size.is_none() {
+                        validate_region_size(
+                            *start,
+                            *end,
+                            size_check_format,
+                            query.effective_merge_distance(),
+                            gfa_maf_fasta.force_large_region,
+                        )?;
+                    }
                 }
                 (targets, false)
             } else {
@@ -1853,18 +2001,36 @@ fn run() -> io::Result<()> {
                         )?;
                     }
                     "gfa" => {
-                        let engine_opts = engine_cli.build(common.threads.get())?;
-                        output_results_gfa(
-                            &impg,
-                            &mut results,
-                            &mut find_output_stream(&output_prefix, "gfa")?,
-                            sequence_index.as_ref().unwrap(),
-                            &name,
-                            query.effective_merge_distance(),
-                            query.merge_strands_for_output("gfa"),
-                            scoring_params,
-                            &engine_opts,
+                        let engine_opts = engine_cli.build(
+                            common.threads.get(),
                         )?;
+                        if let Some(ps) = engine_opts.partition_size {
+                            // Partitioned mode: split query region into sub-windows
+                            output_results_gfa_partitioned(
+                                &impg,
+                                &mut find_output_stream(&output_prefix, "gfa")?,
+                                sequence_index.as_ref().unwrap(),
+                                scoring_params,
+                                &engine_opts,
+                                &target_name,
+                                target_range,
+                                ps,
+                                &query,
+                                subset_filter.as_ref(),
+                            )?;
+                        } else {
+                            output_results_gfa(
+                                &impg,
+                                &mut results,
+                                &mut find_output_stream(&output_prefix, "gfa")?,
+                                sequence_index.as_ref().unwrap(),
+                                &name,
+                                query.effective_merge_distance(),
+                                query.merge_strands_for_output("gfa"),
+                                scoring_params,
+                                &engine_opts,
+                            )?;
+                        }
                     }
                     "maf" => {
                         output_results_maf(
@@ -2194,13 +2360,23 @@ fn run() -> io::Result<()> {
                 ));
             }
 
-            if engine_cli.engine == GfaEngine::Seqwish || engine_cli.engine == GfaEngine::Pggb {
+            // Parse engine spec early
+            let (parsed_engine, parsed_partition_size) = engine_cli.parse_engine()?;
+
+            if parsed_partition_size.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Partitioned mode is not yet supported for the similarity command",
+                ));
+            }
+
+            if parsed_engine == GfaEngine::Seqwish || parsed_engine == GfaEngine::Pggb {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "The 'seqwish' and 'pggb' engines are not yet implemented for the similarity command. Use 'poa'.",
                 ));
             }
-            engine_cli.validate_engine_params()?;
+            engine_cli.validate_engine_params(parsed_engine)?;
 
             // Resolve alignment files once (supports process substitution inputs)
             let alignment_files = resolve_alignment_files(&alignment)?;
@@ -2380,8 +2556,10 @@ fn run() -> io::Result<()> {
             common,
         } => {
             initialize_threads_and_log(&common);
-            engine_cli.validate_engine_params()?;
-            let temp_dir = resolve_temp_dir(engine_cli.aln.temp_dir.clone());
+            let (parsed_engine, parsed_partition_size) = engine_cli.parse_engine()?;
+            engine_cli.validate_engine_params(parsed_engine)?;
+            let temp_dir = resolve_temp_dir(engine_cli.aln.temp_dir.clone())?;
+            setup_temp_dir(&temp_dir)?;
 
             let fasta_files = fasta_input.resolve_sequence_files()?;
             if fasta_files.is_empty() {
@@ -2410,90 +2588,138 @@ fn run() -> io::Result<()> {
 
             let poa_scoring = engine_cli.parse_poa_scoring()?;
 
-            // Shared graph build config — identical for the seqwish and pggb engines; built
-            // once here so neither arm repeats the field list.
-            let graph_config = graph::GraphBuildConfig {
-                num_threads: common.threads.get(),
-                frequency_multiplier: engine_cli.aln.fastga_frequency_multiplier,
-                frequency: engine_cli.aln.fastga_frequency,
-                min_aln_length: engine_cli.aln.min_aln_length,
-                repeat_max: engine_cli.seqwish.repeat_max,
-                min_repeat_dist: engine_cli.seqwish.min_repeat_dist,
-                min_match_len: engine_cli.seqwish.min_match_len,
-                sparse_factor: engine_cli.seqwish.sparse_factor,
-                transclose_batch: engine_cli.seqwish.transclose_batch,
-                use_in_memory: !engine_cli.seqwish.disk_backed,
-                show_progress: common.verbose > 0,
-                temp_dir,
-                input_paf: paf_file,
-                aligner: engine_cli.aln.aligner,
-                no_filter: engine_cli.aln.no_filter,
-                num_mappings: engine_cli.aln.num_mappings,
-                scaffold_jump: engine_cli.aln.scaffold_jump,
-                scaffold_mass: engine_cli.aln.scaffold_mass,
-                scaffold_filter: engine_cli.aln.scaffold_filter,
-                overlap: engine_cli.aln.overlap,
-                min_identity: engine_cli.aln.min_aln_identity,
-                scaffold_dist: engine_cli.aln.scaffold_dist,
-                min_map_length: engine_cli.aln.min_map_length,
-                debug_dir: None,
-                sparsify: sparsify_strategy,
-                mash_params: sweepga::knn_graph::MashParams {
-                    kmer_size: engine_cli.aln.mash_kmer_size,
-                    sketch_size: engine_cli.aln.mash_sketch_size,
-                },
-                batch_bytes: engine_cli.aln.batch_bytes,
-            };
+            if let Some(ps) = parsed_partition_size {
+                // Partitioned mode: align → IMPG → partition → per-partition engine → lace → gfaffix
+                // Build engine_opts before consuming engine_cli fields
+                let engine_opts = engine_cli.build(common.threads.get())?;
 
-            match engine_cli.engine {
-                GfaEngine::Poa => {
-                    let scoring = poa_scoring;
+                let graph_config = graph::GraphBuildConfig {
+                    num_threads: common.threads.get(),
+                    frequency_multiplier: engine_cli.aln.fastga_frequency_multiplier,
+                    frequency: engine_cli.aln.fastga_frequency,
+                    min_aln_length: engine_cli.aln.min_aln_length,
+                    repeat_max: engine_cli.seqwish.repeat_max,
+                    min_repeat_dist: engine_cli.seqwish.min_repeat_dist,
+                    min_match_len: engine_cli.seqwish.min_match_len,
+                    sparse_factor: engine_cli.seqwish.sparse_factor,
+                    transclose_batch: engine_cli.seqwish.transclose_batch,
+                    use_in_memory: !engine_cli.seqwish.disk_backed,
+                    show_progress: common.verbose > 0,
+                    temp_dir: Some(temp_dir.clone()),
+                    input_paf: paf_file,
+                    aligner: engine_cli.aln.aligner,
+                    no_filter: engine_cli.aln.no_filter,
+                    num_mappings: engine_cli.aln.num_mappings,
+                    scaffold_jump: engine_cli.aln.scaffold_jump,
+                    scaffold_mass: engine_cli.aln.scaffold_mass,
+                    scaffold_filter: engine_cli.aln.scaffold_filter,
+                    overlap: engine_cli.aln.overlap,
+                    min_identity: engine_cli.aln.min_aln_identity,
+                    scaffold_dist: engine_cli.aln.scaffold_dist,
+                    min_map_length: engine_cli.aln.min_map_length,
+                    debug_dir: None,
+                    sparsify: sparsify_strategy,
+                    mash_params: sweepga::knn_graph::MashParams {
+                        kmer_size: engine_cli.aln.mash_kmer_size,
+                        sketch_size: engine_cli.aln.mash_sketch_size,
+                    },
+                    batch_bytes: engine_cli.aln.batch_bytes,
+                };
 
-                    if output == "-" {
-                        let stdout = io::stdout();
-                        let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
-                        graph::run_graph_build_poa(
-                            fasta_files,
-                            &mut out,
-                            scoring,
-                            common.threads.get(),
-                        )?;
-                    } else {
-                        let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
-                        graph::run_graph_build_poa(
-                            fasta_files,
-                            &mut out,
-                            scoring,
-                            common.threads.get(),
-                        )?;
+                let scoring = Some(poa_scoring);
+                graph::run_graph_build_partitioned(
+                    fasta_files,
+                    &output,
+                    &graph_config,
+                    &engine_opts,
+                    scoring,
+                    ps,
+                )?;
+            } else {
+                // Shared graph build config — identical for the seqwish and pggb engines
+                let graph_config = graph::GraphBuildConfig {
+                    num_threads: common.threads.get(),
+                    frequency_multiplier: engine_cli.aln.fastga_frequency_multiplier,
+                    frequency: engine_cli.aln.fastga_frequency,
+                    min_aln_length: engine_cli.aln.min_aln_length,
+                    repeat_max: engine_cli.seqwish.repeat_max,
+                    min_repeat_dist: engine_cli.seqwish.min_repeat_dist,
+                    min_match_len: engine_cli.seqwish.min_match_len,
+                    sparse_factor: engine_cli.seqwish.sparse_factor,
+                    transclose_batch: engine_cli.seqwish.transclose_batch,
+                    use_in_memory: !engine_cli.seqwish.disk_backed,
+                    show_progress: common.verbose > 0,
+                    temp_dir: Some(temp_dir),
+                    input_paf: paf_file,
+                    aligner: engine_cli.aln.aligner,
+                    no_filter: engine_cli.aln.no_filter,
+                    num_mappings: engine_cli.aln.num_mappings,
+                    scaffold_jump: engine_cli.aln.scaffold_jump,
+                    scaffold_mass: engine_cli.aln.scaffold_mass,
+                    scaffold_filter: engine_cli.aln.scaffold_filter,
+                    overlap: engine_cli.aln.overlap,
+                    min_identity: engine_cli.aln.min_aln_identity,
+                    scaffold_dist: engine_cli.aln.scaffold_dist,
+                    min_map_length: engine_cli.aln.min_map_length,
+                    debug_dir: None,
+                    sparsify: sparsify_strategy,
+                    mash_params: sweepga::knn_graph::MashParams {
+                        kmer_size: engine_cli.aln.mash_kmer_size,
+                        sketch_size: engine_cli.aln.mash_sketch_size,
+                    },
+                    batch_bytes: engine_cli.aln.batch_bytes,
+                };
+
+                match parsed_engine {
+                    GfaEngine::Poa => {
+                        let scoring = poa_scoring;
+
+                        if output == "-" {
+                            let stdout = io::stdout();
+                            let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
+                            graph::run_graph_build_poa(
+                                fasta_files,
+                                &mut out,
+                                scoring,
+                                common.threads.get(),
+                            )?;
+                        } else {
+                            let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
+                            graph::run_graph_build_poa(
+                                fasta_files,
+                                &mut out,
+                                scoring,
+                                common.threads.get(),
+                            )?;
+                        }
                     }
-                }
-                GfaEngine::Seqwish => {
-                    graph::run_graph_build(fasta_files, &output, graph_config)?;
-                }
-                GfaEngine::Pggb => {
-                    let target_poa_lengths = engine_cli.smooth.parse_target_poa_lengths()?;
-                    if output == "-" {
-                        let stdout = io::stdout();
-                        let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
-                        graph::run_graph_build_pggb(
-                            fasta_files,
-                            &mut out,
-                            &graph_config,
-                            target_poa_lengths,
-                            engine_cli.smooth.max_node_length,
-                            engine_cli.smooth.poa_padding_fraction,
-                        )?;
-                    } else {
-                        let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
-                        graph::run_graph_build_pggb(
-                            fasta_files,
-                            &mut out,
-                            &graph_config,
-                            target_poa_lengths,
-                            engine_cli.smooth.max_node_length,
-                            engine_cli.smooth.poa_padding_fraction,
-                        )?;
+                    GfaEngine::Seqwish => {
+                        graph::run_graph_build(fasta_files, &output, graph_config)?;
+                    }
+                    GfaEngine::Pggb => {
+                        let target_poa_lengths = engine_cli.smooth.parse_target_poa_lengths()?;
+                        if output == "-" {
+                            let stdout = io::stdout();
+                            let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
+                            graph::run_graph_build_pggb(
+                                fasta_files,
+                                &mut out,
+                                &graph_config,
+                                target_poa_lengths,
+                                engine_cli.smooth.max_node_length,
+                                engine_cli.smooth.poa_padding_fraction,
+                            )?;
+                        } else {
+                            let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
+                            graph::run_graph_build_pggb(
+                                fasta_files,
+                                &mut out,
+                                &graph_config,
+                                target_poa_lengths,
+                                engine_cli.smooth.max_node_length,
+                                engine_cli.smooth.poa_padding_fraction,
+                            )?;
+                        }
                     }
                 }
             }
@@ -2506,7 +2732,8 @@ fn run() -> io::Result<()> {
             common,
         } => {
             initialize_threads_and_log(&common);
-            let temp_dir = resolve_temp_dir(aln.temp_dir);
+            let temp_dir = resolve_temp_dir(aln.temp_dir)?;
+            setup_temp_dir(&temp_dir)?;
 
             let fasta_files = fasta_input.resolve_sequence_files()?;
             if fasta_files.is_empty() {
@@ -2555,7 +2782,7 @@ fn run() -> io::Result<()> {
                 output_format,
                 show_progress: common.verbose > 0,
                 aligner: aln.aligner,
-                temp_dir,
+                temp_dir: Some(temp_dir),
                 batch_bytes: aln.batch_bytes,
                 no_filter: aln.no_filter,
                 num_mappings: aln.num_mappings,
@@ -2735,6 +2962,7 @@ fn build_engine_opts(
     smooth: &SmoothOpts,
     debug_dir: Option<String>,
     temp_dir: Option<String>,
+    partition_size: Option<usize>,
 ) -> io::Result<EngineOpts> {
     Ok(EngineOpts {
         engine,
@@ -2761,6 +2989,8 @@ fn build_engine_opts(
         transclose_batch: seqwish.transclose_batch,
         disk_backed: seqwish.disk_backed,
         temp_dir,
+        batch_bytes: aln.batch_bytes.clone(),
+        partition_size,
         target_poa_lengths: smooth.parse_target_poa_lengths()?,
         max_node_length: smooth.max_node_length,
         poa_padding_fraction: smooth.poa_padding_fraction,
@@ -4015,7 +4245,80 @@ fn output_results_gfa(
         scoring_params,
         engine_opts,
     )?;
-    writeln!(out, "{gfa_output}")?;
+    out.write_all(gfa_output.as_bytes())?;
+
+    Ok(())
+}
+
+/// Partitioned GFA output for the query command: splits the query region into
+/// sub-windows of `partition_size` bp, queries each, then runs the partitioned
+/// GFA pipeline (per-partition engine → lace → gfaffix).
+fn output_results_gfa_partitioned(
+    impg: &impl ImpgIndex,
+    out: &mut dyn Write,
+    sequence_index: &UnifiedSequenceIndex,
+    scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
+    engine_opts: &EngineOpts,
+    target_name: &str,
+    target_range: (i32, i32),
+    partition_size: usize,
+    query: &QueryOpts,
+    subset_filter: Option<&SubsetFilter>,
+) -> io::Result<()> {
+    let (start, end) = target_range;
+    let ps = partition_size as i32;
+
+    // Split into sub-windows
+    let mut partitions: Vec<Vec<Interval<u32>>> = Vec::new();
+    let mut window_start = start;
+
+    while window_start < end {
+        let window_end = (window_start + ps).min(end);
+
+        // Query this sub-window
+        let mut results = perform_query(
+            impg,
+            target_name,
+            (window_start, window_end),
+            false, // no CIGAR needed for GFA
+            query.min_identity,
+            query.min_output_length,
+            query.transitive,
+            query.transitive_opts.transitive_dfs,
+            &query.transitive_opts,
+            Some(sequence_index),
+            query.approximate,
+            subset_filter,
+        )?;
+
+        if !results.is_empty() {
+            // Merge intervals
+            merge_query_adjusted_intervals(
+                &mut results,
+                query.effective_merge_distance(),
+                query.merge_strands_for_output("gfa"),
+            );
+
+            // Extract query intervals
+            let query_intervals: Vec<Interval<u32>> = results
+                .drain(..)
+                .map(|(qi, _, _)| qi)
+                .collect();
+
+            partitions.push(query_intervals);
+        }
+
+        window_start = window_end;
+    }
+
+    let gfa_output = impg::partitioned_gfa_pipeline(
+        &partitions,
+        impg,
+        sequence_index,
+        scoring_params,
+        engine_opts,
+    )?;
+    out.write_all(gfa_output.as_bytes())?;
 
     Ok(())
 }

@@ -672,12 +672,6 @@ pub fn sweepga_align(
         let temp = tempfile::Builder::new().suffix(".paf").tempfile()?;
         return Ok(temp);
     }
-
-    // Set up temp directory
-    if let Some(ref temp_dir) = config.temp_dir {
-        std::env::set_var("TMPDIR", temp_dir);
-    }
-
     // Generate pairs based on sparsification strategy
     let pairs = generate_pairs_for_sequences(sequences, &config.sparsify, &config.mash_params);
     let total_possible = sequences.len() * (sequences.len() - 1) / 2;

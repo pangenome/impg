@@ -884,6 +884,8 @@ pub struct SeqwishConfig {
     pub transclose_batch: u64,
     /// Use in-memory interval trees (false = disk-backed, slower but lower memory)
     pub use_in_memory: bool,
+    /// Batch genome alignment to limit resource usage per batch (e.g. "2G", "500M").
+    pub batch_bytes: Option<String>,
 }
 
 impl Default for SeqwishConfig {
@@ -912,6 +914,7 @@ impl Default for SeqwishConfig {
             sparse_factor: 0.0,
             transclose_batch: 10_000_000,
             use_in_memory: true,
+            batch_bytes: None,
         }
     }
 }
@@ -980,6 +983,7 @@ pub fn generate_gfa_seqwish_from_intervals(
         sparse_factor: config.sparse_factor,
         transclose_batch: config.transclose_batch,
         use_in_memory: config.use_in_memory,
+        batch_bytes: config.batch_bytes.clone(),
         show_progress: false,
         ..crate::commands::graph::GraphBuildConfig::default()
     };

@@ -33,7 +33,7 @@ spoa_rs = { git = "https://github.com/AndreaGuarracino/spoa-rs.git" }
 rust-htslib = { version = "1.0.0", default-features = false, features = ["libdeflate"] }
 
 # Dependencies for AGC format (for sequences) support
-ragc-core = { git = "https://github.com/AndreaGuarracino/ragc", rev = "e9e4a6f" }
+ragc-core = { git = "https://github.com/AndreaGuarracino/ragc", rev = "ebfa5eb243541a3d7a5e2f4e3ccb8961283149a0" }
 
 # Dependencies for 1ALN format (for alignments) support
 #onecode = { path = "/home/guarracino/git/onecode-rs" }
@@ -72,8 +72,8 @@ default = []
 
 # It can be removed once the ragc PR is merged and we switch both impg and sweepga to the same upstream rev
 [patch."https://github.com/ekg/ragc"]
-ragc-core = { git = "https://github.com/AndreaGuarracino/ragc", rev = "e9e4a6f" }
-ragc-common = { git = "https://github.com/AndreaGuarracino/ragc", rev = "e9e4a6f" }
+ragc-core = { git = "https://github.com/AndreaGuarracino/ragc", rev = "ebfa5eb243541a3d7a5e2f4e3ccb8961283149a0" }
+ragc-common = { git = "https://github.com/AndreaGuarracino/ragc", rev = "ebfa5eb243541a3d7a5e2f4e3ccb8961283149a0" }
 
 # Redirect gfaffix's handlegraph = "0.7.0-alpha.9" to impg's pinned git rev (same API, 3 additive commits newer)
 [patch.crates-io]
