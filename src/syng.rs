@@ -202,6 +202,9 @@ pub struct SyngIndex {
 // SAFETY: The C structures are only accessed through &self or &mut self,
 // and the C library's read-only query functions are thread-safe.
 unsafe impl Send for SyngIndex {}
+// SAFETY: Read-only query functions (query_region, walk_path) only read from
+// the GBWT/KmerHash/Seqhash structures and create local iterators.
+unsafe impl Sync for SyngIndex {}
 
 impl SyngIndex {
     /// Create a new, empty SyngIndex with default parameters.

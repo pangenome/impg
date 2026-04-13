@@ -989,6 +989,16 @@ enum Args {
         #[clap(flatten)]
         alignment: AlignmentOpts,
 
+        /// Syng index prefix (mutually exclusive with -a/--alignment-files)
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, value_parser, conflicts_with_all = ["alignment_files", "alignment_list"])]
+        syng: Option<String>,
+
+        /// Boundary padding in bp for syng queries (default: 120 = 2× syncmer length)
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, value_parser, default_value_t = 120)]
+        syng_padding: u64,
+
         // --- Partition-specific ---
         /// Window size for partitioning
         #[arg(help_heading = "Partition options")]
@@ -1436,6 +1446,8 @@ fn run() -> io::Result<()> {
         Args::Partition {
             common,
             alignment,
+            syng,
+            syng_padding,
             window_size,
             output_format,
             output_folder,
@@ -1511,6 +1523,69 @@ fn run() -> io::Result<()> {
                 ));
             }
 
+            // ─── Syng-based partition path ──────────────────────────────────
+            if let Some(ref syng_prefix) = syng {
+                if approximate {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--approximate mode is not supported with --syng",
+                    ));
+                }
+
+                info!("Loading syng index from prefix: {}", syng_prefix);
+                let syng_index = impg::syng::SyngIndex::load(syng_prefix, impg::syng::SyncmerParams::default())?;
+                let seq_index = syng_index.build_seq_index();
+
+                let reverse_complement = gfa_maf_fasta.reverse_complement;
+                let needs_sequences = matches!(output_format.as_str(), "gfa" | "maf" | "fasta");
+                let sequence_index = if needs_sequences {
+                    let si = gfa_maf_fasta.sequence.build_sequence_index()?;
+                    if si.is_none() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Sequence files are required for '{}' output with --syng. Use --sequence-files or --sequence-list", output_format),
+                        ));
+                    }
+                    si
+                } else {
+                    None
+                };
+
+                let scoring_params = if matches!(output_format.as_str(), "gfa" | "maf") {
+                    Some(parse_poa_scoring_string(&engine_cli.poa_scoring)?)
+                } else {
+                    None
+                };
+
+                let engine_config = engine_cli.build(common.threads.get())?;
+                let wrapper = impg::SyngImpgWrapper::new(syng_index, seq_index, syng_padding);
+
+                partition::partition_alignments(
+                    &wrapper,
+                    window_size,
+                    starting_sequences_file.as_deref(),
+                    &selection_mode,
+                    merge_distance,
+                    min_identity,
+                    min_missing_size,
+                    min_boundary_distance,
+                    transitive_opts.transitive_dfs,
+                    transitive_opts.max_depth,
+                    transitive_opts.effective_min_transitive_len(),
+                    transitive_opts.min_distance_between_ranges,
+                    &output_format,
+                    output_folder.as_deref(),
+                    sequence_index.as_ref(),
+                    scoring_params,
+                    reverse_complement,
+                    common.verbose > 1,
+                    separate_files,
+                    false, // approximate always false for syng
+                    &engine_config,
+                )?;
+            } else {
+            // ─── Normal (alignment-based) partition path ────────────────────
+
             // Resolve alignment files once (supports process substitution inputs)
             let alignment_files = resolve_alignment_files(&alignment)?;
 
@@ -1561,6 +1636,7 @@ fn run() -> io::Result<()> {
                 approximate,
                 &engine_config,
             )?;
+            }
         }
         Args::Query {
             common,
