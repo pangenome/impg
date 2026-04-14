@@ -5,7 +5,7 @@ use spoa_rs::{AlignmentEngine, AlignmentType as SpoaAlignmentType, Graph as Spoa
 use std::io::{self, BufWriter, Write};
 
 // Gfasort imports for graph sorting
-use gfasort::gfa_parser::{load_gfa, load_gfa_from_str};
+use gfasort::gfa_parser::load_gfa_from_str;
 use gfasort::ygs::{unchop_only, ygs_sort, YgsParams};
 
 #[derive(Clone)]
@@ -836,89 +836,6 @@ pub fn run_gfaffix(gfa_content: &str, _num_threads: usize) -> io::Result<String>
         .map_err(|e| io::Error::other(format!("gfaffix: failed to read output: {}", e)))
 }
 
-/// Configuration for seqwish-based GFA generation
-pub struct SeqwishConfig {
-    /// Number of threads for parallel processing
-    pub num_threads: usize,
-    /// K-mer frequency multiplier (frequency = num_sequences * multiplier)
-    pub frequency_multiplier: usize,
-    /// Minimum alignment length for the aligner
-    pub min_aln_length: u64,
-    /// Optional temp directory for intermediate files
-    pub temp_dir: Option<String>,
-    /// Skip PAF filtering (faster but may produce broken graphs)
-    pub no_filter: bool,
-    /// Aligner backend: "wfmash" or "fastga"
-    pub aligner: String,
-    /// n:m-best mappings kept in query:target dimensions (e.g., "1:1", "many:many")
-    pub num_mappings: String,
-    /// Scaffold jump/gap distance (0 = disable scaffolding)
-    pub scaffold_jump: u64,
-    /// Minimum scaffold chain length
-    pub scaffold_mass: u64,
-    /// Scaffold filter mode (e.g., "1:1", "many:many")
-    pub scaffold_filter: String,
-    /// Maximum overlap ratio for plane sweep filtering
-    pub overlap: f64,
-    /// Minimum identity threshold (0.0-1.0)
-    pub min_identity: f64,
-    /// Maximum scaffold deviation distance (0 = no limit)
-    pub scaffold_dist: u64,
-    /// Minimum mapping length for post-alignment filtering
-    pub min_map_length: u64,
-    /// Optional directory to save intermediate debug files (FASTA, raw PAF, filtered PAF).
-    pub debug_dir: Option<String>,
-    /// Unified sparsification strategy.
-    pub sparsify: sweepga::knn_graph::SparsificationStrategy,
-    /// Mash distance parameters for sparsification sketching.
-    pub mash_params: sweepga::knn_graph::MashParams,
-    /// Maximum repeat count for transitive closure (0 = no limit)
-    pub repeat_max: u64,
-    /// Minimum distance between repeats
-    pub min_repeat_dist: u64,
-    /// Minimum match length filter for alignments
-    pub min_match_len: u64,
-    /// Sparse factor for input matches (0.0 = keep all)
-    pub sparse_factor: f32,
-    /// Batch size for transitive closure computation
-    pub transclose_batch: u64,
-    /// Use in-memory interval trees (false = disk-backed, slower but lower memory)
-    pub use_in_memory: bool,
-    /// Batch genome alignment to limit resource usage per batch (e.g. "2G", "500M").
-    pub batch_bytes: Option<String>,
-}
-
-impl Default for SeqwishConfig {
-    fn default() -> Self {
-        SeqwishConfig {
-            num_threads: 4,
-            frequency_multiplier: 10,
-            min_aln_length: 0,
-            temp_dir: None,
-            no_filter: false,
-            aligner: "wfmash".to_string(),
-            num_mappings: "many:many".to_string(),
-            scaffold_jump: 50_000,
-            scaffold_mass: 10_000,
-            scaffold_filter: "many:many".to_string(),
-            overlap: 0.95,
-            min_identity: 0.0,
-            scaffold_dist: 0,
-            min_map_length: 0,
-            debug_dir: None,
-            sparsify: sweepga::knn_graph::SparsificationStrategy::None,
-            mash_params: sweepga::knn_graph::MashParams::default(),
-            repeat_max: 0,
-            min_repeat_dist: 0,
-            min_match_len: 23,
-            sparse_factor: 0.0,
-            transclose_batch: 10_000_000,
-            use_in_memory: true,
-            batch_bytes: None,
-        }
-    }
-}
-
 /// Generate a variation graph from intervals using sweepga+seqwish (graph induction
 /// via transitive closure). The resulting graph is raw (unsmoothed).
 ///
@@ -929,7 +846,7 @@ pub fn generate_gfa_seqwish_from_intervals(
     impg: &impl ImpgIndex,
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
-    config: &SeqwishConfig,
+    config: &crate::commands::graph::GraphBuildConfig,
 ) -> io::Result<String> {
     if results.is_empty() {
         return Ok(String::from("H\tVN:Z:1.0\n"));
@@ -959,35 +876,6 @@ pub fn generate_gfa_seqwish_from_intervals(
     }
 
     // 3) Build graph using the same pipeline as `graph --gfa-engine seqwish`
-    let graph_config = crate::commands::graph::GraphBuildConfig {
-        num_threads: config.num_threads,
-        frequency_multiplier: config.frequency_multiplier,
-        min_aln_length: config.min_aln_length,
-        temp_dir: config.temp_dir.clone(),
-        no_filter: config.no_filter,
-        aligner: config.aligner.clone(),
-        num_mappings: config.num_mappings.clone(),
-        scaffold_jump: config.scaffold_jump,
-        scaffold_mass: config.scaffold_mass,
-        scaffold_filter: config.scaffold_filter.clone(),
-        overlap: config.overlap,
-        min_identity: config.min_identity,
-        scaffold_dist: config.scaffold_dist,
-        min_map_length: config.min_map_length,
-        debug_dir: config.debug_dir.clone(),
-        sparsify: config.sparsify.clone(),
-        mash_params: config.mash_params.clone(),
-        repeat_max: config.repeat_max,
-        min_repeat_dist: config.min_repeat_dist,
-        min_match_len: config.min_match_len,
-        sparse_factor: config.sparse_factor,
-        transclose_batch: config.transclose_batch,
-        use_in_memory: config.use_in_memory,
-        batch_bytes: config.batch_bytes.clone(),
-        show_progress: false,
-        ..crate::commands::graph::GraphBuildConfig::default()
-    };
-
     let fasta_path = combined_fasta
         .path()
         .to_str()
@@ -995,7 +883,7 @@ pub fn generate_gfa_seqwish_from_intervals(
         .to_string();
 
     let mut gfa_output = Vec::new();
-    crate::commands::graph::build_graph(&[fasta_path], &mut gfa_output, &graph_config)?;
+    crate::commands::graph::build_graph(&[fasta_path], &mut gfa_output, config)?;
 
     String::from_utf8(gfa_output).map_err(|e| {
         io::Error::new(

@@ -1,7 +1,7 @@
 use clap::Parser;
 use coitrees::{Interval, IntervalTree};
 use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
-use impg::commands::{align, graph, lace, partition, refine, similarity};
+use impg::commands::{graph, lace, partition, refine, similarity};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::impg_index::{ImpgIndex, ImpgWrapper};
 use impg::multi_impg::MultiImpg;
@@ -124,20 +124,6 @@ fn setup_temp_dir(temp_dir: &str) -> io::Result<()> {
 use impg::{EngineOpts, GfaEngine};
 use sweepga::knn_graph::SparsificationStrategy;
 
-/// Parse an optional sparsify string into a SparsificationStrategy.
-/// Returns `SparsificationStrategy::None` if the input is `None`.
-fn parse_sparsify(s: &Option<String>) -> io::Result<SparsificationStrategy> {
-    match s {
-        None => Ok(SparsificationStrategy::None),
-        Some(val) => val.parse::<SparsificationStrategy>().map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("Invalid --sparsify: {}", e),
-            )
-        }),
-    }
-}
-
 /// Index mode.
 #[derive(Clone, Debug, Default, clap::ValueEnum)]
 enum IndexMode {
@@ -163,91 +149,21 @@ struct CommonOpts {
     verbose: u8,
 }
 
-/// Alignment options shared by all commands that run alignments.
+/// Alignment options shared by all impg commands that run alignments.
+///
+/// Flattens sweepga's `AlnArgs` and adds one impg-specific filtering 
+/// knob, `--min-map-length`, which is a post-alignment drop threshold, 
+/// so it lives here rather than in sweepga. Field reads use `aln.sw.<field>`
+/// to avoid collisions with impg-internal configs mirror these names.
 #[derive(Parser, Debug, Clone)]
-#[command(next_help_heading = "Alignment options")]
 struct AlnOpts {
-    // --- Aligner backend ---
-    /// Aligner
-    #[clap(long, value_parser = ["fastga", "wfmash"], default_value = "fastga")]
-    aligner: String,
+    #[clap(flatten)]
+    sw: sweepga::AlnArgs,
 
-    // --- General alignment options ---
-    /// Disable all alignment filtering
-    #[clap(long, action)]
-    no_filter: bool,
-
-    /// Sparsification strategy: none, auto, random:<frac>, giant:<prob>, tree:<k>:<k>:<f>, wfmash:auto, wfmash:<frac> (default: no sparsification)
-    #[clap(long)]
-    sparsify: Option<String>,
-
-    /// K-mer size for mash distance sketching (used by sparsification)
-    #[clap(long = "mash-kmer-size", value_parser, default_value_t = sweepga::mash::DEFAULT_KMER_SIZE)]
-    mash_kmer_size: usize,
-
-    /// Sketch size (number of minimizers) for mash distance (used by sparsification)
-    #[clap(long = "mash-sketch-size", value_parser, default_value_t = sweepga::mash::DEFAULT_SKETCH_SIZE)]
-    mash_sketch_size: usize,
-
-    /// Directory for temporary files [default: $TMPDIR or cwd; use "ramdisk" for /dev/shm]
-    #[clap(long, value_parser)]
-    temp_dir: Option<String>,
-
-    /// Batch genome alignment to limit resource usage per batch.
-    /// Accepts an explicit size (e.g., "2G", "500M").
-    /// FastGA: limits disk. Wfmash: limits memory.
-    #[clap(long = "batch-bytes", value_parser)]
-    batch_bytes: Option<String>,
-
-    // --- Filtering options (post-alignment, aligner-independent) ---
-    /// n:m-best mappings kept in query:target dimensions (e.g., "1:1", "many:many")
-    #[clap(long, value_parser, default_value = "many:many")]
-    num_mappings: String,
-
-    /// Scaffold jump/gap distance in bp (0 = disable scaffolding). Accepts k/m/g suffixes.
-    #[clap(long, value_parser = parse_size, default_value = "50000")]
-    scaffold_jump: u64,
-
-    /// Minimum scaffold chain length in bp. Accepts k/m/g suffixes.
-    #[clap(long, value_parser = parse_size, default_value = "10000")]
-    scaffold_mass: u64,
-
-    /// Scaffold filter mode (e.g., "1:1", "many:many", "inf:inf" for no filtering)
-    #[clap(long, value_parser, default_value = "many:many")]
-    scaffold_filter: String,
-
-    /// Maximum overlap ratio for plane sweep filtering (0.0-1.0)
-    #[clap(long, value_parser, default_value_t = 0.95)]
-    overlap: f64,
-
-    /// Minimum alignment identity threshold for filtering (0.0-1.0)
-    #[clap(long = "min-aln-identity", value_parser, default_value_t = 0.0)]
-    min_aln_identity: f64,
-
-    /// Minimum block length for the aligner (0 = adaptive). Accepts k/m/g suffixes.
-    #[clap(long = "min-aln-length", value_parser = parse_size, default_value = "0")]
-    min_aln_length: u64,
-
-    /// Maximum scaffold deviation distance (0 = no limit). Accepts k/m/g suffixes.
-    #[clap(long, value_parser = parse_size, default_value = "0")]
-    scaffold_dist: u64,
-
-    /// Drop mappings shorter than this before plane-sweep/scaffold filtering. Accepts k/m/g suffixes.
-    #[clap(long = "min-map-length", value_parser = parse_size, default_value = "0")]
+    /// Drop mappings shorter than this before plane-sweep / scaffold filtering. Accepts k/m/g suffixes.
+    #[clap(long = "min-map-length", value_parser = parse_size, default_value = "0",
+           help_heading = "Basic filtering")]
     min_map_length: u64,
-
-    // --- fastga-specific options ---
-    /// [fastga] K-mer frequency multiplier (frequency = num_genomes * multiplier)
-    #[clap(
-        long = "fastga-frequency-multiplier",
-        value_parser,
-        default_value_t = 1
-    )]
-    fastga_frequency_multiplier: usize,
-
-    /// [fastga] Explicit k-mer frequency (overrides --fastga-frequency-multiplier)
-    #[clap(long = "fastga-frequency", value_parser)]
-    fastga_frequency: Option<usize>,
 }
 
 /// Seqwish graph induction options shared by the `graph`, `query`, and `partition` commands.
@@ -415,16 +331,22 @@ impl EngineCliOpts {
     fn validate_engine_params(&self, engine: GfaEngine) -> io::Result<()> {
         match engine {
             GfaEngine::Poa => {
-                if self.aln.sparsify.is_some() {
+                // The POA engine builds the graph directly from input
+                // sequences withoyut calling an external pairwise aligner
+                // (FastGA/wfmash), so it has no plane-sweep/scaffold filter stage.
+
+                if self.aln.sw.sparsify != SparsificationStrategy::None {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        "--sparsify is not compatible with --gfa-engine poa (poa does not run alignment)",
+                        "--sparsify controls external-aligner pair selection; \
+                         --gfa-engine poa has no pair-selection step",
                     ));
                 }
-                if self.aln.no_filter {
+                if self.aln.sw.no_filter {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        "--no-filter is not compatible with --gfa-engine poa (poa does not run alignment)",
+                        "--no-filter disables the post-alignment PAF filter; \
+                         --gfa-engine poa has no filtering step",
                     ));
                 }
             }
@@ -441,12 +363,12 @@ impl EngineCliOpts {
         let (engine, partition_size) = self.parse_engine()?;
         self.validate_engine_params(engine)?;
 
-        let sparsify = parse_sparsify(&self.aln.sparsify)?;
+        let sparsify = self.aln.sw.sparsify.clone();
         let mash_params = sweepga::knn_graph::MashParams {
-            kmer_size: self.aln.mash_kmer_size,
-            sketch_size: self.aln.mash_sketch_size,
+            kmer_size: self.aln.sw.mash_kmer_size,
+            sketch_size: self.aln.sw.mash_sketch_size,
         };
-        let temp_dir = resolve_temp_dir(self.aln.temp_dir.clone())?;
+        let temp_dir = resolve_temp_dir(self.aln.sw.tempdir.clone())?;
         setup_temp_dir(&temp_dir)?;
         build_engine_opts(
             engine,
@@ -717,8 +639,8 @@ struct QueryOpts {
 
     /// Minimum gap-compressed identity threshold (0.0-1.0)
     #[arg(help_heading = "Filtering and merging")]
-    #[clap(long, value_parser)]
-    min_identity: Option<f64>,
+    #[clap(long = "min-result-identity", value_parser)]
+    min_result_identity: Option<f64>,
 
     /// Minimum output length: filter results shorter than this (bp)
     #[arg(help_heading = "Filtering and merging")]
@@ -1035,8 +957,8 @@ enum Args {
 
         /// Minimum gap-compressed identity threshold (0.0-1.0)
         #[arg(help_heading = "Filtering and merging")]
-        #[clap(long, value_parser)]
-        min_identity: Option<f64>,
+        #[clap(long = "min-result-identity", value_parser)]
+        min_result_identity: Option<f64>,
 
         #[clap(flatten)]
         transitive_opts: TransitiveOpts,
@@ -1233,29 +1155,6 @@ enum Args {
         common: CommonOpts,
     },
 
-    /// Generate alignment pairs with sparsification strategies
-    Align {
-        // --- Input ---
-        #[clap(flatten)]
-        fasta_input: SequenceOpts,
-
-        // --- Output ---
-        /// Output directory for alignments
-        #[clap(short = 'o', long, value_parser, default_value = "alignments")]
-        output_dir: String,
-
-        /// Output format: paf, 1aln, or joblist
-        #[clap(long, value_parser, default_value = "joblist")]
-        format: String,
-
-        // --- Alignment ---
-        #[clap(flatten)]
-        aln: AlnOpts,
-
-        // --- General ---
-        #[clap(flatten)]
-        common: CommonOpts,
-    },
 }
 
 fn main() {
@@ -1393,7 +1292,7 @@ fn run() -> io::Result<()> {
             gfa_maf_fasta,
             engine_cli,
             merge_distance,
-            min_identity,
+            min_result_identity,
             transitive_opts,
             starting_sequences_file,
             selection_mode,
@@ -1495,7 +1394,7 @@ fn run() -> io::Result<()> {
                 starting_sequences_file.as_deref(),
                 &selection_mode,
                 merge_distance,
-                min_identity,
+                min_result_identity,
                 min_missing_size,
                 min_boundary_distance,
                 transitive_opts.transitive_dfs,
@@ -1732,7 +1631,7 @@ fn run() -> io::Result<()> {
                     &target_name,
                     target_range,
                     resolved_output_format == "paf" || resolved_output_format == "bedpe", // Store CIGAR for PAF/BEDPE output
-                    query.min_identity,
+                    query.min_result_identity,
                     query.min_output_length,
                     query.transitive,
                     query.transitive_opts.transitive_dfs,
@@ -1961,7 +1860,7 @@ fn run() -> io::Result<()> {
                     .map(Into::into)
                     .unwrap_or(refine::SupportMode::Sequence),
                 merge_distance: refine.query.effective_merge_distance(),
-                min_identity: refine.query.min_identity,
+                min_identity: refine.query.min_result_identity,
                 use_transitive_bfs: refine.query.transitive,
                 use_transitive_dfs: refine.query.transitive_opts.transitive_dfs,
                 max_transitive_depth: refine.query.transitive_opts.max_depth,
@@ -2219,7 +2118,7 @@ fn run() -> io::Result<()> {
                     &target_name,
                     target_range,
                     false, // Don't need CIGAR for similarity
-                    query.min_identity,
+                    query.min_result_identity,
                     query.min_output_length,
                     query.transitive,
                     query.transitive_opts.transitive_dfs,
@@ -2296,7 +2195,7 @@ fn run() -> io::Result<()> {
             initialize_threads_and_log(&common);
             let (parsed_engine, parsed_partition_size) = engine_cli.parse_engine()?;
             engine_cli.validate_engine_params(parsed_engine)?;
-            let temp_dir = resolve_temp_dir(engine_cli.aln.temp_dir.clone())?;
+            let temp_dir = resolve_temp_dir(engine_cli.aln.sw.tempdir.clone())?;
             setup_temp_dir(&temp_dir)?;
 
             let fasta_files = fasta_input.resolve_sequence_files()?;
@@ -2307,17 +2206,16 @@ fn run() -> io::Result<()> {
                 ));
             }
 
-            // Parse sparsification strategy
-            let sparsify_strategy = parse_sparsify(&engine_cli.aln.sparsify)?;
-
-            // Validate aligner-parameter compatibility
+            // Validate aligner-parameter compatibility. The sparsify
+            // strategy was already parsed by clap (see sweepga::cli::AlnArgs);
+            // just borrow it.
             if let Err(e) = sweepga::orchestrator::validate_strategy_aligner(
-                &sparsify_strategy,
-                &engine_cli.aln.aligner,
+                &engine_cli.aln.sw.sparsify,
+                &engine_cli.aln.sw.aligner,
             ) {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, e));
             }
-            if engine_cli.aln.aligner == "wfmash" && engine_cli.aln.fastga_frequency.is_some() {
+            if engine_cli.aln.sw.aligner == "wfmash" && engine_cli.aln.sw.frequency.is_some() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "--fastga-frequency is only supported with --aligner fastga; wfmash uses its own frequency estimation",
@@ -2326,43 +2224,20 @@ fn run() -> io::Result<()> {
 
             let poa_scoring = engine_cli.parse_poa_scoring()?;
 
+            let show_progress = common.verbose > 0;
+            let num_threads = common.threads.get();
+
             if let Some(ps) = parsed_partition_size {
                 // Partitioned mode: align → IMPG → partition → per-partition engine → lace → gfaffix
-                // Build engine_opts before consuming engine_cli fields
-                let engine_opts = engine_cli.build(common.threads.get())?;
-
-                let graph_config = graph::GraphBuildConfig {
-                    num_threads: common.threads.get(),
-                    frequency_multiplier: engine_cli.aln.fastga_frequency_multiplier,
-                    frequency: engine_cli.aln.fastga_frequency,
-                    min_aln_length: engine_cli.aln.min_aln_length,
-                    repeat_max: engine_cli.seqwish.repeat_max,
-                    min_repeat_dist: engine_cli.seqwish.min_repeat_dist,
-                    min_match_len: engine_cli.seqwish.min_match_len,
-                    sparse_factor: engine_cli.seqwish.sparse_factor,
-                    transclose_batch: engine_cli.seqwish.transclose_batch,
-                    use_in_memory: !engine_cli.seqwish.disk_backed,
-                    show_progress: common.verbose > 0,
-                    temp_dir: Some(temp_dir.clone()),
-                    input_paf: paf_file,
-                    aligner: engine_cli.aln.aligner,
-                    no_filter: engine_cli.aln.no_filter,
-                    num_mappings: engine_cli.aln.num_mappings,
-                    scaffold_jump: engine_cli.aln.scaffold_jump,
-                    scaffold_mass: engine_cli.aln.scaffold_mass,
-                    scaffold_filter: engine_cli.aln.scaffold_filter,
-                    overlap: engine_cli.aln.overlap,
-                    min_identity: engine_cli.aln.min_aln_identity,
-                    scaffold_dist: engine_cli.aln.scaffold_dist,
-                    min_map_length: engine_cli.aln.min_map_length,
-                    debug_dir: None,
-                    sparsify: sparsify_strategy,
-                    mash_params: sweepga::knn_graph::MashParams {
-                        kmer_size: engine_cli.aln.mash_kmer_size,
-                        sketch_size: engine_cli.aln.mash_sketch_size,
-                    },
-                    batch_bytes: engine_cli.aln.batch_bytes,
-                };
+                let engine_opts = engine_cli.build(num_threads)?;
+                let graph_config = build_graph_config(
+                    &engine_cli,
+                    &engine_cli.aln.sw.sparsify,
+                    paf_file,
+                    &temp_dir,
+                    num_threads,
+                    show_progress,
+                )?;
 
                 let scoring = Some(poa_scoring);
                 graph::run_graph_build_partitioned(
@@ -2374,39 +2249,14 @@ fn run() -> io::Result<()> {
                     ps,
                 )?;
             } else {
-                // Shared graph build config — identical for the seqwish and pggb engines
-                let graph_config = graph::GraphBuildConfig {
-                    num_threads: common.threads.get(),
-                    frequency_multiplier: engine_cli.aln.fastga_frequency_multiplier,
-                    frequency: engine_cli.aln.fastga_frequency,
-                    min_aln_length: engine_cli.aln.min_aln_length,
-                    repeat_max: engine_cli.seqwish.repeat_max,
-                    min_repeat_dist: engine_cli.seqwish.min_repeat_dist,
-                    min_match_len: engine_cli.seqwish.min_match_len,
-                    sparse_factor: engine_cli.seqwish.sparse_factor,
-                    transclose_batch: engine_cli.seqwish.transclose_batch,
-                    use_in_memory: !engine_cli.seqwish.disk_backed,
-                    show_progress: common.verbose > 0,
-                    temp_dir: Some(temp_dir),
-                    input_paf: paf_file,
-                    aligner: engine_cli.aln.aligner,
-                    no_filter: engine_cli.aln.no_filter,
-                    num_mappings: engine_cli.aln.num_mappings,
-                    scaffold_jump: engine_cli.aln.scaffold_jump,
-                    scaffold_mass: engine_cli.aln.scaffold_mass,
-                    scaffold_filter: engine_cli.aln.scaffold_filter,
-                    overlap: engine_cli.aln.overlap,
-                    min_identity: engine_cli.aln.min_aln_identity,
-                    scaffold_dist: engine_cli.aln.scaffold_dist,
-                    min_map_length: engine_cli.aln.min_map_length,
-                    debug_dir: None,
-                    sparsify: sparsify_strategy,
-                    mash_params: sweepga::knn_graph::MashParams {
-                        kmer_size: engine_cli.aln.mash_kmer_size,
-                        sketch_size: engine_cli.aln.mash_sketch_size,
-                    },
-                    batch_bytes: engine_cli.aln.batch_bytes,
-                };
+                let graph_config = build_graph_config(
+                    &engine_cli,
+                    &engine_cli.aln.sw.sparsify,
+                    paf_file,
+                    &temp_dir,
+                    num_threads,
+                    show_progress,
+                )?;
 
                 match parsed_engine {
                     GfaEngine::Poa => {
@@ -2419,7 +2269,7 @@ fn run() -> io::Result<()> {
                                 fasta_files,
                                 &mut out,
                                 scoring,
-                                common.threads.get(),
+                                &graph_config,
                             )?;
                         } else {
                             let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
@@ -2427,7 +2277,7 @@ fn run() -> io::Result<()> {
                                 fasta_files,
                                 &mut out,
                                 scoring,
-                                common.threads.get(),
+                                &graph_config,
                             )?;
                         }
                     }
@@ -2462,82 +2312,58 @@ fn run() -> io::Result<()> {
                 }
             }
         }
-        Args::Align {
-            fasta_input,
-            output_dir,
-            format,
-            aln,
-            common,
-        } => {
-            initialize_threads_and_log(&common);
-            let temp_dir = resolve_temp_dir(aln.temp_dir)?;
-            setup_temp_dir(&temp_dir)?;
-
-            let fasta_files = fasta_input.resolve_sequence_files()?;
-            if fasta_files.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "No sequence files specified. Use --sequence-files or --sequence-list",
-                ));
-            }
-
-            if aln.aligner == "wfmash" && aln.fastga_frequency.is_some() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "--fastga-frequency is only supported with --aligner fastga; wfmash uses its own frequency estimation",
-                ));
-            }
-
-            // Parse sparsification strategy
-            let strategy = parse_sparsify(&aln.sparsify)?;
-
-            // Parse output format
-            let output_format = match format.to_lowercase().as_str() {
-                "paf" => align::AlignOutputFormat::Paf,
-                "1aln" | "onealn" => align::AlignOutputFormat::OneAln,
-                "joblist" | "jobs" => align::AlignOutputFormat::JobList,
-                _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "Unknown output format: {}. Valid: paf, 1aln, joblist",
-                            format
-                        ),
-                    ));
-                }
-            };
-
-            let config = align::AlignConfig {
-                num_threads: common.threads.get(),
-                sparsify: strategy,
-                mash_params: sweepga::knn_graph::MashParams {
-                    kmer_size: aln.mash_kmer_size,
-                    sketch_size: aln.mash_sketch_size,
-                },
-                frequency_multiplier: aln.fastga_frequency_multiplier,
-                frequency: aln.fastga_frequency,
-                min_aln_length: aln.min_aln_length,
-                output_format,
-                show_progress: common.verbose > 0,
-                aligner: aln.aligner,
-                temp_dir: Some(temp_dir),
-                batch_bytes: aln.batch_bytes,
-                no_filter: aln.no_filter,
-                num_mappings: aln.num_mappings,
-                scaffold_jump: aln.scaffold_jump,
-                scaffold_mass: aln.scaffold_mass,
-                scaffold_filter: aln.scaffold_filter,
-                overlap: aln.overlap,
-                min_identity: aln.min_aln_identity,
-                scaffold_dist: aln.scaffold_dist,
-                min_map_length: aln.min_map_length,
-            };
-
-            align::run_align(fasta_files, &output_dir, config)?;
-        }
     }
 
     Ok(())
+}
+
+fn build_graph_config(
+    engine_cli: &EngineCliOpts,
+    sparsify: &SparsificationStrategy,
+    paf_file: Option<String>,
+    temp_dir: &str,
+    num_threads: usize,
+    show_progress: bool,
+) -> io::Result<graph::GraphBuildConfig> {
+    Ok(graph::GraphBuildConfig {
+        num_threads,
+        frequency_multiplier: engine_cli.aln.sw.fastga_frequency_multiplier,
+        frequency: engine_cli.aln.sw.frequency,
+        min_aln_length: engine_cli.aln.sw.block_length.unwrap_or(0),
+        repeat_max: engine_cli.seqwish.repeat_max,
+        min_repeat_dist: engine_cli.seqwish.min_repeat_dist,
+        min_match_len: engine_cli.seqwish.min_match_len,
+        sparse_factor: engine_cli.seqwish.sparse_factor,
+        transclose_batch: engine_cli.seqwish.transclose_batch,
+        disk_backed: engine_cli.seqwish.disk_backed,
+        show_progress,
+        temp_dir: Some(temp_dir.to_string()),
+        input_paf: paf_file,
+        aligner: engine_cli.aln.sw.aligner.clone(),
+        no_filter: engine_cli.aln.sw.no_filter,
+        num_mappings: engine_cli.aln.sw.num_mappings.clone(),
+        scaffold_jump: engine_cli.aln.sw.scaffold_jump,
+        scaffold_mass: engine_cli.aln.sw.scaffold_mass,
+        scaffold_filter: engine_cli.aln.sw.scaffold_filter.clone(),
+        overlap: engine_cli.aln.sw.overlap,
+        min_identity: sweepga::parse_identity_value(&engine_cli.aln.sw.min_identity, None)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?,
+        scaffold_dist: engine_cli.aln.sw.scaffold_dist,
+        min_map_length: engine_cli.aln.min_map_length,
+        debug_dir: None,
+        sparsify: sparsify.clone(),
+        mash_params: sweepga::knn_graph::MashParams {
+            kmer_size: engine_cli.aln.sw.mash_kmer_size,
+            sketch_size: engine_cli.aln.sw.mash_sketch_size,
+        },
+        batch_bytes: engine_cli.aln.sw.batch_bytes.clone(),
+        map_pct_identity: engine_cli
+            .aln
+            .sw
+            .map_pct_identity
+            .clone()
+            .or_else(|| Some("90".to_string())),
+    })
 }
 
 fn build_engine_opts(
@@ -2552,24 +2378,24 @@ fn build_engine_opts(
     temp_dir: Option<String>,
     partition_size: Option<usize>,
 ) -> io::Result<EngineOpts> {
-    Ok(EngineOpts {
-        engine,
+    let pipeline = graph::GraphBuildConfig {
         num_threads,
-        no_filter: aln.no_filter,
+        no_filter: aln.sw.no_filter,
         debug_dir,
         sparsify,
         mash_params,
-        aligner: aln.aligner.clone(),
-        num_mappings: aln.num_mappings.clone(),
-        scaffold_jump: aln.scaffold_jump,
-        scaffold_mass: aln.scaffold_mass,
-        scaffold_filter: aln.scaffold_filter.clone(),
-        overlap: aln.overlap,
-        min_identity: aln.min_aln_identity,
-        scaffold_dist: aln.scaffold_dist,
+        aligner: aln.sw.aligner.clone(),
+        num_mappings: aln.sw.num_mappings.clone(),
+        scaffold_jump: aln.sw.scaffold_jump,
+        scaffold_mass: aln.sw.scaffold_mass,
+        scaffold_filter: aln.sw.scaffold_filter.clone(),
+        overlap: aln.sw.overlap,
+        min_identity: sweepga::parse_identity_value(&aln.sw.min_identity, None)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?,
+        scaffold_dist: aln.sw.scaffold_dist,
         min_map_length: aln.min_map_length,
-        min_aln_length: aln.min_aln_length,
-        frequency_multiplier: aln.fastga_frequency_multiplier,
+        min_aln_length: aln.sw.block_length.unwrap_or(0),
+        frequency_multiplier: aln.sw.fastga_frequency_multiplier,
         repeat_max: seqwish.repeat_max,
         min_repeat_dist: seqwish.min_repeat_dist,
         min_match_len: seqwish.min_match_len,
@@ -2577,7 +2403,15 @@ fn build_engine_opts(
         transclose_batch: seqwish.transclose_batch,
         disk_backed: seqwish.disk_backed,
         temp_dir,
-        batch_bytes: aln.batch_bytes.clone(),
+        batch_bytes: aln.sw.batch_bytes.clone(),
+        // The partitioned pipeline already logs its own progress
+        show_progress: false,
+        ..graph::GraphBuildConfig::default()
+    };
+
+    Ok(EngineOpts {
+        engine,
+        pipeline,
         partition_size,
         target_poa_lengths: smooth.parse_target_poa_lengths()?,
         max_node_length: smooth.max_node_length,
@@ -3453,7 +3287,7 @@ fn perform_query(
     target_name: &str,
     target_range: (i32, i32),
     store_cigar: bool,
-    min_identity: Option<f64>,
+    min_result_identity: Option<f64>,
     min_output_length: Option<i32>,
     transitive: bool,
     transitive_dfs: bool,
@@ -3496,7 +3330,7 @@ fn perform_query(
                 transitive_opts.min_distance_between_ranges,
                 min_output_length,
                 store_cigar,
-                min_identity,
+                min_result_identity,
                 sequence_index,
                 approximate_mode,
                 subset_filter,
@@ -3512,7 +3346,7 @@ fn perform_query(
                 transitive_opts.min_distance_between_ranges,
                 min_output_length,
                 store_cigar,
-                min_identity,
+                min_result_identity,
                 sequence_index,
                 approximate_mode,
                 subset_filter,
@@ -3524,7 +3358,7 @@ fn perform_query(
             target_start,
             target_end,
             store_cigar,
-            min_identity,
+            min_result_identity,
             sequence_index,
             approximate_mode,
         );
@@ -3869,7 +3703,7 @@ fn output_results_gfa_partitioned(
             target_name,
             (window_start, window_end),
             false, // no CIGAR needed for GFA
-            query.min_identity,
+            query.min_result_identity,
             query.min_output_length,
             query.transitive,
             query.transitive_opts.transitive_dfs,

@@ -1,17 +1,16 @@
 #!/bin/bash
 set -euo pipefail
 
-# Demo: validate that "impg query -o gfa", "impg graph", and "impg align + impg graph --input-paf"
-# produce equivalent GFA graphs across all sparsification strategies.
+# Demo: validate that "impg query -o gfa" and "impg graph" produce
+# equivalent GFA graphs across all sparsification strategies.
 #
 # Tests region sizes: 1k, 2k, 10k
 # Tests engines: seqwish, pggb (all sizes) + poa (1k, 2k only)
 # Tests sparsification: none, random:0.5, giant:0.95, tree:3:1:0.1, wfmash:auto
-# Three command paths per (region, engine, strategy):
+# Two command paths per (region, engine, strategy):
 #   1. query -o gfa --sparsify
 #   2. graph --sparsify
-#   3. align --sparsify → PAF, then graph --input-paf
-# Compares graph structure via odgi stats -S across all three paths
+# Compares graph structure via odgi stats -S across both paths.
 # Saves performance TSV and validation TSV to OUTDIR for later analysis.
 #
 # Usage:
@@ -280,7 +279,7 @@ run_region() {
             fi
 
             # --- Path 1: query -o gfa ---
-            echo "  [1/3] query -o gfa ..."
+            echo "  [1/2] query -o gfa ..."
             local qgfa="${PREFIX}.query.${TAG}.gfa"
             metrics=$(run_timed "${PREFIX}.query.${TAG}.log" $IMPG query \
                 --alignment-list tpa-list.txt --sequence-files "$AGC" \
@@ -298,7 +297,7 @@ run_region() {
             # --- Path 2: graph (aligns internally) ---
             local ggfa="${PREFIX}.graph.${TAG}.gfa"
             if $fasta_ok; then
-                echo "  [2/3] graph ..."
+                echo "  [2/2] graph ..."
                 metrics=$(run_timed "${PREFIX}.graph.${TAG}.log" $IMPG graph \
                     --sequence-files "${PREFIX}.fa" \
                     -g "$ggfa" \
@@ -313,44 +312,8 @@ run_region() {
                 fi
             fi
 
-            # --- Path 3: align → PAF, then graph --input-paf ---
-            local align_dir="${PREFIX}.align.${TAG}"
-            local align_paf="${align_dir}/alignments.paf"
-            local agfa="${PREFIX}.align_graph.${TAG}.gfa"
-            if $fasta_ok; then
-                # Step A: align with sparsification → PAF
-                echo "  [3/3] align → graph ..."
-                metrics=$(run_timed "${PREFIX}.align.${TAG}.log" $IMPG align \
-                    --sequence-files "${PREFIX}.fa" \
-                    -o "$align_dir" --format paf \
-                    --aligner wfmash "${SPARSIFY_FLAG[@]}" \
-                    -t "$THREADS" -v 1) || true
-                read -r wall mem st <<< "$metrics"
-                if [ "$st" -eq 0 ] && [ -s "$align_paf" ]; then
-                    record "$LABEL" "a.$TAG" "$wall" "$mem" "OK"
-
-                    # Step B: build graph from pre-computed PAF (no sparsification)
-                    metrics=$(run_timed "${PREFIX}.align_graph.${TAG}.log" $IMPG graph \
-                        --sequence-files "${PREFIX}.fa" \
-                        -a "$align_paf" \
-                        -g "$agfa" \
-                        --gfa-engine "$ENGINE" -t "$THREADS" -v 1) || true
-                    read -r wall mem st <<< "$metrics"
-                    if [ "$st" -eq 0 ] && [ -s "$agfa" ]; then
-                        read -r s l p avg <<< "$(gfa_stats "$agfa")"
-                        record "$LABEL" "ag.$TAG" "$wall" "$mem" "OK" "$s" "$l" "$p" "$avg"
-                    else
-                        record "$LABEL" "ag.$TAG" "$wall" "$mem" "FAIL"
-                    fi
-                else
-                    record "$LABEL" "a.$TAG" "$wall" "$mem" "FAIL"
-                fi
-            fi
-
-            # --- Validate: compare all three paths pairwise ---
+            # --- Validate: query vs graph ---
             compare_gfa "$LABEL" "$ENGINE" "$STAG" "query vs graph" "$qgfa" "$ggfa"
-            compare_gfa "$LABEL" "$ENGINE" "$STAG" "query vs align+graph" "$qgfa" "$agfa"
-            compare_gfa "$LABEL" "$ENGINE" "$STAG" "graph vs align+graph" "$ggfa" "$agfa"
         done
     done
 }
@@ -428,7 +391,7 @@ elif [ "$PASS_COUNT" -eq 0 ]; then
     echo "WARNING: No successful comparisons were made."
     exit 1
 else
-    echo "All graphs equivalent across query / graph / align+graph paths."
+    echo "All graphs equivalent across query / graph paths."
 fi
 
 echo ""
