@@ -310,6 +310,85 @@ fn test_syng_fasta_build_produces_non_empty_index() {
 }
 
 #[test]
+fn test_syng_identical_sequences_build_and_query() {
+    // Regression test for the vendored syng hash.c REMOVED-sentinel bug: two
+    // byte-identical sequences (like AAA#0#chrIII and SGDref#0#chrIII in
+    // yeast235) would both get stored as (start_node=1, start_count=0),
+    // colliding in the GBWT startCount table. On query, the C layer would
+    // die with "syngBWTpathStartOld startNode 1 count 0 >= startCount 0".
+    //
+    // This test builds two identical sequences via the CLI, loads the index,
+    // and queries — it crashes at the C layer if the hash bug comes back.
+    let _guard = lock_syng();
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping: impg binary not built");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join("impg_test_syng_ident_seqs_cli");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let fasta_path = dir.join("test.fa");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        // Two records, byte-identical sequence content
+        let seq = numeric_to_ascii(&make_sequence_numeric(1500, 42));
+        writeln!(f, ">sampleA#0#chrIII").unwrap();
+        f.write_all(&seq).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleB#0#chrIII").unwrap();
+        f.write_all(&seq).unwrap();
+        writeln!(f).unwrap();
+    }
+
+    let out_prefix = dir.join("idx");
+    let build = Command::new(&bin)
+        .args(["syng", "-f", fasta_path.to_str().unwrap(), "-o", out_prefix.to_str().unwrap()])
+        .output()
+        .expect("impg syng failed to run");
+    assert!(
+        build.status.success(),
+        "impg syng failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    // Load and query — this is where the bug used to crash at C level.
+    let index = impg::syng::SyngIndex::load(
+        out_prefix.to_str().unwrap(),
+        impg::syng::SyncmerParams::default(),
+    )
+    .expect("load failed");
+
+    // Verify start_counts are distinct (the bug used to save both as 0)
+    let start_a = index.name_map.path_starts[0].as_ref().expect("seqA missing");
+    let start_b = index.name_map.path_starts[1].as_ref().expect("seqB missing");
+    assert_eq!(
+        start_a.start_node, start_b.start_node,
+        "identical sequences should share start_node"
+    );
+    assert_ne!(
+        start_a.start_count, start_b.start_count,
+        "two paths at same start_node must have distinct start_count indices \
+         (vendored syng hash.c REMOVED-sentinel bug regression)"
+    );
+
+    // Query both sequences — used to crash with startCount 0 >= 0
+    let intervals_a = index
+        .query_region("sampleA#0#chrIII", 0, 1000, 0)
+        .expect("query for sampleA should succeed");
+    let intervals_b = index
+        .query_region("sampleB#0#chrIII", 0, 1000, 0)
+        .expect("query for sampleB should succeed");
+
+    assert!(!intervals_a.is_empty());
+    assert!(!intervals_b.is_empty());
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn test_partition_syng_end_to_end_bed() {
     // End-to-end: build syng index from FASTA, then run `impg partition --syng`
     // and verify non-empty BED output. This is the path I added but never
