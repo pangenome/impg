@@ -2592,7 +2592,7 @@ dependencies = [
 [[package]]
 name = "sweepga"
 version = "0.1.1"
-source = "git+https://github.com/pangenome/sweepga?rev=c5f545e9a00a0516ac48347819c8f155e59b2883#c5f545e9a00a0516ac48347819c8f155e59b2883"
+source = "git+https://github.com/pangenome/sweepga?rev=484a9b68fa9eee62341d7de7997e608beafa32d5#484a9b68fa9eee62341d7de7997e608beafa32d5"
 dependencies = [
  "anyhow",
  "byteorder",
