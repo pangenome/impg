@@ -3,4 +3,5 @@
 	url = https://github.com/marschall-lab/GFAffix
 [submodule "vendor/syng"]
 	path = vendor/syng
-	url = https://github.com/richarddurbin/syng
+	url = https://github.com/pangenome/syng
+	branch = impg-integration
