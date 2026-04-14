@@ -2924,8 +2924,27 @@ fn run() -> io::Result<()> {
                         .list_contigs_names_only(sample)
                         .unwrap_or_default();
                     for contig in &contigs {
-                        let contig_data =
-                            decompressor.get_contig(sample, contig).map_err(|e| {
+                        // NOTE: Do NOT use `decompressor.get_contig()` here — it has a
+                        // bug in ragc-core where it skips the detail-reload after a
+                        // `list_contigs_names_only()` call (it checks contig count, which
+                        // is populated, instead of `are_details_loaded()`), and silently
+                        // returns an empty Vec. Use get_contig_length + get_contig_range
+                        // instead — both correctly reload details. Same pattern as
+                        // src/agc_index.rs.
+                        let length = decompressor
+                            .get_contig_length(sample, contig)
+                            .map_err(|e| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!(
+                                        "Failed to get length for contig '{}@{}': {}",
+                                        contig, sample, e
+                                    ),
+                                )
+                            })?;
+                        let contig_data = decompressor
+                            .get_contig_range(sample, contig, 0, length)
+                            .map_err(|e| {
                                 io::Error::new(
                                     io::ErrorKind::InvalidData,
                                     format!(
