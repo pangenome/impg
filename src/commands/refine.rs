@@ -192,9 +192,7 @@ fn refine_single_range(
         let max = compute_max_entities(impg, target_id, config.support_level, config.subset_filter);
         debug!(
             "Maximum possible {:?} for target {}: {}",
-            config.support_level,
-            chrom,
-            max
+            config.support_level, chrom, max
         );
         Some(max)
     } else {

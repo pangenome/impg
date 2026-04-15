@@ -7,8 +7,6 @@ pub mod similarity;
 use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 
-
-
 /// Resolve a list of files from either a direct `Vec` or a list file.
 ///
 /// - If `files` is non-empty and `list` is `None`: validate all files exist and return them.

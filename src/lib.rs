@@ -259,10 +259,7 @@ pub fn partitioned_gfa_pipeline(
     }
 
     // 2. Lace all partition GFAs together
-    info!(
-        "[partitioned] Lacing {} partition GFAs",
-        sub_gfas.len()
-    );
+    info!("[partitioned] Lacing {} partition GFAs", sub_gfas.len());
     let laced = commands::lace::lace_subgraphs(&sub_gfas, None)?;
     // Free all sub-partition GFAs before gfaffix/sort
     drop(sub_gfas);

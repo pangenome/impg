@@ -151,8 +151,8 @@ struct CommonOpts {
 
 /// Alignment options shared by all impg commands that run alignments.
 ///
-/// Flattens sweepga's `AlnArgs` and adds one impg-specific filtering 
-/// knob, `--min-map-length`, which is a post-alignment drop threshold, 
+/// Flattens sweepga's `AlnArgs` and adds one impg-specific filtering
+/// knob, `--min-map-length`, which is a post-alignment drop threshold,
 /// so it lives here rather than in sweepga. Field reads use `aln.sw.<field>`
 /// to avoid collisions with impg-internal configs mirror these names.
 #[derive(Parser, Debug, Clone)]
@@ -240,7 +240,11 @@ struct EngineCliOpts {
     /// Append ':WINDOW' to enable partitioned mode, e.g. 'pggb:10000'
     /// splits into 10kb windows, builds per-window, laces, and normalizes.
     #[arg(help_heading = "Output options")]
-    #[clap(long = "gfa-engine", default_value = "pggb", value_name = "ENGINE[:WINDOW]")]
+    #[clap(
+        long = "gfa-engine",
+        default_value = "pggb",
+        value_name = "ENGINE[:WINDOW]"
+    )]
     engine_raw: String,
 
     /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2
@@ -356,10 +360,7 @@ impl EngineCliOpts {
     }
 
     /// Resolve and build an `EngineOpts`.
-    fn build(
-        &self,
-        num_threads: usize,
-    ) -> io::Result<EngineOpts> {
+    fn build(&self, num_threads: usize) -> io::Result<EngineOpts> {
         let (engine, partition_size) = self.parse_engine()?;
         self.validate_engine_params(engine)?;
 
@@ -1154,7 +1155,6 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
     },
-
 }
 
 fn main() {
@@ -1681,9 +1681,7 @@ fn run() -> io::Result<()> {
                         )?;
                     }
                     "gfa" => {
-                        let engine_opts = engine_cli.build(
-                            common.threads.get(),
-                        )?;
+                        let engine_opts = engine_cli.build(common.threads.get())?;
                         if let Some(ps) = engine_opts.partition_size {
                             // Partitioned mode: split query region into sub-windows
                             output_results_gfa_partitioned(
@@ -2275,7 +2273,8 @@ fn run() -> io::Result<()> {
                                 &graph_config,
                             )?;
                         } else {
-                            let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
+                            let mut out =
+                                BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
                             graph::run_graph_build_poa(
                                 fasta_files,
                                 &mut out,
@@ -2301,7 +2300,8 @@ fn run() -> io::Result<()> {
                                 engine_cli.smooth.poa_padding_fraction,
                             )?;
                         } else {
-                            let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
+                            let mut out =
+                                BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
                             graph::run_graph_build_pggb(
                                 fasta_files,
                                 &mut out,
@@ -3725,10 +3725,8 @@ fn output_results_gfa_partitioned(
             );
 
             // Extract query intervals
-            let query_intervals: Vec<Interval<u32>> = results
-                .drain(..)
-                .map(|(qi, _, _)| qi)
-                .collect();
+            let query_intervals: Vec<Interval<u32>> =
+                results.drain(..).map(|(qi, _, _)| qi).collect();
 
             partitions.push(query_intervals);
         }
