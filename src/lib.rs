@@ -2,6 +2,7 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
 pub mod agc_index;
+pub mod fast_locate;
 pub mod syng_ffi;
 pub mod syng;
 pub mod alignment_record;
@@ -160,6 +161,17 @@ pub struct SyngImpgWrapper {
 impl SyngImpgWrapper {
     pub fn new(syng_index: syng::SyngIndex, seq_index: seqidx::SequenceIndex, syng_padding: u64) -> Self {
         Self { syng_index, seq_index, syng_padding }
+    }
+
+    /// Borrow the inner `SyngIndex` — for callers that need full
+    /// `HomologousInterval` results (strand, genome name) rather than just
+    /// coitrees intervals.
+    pub fn syng_index(&self) -> &syng::SyngIndex {
+        &self.syng_index
+    }
+
+    pub fn syng_padding(&self) -> u64 {
+        self.syng_padding
     }
 
     /// Convert syng query_region results into AdjustedInterval format.

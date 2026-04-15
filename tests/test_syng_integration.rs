@@ -492,3 +492,120 @@ fn test_partition_syng_end_to_end_bed() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Regression test: `impg query --syng -o gfa --gfa-engine seqwish:X` must
+/// treat `X` as a sub-window size and split the query range into per-window
+/// partitions, not silently collapse into a flat single-engine run.
+///
+/// Before this fix, `pggb:X`/`seqwish:X` in the syng+gfa path set
+/// `partition_size = Some(X)` but was only used as a `skip_normalize` boolean
+/// flag — the actual `X` was discarded and one flat engine call ran on the
+/// entire query range. This broke for large regions because syng's
+/// `query_region` returned whole-chromosome context spans.
+///
+/// We verify the new behavior by checking that the per-sub-window log lines
+/// show up in stderr, one per sub-window.
+#[test]
+fn test_query_syng_gfa_subwindow_splitter() {
+    let _guard = lock_syng();
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping: impg binary not built");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join("impg_test_query_syng_subwindow");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // FASTA with two haplotypes sharing a 15 kbp backbone. FastGA needs
+    // several kbp of alignable sequence per partition to find hits, so we
+    // size this to 15 kbp shared + 2 kbp unique tail = 17 kbp/hap total.
+    let fasta_path = dir.join("test.fa");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        let backbone = numeric_to_ascii(&make_sequence_numeric(15000, 42));
+        let tail1 = numeric_to_ascii(&make_sequence_numeric(2000, 1));
+        let tail2 = numeric_to_ascii(&make_sequence_numeric(2000, 2));
+        writeln!(f, ">sampleA#0#chr1").unwrap();
+        f.write_all(&backbone).unwrap();
+        f.write_all(&tail1).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleB#0#chr1").unwrap();
+        f.write_all(&backbone).unwrap();
+        f.write_all(&tail2).unwrap();
+        writeln!(f).unwrap();
+    }
+
+    // Build syng index
+    let syng_prefix = dir.join("idx");
+    let build = Command::new(&bin)
+        .args(["syng", "-f", fasta_path.to_str().unwrap(), "-o", syng_prefix.to_str().unwrap()])
+        .output()
+        .expect("Failed to run impg syng");
+    assert!(
+        build.status.success(),
+        "impg syng failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    // Query 15 kbp of sampleA's backbone with seqwish:5000 — three sub-windows
+    // of 5 kbp each. Each sub-window pulls homologs from both haplotypes,
+    // producing ~10 kbp of partition sequence for FastGA/seqwish to chew on.
+    let out_prefix = dir.join("region");
+    let out = Command::new(&bin)
+        .args([
+            "query",
+            "--syng", syng_prefix.to_str().unwrap(),
+            "--sequence-files", fasta_path.to_str().unwrap(),
+            "-r", "sampleA#0#chr1:0-15000",
+            "-o", "gfa",
+            "--gfa-engine", "seqwish:5000",
+            "-O", out_prefix.to_str().unwrap(),
+            "-t", "1",
+            "-v", "2",  // info-level logging to capture sub-window log lines
+        ])
+        .env("RUST_LOG", "info")
+        .output()
+        .expect("Failed to run impg query");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    // Primary assertion: sub-window wiring — three log lines must appear.
+    // This is the regression check for the pggb:X / seqwish:X no-op bug.
+    let subwindow_count = stderr
+        .lines()
+        .filter(|l| l.contains("[syng sub-window"))
+        .count();
+    assert_eq!(
+        subwindow_count, 3,
+        "expected 3 sub-window log lines for 15kbp query with seqwish:5000, got {}. stderr: {}",
+        subwindow_count, stderr
+    );
+
+    // If the downstream pipeline succeeded, also verify the GFA is non-empty.
+    // A failure at the FastGA/seqwish stage doesn't invalidate the
+    // sub-windowing wiring test above.
+    if out.status.success() {
+        let gfa_path = format!("{}.gfa", out_prefix.to_str().unwrap());
+        let gfa_size = std::fs::metadata(&gfa_path)
+            .expect("GFA output missing")
+            .len();
+        assert!(
+            gfa_size > 100,
+            "GFA output is only {} bytes — expected a non-trivial graph",
+            gfa_size
+        );
+        let gfa_content = std::fs::read_to_string(&gfa_path).unwrap();
+        let s_lines = gfa_content.lines().filter(|l| l.starts_with("S\t")).count();
+        assert!(s_lines > 0, "GFA has no S lines");
+    } else {
+        eprintln!(
+            "Sub-windowing OK but downstream engine pipeline failed; \
+             this test only asserts sub-window wiring. stderr: {}",
+            stderr
+        );
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+}

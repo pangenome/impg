@@ -1708,7 +1708,9 @@ fn run() -> io::Result<()> {
 
                 info!("Loading syng index from prefix: {}", syng_prefix);
                 let syng_index = impg::syng::SyngIndex::load(syng_prefix, impg::syng::SyncmerParams::default())?;
-                let seq_index = syng_index.build_seq_index();
+                let seq_index_built = syng_index.build_seq_index();
+                // Wrap once; wrapper owns syng_index and seq_index for the rest of the path.
+                let wrapper = impg::SyngImpgWrapper::new(syng_index, seq_index_built, syng_padding);
 
                 // Parse target ranges
                 let target_ranges: Vec<(String, (i32, i32), String)> = if let Some(ref target_range_str) = query.target_range {
@@ -1717,9 +1719,10 @@ fn run() -> io::Result<()> {
                     } else {
                         // Whole sequence
                         let seq_name = target_range_str.as_str();
-                        let seq_len = seq_index
+                        let seq_len = wrapper
+                            .seq_index()
                             .get_id(seq_name)
-                            .and_then(|id| seq_index.get_len_from_id(id))
+                            .and_then(|id| wrapper.seq_index().get_len_from_id(id))
                             .ok_or_else(|| {
                                 io::Error::new(
                                     io::ErrorKind::NotFound,
@@ -1768,48 +1771,120 @@ fn run() -> io::Result<()> {
                 for (target_name, (range_start, range_end), name) in &target_ranges {
                     info!("Syng query: {} ({}:{}-{})", name, target_name, range_start, range_end);
 
-                    let intervals = syng_index.query_region(
-                        target_name,
-                        *range_start as u64,
-                        *range_end as u64,
-                        syng_padding,
-                    )?;
-
                     match resolved_format {
                         "bed" => {
+                            let intervals = wrapper.syng_index().query_region(
+                                target_name,
+                                *range_start as u64,
+                                *range_end as u64,
+                                syng_padding,
+                            )?;
                             let mut out = find_output_stream(&output_prefix, "bed")?;
                             for iv in &intervals {
                                 writeln!(out, "{}\t{}\t{}\t{}", iv.genome, iv.start, iv.end, iv.strand)?;
                             }
                         }
                         "gfa" => {
-                            // Convert HomologousInterval → coitrees::Interval<u32>
-                            let query_intervals: Vec<coitrees::Interval<u32>> = intervals
-                                .iter()
-                                .filter_map(|iv| {
-                                    let id = seq_index.get_id(&iv.genome)?;
-                                    Some(Interval::new(iv.start as i32, iv.end as i32, id))
-                                })
-                                .collect();
-
-                            if query_intervals.is_empty() {
-                                let mut out = find_output_stream(&output_prefix, "gfa")?;
-                                writeln!(out, "H\tVN:Z:1.0")?;
-                                continue;
-                            }
-
                             let engine_opts = engine_cli.build(common.threads.get())?;
-                            let gfa_output = impg::dispatch_gfa_engine_with_seq_index(
-                                &seq_index,
-                                &query_intervals,
-                                sequence_index.as_ref().unwrap(),
-                                scoring_params,
-                                &engine_opts,
-                            )?;
-                            let mut out = find_output_stream(&output_prefix, "gfa")?;
-                            writeln!(out, "{gfa_output}")?;
+
+                            if let Some(partition_size) = engine_opts.partition_size {
+                                // ─── Sub-windowed path: syng-at-the-outer-level ───
+                                //
+                                // Split the query range into `partition_size`-bp
+                                // sub-windows, call `query_region` per sub-window
+                                // (which returns tight, small-scale intervals),
+                                // collect per-window query intervals, then run the
+                                // partitioned GFA pipeline which does a fresh local
+                                // alignment + graph induction per partition and
+                                // laces them together with a single final
+                                // gfaffix. Structurally mirrors the alignment
+                                // path's `output_results_gfa_partitioned`.
+                                let ps = partition_size as i32;
+                                let mut partitions: Vec<Vec<Interval<u32>>> = Vec::new();
+                                let mut window_start = *range_start;
+                                let mut window_idx = 0usize;
+                                while window_start < *range_end {
+                                    let window_end = (window_start + ps).min(*range_end);
+                                    let intervals = wrapper.syng_index().query_region(
+                                        target_name,
+                                        window_start as u64,
+                                        window_end as u64,
+                                        syng_padding,
+                                    )?;
+                                    let window_intervals: Vec<Interval<u32>> = intervals
+                                        .iter()
+                                        .filter_map(|iv| {
+                                            let id = wrapper.seq_index().get_id(&iv.genome)?;
+                                            Some(Interval::new(iv.start as i32, iv.end as i32, id))
+                                        })
+                                        .collect();
+                                    info!(
+                                        "  [syng sub-window {}] {}:{}-{} → {} intervals",
+                                        window_idx, target_name, window_start, window_end,
+                                        window_intervals.len()
+                                    );
+                                    if !window_intervals.is_empty() {
+                                        partitions.push(window_intervals);
+                                    }
+                                    window_start = window_end;
+                                    window_idx += 1;
+                                }
+
+                                if partitions.is_empty() {
+                                    let mut out = find_output_stream(&output_prefix, "gfa")?;
+                                    writeln!(out, "H\tVN:Z:1.0")?;
+                                    continue;
+                                }
+
+                                let gfa_output = impg::partitioned_gfa_pipeline(
+                                    &partitions,
+                                    &wrapper,
+                                    sequence_index.as_ref().unwrap(),
+                                    scoring_params,
+                                    &engine_opts,
+                                )?;
+                                let mut out = find_output_stream(&output_prefix, "gfa")?;
+                                writeln!(out, "{gfa_output}")?;
+                            } else {
+                                // ─── Flat path: one query_region, one engine run ───
+                                let intervals = wrapper.syng_index().query_region(
+                                    target_name,
+                                    *range_start as u64,
+                                    *range_end as u64,
+                                    syng_padding,
+                                )?;
+                                let query_intervals: Vec<coitrees::Interval<u32>> = intervals
+                                    .iter()
+                                    .filter_map(|iv| {
+                                        let id = wrapper.seq_index().get_id(&iv.genome)?;
+                                        Some(Interval::new(iv.start as i32, iv.end as i32, id))
+                                    })
+                                    .collect();
+
+                                if query_intervals.is_empty() {
+                                    let mut out = find_output_stream(&output_prefix, "gfa")?;
+                                    writeln!(out, "H\tVN:Z:1.0")?;
+                                    continue;
+                                }
+
+                                let gfa_output = impg::dispatch_gfa_engine(
+                                    &wrapper,
+                                    &query_intervals,
+                                    sequence_index.as_ref().unwrap(),
+                                    scoring_params,
+                                    &engine_opts,
+                                )?;
+                                let mut out = find_output_stream(&output_prefix, "gfa")?;
+                                writeln!(out, "{gfa_output}")?;
+                            }
                         }
                         "fasta" => {
+                            let intervals = wrapper.syng_index().query_region(
+                                target_name,
+                                *range_start as u64,
+                                *range_end as u64,
+                                syng_padding,
+                            )?;
                             let mut out = find_output_stream(&output_prefix, "fa")?;
                             let seq_idx = sequence_index.as_ref().unwrap();
                             for iv in &intervals {
@@ -1820,6 +1895,12 @@ fn run() -> io::Result<()> {
                             }
                         }
                         "gbwt" => {
+                            let intervals = wrapper.syng_index().query_region(
+                                target_name,
+                                *range_start as u64,
+                                *range_end as u64,
+                                syng_padding,
+                            )?;
                             let seq_idx = sequence_index.as_ref().unwrap();
                             let gbwt_prefix = output_prefix.as_ref().unwrap();
 
@@ -1838,7 +1919,7 @@ fn run() -> io::Result<()> {
                                 .map(|(name, seq)| (name.clone(), seq.as_slice()))
                                 .collect();
 
-                            syng_index.build_region_gbwt(&seq_refs, gbwt_prefix)?;
+                            wrapper.syng_index().build_region_gbwt(&seq_refs, gbwt_prefix)?;
                             info!("Wrote region GBWT: {}.1gbwt + {}.1khash", gbwt_prefix, gbwt_prefix);
                         }
                         _ => unreachable!(),
