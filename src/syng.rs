@@ -8,7 +8,97 @@ use std::ffi::CString;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 
+use crate::fast_locate::FastLocate;
 use crate::syng_ffi;
+use simple_sds::serialize::Serialize as SdsSerialize;
+
+/// Sidecar table mapping `(forward_path_idx, forward_node_idx)` → `bp_pos`.
+///
+/// FastLocate returns visits as `(gbz_seq_id, seq_offset_from_end)`. Since
+/// we build `gbz::GBWT` bidirectionally with one forward + one reverse
+/// sequence per syng path, forward paths live at even gbz_seq_ids:
+/// `gbz_seq_id = 2 * forward_path_idx`. The forward node index within that
+/// path is `forward_node_count - 1 - seq_offset_from_end`. Looking it up
+/// here yields the bp coordinate needed for `HomologousInterval`.
+pub struct BpOffsets {
+    /// Flat storage of bp offsets for all forward paths, concatenated.
+    offsets: Vec<u64>,
+    /// `seq_starts[i]` = index in `offsets` where forward path `i` begins.
+    /// `seq_starts` has `num_forward_paths + 1` entries (last is `offsets.len()`).
+    seq_starts: Vec<usize>,
+}
+
+impl BpOffsets {
+    fn bp_of(&self, forward_path_idx: usize, node_idx: usize) -> Option<u64> {
+        let start = *self.seq_starts.get(forward_path_idx)?;
+        let end = *self.seq_starts.get(forward_path_idx + 1)?;
+        if node_idx >= end - start {
+            return None;
+        }
+        Some(self.offsets[start + node_idx])
+    }
+
+    fn num_forward_nodes(&self, forward_path_idx: usize) -> Option<usize> {
+        let start = *self.seq_starts.get(forward_path_idx)?;
+        let end = *self.seq_starts.get(forward_path_idx + 1)?;
+        Some(end - start)
+    }
+
+    const MAGIC: u64 = 0x494D50_42504F46; // "IMPBPOF"
+    const VERSION: u64 = 1;
+
+    fn save<W: std::io::Write>(&self, w: &mut W) -> io::Result<()> {
+        write_u64(w, Self::MAGIC)?;
+        write_u64(w, Self::VERSION)?;
+        write_u64(w, self.offsets.len() as u64)?;
+        for &x in &self.offsets {
+            write_u64(w, x)?;
+        }
+        write_u64(w, self.seq_starts.len() as u64)?;
+        for &s in &self.seq_starts {
+            write_u64(w, s as u64)?;
+        }
+        Ok(())
+    }
+
+    fn load<R: std::io::Read>(r: &mut R) -> io::Result<Self> {
+        let magic = read_u64(r)?;
+        if magic != Self::MAGIC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("BpOffsets: bad magic 0x{:x}", magic),
+            ));
+        }
+        let version = read_u64(r)?;
+        if version != Self::VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("BpOffsets: unsupported version {}", version),
+            ));
+        }
+        let n_off = read_u64(r)? as usize;
+        let mut offsets = Vec::with_capacity(n_off);
+        for _ in 0..n_off {
+            offsets.push(read_u64(r)?);
+        }
+        let n_starts = read_u64(r)? as usize;
+        let mut seq_starts = Vec::with_capacity(n_starts);
+        for _ in 0..n_starts {
+            seq_starts.push(read_u64(r)? as usize);
+        }
+        Ok(Self { offsets, seq_starts })
+    }
+}
+
+fn write_u64<W: std::io::Write>(w: &mut W, v: u64) -> io::Result<()> {
+    w.write_all(&v.to_le_bytes())
+}
+
+fn read_u64<R: std::io::Read>(r: &mut R) -> io::Result<u64> {
+    let mut buf = [0u8; 8];
+    r.read_exact(&mut buf)?;
+    Ok(u64::from_le_bytes(buf))
+}
 
 /// Parameters controlling syncmer extraction.
 #[derive(Debug, Clone, Copy)]
@@ -197,6 +287,14 @@ pub struct SyngIndex {
     seqhash: *mut syng_ffi::Seqhash,
     pub name_map: SyngNameMap,
     pub params: SyncmerParams,
+    /// Classical GBWT built from syng's forward paths — backs FastLocate.
+    /// None until `build_fast_locate` is called (or an index is loaded that
+    /// already has one).
+    gbz_gbwt: Option<gbz::GBWT>,
+    /// r-index locate structure over `gbz_gbwt`, for fast `query_region`.
+    fast_locate: Option<FastLocate>,
+    /// bp-offset sidecar keyed by `(forward_path_idx, forward_node_idx)`.
+    bp_offsets: Option<BpOffsets>,
 }
 
 // SAFETY: The C structures are only accessed through &self or &mut self,
@@ -224,7 +322,82 @@ impl SyngIndex {
             seqhash,
             name_map: SyngNameMap::new(),
             params,
+            gbz_gbwt: None,
+            fast_locate: None,
+            bp_offsets: None,
         }
+    }
+
+    /// Builds a classical `gbz::GBWT` from the forward paths currently in
+    /// this index, then constructs the FastLocate r-index structure and a
+    /// bp-offset sidecar. After this returns, `query_region` will use the
+    /// fast path (O(query_len) + O(hits)) instead of walking every forward
+    /// path per call.
+    ///
+    /// This walks every existing forward path once to collect (syncmer_id,
+    /// bp_pos) pairs. Safe to call multiple times (each call rebuilds).
+    pub fn build_fast_locate(&mut self) -> io::Result<()> {
+        // Suppress the C debug printfs that syngBWTpathNext emits during walks.
+        unsafe { syng_ffi::impg_syng_suppress_debug() };
+
+        let n_paths = self.name_map.path_to_name.len();
+        let mut builder = gbz::GBWTBuilder::new(true, false, 64 * 1024);
+        let mut offsets_flat: Vec<u64> = Vec::new();
+        let mut seq_starts: Vec<usize> = Vec::with_capacity(n_paths + 1);
+
+        for path_idx in 0..n_paths {
+            seq_starts.push(offsets_flat.len());
+            let Some(ps) = self.name_map.path_starts[path_idx].as_ref() else {
+                // No path start info (zero-length or too-short sequence). Still
+                // insert an empty path placeholder so that forward_path_idx =
+                // gbz_seq_id / 2 stays consistent.
+                builder
+                    .insert(&[], None)
+                    .map_err(|e| io::Error::other(format!("GBWTBuilder::insert(empty): {}", e)))?;
+                continue;
+            };
+            let walk = self.walk_path(ps);
+            // walk_path yields (node_id, accumulated_bp_pos). Syng's rskip may
+            // report negative node ids when a forward walk traverses an edge
+            // whose canonical orientation is the opposite strand; `query_region`
+            // already collapses strand via `unsigned_abs()`, so we do the same
+            // here. Each syncmer maps to one gbz record regardless of which
+            // strand visits it.
+            //
+            // Encoded as gbz forward-orientation ids
+            // (`encode_node(raw, Forward) = raw << 1`). ENDMARKER is 0, so
+            // syncmer ids starting at 1 are safe.
+            let mut path_encoded: Vec<usize> = Vec::with_capacity(walk.len());
+            for &(node, pos) in &walk {
+                let raw = node.unsigned_abs() as usize;
+                debug_assert!(raw > 0, "forward walk produced zero node id");
+                path_encoded.push(raw << 1);
+                offsets_flat.push(pos);
+            }
+            builder
+                .insert(&path_encoded, None)
+                .map_err(|e| io::Error::other(format!("GBWTBuilder::insert: {}", e)))?;
+        }
+        seq_starts.push(offsets_flat.len());
+
+        let gbz_gbwt = builder
+            .build()
+            .map_err(|e| io::Error::other(format!("GBWTBuilder::build: {}", e)))?;
+        let fast_locate = FastLocate::build(&gbz_gbwt);
+
+        self.gbz_gbwt = Some(gbz_gbwt);
+        self.fast_locate = Some(fast_locate);
+        self.bp_offsets = Some(BpOffsets {
+            offsets: offsets_flat,
+            seq_starts,
+        });
+        Ok(())
+    }
+
+    /// True if the FastLocate fast path has been prepared (via
+    /// [`Self::build_fast_locate`] or a load that restored it).
+    pub fn has_fast_locate(&self) -> bool {
+        self.fast_locate.is_some()
     }
 
     /// Build an index progressively from an iterator of (name, sequence) pairs.
@@ -343,6 +516,14 @@ impl SyngIndex {
             );
         }
 
+        // Eagerly build the FastLocate fast path. This makes `query_region`
+        // run in O(query_len + hits) instead of walking every forward path
+        // per call. For very large inputs callers may want a `build_noloc`
+        // variant later; for now the common case benefits.
+        if let Err(e) = index.build_fast_locate() {
+            log::warn!("build_fast_locate failed, falling back to walk-every-path: {}", e);
+        }
+
         index
     }
 
@@ -413,6 +594,23 @@ impl SyngIndex {
         // Write .syng.names
         let names_path = format!("{}.syng.names", prefix);
         self.name_map.save(&names_path)?;
+
+        // Write .syng.locate (optional — only if fast-locate has been built).
+        if let (Some(gbz_gbwt), Some(fl), Some(bp_off)) =
+            (self.gbz_gbwt.as_ref(), self.fast_locate.as_ref(), self.bp_offsets.as_ref())
+        {
+            let locate_path = format!("{}.syng.locate", prefix);
+            let mut f = std::io::BufWriter::new(std::fs::File::create(&locate_path)?);
+            // 1) classical GBWT via simple-sds Serialize
+            gbz_gbwt
+                .serialize(&mut f)
+                .map_err(|e| io::Error::other(format!("gbz::GBWT::serialize: {}", e)))?;
+            // 2) FastLocate custom framing
+            fl.save(&mut f)?;
+            // 3) BpOffsets custom framing (little-endian u64-prefixed blobs)
+            bp_off.save(&mut f)?;
+            f.into_inner()?;
+        }
 
         Ok(())
     }
@@ -518,12 +716,28 @@ impl SyngIndex {
             syng_ffi::impg_seqhashCreateSafe(params.k as i32, params.w as i32, params.seed as i32)
         };
 
+        // Read optional .syng.locate sidecar (classical GBWT + FastLocate + BpOffsets).
+        let locate_path = format!("{}.syng.locate", prefix);
+        let (gbz_gbwt, fast_locate, bp_offsets) = if Path::new(&locate_path).exists() {
+            let mut f = std::io::BufReader::new(std::fs::File::open(&locate_path)?);
+            let gbz_gbwt_loaded = gbz::GBWT::load(&mut f)
+                .map_err(|e| io::Error::other(format!("gbz::GBWT::load: {}", e)))?;
+            let fl_loaded = FastLocate::load(&mut f)?;
+            let bp_loaded = BpOffsets::load(&mut f)?;
+            (Some(gbz_gbwt_loaded), Some(fl_loaded), Some(bp_loaded))
+        } else {
+            (None, None, None)
+        };
+
         Ok(Self {
             gbwt,
             kmer_hash,
             seqhash,
             name_map,
             params,
+            gbz_gbwt,
+            fast_locate,
+            bp_offsets,
         })
     }
 
@@ -633,50 +847,84 @@ impl SyngIndex {
             return Ok(Vec::new());
         }
 
-        // 3. Walk all genomes' forward paths, find overlapping nodes
-        let num_genomes = self.name_map.path_to_name.len();
+        // 3. Enumerate hits. If the FastLocate fast path is prepared, use
+        // it to query each syncmer node in O(k log r) rather than walking
+        // every forward path per query. Otherwise fall back to the original
+        // walk-every-path loop.
+        let syncmer_len = (self.params.w + self.params.k) as u64;
         let mut all_intervals: Vec<HomologousInterval> = Vec::new();
 
-        for genome_idx in 0..num_genomes {
-            let path_start = match &self.name_map.path_starts[genome_idx] {
-                Some(ps) => ps,
-                None => continue,
-            };
-
-            let genome_name = &self.name_map.path_to_name[genome_idx];
-            let genome_len = self.name_map.path_to_length[genome_idx];
-            let nodes = self.walk_path(path_start);
-
-            // Find min/max positions of matching nodes on this genome
-            let mut min_pos: Option<u64> = None;
-            let mut max_pos: Option<u64> = None;
-
-            for &(node_id, pos) in &nodes {
-                if query_node_set.contains(&node_id.unsigned_abs()) {
-                    min_pos = Some(min_pos.map_or(pos, |m: u64| m.min(pos)));
-                    max_pos = Some(max_pos.map_or(pos, |m: u64| m.max(pos)));
+        if let (Some(fl), Some(gbz_gbwt), Some(bp_off)) =
+            (self.fast_locate.as_ref(), self.gbz_gbwt.as_ref(), self.bp_offsets.as_ref())
+        {
+            // Fast path: per query syncmer node, decompress_da -> (gbz_seq_id,
+            // seq_offset_from_end). gbz_seq_id = 2*forward_path_idx + {0 fwd / 1 rev};
+            // we only care about forward visits (even gbz ids).
+            for &query_node in &query_node_set {
+                // syng node id is positive i32; gbz encoded forward id = raw << 1.
+                let encoded = (query_node as usize) << 1;
+                if !gbz_gbwt.has_node(encoded) {
+                    continue;
+                }
+                let visits = fl.decompress_da(gbz_gbwt, encoded);
+                for (gbz_seq_id, seq_off_from_end) in visits {
+                    // Only forward sequences (even gbz ids). Reverse hits land
+                    // at odd gbz ids and are covered via the forward side of
+                    // some other path (or are redundant with its own forward).
+                    if gbz_seq_id & 1 != 0 {
+                        continue;
+                    }
+                    let forward_path_idx = gbz_seq_id >> 1;
+                    let Some(num_nodes) = bp_off.num_forward_nodes(forward_path_idx) else {
+                        continue;
+                    };
+                    if num_nodes == 0 || seq_off_from_end >= num_nodes {
+                        continue;
+                    }
+                    let forward_node_idx = num_nodes - 1 - seq_off_from_end;
+                    let Some(pos) = bp_off.bp_of(forward_path_idx, forward_node_idx) else {
+                        continue;
+                    };
+                    let genome_len = self.name_map.path_to_length[forward_path_idx];
+                    let hit_end = pos + syncmer_len;
+                    let padded_start = pos.saturating_sub(padding);
+                    let padded_end = (hit_end + padding).min(genome_len);
+                    all_intervals.push(HomologousInterval {
+                        genome: self.name_map.path_to_name[forward_path_idx].clone(),
+                        start: padded_start,
+                        end: padded_end,
+                        strand: '+',
+                    });
                 }
             }
-
-            if let (Some(min_p), Some(max_p)) = (min_pos, max_pos) {
-                // Add syncmer length to max_pos to get the end of the last syncmer
-                let syncmer_len = (self.params.w + self.params.k) as u64;
-                let interval_end = max_p + syncmer_len;
-
-                // Apply padding
-                let padded_start = min_p.saturating_sub(padding);
-                let padded_end = (interval_end + padding).min(genome_len);
-
-                all_intervals.push(HomologousInterval {
-                    genome: genome_name.clone(),
-                    start: padded_start,
-                    end: padded_end,
-                    strand: '+',
-                });
+        } else {
+            // Fallback: walk every forward path (the old pre-locate behavior).
+            let num_genomes = self.name_map.path_to_name.len();
+            for genome_idx in 0..num_genomes {
+                let path_start = match &self.name_map.path_starts[genome_idx] {
+                    Some(ps) => ps,
+                    None => continue,
+                };
+                let genome_name = &self.name_map.path_to_name[genome_idx];
+                let genome_len = self.name_map.path_to_length[genome_idx];
+                let nodes = self.walk_path(path_start);
+                for &(node_id, pos) in &nodes {
+                    if query_node_set.contains(&node_id.unsigned_abs()) {
+                        let hit_end = pos + syncmer_len;
+                        let padded_start = pos.saturating_sub(padding);
+                        let padded_end = (hit_end + padding).min(genome_len);
+                        all_intervals.push(HomologousInterval {
+                            genome: genome_name.clone(),
+                            start: padded_start,
+                            end: padded_end,
+                            strand: '+',
+                        });
+                    }
+                }
             }
         }
 
-        // 4. Merge overlapping intervals per genome
+        // 4. Merge overlapping/adjacent intervals per genome
         Self::merge_intervals(&mut all_intervals);
 
         Ok(all_intervals)
@@ -1703,6 +1951,102 @@ mod tests {
     }
 
     // ── 13. query_region tests ─────────────────────────────────────
+
+    /// Full SyngIndex save/load with the FastLocate sidecar file
+    /// (`.syng.locate`). Verify that the reloaded index still has
+    /// `has_fast_locate() == true` and returns the same query results as
+    /// the in-memory version.
+    #[test]
+    fn test_syng_save_load_with_fast_locate() {
+        let _guard = lock_syng();
+        let params = SyncmerParams::default();
+        let shared = make_test_sequence(500, 42);
+        let mut sa = shared.clone();
+        sa.extend_from_slice(&make_test_sequence(500, 1));
+        let mut sb = shared.clone();
+        sb.extend_from_slice(&make_test_sequence(500, 2));
+        let seqs = vec![
+            ("ga".to_string(), sa),
+            ("gb".to_string(), sb),
+        ];
+
+        let mut index = SyngIndex::build(params, seqs.into_iter());
+        index.build_fast_locate().unwrap();
+        let in_mem = index.query_region("ga", 0, 1000, 120).unwrap();
+
+        let dir = std::env::temp_dir().join("impg_test_syng_locate_roundtrip");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("idx");
+        let prefix_str = prefix.to_str().unwrap();
+        index.save(prefix_str).unwrap();
+        assert!(
+            std::path::Path::new(&format!("{}.syng.locate", prefix_str)).exists(),
+            ".syng.locate file should exist after save"
+        );
+
+        let loaded = SyngIndex::load(prefix_str, params).unwrap();
+        assert!(loaded.has_fast_locate(), "loaded index should have fast_locate");
+        let reloaded = loaded.query_region("ga", 0, 1000, 120).unwrap();
+
+        let to_set = |v: &[HomologousInterval]| -> std::collections::BTreeSet<(String, u64, u64)> {
+            v.iter().map(|iv| (iv.genome.clone(), iv.start, iv.end)).collect()
+        };
+        assert_eq!(to_set(&in_mem), to_set(&reloaded));
+        assert!(!in_mem.is_empty());
+    }
+
+    /// FastLocate fast-path parity: building the locate structure on top of
+    /// an existing SyngIndex and re-querying must return the SAME intervals
+    /// (after merging) as the fallback walk-every-path implementation.
+    #[test]
+    fn test_query_region_fast_locate_parity() {
+        let _guard = lock_syng();
+        let params = SyncmerParams::default();
+
+        // Shared backbone + diverging tails + one entirely novel sequence.
+        let shared = make_test_sequence(600, 42);
+        let mut seq_a = shared.clone();
+        seq_a.extend_from_slice(&make_test_sequence(400, 1));
+        let mut seq_b = shared.clone();
+        seq_b.extend_from_slice(&make_test_sequence(400, 2));
+        let mut seq_c = shared.clone();
+        seq_c.extend_from_slice(&make_test_sequence(400, 3));
+        let seq_d = make_test_sequence(1000, 99);
+
+        let seqs = vec![
+            ("ga".to_string(), seq_a),
+            ("gb".to_string(), seq_b),
+            ("gc".to_string(), seq_c),
+            ("gd".to_string(), seq_d),
+        ];
+
+        // `SyngIndex::build` eagerly builds the locate structure, so we pull
+        // out the fast result first and then tear down the locate state to
+        // exercise the fallback walk-every-path implementation.
+        let mut index = SyngIndex::build(params, seqs.into_iter());
+        assert!(index.has_fast_locate());
+        let fast = index.query_region("ga", 0, 1000, 120).unwrap();
+
+        index.gbz_gbwt = None;
+        index.fast_locate = None;
+        index.bp_offsets = None;
+        assert!(!index.has_fast_locate());
+        let slow = index.query_region("ga", 0, 1000, 120).unwrap();
+
+        // Normalize (genome, start, end) tuples and compare as sets.
+        let to_set = |v: &[HomologousInterval]| -> std::collections::BTreeSet<(String, u64, u64)> {
+            v.iter().map(|iv| (iv.genome.clone(), iv.start, iv.end)).collect()
+        };
+        let slow_set = to_set(&slow);
+        let fast_set = to_set(&fast);
+        assert_eq!(
+            slow_set, fast_set,
+            "fast-path and slow-path query_region disagree\nslow: {:?}\nfast: {:?}",
+            slow_set, fast_set
+        );
+        assert!(!slow_set.is_empty(), "test should produce at least one hit");
+    }
 
     /// Build an index from sequences that share some content, then query a region.
     #[test]

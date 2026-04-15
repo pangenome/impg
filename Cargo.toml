@@ -64,6 +64,13 @@ seqwish = { git = "https://github.com/pangenome/seqwish", branch = "rust-2" }
 # Dependencies for graph sorting
 gfasort = { git = "https://github.com/pangenome/gfasort", rev = "b5fdb1d" }
 
+# GBWT + succinct data structures for FastLocate port (src/fast_locate.rs).
+# `gbz` is the jltsiren/gbwt-rs reimplementation (despite the crate name);
+# we use its GBWTBuilder to construct a classical GBWT from syng path data
+# and its BWT primitives + RLEIter to walk records run-by-run.
+gbz = "0.6"
+simple-sds = "0.4"
+
 [build-dependencies]
 cc = "1"
 
