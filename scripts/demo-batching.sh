@@ -190,11 +190,6 @@ NUM_SEQS=$(grep -c '^>' "${PREFIX}.fa")
 TOTAL_BP=$(grep -v '^>' "${PREFIX}.fa" | wc -c)
 echo "  FASTA extracted: ${PREFIX}.fa (${NUM_SEQS} seqs, ${TOTAL_BP} bp, ${wall}s, ${mem}MB)"
 
-# Build the .fai sidecar that sweepga/wfmash expects (sweepga's CLI
-# requires an already-indexed FASTA; the library-API path creates the
-# index automatically, the binary does not).
-samtools faidx "${PREFIX}.fa"
-
 # Step 2: for each aligner, run unbatched and batched alignments
 declare -A PAF_FILES
 

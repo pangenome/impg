@@ -728,7 +728,7 @@ struct RefineOpts {
     /// PanSN aggregation mode when counting support (sample/haplotype)
     #[arg(help_heading = "Refinement options")]
     #[clap(long, value_enum)]
-    pansn_mode: Option<refine::RefineSupportArg>,
+    pansn_mode: Option<sweepga::pansn::PanSnLevel>,
 
     /// Step size for expanding flanks (bp)
     #[arg(help_heading = "Refinement options")]
@@ -1851,14 +1851,15 @@ fn run() -> io::Result<()> {
                 None
             };
 
+            let support_level = refine
+                .pansn_mode
+                .unwrap_or(sweepga::pansn::PanSnLevel::Sequence);
+
             let config = refine::RefineConfig {
                 span_bp: refine.span_bp,
                 max_extension: refine.max_extension,
                 extension_step: refine.extension_step,
-                support_mode: refine
-                    .pansn_mode
-                    .map(Into::into)
-                    .unwrap_or(refine::SupportMode::Sequence),
+                support_level,
                 merge_distance: refine.query.effective_merge_distance(),
                 min_identity: refine.query.min_result_identity,
                 use_transitive_bfs: refine.query.transitive,
@@ -1876,13 +1877,10 @@ fn run() -> io::Result<()> {
 
             let mut records = refine::run_refine(&impg, &target_ranges, config)?;
             info!(
-                "Refining {} targets with max_extension={} (mode: {:?})",
+                "Refining {} targets with max_extension={} (level: {:?})",
                 target_ranges.len(),
                 refine.max_extension,
-                refine
-                    .pansn_mode
-                    .map(Into::into)
-                    .unwrap_or(refine::SupportMode::Sequence)
+                support_level
             );
             let mut writer = BufWriter::new(io::stdout());
             let mut support_writer = if let Some(path) = &refine.support_output {

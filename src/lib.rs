@@ -116,11 +116,33 @@ fn dispatch_gfa_engine_inner(
                 &engine_opts.pipeline,
             )?;
 
+            // Normalize seqwish line order before sort_gfa (seqwish emits
+            // L-edges in a thread-dependent order — same content, unstable
+            // ordering — and ygs_sort is parse-order-sensitive). Must
+            // match `run_graph_build_pggb` for the `query -o gfa` and
+            // `graph --sequence-files` paths to produce the same layout.
+            let raw_gfa = {
+                let mut lines: Vec<&str> = raw_gfa.lines().collect();
+                lines.sort_unstable();
+                lines.join("\n") + "\n"
+            };
+
             // Sort for 1D layout (required by smoothxg block decomposition)
             let raw_gfa = graph::sort_gfa(&raw_gfa, num_threads)?;
 
-            // Step 2: smooth
-            let n_haps = query_intervals.len().max(1);
+            // Step 2: smooth. `n_haps` is the number of unique haplotypes
+            // in the input (distinct `SAMPLE#HAPLOTYPE` prefixes), NOT
+            // the number of query intervals. `max_block_weight` scales
+            // with this, and using the interval count (typically many
+            // multiples larger) inflates block size → different graph
+            // structure. Must match the `graph` subcommand, which counts
+            // haplotypes from the input FASTAs via the same helper.
+            let n_haps = sweepga::pansn::count_pansn_keys(
+                query_intervals
+                    .iter()
+                    .filter_map(|iv| impg.seq_index().get_name(iv.metadata)),
+                sweepga::pansn::PanSnLevel::Haplotype,
+            );
             let smooth_config = smooth::SmoothConfig {
                 num_threads,
                 target_poa_lengths: engine_opts.target_poa_lengths.clone(),
