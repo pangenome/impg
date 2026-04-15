@@ -4,19 +4,20 @@ set -euo pipefail
 # Demo: validate that --batch-bytes produces equivalent alignments to unbatched runs.
 #
 # Tests aligners: wfmash, fastga
-# For each aligner, compares unbatched vs batched alignment output (impg align),
+# For each aligner, compares unbatched vs batched alignment output (sweepga),
 # then builds graphs from both PAFs to verify they're healthy.
 #
 # Batch sizes are per-aligner to trigger multi-batch partitioning given the cost
 # models (wfmash: 500MB + 20 bytes/bp memory, fastga: 100MB + 12 bytes/bp disk).
 #
-# Uses TPA alignment lists and AGC archive as input (same as demo_gfa_commands.sh).
+# Uses TPA alignment lists and AGC archive as input (same as demo-gfa.sh).
 #
 # Usage:
 #   cd data/human-pangenome-tpas
 #   bash ../../scripts/demo-batching.sh
 
 IMPG="../../target/release/impg"
+SWEEPGA="${SWEEPGA:-sweepga}"  # override via env if not on PATH
 AGC="../HPRC_r2_assemblies_0.6.1.agc"
 OUTDIR="../../demo-batching-results"
 THREADS=12
@@ -29,11 +30,13 @@ REGION="CHM13#0#chr6:29000000-29050000"
 ENGINE="seqwish"
 
 # Batch sizes per aligner, chosen to force multiple batches with the extracted data.
-# fastga cost model: 100MB overhead + 12 bytes/bp
+# fastga cost model: ~100MB overhead + 12 bytes/bp (disk-dominated)
+# wfmash cost model: ~500MB overhead + 20 bytes/bp (memory-dominated)
 declare -A BATCH_SIZES
 BATCH_SIZES[fastga]="120M"
+BATCH_SIZES[wfmash]="600M"
 
-ALIGNERS=("fastga")
+ALIGNERS=("wfmash" "fastga")
 
 # -------------------------------------------------------------------------
 # Helpers (from demo_gfa_commands.sh)
@@ -199,11 +202,11 @@ for ALIGNER in "${ALIGNERS[@]}"; do
         PAF="${ALIGN_DIR}/alignments.paf"
         LOG="${PREFIX}.align.${TAG}.log"
         DISK_LOG="${PREFIX}.align.${TAG}.disk.log"
-        TMPDIR_ALIGN="/tmp/impg_batch_demo_${TAG}_$$"
+        TMPDIR_ALIGN="/tmp/sweepga_batch_demo_${TAG}_$$"
         PAF_FILES["${ALIGNER}:${MODE}"]="$PAF"
 
         rm -rf "$ALIGN_DIR" "$TMPDIR_ALIGN"
-        mkdir -p "$TMPDIR_ALIGN"
+        mkdir -p "$ALIGN_DIR" "$TMPDIR_ALIGN"
 
         BATCH_FLAG=()
         if [ "$MODE" != "none" ]; then
@@ -211,18 +214,18 @@ for ALIGNER in "${ALIGNERS[@]}"; do
         fi
 
         echo ""
-        echo "--- impg align: $ALIGNER / batch=$MODE ---"
+        echo "--- sweepga: $ALIGNER / batch=$MODE ---"
 
         # Monitor disk usage of temp dir
         (while true; do du -sb "$TMPDIR_ALIGN" 2>/dev/null; sleep 0.2; done) > "$DISK_LOG" 2>/dev/null &
         MON_PID=$!
 
-        metrics=$(run_timed "$LOG" $IMPG align \
-            --sequence-files "${PREFIX}.fa" \
-            -o "$ALIGN_DIR" --format paf \
+        metrics=$(run_timed "$LOG" $SWEEPGA \
+            "${PREFIX}.fa" \
+            --output-file "$PAF" \
             --aligner "$ALIGNER" "${BATCH_FLAG[@]}" \
             --temp-dir "$TMPDIR_ALIGN" \
-            -t "$THREADS" -v 1) || true
+            -t "$THREADS") || true
         read -r wall mem st <<< "$metrics"
 
         kill $MON_PID 2>/dev/null || true
