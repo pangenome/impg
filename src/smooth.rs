@@ -1090,8 +1090,8 @@ fn smooth_block(
     let msa_bytes: Vec<&[u8]> = msa.iter().map(|s| s.as_bytes()).collect();
 
     let mut core_sequences: Vec<String> = Vec::with_capacity(nseqs);
-    for i in 0..nseqs {
-        let core_seq: String = msa_bytes[i][core_start..core_end]
+    for row in msa_bytes.iter().take(nseqs) {
+        let core_seq: String = row[core_start..core_end]
             .iter()
             .filter(|&&b| b != b'-')
             .map(|&b| b as char)
@@ -1134,8 +1134,8 @@ fn find_core_column_range(msa: &[String], entries: &[SeqEntry]) -> (usize, usize
             continue;
         }
         let mut non_gap_count = 0;
-        for col in 0..ncols {
-            if msa_bytes[i][col] != b'-' {
+        for (col, &b) in msa_bytes[i].iter().take(ncols).enumerate() {
+            if b != b'-' {
                 non_gap_count += 1;
                 if non_gap_count == left_pad {
                     core_start = core_start.max(col + 1);
@@ -1159,8 +1159,8 @@ fn find_core_column_range(msa: &[String], entries: &[SeqEntry]) -> (usize, usize
             break;
         }
         let mut non_gap_count = 0;
-        for col in 0..ncols {
-            if msa_bytes[i][col] != b'-' {
+        for (col, &b) in msa_bytes[i].iter().take(ncols).enumerate() {
+            if b != b'-' {
                 non_gap_count += 1;
                 if non_gap_count == core_base_count {
                     core_end = core_end.min(col + 1);
