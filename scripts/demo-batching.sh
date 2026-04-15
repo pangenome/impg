@@ -30,11 +30,13 @@ REGION="CHM13#0#chr6:29000000-29050000"
 ENGINE="seqwish"
 
 # Batch sizes per aligner, chosen to force multiple batches with the extracted data.
-# fastga cost model: 100MB overhead + 12 bytes/bp
+# fastga cost model: ~100MB overhead + 12 bytes/bp (disk-dominated)
+# wfmash cost model: ~500MB overhead + 20 bytes/bp (memory-dominated)
 declare -A BATCH_SIZES
 BATCH_SIZES[fastga]="120M"
+BATCH_SIZES[wfmash]="600M"
 
-ALIGNERS=("fastga")
+ALIGNERS=("wfmash" "fastga")
 
 # -------------------------------------------------------------------------
 # Helpers (from demo_gfa_commands.sh)

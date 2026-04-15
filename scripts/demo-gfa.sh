@@ -60,6 +60,10 @@ STRATEGIES=(
     "wfmash:auto"
 )
 
+# Aligners to test. `wfmash:*` sparsify strategies are wfmash-only; the
+# loop skips those combos automatically when ALIGNER=fastga.
+ALIGNERS=("wfmash" "fastga")
+
 # -------------------------------------------------------------------------
 # Helpers
 # -------------------------------------------------------------------------
@@ -257,63 +261,76 @@ run_region() {
         record "$LABEL" "fasta" "$wall" "$mem" "FAIL"
     fi
 
-    # --- Step 2: for each engine × strategy, run all three paths ---
-    # poa engine does not run alignment, so --sparsify is invalid; only test "none".
-    for ENGINE in "${REGION_ENGINES[@]}"; do
-        local ENGINE_STRATEGIES=("${STRATEGIES[@]}")
-        if [ "$ENGINE" = "poa" ]; then
-            ENGINE_STRATEGIES=("none")
-        fi
-        for STRATEGY in "${ENGINE_STRATEGIES[@]}"; do
-            local STAG
-            STAG=$(strategy_tag "$STRATEGY")
-            local TAG="${ENGINE}.${STAG}"
-
-            echo ""
-            echo "  --- engine=$ENGINE  sparsify=$STRATEGY ($TAG) ---"
-
-            # Build sparsify flag (omit for "none")
-            local SPARSIFY_FLAG=()
-            if [ "$STRATEGY" != "none" ]; then
-                SPARSIFY_FLAG=(--sparsify "$STRATEGY")
-            fi
-
-            # --- Path 1: query -o gfa ---
-            echo "  [1/2] query -o gfa ..."
-            local qgfa="${PREFIX}.query.${TAG}.gfa"
-            metrics=$(run_timed "${PREFIX}.query.${TAG}.log" $IMPG query \
-                --alignment-list tpa-list.txt --sequence-files "$AGC" \
-                -r "$REGION" -o gfa --gfa-engine "$ENGINE" "${SPARSIFY_FLAG[@]}" \
-                --force-large-region \
-                -O "${PREFIX}.query.${TAG}" -t "$THREADS" -v 1) || true
-            read -r wall mem st <<< "$metrics"
-            if [ "$st" -eq 0 ] && [ -s "$qgfa" ]; then
-                read -r s l p avg <<< "$(gfa_stats "$qgfa")"
-                record "$LABEL" "q.$TAG" "$wall" "$mem" "OK" "$s" "$l" "$p" "$avg"
-            else
-                record "$LABEL" "q.$TAG" "$wall" "$mem" "FAIL"
-            fi
-
-            # --- Path 2: graph (aligns internally) ---
-            local ggfa="${PREFIX}.graph.${TAG}.gfa"
-            if $fasta_ok; then
-                echo "  [2/2] graph ..."
-                metrics=$(run_timed "${PREFIX}.graph.${TAG}.log" $IMPG graph \
-                    --sequence-files "${PREFIX}.fa" \
-                    -g "$ggfa" \
-                    --gfa-engine "$ENGINE" --aligner wfmash "${SPARSIFY_FLAG[@]}" \
-                    -t "$THREADS" -v 1) || true
-                read -r wall mem st <<< "$metrics"
-                if [ "$st" -eq 0 ] && [ -s "$ggfa" ]; then
-                    read -r s l p avg <<< "$(gfa_stats "$ggfa")"
-                    record "$LABEL" "g.$TAG" "$wall" "$mem" "OK" "$s" "$l" "$p" "$avg"
-                else
-                    record "$LABEL" "g.$TAG" "$wall" "$mem" "FAIL"
+    # --- Step 2: for each aligner × engine × strategy, run both paths ---
+    # poa engine does not run alignment, so --sparsify / --aligner are moot;
+    # it's only tested once under a fixed tag.
+    for ALIGNER in "${ALIGNERS[@]}"; do
+        for ENGINE in "${REGION_ENGINES[@]}"; do
+            local ENGINE_STRATEGIES=("${STRATEGIES[@]}")
+            if [ "$ENGINE" = "poa" ]; then
+                # POA is aligner-agnostic; run it only once (under the
+                # first aligner) and only with sparsify=none.
+                if [ "$ALIGNER" != "${ALIGNERS[0]}" ]; then
+                    continue
                 fi
+                ENGINE_STRATEGIES=("none")
             fi
+            for STRATEGY in "${ENGINE_STRATEGIES[@]}"; do
+                # wfmash:* density strategies are wfmash-only.
+                if [[ "$STRATEGY" == wfmash:* ]] && [ "$ALIGNER" != "wfmash" ]; then
+                    continue
+                fi
 
-            # --- Validate: query vs graph ---
-            compare_gfa "$LABEL" "$ENGINE" "$STAG" "query vs graph" "$qgfa" "$ggfa"
+                local STAG
+                STAG=$(strategy_tag "$STRATEGY")
+                local TAG="${ENGINE}.${ALIGNER}.${STAG}"
+
+                echo ""
+                echo "  --- aligner=$ALIGNER engine=$ENGINE sparsify=$STRATEGY ($TAG) ---"
+
+                # Build sparsify flag (omit for "none")
+                local SPARSIFY_FLAG=()
+                if [ "$STRATEGY" != "none" ]; then
+                    SPARSIFY_FLAG=(--sparsify "$STRATEGY")
+                fi
+
+                # --- Path 1: query -o gfa ---
+                echo "  [1/2] query -o gfa ..."
+                local qgfa="${PREFIX}.query.${TAG}.gfa"
+                metrics=$(run_timed "${PREFIX}.query.${TAG}.log" $IMPG query \
+                    --alignment-list tpa-list.txt --sequence-files "$AGC" \
+                    -r "$REGION" -o gfa --gfa-engine "$ENGINE" --aligner "$ALIGNER" "${SPARSIFY_FLAG[@]}" \
+                    --force-large-region \
+                    -O "${PREFIX}.query.${TAG}" -t "$THREADS" -v 1) || true
+                read -r wall mem st <<< "$metrics"
+                if [ "$st" -eq 0 ] && [ -s "$qgfa" ]; then
+                    read -r s l p avg <<< "$(gfa_stats "$qgfa")"
+                    record "$LABEL" "q.$TAG" "$wall" "$mem" "OK" "$s" "$l" "$p" "$avg"
+                else
+                    record "$LABEL" "q.$TAG" "$wall" "$mem" "FAIL"
+                fi
+
+                # --- Path 2: graph (aligns internally) ---
+                local ggfa="${PREFIX}.graph.${TAG}.gfa"
+                if $fasta_ok; then
+                    echo "  [2/2] graph ..."
+                    metrics=$(run_timed "${PREFIX}.graph.${TAG}.log" $IMPG graph \
+                        --sequence-files "${PREFIX}.fa" \
+                        -g "$ggfa" \
+                        --gfa-engine "$ENGINE" --aligner "$ALIGNER" "${SPARSIFY_FLAG[@]}" \
+                        -t "$THREADS" -v 1) || true
+                    read -r wall mem st <<< "$metrics"
+                    if [ "$st" -eq 0 ] && [ -s "$ggfa" ]; then
+                        read -r s l p avg <<< "$(gfa_stats "$ggfa")"
+                        record "$LABEL" "g.$TAG" "$wall" "$mem" "OK" "$s" "$l" "$p" "$avg"
+                    else
+                        record "$LABEL" "g.$TAG" "$wall" "$mem" "FAIL"
+                    fi
+                fi
+
+                # --- Validate: query vs graph ---
+                compare_gfa "$LABEL" "$ENGINE" "$STAG" "query vs graph" "$qgfa" "$ggfa"
+            done
         done
     done
 }
