@@ -2206,14 +2206,19 @@ fn run() -> io::Result<()> {
                 ));
             }
 
-            // Validate aligner-parameter compatibility. The sparsify
-            // strategy was already parsed by clap (see sweepga::cli::AlnArgs);
-            // just borrow it.
-            if let Err(e) = sweepga::orchestrator::validate_strategy_aligner(
-                &engine_cli.aln.sw.sparsify,
-                &engine_cli.aln.sw.aligner,
-            ) {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, e));
+            // Wfmash-density sparsification only makes sense with the wfmash backend
+            if matches!(
+                engine_cli.aln.sw.sparsify,
+                SparsificationStrategy::WfmashDensity(_)
+            ) && engine_cli.aln.sw.aligner != "wfmash"
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Wfmash density sparsification ({}) requires --aligner wfmash, but '{}' was specified",
+                        engine_cli.aln.sw.sparsify, engine_cli.aln.sw.aligner
+                    ),
+                ));
             }
             if engine_cli.aln.sw.aligner == "wfmash" && engine_cli.aln.sw.frequency.is_some() {
                 return Err(io::Error::new(
