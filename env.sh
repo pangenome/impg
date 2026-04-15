@@ -45,7 +45,12 @@ cat > "$_wrapper_dir/rustc" << SCRIPT
 exec $_guix_ldso --library-path "$_lib_path" $_rust_toolchain/bin/rustc "\$@"
 SCRIPT
 
-chmod +x "$_wrapper_dir/cargo" "$_wrapper_dir/rustc"
+cat > "$_wrapper_dir/rustdoc" << SCRIPT
+#!/bin/bash
+exec $_guix_ldso --library-path "$_lib_path" $_rust_toolchain/bin/rustdoc "\$@"
+SCRIPT
+
+chmod +x "$_wrapper_dir/cargo" "$_wrapper_dir/rustc" "$_wrapper_dir/rustdoc"
 
 # --- Environment ---
 export PATH="$_wrapper_dir:$_guix_gcc/bin:$_guix_cmake:$_guix_pkgconfig:$_guix_profile/bin:$PATH"
@@ -64,6 +69,7 @@ export LANG=C
 unset LC_CTYPE
 export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="$_guix_gcc/bin/gcc"
 export RUSTC="$_wrapper_dir/rustc"
+export RUSTDOC="$_wrapper_dir/rustdoc"
 
 echo "impg build env ready — Guix GCC 12.3 + glibc 2.35 (cmake $(cmake --version 2>/dev/null | head -1 | awk '{print $3}'))"
 
