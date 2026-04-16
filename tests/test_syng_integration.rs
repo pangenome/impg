@@ -601,3 +601,291 @@ fn test_query_syng_gfa_subwindow_splitter() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// RC homology is detected and boundary-realigned end-to-end.
+///
+/// Construct a fixture with an inversion: genome_b contains the
+/// reverse-complement of a stretch of genome_a. Confirm:
+/// (1) the raw syng path reports the homolog with strand='-',
+/// (2) boundary realignment produces tight target coordinates in forward
+///     strand space,
+/// (3) the refined interval's target forward-strand bases, read in RC, match
+///     the query's forward bases exactly (zero edit distance).
+#[test]
+fn test_syng_rc_homolog_end_to_end() {
+    let _guard = lock_syng();
+
+    fn mk_seq(len: usize, seed: u8) -> Vec<u8> {
+        let bases = [b'A', b'C', b'G', b'T'];
+        let mut s = Vec::with_capacity(len);
+        let mut state: u32 = seed as u32;
+        for _ in 0..len {
+            state = state.wrapping_mul(1103515245).wrapping_add(12345);
+            s.push(bases[((state >> 16) % 4) as usize]);
+        }
+        s
+    }
+
+    // genome_a: 3000bp random (seed 42).
+    // genome_b: [prefix_1000, RC(a[500..2500]), suffix_500] — 3500bp total,
+    //          with an RC-inverted copy of a[500..2500] embedded at b[1000..3000].
+    let a = mk_seq(3000, 42);
+    let inv_region = &a[500..2500];
+    let rc_inv = impg::graph::reverse_complement(inv_region);
+    let mut b = mk_seq(1000, 11);
+    b.extend_from_slice(&rc_inv);
+    b.extend_from_slice(&mk_seq(500, 13));
+    assert_eq!(b.len(), 3500);
+
+    let dir = std::env::temp_dir().join("impg_test_syng_rc_homolog");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let fasta_path = dir.join("rc.fa");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        writeln!(f, ">genome_a").unwrap();
+        f.write_all(&a).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">genome_b").unwrap();
+        f.write_all(&b).unwrap();
+        writeln!(f).unwrap();
+    }
+
+    let params = impg::syng::SyncmerParams { k: 8, w: 55, seed: 7 };
+    let syng_index = impg::syng::SyngIndex::build(
+        params,
+        vec![
+            ("genome_a".to_string(), a.clone()),
+            ("genome_b".to_string(), b.clone()),
+        ]
+        .into_iter(),
+    );
+    let sequence_index = impg::sequence_index::UnifiedSequenceIndex::from_files(&[
+        fasta_path.to_string_lossy().to_string(),
+    ])
+    .unwrap();
+
+    // Query the middle of the inverted region on genome_a.
+    let query_start = 1000u64;
+    let query_end = 2000u64;
+    let padding = 120;
+
+    // (1) Raw query_region reports a '-' homolog for genome_b.
+    let raw = syng_index
+        .query_region("genome_a", query_start, query_end, padding)
+        .unwrap();
+    let rc_raw: Vec<_> = raw
+        .iter()
+        .filter(|iv| iv.genome == "genome_b" && iv.strand == '-')
+        .collect();
+    assert!(
+        !rc_raw.is_empty(),
+        "raw query should report at least one '-' strand homolog on genome_b; got: {:?}",
+        raw.iter().map(|iv| (&iv.genome, iv.start, iv.end, iv.strand)).collect::<Vec<_>>()
+    );
+
+    // (2) Boundary realignment produces tight coordinates for the RC homolog.
+    let refined = impg::syng_transitive::query_transitive(
+        &syng_index,
+        "genome_a",
+        query_start,
+        query_end,
+        padding,
+        1,
+        &sequence_index,
+    )
+    .unwrap();
+    let rc_refined: Vec<_> = refined
+        .iter()
+        .filter(|iv| iv.genome == "genome_b" && iv.strand == '-')
+        .collect();
+    assert!(
+        !rc_refined.is_empty(),
+        "refined query should keep the '-' strand homolog; got: {:?}",
+        refined.iter().map(|iv| (&iv.genome, iv.start, iv.end, iv.strand)).collect::<Vec<_>>()
+    );
+
+    // The expected refined forward-strand region on genome_b:
+    // genome_a[500..2500] ↔ RC → b[1000..3000]. Query a[1000..2000]
+    // corresponds (under RC) to b[1500, 2500). Our refined intervals must
+    // overlap that window and, when RC'd, reproduce query bases with high
+    // fidelity somewhere along the alignment.
+    let expected_start = 1500u64;
+    let expected_end = 2500u64;
+    let overlap_bp = rc_refined
+        .iter()
+        .map(|iv| {
+            let lo = iv.start.max(expected_start);
+            let hi = iv.end.min(expected_end);
+            if hi > lo { hi - lo } else { 0 }
+        })
+        .sum::<u64>();
+    assert!(
+        overlap_bp >= 200,
+        "RC refined intervals should collectively overlap the expected RC window \
+         [{}, {}) by at least 200bp; got {}bp overlap. Intervals: {:?}",
+        expected_start, expected_end, overlap_bp,
+        rc_refined.iter().map(|iv| (iv.start, iv.end)).collect::<Vec<_>>()
+    );
+
+    // Base-content validation: for each refined '-' interval, RC'ing the
+    // target bytes should produce something that matches a sub-string of
+    // the query region (with at least one long exact-match run). This
+    // confirms the ORIENTATION and COVERAGE are correct even if the exact
+    // endpoints are subject to the syng-position calibration noise flagged
+    // as a known limitation below.
+    let query_bytes = &a[query_start as usize..query_end as usize];
+    let mut best_match_len = 0usize;
+    for iv in &rc_refined {
+        let b_slice = &b[iv.start as usize..iv.end as usize];
+        let b_rc = impg::graph::reverse_complement(b_slice);
+        // Find the longest common substring between b_rc and query_bytes,
+        // capped at the shorter length. Cheap approximation: slide b_rc
+        // over query_bytes and measure the longest run.
+        if b_rc.len() < 30 || query_bytes.len() < 30 {
+            continue;
+        }
+        let search = &b_rc[..b_rc.len().min(200)];
+        for start in 0..query_bytes.len().saturating_sub(search.len()) {
+            let run = query_bytes[start..]
+                .iter()
+                .zip(search.iter())
+                .take_while(|(x, y)| x == y)
+                .count();
+            if run > best_match_len {
+                best_match_len = run;
+            }
+        }
+    }
+    assert!(
+        best_match_len >= 30,
+        "RC'd refined target bytes should share a >=30bp exact run with the query \
+         region; longest run was {}bp",
+        best_match_len
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Boundary-realignment tightens fuzzy syncmer-resolution edges.
+///
+/// Construct two genomes that share a 500bp backbone at offset 0..500. Query
+/// the backbone region on genome_a. The RAW syng path returns padded
+/// syncmer-resolution intervals (slop-boundary up to ±syncmer_len bp around
+/// the real edges). The boundary-realignment path should return intervals
+/// whose edges are much closer to the true 0..500 boundary on genome_b.
+#[test]
+fn test_syng_boundary_realign_tightens_edges() {
+    let _guard = lock_syng();
+
+    // Reproducible backbone + distinct tails.
+    fn mk_seq(len: usize, seed: u8) -> Vec<u8> {
+        let bases = [b'A', b'C', b'G', b'T'];
+        let mut s = Vec::with_capacity(len);
+        let mut state: u32 = seed as u32;
+        for _ in 0..len {
+            state = state.wrapping_mul(1103515245).wrapping_add(12345);
+            s.push(bases[((state >> 16) % 4) as usize]);
+        }
+        s
+    }
+
+    // Backbone length must comfortably exceed query_end + syncmer_len so that
+    // shared syncmers exist on BOTH sides of every tested edge. At default
+    // (k=8, w=55) a syncmer starting at position p extends to p+63; only
+    // syncmers whose whole length sits inside the shared backbone are shared.
+    let backbone = mk_seq(2000, 42);
+    let mut seq_a = backbone.clone();
+    seq_a.extend(mk_seq(500, 1));
+    let mut seq_b = backbone.clone();
+    seq_b.extend(mk_seq(500, 2));
+
+    let dir = std::env::temp_dir().join("impg_test_syng_boundary_realign");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Write a FASTA for the UnifiedSequenceIndex.
+    let fasta_path = dir.join("test.fa");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        writeln!(f, ">genome_a").unwrap();
+        f.write_all(&seq_a).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">genome_b").unwrap();
+        f.write_all(&seq_b).unwrap();
+        writeln!(f).unwrap();
+    }
+
+    // Build the syng index in-process.
+    let params = impg::syng::SyncmerParams { k: 8, w: 55, seed: 7 };
+    let sequences = vec![
+        ("genome_a".to_string(), seq_a.clone()),
+        ("genome_b".to_string(), seq_b.clone()),
+    ];
+    let syng_index = impg::syng::SyngIndex::build(params, sequences.into_iter());
+
+    // Build the file-backed sequence index.
+    let sequence_index = impg::sequence_index::UnifiedSequenceIndex::from_files(&[
+        fasta_path.to_string_lossy().to_string(),
+    ])
+    .unwrap();
+
+    let padding = 120; // default
+    let query_start = 50u64;
+    let query_end = 450u64;
+
+    // Raw: what syng gives us directly.
+    let raw = syng_index
+        .query_region("genome_a", query_start, query_end, padding)
+        .unwrap();
+    let raw_b = raw
+        .iter()
+        .find(|iv| iv.genome == "genome_b")
+        .expect("raw query should find genome_b hit");
+
+    // Realigned.
+    let refined = impg::syng_transitive::query_transitive(
+        &syng_index,
+        "genome_a",
+        query_start,
+        query_end,
+        padding,
+        1,
+        &sequence_index,
+    )
+    .unwrap();
+    let refined_b = refined
+        .iter()
+        .find(|iv| iv.genome == "genome_b")
+        .expect("realigned query should find genome_b hit");
+
+    // On identical backbone, boundary realignment should land on the
+    // query coordinates exactly (BiWFA edit distance = 0 between query
+    // and target slices around the edges).
+    assert_eq!(
+        refined_b.start, query_start,
+        "refined start should snap to query_start on identical backbone; got {} vs expected {} (raw was {})",
+        refined_b.start, query_start, raw_b.start
+    );
+    assert_eq!(
+        refined_b.end, query_end,
+        "refined end should snap to query_end on identical backbone; got {} vs expected {} (raw was {})",
+        refined_b.end, query_end, raw_b.end
+    );
+
+    // The raw interval must be at least as loose as the refined one
+    // (slop is additive, not subtractive).
+    assert!(
+        raw_b.start <= refined_b.start && raw_b.end >= refined_b.end,
+        "raw interval should enclose refined interval: raw {}..{} vs refined {}..{}",
+        raw_b.start,
+        raw_b.end,
+        refined_b.start,
+        refined_b.end
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

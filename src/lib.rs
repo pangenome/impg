@@ -19,6 +19,7 @@ pub mod seqidx;
 pub mod sequence_index;
 pub mod smooth;
 pub mod subset_filter;
+pub mod syng_transitive;
 pub mod tpa_parser;
 
 /// GFA engine selection.
