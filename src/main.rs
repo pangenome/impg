@@ -3046,11 +3046,18 @@ fn run() -> io::Result<()> {
                             })
                             .collect();
 
-                        // Use the contig name directly — it already follows
-                        // PanSN convention (sample#haplotype#contig) so
-                        // appending @sample would create a redundant suffix
-                        // that makes query -r lookups fail.
-                        let name = contig.clone();
+                        // If the contig name already follows PanSN convention
+                        // (sample#haplotype#contig), use it as-is — it already
+                        // embeds the sample, so appending @sample would create
+                        // a redundant suffix that makes query -r lookups fail.
+                        // Otherwise (raw contig name like `chr1`), prepend the
+                        // sample via `contig@sample` so names stay unique across
+                        // samples that share a contig name.
+                        let name = if contig.contains('#') {
+                            contig.clone()
+                        } else {
+                            format!("{}@{}", contig, sample)
+                        };
                         info!("  Processing {} ({} bp)", name, seq.len());
                         sequences.push((name, seq));
                     }
