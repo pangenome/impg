@@ -142,6 +142,18 @@ pub struct GbwtPathStart {
     pub start_count: u32,
     /// Number of syncmer nodes in the forward path.
     pub num_syncmers: u32,
+    /// Absolute bp position of the first syncmer on the forward sequence.
+    ///
+    /// Syng's syncmer iterator reports the first syncmer at wherever the
+    /// first min k-mer lands in the initial window — this can be anywhere
+    /// in `[0, w+k)`. `walk_path` uses this value to initialise its bp
+    /// accumulator so that downstream consumers see ABSOLUTE sequence
+    /// coordinates (not positions relative to the first syncmer).
+    ///
+    /// Defaults to 0 when an index loaded from an older format lacks this
+    /// field (preserving the pre-fix behaviour for such indexes — still
+    /// buggy for anchors, but not worse; a fresh rebuild corrects it).
+    pub first_syncmer_pos: u64,
 }
 
 /// Maps between GBWT path numbers and sequence names/lengths.
@@ -185,8 +197,10 @@ impl SyngNameMap {
 
     /// Save to a `.syng.names` file.
     /// Format: one line per path, tab-separated:
-    /// `path_number\tname\tlength\tstart_node\tstart_count\tnum_syncmers`
-    /// (last three columns are 0 if path start info is unavailable)
+    /// `path_number\tname\tlength\tstart_node\tstart_count\tnum_syncmers\tfirst_syncmer_pos`
+    /// (columns 3-6 are 0 if path start info is unavailable). The 7th column
+    /// `first_syncmer_pos` was added to record the absolute bp offset of
+    /// the forward path's first syncmer — older 6-column files load it as 0.
     pub fn save(&self, path: &str) -> io::Result<()> {
         let file = std::fs::File::create(path)?;
         let mut writer = BufWriter::new(file);
@@ -197,18 +211,29 @@ impl SyngNameMap {
             .zip(self.path_starts.iter())
             .enumerate()
         {
-            let (sn, sc, ns) = match start {
-                Some(info) => (info.start_node, info.start_count, info.num_syncmers),
-                None => (0, 0, 0),
+            let (sn, sc, ns, fsp) = match start {
+                Some(info) => (
+                    info.start_node,
+                    info.start_count,
+                    info.num_syncmers,
+                    info.first_syncmer_pos,
+                ),
+                None => (0, 0, 0, 0),
             };
-            writeln!(writer, "{}\t{}\t{}\t{}\t{}\t{}", i, name, length, sn, sc, ns)?;
+            writeln!(
+                writer,
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                i, name, length, sn, sc, ns, fsp
+            )?;
         }
         writer.flush()?;
         Ok(())
     }
 
     /// Load from a `.syng.names` file.
-    /// Supports both old 3-column format and new 6-column format.
+    /// Supports 3-, 6-, and 7-column formats. Older 6-column files load with
+    /// `first_syncmer_pos = 0` (the pre-fix behaviour) — rebuild the index
+    /// for coordinate-accurate anchor positions.
     pub fn load(path: &str) -> io::Result<Self> {
         let file = std::fs::File::open(path)?;
         let reader = BufReader::new(file);
@@ -241,11 +266,19 @@ impl SyngNameMap {
             })?;
             let path_num = name_map.add(name, length);
 
-            // Parse optional path start info (columns 3-5)
+            // Parse optional path start info (columns 3-5, plus optional
+            // column 6 for first_syncmer_pos).
             if parts.len() >= 6 {
                 let start_node: i32 = parts[3].parse().unwrap_or(0);
                 let start_count: u32 = parts[4].parse().unwrap_or(0);
                 let num_syncmers: u32 = parts[5].parse().unwrap_or(0);
+                // 7th column is optional (new in this format revision). Old
+                // files default to 0 — anchors remain off by the first
+                // syncmer's absolute position until the index is rebuilt.
+                let first_syncmer_pos: u64 = parts
+                    .get(6)
+                    .map(|s| s.parse().unwrap_or(0))
+                    .unwrap_or(0);
                 if num_syncmers > 0 {
                     name_map.set_path_start(
                         path_num,
@@ -253,6 +286,7 @@ impl SyngNameMap {
                             start_node,
                             start_count,
                             num_syncmers,
+                            first_syncmer_pos,
                         },
                     );
                 }
@@ -474,6 +508,10 @@ impl SyngIndex {
             // Build forward GBWT path and capture start info
             let fwd_start_node;
             let fwd_start_count;
+            // Syng's first syncmer lands at wherever the first min k-mer
+            // appears in the initial window — anywhere in `[0, w+k)`. We
+            // record it so `walk_path` can emit absolute bp coordinates.
+            let fwd_first_syncmer_pos = syncmers[0].1 as u64;
             unsafe {
                 let first_sync = syncmers[0].0 as i32;
                 let sbp = syng_ffi::syngBWTpathStartNew(index.gbwt, first_sync);
@@ -512,6 +550,7 @@ impl SyngIndex {
                     start_node: fwd_start_node,
                     start_count: fwd_start_count,
                     num_syncmers: syncmers.len() as u32,
+                    first_syncmer_pos: fwd_first_syncmer_pos,
                 },
             );
         }
@@ -770,16 +809,29 @@ impl SyngIndex {
         seq_index
     }
 
-    /// Walk a genome's forward GBWT path, returning (node_id, accumulated_position)
+    /// Walk a genome's forward GBWT path, returning `(node_id, absolute_bp_pos)`
     /// for each syncmer in the path.
+    ///
+    /// Positions are ABSOLUTE bp coordinates on the forward sequence — the
+    /// first syncmer is placed at `start.first_syncmer_pos` (the bp offset
+    /// at which syng's C iterator emitted it), and subsequent syncmers are
+    /// accumulated from there using the inter-syncmer offsets stored in the
+    /// GBWT. This matches the convention used by callers of
+    /// `query_region_with_anchors` (which treat returned positions as
+    /// absolute sequence coordinates when computing BiWFA realignment).
+    ///
+    /// For indexes loaded from an older on-disk format that predates the
+    /// `first_syncmer_pos` field, that value is 0 and the returned positions
+    /// reduce to the old behaviour (relative to the first syncmer). A fresh
+    /// rebuild of the index corrects this.
     fn walk_path(&self, start: &GbwtPathStart) -> Vec<(i32, u64)> {
         let mut nodes = Vec::with_capacity(start.num_syncmers as usize);
         unsafe {
             let sbp =
                 syng_ffi::syngBWTpathStartOld(self.gbwt, start.start_node, start.start_count);
-            // First node position is 0 (relative — actual genomic position comes from syncmer pos)
-            // We track accumulated offset from path start
-            let mut acc_pos: u64 = 0;
+            // Anchor the bp accumulator at the first syncmer's absolute
+            // position (0 for old indexes — pre-fix behaviour).
+            let mut acc_pos: u64 = start.first_syncmer_pos;
             nodes.push((start.start_node, acc_pos));
 
             let mut next_node: i32 = 0;
