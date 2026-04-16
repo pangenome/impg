@@ -155,6 +155,56 @@ fn refine_boundaries(
     (start.max(homolog.start), end.min(homolog.end))
 }
 
+/// Per-path strand dedupe: for each target path (= one haplotype's one
+/// contig), if a `+` interval and a `-` interval overlap on the target
+/// forward strand, keep only the one with more anchor support. The minority
+/// strand is treated as noise from random-coincidence syncmer matches (short
+/// k-mers whose canonical hash also hits at unrelated positions in the
+/// opposite orientation).
+///
+/// Non-overlapping `+` / `-` intervals on the same path represent genuinely
+/// distinct biological homologies (e.g. a collinear region plus an inversion
+/// elsewhere on the same contig) and both are preserved.
+fn dedupe_strand_overlaps(
+    hits: Vec<HomologousIntervalWithAnchors>,
+) -> Vec<HomologousIntervalWithAnchors> {
+    if hits.len() <= 1 {
+        return hits;
+    }
+    let n = hits.len();
+    let mut keep = vec![true; n];
+    for i in 0..n {
+        if !keep[i] {
+            continue;
+        }
+        for j in (i + 1)..n {
+            if !keep[j] {
+                continue;
+            }
+            let a = &hits[i];
+            let b = &hits[j];
+            if a.genome != b.genome
+                || a.strand == b.strand
+                || a.start >= b.end
+                || b.start >= a.end
+            {
+                continue;
+            }
+            // Overlap on same path with opposite strands — majority wins.
+            if a.anchors.len() >= b.anchors.len() {
+                keep[j] = false;
+            } else {
+                keep[i] = false;
+                break;
+            }
+        }
+    }
+    hits.into_iter()
+        .zip(keep)
+        .filter_map(|(iv, k)| if k { Some(iv) } else { None })
+        .collect()
+}
+
 /// Run one hop of syng-seeded homology query.
 ///
 /// `merge_distance` controls bedtools-style `-d` distance merging of padded
@@ -174,6 +224,10 @@ pub fn one_hop(
         query_name, query_start, query_end, padding,
     )?;
     let hits = distance_merge_anchored(hits, merge_distance);
+    // Collapse strand-duplication noise: if a single path has a `+` and a
+    // `-` interval overlapping on the target forward strand, the minority-
+    // anchor strand is random syncmer coincidence — drop it.
+    let hits = dedupe_strand_overlaps(hits);
     let syncmer_len = (syng_index.params.w + syng_index.params.k) as u64;
 
     let mut out: Vec<HomologousInterval> = Vec::with_capacity(hits.len());
@@ -389,7 +443,72 @@ mod tests {
             },
         ];
         let merged = distance_merge_anchored(hits, 10_000);
-        // Different strands must not merge.
+        // Different strands must not merge at this stage (cross-strand
+        // dedupe happens separately).
         assert_eq!(merged.len(), 2);
+    }
+
+    fn mk_hit(genome: &str, start: u64, end: u64, strand: char, n_anchors: usize) -> HomologousIntervalWithAnchors {
+        HomologousIntervalWithAnchors {
+            genome: genome.into(),
+            start, end, strand,
+            anchors: (0..n_anchors)
+                .map(|i| mk_anchor(start + i as u64, start + i as u64))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn dedupe_keeps_majority_strand_on_overlap() {
+        // On path X, a dense `+` interval at [100, 500) (50 anchors) overlaps
+        // a sparse `-` interval at [200, 400) (3 anchors — random coincidence).
+        // Dedupe should keep only the `+`.
+        let hits = vec![
+            mk_hit("X", 100, 500, '+', 50),
+            mk_hit("X", 200, 400, '-', 3),
+        ];
+        let out = dedupe_strand_overlaps(hits);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].strand, '+');
+        assert_eq!((out[0].start, out[0].end), (100, 500));
+    }
+
+    #[test]
+    fn dedupe_preserves_distinct_real_inversion() {
+        // On path X: collinear `+` at [100, 500) AND real inversion `-` at
+        // [1000, 1200) (non-overlapping target coords). Both kept.
+        let hits = vec![
+            mk_hit("X", 100, 500, '+', 50),
+            mk_hit("X", 1000, 1200, '-', 40),
+        ];
+        let out = dedupe_strand_overlaps(hits);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn dedupe_is_per_path_not_cross_path() {
+        // Two different paths: Y '+', Z '-'. They don't overlap logically
+        // because they're different sequences. Both kept.
+        let hits = vec![
+            mk_hit("Y", 100, 500, '+', 50),
+            mk_hit("Z", 200, 400, '-', 50),
+        ];
+        let out = dedupe_strand_overlaps(hits);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn dedupe_tie_prefers_first_wins() {
+        // Equal anchor counts on overlap → keep the one we encountered first
+        // (stable choice). Not a critical property but the algorithm must be
+        // deterministic.
+        let hits = vec![
+            mk_hit("X", 100, 500, '+', 10),
+            mk_hit("X", 200, 400, '-', 10),
+        ];
+        let out = dedupe_strand_overlaps(hits);
+        assert_eq!(out.len(), 1);
+        // `>=` in the comparator means the `+` (first) wins ties.
+        assert_eq!(out[0].strand, '+');
     }
 }
