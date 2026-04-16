@@ -111,11 +111,49 @@ fn align_edge_to_anchor(
     })
 }
 
-/// Distance-merge anchored intervals in place: any two intervals on the same
-/// (genome, strand) whose target-axis gap is `<= merge_distance` are merged
-/// and their anchor sets are unioned. Mirrors bedtools `merge -d`. A distance
-/// of 0 is a no-op (raw output from `query_region_with_anchors` is already
-/// overlap-merged).
+/// Co-linearity signature for an anchor on a given strand.
+///
+/// Two anchors on the same biological homology (modulo indels) will have
+/// the same signature modulo the local indel burden; anchors on different
+/// homologies (paralog, inversion elsewhere) will have very different
+/// signatures.
+///
+/// * `'+'` strand:  `signature = target_pos - query_pos`  (constant under
+///   collinear homology — increases equally on both axes).
+/// * `'-'` strand:  `signature = query_pos + target_pos`  (constant under
+///   RC homology — target decreases as query increases, so the sum is
+///   stable).
+fn anchor_signature(a: Anchor, strand: char) -> i64 {
+    match strand {
+        '+' => a.target_pos as i64 - a.query_pos as i64,
+        '-' => a.query_pos as i64 + a.target_pos as i64,
+        _ => 0,
+    }
+}
+
+/// Median anchor signature for an interval (representative co-linearity
+/// "level" of the interval's homology).
+fn interval_signature(iv: &HomologousIntervalWithAnchors) -> Option<i64> {
+    if iv.anchors.is_empty() {
+        return None;
+    }
+    let mut sigs: Vec<i64> = iv.anchors.iter().map(|&a| anchor_signature(a, iv.strand)).collect();
+    sigs.sort();
+    Some(sigs[sigs.len() / 2])
+}
+
+/// Distance-merge anchored intervals in place: two intervals on the same
+/// `(genome, strand)` merge when BOTH:
+///   1. Their target-axis gap is `<= merge_distance` (bedtools `-d` style), AND
+///   2. Their median anchor co-linearity signatures are within
+///      `merge_distance / 10` of each other.
+///
+/// Criterion #2 prevents merging across paralogs / distinct homologies that
+/// happen to sit within `-d` of each other but have very different
+/// signatures (e.g. one at delta=1047 and one at delta=7275 on the same
+/// contig — clearly two separate biological regions, not fragments of one).
+///
+/// `merge_distance = 0` is a no-op.
 fn distance_merge_anchored(
     mut hits: Vec<HomologousIntervalWithAnchors>,
     merge_distance: u64,
@@ -123,6 +161,7 @@ fn distance_merge_anchored(
     if hits.len() <= 1 || merge_distance == 0 {
         return hits;
     }
+    let signature_tolerance = (merge_distance / 10).max(1) as i64;
     hits.sort_by(|a, b| {
         a.genome
             .cmp(&b.genome)
@@ -130,18 +169,33 @@ fn distance_merge_anchored(
             .then(a.start.cmp(&b.start))
     });
     let mut merged: Vec<HomologousIntervalWithAnchors> = Vec::with_capacity(hits.len());
+    let mut merged_sigs: Vec<Option<i64>> = Vec::with_capacity(hits.len());
     for mut iv in hits {
-        if let Some(last) = merged.last_mut() {
-            if last.genome == iv.genome
-                && last.strand == iv.strand
-                && iv.start <= last.end.saturating_add(merge_distance)
+        let iv_sig = interval_signature(&iv);
+        let can_merge = {
+            if let (Some(last), Some(last_sig)) =
+                (merged.last(), merged_sigs.last().and_then(|s| *s))
             {
-                last.end = last.end.max(iv.end);
-                last.anchors.append(&mut iv.anchors);
-                continue;
+                last.genome == iv.genome
+                    && last.strand == iv.strand
+                    && iv.start <= last.end.saturating_add(merge_distance)
+                    && iv_sig
+                        .map(|s| (s - last_sig).abs() <= signature_tolerance)
+                        .unwrap_or(false)
+            } else {
+                false
             }
+        };
+        if can_merge {
+            let last = merged.last_mut().unwrap();
+            last.end = last.end.max(iv.end);
+            last.anchors.append(&mut iv.anchors);
+            // Update the cached signature for the (now larger) last interval.
+            *merged_sigs.last_mut().unwrap() = interval_signature(last);
+        } else {
+            merged.push(iv);
+            merged_sigs.push(iv_sig);
         }
-        merged.push(iv);
     }
     for iv in &mut merged {
         iv.anchors
@@ -718,6 +772,68 @@ mod tests {
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].end, 300);
         assert_eq!(merged[0].anchors.len(), 2);
+    }
+
+    #[test]
+    fn distance_merge_refuses_when_signatures_diverge() {
+        // Two intervals on the same (genome, strand), within -d on target
+        // axis, but with very different co-linearity signatures — these are
+        // paralogs, not fragments of one homology. Must NOT merge.
+        // Anchors for first: delta=1047 (target - query). Second: delta=7275.
+        let hits = vec![
+            HomologousIntervalWithAnchors {
+                genome: "g".into(),
+                start: 409000, end: 410200, strand: '+',
+                anchors: vec![
+                    Anchor { query_pos: 408100, target_pos: 409147, node_id: 1 },
+                    Anchor { query_pos: 408500, target_pos: 409547, node_id: 2 },
+                    Anchor { query_pos: 409000, target_pos: 410047, node_id: 3 },
+                ],
+            },
+            HomologousIntervalWithAnchors {
+                genome: "g".into(),
+                start: 416300, end: 417400, strand: '+',
+                anchors: vec![
+                    Anchor { query_pos: 409100, target_pos: 416375, node_id: 4 },
+                    Anchor { query_pos: 409500, target_pos: 416775, node_id: 5 },
+                    Anchor { query_pos: 409900, target_pos: 417175, node_id: 6 },
+                ],
+            },
+        ];
+        let merged = distance_merge_anchored(hits, 10_000);
+        assert_eq!(
+            merged.len(),
+            2,
+            "Signatures 1047 vs 7275 differ far beyond tolerance — must stay separate"
+        );
+    }
+
+    #[test]
+    fn distance_merge_joins_when_signatures_close() {
+        // Same strand, within -d, and signatures within tolerance (within
+        // a few bp of each other — real fragmentation of the same homology).
+        let hits = vec![
+            HomologousIntervalWithAnchors {
+                genome: "g".into(),
+                start: 100, end: 300, strand: '+',
+                anchors: vec![
+                    Anchor { query_pos: 100, target_pos: 200, node_id: 1 },
+                    Anchor { query_pos: 200, target_pos: 300, node_id: 2 },
+                ],
+            },
+            HomologousIntervalWithAnchors {
+                genome: "g".into(),
+                start: 500, end: 700, strand: '+',
+                anchors: vec![
+                    Anchor { query_pos: 400, target_pos: 500, node_id: 3 },
+                    Anchor { query_pos: 500, target_pos: 600, node_id: 4 },
+                ],
+            },
+        ];
+        // Both intervals have signature delta=100.
+        let merged = distance_merge_anchored(hits, 10_000);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].anchors.len(), 4);
     }
 
     #[test]
