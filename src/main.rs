@@ -1761,9 +1761,10 @@ fn run() -> io::Result<()> {
                     1
                 };
                 // bedtools-style `-d` merge distance, applied to padded syncmer
-                // hits before realignment. Default 0 (= overlap-merge only).
-                let syng_merge_distance =
-                    query.transitive_opts.min_distance_between_ranges.max(0) as u64;
+                // hits before edge projection. Maps to the CLI's `-d` /
+                // `--merge-distance` (the same flag PAF-based queries use to
+                // merge post-transitive intervals). Default 0 = overlap-only.
+                let syng_merge_distance = query.effective_merge_distance().max(0) as u64;
 
                 // Setup output resources for GFA/FASTA/GBWT (need sequence files).
                 // Boundary realignment also needs them for edge-window fetches.
