@@ -311,6 +311,34 @@ pub struct HomologousInterval {
     pub strand: char,
 }
 
+/// A shared syncmer node between the query path and a target path.
+///
+/// `query_pos` and `target_pos` are the bp-coordinate positions of the
+/// syncmer's start on each respective path. `node_id` is the absolute
+/// (unsigned) syncmer node id.
+///
+/// Used by the boundary-realignment transitive pipeline to locate
+/// flanking anchors for each query edge.
+#[derive(Debug, Clone, Copy)]
+pub struct Anchor {
+    pub query_pos: u64,
+    pub target_pos: u64,
+    pub node_id: u32,
+}
+
+/// A homologous interval plus the shared-syncmer anchors that produced it.
+///
+/// Anchors are sorted by `query_pos` ascending. For merged intervals the
+/// anchor set is the union of anchors from the pre-merge intervals.
+#[derive(Debug, Clone)]
+pub struct HomologousIntervalWithAnchors {
+    pub genome: String,
+    pub start: u64,
+    pub end: u64,
+    pub strand: char,
+    pub anchors: Vec<Anchor>,
+}
+
 /// A loaded GBWT index with syncmer hash and name mapping.
 ///
 /// This is the primary handle for syng integration. It owns the C-allocated
@@ -391,21 +419,21 @@ impl SyngIndex {
                 continue;
             };
             let walk = self.walk_path(ps);
-            // walk_path yields (node_id, accumulated_bp_pos). Syng's rskip may
-            // report negative node ids when a forward walk traverses an edge
-            // whose canonical orientation is the opposite strand; `query_region`
-            // already collapses strand via `unsigned_abs()`, so we do the same
-            // here. Each syncmer maps to one gbz record regardless of which
-            // strand visits it.
+            // walk_path yields (signed_node_id, accumulated_bp_pos). Syng's
+            // sign encodes the orientation of the syncmer on this path's
+            // forward strand: positive = canonical (forward), negative = RC
+            // (reverse). We preserve that sign as the low bit of the GBWT
+            // encoded node id so the fast-locate path can distinguish
+            // forward- from reverse-orientation visits — required for
+            // detecting RC homology via `decompress_da(2*N + 1)`.
             //
-            // Encoded as gbz forward-orientation ids
-            // (`encode_node(raw, Forward) = raw << 1`). ENDMARKER is 0, so
-            // syncmer ids starting at 1 are safe.
+            // ENDMARKER is 0, so syncmer ids starting at 1 are safe.
             let mut path_encoded: Vec<usize> = Vec::with_capacity(walk.len());
             for &(node, pos) in &walk {
                 let raw = node.unsigned_abs() as usize;
                 debug_assert!(raw > 0, "forward walk produced zero node id");
-                path_encoded.push(raw << 1);
+                let orient_bit: usize = if node >= 0 { 0 } else { 1 };
+                path_encoded.push((raw << 1) | orient_bit);
                 offsets_flat.push(pos);
             }
             builder
@@ -850,6 +878,9 @@ impl SyngIndex {
     /// Returns intervals on other genomes that share syncmer nodes with the
     /// query region `[start, end)` on `genome`. Results are padded outward
     /// by `padding` bp.
+    ///
+    /// Thin wrapper over [`query_region_with_anchors`] that discards the
+    /// per-homolog anchor set.
     pub fn query_region(
         &self,
         genome: &str,
@@ -857,6 +888,40 @@ impl SyngIndex {
         end: u64,
         padding: u64,
     ) -> Result<Vec<HomologousInterval>, io::Error> {
+        let with_anchors = self.query_region_with_anchors(genome, start, end, padding)?;
+        Ok(with_anchors
+            .into_iter()
+            .map(|h| HomologousInterval {
+                genome: h.genome,
+                start: h.start,
+                end: h.end,
+                strand: h.strand,
+            })
+            .collect())
+    }
+
+    /// Query variant that preserves per-hit shared-syncmer anchor positions.
+    ///
+    /// Each returned homolog carries the `(query_pos, target_pos, node_id)`
+    /// positions of the shared syncmers that contributed to it. These anchors
+    /// are the input to the boundary-realignment transitive pipeline
+    /// (see notes/SYNG_TRANSITIVE_DESIGN.md).
+    ///
+    /// Handles BOTH forward- and reverse-complement homology. Query syncmers
+    /// are tagged with their orientation on the query path (from `walk_path`
+    /// node sign); target syncmers are matched against both GBWT node
+    /// encodings (forward = `2*N`, reverse = `2*N + 1`). A query orientation
+    /// matching the target's produces a forward-strand hit (`strand='+'`);
+    /// a mismatch produces a reverse-strand hit (`strand='-'`). The two
+    /// strands are kept as separate homolog intervals (not merged) since
+    /// they describe distinct homologies.
+    pub fn query_region_with_anchors(
+        &self,
+        genome: &str,
+        start: u64,
+        end: u64,
+        padding: u64,
+    ) -> Result<Vec<HomologousIntervalWithAnchors>, io::Error> {
         // Suppress C debug output from syngBWTnext
         unsafe { syng_ffi::impg_syng_suppress_debug() };
 
@@ -885,72 +950,129 @@ impl SyngIndex {
                 )
             })?;
 
-        // 2. Walk the query genome's path, find nodes in [start, end]
+        // 2. Walk the query genome's path, collect nodes in [start, end)
+        //    along with (query_position, query_orientation).
+        //    Query orientation is 0 = forward (canonical), 1 = reverse
+        //    (RC traversal) — encoded in the sign of the node id from
+        //    walk_path: negative node id → reverse orientation.
+        //    A syncmer node may appear at multiple query positions (repeat
+        //    families) — we keep all of them and cross-product with target
+        //    hits downstream. Callers pick the nearest anchor per edge.
         let query_nodes = self.walk_path(query_start);
-        let mut query_node_set = rustc_hash::FxHashSet::default();
-        for &(node_id, pos) in &query_nodes {
+        // abs_node -> Vec<(query_pos, q_orient_bit)>. q_orient_bit is 0 for
+        // forward, 1 for reverse — matching the low bit of the GBWT node
+        // encoding so we can compare directly against target visits.
+        let mut query_node_positions: FxHashMap<u32, Vec<(u64, u8)>> =
+            FxHashMap::default();
+        for &(signed_node, pos) in &query_nodes {
             if pos >= start && pos < end {
-                // Use absolute node ID (positive) so both strands match
-                query_node_set.insert(node_id.unsigned_abs());
+                let abs = signed_node.unsigned_abs();
+                let q_orient: u8 = if signed_node >= 0 { 0 } else { 1 };
+                query_node_positions
+                    .entry(abs)
+                    .or_default()
+                    .push((pos, q_orient));
             }
         }
 
-        if query_node_set.is_empty() {
+        if query_node_positions.is_empty() {
             return Ok(Vec::new());
         }
 
-        // 3. Enumerate hits. If the FastLocate fast path is prepared, use
-        // it to query each syncmer node in O(k log r) rather than walking
-        // every forward path per query. Otherwise fall back to the original
-        // walk-every-path loop.
         let syncmer_len = (self.params.w + self.params.k) as u64;
-        let mut all_intervals: Vec<HomologousInterval> = Vec::new();
+        // Group per (forward_path_idx, strand). Intervals on the same genome
+        // but different strands are NOT merged — they represent distinct
+        // homologies (forward match vs RC / inversion).
+        let mut per_path: FxHashMap<(usize, char), Vec<HomologousIntervalWithAnchors>> =
+            FxHashMap::default();
 
         if let (Some(fl), Some(gbz_gbwt), Some(bp_off)) =
             (self.fast_locate.as_ref(), self.gbz_gbwt.as_ref(), self.bp_offsets.as_ref())
         {
-            // Fast path: per query syncmer node, decompress_da -> (gbz_seq_id,
-            // seq_offset_from_end). gbz_seq_id = 2*forward_path_idx + {0 fwd / 1 rev};
-            // we only care about forward visits (even gbz ids).
-            for &query_node in &query_node_set {
-                // syng node id is positive i32; gbz encoded forward id = raw << 1.
-                let encoded = (query_node as usize) << 1;
-                if !gbz_gbwt.has_node(encoded) {
-                    continue;
-                }
-                let visits = fl.decompress_da(gbz_gbwt, encoded);
-                for (gbz_seq_id, seq_off_from_end) in visits {
-                    // Only forward sequences (even gbz ids). Reverse hits land
-                    // at odd gbz ids and are covered via the forward side of
-                    // some other path (or are redundant with its own forward).
-                    if gbz_seq_id & 1 != 0 {
+            // Fast path: for each query node, query BOTH orientations of the
+            // GBWT encoding to catch forward and RC homology. Each target
+            // visit is tagged with the orientation it was found under; the
+            // strand is query_orient XOR target_orient.
+            for (&query_node, query_positions) in &query_node_positions {
+                for t_orient in 0u8..=1 {
+                    let encoded = ((query_node as usize) << 1) | (t_orient as usize);
+                    if !gbz_gbwt.has_node(encoded) {
                         continue;
                     }
-                    let forward_path_idx = gbz_seq_id >> 1;
-                    let Some(num_nodes) = bp_off.num_forward_nodes(forward_path_idx) else {
-                        continue;
-                    };
-                    if num_nodes == 0 || seq_off_from_end >= num_nodes {
-                        continue;
+                    let visits = fl.decompress_da(gbz_gbwt, encoded);
+                    for (gbz_seq_id, seq_off_from_end) in visits {
+                        // Only forward GBWT sequences (even gbz ids). The
+                        // reverse GBWT sequence is redundant: any RC homology
+                        // it would report is already captured by the opposite
+                        // orientation hit on some forward path.
+                        if gbz_seq_id & 1 != 0 {
+                            continue;
+                        }
+                        let forward_path_idx = gbz_seq_id >> 1;
+                        let Some(num_nodes) = bp_off.num_forward_nodes(forward_path_idx) else {
+                            continue;
+                        };
+                        if num_nodes == 0 || seq_off_from_end >= num_nodes {
+                            continue;
+                        }
+                        let forward_node_idx = num_nodes - 1 - seq_off_from_end;
+                        let Some(target_pos) = bp_off.bp_of(forward_path_idx, forward_node_idx)
+                        else {
+                            continue;
+                        };
+                        let genome_len = self.name_map.path_to_length[forward_path_idx];
+                        let hit_end = target_pos + syncmer_len;
+                        let padded_start = target_pos.saturating_sub(padding);
+                        let padded_end = (hit_end + padding).min(genome_len);
+                        // Partition this visit's anchors by strand based on
+                        // whether each query occurrence's orientation matches
+                        // the target-side orientation we queried.
+                        let mut fwd_anchors: Vec<Anchor> = Vec::new();
+                        let mut rev_anchors: Vec<Anchor> = Vec::new();
+                        for &(qp, q_orient) in query_positions {
+                            let anchor = Anchor {
+                                query_pos: qp,
+                                target_pos,
+                                node_id: query_node,
+                            };
+                            if q_orient == t_orient {
+                                fwd_anchors.push(anchor);
+                            } else {
+                                rev_anchors.push(anchor);
+                            }
+                        }
+                        if !fwd_anchors.is_empty() {
+                            per_path
+                                .entry((forward_path_idx, '+'))
+                                .or_default()
+                                .push(HomologousIntervalWithAnchors {
+                                    genome: self.name_map.path_to_name[forward_path_idx].clone(),
+                                    start: padded_start,
+                                    end: padded_end,
+                                    strand: '+',
+                                    anchors: fwd_anchors,
+                                });
+                        }
+                        if !rev_anchors.is_empty() {
+                            per_path
+                                .entry((forward_path_idx, '-'))
+                                .or_default()
+                                .push(HomologousIntervalWithAnchors {
+                                    genome: self.name_map.path_to_name[forward_path_idx].clone(),
+                                    start: padded_start,
+                                    end: padded_end,
+                                    strand: '-',
+                                    anchors: rev_anchors,
+                                });
+                        }
                     }
-                    let forward_node_idx = num_nodes - 1 - seq_off_from_end;
-                    let Some(pos) = bp_off.bp_of(forward_path_idx, forward_node_idx) else {
-                        continue;
-                    };
-                    let genome_len = self.name_map.path_to_length[forward_path_idx];
-                    let hit_end = pos + syncmer_len;
-                    let padded_start = pos.saturating_sub(padding);
-                    let padded_end = (hit_end + padding).min(genome_len);
-                    all_intervals.push(HomologousInterval {
-                        genome: self.name_map.path_to_name[forward_path_idx].clone(),
-                        start: padded_start,
-                        end: padded_end,
-                        strand: '+',
-                    });
                 }
             }
         } else {
             // Fallback: walk every forward path (the old pre-locate behavior).
+            // Each target visit carries its own orientation (sign of the
+            // target's node id) which we XOR against the query's orientation
+            // to determine strand.
             let num_genomes = self.name_map.path_to_name.len();
             for genome_idx in 0..num_genomes {
                 let path_start = match &self.name_map.path_starts[genome_idx] {
@@ -960,26 +1082,70 @@ impl SyngIndex {
                 let genome_name = &self.name_map.path_to_name[genome_idx];
                 let genome_len = self.name_map.path_to_length[genome_idx];
                 let nodes = self.walk_path(path_start);
-                for &(node_id, pos) in &nodes {
-                    if query_node_set.contains(&node_id.unsigned_abs()) {
-                        let hit_end = pos + syncmer_len;
-                        let padded_start = pos.saturating_sub(padding);
+                for &(signed_target_node, target_pos) in &nodes {
+                    let abs_node = signed_target_node.unsigned_abs();
+                    let t_orient: u8 = if signed_target_node >= 0 { 0 } else { 1 };
+                    if let Some(query_positions) = query_node_positions.get(&abs_node) {
+                        let hit_end = target_pos + syncmer_len;
+                        let padded_start = target_pos.saturating_sub(padding);
                         let padded_end = (hit_end + padding).min(genome_len);
-                        all_intervals.push(HomologousInterval {
-                            genome: genome_name.clone(),
-                            start: padded_start,
-                            end: padded_end,
-                            strand: '+',
-                        });
+                        let mut fwd_anchors: Vec<Anchor> = Vec::new();
+                        let mut rev_anchors: Vec<Anchor> = Vec::new();
+                        for &(qp, q_orient) in query_positions {
+                            let anchor = Anchor {
+                                query_pos: qp,
+                                target_pos,
+                                node_id: abs_node,
+                            };
+                            if q_orient == t_orient {
+                                fwd_anchors.push(anchor);
+                            } else {
+                                rev_anchors.push(anchor);
+                            }
+                        }
+                        if !fwd_anchors.is_empty() {
+                            per_path
+                                .entry((genome_idx, '+'))
+                                .or_default()
+                                .push(HomologousIntervalWithAnchors {
+                                    genome: genome_name.clone(),
+                                    start: padded_start,
+                                    end: padded_end,
+                                    strand: '+',
+                                    anchors: fwd_anchors,
+                                });
+                        }
+                        if !rev_anchors.is_empty() {
+                            per_path
+                                .entry((genome_idx, '-'))
+                                .or_default()
+                                .push(HomologousIntervalWithAnchors {
+                                    genome: genome_name.clone(),
+                                    start: padded_start,
+                                    end: padded_end,
+                                    strand: '-',
+                                    anchors: rev_anchors,
+                                });
+                        }
                     }
                 }
             }
         }
 
-        // 4. Merge overlapping/adjacent intervals per genome
-        Self::merge_intervals(&mut all_intervals);
-
-        Ok(all_intervals)
+        // 3. Merge per (target, strand); different strands stay separate.
+        let mut merged: Vec<HomologousIntervalWithAnchors> = Vec::new();
+        for (_key, mut group) in per_path {
+            Self::merge_intervals_with_anchors(&mut group);
+            merged.extend(group);
+        }
+        // Sort final output for deterministic order (by genome, strand, start)
+        merged.sort_by(|a, b| {
+            a.genome
+                .cmp(&b.genome)
+                .then(a.strand.cmp(&b.strand))
+                .then(a.start.cmp(&b.start))
+        });
+        Ok(merged)
     }
 
     /// Build a region-specific GBWT from fetched sequences.
@@ -1166,30 +1332,32 @@ impl SyngIndex {
     }
 
     /// Merge overlapping or adjacent intervals that share the same genome and strand.
-    fn merge_intervals(intervals: &mut Vec<HomologousInterval>) {
-        if intervals.len() <= 1 {
+    /// Merge a per-target group of anchored intervals in place. Assumes all
+    /// entries reference the same genome + strand (caller groups by path).
+    fn merge_intervals_with_anchors(group: &mut Vec<HomologousIntervalWithAnchors>) {
+        if group.len() <= 1 {
             return;
         }
-
-        // Sort by (genome, strand, start)
-        intervals.sort_by(|a, b| {
-            a.genome
-                .cmp(&b.genome)
-                .then(a.strand.cmp(&b.strand))
-                .then(a.start.cmp(&b.start))
-        });
-
-        let mut merged: Vec<HomologousInterval> = Vec::new();
-        for iv in intervals.drain(..) {
+        group.sort_by_key(|h| h.start);
+        let mut merged: Vec<HomologousIntervalWithAnchors> = Vec::with_capacity(group.len());
+        for mut iv in group.drain(..) {
             if let Some(last) = merged.last_mut() {
-                if last.genome == iv.genome && last.strand == iv.strand && iv.start <= last.end {
+                if iv.start <= last.end {
                     last.end = last.end.max(iv.end);
+                    last.anchors.append(&mut iv.anchors);
                     continue;
                 }
             }
             merged.push(iv);
         }
-        *intervals = merged;
+        // Dedupe + sort anchors within each merged interval
+        for iv in &mut merged {
+            iv.anchors
+                .sort_by(|a, b| a.query_pos.cmp(&b.query_pos).then(a.target_pos.cmp(&b.target_pos)));
+            iv.anchors
+                .dedup_by(|a, b| a.query_pos == b.query_pos && a.target_pos == b.target_pos);
+        }
+        *group = merged;
     }
 }
 
@@ -2496,88 +2664,104 @@ mod tests {
     }
 
     // ── 16. Interval merging tests ─────────────────────────────────
+    //
+    // `merge_intervals_with_anchors` operates on a per-target-path group,
+    // so all inputs share the same genome by construction. Cross-genome
+    // grouping happens one level up (in `query_region_with_anchors`).
 
-    #[test]
-    fn test_merge_intervals_no_overlap() {
-        let _guard = lock_syng();
-        let mut intervals = vec![
-            HomologousInterval { genome: "g1".to_string(), start: 0, end: 100, strand: '+' },
-            HomologousInterval { genome: "g1".to_string(), start: 200, end: 300, strand: '+' },
-        ];
-        SyngIndex::merge_intervals(&mut intervals);
-        assert_eq!(intervals.len(), 2, "Non-overlapping intervals should not merge");
+    fn mk_hiwa(start: u64, end: u64, anchors: Vec<(u64, u64)>) -> HomologousIntervalWithAnchors {
+        HomologousIntervalWithAnchors {
+            genome: "g1".to_string(),
+            start,
+            end,
+            strand: '+',
+            anchors: anchors
+                .into_iter()
+                .map(|(q, t)| Anchor { query_pos: q, target_pos: t, node_id: 0 })
+                .collect(),
+        }
     }
 
     #[test]
-    fn test_merge_intervals_overlapping() {
+    fn test_merge_with_anchors_no_overlap() {
         let _guard = lock_syng();
         let mut intervals = vec![
-            HomologousInterval { genome: "g1".to_string(), start: 0, end: 150, strand: '+' },
-            HomologousInterval { genome: "g1".to_string(), start: 100, end: 300, strand: '+' },
+            mk_hiwa(0, 100, vec![(10, 10)]),
+            mk_hiwa(200, 300, vec![(250, 250)]),
         ];
-        SyngIndex::merge_intervals(&mut intervals);
-        assert_eq!(intervals.len(), 1, "Overlapping intervals should merge");
+        SyngIndex::merge_intervals_with_anchors(&mut intervals);
+        assert_eq!(intervals.len(), 2);
+    }
+
+    #[test]
+    fn test_merge_with_anchors_overlapping() {
+        let _guard = lock_syng();
+        let mut intervals = vec![
+            mk_hiwa(0, 150, vec![(10, 10)]),
+            mk_hiwa(100, 300, vec![(200, 200)]),
+        ];
+        SyngIndex::merge_intervals_with_anchors(&mut intervals);
+        assert_eq!(intervals.len(), 1);
         assert_eq!(intervals[0].start, 0);
         assert_eq!(intervals[0].end, 300);
+        // Anchors from both intervals are preserved
+        assert_eq!(intervals[0].anchors.len(), 2);
     }
 
     #[test]
-    fn test_merge_intervals_adjacent() {
+    fn test_merge_with_anchors_adjacent() {
         let _guard = lock_syng();
         let mut intervals = vec![
-            HomologousInterval { genome: "g1".to_string(), start: 0, end: 100, strand: '+' },
-            HomologousInterval { genome: "g1".to_string(), start: 100, end: 200, strand: '+' },
+            mk_hiwa(0, 100, vec![(10, 10)]),
+            mk_hiwa(100, 200, vec![(150, 150)]),
         ];
-        SyngIndex::merge_intervals(&mut intervals);
-        assert_eq!(intervals.len(), 1, "Adjacent intervals should merge");
+        SyngIndex::merge_intervals_with_anchors(&mut intervals);
+        assert_eq!(intervals.len(), 1);
         assert_eq!(intervals[0].start, 0);
         assert_eq!(intervals[0].end, 200);
     }
 
     #[test]
-    fn test_merge_intervals_different_genomes() {
+    fn test_merge_with_anchors_multiple_groups() {
         let _guard = lock_syng();
         let mut intervals = vec![
-            HomologousInterval { genome: "g1".to_string(), start: 0, end: 150, strand: '+' },
-            HomologousInterval { genome: "g2".to_string(), start: 50, end: 200, strand: '+' },
+            mk_hiwa(0, 100, vec![(10, 10)]),
+            mk_hiwa(50, 200, vec![(100, 100)]),
+            mk_hiwa(150, 400, vec![(300, 300)]),
         ];
-        SyngIndex::merge_intervals(&mut intervals);
-        assert_eq!(intervals.len(), 2, "Overlapping intervals on different genomes should not merge");
+        SyngIndex::merge_intervals_with_anchors(&mut intervals);
+        // All three overlap transitively → one merged interval
+        assert_eq!(intervals.len(), 1);
+        assert_eq!(intervals[0].start, 0);
+        assert_eq!(intervals[0].end, 400);
+        assert_eq!(intervals[0].anchors.len(), 3);
     }
 
     #[test]
-    fn test_merge_intervals_multiple_groups() {
+    fn test_merge_with_anchors_dedup() {
         let _guard = lock_syng();
         let mut intervals = vec![
-            HomologousInterval { genome: "g1".to_string(), start: 0, end: 100, strand: '+' },
-            HomologousInterval { genome: "g1".to_string(), start: 50, end: 200, strand: '+' },
-            HomologousInterval { genome: "g1".to_string(), start: 150, end: 400, strand: '+' },
-            HomologousInterval { genome: "g2".to_string(), start: 0, end: 500, strand: '+' },
+            mk_hiwa(0, 150, vec![(10, 10), (20, 20)]),
+            mk_hiwa(100, 300, vec![(20, 20), (200, 200)]), // (20,20) is dup
         ];
-        SyngIndex::merge_intervals(&mut intervals);
-        // g1: [0,100] + [50,200] + [150,400] → [0,400]
-        // g2: [0,500]
-        assert_eq!(intervals.len(), 2);
-        let g1 = intervals.iter().find(|iv| iv.genome == "g1").unwrap();
-        assert_eq!(g1.start, 0);
-        assert_eq!(g1.end, 400);
+        SyngIndex::merge_intervals_with_anchors(&mut intervals);
+        assert_eq!(intervals.len(), 1);
+        assert_eq!(intervals[0].anchors.len(), 3); // deduped
     }
 
     #[test]
-    fn test_merge_intervals_empty() {
+    fn test_merge_with_anchors_empty() {
         let _guard = lock_syng();
-        let mut intervals: Vec<HomologousInterval> = Vec::new();
-        SyngIndex::merge_intervals(&mut intervals);
+        let mut intervals: Vec<HomologousIntervalWithAnchors> = Vec::new();
+        SyngIndex::merge_intervals_with_anchors(&mut intervals);
         assert_eq!(intervals.len(), 0);
     }
 
     #[test]
-    fn test_merge_intervals_single() {
+    fn test_merge_with_anchors_single() {
         let _guard = lock_syng();
-        let mut intervals = vec![
-            HomologousInterval { genome: "g1".to_string(), start: 10, end: 20, strand: '+' },
-        ];
-        SyngIndex::merge_intervals(&mut intervals);
+        let mut intervals = vec![mk_hiwa(10, 20, vec![(15, 15)])];
+        SyngIndex::merge_intervals_with_anchors(&mut intervals);
         assert_eq!(intervals.len(), 1);
     }
 
@@ -2661,11 +2845,23 @@ mod tests {
         );
 
         let intervals = index.query_region("only_genome", 100, 500, 0).unwrap();
-        assert_eq!(
-            intervals.len(), 1,
-            "Single-sequence index should return exactly 1 interval (self)"
+        // The query must find at least a forward self-hit. Random data can
+        // also produce palindromic syncmer matches (same syncmer canonical
+        // hash in both orientations on the same path), so we tolerate '-'
+        // self-hits in addition — they're legitimate RC homology within the
+        // single genome, not noise.
+        assert!(
+            !intervals.is_empty(),
+            "Single-sequence index must return at least one self-hit"
         );
-        assert_eq!(intervals[0].genome, "only_genome");
+        assert!(
+            intervals.iter().all(|iv| iv.genome == "only_genome"),
+            "All hits must be on the only indexed genome"
+        );
+        assert!(
+            intervals.iter().any(|iv| iv.strand == '+'),
+            "Must find at least one forward self-hit"
+        );
     }
 
     #[test]
