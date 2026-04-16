@@ -3046,7 +3046,11 @@ fn run() -> io::Result<()> {
                             })
                             .collect();
 
-                        let name = format!("{}@{}", contig, sample);
+                        // Use the contig name directly — it already follows
+                        // PanSN convention (sample#haplotype#contig) so
+                        // appending @sample would create a redundant suffix
+                        // that makes query -r lookups fail.
+                        let name = contig.clone();
                         info!("  Processing {} ({} bp)", name, seq.len());
                         sequences.push((name, seq));
                     }
