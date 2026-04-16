@@ -19,13 +19,97 @@
 //!
 //! See `notes/SYNG_TRANSITIVE_DESIGN.md`.
 
+use std::cell::RefCell;
 use std::io;
 
+use lib_wfa2::affine_wavefront::{AffineWavefronts, AlignmentStatus, Distance, MemoryMode};
 use log::warn;
 use rustc_hash::FxHashSet;
 
-use crate::sequence_index::UnifiedSequenceIndex;
+use crate::graph::reverse_complement;
+use crate::sequence_index::{SequenceIndex as _, UnifiedSequenceIndex};
 use crate::syng::{Anchor, HomologousInterval, HomologousIntervalWithAnchors, SyngIndex};
+
+/// Upper bound on the query-side outer span `q_anchor - qs` (or `qe -
+/// q_anchor`) we'll realign. In practice the outer span is typically <
+/// one syncmer gap (~30bp at default params); the cap is there to avoid
+/// pathological cases (sparse anchors in divergent regions).
+const EDGE_ALIGN_CAP_BP: u64 = 4096;
+
+/// Extra bp fetched on the target side beyond the query-side window, to
+/// accommodate net insertions / deletions in the inter-anchor region. Sized
+/// to comfortably exceed typical indel burden over ≤4kb of query-outer span.
+const EDGE_ALIGN_TARGET_BUFFER_BP: u64 = 256;
+
+thread_local! {
+    /// Edit-distance aligner for edge refinement. High-memory mode (small
+    /// windows — 100–4kb — so memory isn't a concern, but EndsFree needs
+    /// the full traceback that Ultralow's BiWFA doesn't always provide).
+    static EDGE_ALIGNER: RefCell<Option<AffineWavefronts>> =
+        const { RefCell::new(None) };
+}
+
+fn with_edge_aligner<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut AffineWavefronts) -> R,
+{
+    EDGE_ALIGNER.with(|cell| {
+        let mut opt = cell.borrow_mut();
+        if opt.is_none() {
+            *opt = Some(Distance::Edit.create_aligner(None, Some(&MemoryMode::High)));
+        }
+        f(opt.as_mut().unwrap())
+    })
+}
+
+/// Align a small outer window (at a merged-homolog edge) against the
+/// corresponding target window with the ANCHOR end fixed and the OUTER end
+/// free on the target side (to absorb inter-anchor indels). Returns the
+/// number of leading target bases the alignment skipped — equivalently,
+/// the position in the oriented target window where query position 0
+/// starts aligning.
+///
+/// `q_slice` and `t_slice_oriented` are both oriented so the anchor end is
+/// at their right (last) end. `target_begin_buffer` is the number of
+/// extra target bases fetched at the outer end, past where the query
+/// window would land under zero-indel linear projection.
+fn align_edge_to_anchor(
+    q_slice: &[u8],
+    t_slice_oriented: &[u8],
+    target_begin_buffer: u64,
+) -> Option<u64> {
+    if q_slice.is_empty() || t_slice_oriented.is_empty() {
+        return None;
+    }
+    // WFA2 requires text_begin_free <= |text|. Cap to the slice length;
+    // if the target is shorter than the nominal buffer we still allow it
+    // to skip up to its full length.
+    let text_begin_free = target_begin_buffer.min(t_slice_oriented.len() as u64) as i32;
+    with_edge_aligner(|aligner| {
+        unsafe {
+            lib_wfa2::bindings::wfa::wavefront_aligner_set_alignment_free_ends(
+                aligner.aligner_mut(),
+                0,                // pattern_begin_free: qs is fixed
+                0,                // pattern_end_free: anchor end fixed
+                text_begin_free,  // text_begin_free: outer end on target can skip
+                0,                // text_end_free: anchor end fixed
+            );
+        }
+        let status = aligner.align(q_slice, t_slice_oriented);
+        if !matches!(status, AlignmentStatus::Completed) {
+            return None;
+        }
+        let cigar = aligner.cigar();
+        // WFA2 CIGAR convention (opposite of PAF/SAM):
+        //   M / = / X  — both pattern and text advance
+        //   I          — TEXT advances only  (skipped target base)
+        //   D          — PATTERN advances only (skipped query base)
+        // Leading 'I' ops = target bases skipped before the alignment
+        // actually begins matching query.
+        let skipped = cigar.iter().take_while(|&&op| op == b'I').count() as u64;
+        Some(skipped)
+    })
+}
 
 /// Distance-merge anchored intervals in place: any two intervals on the same
 /// (genome, strand) whose target-axis gap is `<= merge_distance` are merged
@@ -107,25 +191,221 @@ fn project_query_to_target(
     }
 }
 
+/// Refine one edge of a merged homolog by local realignment between the
+/// innermost shared-syncmer anchor and the user's query boundary.
+///
+/// `is_left_edge = true` for qs projection (innermost = leftmost-q anchor);
+/// `false` for qe (innermost = rightmost-q anchor).
+///
+/// Returns the target forward-strand coordinate where the query edge lands.
+/// Falls back to linear projection when the outer span is zero, too large
+/// for realignment, or a sequence fetch fails.
+fn refine_edge_via_realignment(
+    homolog: &HomologousIntervalWithAnchors,
+    query_name: &str,
+    query_edge: u64,
+    inner_anchor: Anchor,
+    is_left_edge: bool,
+    syncmer_len: u64,
+    target_len: u64,
+    sequence_index: &UnifiedSequenceIndex,
+) -> u64 {
+    let linear = project_query_to_target(
+        query_edge,
+        inner_anchor,
+        homolog.strand,
+        syncmer_len,
+        target_len,
+    );
+    let q_anchor = inner_anchor.query_pos;
+    let t_anchor = inner_anchor.target_pos;
+
+    // Outer span on query (from edge to the innermost anchor).
+    let outer_span = if is_left_edge {
+        q_anchor.saturating_sub(query_edge)
+    } else {
+        query_edge.saturating_sub(q_anchor + syncmer_len)
+    };
+    if outer_span == 0 || outer_span > EDGE_ALIGN_CAP_BP {
+        return linear;
+    }
+
+    // Build query and target windows oriented so the anchor sits at the
+    // RIGHT end of both (so the outer end is at position 0 and the
+    // alignment can use the anchor as a fixed right-edge tether).
+    //
+    // For the LEFT edge: q_window = query[qs .. q_anchor + k]
+    //   '+' strand: t_window = target[t_anchor + k - (q_window_len) - buffer .. t_anchor + k]
+    //   '-' strand: t_window_fwd = target[t_anchor .. t_anchor + q_window_len + buffer],
+    //               then RC it — the anchor ends up at the right, as intended.
+    //
+    // For the RIGHT edge the orientation is flipped: we want the anchor at
+    // the LEFT end of both windows (so outer is on the right). The BiWFA call
+    // with `text_end_free` would handle that symmetrically — but we can also
+    // simply reverse both sequences and reuse the same left-edge routine.
+    let buffer = EDGE_ALIGN_TARGET_BUFFER_BP;
+    let q_window_len = outer_span + syncmer_len;
+
+    let (q_slice, t_slice_fwd_range, rc_target) = if is_left_edge {
+        let q_start = query_edge;
+        let q_end = q_anchor + syncmer_len;
+        let (t_start, t_end, rc) = match homolog.strand {
+            '+' => {
+                let t_end = t_anchor + syncmer_len;
+                let t_start = t_end.saturating_sub(q_window_len + buffer);
+                (t_start, t_end, false)
+            }
+            '-' => {
+                let t_start = t_anchor;
+                let t_end = t_anchor + syncmer_len + outer_span + buffer;
+                (t_start, t_end.min(target_len), true)
+            }
+            _ => return linear,
+        };
+        ((q_start, q_end), (t_start, t_end), rc)
+    } else {
+        // RIGHT edge: flip both windows so the anchor ends up on the right.
+        // Query window: query[q_anchor .. qe], reversed for alignment.
+        let q_start = q_anchor;
+        let q_end = query_edge;
+        let (t_start, t_end, rc) = match homolog.strand {
+            '+' => {
+                // Anchor starts at t_anchor. Outward = rightward on target.
+                let t_start = t_anchor;
+                let t_end = t_anchor + q_window_len + buffer;
+                (t_start, t_end.min(target_len), false)
+            }
+            '-' => {
+                // Under RC: rightward on query = leftward on target forward.
+                let t_end = t_anchor + syncmer_len;
+                let t_start = t_end.saturating_sub(q_window_len + buffer);
+                (t_start, t_end, true)
+            }
+            _ => return linear,
+        };
+        ((q_start, q_end), (t_start, t_end), rc)
+    };
+
+    let q_bytes = match sequence_index.fetch_sequence(
+        query_name,
+        q_slice.0 as i32,
+        q_slice.1 as i32,
+    ) {
+        Ok(b) => b,
+        Err(_) => return linear,
+    };
+    let t_bytes_fwd = match sequence_index.fetch_sequence(
+        &homolog.genome,
+        t_slice_fwd_range.0 as i32,
+        t_slice_fwd_range.1 as i32,
+    ) {
+        Ok(b) => b,
+        Err(_) => return linear,
+    };
+
+    // Orient both slices so the anchor is on the RIGHT end of both.
+    let (q_oriented, t_oriented) = if is_left_edge {
+        let t_o = if rc_target { reverse_complement(&t_bytes_fwd) } else { t_bytes_fwd.clone() };
+        (q_bytes.clone(), t_o)
+    } else {
+        // Right edge: reverse both so the anchor lands at the right.
+        let mut q_rev = q_bytes.clone();
+        q_rev.reverse();
+        let t_o = if rc_target {
+            // Target was fetched with anchor at right in forward coords; RC for '-' strand
+            // alignment, then reverse again so anchor lands right in oriented frame? Let's
+            // think: for '-' strand RIGHT edge, anchor end on target-forward is at t_end
+            // = t_anchor + syncmer_len. We fetched [t_end - (q_window_len + buffer), t_end).
+            // RC puts the anchor at the LEFT of oriented. Reversing afterwards (making it
+            // the RC's reverse = original forward) puts anchor back at right... confusing.
+            // Simpler: for the right edge, build the slice already-anchor-right:
+            //  '+': target[t_anchor .. t_anchor + q_window_len + buffer).
+            //       reverse this so anchor (at left in forward) ends up on right.
+            //  '-': target[t_end - (q_window_len + buffer) .. t_end).
+            //       RC + reverse = complement only (identity on indexing).
+            let mut t_rev = t_bytes_fwd.clone();
+            t_rev.reverse();
+            // Now the LEFT-most byte is the anchor's last base on target forward, i.e.
+            // the base corresponding to q_anchor under RC. Complement each byte to get
+            // the RC'd oriented slice (anchor on right now).
+            for b in &mut t_rev {
+                *b = match *b {
+                    b'A' | b'a' => b'T',
+                    b'T' | b't' => b'A',
+                    b'C' | b'c' => b'G',
+                    b'G' | b'g' => b'C',
+                    _ => *b,
+                };
+            }
+            t_rev
+        } else {
+            // '+' strand right-edge: target is forward, anchor at LEFT of fetched slice.
+            // Reverse the bytes to put the anchor at right (so we can reuse left-edge-style
+            // EndsFree with free text_begin).
+            let mut t_rev = t_bytes_fwd.clone();
+            t_rev.reverse();
+            t_rev
+        };
+        (q_rev, t_o)
+    };
+
+    // Align (anchor-end-fixed = right end; outer-end-free = left end on target).
+    let skipped = match align_edge_to_anchor(&q_oriented, &t_oriented, buffer) {
+        Some(s) => s,
+        None => return linear,
+    };
+
+    // Translate `skipped` back to a target forward-strand position.
+    // In oriented space, q_oriented[0] aligns to t_oriented[skipped].
+    // t_oriented = positions in fetched target slice, possibly RC'd and/or reversed.
+    // Mapping back:
+    //   LEFT edge:
+    //     '+': oriented = t_bytes_fwd. position `skipped` in oriented = position `skipped`
+    //          in fwd slice. Target forward coord = t_slice_start + skipped.
+    //     '-': oriented = RC(t_bytes_fwd). position `skipped` = RC of fwd[len-1-skipped].
+    //          Target forward coord (exclusive) = t_slice_end - skipped.
+    //   RIGHT edge (both sequences were reversed to put anchor at right):
+    //     '+': oriented = reverse(t_bytes_fwd). position `skipped` = fwd[len-1-skipped].
+    //          Target forward coord (exclusive) = t_slice_end - skipped.
+    //     '-': oriented = reverse(RC(t_bytes_fwd)) = complement(t_bytes_fwd).
+    //          Position `skipped` in oriented = complement(fwd[skipped]), which
+    //          sits at target forward coord t_slice_start + skipped.
+    let (t_start, t_end) = t_slice_fwd_range;
+    let refined = if is_left_edge {
+        match homolog.strand {
+            '+' => t_start + skipped,
+            '-' => t_end.saturating_sub(skipped),
+            _ => linear,
+        }
+    } else {
+        match homolog.strand {
+            '+' => t_end.saturating_sub(skipped),
+            '-' => t_start + skipped,
+            _ => linear,
+        }
+    };
+    refined.min(target_len)
+}
+
 /// Project the user's query edges onto the target forward strand for one
-/// merged homolog, using linear extrapolation from the innermost anchors.
+/// merged homolog. When `sequence_index` is provided, each edge is refined
+/// by a local BiWFA realignment between the innermost anchor and the query
+/// boundary — this captures indels that sit in the inter-anchor gap (which
+/// linear projection from syncmer anchors cannot see). Otherwise (no
+/// sequence access), falls back to pure linear extrapolation.
 ///
 /// "Innermost" = leftmost-by-query_pos and rightmost-by-query_pos anchors
-/// in the merged homolog. These anchors sit somewhere inside the
-/// homology region; the user's query edges `qs` / `qe` may sit anywhere
-/// relative to them (inside the homology, at the boundary, or outside
-/// in padding). Linear extrapolation gives a coordinate to within the
-/// local indel burden — which for closely-related genomes is a handful
-/// of bp, matching the precision of PAF-based queries for the same case.
+/// in the merged homolog.
 fn refine_boundaries(
     homolog: &HomologousIntervalWithAnchors,
+    query_name: &str,
     query_start: u64,
     query_end: u64,
     syncmer_len: u64,
     target_len: u64,
+    sequence_index: Option<&UnifiedSequenceIndex>,
 ) -> (u64, u64) {
     if homolog.anchors.is_empty() {
-        // No anchor data → fall back to padded syncmer-resolution bounds.
         return (homolog.start, homolog.end);
     }
 
@@ -134,24 +414,28 @@ fn refine_boundaries(
     let leftmost = anchors[0];
     let rightmost = *anchors.last().unwrap();
 
-    let t_for_qs = project_query_to_target(
-        query_start, leftmost, homolog.strand, syncmer_len, target_len,
-    );
-    let t_for_qe = project_query_to_target(
-        query_end, rightmost, homolog.strand, syncmer_len, target_len,
-    );
+    let (t_for_qs, t_for_qe) = match sequence_index {
+        Some(seq_idx) => (
+            refine_edge_via_realignment(
+                homolog, query_name, query_start, leftmost, true,
+                syncmer_len, target_len, seq_idx,
+            ),
+            refine_edge_via_realignment(
+                homolog, query_name, query_end, rightmost, false,
+                syncmer_len, target_len, seq_idx,
+            ),
+        ),
+        None => (
+            project_query_to_target(query_start, leftmost, homolog.strand, syncmer_len, target_len),
+            project_query_to_target(query_end, rightmost, homolog.strand, syncmer_len, target_len),
+        ),
+    };
 
-    // For '+': t_for_qs <= t_for_qe. For '-': reversed. Sort for a
-    // forward-strand half-open interval output.
     let (start, end) = if t_for_qs <= t_for_qe {
         (t_for_qs, t_for_qe)
     } else {
         (t_for_qe, t_for_qs)
     };
-
-    // Clamp to the padded syncmer-resolution bounds. The padded bounds are
-    // always a valid superset of the homology; projection outside them is
-    // an extrapolation too far (e.g. qs far outside the homology region).
     (start.max(homolog.start), end.min(homolog.end))
 }
 
@@ -236,8 +520,15 @@ pub fn one_hop(
             .get_sequence_length(&hit.genome)
             .map(|l| l as u64)
             .unwrap_or(u64::MAX);
-        let (refined_start, refined_end) =
-            refine_boundaries(hit, query_start, query_end, syncmer_len, target_len);
+        let (refined_start, refined_end) = refine_boundaries(
+            hit,
+            query_name,
+            query_start,
+            query_end,
+            syncmer_len,
+            target_len,
+            Some(sequence_index),
+        );
         if refined_end <= refined_start {
             continue;
         }
@@ -364,7 +655,8 @@ mod tests {
                 mk_anchor(2450, 2440),
             ],
         };
-        let (s, e) = refine_boundaries(&hit, 500, 2500, 63, 10_000);
+        // No sequence_index → pure linear projection path.
+        let (s, e) = refine_boundaries(&hit, "q", 500, 2500, 63, 10_000, None);
         // Left: leftmost anchor (550, 550), qs=500 → 550 + (500-550) = 500.
         // Right: rightmost anchor (2450, 2440), qe=2500 → 2440 + (2500-2450) = 2490.
         assert_eq!(s, 500);
@@ -384,7 +676,7 @@ mod tests {
         };
         // qs=400: anchor (500, 3000) → t = 3000 + 63 - (400-500) = 3163.
         // qe=1600: anchor (1500, 2000) → t = 2000 + 63 - (1600-1500) = 1963.
-        let (s, e) = refine_boundaries(&hit, 400, 1600, 63, 10_000);
+        let (s, e) = refine_boundaries(&hit, "q", 400, 1600, 63, 10_000, None);
         // Forward-strand interval: min..max, clamped to [1900, 3100].
         assert_eq!(s, 1963);
         assert_eq!(e, 3100); // 3163 clamped to homolog.end=3100
