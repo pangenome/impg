@@ -1750,15 +1750,20 @@ fn run() -> io::Result<()> {
 
                 // Boundary-realignment default path: needs a UnifiedSequenceIndex to
                 // fetch small windows around each fuzzy edge. --syng-raw opts out and
-                // uses the current syncmer-resolution pass-through.
-                // GFA output stays on raw intervals for now — its partitioning
-                // pipeline does its own alignment downstream.
-                let use_boundary_realign = !syng_raw && resolved_format != "gfa";
+                // uses the current syncmer-resolution pass-through. All output
+                // formats (bed, fasta, gbwt, gfa) route through realignment by
+                // default — fragmented raw intervals would otherwise feed straight
+                // into the GFA partitioning pipeline and produce a fragmented graph.
+                let use_boundary_realign = !syng_raw;
                 let syng_max_depth = if query.transitive {
                     query.transitive_opts.max_depth.max(1)
                 } else {
                     1
                 };
+                // bedtools-style `-d` merge distance, applied to padded syncmer
+                // hits before realignment. Default 0 (= overlap-merge only).
+                let syng_merge_distance =
+                    query.transitive_opts.min_distance_between_ranges.max(0) as u64;
 
                 // Setup output resources for GFA/FASTA/GBWT (need sequence files).
                 // Boundary realignment also needs them for edge-window fetches.
@@ -1810,6 +1815,7 @@ fn run() -> io::Result<()> {
                                     *range_end as u64,
                                     syng_padding,
                                     syng_max_depth,
+                                    syng_merge_distance,
                                     sequence_index.as_ref().unwrap(),
                                 )?
                             } else {
@@ -1846,12 +1852,25 @@ fn run() -> io::Result<()> {
                                 let mut window_idx = 0usize;
                                 while window_start < *range_end {
                                     let window_end = (window_start + ps).min(*range_end);
-                                    let intervals = wrapper.syng_index().query_region(
-                                        target_name,
-                                        window_start as u64,
-                                        window_end as u64,
-                                        syng_padding,
-                                    )?;
+                                    let intervals = if use_boundary_realign {
+                                        impg::syng_transitive::query_transitive(
+                                            wrapper.syng_index(),
+                                            target_name,
+                                            window_start as u64,
+                                            window_end as u64,
+                                            syng_padding,
+                                            syng_max_depth,
+                                            syng_merge_distance,
+                                            sequence_index.as_ref().unwrap(),
+                                        )?
+                                    } else {
+                                        wrapper.syng_index().query_region(
+                                            target_name,
+                                            window_start as u64,
+                                            window_end as u64,
+                                            syng_padding,
+                                        )?
+                                    };
                                     let window_intervals: Vec<Interval<u32>> = intervals
                                         .iter()
                                         .filter_map(|iv| {
@@ -1888,12 +1907,25 @@ fn run() -> io::Result<()> {
                                 writeln!(out, "{gfa_output}")?;
                             } else {
                                 // ─── Flat path: one query_region, one engine run ───
-                                let intervals = wrapper.syng_index().query_region(
-                                    target_name,
-                                    *range_start as u64,
-                                    *range_end as u64,
-                                    syng_padding,
-                                )?;
+                                let intervals = if use_boundary_realign {
+                                    impg::syng_transitive::query_transitive(
+                                        wrapper.syng_index(),
+                                        target_name,
+                                        *range_start as u64,
+                                        *range_end as u64,
+                                        syng_padding,
+                                        syng_max_depth,
+                                        syng_merge_distance,
+                                        sequence_index.as_ref().unwrap(),
+                                    )?
+                                } else {
+                                    wrapper.syng_index().query_region(
+                                        target_name,
+                                        *range_start as u64,
+                                        *range_end as u64,
+                                        syng_padding,
+                                    )?
+                                };
                                 let query_intervals: Vec<coitrees::Interval<u32>> = intervals
                                     .iter()
                                     .filter_map(|iv| {
@@ -1929,6 +1961,7 @@ fn run() -> io::Result<()> {
                                     *range_end as u64,
                                     syng_padding,
                                     syng_max_depth,
+                                    syng_merge_distance,
                                     seq_idx,
                                 )?
                             } else {
@@ -1957,6 +1990,7 @@ fn run() -> io::Result<()> {
                                     *range_end as u64,
                                     syng_padding,
                                     syng_max_depth,
+                                    syng_merge_distance,
                                     seq_idx,
                                 )?
                             } else {

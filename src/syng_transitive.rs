@@ -319,6 +319,47 @@ fn refine_boundaries(
     (refined_start, refined_end)
 }
 
+/// Distance-merge anchored intervals in place: any two intervals on the same
+/// (genome, strand) whose target-axis gap is `<= merge_distance` are merged
+/// and their anchor sets are unioned. Mirrors bedtools `merge -d`. A distance
+/// of 0 is a no-op (raw output from `query_region_with_anchors` is already
+/// overlap-merged).
+fn distance_merge_anchored(
+    mut hits: Vec<HomologousIntervalWithAnchors>,
+    merge_distance: u64,
+) -> Vec<HomologousIntervalWithAnchors> {
+    if hits.len() <= 1 || merge_distance == 0 {
+        return hits;
+    }
+    hits.sort_by(|a, b| {
+        a.genome
+            .cmp(&b.genome)
+            .then(a.strand.cmp(&b.strand))
+            .then(a.start.cmp(&b.start))
+    });
+    let mut merged: Vec<HomologousIntervalWithAnchors> = Vec::with_capacity(hits.len());
+    for mut iv in hits {
+        if let Some(last) = merged.last_mut() {
+            if last.genome == iv.genome
+                && last.strand == iv.strand
+                && iv.start <= last.end.saturating_add(merge_distance)
+            {
+                last.end = last.end.max(iv.end);
+                last.anchors.append(&mut iv.anchors);
+                continue;
+            }
+        }
+        merged.push(iv);
+    }
+    for iv in &mut merged {
+        iv.anchors
+            .sort_by(|a, b| a.query_pos.cmp(&b.query_pos).then(a.target_pos.cmp(&b.target_pos)));
+        iv.anchors
+            .dedup_by(|a, b| a.query_pos == b.query_pos && a.target_pos == b.target_pos);
+    }
+    merged
+}
+
 /// Run one hop of boundary-realignment transitive query.
 ///
 /// Returns refined intervals (base-pair-precise endpoints) for all homologs
@@ -326,12 +367,17 @@ fn refine_boundaries(
 /// [`ANCHOR_FLANK_BP`] on each side so that each edge of `[query_start,
 /// query_end)` has shared-syncmer anchors on both sides for BiWFA
 /// projection. Refinement uses the original (un-widened) edges.
+///
+/// `merge_distance` controls bedtools-style distance merging of padded
+/// syncmer hits before realignment (honours `-d` from the CLI). 0 = only
+/// merge overlapping intervals.
 pub fn one_hop(
     syng_index: &SyngIndex,
     query_name: &str,
     query_start: u64,
     query_end: u64,
     padding: u64,
+    merge_distance: u64,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
     let widened_start = query_start.saturating_sub(ANCHOR_FLANK_BP);
@@ -348,6 +394,7 @@ pub fn one_hop(
         widened_end,
         padding,
     )?;
+    let hits = distance_merge_anchored(hits, merge_distance);
     let syncmer_len = (syng_index.params.w + syng_index.params.k) as u64;
     let mut out: Vec<HomologousInterval> = Vec::with_capacity(hits.len());
     for hit in &hits {
@@ -382,6 +429,9 @@ pub fn one_hop(
 /// prevent cycles. Terminates after `max_depth` hops or when no new
 /// intervals are discovered.
 ///
+/// `merge_distance` is the bedtools-style `-d` merge distance applied to
+/// padded syncmer hits before realignment, at every hop.
+///
 /// Because each hop snaps boundaries to base-pair precision via BiWFA,
 /// slop does NOT compound across hops.
 pub fn query_transitive(
@@ -391,6 +441,7 @@ pub fn query_transitive(
     query_end: u64,
     padding: u64,
     max_depth: u16,
+    merge_distance: u64,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
     let mut visited: FxHashSet<(String, u64, u64, char)> = FxHashSet::default();
@@ -412,6 +463,7 @@ pub fn query_transitive(
                 *q_start,
                 *q_end,
                 padding,
+                merge_distance,
                 sequence_index,
             ) {
                 Ok(h) => h,

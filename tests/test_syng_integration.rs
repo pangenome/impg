@@ -694,6 +694,7 @@ fn test_syng_rc_homolog_end_to_end() {
         query_end,
         padding,
         1,
+        0, // merge_distance
         &sequence_index,
     )
     .unwrap();
@@ -854,6 +855,7 @@ fn test_syng_boundary_realign_tightens_edges() {
         query_end,
         padding,
         1,
+        0, // merge_distance
         &sequence_index,
     )
     .unwrap();
@@ -885,6 +887,170 @@ fn test_syng_boundary_realign_tightens_edges() {
         raw_b.end,
         refined_b.start,
         refined_b.end
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Realistic "homologous-with-small-differences" end-to-end test.
+///
+/// Build three genomes that share a 3kb region but differ at a handful of
+/// scattered positions (SNPs) and with a small indel on one of them. Query
+/// a 2kb region in the middle of genome_a at depth 1; expect the refined
+/// boundary coordinates on both targets to snap to the biological
+/// boundaries of the query (not the padded syncmer-resolution bounds).
+///
+/// This is the test Erik asked for — the current code is expected to show
+/// fragmentation / loose edges on this fixture, because `resolve_edge_via_biwfa`
+/// projects through flanking anchors around the query edge and doesn't do a
+/// bedtools-style merge + end-alignment pass. Once the merge-then-end-align
+/// pipeline lands, this test should pass with single-digit bp precision.
+#[test]
+fn test_syng_query_reconstructs_homology_with_diffs() {
+    let _guard = lock_syng();
+
+    fn mk_seq(len: usize, seed: u8) -> Vec<u8> {
+        let bases = [b'A', b'C', b'G', b'T'];
+        let mut s = Vec::with_capacity(len);
+        let mut state: u32 = seed as u32;
+        for _ in 0..len {
+            state = state.wrapping_mul(1103515245).wrapping_add(12345);
+            s.push(bases[((state >> 16) % 4) as usize]);
+        }
+        s
+    }
+
+    // Shared 3kb backbone, unique 500bp tails.
+    let backbone = mk_seq(3000, 42);
+
+    let seq_a = {
+        let mut s = backbone.clone();
+        s.extend(mk_seq(500, 1));
+        s
+    };
+
+    // seq_b: identical backbone in the first 3kb, plus 5 scattered SNPs.
+    //        SNPs shouldn't shift any coordinates.
+    let seq_b = {
+        let mut s = backbone.clone();
+        for &pos in &[250usize, 800, 1337, 1900, 2500] {
+            // Flip one base deterministically (shift by 1 in the 4-base alphabet).
+            s[pos] = match s[pos] {
+                b'A' => b'C',
+                b'C' => b'G',
+                b'G' => b'T',
+                b'T' => b'A',
+                other => other,
+            };
+        }
+        s.extend(mk_seq(500, 2));
+        s
+    };
+
+    // seq_c: identical first ~1500bp; 10bp deletion at 1500; then the rest
+    //        of the backbone continues. So homology to genome_a covers
+    //        [0, 1500) and [1500, 2990) on seq_c (target coords are shifted
+    //        by -10 after position 1500).
+    let seq_c = {
+        let mut s: Vec<u8> = Vec::with_capacity(3490);
+        s.extend_from_slice(&backbone[..1500]);
+        s.extend_from_slice(&backbone[1510..]); // drop 10bp at 1500..1510
+        s.extend(mk_seq(500, 3));
+        s
+    };
+
+    let dir = std::env::temp_dir().join("impg_test_syng_homology_diffs");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let fasta_path = dir.join("test.fa");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        writeln!(f, ">genome_a").unwrap();
+        f.write_all(&seq_a).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">genome_b").unwrap();
+        f.write_all(&seq_b).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">genome_c").unwrap();
+        f.write_all(&seq_c).unwrap();
+        writeln!(f).unwrap();
+    }
+
+    let params = impg::syng::SyncmerParams { k: 8, w: 55, seed: 7 };
+    let syng_index = impg::syng::SyngIndex::build(
+        params,
+        vec![
+            ("genome_a".to_string(), seq_a.clone()),
+            ("genome_b".to_string(), seq_b.clone()),
+            ("genome_c".to_string(), seq_c.clone()),
+        ]
+        .into_iter(),
+    );
+    let sequence_index = impg::sequence_index::UnifiedSequenceIndex::from_files(&[
+        fasta_path.to_string_lossy().to_string(),
+    ])
+    .unwrap();
+
+    // Query the middle 2kb of genome_a: [500, 2500).
+    let query_start = 500u64;
+    let query_end = 2500u64;
+    let padding = 120;
+
+    let refined = impg::syng_transitive::query_transitive(
+        &syng_index,
+        "genome_a",
+        query_start,
+        query_end,
+        padding,
+        1,
+        0, // merge_distance
+        &sequence_index,
+    )
+    .unwrap();
+
+    // Expected: ONE homolog per target genome at the biological coordinates.
+    //
+    // On genome_b: matches [500, 2500) exactly (SNPs don't shift coords).
+    // On genome_c: matches [500, 2490) — the 10bp deletion at backbone pos
+    //              1500 shifts all downstream positions by -10, so the
+    //              query's right edge at 2500 maps to c's 2490.
+    let refined_on = |genome: &str| -> Vec<(u64, u64)> {
+        refined
+            .iter()
+            .filter(|iv| iv.genome == genome && iv.strand == '+')
+            .map(|iv| (iv.start, iv.end))
+            .collect()
+    };
+
+    let on_b = refined_on("genome_b");
+    let on_c = refined_on("genome_c");
+
+    // Step 1: no fragmentation.
+    assert_eq!(
+        on_b.len(), 1,
+        "expected exactly one forward-strand homolog on genome_b; got {:?}", on_b
+    );
+    assert_eq!(
+        on_c.len(), 1,
+        "expected exactly one forward-strand homolog on genome_c; got {:?}", on_c
+    );
+
+    // Step 2: refined edges match biological truth within a few bp.
+    let tol: u64 = 5;
+    let (b_start, b_end) = on_b[0];
+    let (c_start, c_end) = on_c[0];
+
+    assert!(
+        b_start.abs_diff(500) <= tol && b_end.abs_diff(2500) <= tol,
+        "refined genome_b interval should snap to [500, 2500) within {}bp; got [{}, {})",
+        tol, b_start, b_end
+    );
+    assert!(
+        c_start.abs_diff(500) <= tol && c_end.abs_diff(2490) <= tol,
+        "refined genome_c interval should snap to [500, 2490) within {}bp (10bp deletion at 1500 shifts the right edge); got [{}, {})",
+        tol, c_start, c_end
     );
 
     std::fs::remove_dir_all(&dir).ok();
