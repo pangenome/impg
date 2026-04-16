@@ -1096,6 +1096,15 @@ enum Args {
         #[clap(long, value_parser, default_value_t = 120)]
         syng_padding: u64,
 
+        /// Debug-only: skip boundary realignment and emit raw syncmer-resolution
+        /// intervals from syng's query_region. The default --syng path runs
+        /// BiWFA boundary realignment for base-pair-precise edges (and iterates
+        /// under --transitive). Use --syng-raw to inspect the underlying syng
+        /// hits without refinement.
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, default_value_t = false)]
+        syng_raw: bool,
+
         // --- Query-specific ---
         #[clap(flatten)]
         query: QueryOpts,
@@ -1643,6 +1652,7 @@ fn run() -> io::Result<()> {
             alignment,
             syng,
             syng_padding,
+            syng_raw,
             query,
             output_format,
             output_prefix,
@@ -1738,14 +1748,33 @@ fn run() -> io::Result<()> {
                     unreachable!();
                 };
 
-                // Setup output resources for GFA/FASTA/GBWT (need sequence files)
-                let needs_sequences = matches!(resolved_format, "gfa" | "fasta" | "gbwt");
+                // Boundary-realignment default path: needs a UnifiedSequenceIndex to
+                // fetch small windows around each fuzzy edge. --syng-raw opts out and
+                // uses the current syncmer-resolution pass-through.
+                // GFA output stays on raw intervals for now — its partitioning
+                // pipeline does its own alignment downstream.
+                let use_boundary_realign = !syng_raw && resolved_format != "gfa";
+                let syng_max_depth = if query.transitive {
+                    query.transitive_opts.max_depth.max(1)
+                } else {
+                    1
+                };
+
+                // Setup output resources for GFA/FASTA/GBWT (need sequence files).
+                // Boundary realignment also needs them for edge-window fetches.
+                let needs_sequences =
+                    matches!(resolved_format, "gfa" | "fasta" | "gbwt") || use_boundary_realign;
                 let sequence_index = if needs_sequences {
                     let si = gfa_maf_fasta.sequence.build_sequence_index()?;
                     if si.is_none() {
+                        let reason = if use_boundary_realign && resolved_format == "bed" {
+                            "boundary realignment (default --syng behavior). Use --syng-raw for the syncmer-resolution pass-through, or".to_string()
+                        } else {
+                            format!("'{}' output with --syng.", resolved_format)
+                        };
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
-                            format!("Sequence files are required for '{}' output with --syng. Use --sequence-files or --sequence-list", resolved_format),
+                            format!("Sequence files are required for {} Use --sequence-files or --sequence-list", reason),
                         ));
                     }
                     si
@@ -1773,12 +1802,24 @@ fn run() -> io::Result<()> {
 
                     match resolved_format {
                         "bed" => {
-                            let intervals = wrapper.syng_index().query_region(
-                                target_name,
-                                *range_start as u64,
-                                *range_end as u64,
-                                syng_padding,
-                            )?;
+                            let intervals = if use_boundary_realign {
+                                impg::syng_transitive::query_transitive(
+                                    wrapper.syng_index(),
+                                    target_name,
+                                    *range_start as u64,
+                                    *range_end as u64,
+                                    syng_padding,
+                                    syng_max_depth,
+                                    sequence_index.as_ref().unwrap(),
+                                )?
+                            } else {
+                                wrapper.syng_index().query_region(
+                                    target_name,
+                                    *range_start as u64,
+                                    *range_end as u64,
+                                    syng_padding,
+                                )?
+                            };
                             let mut out = find_output_stream(&output_prefix, "bed")?;
                             for iv in &intervals {
                                 writeln!(out, "{}\t{}\t{}\t{}", iv.genome, iv.start, iv.end, iv.strand)?;
@@ -1879,14 +1920,26 @@ fn run() -> io::Result<()> {
                             }
                         }
                         "fasta" => {
-                            let intervals = wrapper.syng_index().query_region(
-                                target_name,
-                                *range_start as u64,
-                                *range_end as u64,
-                                syng_padding,
-                            )?;
-                            let mut out = find_output_stream(&output_prefix, "fa")?;
                             let seq_idx = sequence_index.as_ref().unwrap();
+                            let intervals = if use_boundary_realign {
+                                impg::syng_transitive::query_transitive(
+                                    wrapper.syng_index(),
+                                    target_name,
+                                    *range_start as u64,
+                                    *range_end as u64,
+                                    syng_padding,
+                                    syng_max_depth,
+                                    seq_idx,
+                                )?
+                            } else {
+                                wrapper.syng_index().query_region(
+                                    target_name,
+                                    *range_start as u64,
+                                    *range_end as u64,
+                                    syng_padding,
+                                )?
+                            };
+                            let mut out = find_output_stream(&output_prefix, "fa")?;
                             for iv in &intervals {
                                 let sequence = seq_idx.fetch_sequence(&iv.genome, iv.start as i32, iv.end as i32)?;
                                 writeln!(out, ">{}:{}-{}({})", iv.genome, iv.start, iv.end, iv.strand)?;
@@ -1895,13 +1948,25 @@ fn run() -> io::Result<()> {
                             }
                         }
                         "gbwt" => {
-                            let intervals = wrapper.syng_index().query_region(
-                                target_name,
-                                *range_start as u64,
-                                *range_end as u64,
-                                syng_padding,
-                            )?;
                             let seq_idx = sequence_index.as_ref().unwrap();
+                            let intervals = if use_boundary_realign {
+                                impg::syng_transitive::query_transitive(
+                                    wrapper.syng_index(),
+                                    target_name,
+                                    *range_start as u64,
+                                    *range_end as u64,
+                                    syng_padding,
+                                    syng_max_depth,
+                                    seq_idx,
+                                )?
+                            } else {
+                                wrapper.syng_index().query_region(
+                                    target_name,
+                                    *range_start as u64,
+                                    *range_end as u64,
+                                    syng_padding,
+                                )?
+                            };
                             let gbwt_prefix = output_prefix.as_ref().unwrap();
 
                             // Fetch sequences for all intervals
