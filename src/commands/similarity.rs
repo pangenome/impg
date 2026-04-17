@@ -14,11 +14,11 @@ use std::sync::{Arc, Mutex};
 
 use sweepga::mash::KmerSketch;
 
-/// Floor on the adaptive sketch size so that Jaccard estimator variance stays bounded.
+/// Hard floor on the adaptive sketch size so that Jaccard estimator variance stays bounded
+/// even when the median group length is vanishingly small. At sketch size 100 the std-dev of
+/// Jaccard at J=0.99 is ~1%, which is already noisy; going lower would dominate any real
+/// signal in the pairwise identity column.
 const FAST_SKETCH_FLOOR: usize = 100;
-
-/// Divisor applied to the median group length to derive the adaptive sketch size.
-const FAST_SKETCH_LEN_DIVISOR: usize = 10;
 
 /// Which back-end the `similarity` command uses to produce pairwise signatures.
 #[derive(Clone, Copy, Debug)]
@@ -59,16 +59,24 @@ struct GroupInfo {
 /// Counts extracted from a pairwise comparison between two groups' signatures.
 ///
 /// `matches` is reported directly in the per-pair output as `intersection` (POA) or
-/// `shared.minimizers` (Mash). `mismatches` is only populated in POA mode: it counts MSA
-/// positions where both groups have non-gap bases that differ. It drives the corrected
-/// per-base identity estimator (`matches / (matches + mismatches)`).
+/// `shared.minimizers` (Mash). `mismatches` and `gap_events` are only populated in POA
+/// mode. Together they drive **gap-compressed identity** — the same metric:
 ///
-/// Mash mode leaves `mismatches = 0` because mismatches are not recoverable from k-mer
-/// sketches; the Mash identity estimator `(2J/(1+J))^(1/k)` is used instead.
+///     identity = matches / (matches + mismatches + gap_events)
+///
+/// A `gap_event` is a *maximal contiguous run* of MSA columns where one group has at
+/// least one non-gap base and the other has none — a single 40 bp deletion counts once,
+/// not forty times. This is the standard alignment-field convention; per-base gap
+/// penalties would harshly over-weight long indels, per-alignment penalties would
+/// ignore them entirely. Gap-compressed sits between.
+///
+/// Mash mode leaves `mismatches = gap_events = 0`; its identity estimator
+/// `(2J/(1+J))^(1/k)` draws its indel sensitivity from k-mer loss instead.
 #[derive(Clone, Copy, Debug, Default)]
 struct AlignmentCounts {
     matches: usize,
     mismatches: usize,
+    gap_events: usize,
 }
 
 #[derive(Clone)]
@@ -87,9 +95,9 @@ impl SimilarityMetrics {
     /// `estimated_identity` semantics:
     /// * Mash mode (`identity_kmer_k = Some(k)`): apply the Mash-paper correction
     ///   `(2J/(1+J))^(1/k)` to recover per-base nucleotide identity from k-mer Jaccard.
-    /// * POA mode (`identity_kmer_k = None`): proper per-base alignment identity —
-    ///   `matches / (matches + mismatches)` over MSA columns where both groups have a
-    ///   non-gap base. This is NOT the Dice coefficient; indels do not contribute.
+    /// * POA mode (`identity_kmer_k = None`): gap-compressed alignment identity —
+    ///   `matches / (matches + mismatches + gap_events)`. One indel of any length
+    ///   counts as a single event.
     fn new(
         counts: AlignmentCounts,
         len_a: usize,
@@ -98,9 +106,11 @@ impl SimilarityMetrics {
     ) -> Self {
         let intersection = counts.matches;
         // Perfect-match shortcut: both sides the same length, every position matches,
-        // and no positions were recorded as aligned-but-mismatching.
-        let is_perfect_match =
-            len_a == len_b && intersection == len_a && counts.mismatches == 0;
+        // no mismatches and no indel events were observed.
+        let is_perfect_match = len_a == len_b
+            && intersection == len_a
+            && counts.mismatches == 0
+            && counts.gap_events == 0;
 
         let union = (len_a + len_b).saturating_sub(intersection);
         let jaccard = if is_perfect_match {
@@ -139,10 +149,10 @@ impl SimilarityMetrics {
                 0.0
             }
         } else {
-            // POA mode: proper alignment identity over aligned columns (indels excluded).
-            let aligned_cols = counts.matches + counts.mismatches;
-            if aligned_cols > 0 {
-                counts.matches as f32 / aligned_cols as f32
+            // POA mode: gap-compressed identity.
+            let denom = counts.matches + counts.mismatches + counts.gap_events;
+            if denom > 0 {
+                counts.matches as f32 / denom as f32
             } else {
                 0.0
             }
@@ -530,33 +540,40 @@ fn prepare_groups_and_signatures(
             // 2. Build groups over sequence metadata (same logic as POA path).
             let mut groups = create_groups(&sequence_metadata, delim, delim_pos)?;
 
-            // 3. Derive adaptive sketch size from the median group concatenation length.
-            //    Using median, not min/avg: robust to both tiny outliers (e.g. one 10 bp seq)
-            //    and highly skewed mixes. Clamp to [FLOOR, user_cap].
-            let mut group_concat_lens: Vec<usize> = groups
+            // 3. Derive adaptive sketch size from the median group's k-mer capacity.
+            //    Rule: `effective_sketch = min(user_cap, max(FLOOR, median_num_kmers))`.
+            //    The intent is the opposite of "compress aggressively": if a group has fewer
+            //    k-mers than the cap we keep them ALL (exact set Jaccard, no sampling noise);
+            //    only when groups are long enough that we'd actually be throwing k-mers away
+            //    does the cap kick in. Sampling too aggressively on small regions was hiding
+            //    real pair-to-pair variation under Jaccard estimator noise — observed on chr6
+            //    1-5 kb runs where POA disagreed with a highly-quantized sketch identity.
+            let mut group_num_kmers: Vec<usize> = groups
                 .iter()
                 .map(|g| {
-                    let sum: usize = g
-                        .sequence_indices
+                    // Count only k-mers that can't be destroyed by the `N*k` separator.
+                    // For a single sequence of length L this is max(0, L - k + 1); for
+                    // concatenated group members we sum per-sequence capacities (the
+                    // separator blocks any cross-boundary k-mers).
+                    g.sequence_indices
                         .iter()
-                        .map(|&idx| sequences[idx].len())
-                        .sum();
-                    let sep = g.sequence_indices.len().saturating_sub(1) * kmer_k;
-                    sum + sep
+                        .map(|&idx| sequences[idx].len().saturating_sub(kmer_k - 1))
+                        .sum()
                 })
                 .collect();
-            group_concat_lens.sort_unstable();
-            let median_concat_len = if group_concat_lens.is_empty() {
+            group_num_kmers.sort_unstable();
+            let median_num_kmers = if group_num_kmers.is_empty() {
                 0
             } else {
-                group_concat_lens[group_concat_lens.len() / 2]
+                group_num_kmers[group_num_kmers.len() / 2]
             };
-            let effective_sketch = (median_concat_len / FAST_SKETCH_LEN_DIVISOR)
-                .clamp(FAST_SKETCH_FLOOR, sketch_cap.max(FAST_SKETCH_FLOOR));
+            let effective_sketch = median_num_kmers
+                .max(FAST_SKETCH_FLOOR)
+                .min(sketch_cap.max(FAST_SKETCH_FLOOR));
             debug!(
-                "Mash sketching: {} groups, median concat length {} bp, effective sketch size {} (cap {}, k={})",
+                "Mash sketching: {} groups, median k-mer count {}, effective sketch size {} (cap {}, k={})",
                 groups.len(),
-                median_concat_len,
+                median_num_kmers,
                 effective_sketch,
                 sketch_cap,
                 kmer_k
@@ -641,11 +658,12 @@ fn calculate_intersection(
             let idx_b = group_b
                 .sketch_index
                 .expect("Mash signatures require sketch_index on every group");
-            // Mismatches are not recoverable from k-mer sketches; identity is computed
-            // via the Mash k-th-root formula in SimilarityMetrics::new.
+            // Mismatches and gap events are not recoverable from k-mer sketches; identity
+            // is computed via the Mash k-th-root formula in SimilarityMetrics::new.
             AlignmentCounts {
                 matches: count_shared_sorted(&sketches[idx_a], &sketches[idx_b]),
                 mismatches: 0,
+                gap_events: 0,
             }
         }
     }
@@ -788,43 +806,84 @@ fn extract_group_name(path_name: &str, delim: char, delim_pos: u16) -> io::Resul
 }
 
 // Fast path for comparing two individual sequences. Walks the two aligned rows column by
-// column and counts matches and mismatches at positions where both sides are non-gap.
-// Gap-only columns are ignored on both axes — they're indels, not substitutions.
+// column and classifies each column:
+//   * both non-gap, equal       → matches++
+//   * both non-gap, different   → mismatches++
+//   * exactly one is a gap      → part of an indel run; one maximal run = one gap_event
+//   * both gapped               → ignored (gap-vs-gap MSA columns carry no pair signal)
+// Gap-compressed identity: indel *events* are penalized, not indel *bases*.
 fn calculate_pairwise_intersection(seq_a: &[char], seq_b: &[char]) -> AlignmentCounts {
+    #[derive(PartialEq, Eq, Clone, Copy)]
+    enum ColState {
+        Aligned,
+        GapInA,
+        GapInB,
+        BothGap,
+    }
+
     let mut matches = 0usize;
     let mut mismatches = 0usize;
+    let mut gap_events = 0usize;
+    let mut prev_state: Option<ColState> = None;
+
     for (&char_a, &char_b) in seq_a.iter().zip(seq_b.iter()) {
-        if char_a == '-' || char_b == '-' {
-            continue;
+        let state = match (char_a, char_b) {
+            ('-', '-') => ColState::BothGap,
+            ('-', _) => ColState::GapInA,
+            (_, '-') => ColState::GapInB,
+            (a, b) => {
+                if a == b {
+                    matches += 1;
+                } else {
+                    mismatches += 1;
+                }
+                ColState::Aligned
+            }
+        };
+
+        // Count gap events on entry into a GapInA / GapInB run. Consecutive gapped
+        // columns on the same side collapse to a single event; a transition from
+        // GapInA directly to GapInB (unusual but possible in MSAs) counts as two.
+        let is_new_indel_run = matches!(state, ColState::GapInA | ColState::GapInB)
+            && prev_state.as_ref() != Some(&state);
+        if is_new_indel_run {
+            gap_events += 1;
         }
-        if char_a == char_b {
-            matches += 1;
-        } else {
-            mismatches += 1;
-        }
+        prev_state = Some(state);
     }
+
     AlignmentCounts {
         matches,
         mismatches,
+        gap_events,
     }
 }
 
-// General case for comparing groups of sequences. At each MSA column we look at all
-// non-gap bases on both sides: matches are pairwise character identities, mismatches are
-// the remaining pairwise combinations. Both are then scaled by `min(group_a_count,
-// group_b_count)` so the per-position contribution is bounded by the effective coverage
-// of the smaller group — same weighting rule the pre-existing intersection used, applied
-// symmetrically to the mismatch count so that matches + mismatches at each column equals
-// that coverage (and the resulting `matches / (matches + mismatches)` collapses to the
-// pairwise formula when both groups have a single sequence).
+// General case for comparing groups of sequences. Classifies each MSA column into one of
+// four states based on which groups have at least one non-gap base:
+//   * Both groups present → scale matches/mismatches by min(g_a_count, g_b_count) so the
+//     per-column contribution equals the effective coverage of the smaller group.
+//   * Exactly one group present → part of an indel run at the group level.
+//   * Both fully gapped → ignored (no alignment signal for this pair).
+// Gap events are counted at transitions *into* a group-level indel state.
 fn calculate_group_intersection(
     msa_chars: &[Vec<char>],
     group_a_indices: &[usize],
     group_b_indices: &[usize],
 ) -> AlignmentCounts {
+    #[derive(PartialEq, Eq, Clone, Copy)]
+    enum ColState {
+        Aligned,
+        GapInA,
+        GapInB,
+        BothGap,
+    }
+
     let msa_len = msa_chars[0].len();
     let mut total_matches = 0usize;
     let mut total_mismatches = 0usize;
+    let mut gap_events = 0usize;
+    let mut prev_state: Option<ColState> = None;
 
     for pos in 0..msa_len {
         let mut position_matches = 0usize;
@@ -847,29 +906,38 @@ fn calculate_group_intersection(
                 }
             }
         }
-        // Re-count non-gap chars in group B (char_b-only loop; decoupled for clarity).
         for &idx_b in group_b_indices {
             if msa_chars[idx_b][pos] != '-' {
                 group_b_count += 1;
             }
         }
 
-        let coverage = group_a_count.min(group_b_count);
-        if coverage == 0 {
-            // At least one group is fully gapped at this column: no aligned signal.
-            continue;
+        let state = match (group_a_count, group_b_count) {
+            (0, 0) => ColState::BothGap,
+            (0, _) => ColState::GapInA,
+            (_, 0) => ColState::GapInB,
+            (ga, gb) => {
+                let coverage = ga.min(gb);
+                let scaled_matches = position_matches.min(coverage);
+                let scaled_mismatches = coverage - scaled_matches;
+                total_matches += scaled_matches;
+                total_mismatches += scaled_mismatches;
+                ColState::Aligned
+            }
+        };
+
+        let is_new_indel_run = matches!(state, ColState::GapInA | ColState::GapInB)
+            && prev_state.as_ref() != Some(&state);
+        if is_new_indel_run {
+            gap_events += 1;
         }
-
-        let scaled_matches = position_matches.min(coverage);
-        let scaled_mismatches = coverage - scaled_matches;
-
-        total_matches += scaled_matches;
-        total_mismatches += scaled_mismatches;
+        prev_state = Some(state);
     }
 
     AlignmentCounts {
         matches: total_matches,
         mismatches: total_mismatches,
+        gap_events,
     }
 }
 
