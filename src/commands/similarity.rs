@@ -60,9 +60,8 @@ struct GroupInfo {
 ///
 /// `matches` is reported directly in the per-pair output as `intersection` (POA) or
 /// `shared.minimizers` (Mash). `mismatches` and `gap_events` are only populated in POA
-/// mode. Together they drive **gap-compressed identity** — the same metric:
-///
-///     identity = matches / (matches + mismatches + gap_events)
+/// mode. Together they drive **gap-compressed identity**:
+/// `matches / (matches + mismatches + gap_events)`.
 ///
 /// A `gap_event` is a *maximal contiguous run* of MSA columns where one group has at
 /// least one non-gap base and the other has none — a single 40 bp deletion counts once,
