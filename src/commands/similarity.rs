@@ -56,6 +56,21 @@ struct GroupInfo {
     sketch_index: Option<usize>,
 }
 
+/// Counts extracted from a pairwise comparison between two groups' signatures.
+///
+/// `matches` is reported directly in the per-pair output as `intersection` (POA) or
+/// `shared.minimizers` (Mash). `mismatches` is only populated in POA mode: it counts MSA
+/// positions where both groups have non-gap bases that differ. It drives the corrected
+/// per-base identity estimator (`matches / (matches + mismatches)`).
+///
+/// Mash mode leaves `mismatches = 0` because mismatches are not recoverable from k-mer
+/// sketches; the Mash identity estimator `(2J/(1+J))^(1/k)` is used instead.
+#[derive(Clone, Copy, Debug, Default)]
+struct AlignmentCounts {
+    matches: usize,
+    mismatches: usize,
+}
+
 #[derive(Clone)]
 struct SimilarityMetrics {
     jaccard: f32,
@@ -65,23 +80,27 @@ struct SimilarityMetrics {
 }
 
 impl SimilarityMetrics {
-    /// Build metrics from an intersection count and two "sizes".
+    /// Build metrics from a pair of alignment counts and two "sizes".
     ///
-    /// In POA mode `intersection` is the count of matching MSA columns and the sizes are
-    /// sequence lengths; `identity_kmer_k` must be `None` and `estimated_identity` collapses
-    /// to the per-base Dice / Sørensen formula `2J/(1+J)`.
+    /// `counts.matches` is the set intersection count used for jaccard/cosine/dice.
     ///
-    /// In Mash mode `intersection` is the number of shared minimizers and the sizes are the
-    /// deduplicated sketch sizes; passing `Some(k)` applies the Mash-paper correction
-    /// `(2J/(1+J))^(1/k)` to recover per-base nucleotide identity.
+    /// `estimated_identity` semantics:
+    /// * Mash mode (`identity_kmer_k = Some(k)`): apply the Mash-paper correction
+    ///   `(2J/(1+J))^(1/k)` to recover per-base nucleotide identity from k-mer Jaccard.
+    /// * POA mode (`identity_kmer_k = None`): proper per-base alignment identity —
+    ///   `matches / (matches + mismatches)` over MSA columns where both groups have a
+    ///   non-gap base. This is NOT the Dice coefficient; indels do not contribute.
     fn new(
-        intersection: usize,
+        counts: AlignmentCounts,
         len_a: usize,
         len_b: usize,
         identity_kmer_k: Option<usize>,
     ) -> Self {
-        // Check for perfect match first
-        let is_perfect_match = len_a == len_b && intersection == len_a;
+        let intersection = counts.matches;
+        // Perfect-match shortcut: both sides the same length, every position matches,
+        // and no positions were recorded as aligned-but-mismatching.
+        let is_perfect_match =
+            len_a == len_b && intersection == len_a && counts.mismatches == 0;
 
         let union = (len_a + len_b).saturating_sub(intersection);
         let jaccard = if is_perfect_match {
@@ -107,14 +126,26 @@ impl SimilarityMetrics {
         };
         let estimated_identity = if is_perfect_match {
             1.0
-        } else if jaccard > 0.0 {
-            let base = 2.0 * jaccard / (1.0 + jaccard);
-            match identity_kmer_k {
-                Some(k) if k > 1 => base.powf(1.0 / k as f32),
-                _ => base,
+        } else if let Some(k) = identity_kmer_k {
+            // Mash mode: per-base identity from k-mer Jaccard via the Mash formula.
+            if jaccard > 0.0 {
+                let base = 2.0 * jaccard / (1.0 + jaccard);
+                if k > 1 {
+                    base.powf(1.0 / k as f32)
+                } else {
+                    base
+                }
+            } else {
+                0.0
             }
         } else {
-            0.0
+            // POA mode: proper alignment identity over aligned columns (indels excluded).
+            let aligned_cols = counts.matches + counts.mismatches;
+            if aligned_cols > 0 {
+                counts.matches as f32 / aligned_cols as f32
+            } else {
+                0.0
+            }
         };
 
         Self {
@@ -337,15 +368,15 @@ fn compute_similarities_for_region(
             let group_a = &groups[i];
             let group_b = &groups[j];
 
-            let intersection =
+            let counts =
                 calculate_intersection(&signatures, group_a, group_b, delim.is_none());
 
-            if intersection == 0 && !emit_all_pairs {
+            if counts.matches == 0 && !emit_all_pairs {
                 continue;
             }
 
             let metrics = SimilarityMetrics::new(
-                intersection,
+                counts,
                 group_a.total_length,
                 group_b.total_length,
                 identity_k,
@@ -361,7 +392,7 @@ fn compute_similarities_for_region(
                 &group_b.name,
                 group_a.total_length,
                 group_b.total_length,
-                intersection,
+                counts.matches,
                 &metrics,
                 emit_distances,
             );
@@ -377,7 +408,7 @@ fn compute_similarities_for_region(
                     &group_a.name,
                     group_b.total_length,
                     group_a.total_length,
-                    intersection,
+                    counts.matches,
                     &metrics,
                     emit_distances,
                 );
@@ -424,12 +455,12 @@ fn compute_pca_for_region(
             let group_a = &groups[i];
             let group_b = &groups[j];
 
-            let intersection =
+            let counts =
                 calculate_intersection(&signatures, group_a, group_b, delim.is_none());
 
-            if intersection > 0 || emit_all_pairs {
+            if counts.matches > 0 || emit_all_pairs {
                 let metrics = SimilarityMetrics::new(
-                    intersection,
+                    counts,
                     group_a.total_length,
                     group_b.total_length,
                     identity_k,
@@ -584,7 +615,7 @@ fn calculate_intersection(
     group_a: &GroupInfo,
     group_b: &GroupInfo,
     is_individual: bool,
-) -> usize {
+) -> AlignmentCounts {
     match signatures {
         GroupSignatures::Msa { chars } => {
             if is_individual
@@ -610,7 +641,12 @@ fn calculate_intersection(
             let idx_b = group_b
                 .sketch_index
                 .expect("Mash signatures require sketch_index on every group");
-            count_shared_sorted(&sketches[idx_a], &sketches[idx_b])
+            // Mismatches are not recoverable from k-mer sketches; identity is computed
+            // via the Mash k-th-root formula in SimilarityMetrics::new.
+            AlignmentCounts {
+                matches: count_shared_sorted(&sketches[idx_a], &sketches[idx_b]),
+                mismatches: 0,
+            }
         }
     }
 }
@@ -751,57 +787,90 @@ fn extract_group_name(path_name: &str, delim: char, delim_pos: u16) -> io::Resul
     }
 }
 
-// Fast path for comparing two individual sequences
-fn calculate_pairwise_intersection(seq_a: &[char], seq_b: &[char]) -> usize {
-    seq_a
-        .iter()
-        .zip(seq_b.iter())
-        .filter(|&(&char_a, &char_b)| char_a != '-' && char_b != '-' && char_a == char_b)
-        .count()
+// Fast path for comparing two individual sequences. Walks the two aligned rows column by
+// column and counts matches and mismatches at positions where both sides are non-gap.
+// Gap-only columns are ignored on both axes — they're indels, not substitutions.
+fn calculate_pairwise_intersection(seq_a: &[char], seq_b: &[char]) -> AlignmentCounts {
+    let mut matches = 0usize;
+    let mut mismatches = 0usize;
+    for (&char_a, &char_b) in seq_a.iter().zip(seq_b.iter()) {
+        if char_a == '-' || char_b == '-' {
+            continue;
+        }
+        if char_a == char_b {
+            matches += 1;
+        } else {
+            mismatches += 1;
+        }
+    }
+    AlignmentCounts {
+        matches,
+        mismatches,
+    }
 }
 
-// General case for comparing groups of sequences
+// General case for comparing groups of sequences. At each MSA column we look at all
+// non-gap bases on both sides: matches are pairwise character identities, mismatches are
+// the remaining pairwise combinations. Both are then scaled by `min(group_a_count,
+// group_b_count)` so the per-position contribution is bounded by the effective coverage
+// of the smaller group — same weighting rule the pre-existing intersection used, applied
+// symmetrically to the mismatch count so that matches + mismatches at each column equals
+// that coverage (and the resulting `matches / (matches + mismatches)` collapses to the
+// pairwise formula when both groups have a single sequence).
 fn calculate_group_intersection(
     msa_chars: &[Vec<char>],
     group_a_indices: &[usize],
     group_b_indices: &[usize],
-) -> usize {
+) -> AlignmentCounts {
     let msa_len = msa_chars[0].len();
-    let mut intersection = 0;
+    let mut total_matches = 0usize;
+    let mut total_mismatches = 0usize;
 
     for pos in 0..msa_len {
-        // For each position, check all pairwise comparisons between groups and count matches
-        let mut position_matches = 0;
+        let mut position_matches = 0usize;
+        let mut group_a_count = 0usize;
+        let mut group_b_count = 0usize;
 
         for &idx_a in group_a_indices {
             let char_a = msa_chars[idx_a][pos];
-            if char_a != '-' {
-                for &idx_b in group_b_indices {
-                    let char_b = msa_chars[idx_b][pos];
-                    if char_b != '-' && char_a == char_b {
-                        position_matches += 1;
-                    }
+            if char_a == '-' {
+                continue;
+            }
+            group_a_count += 1;
+            for &idx_b in group_b_indices {
+                let char_b = msa_chars[idx_b][pos];
+                if char_b == '-' {
+                    continue;
+                }
+                if char_a == char_b {
+                    position_matches += 1;
                 }
             }
         }
+        // Re-count non-gap chars in group B (char_b-only loop; decoupled for clarity).
+        for &idx_b in group_b_indices {
+            if msa_chars[idx_b][pos] != '-' {
+                group_b_count += 1;
+            }
+        }
 
-        // For this position, add the minimum of:
-        // - number of non-gap characters in group A
-        // - number of non-gap characters in group B
-        // - number of actual matches found
-        let group_a_count = group_a_indices
-            .iter()
-            .filter(|&&idx| msa_chars[idx][pos] != '-')
-            .count();
-        let group_b_count = group_b_indices
-            .iter()
-            .filter(|&&idx| msa_chars[idx][pos] != '-')
-            .count();
+        let coverage = group_a_count.min(group_b_count);
+        if coverage == 0 {
+            // At least one group is fully gapped at this column: no aligned signal.
+            continue;
+        }
 
-        intersection += position_matches.min(group_a_count).min(group_b_count);
+        let scaled_matches = position_matches.min(coverage);
+        let scaled_mismatches = coverage - scaled_matches;
+
+        total_matches += scaled_matches;
+        total_mismatches += scaled_mismatches;
     }
 
-    intersection
+    AlignmentCounts {
+        matches: total_matches,
+        mismatches: total_mismatches,
+    }
 }
 
 // PCA/MDS related structures and implementations
