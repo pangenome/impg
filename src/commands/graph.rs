@@ -309,18 +309,22 @@ pub fn build_graph<W: Write>(
                 )?;
 
                 // Run all-vs-all alignment, with optional batching
-                sweepga::align_self_paf(
-                    combined_fasta.path(),
-                    aligner.as_ref(),
-                    &config.aligner,
-                    kmer_frequency,
-                    config.num_threads,
-                    config.min_aln_length,
-                    Some("90".to_string()),
-                    config.temp_dir.clone(),
-                    config.batch_bytes.as_deref(),
-                    !config.show_progress,
-                )
+                match config.batch_bytes.as_deref() {
+                    None => sweepga::align_self_paf_direct(aligner.as_ref(), combined_fasta.path()),
+                    Some(batch_bytes) => sweepga::align_self_paf_batched(
+                        combined_fasta.path(),
+                        &config.aligner,
+                        kmer_frequency,
+                        config.num_threads,
+                        config.min_aln_length,
+                        Some("90".to_string()),
+                        config.temp_dir.clone(),
+                        wfmash_density,
+                        None, // pairs_file: this path is unsparsified
+                        batch_bytes,
+                        !config.show_progress,
+                    ),
+                }
                 .map_err(|e| {
                     io::Error::other(format!("{} alignment failed: {}", config.aligner, e))
                 })?
@@ -1069,18 +1073,22 @@ pub fn align_sequences(
                     None,
                 )?;
 
-                sweepga::align_self_paf(
-                    combined_fasta.path(),
-                    aligner.as_ref(),
-                    &config.aligner,
-                    kmer_frequency,
-                    config.num_threads,
-                    config.min_aln_length,
-                    Some("90".to_string()),
-                    config.temp_dir.clone(),
-                    config.batch_bytes.as_deref(),
-                    !config.show_progress,
-                )
+                match config.batch_bytes.as_deref() {
+                    None => sweepga::align_self_paf_direct(aligner.as_ref(), combined_fasta.path()),
+                    Some(batch_bytes) => sweepga::align_self_paf_batched(
+                        combined_fasta.path(),
+                        &config.aligner,
+                        kmer_frequency,
+                        config.num_threads,
+                        config.min_aln_length,
+                        Some("90".to_string()),
+                        config.temp_dir.clone(),
+                        wfmash_density,
+                        None, // pairs_file: unsparsified path
+                        batch_bytes,
+                        !config.show_progress,
+                    ),
+                }
                 .map_err(|e| io::Error::other(format!("{} alignment failed: {}", config.aligner, e)))?
             }
             _ => {

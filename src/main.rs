@@ -2830,12 +2830,8 @@ fn run() -> io::Result<()> {
             let sparsify_strategy = parse_sparsify(&engine_cli.aln.sparsify)?;
 
             // Validate aligner-parameter compatibility
-            if let Err(e) = sweepga::orchestrator::validate_strategy_aligner(
-                &sparsify_strategy,
-                &engine_cli.aln.aligner,
-            ) {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, e));
-            }
+            // TODO: restore validate_strategy_aligner once upstream sweepga
+            // re-exposes it (it was removed in the alignment-unification PR).
             if engine_cli.aln.aligner == "wfmash" && engine_cli.aln.fastga_frequency.is_some() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,

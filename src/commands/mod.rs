@@ -77,7 +77,7 @@ pub fn create_aligner_adaptive(
             Ok(Box::new(wfmash))
         }
         "fastga" => Ok(Box::new(FastGAIntegration::new(
-            Some(kmer_frequency),
+            kmer_frequency,
             num_threads,
             min_aln_length,
             temp_dir,

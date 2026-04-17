@@ -2639,15 +2639,18 @@ dependencies = [
 [[package]]
 name = "sweepga"
 version = "0.1.1"
-source = "git+https://github.com/pangenome/sweepga?rev=29d21238765abb1016d7d75c19666127faa962cb#29d21238765abb1016d7d75c19666127faa962cb"
+source = "git+https://github.com/pangenome/sweepga?rev=b7d8820a8cad5d37105cc5d10250e753d35d88cc#b7d8820a8cad5d37105cc5d10250e753d35d88cc"
 dependencies = [
  "anyhow",
  "byteorder",
  "chrono",
  "clap",
+ "env_logger",
  "fastga-rs",
  "flate2",
+ "indexmap",
  "libc",
+ "log",
  "nom 7.1.3",
  "noodles",
  "onecode 0.1.0 (git+https://github.com/pangenome/onecode-rs?rev=f531f5b0ff54001a898ec4e0c0c761b2bd0a1f34)",
@@ -2655,6 +2658,7 @@ dependencies = [
  "ragc-core",
  "rand 0.8.5",
  "rayon",
+ "rust-htslib",
  "tempfile",
  "wfmash-rs",
 ]
