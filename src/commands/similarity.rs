@@ -1,21 +1,59 @@
-use crate::graph::prepare_poa_graph_and_sequences;
+use crate::graph::{prepare_poa_graph_and_sequences, prepare_sequences};
 use crate::impg_index::ImpgIndex;
 use crate::sequence_index::UnifiedSequenceIndex;
 use coitrees::Interval;
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, info, warn};
 use rayon::prelude::*;
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::io;
 
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
+use sweepga::mash::KmerSketch;
+
+/// Floor on the adaptive sketch size so that Jaccard estimator variance stays bounded.
+const FAST_SKETCH_FLOOR: usize = 100;
+
+/// Divisor applied to the median group length to derive the adaptive sketch size.
+const FAST_SKETCH_LEN_DIVISOR: usize = 10;
+
+/// Which back-end the `similarity` command uses to produce pairwise signatures.
+#[derive(Clone, Copy, Debug)]
+pub enum SimilarityEngine {
+    /// SPOA-based multiple sequence alignment; intersection = matching aligned columns.
+    Poa {
+        scoring: (u8, u8, u8, u8, u8, u8),
+    },
+    /// MinHash k-mer sketching; intersection = shared minimizers between group sketches.
+    Mash {
+        kmer_k: usize,
+        sketch_cap: usize,
+    },
+}
+
+/// Per-group signatures produced by the chosen engine. Exactly one variant is used per region.
+enum GroupSignatures {
+    /// Aligned rows (one per input sequence). Indexed by `GroupInfo::sequence_indices`.
+    Msa { chars: Vec<Vec<char>> },
+    /// One deduplicated, sorted minimizer set per group. Indexed by `GroupInfo::sketch_index`.
+    Sketches {
+        /// Sorted, deduplicated minimizers per group.
+        sketches: Vec<Vec<u64>>,
+    },
+}
+
 #[derive(Clone)]
 struct GroupInfo {
     name: String,
+    /// Indices into the per-sequence MSA rows. Used by the POA path.
     sequence_indices: Vec<usize>,
+    /// POA path: sum of input sequence lengths. Mash path: size of the group's deduplicated sketch.
     total_length: usize,
+    /// Mash path only: index into `GroupSignatures::Sketches::sketches`.
+    sketch_index: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -27,7 +65,21 @@ struct SimilarityMetrics {
 }
 
 impl SimilarityMetrics {
-    fn new(intersection: usize, len_a: usize, len_b: usize) -> Self {
+    /// Build metrics from an intersection count and two "sizes".
+    ///
+    /// In POA mode `intersection` is the count of matching MSA columns and the sizes are
+    /// sequence lengths; `identity_kmer_k` must be `None` and `estimated_identity` collapses
+    /// to the per-base Dice / Sørensen formula `2J/(1+J)`.
+    ///
+    /// In Mash mode `intersection` is the number of shared minimizers and the sizes are the
+    /// deduplicated sketch sizes; passing `Some(k)` applies the Mash-paper correction
+    /// `(2J/(1+J))^(1/k)` to recover per-base nucleotide identity.
+    fn new(
+        intersection: usize,
+        len_a: usize,
+        len_b: usize,
+        identity_kmer_k: Option<usize>,
+    ) -> Self {
         // Check for perfect match first
         let is_perfect_match = len_a == len_b && intersection == len_a;
 
@@ -56,7 +108,11 @@ impl SimilarityMetrics {
         let estimated_identity = if is_perfect_match {
             1.0
         } else if jaccard > 0.0 {
-            2.0 * jaccard / (1.0 + jaccard)
+            let base = 2.0 * jaccard / (1.0 + jaccard);
+            match identity_kmer_k {
+                Some(k) if k > 1 => base.powf(1.0 / k as f32),
+                _ => base,
+            }
         } else {
             0.0
         };
@@ -83,7 +139,7 @@ pub fn compute_and_output_similarities(
     impg: &impl ImpgIndex,
     query_data: Vec<(Vec<Interval<u32>>, String)>,
     sequence_index: &UnifiedSequenceIndex,
-    scoring_params: (u8, u8, u8, u8, u8, u8),
+    engine: SimilarityEngine,
     emit_distances: bool,
     emit_all_pairs: bool,
     delim: Option<char>,
@@ -94,6 +150,17 @@ pub fn compute_and_output_similarities(
     polarize_n_prev: usize,
     guide_samples: Option<&[String]>,
 ) -> io::Result<()> {
+    // Column names for the three per-pair size/intersection columns depend on the engine:
+    // POA counts aligned bases, Mash counts shared minimizers.
+    let (len_a_col, len_b_col, intersection_col) = match engine {
+        SimilarityEngine::Poa { .. } => ("group.a.length", "group.b.length", "intersection"),
+        SimilarityEngine::Mash { .. } => (
+            "group.a.sketch.size",
+            "group.b.sketch.size",
+            "shared.minimizers",
+        ),
+    };
+
     if !perform_pca {
         info!("Computing similarities for {} regions", query_data.len());
 
@@ -101,7 +168,7 @@ pub fn compute_and_output_similarities(
 
         // Write header once before parallel processing
         println!(
-            "chrom\tstart\tend\tgroup.a\tgroup.b\tgroup.a.length\tgroup.b.length\tintersection\t{}",
+            "chrom\tstart\tend\tgroup.a\tgroup.b\t{len_a_col}\t{len_b_col}\t{intersection_col}\t{}",
             if emit_distances {
                 "jaccard.distance\tcosine.distance\tdice.distance\testimated.difference.rate"
             } else {
@@ -135,7 +202,7 @@ pub fn compute_and_output_similarities(
                     impg,
                     query_intervals,
                     sequence_index,
-                    scoring_params,
+                    engine,
                     emit_distances,
                     emit_all_pairs,
                     delim,
@@ -186,7 +253,7 @@ pub fn compute_and_output_similarities(
                     impg,
                     query_intervals,
                     sequence_index,
-                    scoring_params,
+                    engine,
                     emit_all_pairs,
                     delim,
                     delim_pos,
@@ -235,7 +302,7 @@ fn compute_similarities_for_region(
     impg: &impl ImpgIndex,
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
-    scoring_params: (u8, u8, u8, u8, u8, u8),
+    engine: SimilarityEngine,
     emit_distances: bool,
     emit_all_pairs: bool,
     delim: Option<char>,
@@ -244,14 +311,20 @@ fn compute_similarities_for_region(
 ) -> io::Result<String> {
     debug!("Computing similarities for region {region:?}");
 
-    let (groups, msa_chars) = prepare_groups_and_msa(
+    let (groups, signatures) = prepare_groups_and_signatures(
         impg,
         results,
         sequence_index,
-        scoring_params,
+        engine,
         delim,
         delim_pos,
     )?;
+
+    // Identity correction: POA mode uses the k=1 special case, Mash mode uses the k-th root.
+    let identity_k: Option<usize> = match engine {
+        SimilarityEngine::Poa { .. } => None,
+        SimilarityEngine::Mash { kmer_k, .. } => Some(kmer_k),
+    };
 
     // Parse region once
     let (chrom, start, end) = parse_region_string(region);
@@ -265,14 +338,18 @@ fn compute_similarities_for_region(
             let group_b = &groups[j];
 
             let intersection =
-                calculate_intersection(&msa_chars, group_a, group_b, delim.is_none());
+                calculate_intersection(&signatures, group_a, group_b, delim.is_none());
 
             if intersection == 0 && !emit_all_pairs {
                 continue;
             }
 
-            let metrics =
-                SimilarityMetrics::new(intersection, group_a.total_length, group_b.total_length);
+            let metrics = SimilarityMetrics::new(
+                intersection,
+                group_a.total_length,
+                group_b.total_length,
+                identity_k,
+            );
 
             // Output (i,j)
             format_similarity_line(
@@ -316,7 +393,7 @@ fn compute_pca_for_region(
     impg: &impl ImpgIndex,
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
-    scoring_params: (u8, u8, u8, u8, u8, u8),
+    engine: SimilarityEngine,
     emit_all_pairs: bool,
     delim: Option<char>,
     delim_pos: u16,
@@ -325,14 +402,19 @@ fn compute_pca_for_region(
 ) -> io::Result<PcaResult> {
     debug!("Computing PCA for region with {} intervals", results.len());
 
-    let (groups, msa_chars) = prepare_groups_and_msa(
+    let (groups, signatures) = prepare_groups_and_signatures(
         impg,
         results,
         sequence_index,
-        scoring_params,
+        engine,
         delim,
         delim_pos,
     )?;
+
+    let identity_k: Option<usize> = match engine {
+        SimilarityEngine::Poa { .. } => None,
+        SimilarityEngine::Mash { kmer_k, .. } => Some(kmer_k),
+    };
 
     // Collect all similarities for PCA
     let mut similarities = Vec::new();
@@ -343,13 +425,14 @@ fn compute_pca_for_region(
             let group_b = &groups[j];
 
             let intersection =
-                calculate_intersection(&msa_chars, group_a, group_b, delim.is_none());
+                calculate_intersection(&signatures, group_a, group_b, delim.is_none());
 
             if intersection > 0 || emit_all_pairs {
                 let metrics = SimilarityMetrics::new(
                     intersection,
                     group_a.total_length,
                     group_b.total_length,
+                    identity_k,
                 );
                 let similarity = metrics.get_by_name(pca_similarity);
 
@@ -384,46 +467,170 @@ fn compute_pca_for_region(
     }
 }
 
-// Helper to prepare groups and MSA characters
-fn prepare_groups_and_msa(
+// Helper to prepare groups and engine-specific signatures (MSA rows or sketches).
+fn prepare_groups_and_signatures(
     impg: &impl ImpgIndex,
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
-    scoring_params: (u8, u8, u8, u8, u8, u8),
+    engine: SimilarityEngine,
     delim: Option<char>,
     delim_pos: u16,
-) -> io::Result<(Vec<GroupInfo>, Vec<Vec<char>>)> {
-    let (graph, sequence_metadata) =
-        prepare_poa_graph_and_sequences(impg, results, sequence_index, scoring_params)?;
+) -> io::Result<(Vec<GroupInfo>, GroupSignatures)> {
+    match engine {
+        SimilarityEngine::Poa { scoring } => {
+            let (graph, sequence_metadata) =
+                prepare_poa_graph_and_sequences(impg, results, sequence_index, scoring)?;
 
-    let msa = graph.generate_msa();
-    let msa_chars: Vec<Vec<char>> = msa.iter().map(|s| s.chars().collect()).collect();
-    let groups = create_groups(&sequence_metadata, delim, delim_pos)?;
+            let msa = graph.generate_msa();
+            let msa_chars: Vec<Vec<char>> = msa.iter().map(|s| s.chars().collect()).collect();
+            let groups = create_groups(&sequence_metadata, delim, delim_pos)?;
 
-    Ok((groups, msa_chars))
+            Ok((groups, GroupSignatures::Msa { chars: msa_chars }))
+        }
+        SimilarityEngine::Mash {
+            kmer_k,
+            sketch_cap,
+        } => {
+            // 1. Fetch strand-normalized sequences + metadata via the shared helper.
+            let pairs = prepare_sequences(impg, results, sequence_index)?;
+            let sequences: Vec<String> = pairs.iter().map(|(s, _)| s.clone()).collect();
+            let sequence_metadata: Vec<_> = pairs.into_iter().map(|(_, m)| m).collect();
+
+            // 2. Build groups over sequence metadata (same logic as POA path).
+            let mut groups = create_groups(&sequence_metadata, delim, delim_pos)?;
+
+            // 3. Derive adaptive sketch size from the median group concatenation length.
+            //    Using median, not min/avg: robust to both tiny outliers (e.g. one 10 bp seq)
+            //    and highly skewed mixes. Clamp to [FLOOR, user_cap].
+            let mut group_concat_lens: Vec<usize> = groups
+                .iter()
+                .map(|g| {
+                    let sum: usize = g
+                        .sequence_indices
+                        .iter()
+                        .map(|&idx| sequences[idx].len())
+                        .sum();
+                    let sep = g.sequence_indices.len().saturating_sub(1) * kmer_k;
+                    sum + sep
+                })
+                .collect();
+            group_concat_lens.sort_unstable();
+            let median_concat_len = if group_concat_lens.is_empty() {
+                0
+            } else {
+                group_concat_lens[group_concat_lens.len() / 2]
+            };
+            let effective_sketch = (median_concat_len / FAST_SKETCH_LEN_DIVISOR)
+                .clamp(FAST_SKETCH_FLOOR, sketch_cap.max(FAST_SKETCH_FLOOR));
+            debug!(
+                "Mash sketching: {} groups, median concat length {} bp, effective sketch size {} (cap {}, k={})",
+                groups.len(),
+                median_concat_len,
+                effective_sketch,
+                sketch_cap,
+                kmer_k
+            );
+
+            // 4. Warn about sequences too short to produce any k-mers.
+            for (idx, meta) in sequence_metadata.iter().enumerate() {
+                if sequences[idx].len() < kmer_k {
+                    debug!(
+                        "Sequence '{}' is shorter than k={} ({} bp); contributes no minimizers",
+                        meta.path_name(),
+                        kmer_k,
+                        sequences[idx].len()
+                    );
+                }
+            }
+
+            // 5. Sketch each group in parallel: concat sequences with an N*k separator so no
+            //    k-mer can span a boundary, then build a bottom-k MinHash.
+            //    Store sketches deduplicated and sorted for O(n+m) merge-intersection.
+            let sketches: Vec<Vec<u64>> = groups
+                .par_iter()
+                .map(|g| {
+                    let mut concat: Vec<u8> = Vec::new();
+                    let sep = vec![b'N'; kmer_k];
+                    for (i, &seq_idx) in g.sequence_indices.iter().enumerate() {
+                        if i > 0 {
+                            concat.extend_from_slice(&sep);
+                        }
+                        concat.extend_from_slice(sequences[seq_idx].as_bytes());
+                    }
+                    let sketch =
+                        KmerSketch::from_sequence(&concat, kmer_k, effective_sketch);
+                    let mut mins = sketch.minimizers;
+                    // Already sorted by bottom-k; dedupe so set-Jaccard is unambiguous.
+                    mins.dedup();
+                    mins
+                })
+                .collect();
+
+            // 6. Update GroupInfo: total_length now reports the (deduplicated) sketch size
+            //    and sketch_index points at the per-group sketch.
+            for (i, group) in groups.iter_mut().enumerate() {
+                group.total_length = sketches[i].len();
+                group.sketch_index = Some(i);
+            }
+
+            Ok((groups, GroupSignatures::Sketches { sketches }))
+        }
+    }
 }
 
-// Calculate intersection between two groups
+// Calculate intersection between two groups using the engine-specific signatures.
 fn calculate_intersection(
-    msa_chars: &[Vec<char>],
+    signatures: &GroupSignatures,
     group_a: &GroupInfo,
     group_b: &GroupInfo,
     is_individual: bool,
 ) -> usize {
-    if is_individual && group_a.sequence_indices.len() == 1 && group_b.sequence_indices.len() == 1 {
-        // Fast path for individual sequences
-        calculate_pairwise_intersection(
-            &msa_chars[group_a.sequence_indices[0]],
-            &msa_chars[group_b.sequence_indices[0]],
-        )
-    } else {
-        // General case for groups
-        calculate_group_intersection(
-            msa_chars,
-            &group_a.sequence_indices,
-            &group_b.sequence_indices,
-        )
+    match signatures {
+        GroupSignatures::Msa { chars } => {
+            if is_individual
+                && group_a.sequence_indices.len() == 1
+                && group_b.sequence_indices.len() == 1
+            {
+                calculate_pairwise_intersection(
+                    &chars[group_a.sequence_indices[0]],
+                    &chars[group_b.sequence_indices[0]],
+                )
+            } else {
+                calculate_group_intersection(
+                    chars,
+                    &group_a.sequence_indices,
+                    &group_b.sequence_indices,
+                )
+            }
+        }
+        GroupSignatures::Sketches { sketches } => {
+            let idx_a = group_a
+                .sketch_index
+                .expect("Mash signatures require sketch_index on every group");
+            let idx_b = group_b
+                .sketch_index
+                .expect("Mash signatures require sketch_index on every group");
+            count_shared_sorted(&sketches[idx_a], &sketches[idx_b])
+        }
     }
+}
+
+/// Count the number of shared hashes between two sorted, deduplicated minimizer vectors
+/// using a merge walk. O(|a| + |b|), zero allocation.
+fn count_shared_sorted(a: &[u64], b: &[u64]) -> usize {
+    let (mut i, mut j, mut count) = (0usize, 0usize, 0usize);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            Ordering::Equal => {
+                count += 1;
+                i += 1;
+                j += 1;
+            }
+            Ordering::Less => i += 1,
+            Ordering::Greater => j += 1,
+        }
+    }
+    count
 }
 
 // Unified function for formatting similarity output
@@ -499,6 +706,7 @@ fn create_groups(
                 name: group_name,
                 sequence_indices: indices,
                 total_length,
+                sketch_index: None,
             });
         }
 
@@ -514,6 +722,7 @@ fn create_groups(
                     name,
                     sequence_indices: vec![i],
                     total_length: meta.size as usize,
+                    sketch_index: None,
                 }
             })
             .collect();
