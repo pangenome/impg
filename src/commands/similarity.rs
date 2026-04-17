@@ -1,21 +1,81 @@
-use crate::graph::prepare_poa_graph_and_sequences;
+use crate::graph::{prepare_poa_graph_and_sequences, prepare_sequences};
 use crate::impg_index::ImpgIndex;
 use crate::sequence_index::UnifiedSequenceIndex;
 use coitrees::Interval;
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, info, warn};
 use rayon::prelude::*;
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::io;
 
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
+use sweepga::mash::KmerSketch;
+
+/// Hard floor on the adaptive sketch size so that Jaccard estimator variance stays bounded
+/// even when the median group length is vanishingly small. At sketch size 100 the std-dev of
+/// Jaccard at J=0.99 is ~1%, which is already noisy; going lower would dominate any real
+/// signal in the pairwise identity column.
+const FAST_SKETCH_FLOOR: usize = 100;
+
+/// Which back-end the `similarity` command uses to produce pairwise signatures.
+#[derive(Clone, Copy, Debug)]
+pub enum SimilarityEngine {
+    /// SPOA-based multiple sequence alignment; intersection = matching aligned columns.
+    Poa {
+        scoring: (u8, u8, u8, u8, u8, u8),
+    },
+    /// MinHash k-mer sketching; intersection = shared minimizers between group sketches.
+    Mash {
+        kmer_k: usize,
+        sketch_cap: usize,
+    },
+}
+
+/// Per-group signatures produced by the chosen engine. Exactly one variant is used per region.
+enum GroupSignatures {
+    /// Aligned rows (one per input sequence). Indexed by `GroupInfo::sequence_indices`.
+    Msa { chars: Vec<Vec<char>> },
+    /// One deduplicated, sorted minimizer set per group. Indexed by `GroupInfo::sketch_index`.
+    Sketches {
+        /// Sorted, deduplicated minimizers per group.
+        sketches: Vec<Vec<u64>>,
+    },
+}
+
 #[derive(Clone)]
 struct GroupInfo {
     name: String,
+    /// Indices into the per-sequence MSA rows. Used by the POA path.
     sequence_indices: Vec<usize>,
+    /// POA path: sum of input sequence lengths. Mash path: size of the group's deduplicated sketch.
     total_length: usize,
+    /// Mash path only: index into `GroupSignatures::Sketches::sketches`.
+    sketch_index: Option<usize>,
+}
+
+/// Counts extracted from a pairwise comparison between two groups' signatures.
+///
+/// `matches` is reported directly in the per-pair output as `intersection` (POA) or
+/// `shared.minimizers` (Mash). `mismatches` and `gap_events` are only populated in POA
+/// mode. Together they drive **gap-compressed identity**:
+/// `matches / (matches + mismatches + gap_events)`.
+///
+/// A `gap_event` is a *maximal contiguous run* of MSA columns where one group has at
+/// least one non-gap base and the other has none — a single 40 bp deletion counts once,
+/// not forty times. This is the standard alignment-field convention; per-base gap
+/// penalties would harshly over-weight long indels, per-alignment penalties would
+/// ignore them entirely. Gap-compressed sits between.
+///
+/// Mash mode leaves `mismatches = gap_events = 0`; its identity estimator
+/// `(2J/(1+J))^(1/k)` draws its indel sensitivity from k-mer loss instead.
+#[derive(Clone, Copy, Debug, Default)]
+struct AlignmentCounts {
+    matches: usize,
+    mismatches: usize,
+    gap_events: usize,
 }
 
 #[derive(Clone)]
@@ -27,9 +87,29 @@ struct SimilarityMetrics {
 }
 
 impl SimilarityMetrics {
-    fn new(intersection: usize, len_a: usize, len_b: usize) -> Self {
-        // Check for perfect match first
-        let is_perfect_match = len_a == len_b && intersection == len_a;
+    /// Build metrics from a pair of alignment counts and two "sizes".
+    ///
+    /// `counts.matches` is the set intersection count used for jaccard/cosine/dice.
+    ///
+    /// `estimated_identity` semantics:
+    /// * Mash mode (`identity_kmer_k = Some(k)`): apply the Mash-paper correction
+    ///   `(2J/(1+J))^(1/k)` to recover per-base nucleotide identity from k-mer Jaccard.
+    /// * POA mode (`identity_kmer_k = None`): gap-compressed alignment identity —
+    ///   `matches / (matches + mismatches + gap_events)`. One indel of any length
+    ///   counts as a single event.
+    fn new(
+        counts: AlignmentCounts,
+        len_a: usize,
+        len_b: usize,
+        identity_kmer_k: Option<usize>,
+    ) -> Self {
+        let intersection = counts.matches;
+        // Perfect-match shortcut: both sides the same length, every position matches,
+        // no mismatches and no indel events were observed.
+        let is_perfect_match = len_a == len_b
+            && intersection == len_a
+            && counts.mismatches == 0
+            && counts.gap_events == 0;
 
         let union = (len_a + len_b).saturating_sub(intersection);
         let jaccard = if is_perfect_match {
@@ -55,10 +135,26 @@ impl SimilarityMetrics {
         };
         let estimated_identity = if is_perfect_match {
             1.0
-        } else if jaccard > 0.0 {
-            2.0 * jaccard / (1.0 + jaccard)
+        } else if let Some(k) = identity_kmer_k {
+            // Mash mode: per-base identity from k-mer Jaccard via the Mash formula.
+            if jaccard > 0.0 {
+                let base = 2.0 * jaccard / (1.0 + jaccard);
+                if k > 1 {
+                    base.powf(1.0 / k as f32)
+                } else {
+                    base
+                }
+            } else {
+                0.0
+            }
         } else {
-            0.0
+            // POA mode: gap-compressed identity.
+            let denom = counts.matches + counts.mismatches + counts.gap_events;
+            if denom > 0 {
+                counts.matches as f32 / denom as f32
+            } else {
+                0.0
+            }
         };
 
         Self {
@@ -83,7 +179,7 @@ pub fn compute_and_output_similarities(
     impg: &impl ImpgIndex,
     query_data: Vec<(Vec<Interval<u32>>, String)>,
     sequence_index: &UnifiedSequenceIndex,
-    scoring_params: (u8, u8, u8, u8, u8, u8),
+    engine: SimilarityEngine,
     emit_distances: bool,
     emit_all_pairs: bool,
     delim: Option<char>,
@@ -94,6 +190,17 @@ pub fn compute_and_output_similarities(
     polarize_n_prev: usize,
     guide_samples: Option<&[String]>,
 ) -> io::Result<()> {
+    // Column names for the three per-pair size/intersection columns depend on the engine:
+    // POA counts aligned bases, Mash counts shared minimizers.
+    let (len_a_col, len_b_col, intersection_col) = match engine {
+        SimilarityEngine::Poa { .. } => ("group.a.length", "group.b.length", "intersection"),
+        SimilarityEngine::Mash { .. } => (
+            "group.a.sketch.size",
+            "group.b.sketch.size",
+            "shared.minimizers",
+        ),
+    };
+
     if !perform_pca {
         info!("Computing similarities for {} regions", query_data.len());
 
@@ -101,7 +208,7 @@ pub fn compute_and_output_similarities(
 
         // Write header once before parallel processing
         println!(
-            "chrom\tstart\tend\tgroup.a\tgroup.b\tgroup.a.length\tgroup.b.length\tintersection\t{}",
+            "chrom\tstart\tend\tgroup.a\tgroup.b\t{len_a_col}\t{len_b_col}\t{intersection_col}\t{}",
             if emit_distances {
                 "jaccard.distance\tcosine.distance\tdice.distance\testimated.difference.rate"
             } else {
@@ -135,7 +242,7 @@ pub fn compute_and_output_similarities(
                     impg,
                     query_intervals,
                     sequence_index,
-                    scoring_params,
+                    engine,
                     emit_distances,
                     emit_all_pairs,
                     delim,
@@ -186,7 +293,7 @@ pub fn compute_and_output_similarities(
                     impg,
                     query_intervals,
                     sequence_index,
-                    scoring_params,
+                    engine,
                     emit_all_pairs,
                     delim,
                     delim_pos,
@@ -235,7 +342,7 @@ fn compute_similarities_for_region(
     impg: &impl ImpgIndex,
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
-    scoring_params: (u8, u8, u8, u8, u8, u8),
+    engine: SimilarityEngine,
     emit_distances: bool,
     emit_all_pairs: bool,
     delim: Option<char>,
@@ -244,14 +351,20 @@ fn compute_similarities_for_region(
 ) -> io::Result<String> {
     debug!("Computing similarities for region {region:?}");
 
-    let (groups, msa_chars) = prepare_groups_and_msa(
+    let (groups, signatures) = prepare_groups_and_signatures(
         impg,
         results,
         sequence_index,
-        scoring_params,
+        engine,
         delim,
         delim_pos,
     )?;
+
+    // Identity correction: POA mode uses the k=1 special case, Mash mode uses the k-th root.
+    let identity_k: Option<usize> = match engine {
+        SimilarityEngine::Poa { .. } => None,
+        SimilarityEngine::Mash { kmer_k, .. } => Some(kmer_k),
+    };
 
     // Parse region once
     let (chrom, start, end) = parse_region_string(region);
@@ -264,15 +377,19 @@ fn compute_similarities_for_region(
             let group_a = &groups[i];
             let group_b = &groups[j];
 
-            let intersection =
-                calculate_intersection(&msa_chars, group_a, group_b, delim.is_none());
+            let counts =
+                calculate_intersection(&signatures, group_a, group_b, delim.is_none());
 
-            if intersection == 0 && !emit_all_pairs {
+            if counts.matches == 0 && !emit_all_pairs {
                 continue;
             }
 
-            let metrics =
-                SimilarityMetrics::new(intersection, group_a.total_length, group_b.total_length);
+            let metrics = SimilarityMetrics::new(
+                counts,
+                group_a.total_length,
+                group_b.total_length,
+                identity_k,
+            );
 
             // Output (i,j)
             format_similarity_line(
@@ -284,7 +401,7 @@ fn compute_similarities_for_region(
                 &group_b.name,
                 group_a.total_length,
                 group_b.total_length,
-                intersection,
+                counts.matches,
                 &metrics,
                 emit_distances,
             );
@@ -300,7 +417,7 @@ fn compute_similarities_for_region(
                     &group_a.name,
                     group_b.total_length,
                     group_a.total_length,
-                    intersection,
+                    counts.matches,
                     &metrics,
                     emit_distances,
                 );
@@ -316,7 +433,7 @@ fn compute_pca_for_region(
     impg: &impl ImpgIndex,
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
-    scoring_params: (u8, u8, u8, u8, u8, u8),
+    engine: SimilarityEngine,
     emit_all_pairs: bool,
     delim: Option<char>,
     delim_pos: u16,
@@ -325,14 +442,19 @@ fn compute_pca_for_region(
 ) -> io::Result<PcaResult> {
     debug!("Computing PCA for region with {} intervals", results.len());
 
-    let (groups, msa_chars) = prepare_groups_and_msa(
+    let (groups, signatures) = prepare_groups_and_signatures(
         impg,
         results,
         sequence_index,
-        scoring_params,
+        engine,
         delim,
         delim_pos,
     )?;
+
+    let identity_k: Option<usize> = match engine {
+        SimilarityEngine::Poa { .. } => None,
+        SimilarityEngine::Mash { kmer_k, .. } => Some(kmer_k),
+    };
 
     // Collect all similarities for PCA
     let mut similarities = Vec::new();
@@ -342,14 +464,15 @@ fn compute_pca_for_region(
             let group_a = &groups[i];
             let group_b = &groups[j];
 
-            let intersection =
-                calculate_intersection(&msa_chars, group_a, group_b, delim.is_none());
+            let counts =
+                calculate_intersection(&signatures, group_a, group_b, delim.is_none());
 
-            if intersection > 0 || emit_all_pairs {
+            if counts.matches > 0 || emit_all_pairs {
                 let metrics = SimilarityMetrics::new(
-                    intersection,
+                    counts,
                     group_a.total_length,
                     group_b.total_length,
+                    identity_k,
                 );
                 let similarity = metrics.get_by_name(pca_similarity);
 
@@ -384,46 +507,183 @@ fn compute_pca_for_region(
     }
 }
 
-// Helper to prepare groups and MSA characters
-fn prepare_groups_and_msa(
+// Helper to prepare groups and engine-specific signatures (MSA rows or sketches).
+fn prepare_groups_and_signatures(
     impg: &impl ImpgIndex,
     results: &[Interval<u32>],
     sequence_index: &UnifiedSequenceIndex,
-    scoring_params: (u8, u8, u8, u8, u8, u8),
+    engine: SimilarityEngine,
     delim: Option<char>,
     delim_pos: u16,
-) -> io::Result<(Vec<GroupInfo>, Vec<Vec<char>>)> {
-    let (graph, sequence_metadata) =
-        prepare_poa_graph_and_sequences(impg, results, sequence_index, scoring_params)?;
+) -> io::Result<(Vec<GroupInfo>, GroupSignatures)> {
+    match engine {
+        SimilarityEngine::Poa { scoring } => {
+            let (graph, sequence_metadata) =
+                prepare_poa_graph_and_sequences(impg, results, sequence_index, scoring)?;
 
-    let msa = graph.generate_msa();
-    let msa_chars: Vec<Vec<char>> = msa.iter().map(|s| s.chars().collect()).collect();
-    let groups = create_groups(&sequence_metadata, delim, delim_pos)?;
+            let msa = graph.generate_msa();
+            let msa_chars: Vec<Vec<char>> = msa.iter().map(|s| s.chars().collect()).collect();
+            let groups = create_groups(&sequence_metadata, delim, delim_pos)?;
 
-    Ok((groups, msa_chars))
+            Ok((groups, GroupSignatures::Msa { chars: msa_chars }))
+        }
+        SimilarityEngine::Mash {
+            kmer_k,
+            sketch_cap,
+        } => {
+            // 1. Fetch strand-normalized sequences + metadata via the shared helper.
+            let pairs = prepare_sequences(impg, results, sequence_index)?;
+            let sequences: Vec<String> = pairs.iter().map(|(s, _)| s.clone()).collect();
+            let sequence_metadata: Vec<_> = pairs.into_iter().map(|(_, m)| m).collect();
+
+            // 2. Build groups over sequence metadata (same logic as POA path).
+            let mut groups = create_groups(&sequence_metadata, delim, delim_pos)?;
+
+            // 3. Derive adaptive sketch size from the median group's k-mer capacity.
+            //    Rule: `effective_sketch = min(user_cap, max(FLOOR, median_num_kmers))`.
+            //    The intent is the opposite of "compress aggressively": if a group has fewer
+            //    k-mers than the cap we keep them ALL (exact set Jaccard, no sampling noise);
+            //    only when groups are long enough that we'd actually be throwing k-mers away
+            //    does the cap kick in. Sampling too aggressively on small regions was hiding
+            //    real pair-to-pair variation under Jaccard estimator noise — observed on chr6
+            //    1-5 kb runs where POA disagreed with a highly-quantized sketch identity.
+            let mut group_num_kmers: Vec<usize> = groups
+                .iter()
+                .map(|g| {
+                    // Count only k-mers that can't be destroyed by the `N*k` separator.
+                    // For a single sequence of length L this is max(0, L - k + 1); for
+                    // concatenated group members we sum per-sequence capacities (the
+                    // separator blocks any cross-boundary k-mers).
+                    g.sequence_indices
+                        .iter()
+                        .map(|&idx| sequences[idx].len().saturating_sub(kmer_k - 1))
+                        .sum()
+                })
+                .collect();
+            group_num_kmers.sort_unstable();
+            let median_num_kmers = if group_num_kmers.is_empty() {
+                0
+            } else {
+                group_num_kmers[group_num_kmers.len() / 2]
+            };
+            let effective_sketch = median_num_kmers
+                .max(FAST_SKETCH_FLOOR)
+                .min(sketch_cap.max(FAST_SKETCH_FLOOR));
+            debug!(
+                "Mash sketching: {} groups, median k-mer count {}, effective sketch size {} (cap {}, k={})",
+                groups.len(),
+                median_num_kmers,
+                effective_sketch,
+                sketch_cap,
+                kmer_k
+            );
+
+            // 4. Warn about sequences too short to produce any k-mers.
+            for (idx, meta) in sequence_metadata.iter().enumerate() {
+                if sequences[idx].len() < kmer_k {
+                    debug!(
+                        "Sequence '{}' is shorter than k={} ({} bp); contributes no minimizers",
+                        meta.path_name(),
+                        kmer_k,
+                        sequences[idx].len()
+                    );
+                }
+            }
+
+            // 5. Sketch each group in parallel: concat sequences with an N*k separator so no
+            //    k-mer can span a boundary, then build a bottom-k MinHash.
+            //    Store sketches deduplicated and sorted for O(n+m) merge-intersection.
+            let sketches: Vec<Vec<u64>> = groups
+                .par_iter()
+                .map(|g| {
+                    let mut concat: Vec<u8> = Vec::new();
+                    let sep = vec![b'N'; kmer_k];
+                    for (i, &seq_idx) in g.sequence_indices.iter().enumerate() {
+                        if i > 0 {
+                            concat.extend_from_slice(&sep);
+                        }
+                        concat.extend_from_slice(sequences[seq_idx].as_bytes());
+                    }
+                    let sketch =
+                        KmerSketch::from_sequence(&concat, kmer_k, effective_sketch);
+                    let mut mins = sketch.minimizers;
+                    // Already sorted by bottom-k; dedupe so set-Jaccard is unambiguous.
+                    mins.dedup();
+                    mins
+                })
+                .collect();
+
+            // 6. Update GroupInfo: total_length now reports the (deduplicated) sketch size
+            //    and sketch_index points at the per-group sketch.
+            for (i, group) in groups.iter_mut().enumerate() {
+                group.total_length = sketches[i].len();
+                group.sketch_index = Some(i);
+            }
+
+            Ok((groups, GroupSignatures::Sketches { sketches }))
+        }
+    }
 }
 
-// Calculate intersection between two groups
+// Calculate intersection between two groups using the engine-specific signatures.
 fn calculate_intersection(
-    msa_chars: &[Vec<char>],
+    signatures: &GroupSignatures,
     group_a: &GroupInfo,
     group_b: &GroupInfo,
     is_individual: bool,
-) -> usize {
-    if is_individual && group_a.sequence_indices.len() == 1 && group_b.sequence_indices.len() == 1 {
-        // Fast path for individual sequences
-        calculate_pairwise_intersection(
-            &msa_chars[group_a.sequence_indices[0]],
-            &msa_chars[group_b.sequence_indices[0]],
-        )
-    } else {
-        // General case for groups
-        calculate_group_intersection(
-            msa_chars,
-            &group_a.sequence_indices,
-            &group_b.sequence_indices,
-        )
+) -> AlignmentCounts {
+    match signatures {
+        GroupSignatures::Msa { chars } => {
+            if is_individual
+                && group_a.sequence_indices.len() == 1
+                && group_b.sequence_indices.len() == 1
+            {
+                calculate_pairwise_intersection(
+                    &chars[group_a.sequence_indices[0]],
+                    &chars[group_b.sequence_indices[0]],
+                )
+            } else {
+                calculate_group_intersection(
+                    chars,
+                    &group_a.sequence_indices,
+                    &group_b.sequence_indices,
+                )
+            }
+        }
+        GroupSignatures::Sketches { sketches } => {
+            let idx_a = group_a
+                .sketch_index
+                .expect("Mash signatures require sketch_index on every group");
+            let idx_b = group_b
+                .sketch_index
+                .expect("Mash signatures require sketch_index on every group");
+            // Mismatches and gap events are not recoverable from k-mer sketches; identity
+            // is computed via the Mash k-th-root formula in SimilarityMetrics::new.
+            AlignmentCounts {
+                matches: count_shared_sorted(&sketches[idx_a], &sketches[idx_b]),
+                mismatches: 0,
+                gap_events: 0,
+            }
+        }
     }
+}
+
+/// Count the number of shared hashes between two sorted, deduplicated minimizer vectors
+/// using a merge walk. O(|a| + |b|), zero allocation.
+fn count_shared_sorted(a: &[u64], b: &[u64]) -> usize {
+    let (mut i, mut j, mut count) = (0usize, 0usize, 0usize);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            Ordering::Equal => {
+                count += 1;
+                i += 1;
+                j += 1;
+            }
+            Ordering::Less => i += 1,
+            Ordering::Greater => j += 1,
+        }
+    }
+    count
 }
 
 // Unified function for formatting similarity output
@@ -499,6 +759,7 @@ fn create_groups(
                 name: group_name,
                 sequence_indices: indices,
                 total_length,
+                sketch_index: None,
             });
         }
 
@@ -514,6 +775,7 @@ fn create_groups(
                     name,
                     sequence_indices: vec![i],
                     total_length: meta.size as usize,
+                    sketch_index: None,
                 }
             })
             .collect();
@@ -542,57 +804,140 @@ fn extract_group_name(path_name: &str, delim: char, delim_pos: u16) -> io::Resul
     }
 }
 
-// Fast path for comparing two individual sequences
-fn calculate_pairwise_intersection(seq_a: &[char], seq_b: &[char]) -> usize {
-    seq_a
-        .iter()
-        .zip(seq_b.iter())
-        .filter(|&(&char_a, &char_b)| char_a != '-' && char_b != '-' && char_a == char_b)
-        .count()
+// Fast path for comparing two individual sequences. Walks the two aligned rows column by
+// column and classifies each column:
+//   * both non-gap, equal       → matches++
+//   * both non-gap, different   → mismatches++
+//   * exactly one is a gap      → part of an indel run; one maximal run = one gap_event
+//   * both gapped               → ignored (gap-vs-gap MSA columns carry no pair signal)
+// Gap-compressed identity: indel *events* are penalized, not indel *bases*.
+fn calculate_pairwise_intersection(seq_a: &[char], seq_b: &[char]) -> AlignmentCounts {
+    #[derive(PartialEq, Eq, Clone, Copy)]
+    enum ColState {
+        Aligned,
+        GapInA,
+        GapInB,
+        BothGap,
+    }
+
+    let mut matches = 0usize;
+    let mut mismatches = 0usize;
+    let mut gap_events = 0usize;
+    let mut prev_state: Option<ColState> = None;
+
+    for (&char_a, &char_b) in seq_a.iter().zip(seq_b.iter()) {
+        let state = match (char_a, char_b) {
+            ('-', '-') => ColState::BothGap,
+            ('-', _) => ColState::GapInA,
+            (_, '-') => ColState::GapInB,
+            (a, b) => {
+                if a == b {
+                    matches += 1;
+                } else {
+                    mismatches += 1;
+                }
+                ColState::Aligned
+            }
+        };
+
+        // Count gap events on entry into a GapInA / GapInB run. Consecutive gapped
+        // columns on the same side collapse to a single event; a transition from
+        // GapInA directly to GapInB (unusual but possible in MSAs) counts as two.
+        let is_new_indel_run = matches!(state, ColState::GapInA | ColState::GapInB)
+            && prev_state.as_ref() != Some(&state);
+        if is_new_indel_run {
+            gap_events += 1;
+        }
+        prev_state = Some(state);
+    }
+
+    AlignmentCounts {
+        matches,
+        mismatches,
+        gap_events,
+    }
 }
 
-// General case for comparing groups of sequences
+// General case for comparing groups of sequences. Classifies each MSA column into one of
+// four states based on which groups have at least one non-gap base:
+//   * Both groups present → scale matches/mismatches by min(g_a_count, g_b_count) so the
+//     per-column contribution equals the effective coverage of the smaller group.
+//   * Exactly one group present → part of an indel run at the group level.
+//   * Both fully gapped → ignored (no alignment signal for this pair).
+// Gap events are counted at transitions *into* a group-level indel state.
 fn calculate_group_intersection(
     msa_chars: &[Vec<char>],
     group_a_indices: &[usize],
     group_b_indices: &[usize],
-) -> usize {
+) -> AlignmentCounts {
+    #[derive(PartialEq, Eq, Clone, Copy)]
+    enum ColState {
+        Aligned,
+        GapInA,
+        GapInB,
+        BothGap,
+    }
+
     let msa_len = msa_chars[0].len();
-    let mut intersection = 0;
+    let mut total_matches = 0usize;
+    let mut total_mismatches = 0usize;
+    let mut gap_events = 0usize;
+    let mut prev_state: Option<ColState> = None;
 
     for pos in 0..msa_len {
-        // For each position, check all pairwise comparisons between groups and count matches
-        let mut position_matches = 0;
+        let mut position_matches = 0usize;
+        let mut group_a_count = 0usize;
+        let mut group_b_count = 0usize;
 
         for &idx_a in group_a_indices {
             let char_a = msa_chars[idx_a][pos];
-            if char_a != '-' {
-                for &idx_b in group_b_indices {
-                    let char_b = msa_chars[idx_b][pos];
-                    if char_b != '-' && char_a == char_b {
-                        position_matches += 1;
-                    }
+            if char_a == '-' {
+                continue;
+            }
+            group_a_count += 1;
+            for &idx_b in group_b_indices {
+                let char_b = msa_chars[idx_b][pos];
+                if char_b == '-' {
+                    continue;
+                }
+                if char_a == char_b {
+                    position_matches += 1;
                 }
             }
         }
+        for &idx_b in group_b_indices {
+            if msa_chars[idx_b][pos] != '-' {
+                group_b_count += 1;
+            }
+        }
 
-        // For this position, add the minimum of:
-        // - number of non-gap characters in group A
-        // - number of non-gap characters in group B
-        // - number of actual matches found
-        let group_a_count = group_a_indices
-            .iter()
-            .filter(|&&idx| msa_chars[idx][pos] != '-')
-            .count();
-        let group_b_count = group_b_indices
-            .iter()
-            .filter(|&&idx| msa_chars[idx][pos] != '-')
-            .count();
+        let state = match (group_a_count, group_b_count) {
+            (0, 0) => ColState::BothGap,
+            (0, _) => ColState::GapInA,
+            (_, 0) => ColState::GapInB,
+            (ga, gb) => {
+                let coverage = ga.min(gb);
+                let scaled_matches = position_matches.min(coverage);
+                let scaled_mismatches = coverage - scaled_matches;
+                total_matches += scaled_matches;
+                total_mismatches += scaled_mismatches;
+                ColState::Aligned
+            }
+        };
 
-        intersection += position_matches.min(group_a_count).min(group_b_count);
+        let is_new_indel_run = matches!(state, ColState::GapInA | ColState::GapInB)
+            && prev_state.as_ref() != Some(&state);
+        if is_new_indel_run {
+            gap_events += 1;
+        }
+        prev_state = Some(state);
     }
 
-    intersection
+    AlignmentCounts {
+        matches: total_matches,
+        mismatches: total_mismatches,
+        gap_events,
+    }
 }
 
 // PCA/MDS related structures and implementations
