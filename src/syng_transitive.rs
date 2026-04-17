@@ -471,7 +471,59 @@ pub fn query_transitive(
         frontier = next_frontier;
     }
 
-    Ok(all_hits)
+    Ok(merge_overlapping_on_same_path(all_hits))
+}
+
+/// Collapse strictly overlapping intervals that share the same
+/// `(genome, strand)`. Different transitive paths can reach the same
+/// homolog and produce intervals that differ by a few bp at the boundaries
+/// (BiWFA refinement is not idempotent across hop depths), leaving tens of
+/// near-duplicate rows per haplotype for a single query. Strictly touching
+/// or gapped intervals are *not* merged — those represent genuinely adjacent
+/// homologs (e.g. tandem arrays) that should stay separate.
+fn merge_overlapping_on_same_path(hits: Vec<HomologousInterval>) -> Vec<HomologousInterval> {
+    use std::collections::HashMap;
+    let mut groups: HashMap<(String, char), Vec<(u64, u64)>> = HashMap::new();
+    for h in hits {
+        groups.entry((h.genome, h.strand)).or_default().push((h.start, h.end));
+    }
+    let mut out: Vec<HomologousInterval> = Vec::new();
+    for ((genome, strand), mut ivs) in groups {
+        ivs.sort_unstable();
+        let mut iter = ivs.into_iter();
+        let Some(mut cur) = iter.next() else {
+            continue;
+        };
+        for next in iter {
+            if next.0 < cur.1 {
+                if next.1 > cur.1 {
+                    cur.1 = next.1;
+                }
+            } else {
+                out.push(HomologousInterval {
+                    genome: genome.clone(),
+                    start: cur.0,
+                    end: cur.1,
+                    strand,
+                });
+                cur = next;
+            }
+        }
+        out.push(HomologousInterval {
+            genome,
+            start: cur.0,
+            end: cur.1,
+            strand,
+        });
+    }
+    out.sort_by(|a, b| {
+        a.genome
+            .cmp(&b.genome)
+            .then(a.start.cmp(&b.start))
+            .then(a.end.cmp(&b.end))
+            .then(a.strand.cmp(&b.strand))
+    });
+    out
 }
 
 #[cfg(test)]
