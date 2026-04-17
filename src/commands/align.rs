@@ -1269,6 +1269,130 @@ pub fn run_align(
     Ok(())
 }
 
+/// Execute a joblist file (one shell command per line, `#`-comments and
+/// blank lines skipped) with `jobs`-way parallelism. Each command runs via
+/// `bash -c`. Progress — completion count, throughput, and ETA — is logged
+/// to stderr every ~2 seconds.
+///
+/// Returns an error listing failure counts if any individual job exits
+/// non-zero; successful jobs still ran and their output files are left in
+/// place (failures are reported, not rolled back).
+pub fn run_joblist(joblist_path: &Path, jobs: usize) -> io::Result<()> {
+    use std::process::Command;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    let file = File::open(joblist_path)?;
+    let reader = BufReader::new(file);
+    let commands: Vec<String> = reader
+        .lines()
+        .filter_map(|l| l.ok())
+        .filter(|l| {
+            let t = l.trim();
+            !t.is_empty() && !t.starts_with('#')
+        })
+        .collect();
+
+    let total = commands.len();
+    if total == 0 {
+        info!("Joblist {} is empty", joblist_path.display());
+        return Ok(());
+    }
+
+    let jobs = jobs.max(1);
+    info!(
+        "[joblist] running {} jobs from {} with {}-way parallelism",
+        total,
+        joblist_path.display(),
+        jobs,
+    );
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(jobs)
+        .build()
+        .map_err(|e| io::Error::other(format!("Failed to build joblist pool: {}", e)))?;
+
+    let start = Instant::now();
+    let completed = AtomicUsize::new(0);
+    let failures: Mutex<Vec<(usize, i32)>> = Mutex::new(Vec::new());
+    let last_log = Mutex::new(Instant::now() - std::time::Duration::from_secs(3));
+
+    pool.install(|| {
+        commands.par_iter().enumerate().for_each(|(i, cmd)| {
+            let status = Command::new("bash").args(["-c", cmd]).status();
+            let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+
+            match status {
+                Ok(s) if s.success() => {}
+                Ok(s) => {
+                    let code = s.code().unwrap_or(-1);
+                    failures.lock().unwrap().push((i, code));
+                }
+                Err(e) => {
+                    failures.lock().unwrap().push((i, -1));
+                    log::warn!("[joblist] spawn failed for line {}: {}", i + 1, e);
+                }
+            }
+
+            let should_log = {
+                let mut last = last_log.lock().unwrap();
+                if last.elapsed().as_secs_f64() >= 2.0 || done == total {
+                    *last = Instant::now();
+                    true
+                } else {
+                    false
+                }
+            };
+            if should_log {
+                let elapsed = start.elapsed().as_secs_f64();
+                let rate = done as f64 / elapsed.max(1e-9);
+                let remaining = total.saturating_sub(done);
+                let eta = if rate > 0.0 {
+                    remaining as f64 / rate
+                } else {
+                    0.0
+                };
+                info!(
+                    "[joblist] {}/{} ({:.1}%) elapsed={:.0}s rate={:.2} jobs/s eta={}m{:02}s",
+                    done,
+                    total,
+                    (done as f64 / total as f64) * 100.0,
+                    elapsed,
+                    rate,
+                    (eta / 60.0) as u64,
+                    (eta % 60.0) as u64,
+                );
+            }
+        });
+    });
+
+    let fails = failures.into_inner().unwrap();
+    let elapsed = start.elapsed().as_secs_f64();
+    if !fails.is_empty() {
+        let sample: Vec<String> = fails
+            .iter()
+            .take(5)
+            .map(|(i, code)| format!("line {} exit {}", i + 1, code))
+            .collect();
+        return Err(io::Error::other(format!(
+            "[joblist] {} of {} jobs failed (e.g. {}) after {:.1}s",
+            fails.len(),
+            total,
+            sample.join(", "),
+            elapsed,
+        )));
+    }
+
+    info!(
+        "[joblist] completed {} jobs in {:.1}s ({:.2} jobs/s)",
+        total,
+        elapsed,
+        total as f64 / elapsed.max(1e-9),
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

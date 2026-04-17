@@ -1279,6 +1279,18 @@ enum Args {
         #[clap(long, value_parser, default_value = "joblist")]
         format: String,
 
+        /// Execute an existing joblist file (one shell command per line)
+        /// in parallel with progress/ETA logging. When set, sparsification
+        /// and sequence inputs are ignored.
+        #[clap(long, value_parser)]
+        run_joblist: Option<String>,
+
+        /// Parallel slots for `--run-joblist`. Each slot runs one command
+        /// at a time; per-command thread count is whatever the joblist line
+        /// already specifies. Defaults to `--threads`.
+        #[clap(long, value_parser)]
+        jobs: Option<usize>,
+
         // --- Alignment ---
         #[clap(flatten)]
         aln: AlnOpts,
@@ -2981,10 +2993,20 @@ fn run() -> io::Result<()> {
             fasta_input,
             output_dir,
             format,
+            run_joblist,
+            jobs,
             aln,
             common,
         } => {
             initialize_threads_and_log(&common);
+
+            // Short-circuit: execute a pre-generated joblist and exit.
+            if let Some(joblist_path) = run_joblist {
+                let jobs = jobs.unwrap_or_else(|| common.threads.get());
+                align::run_joblist(std::path::Path::new(&joblist_path), jobs)?;
+                return Ok(());
+            }
+
             let temp_dir = resolve_temp_dir(aln.temp_dir)?;
             setup_temp_dir(&temp_dir)?;
 
