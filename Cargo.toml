@@ -58,11 +58,13 @@ zstd = { version = "0.13.3", features = ["zstdmt"] }
 gzp = "1.0.1"
 
 # Dependencies for graph building (sweepga + seqwish integration)
+# b7d8820 = main 018e4ce + fix(batch): plumb pairs_file through WfmashBatchAligner.
+# Will be bumped again once upstream sweepga absorbs PanSN-haplotype sparsification.
 sweepga = { git = "https://github.com/pangenome/sweepga", rev = "b7d8820a8cad5d37105cc5d10250e753d35d88cc", default-features = false }
 seqwish = { git = "https://github.com/pangenome/seqwish", branch = "rust-2" }
 
 # Dependencies for graph sorting
-gfasort = { git = "https://github.com/pangenome/gfasort", rev = "b5fdb1d" }
+gfasort = { git = "https://github.com/pangenome/gfasort", rev = "f15d8ebfdc632af2333f277cb9da0748d8fba7aa" }
 
 # GBWT + succinct data structures for FastLocate port (src/fast_locate.rs).
 # `gbz` is the jltsiren/gbwt-rs reimplementation (despite the crate name);

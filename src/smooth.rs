@@ -1135,8 +1135,8 @@ fn find_core_column_range(msa: &[String], entries: &[SeqEntry]) -> (usize, usize
             continue;
         }
         let mut non_gap_count = 0;
-        for col in 0..ncols {
-            if msa_bytes[i][col] != b'-' {
+        for (col, &b) in msa_bytes[i].iter().take(ncols).enumerate() {
+            if b != b'-' {
                 non_gap_count += 1;
                 if non_gap_count == left_pad {
                     core_start = core_start.max(col + 1);
@@ -1160,8 +1160,8 @@ fn find_core_column_range(msa: &[String], entries: &[SeqEntry]) -> (usize, usize
             break;
         }
         let mut non_gap_count = 0;
-        for col in 0..ncols {
-            if msa_bytes[i][col] != b'-' {
+        for (col, &b) in msa_bytes[i].iter().take(ncols).enumerate() {
+            if b != b'-' {
                 non_gap_count += 1;
                 if non_gap_count == core_base_count {
                     core_end = core_end.min(col + 1);

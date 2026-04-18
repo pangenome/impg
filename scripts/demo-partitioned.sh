@@ -22,6 +22,7 @@ ODGI=$(command -v odgi 2>/dev/null || true)
 REGION="CHM13#0#chr6:29000000-30000000"
 PARTITION_SIZE=10000
 BATCH_BYTES="50M"
+ALIGNERS=("wfmash" "fastga")
 
 mkdir -p "$OUTDIR"
 
@@ -165,61 +166,60 @@ else
 fi
 
 # -------------------------------------------------------------------------
-# Run 1: full pggb (baseline)
+# For each aligner: run full pggb baseline + partitioned pggb, then compare.
 # -------------------------------------------------------------------------
 
-FULL_GFA="${PREFIX}.full.pggb.gfa"
-echo ""
-echo "--- Run 1: full pggb --force-large-region --batch-bytes ${BATCH_BYTES} ---"
-metrics=$(run_timed "${PREFIX}.full.pggb.log" $IMPG query \
-    --alignment-list data/hprcv2/tpas/tpa-list.txt --sequence-files "$AGC" \
-    -r "$REGION" -o gfa --gfa-engine pggb \
-    --force-large-region --batch-bytes "$BATCH_BYTES" \
-    -O "${PREFIX}.full.pggb" -t "$THREADS" -v 1) || true
-read -r wall mem st <<< "$metrics"
-if [ "$st" -eq 0 ] && [ -s "$FULL_GFA" ]; then
-    read -r s l p avg <<< "$(gfa_stats "$FULL_GFA")"
-    echo "  OK  wall=${wall}s  mem=${mem}MB  ${s}S/${l}L/${p}P/avg${avg}bp"
-    record "full.pggb" "$wall" "$mem" "$s" "$l" "$p" "$avg" "OK"
-    check_paths_vs_input "full.pggb" "$FULL_GFA" "$EXPECTED_SORTED"
-else
-    echo "  FAIL"
-    record "full.pggb" "$wall" "$mem" "" "" "" "" "FAIL"
-fi
+for ALIGNER in "${ALIGNERS[@]}"; do
+    echo ""
+    echo "================================================================="
+    echo "Aligner: $ALIGNER"
+    echo "================================================================="
 
-# -------------------------------------------------------------------------
-# Run 2: partitioned pggb
-# -------------------------------------------------------------------------
+    FULL_GFA="${PREFIX}.full.${ALIGNER}.pggb.gfa"
+    echo ""
+    echo "--- full pggb (aligner=$ALIGNER) --batch-bytes ${BATCH_BYTES} ---"
+    metrics=$(run_timed "${PREFIX}.full.${ALIGNER}.pggb.log" $IMPG query \
+        --alignment-list data/hprcv2/tpas/tpa-list.txt --sequence-files "$AGC" \
+        -r "$REGION" -o gfa --gfa-engine pggb --aligner "$ALIGNER" \
+        --force-large-region --batch-bytes "$BATCH_BYTES" \
+        -O "${PREFIX}.full.${ALIGNER}.pggb" -t "$THREADS" -v 1) || true
+    read -r wall mem st <<< "$metrics"
+    if [ "$st" -eq 0 ] && [ -s "$FULL_GFA" ]; then
+        read -r s l p avg <<< "$(gfa_stats "$FULL_GFA")"
+        echo "  OK  wall=${wall}s  mem=${mem}MB  ${s}S/${l}L/${p}P/avg${avg}bp"
+        record "full.${ALIGNER}.pggb" "$wall" "$mem" "$s" "$l" "$p" "$avg" "OK"
+        check_paths_vs_input "full.${ALIGNER}.pggb" "$FULL_GFA" "$EXPECTED_SORTED"
+    else
+        echo "  FAIL"
+        record "full.${ALIGNER}.pggb" "$wall" "$mem" "" "" "" "" "FAIL"
+    fi
 
-PART_GFA="${PREFIX}.part.pggb.gfa"
-echo ""
-echo "--- Run 2: partitioned pggb:${PARTITION_SIZE} ---"
-metrics=$(run_timed "${PREFIX}.part.pggb.log" $IMPG query \
-    --alignment-list data/hprcv2/tpas/tpa-list.txt --sequence-files "$AGC" \
-    -r "$REGION" -o gfa --gfa-engine "pggb:${PARTITION_SIZE}" \
-    -O "${PREFIX}.part.pggb" -t "$THREADS" -v 1) || true
-read -r wall mem st <<< "$metrics"
-if [ "$st" -eq 0 ] && [ -s "$PART_GFA" ]; then
-    read -r s l p avg <<< "$(gfa_stats "$PART_GFA")"
-    echo "  OK  wall=${wall}s  mem=${mem}MB  ${s}S/${l}L/${p}P/avg${avg}bp"
-    record "part.pggb:${PARTITION_SIZE}" "$wall" "$mem" "$s" "$l" "$p" "$avg" "OK"
-    check_paths_vs_input "part.pggb:${PARTITION_SIZE}" "$PART_GFA" "$EXPECTED_SORTED"
-else
-    echo "  FAIL"
-    record "part.pggb:${PARTITION_SIZE}" "$wall" "$mem" "" "" "" "" "FAIL"
-fi
+    PART_GFA="${PREFIX}.part.${ALIGNER}.pggb.gfa"
+    echo ""
+    echo "--- partitioned pggb:${PARTITION_SIZE} (aligner=$ALIGNER) ---"
+    metrics=$(run_timed "${PREFIX}.part.${ALIGNER}.pggb.log" $IMPG query \
+        --alignment-list data/hprcv2/tpas/tpa-list.txt --sequence-files "$AGC" \
+        -r "$REGION" -o gfa --gfa-engine "pggb:${PARTITION_SIZE}" --aligner "$ALIGNER" \
+        -O "${PREFIX}.part.${ALIGNER}.pggb" -t "$THREADS" -v 1) || true
+    read -r wall mem st <<< "$metrics"
+    if [ "$st" -eq 0 ] && [ -s "$PART_GFA" ]; then
+        read -r s l p avg <<< "$(gfa_stats "$PART_GFA")"
+        echo "  OK  wall=${wall}s  mem=${mem}MB  ${s}S/${l}L/${p}P/avg${avg}bp"
+        record "part.${ALIGNER}.pggb:${PARTITION_SIZE}" "$wall" "$mem" "$s" "$l" "$p" "$avg" "OK"
+        check_paths_vs_input "part.${ALIGNER}.pggb:${PARTITION_SIZE}" "$PART_GFA" "$EXPECTED_SORTED"
+    else
+        echo "  FAIL"
+        record "part.${ALIGNER}.pggb:${PARTITION_SIZE}" "$wall" "$mem" "" "" "" "" "FAIL"
+    fi
 
-# -------------------------------------------------------------------------
-# Compare
-# -------------------------------------------------------------------------
-
-echo ""
-echo "--- Comparison ---"
-if [ -s "$FULL_GFA" ] && [ -s "$PART_GFA" ]; then
-    compare_gfa "$FULL_GFA" "$PART_GFA"
-else
-    echo "  SKIP: one or both GFAs missing"
-fi
+    echo ""
+    echo "--- Comparison ($ALIGNER: full vs partitioned) ---"
+    if [ -s "$FULL_GFA" ] && [ -s "$PART_GFA" ]; then
+        compare_gfa "$FULL_GFA" "$PART_GFA"
+    else
+        echo "  SKIP: one or both GFAs missing"
+    fi
+done
 
 # -------------------------------------------------------------------------
 # Summary
