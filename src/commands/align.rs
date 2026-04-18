@@ -94,132 +94,14 @@ struct SequenceInfo {
     sketch: sweepga::mash::KmerSketch,
 }
 
-/// Group sequence indices by PanSN haplotype key (`SAMPLE#HAPLOTYPE`).
-/// For non-PanSN names the whole name acts as its own key, so every contig
-/// becomes its own "haplotype" and the caller falls back to contig-level
-/// behavior.
-fn group_indices_by_haplotype(names: &[&str]) -> Vec<Vec<usize>> {
-    use std::collections::BTreeMap;
-    use sweepga::pansn::{extract_pansn_key, PanSnLevel};
-    let mut map: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for (i, name) in names.iter().enumerate() {
-        let key =
-            extract_pansn_key(name, PanSnLevel::Haplotype).unwrap_or_else(|| (*name).to_string());
-        map.entry(key).or_default().push(i);
-    }
-    map.into_values().collect()
-}
-
-/// Merge MinHash sketches by unioning their minimizer vectors and re-truncating
-/// to `sketch_size`. MinHash bottom-k has the mergeability property that the
-/// bottom-k of the union equals the bottom-k of the merged bottom-k sketches.
-fn merge_sketches(
-    parts: &[&sweepga::mash::KmerSketch],
-    sketch_size: usize,
-) -> sweepga::mash::KmerSketch {
-    let k = parts
-        .first()
-        .map(|s| s.k)
-        .unwrap_or(sweepga::mash::DEFAULT_KMER_SIZE);
-    let mut minimizers: Vec<u64> = parts
-        .iter()
-        .flat_map(|s| s.minimizers.iter().copied())
-        .collect();
-    let length: usize = parts.iter().map(|s| s.length).sum();
-    minimizers.sort_unstable();
-    minimizers.dedup();
-    minimizers.truncate(sketch_size);
-    sweepga::mash::KmerSketch {
-        minimizers,
-        k,
-        length,
-    }
-}
-
-/// Expand haplotype-level pairs into contig-level pairs: cross-product across
-/// selected haplotype pairs plus all intra-haplotype contig pairs.
-fn expand_haplotype_pairs(
-    hap_pairs: &[(usize, usize)],
-    hap_groups: &[Vec<usize>],
-) -> Vec<(usize, usize)> {
-    let mut seen: HashSet<(usize, usize)> = HashSet::new();
-    for &(hi, hj) in hap_pairs {
-        for &ci in &hap_groups[hi] {
-            for &cj in &hap_groups[hj] {
-                if ci == cj {
-                    continue;
-                }
-                let pair = if ci < cj { (ci, cj) } else { (cj, ci) };
-                seen.insert(pair);
-            }
-        }
-    }
-    for contigs in hap_groups {
-        for a in 0..contigs.len() {
-            for b in a + 1..contigs.len() {
-                let (ci, cj) = (contigs[a], contigs[b]);
-                let pair = if ci < cj { (ci, cj) } else { (cj, ci) };
-                seen.insert(pair);
-            }
-        }
-    }
-    let mut out: Vec<(usize, usize)> = seen.into_iter().collect();
-    out.sort_unstable();
-    out
-}
-
-/// Run `select_pairs_from_sketches` at PanSN haplotype granularity.
-///
-/// Groups input contigs by their `SAMPLE#HAPLOTYPE` prefix, merges per-contig
-/// MinHash sketches into one sketch per haplotype, runs the sparsification
-/// strategy on haplotype sketches, then expands the selected haplotype pairs
-/// to contig pairs (cross-product + all intra-haplotype pairs).
-///
-/// Falls back to plain contig-level selection when every name is already its
-/// own haplotype (non-PanSN inputs).
-fn select_pairs_haplotype_aware(
-    names: &[&str],
-    contig_sketches: &[sweepga::mash::KmerSketch],
-    strategy: &SparsificationStrategy,
-    mash_params: &sweepga::knn_graph::MashParams,
-) -> Vec<(usize, usize)> {
-    let hap_groups = group_indices_by_haplotype(names);
-    if hap_groups.len() == contig_sketches.len() {
-        return sweepga::knn_graph::select_pairs_from_sketches(contig_sketches, strategy);
-    }
-    let hap_sketches: Vec<sweepga::mash::KmerSketch> = hap_groups
-        .iter()
-        .map(|idxs| {
-            let parts: Vec<&sweepga::mash::KmerSketch> =
-                idxs.iter().map(|&i| &contig_sketches[i]).collect();
-            merge_sketches(&parts, mash_params.sketch_size)
-        })
-        .collect();
-    let hap_pairs = sweepga::knn_graph::select_pairs_from_sketches(&hap_sketches, strategy);
-    expand_haplotype_pairs(&hap_pairs, &hap_groups)
-}
-
-/// Run sketch-free pair selection (None/Random/WfmashDensity) at haplotype
-/// granularity, then expand to contig pairs. `Random(f)` samples `f` of the
-/// haplotype pairs, which — once expanded — gives `f` of the haplotype-pair
-/// fraction, not `f` of contig pairs. That is the intended semantics: the
-/// user's sparsification fraction operates on biologically meaningful units.
-fn select_pairs_haplotype_aware_no_sketch(
-    names: &[&str],
-    strategy: &SparsificationStrategy,
-    mash_params: &sweepga::knn_graph::MashParams,
-) -> Vec<(usize, usize)> {
-    let n = names.len();
-    let hap_groups = group_indices_by_haplotype(names);
-    if hap_groups.len() == n {
-        return sweepga::knn_graph::select_pairs(n, None, strategy, mash_params);
-    }
-    let hap_pairs =
-        sweepga::knn_graph::select_pairs(hap_groups.len(), None, strategy, mash_params);
-    expand_haplotype_pairs(&hap_pairs, &hap_groups)
-}
-
 /// Generate alignment pairs from named in-memory sequences.
+///
+/// Thin wrapper over [`sweepga::knn_graph::select_pairs_haplotype_aware`]
+/// (distance-based strategies) and
+/// [`sweepga::knn_graph::select_pairs_haplotype_aware_no_sketch`] (the
+/// `None` / `Random(_)` / `WfmashDensity(_)` strategies) — both group by
+/// PanSN `SAMPLE#HAPLOTYPE` prefix and fall back transparently to
+/// contig-level selection for non-PanSN inputs.
 pub fn generate_pairs_for_sequences(
     sequences: &[(String, &[u8])],
     strategy: &SparsificationStrategy,
@@ -235,7 +117,9 @@ pub fn generate_pairs_for_sequences(
         SparsificationStrategy::None
         | SparsificationStrategy::Random(_)
         | SparsificationStrategy::WfmashDensity(_) => {
-            select_pairs_haplotype_aware_no_sketch(&names, strategy, mash_params)
+            sweepga::knn_graph::select_pairs_haplotype_aware_no_sketch(
+                &names, strategy, mash_params,
+            )
         }
         _ => {
             let raw_seqs: Vec<Vec<u8>> = sequences.iter().map(|(_, s)| s.to_vec()).collect();
@@ -244,12 +128,18 @@ pub fn generate_pairs_for_sequences(
                 mash_params.kmer_size,
                 mash_params.sketch_size,
             );
-            select_pairs_haplotype_aware(&names, &sketches, strategy, mash_params)
+            sweepga::knn_graph::select_pairs_haplotype_aware(
+                &names,
+                &sketches,
+                strategy,
+                mash_params.sketch_size,
+            )
         }
     }
 }
 
-/// Generate pairs from pre-loaded SequenceInfo (with pre-computed sketches).
+/// Generate pairs from pre-loaded `SequenceInfo` (with pre-computed sketches),
+/// routed through sweepga's haplotype-aware selection.
 fn generate_pairs(
     sequences: &[SequenceInfo],
     strategy: &SparsificationStrategy,
@@ -265,12 +155,19 @@ fn generate_pairs(
         SparsificationStrategy::None
         | SparsificationStrategy::Random(_)
         | SparsificationStrategy::WfmashDensity(_) => {
-            select_pairs_haplotype_aware_no_sketch(&names, strategy, mash_params)
+            sweepga::knn_graph::select_pairs_haplotype_aware_no_sketch(
+                &names, strategy, mash_params,
+            )
         }
         _ => {
             let sketches: Vec<sweepga::mash::KmerSketch> =
                 sequences.iter().map(|s| s.sketch.clone()).collect();
-            select_pairs_haplotype_aware(&names, &sketches, strategy, mash_params)
+            sweepga::knn_graph::select_pairs_haplotype_aware(
+                &names,
+                &sketches,
+                strategy,
+                mash_params.sketch_size,
+            )
         }
     }
 }
@@ -350,29 +247,17 @@ fn load_sequences(
     Ok(result)
 }
 
-/// Replace filesystem-hostile characters (including PanSN `#`) in a string
-/// so it's safe to use as a filename component.
-fn sanitize_for_filename(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            '/' | '\\' | '#' | ':' | ' ' | '\t' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            other => other,
-        })
-        .collect()
-}
-
 /// Write job list for cluster execution.
 ///
-/// For `wfmash`: groups the selected pairs by PanSN haplotype
-/// (`SAMPLE#HAPLOTYPE`) and emits one `wfmash` command per haplotype pair,
-/// using `-T` (target prefix) and `-Q` (query prefix) to filter the input.
-/// This matches wfmash's "one genome pair per invocation" model and lets the
-/// user parallelize at haplotype granularity with `xargs -P` / `parallel`.
+/// For `wfmash`: emits one `wfmash -T <target_hap> -Q <query_hap> …`
+/// command per PanSN haplotype pair, using sweepga's upstream
+/// [`sweepga::joblist::write_wfmash_pansn_commands`] helper. Single-FASTA
+/// PanSN input is the common pangenome case; the same physical FASTA is
+/// passed on both sides and wfmash filters by prefix.
 ///
-/// For `fastga`: FastGA has no prefix filter, so we emit one command per
-/// unique `(target_file, query_file)` pair — not per contig pair — which
-/// keeps single-file PanSN inputs from exploding into millions of identical
-/// lines.
+/// For `fastga`: FastGA has no PanSN prefix filter, so we emit one
+/// command per unique `(target_file, query_file)` pair (collapses
+/// single-file PanSN inputs to one self-alignment line).
 fn write_job_list<W: Write>(
     pairs: &[(usize, usize)],
     sequences: &[SequenceInfo],
@@ -386,7 +271,8 @@ fn write_job_list<W: Write>(
     }
 }
 
-/// Emit one `wfmash` command per unique haplotype pair using `-T`/`-Q`.
+/// Emit one `wfmash` command per unique haplotype pair, backed by
+/// sweepga's upstream emitter.
 fn write_wfmash_joblist<W: Write>(
     pairs: &[(usize, usize)],
     sequences: &[SequenceInfo],
@@ -394,28 +280,15 @@ fn write_wfmash_joblist<W: Write>(
     writer: &mut W,
     config: &AlignConfig,
 ) -> io::Result<usize> {
-    use std::collections::BTreeMap;
     use sweepga::pansn::{extract_pansn_key, PanSnLevel};
 
-    // Map each contig index to its haplotype key.
+    // Collapse contig indices to unique (target_hap, query_hap) keys.
     let hap_of: Vec<String> = sequences
         .iter()
         .map(|s| {
             extract_pansn_key(&s.name, PanSnLevel::Haplotype).unwrap_or_else(|| s.name.clone())
         })
         .collect();
-
-    // For each hap, remember one representative FASTA path (assume each hap
-    // lives in a single file — the common pangenome case).
-    let mut hap_to_file: BTreeMap<String, String> = BTreeMap::new();
-    for (i, s) in sequences.iter().enumerate() {
-        hap_to_file
-            .entry(hap_of[i].clone())
-            .or_insert_with(|| s.path.clone());
-    }
-
-    // Collect unique (target_hap, query_hap) pairs. Normalize ordering so
-    // (H_a, H_b) and (H_b, H_a) map to the same command.
     let mut hap_pairs: std::collections::BTreeSet<(String, String)> =
         std::collections::BTreeSet::new();
     for &(i, j) in pairs {
@@ -427,42 +300,23 @@ fn write_wfmash_joblist<W: Write>(
         };
         hap_pairs.insert(pair);
     }
+    let hap_pairs_vec: Vec<(String, String)> = hap_pairs.into_iter().collect();
 
-    let mut count = 0usize;
-    for (target_hap, query_hap) in hap_pairs {
-        let target_file = hap_to_file
-            .get(&target_hap)
-            .cloned()
-            .unwrap_or_else(|| sequences[0].path.clone());
-        let query_file = hap_to_file
-            .get(&query_hap)
-            .cloned()
-            .unwrap_or_else(|| target_file.clone());
-
-        let output_name = format!(
-            "{}_vs_{}.paf",
-            sanitize_for_filename(&target_hap),
-            sanitize_for_filename(&query_hap),
-        );
-        let output_path = format!("{}/{}", output_dir, output_name);
-
-        let mut cmd = format!("wfmash -t {}", config.num_threads);
-        if config.min_aln_length > 0 {
-            cmd.push_str(&format!(" -l {}", config.min_aln_length));
-        }
-        cmd.push_str(&format!(" -T {} -Q {}", target_hap, query_hap));
-        cmd.push_str(&format!(" {}", target_file));
-        // Only pass query.fa when it's a different file — otherwise let wfmash self-map.
-        if query_file != target_file {
-            cmd.push_str(&format!(" {}", query_file));
-        }
-        cmd.push_str(&format!(" > {}", output_path));
-
-        writeln!(writer, "{}", cmd)?;
-        count += 1;
-    }
-
-    Ok(count)
+    // The common pangenome case: a single PanSN FASTA for all haplotypes.
+    // Pick the first sequence's path — all contigs share it when the user
+    // passed one file on the CLI (matches sweepga's single-FASTA joblist
+    // semantics).
+    let fasta = std::path::Path::new(&sequences[0].path);
+    let out_dir = std::path::Path::new(output_dir);
+    let cfg = sweepga::joblist::WfmashPansnEmitConfig {
+        fasta,
+        output_dir: out_dir,
+        threads: config.num_threads,
+        block_length: config.min_aln_length,
+    };
+    sweepga::joblist::write_wfmash_pansn_commands(&hap_pairs_vec, &cfg, writer)
+        .map_err(|e| io::Error::other(format!("wfmash joblist emit failed: {e}")))?;
+    Ok(hap_pairs_vec.len())
 }
 
 /// Emit one `FastGA` command per unique `(target_file, query_file)` pair.
@@ -491,11 +345,11 @@ fn write_fastga_joblist<W: Write>(
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
-        let output_name = format!(
-            "{}_vs_{}.paf",
-            sanitize_for_filename(&stem_i),
-            sanitize_for_filename(&stem_j),
-        );
+        // FastGA's joblist is indexed by file stems, which come from
+        // Path::file_stem() and so contain no path separators or PanSN `#`.
+        // No sanitization needed here; wfmash's joblist (which does use
+        // `SAMPLE#HAPLOTYPE` keys) goes through sweepga::joblist instead.
+        let output_name = format!("{}_vs_{}.paf", stem_i, stem_j);
         let output_path = format!("{}/{}", output_dir, output_name);
 
         writeln!(
@@ -1413,74 +1267,10 @@ mod tests {
         assert_eq!(s, SparsificationStrategy::WfmashDensity(None));
     }
 
-    #[test]
-    fn test_haplotype_grouping_pansn() {
-        let names = [
-            "HG01#1#chr1",
-            "HG01#1#chr2",
-            "HG01#2#chr1",
-            "HG02#1#chr1",
-            "chm13#0#chrX",
-        ];
-        let groups = group_indices_by_haplotype(&names);
-        // 4 haplotypes: HG01#1, HG01#2, HG02#1, chm13#0
-        assert_eq!(groups.len(), 4);
-        // HG01#1 should group indices 0 and 1
-        let hg01_1 = groups.iter().find(|g| g.len() == 2).unwrap();
-        assert_eq!(hg01_1, &vec![0, 1]);
-    }
-
-    #[test]
-    fn test_haplotype_grouping_non_pansn() {
-        // Non-PanSN names: each contig is its own haplotype
-        let names = ["chr1", "chr2", "chr3"];
-        let groups = group_indices_by_haplotype(&names);
-        assert_eq!(groups.len(), 3);
-    }
-
-    #[test]
-    fn test_expand_haplotype_pairs_cross_and_intra() {
-        // Two haplotypes: hap0 = [0, 1], hap1 = [2, 3, 4]
-        let groups = vec![vec![0, 1], vec![2, 3, 4]];
-        // Select the single hap pair (0, 1)
-        let pairs = expand_haplotype_pairs(&[(0, 1)], &groups);
-        // Expect: 2*3 cross pairs + 1 intra-hap0 + 3 intra-hap1 = 10 pairs
-        assert_eq!(pairs.len(), 10);
-        assert!(pairs.contains(&(0, 1))); // intra hap0
-        assert!(pairs.contains(&(2, 3))); // intra hap1
-        assert!(pairs.contains(&(0, 2))); // cross
-        assert!(pairs.contains(&(1, 4))); // cross
-    }
-
-    #[test]
-    fn test_select_pairs_haplotype_aware_none_strategy() {
-        // With None strategy and PanSN input, haplotype expansion must yield
-        // the full set of contig pairs (equivalent to contig-level "all pairs").
-        let names = ["S1#1#a", "S1#1#b", "S2#1#a", "S2#1#b"];
-        let mash_params = sweepga::knn_graph::MashParams::default();
-        let pairs = select_pairs_haplotype_aware_no_sketch(
-            &names,
-            &SparsificationStrategy::None,
-            &mash_params,
-        );
-        // 4 choose 2 = 6 pairs total
-        assert_eq!(pairs.len(), 6);
-    }
-
-    #[test]
-    fn test_merge_sketches_union_semantics() {
-        let a = sweepga::mash::KmerSketch::from_sequence(b"ACGTACGTACGTACGT", 5, 100);
-        let b = sweepga::mash::KmerSketch::from_sequence(b"TTTTGGGGAAAACCCC", 5, 100);
-        let merged = merge_sketches(&[&a, &b], 100);
-        assert_eq!(merged.k, 5);
-        assert_eq!(merged.length, a.length + b.length);
-        // Every minimizer in merged must come from a or b
-        let union: std::collections::HashSet<u64> =
-            a.minimizers.iter().chain(b.minimizers.iter()).copied().collect();
-        for m in &merged.minimizers {
-            assert!(union.contains(m));
-        }
-    }
+    // The haplotype-grouping / sketch-merging / pair-expansion unit tests
+    // moved upstream with the helpers themselves (sweepga:
+    // knn_graph::{merge_sketches, expand_haplotype_pairs,
+    // select_pairs_haplotype_aware*} and pansn::group_indices_by_pansn).
 
     #[test]
     fn test_mash_sketch_and_distance() {
