@@ -1096,6 +1096,14 @@ enum Args {
         #[clap(long, value_parser, default_value_t = 120)]
         syng_padding: u64,
 
+        /// Source-side window extension (bp) for syncmer lookup. Widens the
+        /// query interval during syncmer discovery only; boundaries remain
+        /// clipped by BiWFA refinement. Helps when the query lands just past
+        /// the end of a conserved syncmer block (default: 0)
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, value_parser, default_value_t = 0)]
+        syng_extension: u64,
+
         /// Debug-only: skip boundary realignment and emit raw syncmer-resolution
         /// intervals from syng's query_region. The default --syng path runs
         /// BiWFA boundary realignment for base-pair-precise edges (and iterates
@@ -1664,6 +1672,7 @@ fn run() -> io::Result<()> {
             alignment,
             syng,
             syng_padding,
+            syng_extension,
             syng_raw,
             query,
             output_format,
@@ -1821,7 +1830,7 @@ fn run() -> io::Result<()> {
                     match resolved_format {
                         "bed" => {
                             let intervals = if use_boundary_realign {
-                                impg::syng_transitive::query_transitive(
+                                impg::syng_transitive::query_transitive_ext(
                                     wrapper.syng_index(),
                                     target_name,
                                     *range_start as u64,
@@ -1829,15 +1838,17 @@ fn run() -> io::Result<()> {
                                     syng_padding,
                                     syng_max_depth,
                                     syng_merge_distance,
+                                    syng_extension,
                                     sequence_index.as_ref().unwrap(),
                                 )?
                             } else {
-                                wrapper.syng_index().query_region(
+                                wrapper.syng_index().query_region_ext(
                                     target_name,
                                     *range_start as u64,
                                     *range_end as u64,
                                     syng_padding,
-                                )?
+                                syng_extension,
+                            )?
                             };
                             let mut out = find_output_stream(&output_prefix, "bed")?;
                             for iv in &intervals {
@@ -1866,7 +1877,7 @@ fn run() -> io::Result<()> {
                                 while window_start < *range_end {
                                     let window_end = (window_start + ps).min(*range_end);
                                     let intervals = if use_boundary_realign {
-                                        impg::syng_transitive::query_transitive(
+                                        impg::syng_transitive::query_transitive_ext(
                                             wrapper.syng_index(),
                                             target_name,
                                             window_start as u64,
@@ -1874,15 +1885,17 @@ fn run() -> io::Result<()> {
                                             syng_padding,
                                             syng_max_depth,
                                             syng_merge_distance,
+                                    syng_extension,
                                             sequence_index.as_ref().unwrap(),
                                         )?
                                     } else {
-                                        wrapper.syng_index().query_region(
+                                        wrapper.syng_index().query_region_ext(
                                             target_name,
                                             window_start as u64,
                                             window_end as u64,
                                             syng_padding,
-                                        )?
+                                        syng_extension,
+                                    )?
                                     };
                                     let window_intervals: Vec<Interval<u32>> = intervals
                                         .iter()
@@ -1921,7 +1934,7 @@ fn run() -> io::Result<()> {
                             } else {
                                 // ─── Flat path: one query_region, one engine run ───
                                 let intervals = if use_boundary_realign {
-                                    impg::syng_transitive::query_transitive(
+                                    impg::syng_transitive::query_transitive_ext(
                                         wrapper.syng_index(),
                                         target_name,
                                         *range_start as u64,
@@ -1929,15 +1942,17 @@ fn run() -> io::Result<()> {
                                         syng_padding,
                                         syng_max_depth,
                                         syng_merge_distance,
+                                    syng_extension,
                                         sequence_index.as_ref().unwrap(),
                                     )?
                                 } else {
-                                    wrapper.syng_index().query_region(
+                                    wrapper.syng_index().query_region_ext(
                                         target_name,
                                         *range_start as u64,
                                         *range_end as u64,
                                         syng_padding,
-                                    )?
+                                    syng_extension,
+                                )?
                                 };
                                 let query_intervals: Vec<coitrees::Interval<u32>> = intervals
                                     .iter()
@@ -1967,7 +1982,7 @@ fn run() -> io::Result<()> {
                         "fasta" => {
                             let seq_idx = sequence_index.as_ref().unwrap();
                             let intervals = if use_boundary_realign {
-                                impg::syng_transitive::query_transitive(
+                                impg::syng_transitive::query_transitive_ext(
                                     wrapper.syng_index(),
                                     target_name,
                                     *range_start as u64,
@@ -1975,15 +1990,17 @@ fn run() -> io::Result<()> {
                                     syng_padding,
                                     syng_max_depth,
                                     syng_merge_distance,
+                                    syng_extension,
                                     seq_idx,
                                 )?
                             } else {
-                                wrapper.syng_index().query_region(
+                                wrapper.syng_index().query_region_ext(
                                     target_name,
                                     *range_start as u64,
                                     *range_end as u64,
                                     syng_padding,
-                                )?
+                                syng_extension,
+                            )?
                             };
                             let mut out = find_output_stream(&output_prefix, "fa")?;
                             for iv in &intervals {
@@ -1996,7 +2013,7 @@ fn run() -> io::Result<()> {
                         "gbwt" => {
                             let seq_idx = sequence_index.as_ref().unwrap();
                             let intervals = if use_boundary_realign {
-                                impg::syng_transitive::query_transitive(
+                                impg::syng_transitive::query_transitive_ext(
                                     wrapper.syng_index(),
                                     target_name,
                                     *range_start as u64,
@@ -2004,15 +2021,17 @@ fn run() -> io::Result<()> {
                                     syng_padding,
                                     syng_max_depth,
                                     syng_merge_distance,
+                                    syng_extension,
                                     seq_idx,
                                 )?
                             } else {
-                                wrapper.syng_index().query_region(
+                                wrapper.syng_index().query_region_ext(
                                     target_name,
                                     *range_start as u64,
                                     *range_end as u64,
                                     syng_padding,
-                                )?
+                                syng_extension,
+                            )?
                             };
                             let gbwt_prefix = output_prefix.as_ref().unwrap();
 

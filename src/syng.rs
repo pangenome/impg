@@ -888,7 +888,26 @@ impl SyngIndex {
         end: u64,
         padding: u64,
     ) -> Result<Vec<HomologousInterval>, io::Error> {
-        let with_anchors = self.query_region_with_anchors(genome, start, end, padding)?;
+        self.query_region_ext(genome, start, end, padding, 0)
+    }
+
+    /// [`query_region`] + a `query_extension` that widens the query interval
+    /// for syncmer lookup on the source side (not target padding).
+    ///
+    /// Useful when the user's query sits just past the end of a conserved
+    /// syncmer block: a small extension (e.g. a few kb) lets the lookup
+    /// pick up the block's terminal anchors, after which downstream
+    /// refinement can project back onto the original region.
+    pub fn query_region_ext(
+        &self,
+        genome: &str,
+        start: u64,
+        end: u64,
+        padding: u64,
+        query_extension: u64,
+    ) -> Result<Vec<HomologousInterval>, io::Error> {
+        let with_anchors =
+            self.query_region_with_anchors_ext(genome, start, end, padding, query_extension)?;
         Ok(with_anchors
             .into_iter()
             .map(|h| HomologousInterval {
@@ -921,6 +940,21 @@ impl SyngIndex {
         start: u64,
         end: u64,
         padding: u64,
+    ) -> Result<Vec<HomologousIntervalWithAnchors>, io::Error> {
+        self.query_region_with_anchors_ext(genome, start, end, padding, 0)
+    }
+
+    /// [`query_region_with_anchors`] + `query_extension` bp on each side of
+    /// the source query region for the syncmer-lookup filter. Extension is
+    /// clamped to `[0, query_path_length]`. Target-side padding is
+    /// unaffected.
+    pub fn query_region_with_anchors_ext(
+        &self,
+        genome: &str,
+        start: u64,
+        end: u64,
+        padding: u64,
+        query_extension: u64,
     ) -> Result<Vec<HomologousIntervalWithAnchors>, io::Error> {
         // Suppress C debug output from syngBWTnext
         unsafe { syng_ffi::impg_syng_suppress_debug() };
@@ -959,13 +993,19 @@ impl SyngIndex {
         //    families) — we keep all of them and cross-product with target
         //    hits downstream. Callers pick the nearest anchor per edge.
         let query_nodes = self.walk_path(query_start);
+        // Expanded syncmer-lookup window. `query_extension` pushes the filter
+        // outward so conserved blocks that end just outside the user's
+        // declared region are still discoverable; refined boundaries stay
+        // clipped to the original interval downstream.
+        let expanded_start = start.saturating_sub(query_extension);
+        let expanded_end = end.saturating_add(query_extension);
         // abs_node -> Vec<(query_pos, q_orient_bit)>. q_orient_bit is 0 for
         // forward, 1 for reverse — matching the low bit of the GBWT node
         // encoding so we can compare directly against target visits.
         let mut query_node_positions: FxHashMap<u32, Vec<(u64, u8)>> =
             FxHashMap::default();
         for &(signed_node, pos) in &query_nodes {
-            if pos >= start && pos < end {
+            if pos >= expanded_start && pos < expanded_end {
                 let abs = signed_node.unsigned_abs();
                 let q_orient: u8 = if signed_node >= 0 { 0 } else { 1 };
                 query_node_positions

@@ -64,7 +64,7 @@ for region in $regions; do
         > "$syng_bed" 2>/dev/null || { echo "syng query failed: $region" >&2; continue; }
 
     impg query -a "$paf_path" --sequence-files "$agc_path" \
-        -r "$region" -d 10000 -o bed \
+        -r "$region" -d 10000 -o bed -x \
         2>/dev/null \
         | awk -F'\t' '{print $1"\t"$2"\t"$3"\t"$6}' \
         > "$paf_bed" || { echo "paf query failed: $region" >&2; continue; }

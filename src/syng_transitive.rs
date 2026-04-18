@@ -378,8 +378,34 @@ pub fn one_hop(
     merge_distance: u64,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
-    let hits = syng_index.query_region_with_anchors(
-        query_name, query_start, query_end, padding,
+    one_hop_ext(
+        syng_index,
+        query_name,
+        query_start,
+        query_end,
+        padding,
+        merge_distance,
+        0,
+        sequence_index,
+    )
+}
+
+/// [`one_hop`] with a `query_extension` bp source-side widening for
+/// syncmer discovery. Lets syng reach homologs whose shared-syncmer
+/// support ends just outside the user's declared query range; BiWFA
+/// refinement still pairs against the original query bytes.
+pub fn one_hop_ext(
+    syng_index: &SyngIndex,
+    query_name: &str,
+    query_start: u64,
+    query_end: u64,
+    padding: u64,
+    merge_distance: u64,
+    query_extension: u64,
+    sequence_index: &UnifiedSequenceIndex,
+) -> io::Result<Vec<HomologousInterval>> {
+    let hits = syng_index.query_region_with_anchors_ext(
+        query_name, query_start, query_end, padding, query_extension,
     )?;
     let hits = distance_merge_anchored(hits, merge_distance);
     let hits = dedupe_strand_overlaps(hits);
@@ -429,6 +455,34 @@ pub fn query_transitive(
     merge_distance: u64,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
+    query_transitive_ext(
+        syng_index,
+        query_name,
+        query_start,
+        query_end,
+        padding,
+        max_depth,
+        merge_distance,
+        0,
+        sequence_index,
+    )
+}
+
+/// [`query_transitive`] with an optional `query_extension` plumbed through
+/// every hop. The extension widens syncmer discovery on the source side at
+/// each frontier step, so the BFS can follow conserved blocks whose
+/// endpoints fall just outside each frontier region.
+pub fn query_transitive_ext(
+    syng_index: &SyngIndex,
+    query_name: &str,
+    query_start: u64,
+    query_end: u64,
+    padding: u64,
+    max_depth: u16,
+    merge_distance: u64,
+    query_extension: u64,
+    sequence_index: &UnifiedSequenceIndex,
+) -> io::Result<Vec<HomologousInterval>> {
     let mut visited: FxHashSet<(String, u64, u64, char)> = FxHashSet::default();
     visited.insert((query_name.to_string(), query_start, query_end, '+'));
 
@@ -440,15 +494,20 @@ pub fn query_transitive(
         if frontier.is_empty() {
             break;
         }
+        // Extension only widens the initial query. Subsequent hops already
+        // land inside syncmer-connected neighborhoods, so extending them
+        // compounds BFS fan-out without adding new reach.
+        let hop_extension = if depth == 0 { query_extension } else { 0 };
         let mut next_frontier: Vec<(String, u64, u64)> = Vec::new();
         for (q_name, q_start, q_end) in &frontier {
-            let hits = match one_hop(
+            let hits = match one_hop_ext(
                 syng_index,
                 q_name,
                 *q_start,
                 *q_end,
                 padding,
                 merge_distance,
+                hop_extension,
                 sequence_index,
             ) {
                 Ok(h) => h,
