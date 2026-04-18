@@ -272,7 +272,10 @@ fn write_job_list<W: Write>(
 }
 
 /// Emit one `wfmash` command per unique haplotype pair, backed by
-/// sweepga's upstream emitter.
+/// sweepga's upstream emitter. Supports both single-FASTA PanSN inputs
+/// (all haplotypes in one file; self-map form) and multi-FASTA inputs
+/// (per-haplotype FASTAs or mixed; each job points at the FASTA that
+/// owns its haplotype's contigs).
 fn write_wfmash_joblist<W: Write>(
     pairs: &[(usize, usize)],
     sequences: &[SequenceInfo],
@@ -281,15 +284,29 @@ fn write_wfmash_joblist<W: Write>(
     config: &AlignConfig,
 ) -> io::Result<usize> {
     use sweepga::pansn::{extract_pansn_key, PanSnLevel};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
 
-    // Collapse contig indices to unique (target_hap, query_hap) keys.
+    // Contig index → haplotype key.
     let hap_of: Vec<String> = sequences
         .iter()
         .map(|s| {
             extract_pansn_key(&s.name, PanSnLevel::Haplotype).unwrap_or_else(|| s.name.clone())
         })
         .collect();
-    let mut hap_pairs: std::collections::BTreeSet<(String, String)> =
+
+    // Haplotype key → representative FASTA path (first-seen wins if a
+    // haplotype somehow spans multiple files).
+    let mut hap_file: BTreeMap<String, PathBuf> = BTreeMap::new();
+    for (i, s) in sequences.iter().enumerate() {
+        hap_file
+            .entry(hap_of[i].clone())
+            .or_insert_with(|| PathBuf::from(&s.path));
+    }
+
+    // Collapse selected contig pairs to unique (target_hap, query_hap)
+    // keys. Sort order is (target, query) so output is reproducible.
+    let mut seen: std::collections::BTreeSet<(String, String)> =
         std::collections::BTreeSet::new();
     for &(i, j) in pairs {
         let (a, b) = (&hap_of[i], &hap_of[j]);
@@ -298,25 +315,37 @@ fn write_wfmash_joblist<W: Write>(
         } else {
             (b.clone(), a.clone())
         };
-        hap_pairs.insert(pair);
+        seen.insert(pair);
     }
-    let hap_pairs_vec: Vec<(String, String)> = hap_pairs.into_iter().collect();
 
-    // The common pangenome case: a single PanSN FASTA for all haplotypes.
-    // Pick the first sequence's path — all contigs share it when the user
-    // passed one file on the CLI (matches sweepga's single-FASTA joblist
-    // semantics).
-    let fasta = std::path::Path::new(&sequences[0].path);
+    // Build per-job target/query FASTA paths.
+    let mut jobs: Vec<sweepga::joblist::WfmashPansnJob> = Vec::with_capacity(seen.len());
+    for (target_hap, query_hap) in seen {
+        let target_fasta = hap_file
+            .get(&target_hap)
+            .cloned()
+            .unwrap_or_else(|| PathBuf::from(&sequences[0].path));
+        let query_fasta = hap_file
+            .get(&query_hap)
+            .cloned()
+            .unwrap_or_else(|| target_fasta.clone());
+        jobs.push(sweepga::joblist::WfmashPansnJob {
+            target_hap,
+            query_hap,
+            target_fasta,
+            query_fasta,
+        });
+    }
+
     let out_dir = std::path::Path::new(output_dir);
     let cfg = sweepga::joblist::WfmashPansnEmitConfig {
-        fasta,
         output_dir: out_dir,
         threads: config.num_threads,
         block_length: config.min_aln_length,
     };
-    sweepga::joblist::write_wfmash_pansn_commands(&hap_pairs_vec, &cfg, writer)
+    sweepga::joblist::write_wfmash_pansn_commands(&jobs, &cfg, writer)
         .map_err(|e| io::Error::other(format!("wfmash joblist emit failed: {e}")))?;
-    Ok(hap_pairs_vec.len())
+    Ok(jobs.len())
 }
 
 /// Emit one `FastGA` command per unique `(target_file, query_file)` pair.
