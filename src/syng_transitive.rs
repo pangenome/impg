@@ -404,8 +404,36 @@ pub fn one_hop_ext(
     query_extension: u64,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
-    let hits = syng_index.query_region_with_anchors_ext(
-        query_name, query_start, query_end, padding, query_extension,
+    one_hop_ext_visited(
+        syng_index,
+        query_name,
+        query_start,
+        query_end,
+        padding,
+        merge_distance,
+        query_extension,
+        None,
+        sequence_index,
+    )
+}
+
+/// As [`one_hop_ext`], but threading a shared `visited_nodes` set through
+/// syng so that syncmer nodes already consumed by an earlier BFS hop are
+/// skipped at lookup time — avoiding re-running BiWFA refinement for
+/// homologs that transitive-level dedup would drop after the fact.
+pub fn one_hop_ext_visited(
+    syng_index: &SyngIndex,
+    query_name: &str,
+    query_start: u64,
+    query_end: u64,
+    padding: u64,
+    merge_distance: u64,
+    query_extension: u64,
+    visited_nodes: Option<&mut FxHashSet<u32>>,
+    sequence_index: &UnifiedSequenceIndex,
+) -> io::Result<Vec<HomologousInterval>> {
+    let hits = syng_index.query_region_with_anchors_ext_visited(
+        query_name, query_start, query_end, padding, query_extension, visited_nodes,
     )?;
     let hits = distance_merge_anchored(hits, merge_distance);
     let hits = dedupe_strand_overlaps(hits);
@@ -485,6 +513,10 @@ pub fn query_transitive_ext(
 ) -> io::Result<Vec<HomologousInterval>> {
     let mut visited: FxHashSet<(String, u64, u64, char)> = FxHashSet::default();
     visited.insert((query_name.to_string(), query_start, query_end, '+'));
+    // Shared across all hops: any syncmer node consumed at an earlier hop
+    // need not be re-entered. This collapses quadratic BFS cost on repeat-
+    // dense regions (same node hit from many overlapping frontier ranges).
+    let mut visited_nodes: FxHashSet<u32> = FxHashSet::default();
 
     let mut frontier: Vec<(String, u64, u64)> =
         vec![(query_name.to_string(), query_start, query_end)];
@@ -500,7 +532,7 @@ pub fn query_transitive_ext(
         let hop_extension = if depth == 0 { query_extension } else { 0 };
         let mut next_frontier: Vec<(String, u64, u64)> = Vec::new();
         for (q_name, q_start, q_end) in &frontier {
-            let hits = match one_hop_ext(
+            let hits = match one_hop_ext_visited(
                 syng_index,
                 q_name,
                 *q_start,
@@ -508,6 +540,7 @@ pub fn query_transitive_ext(
                 padding,
                 merge_distance,
                 hop_extension,
+                Some(&mut visited_nodes),
                 sequence_index,
             ) {
                 Ok(h) => h,

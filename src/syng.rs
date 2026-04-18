@@ -3,7 +3,7 @@
 //! Provides `SyngIndex` for building, loading, saving, and querying
 //! GBWT-based syncmer indices.
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::ffi::CString;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
@@ -956,6 +956,22 @@ impl SyngIndex {
         padding: u64,
         query_extension: u64,
     ) -> Result<Vec<HomologousIntervalWithAnchors>, io::Error> {
+        self.query_region_with_anchors_ext_visited(genome, start, end, padding, query_extension, None)
+    }
+
+    /// As [`query_region_with_anchors_ext`], but with an optional shared
+    /// `visited_nodes` set used to suppress re-processing of syncmer nodes
+    /// already handled by earlier BFS hops in a transitive query. Nodes
+    /// in the set are skipped; nodes processed here are inserted.
+    pub fn query_region_with_anchors_ext_visited(
+        &self,
+        genome: &str,
+        start: u64,
+        end: u64,
+        padding: u64,
+        query_extension: u64,
+        mut visited_nodes: Option<&mut FxHashSet<u32>>,
+    ) -> Result<Vec<HomologousIntervalWithAnchors>, io::Error> {
         // Suppress C debug output from syngBWTnext
         unsafe { syng_ffi::impg_syng_suppress_debug() };
 
@@ -1034,6 +1050,18 @@ impl SyngIndex {
             // visit is tagged with the orientation it was found under; the
             // strand is query_orient XOR target_orient.
             for (&query_node, query_positions) in &query_node_positions {
+                // Skip syncmer nodes already consumed by earlier BFS hops —
+                // revisiting them would only redo alignment work that the
+                // prior hop already spent, producing hits that coordinate-
+                // level dedup would drop after the fact.
+                if let Some(v) = visited_nodes.as_deref() {
+                    if v.contains(&query_node) {
+                        continue;
+                    }
+                }
+                if let Some(v) = visited_nodes.as_deref_mut() {
+                    v.insert(query_node);
+                }
                 for t_orient in 0u8..=1 {
                     let encoded = ((query_node as usize) << 1) | (t_orient as usize);
                     if !gbz_gbwt.has_node(encoded) {
@@ -1126,6 +1154,16 @@ impl SyngIndex {
                     let abs_node = signed_target_node.unsigned_abs();
                     let t_orient: u8 = if signed_target_node >= 0 { 0 } else { 1 };
                     if let Some(query_positions) = query_node_positions.get(&abs_node) {
+                        // Same BFS-scope filter as the fast path — suppress
+                        // re-entering syncmer nodes already traversed.
+                        if let Some(v) = visited_nodes.as_deref() {
+                            if v.contains(&abs_node) {
+                                continue;
+                            }
+                        }
+                        if let Some(v) = visited_nodes.as_deref_mut() {
+                            v.insert(abs_node);
+                        }
                         let hit_end = target_pos + syncmer_len;
                         let padded_start = target_pos.saturating_sub(padding);
                         let padded_end = (hit_end + padding).min(genome_len);
