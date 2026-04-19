@@ -43,28 +43,6 @@ const HOMOLOG_FETCH_PAD_BP: u64 = 2048;
 /// non-homology.
 const MIN_ALIGNMENT_IDENTITY: f64 = 0.3;
 
-/// Maximum target-window length (bp) for BiWFA refinement. Hits whose
-/// merged span exceeds this fall back to linear projection instead of
-/// running a full EndsFree alignment.
-///
-/// `distance_merge_anchored` collapses adjacent hits on the same
-/// `(genome, strand)` within `merge_distance` (default 10 kb). On
-/// pathological repeat arrays — rDNA on chrXII, Ty-element clusters,
-/// subtelomeric repeats — dozens-to-thousands of syncmer hits scatter
-/// across a single ~Mb region and all merge into ONE giant hit. Its
-/// fetch window then spans ~target_len bytes, and BiWFA in `MemoryMode::High`
-/// allocates `O(query_len × target_len)` space: 5 kb × 1 Mb × 8 B ≈ 40 GB
-/// per call. That's the 77 GB OOM we hit on the first genome-wide battery
-/// run.
-///
-/// 200 kb is 40× a typical 5 kb tile. Hits that large are either
-/// (a) the merged-repeat pathology (where linear projection is a
-/// perfectly acceptable fallback — the boundaries on arrays are
-/// ill-defined anyway) or (b) a genuinely huge homolog that deserves
-/// its own alignment job, not a per-hop realignment. Either way BiWFA
-/// is the wrong tool.
-const MAX_REFINE_TARGET_WINDOW_BP: u64 = 200_000;
-
 thread_local! {
     /// Edit-distance aligner for per-homolog refinement. High memory mode
     /// — windows are small (a few kb per side) and EndsFree semantics
@@ -255,13 +233,6 @@ fn refine_homolog_by_alignment(
     let fetch_start = hit.start.saturating_sub(HOMOLOG_FETCH_PAD_BP);
     let fetch_end = hit.end.saturating_add(HOMOLOG_FETCH_PAD_BP).min(target_len);
     if fetch_end <= fetch_start {
-        return None;
-    }
-    // Refuse to BiWFA-align against a huge target window (see
-    // MAX_REFINE_TARGET_WINDOW_BP). Signals to the caller to use
-    // linear projection, which degrades gracefully on repeat-array
-    // hits where boundaries are ill-defined anyway.
-    if fetch_end - fetch_start > MAX_REFINE_TARGET_WINDOW_BP {
         return None;
     }
     let t_bytes_fwd = sequence_index
