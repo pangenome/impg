@@ -44,9 +44,16 @@ const HOMOLOG_FETCH_PAD_BP: u64 = 2048;
 const MIN_ALIGNMENT_IDENTITY: f64 = 0.3;
 
 thread_local! {
-    /// Edit-distance aligner for per-homolog refinement. High memory mode
-    /// — windows are small (a few kb per side) and EndsFree semantics
-    /// need the full traceback.
+    /// Edit-distance aligner for per-homolog refinement.
+    ///
+    /// `MemoryMode::Low` = piggyback bidirectional WFA: O(s · log s)
+    /// working memory vs `High`'s full O(s² + n·m) DP matrix. Traceback
+    /// (which we need for leading / trailing-I counts in
+    /// `refine_homolog_by_alignment`) is preserved in all modes — only the
+    /// intermediate storage shrinks. On our hot path (thousands of per-hit
+    /// refinements, small windows) `High` was the primary reason a single
+    /// query could OOM at 77 GB RSS when a merged repeat cluster pushed
+    /// any one target window into the Mb range.
     static EDGE_ALIGNER: RefCell<Option<AffineWavefronts>> =
         const { RefCell::new(None) };
 }
@@ -58,7 +65,7 @@ where
     EDGE_ALIGNER.with(|cell| {
         let mut opt = cell.borrow_mut();
         if opt.is_none() {
-            *opt = Some(Distance::Edit.create_aligner(None, Some(&MemoryMode::High)));
+            *opt = Some(Distance::Edit.create_aligner(None, Some(&MemoryMode::Low)));
         }
         f(opt.as_mut().unwrap())
     })

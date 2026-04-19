@@ -1704,11 +1704,24 @@ fn run() -> io::Result<()> {
                 } else {
                     1
                 };
-                // bedtools-style `-d` merge distance, applied to padded syncmer
-                // hits before edge projection. Maps to the CLI's `-d` /
-                // `--merge-distance` (the same flag PAF-based queries use to
-                // merge post-transitive intervals). Default 0 = overlap-only.
-                let syng_merge_distance = query.effective_merge_distance().max(0) as u64;
+                // Internal anchor merge-distance used during the syng
+                // per-hop pipeline. Fixed at 0 regardless of the user's
+                // `-d` / `--merge-distance`, so each syncmer-resolution
+                // hit keeps its own identity into BiWFA refinement.
+                //
+                // The old behaviour — inheriting the user's output `-d`
+                // (e.g. 10 kb) directly into `distance_merge_anchored` —
+                // let a repeat cluster (rDNA, Ty array, subtelomere) be
+                // collapsed into one mega-hit before refinement. BiWFA
+                // then tried to align the 5 kb query against a Mb-scale
+                // target window and allocated tens of GB. By refining
+                // each copy on its own small window instead, every
+                // repeat unit gets its proper coordinates; bedtools-style
+                // output merging is a separate post-processing concern
+                // applied on refined coords (via
+                // `merge_overlapping_on_same_path` and downstream BED
+                // output merging).
+                let syng_merge_distance: u64 = 0;
 
                 // Setup output resources for GFA/FASTA/GBWT (need sequence files).
                 // Boundary realignment also needs them for edge-window fetches.
