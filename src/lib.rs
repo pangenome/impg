@@ -54,6 +54,10 @@ struct SeqIndexWrapper {
 }
 
 impl impg_index::ImpgIndex for SeqIndexWrapper {
+    // Bare-minimum wrapper for `dispatch_gfa_engine_with_seq_index`:
+    // every method returns a safe empty value so this can sit inside
+    // a heterogeneous `Vec<Arc<dyn ImpgIndex + Send + Sync>>` without
+    // risking a panic. Only `seq_index()` is called in practice.
     fn seq_index(&self) -> &seqidx::SequenceIndex {
         &self.seq_index
     }
@@ -62,7 +66,7 @@ impl impg_index::ImpgIndex for SeqIndexWrapper {
         &self, _: u32, _: i32, _: i32, _: bool, _: Option<f64>,
         _: Option<&sequence_index::UnifiedSequenceIndex>, _: bool,
     ) -> Vec<impg::AdjustedInterval> {
-        unimplemented!("not used in syng path")
+        Vec::new()
     }
 
     fn query_with_cache(
@@ -70,7 +74,7 @@ impl impg_index::ImpgIndex for SeqIndexWrapper {
         _: Option<&sequence_index::UnifiedSequenceIndex>,
         _: &rustc_hash::FxHashMap<(u32, u64), Vec<impg::CigarOp>>,
     ) -> Vec<impg::AdjustedInterval> {
-        unimplemented!("not used in syng path")
+        Vec::new()
     }
 
     fn populate_cigar_cache(
@@ -78,7 +82,6 @@ impl impg_index::ImpgIndex for SeqIndexWrapper {
         _: Option<&sequence_index::UnifiedSequenceIndex>,
         _: &mut rustc_hash::FxHashMap<(u32, u64), Vec<impg::CigarOp>>,
     ) {
-        unimplemented!("not used in syng path")
     }
 
     fn query_transitive_dfs(
@@ -88,7 +91,7 @@ impl impg_index::ImpgIndex for SeqIndexWrapper {
         _: Option<&sequence_index::UnifiedSequenceIndex>, _: bool,
         _: Option<&subset_filter::SubsetFilter>,
     ) -> Vec<impg::AdjustedInterval> {
-        unimplemented!("not used in syng path")
+        Vec::new()
     }
 
     fn query_transitive_bfs(
@@ -98,19 +101,18 @@ impl impg_index::ImpgIndex for SeqIndexWrapper {
         _: Option<&sequence_index::UnifiedSequenceIndex>, _: bool,
         _: Option<&subset_filter::SubsetFilter>,
     ) -> Vec<impg::AdjustedInterval> {
-        unimplemented!("not used in syng path")
+        Vec::new()
     }
 
     fn get_or_load_tree(&self, _: u32) -> Option<std::sync::Arc<coitrees::BasicCOITree<impg::QueryMetadata, u32>>> {
-        unimplemented!("not used in syng path")
+        None
     }
 
     fn target_ids(&self) -> Vec<u32> {
-        unimplemented!("not used in syng path")
+        (0..self.seq_index.len() as u32).collect()
     }
 
     fn remove_cached_tree(&self, _: u32) {
-        unimplemented!("not used in syng path")
     }
 
     fn sequence_files(&self) -> &[String] {
@@ -186,12 +188,17 @@ impl impg_index::ImpgIndex for SyngImpgWrapper {
         self.query_via_syng(target_id, range_start, range_end)
     }
 
+    // CIGAR-cache methods are PAF-native concepts; syng has no cached
+    // alignment storage, so they no-op. Reshaped from `unimplemented!()`
+    // panics so `SyngImpgWrapper` can safely live inside a heterogeneous
+    // `Vec<Arc<dyn ImpgIndex + Send + Sync>>` alongside alignment backends.
     fn query_with_cache(
-        &self, _: u32, _: i32, _: i32, _: bool, _: Option<f64>,
+        &self, target_id: u32, range_start: i32, range_end: i32,
+        _: bool, _: Option<f64>,
         _: Option<&sequence_index::UnifiedSequenceIndex>,
         _: &rustc_hash::FxHashMap<(u32, u64), Vec<impg::CigarOp>>,
     ) -> Vec<impg::AdjustedInterval> {
-        unimplemented!("not used in syng path")
+        self.query_via_syng(target_id, range_start, range_end)
     }
 
     fn populate_cigar_cache(
@@ -199,7 +206,6 @@ impl impg_index::ImpgIndex for SyngImpgWrapper {
         _: Option<&sequence_index::UnifiedSequenceIndex>,
         _: &mut rustc_hash::FxHashMap<(u32, u64), Vec<impg::CigarOp>>,
     ) {
-        unimplemented!("not used in syng path")
     }
 
     fn query_transitive_dfs(
@@ -223,15 +229,24 @@ impl impg_index::ImpgIndex for SyngImpgWrapper {
     }
 
     fn get_or_load_tree(&self, _: u32) -> Option<std::sync::Arc<coitrees::BasicCOITree<impg::QueryMetadata, u32>>> {
-        unimplemented!("not used in syng path")
+        // Syng has no alignment interval tree. Returning None is correct —
+        // callers that need this (partition / similarity / stats on PAF)
+        // should dispatch via `query()` instead.
+        None
     }
 
     fn target_ids(&self) -> Vec<u32> {
-        unimplemented!("not used in syng path")
+        // Every syng-indexed path is a potential target. Map through this
+        // wrapper's sequence index so IDs match the caller's namespace.
+        self.syng_index
+            .name_map
+            .path_to_name
+            .iter()
+            .filter_map(|name| self.seq_index.get_id(name))
+            .collect()
     }
 
     fn remove_cached_tree(&self, _: u32) {
-        // no-op
     }
 
     fn sequence_files(&self) -> &[String] {
