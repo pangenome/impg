@@ -3,8 +3,11 @@
 //! Pipeline per hop:
 //!   1. `query_region_with_anchors` — syng returns padded syncmer-
 //!      resolution intervals per (target, strand), with anchor positions.
-//!   2. `distance_merge_anchored` — bedtools-style `-d` merge, with a
-//!      co-linearity-signature guard that prevents merging paralogs.
+//!   2. `cluster_by_signature` — group hits into homology blocks by
+//!      co-linearity signature (`target_pos − query_pos` on `+`, the
+//!      sum on `-`). Each block is one colinear chain; paralog copies
+//!      and insertions that shift signatures by > `merge_distance`
+//!      fall into separate clusters.
 //!   3. `dedupe_strand_overlaps` — per path, overlapping +/- intervals
 //!      resolved by majority anchor count.
 //!   4. `refine_homolog_by_alignment` — per merged homolog, BiWFA
@@ -118,61 +121,109 @@ fn interval_signature(iv: &HomologousIntervalWithAnchors) -> Option<i64> {
     Some(sigs[sigs.len() / 2])
 }
 
-/// Distance-merge anchored intervals: two intervals on the same
-/// `(genome, strand)` merge when BOTH target-axis gap ≤ `merge_distance`
-/// AND median anchor co-linearity signatures within `merge_distance / 10`.
+/// Signature-space clustering of anchored syncmer hits into homology
+/// blocks.
 ///
-/// The signature guard prevents merging paralogs that happen to sit
-/// within `-d` of each other but belong to different biological regions.
-pub(crate) fn distance_merge_anchored(
-    mut hits: Vec<HomologousIntervalWithAnchors>,
+/// Each hit carries a co-linearity signature (see [`anchor_signature`]):
+///
+/// * `'+'` strand: `signature = target_pos − query_pos`
+/// * `'-'` strand: `signature = target_pos + query_pos`
+///
+/// Along a single colinear homology the signature is invariant modulo
+/// the local indel burden. Paralog copies of the same sequence appear
+/// at structurally different signatures — a tandem array at period P
+/// has copies whose signatures differ by P; two paralogs elsewhere on
+/// the same chromosome have signatures that differ by the paralog
+/// offset. That's the right physical basis for block identity.
+///
+/// Algorithm: group by `(genome, strand)`, sort by signature, walk the
+/// sorted list and start a new cluster whenever the signature gap
+/// between consecutive hits exceeds `merge_distance`. Each cluster
+/// becomes one `HomologousIntervalWithAnchors` spanning the union of
+/// its members' target bounds and carrying the union of their anchors.
+///
+/// `merge_distance` is the user's `-d` / `--merge-distance` flowing
+/// through unchanged. It's a single knob with a clean physical meaning:
+/// the maximum signature excursion tolerated within one block. Typical
+/// within-block jitter from small indels is tens of bp; paralog
+/// separations are kb-scale on yeast; so `-d` up to ~1 kb reliably
+/// merges within-homology chains without collapsing paralog copies.
+pub(crate) fn cluster_by_signature(
+    hits: Vec<HomologousIntervalWithAnchors>,
     merge_distance: u64,
 ) -> Vec<HomologousIntervalWithAnchors> {
     if hits.len() <= 1 || merge_distance == 0 {
         return hits;
     }
-    let signature_tolerance = (merge_distance / 10).max(1) as i64;
-    hits.sort_by(|a, b| {
-        a.genome
-            .cmp(&b.genome)
-            .then(a.strand.cmp(&b.strand))
-            .then(a.start.cmp(&b.start))
-    });
-    let mut merged: Vec<HomologousIntervalWithAnchors> = Vec::with_capacity(hits.len());
-    let mut merged_sigs: Vec<Option<i64>> = Vec::with_capacity(hits.len());
-    for mut iv in hits {
-        let iv_sig = interval_signature(&iv);
-        let can_merge = {
-            if let (Some(last), Some(last_sig)) =
-                (merged.last(), merged_sigs.last().and_then(|s| *s))
-            {
-                last.genome == iv.genome
-                    && last.strand == iv.strand
-                    && iv.start <= last.end.saturating_add(merge_distance)
-                    && iv_sig
-                        .map(|s| (s - last_sig).abs() <= signature_tolerance)
-                        .unwrap_or(false)
-            } else {
-                false
+    let tol = merge_distance as i64;
+
+    // Partition into (genome, strand) buckets; within each, sort by
+    // signature and walk — clustering in one pass per path/strand.
+    use std::collections::HashMap;
+    let mut buckets: HashMap<(String, char), Vec<HomologousIntervalWithAnchors>> = HashMap::new();
+    for h in hits {
+        buckets
+            .entry((h.genome.clone(), h.strand))
+            .or_default()
+            .push(h);
+    }
+
+    let mut out: Vec<HomologousIntervalWithAnchors> = Vec::new();
+    for ((genome, strand), mut group) in buckets {
+        // Hits with no anchors have no signature and can't be clustered;
+        // pass them through unchanged.
+        group.sort_by_key(|h| interval_signature(h).unwrap_or(i64::MIN));
+
+        let mut cur: Option<HomologousIntervalWithAnchors> = None;
+        let mut cur_sig: Option<i64> = None;
+        for mut iv in group {
+            let iv_sig = interval_signature(&iv);
+            let start_new = match (cur_sig, iv_sig) {
+                (Some(cs), Some(is)) => (is - cs).abs() > tol,
+                // Never collapse across the "no-signature" boundary.
+                _ => cur.is_some(),
+            };
+            if start_new {
+                if let Some(mut done) = cur.take() {
+                    finalize_cluster_anchors(&mut done);
+                    out.push(done);
+                }
             }
-        };
-        if can_merge {
-            let last = merged.last_mut().unwrap();
-            last.end = last.end.max(iv.end);
-            last.anchors.append(&mut iv.anchors);
-            *merged_sigs.last_mut().unwrap() = interval_signature(last);
-        } else {
-            merged.push(iv);
-            merged_sigs.push(iv_sig);
+            match cur.as_mut() {
+                Some(accum) => {
+                    accum.end = accum.end.max(iv.end);
+                    accum.start = accum.start.min(iv.start);
+                    accum.anchors.append(&mut iv.anchors);
+                    cur_sig = interval_signature(accum);
+                }
+                None => {
+                    cur = Some(HomologousIntervalWithAnchors {
+                        genome: genome.clone(),
+                        start: iv.start,
+                        end: iv.end,
+                        strand,
+                        anchors: std::mem::take(&mut iv.anchors),
+                    });
+                    cur_sig = iv_sig;
+                }
+            }
+        }
+        if let Some(mut done) = cur.take() {
+            finalize_cluster_anchors(&mut done);
+            out.push(done);
         }
     }
-    for iv in &mut merged {
-        iv.anchors
-            .sort_by(|a, b| a.query_pos.cmp(&b.query_pos).then(a.target_pos.cmp(&b.target_pos)));
-        iv.anchors
-            .dedup_by(|a, b| a.query_pos == b.query_pos && a.target_pos == b.target_pos);
-    }
-    merged
+    out
+}
+
+/// Sort anchors within a finished cluster by `(query_pos, target_pos)`
+/// and drop exact duplicates. Keeps projection fast and leaves the
+/// signature-stable invariant intact.
+fn finalize_cluster_anchors(iv: &mut HomologousIntervalWithAnchors) {
+    iv.anchors
+        .sort_by(|a, b| a.query_pos.cmp(&b.query_pos).then(a.target_pos.cmp(&b.target_pos)));
+    iv.anchors
+        .dedup_by(|a, b| a.query_pos == b.query_pos && a.target_pos == b.target_pos);
 }
 
 /// Linear projection from an anchor to a query position — coordinate
@@ -460,7 +511,7 @@ pub fn one_hop_ext_visited(
     let hits = syng_index.query_region_with_anchors_ext_visited(
         query_name, query_start, query_end, padding, query_extension, visited_nodes,
     )?;
-    let hits = distance_merge_anchored(hits, merge_distance);
+    let hits = cluster_by_signature(hits, merge_distance);
     let hits = dedupe_strand_overlaps(hits);
     let syncmer_len = (syng_index.params.w + syng_index.params.k) as u64;
 
@@ -733,7 +784,7 @@ mod tests {
     }
 
     #[test]
-    fn distance_merge_zero_is_noop() {
+    fn cluster_by_signature_zero_is_noop() {
         let hits = vec![
             HomologousIntervalWithAnchors {
                 genome: "g".into(),
@@ -746,12 +797,14 @@ mod tests {
                 anchors: vec![mk_anchor(200, 200)],
             },
         ];
-        let merged = distance_merge_anchored(hits, 0);
+        let merged = cluster_by_signature(hits, 0);
         assert_eq!(merged.len(), 2);
     }
 
     #[test]
-    fn distance_merge_joins_within_d_with_matching_signatures() {
+    fn cluster_by_signature_joins_matching_signatures() {
+        // Two hits, signatures both 0 (target == query). Any positive
+        // merge_distance should cluster them together.
         let hits = vec![
             HomologousIntervalWithAnchors {
                 genome: "g".into(),
@@ -764,14 +817,17 @@ mod tests {
                 anchors: vec![mk_anchor(200, 200), mk_anchor(250, 250)],
             },
         ];
-        let merged = distance_merge_anchored(hits, 150);
+        let merged = cluster_by_signature(hits, 150);
         assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].start, 0);
         assert_eq!(merged[0].end, 300);
         assert_eq!(merged[0].anchors.len(), 4);
     }
 
     #[test]
-    fn distance_merge_respects_strand_boundaries() {
+    fn cluster_by_signature_respects_strand_boundaries() {
+        // +/- on the same path never co-cluster — they come from
+        // different strand semantics (distinct signatures).
         let hits = vec![
             HomologousIntervalWithAnchors {
                 genome: "g".into(),
@@ -784,12 +840,14 @@ mod tests {
                 anchors: vec![mk_anchor(50, 150)],
             },
         ];
-        let merged = distance_merge_anchored(hits, 10_000);
+        let merged = cluster_by_signature(hits, 10_000);
         assert_eq!(merged.len(), 2);
     }
 
     #[test]
-    fn distance_merge_refuses_when_signatures_diverge() {
+    fn cluster_by_signature_splits_when_sig_gap_exceeds_merge_distance() {
+        // Hit A: target-query == 1047. Hit B: target-query == 7275.
+        // Sig gap = 6228. merge_distance = 3000 < 6228 → separate clusters.
         let hits = vec![
             HomologousIntervalWithAnchors {
                 genome: "g".into(),
@@ -810,8 +868,37 @@ mod tests {
                 ],
             },
         ];
-        let merged = distance_merge_anchored(hits, 10_000);
+        let merged = cluster_by_signature(hits, 3_000);
         assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn cluster_by_signature_merges_when_sig_gap_within_merge_distance() {
+        // Same two hits as above but merge_distance = 10_000 > 6228 sig
+        // gap → user said "merge within 10 kb", so they cluster.
+        let hits = vec![
+            HomologousIntervalWithAnchors {
+                genome: "g".into(),
+                start: 409000, end: 410200, strand: '+',
+                anchors: vec![
+                    Anchor { query_pos: 408100, target_pos: 409147, node_id: 1 },
+                    Anchor { query_pos: 408500, target_pos: 409547, node_id: 2 },
+                    Anchor { query_pos: 409000, target_pos: 410047, node_id: 3 },
+                ],
+            },
+            HomologousIntervalWithAnchors {
+                genome: "g".into(),
+                start: 416300, end: 417400, strand: '+',
+                anchors: vec![
+                    Anchor { query_pos: 409100, target_pos: 416375, node_id: 4 },
+                    Anchor { query_pos: 409500, target_pos: 416775, node_id: 5 },
+                    Anchor { query_pos: 409900, target_pos: 417175, node_id: 6 },
+                ],
+            },
+        ];
+        let merged = cluster_by_signature(hits, 10_000);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].anchors.len(), 6);
     }
 
     fn mk_hit(genome: &str, start: u64, end: u64, strand: char, n_anchors: usize) -> HomologousIntervalWithAnchors {
