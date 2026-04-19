@@ -46,24 +46,6 @@ const HOMOLOG_FETCH_PAD_BP: u64 = 2048;
 /// non-homology.
 const MIN_ALIGNMENT_IDENTITY: f64 = 0.3;
 
-/// Hard cap on BiWFA refinements per single hop.
-///
-/// Repeat-rich / subtelomeric queries can produce tens of thousands of
-/// syncmer-resolution hits in one hop (18 700 on a 21 kb chrI tile in
-/// our benchmarks). At ~15 ms per BiWFA call that's >4 min/hop even
-/// with `MemoryMode::Low` keeping each call bounded — enough to time
-/// the agent's 240 s-per-region battery out on 52/300 random regions.
-///
-/// We keep the **top-K most-anchored hits** on the BiWFA path for
-/// bp-precise boundaries and degrade the long tail to linear projection.
-/// Anchor count is a reasonable confidence proxy: hits supported by many
-/// shared syncmer nodes are more likely to reflect real homology than
-/// singletons, so retaining precision on them while projection-only on
-/// the noisy tail trades little real information for bounded time.
-/// `--syng-raw` (zero refines) runs the same 21 kb chrI query in 6 s;
-/// a 2 000-refine cap stays well under a minute per hop.
-const MAX_BIWFA_REFINES_PER_HOP: usize = 500;
-
 thread_local! {
     /// Edit-distance aligner for per-homolog refinement.
     ///
@@ -290,22 +272,66 @@ fn refine_by_linear_projection(
     (start.max(homolog.start), end.min(homolog.end))
 }
 
-/// BiWFA-align query bytes against a padded target window for one merged
-/// homolog. Returns refined forward-strand bounds, or None on
-/// fetch/alignment failure or below-threshold identity.
+/// Padding (bp) added on each side of a cluster's anchor-covered query
+/// span when extracting the sub-query bytes to feed BiWFA. Gives the
+/// aligner a small margin of query sequence beyond the anchors to
+/// refine the exact boundary.
+const SUBQUERY_FLANK_PAD_BP: u64 = 200;
+
+/// BiWFA-align one cluster's anchor-covered query span against a padded
+/// target window. Returns refined forward-strand target bounds, or None
+/// on fetch / alignment failure or below-threshold identity.
 ///
-/// The alignment is configured EndsFree on the target (both ends) and
-/// End2End on the query — so the full query must align somewhere inside
-/// the padded target window. Leading and trailing `I` ops (WFA2 CIGAR
-/// convention: `I` = text-only advance) measure how much of the target
-/// flanks fall outside the query's extent, giving us the refined
-/// boundaries directly.
+/// Key: we align only the *sub-query* covered by the cluster's anchors
+/// (leftmost-anchor to rightmost-anchor + small flank padding), NOT the
+/// user's full query region. A cluster of syncmer hits on one homology
+/// block covers a specific contiguous stretch of query; forcing the
+/// 21 kb full query to squeeze into a 4 kb target window was the reason
+/// a single refinement took ~250 ms.
+///
+/// Alignment is configured EndsFree on the target (both ends) and
+/// End2End on the sub-query — the sub-query must align, but the target
+/// window can skip arbitrary prefix / suffix. Leading and trailing `I`
+/// ops in the CIGAR (WFA2 convention: `I` = text-only advance) measure
+/// how much of the target flanks fall outside the sub-query's extent,
+/// giving us the refined boundaries directly.
 fn refine_homolog_by_alignment(
-    query_bytes: &[u8],
+    query_bytes_full: &[u8],
+    query_region_start: u64,
     hit: &HomologousIntervalWithAnchors,
     sequence_index: &UnifiedSequenceIndex,
     target_len: u64,
 ) -> Option<(u64, u64)> {
+    if hit.anchors.is_empty() {
+        return None;
+    }
+    let syncmer_end_offset: u64 = 1; // anchors point at syncmer starts; include one base beyond to bound range
+
+    // Sub-query span from cluster anchors (anchor query_pos values are
+    // absolute query coordinates; subtract query_region_start to index
+    // into query_bytes_full).
+    let mut q_lo: u64 = u64::MAX;
+    let mut q_hi: u64 = 0;
+    for a in &hit.anchors {
+        q_lo = q_lo.min(a.query_pos);
+        q_hi = q_hi.max(a.query_pos.saturating_add(syncmer_end_offset));
+    }
+    let sub_lo = q_lo
+        .saturating_sub(SUBQUERY_FLANK_PAD_BP)
+        .max(query_region_start);
+    let sub_hi = q_hi
+        .saturating_add(SUBQUERY_FLANK_PAD_BP)
+        .min(query_region_start + query_bytes_full.len() as u64);
+    if sub_hi <= sub_lo {
+        return None;
+    }
+    let sub_q_start_idx = (sub_lo - query_region_start) as usize;
+    let sub_q_end_idx = (sub_hi - query_region_start) as usize;
+    if sub_q_end_idx <= sub_q_start_idx || sub_q_end_idx > query_bytes_full.len() {
+        return None;
+    }
+    let sub_query_bytes = &query_bytes_full[sub_q_start_idx..sub_q_end_idx];
+
     let fetch_start = hit.start.saturating_sub(HOMOLOG_FETCH_PAD_BP);
     let fetch_end = hit.end.saturating_add(HOMOLOG_FETCH_PAD_BP).min(target_len);
     if fetch_end <= fetch_start {
@@ -314,7 +340,7 @@ fn refine_homolog_by_alignment(
     let t_bytes_fwd = sequence_index
         .fetch_sequence(&hit.genome, fetch_start as i32, fetch_end as i32)
         .ok()?;
-    if t_bytes_fwd.is_empty() || query_bytes.is_empty() {
+    if t_bytes_fwd.is_empty() || sub_query_bytes.is_empty() {
         return None;
     }
 
@@ -329,20 +355,19 @@ fn refine_homolog_by_alignment(
         unsafe {
             lib_wfa2::bindings::wfa::wavefront_aligner_set_alignment_free_ends(
                 aligner.aligner_mut(),
-                0,                // pattern (query) must begin at 0
-                0,                // pattern (query) must end at qe
+                0,                // pattern (sub-query) must begin at 0
+                0,                // pattern (sub-query) must end at qe
                 t_len as i32,     // text (target) can skip any prefix
                 t_len as i32,     // text (target) can skip any suffix
             );
         }
-        let status = aligner.align(query_bytes, &t_bytes_oriented);
+        let status = aligner.align(sub_query_bytes, &t_bytes_oriented);
         if !matches!(status, AlignmentStatus::Completed) {
             return None;
         }
         let cigar = aligner.cigar();
         let leading_i = cigar.iter().take_while(|&&op| op == b'I').count();
         let trailing_i = cigar.iter().rev().take_while(|&&op| op == b'I').count();
-        // Identity gate: count M / = ops in the aligned portion only.
         let core_slice_end = cigar.len().saturating_sub(trailing_i);
         let matches = if core_slice_end > leading_i {
             cigar[leading_i..core_slice_end]
@@ -352,7 +377,7 @@ fn refine_homolog_by_alignment(
         } else {
             0
         };
-        let identity = matches as f64 / query_bytes.len() as f64;
+        let identity = matches as f64 / sub_query_bytes.len() as f64;
         if identity < MIN_ALIGNMENT_IDENTITY {
             return None;
         }
@@ -515,24 +540,10 @@ pub fn one_hop_ext_visited(
     let hits = dedupe_strand_overlaps(hits);
     let syncmer_len = (syng_index.params.w + syng_index.params.k) as u64;
 
-    // Pick the top-K most-anchored hits for BiWFA refinement; the rest
-    // get linear projection. Caps per-hop BiWFA cost so a
-    // 20k-hit repeat-rich query doesn't time out. Anchor count is a
-    // confidence proxy (more shared syncmers = more likely real
-    // homology), so ordered selection keeps precision where it matters.
-    let mut biwfa_eligible: std::collections::HashSet<(String, u64, u64, char)> =
-        std::collections::HashSet::new();
-    if hits.len() > MAX_BIWFA_REFINES_PER_HOP {
-        let mut by_anchors: Vec<&HomologousIntervalWithAnchors> = hits.iter().collect();
-        by_anchors.sort_by(|a, b| b.anchors.len().cmp(&a.anchors.len()));
-        for h in by_anchors.iter().take(MAX_BIWFA_REFINES_PER_HOP) {
-            biwfa_eligible.insert((h.genome.clone(), h.start, h.end, h.strand));
-        }
-    }
-    let cap_refines = hits.len() > MAX_BIWFA_REFINES_PER_HOP;
-
-    // Fetch query bytes ONCE per hop — the same slice is compared against
-    // every homolog's target window. Avoids 270× redundant AGC reads.
+    // Fetch the full query bytes ONCE per hop. Per-cluster BiWFA
+    // extracts just the sub-range its anchors cover, so this single
+    // allocation is reused across every refinement without per-hit
+    // AGC reads.
     let query_bytes_cache: Option<Vec<u8>> = sequence_index
         .fetch_sequence(query_name, query_start as i32, query_end as i32)
         .ok();
@@ -544,21 +555,13 @@ pub fn one_hop_ext_visited(
             .map(|l| l as u64)
             .unwrap_or(u64::MAX);
 
-        let should_biwfa = !cap_refines
-            || biwfa_eligible.contains(&(
-                hit.genome.clone(),
-                hit.start,
-                hit.end,
-                hit.strand,
-            ));
-        // Preferred path: per-homolog pairwise alignment (when eligible).
-        let aligned = if should_biwfa {
-            query_bytes_cache.as_deref().and_then(|qb| {
-                refine_homolog_by_alignment(qb, hit, sequence_index, target_len)
-            })
-        } else {
-            None
-        };
+        // Every cluster gets its own BiWFA pass — the sub-query bytes
+        // covered by its anchors against its own small target window,
+        // a fast alignment regardless of how wide the user's query
+        // region is.
+        let aligned = query_bytes_cache.as_deref().and_then(|qb| {
+            refine_homolog_by_alignment(qb, query_start, hit, sequence_index, target_len)
+        });
         let (refined_start, refined_end) = aligned.unwrap_or_else(|| {
             refine_by_linear_projection(hit, query_start, query_end, syncmer_len, target_len)
         });
