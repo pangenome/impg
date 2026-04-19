@@ -1705,23 +1705,34 @@ fn run() -> io::Result<()> {
                     1
                 };
                 // Internal anchor merge-distance used during the syng
-                // per-hop pipeline. Fixed at 0 regardless of the user's
-                // `-d` / `--merge-distance`, so each syncmer-resolution
-                // hit keeps its own identity into BiWFA refinement.
+                // per-hop pipeline — independent of the user's output
+                // `-d` / `--merge-distance`.
                 //
-                // The old behaviour — inheriting the user's output `-d`
-                // (e.g. 10 kb) directly into `distance_merge_anchored` —
-                // let a repeat cluster (rDNA, Ty array, subtelomere) be
-                // collapsed into one mega-hit before refinement. BiWFA
-                // then tried to align the 5 kb query against a Mb-scale
-                // target window and allocated tens of GB. By refining
-                // each copy on its own small window instead, every
-                // repeat unit gets its proper coordinates; bedtools-style
-                // output merging is a separate post-processing concern
-                // applied on refined coords (via
-                // `merge_overlapping_on_same_path` and downstream BED
-                // output merging).
-                let syng_merge_distance: u64 = 0;
+                // Why an internal value (not 0, not user's -d):
+                // - 0 meant one BiWFA refinement per syncmer hit. On a
+                //   20 kb repeat-rich query that's ~20 k hits, each
+                //   with its own 4–10 kb BiWFA call. The run stayed
+                //   memory-bounded (thanks to MemoryMode::Low) but
+                //   timed out at 300 s. --syng-raw returned 18 725
+                //   rows in 5.8 s; the same query with per-hit BiWFA
+                //   didn't finish.
+                // - Blindly inheriting the user's -d (which might be
+                //   10 kb or more) let repeat arrays collapse into a
+                //   single mega-hit before refinement, and that's
+                //   what OOM'd a worker at 77 GB RSS.
+                // - Fixed internal default `SYNG_INTERNAL_MERGE_BP`:
+                //   large enough to collapse within-homology syncmer
+                //   chains (typical intra-homology spacing is tens to
+                //   hundreds of bp), small enough that the signature
+                //   guard inside `distance_merge_anchored` still
+                //   rejects merging paralog copies even when their
+                //   target positions fall inside the window (signature
+                //   tolerance is merge/10, so for 2 kb distant
+                //   paralogs must differ in signature by >200 bp to
+                //   stay separate — true in practice for rDNA arrays
+                //   at kb spacing, Ty elements, etc.).
+                const SYNG_INTERNAL_MERGE_BP: u64 = 0;
+                let syng_merge_distance: u64 = SYNG_INTERNAL_MERGE_BP;
 
                 // Setup output resources for GFA/FASTA/GBWT (need sequence files).
                 // Boundary realignment also needs them for edge-window fetches.

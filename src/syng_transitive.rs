@@ -43,6 +43,24 @@ const HOMOLOG_FETCH_PAD_BP: u64 = 2048;
 /// non-homology.
 const MIN_ALIGNMENT_IDENTITY: f64 = 0.3;
 
+/// Hard cap on BiWFA refinements per single hop.
+///
+/// Repeat-rich / subtelomeric queries can produce tens of thousands of
+/// syncmer-resolution hits in one hop (18 700 on a 21 kb chrI tile in
+/// our benchmarks). At ~15 ms per BiWFA call that's >4 min/hop even
+/// with `MemoryMode::Low` keeping each call bounded — enough to time
+/// the agent's 240 s-per-region battery out on 52/300 random regions.
+///
+/// We keep the **top-K most-anchored hits** on the BiWFA path for
+/// bp-precise boundaries and degrade the long tail to linear projection.
+/// Anchor count is a reasonable confidence proxy: hits supported by many
+/// shared syncmer nodes are more likely to reflect real homology than
+/// singletons, so retaining precision on them while projection-only on
+/// the noisy tail trades little real information for bounded time.
+/// `--syng-raw` (zero refines) runs the same 21 kb chrI query in 6 s;
+/// a 2 000-refine cap stays well under a minute per hop.
+const MAX_BIWFA_REFINES_PER_HOP: usize = 500;
+
 thread_local! {
     /// Edit-distance aligner for per-homolog refinement.
     ///
@@ -446,6 +464,22 @@ pub fn one_hop_ext_visited(
     let hits = dedupe_strand_overlaps(hits);
     let syncmer_len = (syng_index.params.w + syng_index.params.k) as u64;
 
+    // Pick the top-K most-anchored hits for BiWFA refinement; the rest
+    // get linear projection. Caps per-hop BiWFA cost so a
+    // 20k-hit repeat-rich query doesn't time out. Anchor count is a
+    // confidence proxy (more shared syncmers = more likely real
+    // homology), so ordered selection keeps precision where it matters.
+    let mut biwfa_eligible: std::collections::HashSet<(String, u64, u64, char)> =
+        std::collections::HashSet::new();
+    if hits.len() > MAX_BIWFA_REFINES_PER_HOP {
+        let mut by_anchors: Vec<&HomologousIntervalWithAnchors> = hits.iter().collect();
+        by_anchors.sort_by(|a, b| b.anchors.len().cmp(&a.anchors.len()));
+        for h in by_anchors.iter().take(MAX_BIWFA_REFINES_PER_HOP) {
+            biwfa_eligible.insert((h.genome.clone(), h.start, h.end, h.strand));
+        }
+    }
+    let cap_refines = hits.len() > MAX_BIWFA_REFINES_PER_HOP;
+
     // Fetch query bytes ONCE per hop — the same slice is compared against
     // every homolog's target window. Avoids 270× redundant AGC reads.
     let query_bytes_cache: Option<Vec<u8>> = sequence_index
@@ -459,10 +493,21 @@ pub fn one_hop_ext_visited(
             .map(|l| l as u64)
             .unwrap_or(u64::MAX);
 
-        // Preferred path: per-homolog pairwise alignment.
-        let aligned = query_bytes_cache.as_deref().and_then(|qb| {
-            refine_homolog_by_alignment(qb, hit, sequence_index, target_len)
-        });
+        let should_biwfa = !cap_refines
+            || biwfa_eligible.contains(&(
+                hit.genome.clone(),
+                hit.start,
+                hit.end,
+                hit.strand,
+            ));
+        // Preferred path: per-homolog pairwise alignment (when eligible).
+        let aligned = if should_biwfa {
+            query_bytes_cache.as_deref().and_then(|qb| {
+                refine_homolog_by_alignment(qb, hit, sequence_index, target_len)
+            })
+        } else {
+            None
+        };
         let (refined_start, refined_end) = aligned.unwrap_or_else(|| {
             refine_by_linear_projection(hit, query_start, query_end, syncmer_len, target_len)
         });
