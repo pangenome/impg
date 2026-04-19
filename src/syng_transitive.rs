@@ -32,13 +32,6 @@ use crate::graph::reverse_complement;
 use crate::sequence_index::{SequenceIndex as _, UnifiedSequenceIndex};
 use crate::syng::{Anchor, HomologousInterval, HomologousIntervalWithAnchors, SyngIndex};
 
-/// Padding (bp) added on each side of syng's padded homolog bounds when
-/// fetching target bytes for pairwise refinement. Must comfortably exceed
-/// the worst anchor-to-boundary gap observed — ~1500bp on RC homologs in
-/// yeast235 validation — so the real alignment endpoint lies within the
-/// fetched window even when syng's bounds are loose.
-const HOMOLOG_FETCH_PAD_BP: u64 = 2048;
-
 /// Minimum fraction of query bases that must align at 'M'/'=' ops for
 /// the refined homolog to be accepted. Below this, the "homolog" is
 /// treated as syncmer noise and the refinement falls back to syng's
@@ -272,56 +265,87 @@ fn refine_by_linear_projection(
     (start.max(homolog.start), end.min(homolog.end))
 }
 
-/// Padding (bp) added on each side of a cluster's anchor-covered query
-/// span when extracting the sub-query bytes to feed BiWFA. Gives the
-/// aligner a small margin of query sequence beyond the anchors to
-/// refine the exact boundary.
-const SUBQUERY_FLANK_PAD_BP: u64 = 200;
-
-/// BiWFA-align one cluster's anchor-covered query span against a padded
-/// target window. Returns refined forward-strand target bounds, or None
-/// on fetch / alignment failure or below-threshold identity.
+/// BiWFA-align one cluster's anchor-extended sub-query against its
+/// anchor-extended target window. Returns refined forward-strand
+/// target bounds, or None on fetch / alignment failure or below-
+/// threshold identity.
 ///
-/// Key: we align only the *sub-query* covered by the cluster's anchors
-/// (leftmost-anchor to rightmost-anchor + small flank padding), NOT the
-/// user's full query region. A cluster of syncmer hits on one homology
-/// block covers a specific contiguous stretch of query; forcing the
-/// 21 kb full query to squeeze into a 4 kb target window was the reason
-/// a single refinement took ~250 ms.
+/// Anchor-and-extend, both axes:
+/// - Sub-query = `[min(anchor.query_pos) − extend_budget,
+///                 max(anchor.query_pos) + extend_budget]`, clipped to
+///   the user's query region.
+/// - Target window = `[hit.start − extend_budget, hit.end + extend_budget]`,
+///   clipped to the signature-sorted neighbor clusters'
+///   `(prev_target_end, next_target_start)` on the same `(genome,
+///   strand)` and the target chromosome edges.
 ///
-/// Alignment is configured EndsFree on the target (both ends) and
-/// End2End on the sub-query — the sub-query must align, but the target
-/// window can skip arbitrary prefix / suffix. Leading and trailing `I`
-/// ops in the CIGAR (WFA2 convention: `I` = text-only advance) measure
-/// how much of the target flanks fall outside the sub-query's extent,
-/// giving us the refined boundaries directly.
+/// The neighbor clips mean extension stops naturally at syncmer-
+/// indicated block boundaries: we never extend this cluster's
+/// alignment into the territory of the next block on the same path.
+/// In unique-homology regions with no nearby clusters the extension
+/// runs out to `budget` or the query edge, whichever comes first,
+/// recovering the full conserved block.
+///
+/// BiWFA is configured End2End on the sub-query and EndsFree on the
+/// target. Leading / trailing `I` ops (WFA2 convention: `I` = text-
+/// only advance) measure how much of the target window was skipped
+/// outside the sub-query's extent; that gives refined target bounds.
+#[allow(clippy::too_many_arguments)]
 fn refine_homolog_by_alignment(
     query_bytes_full: &[u8],
     query_region_start: u64,
+    query_region_end: u64,
+    extend_budget: u64,
     hit: &HomologousIntervalWithAnchors,
+    prev_target_end: u64,
+    next_target_start: u64,
     sequence_index: &UnifiedSequenceIndex,
     target_len: u64,
 ) -> Option<(u64, u64)> {
     if hit.anchors.is_empty() {
         return None;
     }
-    let syncmer_end_offset: u64 = 1; // anchors point at syncmer starts; include one base beyond to bound range
 
-    // Sub-query span from cluster anchors (anchor query_pos values are
-    // absolute query coordinates; subtract query_region_start to index
-    // into query_bytes_full).
+    // Anchor-supported query extent.
     let mut q_lo: u64 = u64::MAX;
     let mut q_hi: u64 = 0;
     for a in &hit.anchors {
         q_lo = q_lo.min(a.query_pos);
-        q_hi = q_hi.max(a.query_pos.saturating_add(syncmer_end_offset));
+        q_hi = q_hi.max(a.query_pos);
     }
+
+    // Target window extended by budget, clipped to neighbor-cluster
+    // target bounds and the chromosome edges. Computed FIRST because
+    // the effective (neighbor-clipped) target span caps how far we
+    // should extend the sub-query: a 10 kb budget on the source with
+    // a 2 kb clipped target window forces BiWFA to squeeze a 10 kb
+    // sub-query into 2 kb target, which is the same O(s²) pathology
+    // that a priori-huge-full-query refinement had.
+    let fetch_start = hit
+        .start
+        .saturating_sub(extend_budget)
+        .max(prev_target_end);
+    let fetch_end = hit
+        .end
+        .saturating_add(extend_budget)
+        .min(next_target_start)
+        .min(target_len);
+    if fetch_end <= fetch_start {
+        return None;
+    }
+    let target_span = fetch_end - fetch_start;
+
+    // Effective per-side extension on the source: the actual budget,
+    // capped so the sub-query doesn't materially exceed the target
+    // window it has to fit inside. Neighbor-constrained repeat-array
+    // clusters get automatically small sub-queries.
+    let effective_ext = extend_budget.min(target_span.saturating_div(2).max(1));
     let sub_lo = q_lo
-        .saturating_sub(SUBQUERY_FLANK_PAD_BP)
+        .saturating_sub(effective_ext)
         .max(query_region_start);
     let sub_hi = q_hi
-        .saturating_add(SUBQUERY_FLANK_PAD_BP)
-        .min(query_region_start + query_bytes_full.len() as u64);
+        .saturating_add(effective_ext)
+        .min(query_region_end);
     if sub_hi <= sub_lo {
         return None;
     }
@@ -331,12 +355,6 @@ fn refine_homolog_by_alignment(
         return None;
     }
     let sub_query_bytes = &query_bytes_full[sub_q_start_idx..sub_q_end_idx];
-
-    let fetch_start = hit.start.saturating_sub(HOMOLOG_FETCH_PAD_BP);
-    let fetch_end = hit.end.saturating_add(HOMOLOG_FETCH_PAD_BP).min(target_len);
-    if fetch_end <= fetch_start {
-        return None;
-    }
     let t_bytes_fwd = sequence_index
         .fetch_sequence(&hit.genome, fetch_start as i32, fetch_end as i32)
         .ok()?;
@@ -487,14 +505,13 @@ pub fn one_hop(
         padding,
         merge_distance,
         0,
+        DEFAULT_EXTEND_BUDGET_BP,
         sequence_index,
     )
 }
 
-/// [`one_hop`] with a `query_extension` bp source-side widening for
-/// syncmer discovery. Lets syng reach homologs whose shared-syncmer
-/// support ends just outside the user's declared query range; BiWFA
-/// refinement still pairs against the original query bytes.
+/// [`one_hop`] with tunable source-side widening and per-cluster
+/// anchor-and-extend budget.
 pub fn one_hop_ext(
     syng_index: &SyngIndex,
     query_name: &str,
@@ -503,6 +520,7 @@ pub fn one_hop_ext(
     padding: u64,
     merge_distance: u64,
     query_extension: u64,
+    extend_budget: u64,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
     one_hop_ext_visited(
@@ -513,15 +531,29 @@ pub fn one_hop_ext(
         padding,
         merge_distance,
         query_extension,
+        extend_budget,
         None,
         sequence_index,
     )
 }
 
-/// As [`one_hop_ext`], but threading a shared `visited_nodes` set through
-/// syng so that syncmer nodes already consumed by an earlier BFS hop are
-/// skipped at lookup time — avoiding re-running BiWFA refinement for
-/// homologs that transitive-level dedup would drop after the fact.
+/// Core single-hop entry: anchor-and-extend refinement per cluster.
+///
+/// After signature clustering + strand dedupe, each cluster is
+/// refined by BiWFA over a *sub-query* extended from its anchor extent
+/// by `extend_budget` bp on each side (clipped to the user's query
+/// region), and a *target window* extended from the cluster's hit
+/// bounds by the same budget, clipped to:
+///   - `prev_target_end` of the previous signature-sorted cluster
+///     on the same `(genome, strand)`, and
+///   - `next_target_start` of the following one.
+///
+/// This stops extension naturally at syncmer-indicated block
+/// boundaries: a neighbor cluster means "another block lives here",
+/// so we don't spill the current cluster's alignment into it. In
+/// unique-homology regions with no nearby clusters, extension runs
+/// out to the query edges on one side and `budget` on the other,
+/// recovering the full conserved-block extent.
 pub fn one_hop_ext_visited(
     syng_index: &SyngIndex,
     query_name: &str,
@@ -530,6 +562,7 @@ pub fn one_hop_ext_visited(
     padding: u64,
     merge_distance: u64,
     query_extension: u64,
+    extend_budget: u64,
     visited_nodes: Option<&mut FxHashSet<u32>>,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
@@ -540,27 +573,35 @@ pub fn one_hop_ext_visited(
     let hits = dedupe_strand_overlaps(hits);
     let syncmer_len = (syng_index.params.w + syng_index.params.k) as u64;
 
-    // Fetch the full query bytes ONCE per hop. Per-cluster BiWFA
-    // extracts just the sub-range its anchors cover, so this single
-    // allocation is reused across every refinement without per-hit
-    // AGC reads.
+    // Fetch the full query bytes ONCE per hop; refinement extracts
+    // the sub-range its anchors + extension budget cover.
     let query_bytes_cache: Option<Vec<u8>> = sequence_index
         .fetch_sequence(query_name, query_start as i32, query_end as i32)
         .ok();
 
-    let mut out: Vec<HomologousInterval> = Vec::with_capacity(hits.len());
-    for hit in &hits {
+    // Attach per-cluster target-axis neighbors (prev_end, next_start)
+    // within each (genome, strand) bucket. These bound extension.
+    let hits_with_neighbors = attach_target_neighbors(hits);
+
+    let mut out: Vec<HomologousInterval> = Vec::with_capacity(hits_with_neighbors.len());
+    for (hit, prev_end, next_start) in &hits_with_neighbors {
         let target_len = sequence_index
             .get_sequence_length(&hit.genome)
             .map(|l| l as u64)
             .unwrap_or(u64::MAX);
 
-        // Every cluster gets its own BiWFA pass — the sub-query bytes
-        // covered by its anchors against its own small target window,
-        // a fast alignment regardless of how wide the user's query
-        // region is.
         let aligned = query_bytes_cache.as_deref().and_then(|qb| {
-            refine_homolog_by_alignment(qb, query_start, hit, sequence_index, target_len)
+            refine_homolog_by_alignment(
+                qb,
+                query_start,
+                query_end,
+                extend_budget,
+                hit,
+                *prev_end,
+                *next_start,
+                sequence_index,
+                target_len,
+            )
         });
         let (refined_start, refined_end) = aligned.unwrap_or_else(|| {
             refine_by_linear_projection(hit, query_start, query_end, syncmer_len, target_len)
@@ -577,6 +618,38 @@ pub fn one_hop_ext_visited(
     }
     Ok(out)
 }
+
+/// For each cluster, attach the `(prev_target_end, next_target_start)`
+/// of its signature-sorted neighbors within the same
+/// `(genome, strand)`. A cluster with no predecessor gets `prev_end = 0`;
+/// with no successor, `next_start = u64::MAX`.
+fn attach_target_neighbors(
+    hits: Vec<HomologousIntervalWithAnchors>,
+) -> Vec<(HomologousIntervalWithAnchors, u64, u64)> {
+    use std::collections::HashMap;
+    let mut groups: HashMap<(String, char), Vec<HomologousIntervalWithAnchors>> = HashMap::new();
+    for h in hits {
+        groups.entry((h.genome.clone(), h.strand)).or_default().push(h);
+    }
+    let mut out: Vec<(HomologousIntervalWithAnchors, u64, u64)> = Vec::new();
+    for (_, mut group) in groups {
+        group.sort_by_key(|h| h.start);
+        let bounds: Vec<(u64, u64)> = group.iter().map(|h| (h.start, h.end)).collect();
+        let n = group.len();
+        for (i, h) in group.into_iter().enumerate() {
+            let prev_end = if i > 0 { bounds[i - 1].1 } else { 0 };
+            let next_start = if i + 1 < n { bounds[i + 1].0 } else { u64::MAX };
+            out.push((h, prev_end, next_start));
+        }
+    }
+    out
+}
+
+/// Default sub-query/target extension budget used by the thin
+/// [`query_transitive`] / [`query_transitive_ext`] wrappers when no
+/// explicit value is passed. Matches the default on the CLI's
+/// `--syng-extend-budget`.
+pub const DEFAULT_EXTEND_BUDGET_BP: u64 = 1_000;
 
 /// Run a multihop syng-seeded homology query.
 pub fn query_transitive(
@@ -598,14 +671,19 @@ pub fn query_transitive(
         max_depth,
         merge_distance,
         0,
+        DEFAULT_EXTEND_BUDGET_BP,
         sequence_index,
     )
 }
 
-/// [`query_transitive`] with an optional `query_extension` plumbed through
-/// every hop. The extension widens syncmer discovery on the source side at
-/// each frontier step, so the BFS can follow conserved blocks whose
-/// endpoints fall just outside each frontier region.
+/// [`query_transitive`] with source-side `query_extension` and
+/// refinement `extend_budget` plumbed through every hop.
+///
+/// * `query_extension`: widens syncmer discovery on the source side at
+///   each frontier step, so BFS can follow conserved blocks whose
+///   endpoints fall just outside each frontier region.
+/// * `extend_budget`: per-cluster bp budget for anchor-and-extend
+///   boundary refinement; see [`one_hop_ext_visited`].
 pub fn query_transitive_ext(
     syng_index: &SyngIndex,
     query_name: &str,
@@ -615,6 +693,7 @@ pub fn query_transitive_ext(
     max_depth: u16,
     merge_distance: u64,
     query_extension: u64,
+    extend_budget: u64,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
     let mut visited: FxHashSet<(String, u64, u64, char)> = FxHashSet::default();
@@ -646,6 +725,7 @@ pub fn query_transitive_ext(
                 padding,
                 merge_distance,
                 hop_extension,
+                extend_budget,
                 Some(&mut visited_nodes),
                 sequence_index,
             ) {

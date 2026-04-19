@@ -1027,6 +1027,24 @@ enum Args {
         #[clap(long, value_parser, default_value_t = 0)]
         syng_extension: u64,
 
+        /// Boundary-extension budget (bp) per cluster in syng queries.
+        /// `refine_homolog_by_alignment` expands the anchor-supported
+        /// sub-query and the refinement target window outward by this
+        /// amount on each side before BiWFA. Target extension clips to
+        /// neighbor-cluster bounds on the same `(genome, strand)`;
+        /// source extension clips to the user's query region and to
+        /// half the clipped target span (keeps BiWFA's two inputs
+        /// similarly-sized, avoiding the O(s²) pathology of a wide
+        /// query forced into a narrow target). The default 1 kb
+        /// recovers most indel-bounded block boundaries (typical
+        /// intra-homology indels are &lt; 500 bp) while staying
+        /// tractable on repeat-dense queries with tens of thousands
+        /// of clusters. Raise for sparser pangenomes with longer
+        /// conserved blocks.
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, value_parser, default_value_t = 1_000)]
+        syng_extend_budget: u64,
+
         /// Debug-only: skip boundary realignment and emit raw syncmer-resolution
         /// intervals from syng's query_region. The default --syng path runs
         /// BiWFA boundary realignment for base-pair-precise edges (and iterates
@@ -1596,6 +1614,7 @@ fn run() -> io::Result<()> {
             syng,
             syng_padding,
             syng_extension,
+            syng_extend_budget,
             syng_raw,
             query,
             output_format,
@@ -1767,6 +1786,7 @@ fn run() -> io::Result<()> {
                                     syng_max_depth,
                                     syng_merge_distance,
                                     syng_extension,
+                                    syng_extend_budget,
                                     sequence_index.as_ref().unwrap(),
                                 )?
                             } else {
@@ -1814,6 +1834,7 @@ fn run() -> io::Result<()> {
                                             syng_max_depth,
                                             syng_merge_distance,
                                     syng_extension,
+                                            syng_extend_budget,
                                             sequence_index.as_ref().unwrap(),
                                         )?
                                     } else {
@@ -1871,6 +1892,7 @@ fn run() -> io::Result<()> {
                                         syng_max_depth,
                                         syng_merge_distance,
                                     syng_extension,
+                                        syng_extend_budget,
                                         sequence_index.as_ref().unwrap(),
                                     )?
                                 } else {
@@ -1919,6 +1941,7 @@ fn run() -> io::Result<()> {
                                     syng_max_depth,
                                     syng_merge_distance,
                                     syng_extension,
+                                    syng_extend_budget,
                                     seq_idx,
                                 )?
                             } else {
@@ -1950,6 +1973,7 @@ fn run() -> io::Result<()> {
                                     syng_max_depth,
                                     syng_merge_distance,
                                     syng_extension,
+                                    syng_extend_budget,
                                     seq_idx,
                                 )?
                             } else {
