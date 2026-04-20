@@ -694,7 +694,6 @@ fn test_syng_rc_homolog_end_to_end() {
         query_end,
         padding,
         1,
-        0, // merge_distance
         &sequence_index,
     )
     .unwrap();
@@ -855,7 +854,6 @@ fn test_syng_boundary_realign_tightens_edges() {
         query_end,
         padding,
         1,
-        0, // merge_distance
         &sequence_index,
     )
     .unwrap();
@@ -1005,7 +1003,6 @@ fn test_syng_query_reconstructs_homology_with_diffs() {
         query_end,
         padding,
         1,
-        0, // merge_distance
         &sequence_index,
     )
     .unwrap();

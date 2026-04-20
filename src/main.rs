@@ -1045,18 +1045,6 @@ enum Args {
         #[clap(long, value_parser, default_value_t = 1_000)]
         syng_extend_budget: u64,
 
-        /// Positional-cap multiplier for syng anchor clustering.
-        /// `positional_cap = multiplier × --syng-extend-budget`. Two
-        /// anchors assign to the same chain only if they are within
-        /// `merge_distance` in signature AND within `positional_cap` bp
-        /// on the query axis. Kills the "same-diagonal, far-apart"
-        /// pathology of pure diagonal clustering. Raise to permit
-        /// longer same-diagonal chains; lower to force more chain
-        /// breaks in dense repeats.
-        #[arg(help_heading = "Syng input")]
-        #[clap(long, value_parser, default_value_t = 4)]
-        syng_positional_cap_multiplier: u64,
-
         /// Emit a full CIGAR per syng segment by aggregating interior
         /// anchor-gap BiWFA alignments + the two end-projection CIGARs.
         /// Off by default (ends-only projection sufficient for
@@ -1637,7 +1625,6 @@ fn run() -> io::Result<()> {
             syng_padding,
             syng_extension,
             syng_extend_budget,
-            syng_positional_cap_multiplier,
             syng_emit_cigar,
             syng_raw,
             query,
@@ -1754,10 +1741,6 @@ fn run() -> io::Result<()> {
                 // (local indels), paralog copies and long insertions
                 // sit at structurally different signatures (kb-scale
                 // on yeast). A typical `-d` up to a few kb cleanly
-                // reproduces the biological block structure without
-                // collapsing paralogs.
-                let syng_merge_distance = query.effective_merge_distance().max(0) as u64;
-
                 // Setup output resources for GFA/FASTA/GBWT (need sequence files).
                 // Boundary realignment also needs them for edge-window fetches.
                 let needs_sequences =
@@ -1808,10 +1791,8 @@ fn run() -> io::Result<()> {
                                     *range_end as u64,
                                     syng_padding,
                                     syng_max_depth,
-                                    syng_merge_distance,
                                     syng_extension,
                                     syng_extend_budget,
-                                    syng_positional_cap_multiplier,
                                     syng_emit_cigar,
                                     sequence_index.as_ref().unwrap(),
                                 )?
@@ -1858,10 +1839,8 @@ fn run() -> io::Result<()> {
                                             window_end as u64,
                                             syng_padding,
                                             syng_max_depth,
-                                            syng_merge_distance,
-                                    syng_extension,
+                                            syng_extension,
                                             syng_extend_budget,
-                                            syng_positional_cap_multiplier,
                                             syng_emit_cigar,
                                             sequence_index.as_ref().unwrap(),
                                         )?
@@ -1918,10 +1897,8 @@ fn run() -> io::Result<()> {
                                         *range_end as u64,
                                         syng_padding,
                                         syng_max_depth,
-                                        syng_merge_distance,
-                                    syng_extension,
+                                        syng_extension,
                                         syng_extend_budget,
-                                        syng_positional_cap_multiplier,
                                         syng_emit_cigar,
                                         sequence_index.as_ref().unwrap(),
                                     )?
@@ -1969,10 +1946,8 @@ fn run() -> io::Result<()> {
                                     *range_end as u64,
                                     syng_padding,
                                     syng_max_depth,
-                                    syng_merge_distance,
                                     syng_extension,
                                     syng_extend_budget,
-                                    syng_positional_cap_multiplier,
                                     syng_emit_cigar,
                                     seq_idx,
                                 )?
@@ -2003,10 +1978,8 @@ fn run() -> io::Result<()> {
                                     *range_end as u64,
                                     syng_padding,
                                     syng_max_depth,
-                                    syng_merge_distance,
                                     syng_extension,
                                     syng_extend_budget,
-                                    syng_positional_cap_multiplier,
                                     syng_emit_cigar,
                                     seq_idx,
                                 )?

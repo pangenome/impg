@@ -1068,6 +1068,16 @@ impl SyngIndex {
                 if let Some(v) = visited_nodes.as_deref_mut() {
                     v.insert(query_node);
                 }
+                // Per-node signature dedup bucket: for each (path, strand),
+                // keep one anchor per distinct diagonal signature. A
+                // hyper-repetitive syncmer with K query occurrences and V
+                // target visits naively emits K × V anchors — all distinct
+                // (q_pos, t_pos) pairs but collapsing onto K + V − 1
+                // diagonals on a tandem array. One anchor per diagonal is
+                // all chain_anchors needs downstream; more would be
+                // redundant evidence of the same alignment frame.
+                let mut per_node: FxHashMap<(usize, char), (u64, u64, FxHashMap<i64, Anchor>)> =
+                    FxHashMap::default();
                 for t_orient in 0u8..=1 {
                     let encoded = ((query_node as usize) << 1) | (t_orient as usize);
                     if !gbz_gbwt.has_node(encoded) {
@@ -1098,54 +1108,41 @@ impl SyngIndex {
                         let hit_end = target_pos + syncmer_len;
                         let padded_start = target_pos.saturating_sub(padding);
                         let padded_end = (hit_end + padding).min(genome_len);
-                        // Partition this visit's anchors by strand based on
-                        // whether each query occurrence's orientation matches
-                        // the target-side orientation we queried. All K query
-                        // occurrences × V target visits are materialized —
-                        // memory is bounded by clustering's positional-cap
-                        // downstream, not by a K-cap here.
-                        let mut fwd_anchors: Vec<Anchor> = Vec::new();
-                        let mut rev_anchors: Vec<Anchor> = Vec::new();
                         for &(qp, q_orient) in query_positions {
-                            if q_orient == t_orient {
-                                fwd_anchors.push(Anchor {
-                                    query_pos: qp,
-                                    target_pos,
-                                    node_id: query_node,
-                                });
+                            let strand = if q_orient == t_orient { '+' } else { '-' };
+                            let sig: i64 = if strand == '+' {
+                                target_pos as i64 - qp as i64
                             } else {
-                                rev_anchors.push(Anchor {
-                                    query_pos: qp,
-                                    target_pos,
-                                    node_id: query_node,
-                                });
-                            }
-                        }
-                        if !fwd_anchors.is_empty() {
-                            per_path
-                                .entry((forward_path_idx, '+'))
-                                .or_default()
-                                .push(HomologousIntervalWithAnchors {
-                                    genome: self.name_map.path_to_name[forward_path_idx].clone(),
-                                    start: padded_start,
-                                    end: padded_end,
-                                    strand: '+',
-                                    anchors: fwd_anchors,
-                                });
-                        }
-                        if !rev_anchors.is_empty() {
-                            per_path
-                                .entry((forward_path_idx, '-'))
-                                .or_default()
-                                .push(HomologousIntervalWithAnchors {
-                                    genome: self.name_map.path_to_name[forward_path_idx].clone(),
-                                    start: padded_start,
-                                    end: padded_end,
-                                    strand: '-',
-                                    anchors: rev_anchors,
-                                });
+                                target_pos as i64 + qp as i64
+                            };
+                            let entry = per_node
+                                .entry((forward_path_idx, strand))
+                                .or_insert_with(|| (padded_start, padded_end, FxHashMap::default()));
+                            entry.0 = entry.0.min(padded_start);
+                            entry.1 = entry.1.max(padded_end);
+                            entry.2.entry(sig).or_insert(Anchor {
+                                query_pos: qp,
+                                target_pos,
+                                node_id: query_node,
+                            });
                         }
                     }
+                }
+                for ((forward_path_idx, strand), (start, end, sig_map)) in per_node {
+                    if sig_map.is_empty() {
+                        continue;
+                    }
+                    let anchors: Vec<Anchor> = sig_map.into_values().collect();
+                    per_path
+                        .entry((forward_path_idx, strand))
+                        .or_default()
+                        .push(HomologousIntervalWithAnchors {
+                            genome: self.name_map.path_to_name[forward_path_idx].clone(),
+                            start,
+                            end,
+                            strand,
+                            anchors,
+                        });
                 }
             }
         } else {
@@ -1154,12 +1151,19 @@ impl SyngIndex {
             // target's node id) which we XOR against the query's orientation
             // to determine strand.
             let num_genomes = self.name_map.path_to_name.len();
+            // Per-query-node signature dedup across the full path walk —
+            // fallback equivalent of the fast path's per-query-node
+            // aggregation. Keyed by (genome_idx, query_node, strand) since
+            // the walk interleaves nodes from all paths.
+            let mut per_node_fallback: FxHashMap<
+                (usize, u32, char),
+                (u64, u64, FxHashMap<i64, Anchor>),
+            > = FxHashMap::default();
             for genome_idx in 0..num_genomes {
                 let path_start = match &self.name_map.path_starts[genome_idx] {
                     Some(ps) => ps,
                     None => continue,
                 };
-                let genome_name = &self.name_map.path_to_name[genome_idx];
                 let genome_len = self.name_map.path_to_length[genome_idx];
                 let nodes = self.walk_path(path_start);
                 for &(signed_target_node, target_pos) in &nodes {
@@ -1179,49 +1183,42 @@ impl SyngIndex {
                         let hit_end = target_pos + syncmer_len;
                         let padded_start = target_pos.saturating_sub(padding);
                         let padded_end = (hit_end + padding).min(genome_len);
-                        let mut fwd_anchors: Vec<Anchor> = Vec::new();
-                        let mut rev_anchors: Vec<Anchor> = Vec::new();
                         for &(qp, q_orient) in query_positions {
-                            if q_orient == t_orient {
-                                fwd_anchors.push(Anchor {
-                                    query_pos: qp,
-                                    target_pos,
-                                    node_id: abs_node,
-                                });
+                            let strand = if q_orient == t_orient { '+' } else { '-' };
+                            let sig: i64 = if strand == '+' {
+                                target_pos as i64 - qp as i64
                             } else {
-                                rev_anchors.push(Anchor {
-                                    query_pos: qp,
-                                    target_pos,
-                                    node_id: abs_node,
-                                });
-                            }
-                        }
-                        if !fwd_anchors.is_empty() {
-                            per_path
-                                .entry((genome_idx, '+'))
-                                .or_default()
-                                .push(HomologousIntervalWithAnchors {
-                                    genome: genome_name.clone(),
-                                    start: padded_start,
-                                    end: padded_end,
-                                    strand: '+',
-                                    anchors: fwd_anchors,
-                                });
-                        }
-                        if !rev_anchors.is_empty() {
-                            per_path
-                                .entry((genome_idx, '-'))
-                                .or_default()
-                                .push(HomologousIntervalWithAnchors {
-                                    genome: genome_name.clone(),
-                                    start: padded_start,
-                                    end: padded_end,
-                                    strand: '-',
-                                    anchors: rev_anchors,
-                                });
+                                target_pos as i64 + qp as i64
+                            };
+                            let entry = per_node_fallback
+                                .entry((genome_idx, abs_node, strand))
+                                .or_insert_with(|| (padded_start, padded_end, FxHashMap::default()));
+                            entry.0 = entry.0.min(padded_start);
+                            entry.1 = entry.1.max(padded_end);
+                            entry.2.entry(sig).or_insert(Anchor {
+                                query_pos: qp,
+                                target_pos,
+                                node_id: abs_node,
+                            });
                         }
                     }
                 }
+            }
+            for ((genome_idx, _node, strand), (start, end, sig_map)) in per_node_fallback {
+                if sig_map.is_empty() {
+                    continue;
+                }
+                let anchors: Vec<Anchor> = sig_map.into_values().collect();
+                per_path
+                    .entry((genome_idx, strand))
+                    .or_default()
+                    .push(HomologousIntervalWithAnchors {
+                        genome: self.name_map.path_to_name[genome_idx].clone(),
+                        start,
+                        end,
+                        strand,
+                        anchors,
+                    });
             }
         }
 

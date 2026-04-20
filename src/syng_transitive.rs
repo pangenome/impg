@@ -34,13 +34,6 @@ use crate::graph::reverse_complement;
 use crate::sequence_index::{SequenceIndex as _, UnifiedSequenceIndex};
 use crate::syng::{Anchor, HomologousInterval, HomologousIntervalWithAnchors, SyngIndex};
 
-/// Default multiplier applied to `extend_budget` to obtain the query-axis
-/// positional cap used in `chain_anchors`. Two anchors cluster into the
-/// same chain only if they are within `merge_distance` in signature AND
-/// within `positional_cap = multiplier × extend_budget` bp on the query
-/// axis.
-pub const DEFAULT_POSITIONAL_CAP_MULTIPLIER: u64 = 4;
-
 /// Minimum fraction of query bases that must align at 'M'/'=' ops for
 /// the refined homolog to be accepted. Below this, the "homolog" is
 /// treated as syncmer noise and the refinement falls back to syng's
@@ -76,70 +69,40 @@ where
     })
 }
 
-/// Co-linearity signature for an anchor on a given strand.
+/// Mutual-best-buddy anchor chaining with range-bounded
+/// diagonal-preferring scoring.
 ///
-/// Two anchors on the same biological homology (modulo indels) have the
-/// same signature modulo the local indel burden; anchors on different
-/// homologies (paralog, inversion elsewhere) have very different
-/// signatures.
+/// Flattens per-visit hits' anchors into per-(target, strand) anchor
+/// lists, sorts each by `query_pos`, and scores candidate forward
+/// buddies per anchor. For a pair `(A, B)` with `B` downstream of `A`
+/// on query axis (and on target axis per strand):
 ///
-/// * `'+'` strand:  `signature = target_pos - query_pos`  (constant under
-///   collinear homology — increases equally on both axes).
-/// * `'-'` strand:  `signature = query_pos + target_pos`  (constant under
-///   RC homology — target decreases as query increases, so the sum is
-///   stable).
-fn anchor_signature(a: Anchor, strand: char) -> i64 {
-    match strand {
-        '+' => a.target_pos as i64 - a.query_pos as i64,
-        '-' => a.query_pos as i64 + a.target_pos as i64,
-        _ => 0,
-    }
-}
-
-/// Greedy per-anchor chaining with most-similar-diagonal assignment
-/// and a query-axis positional cap.
+/// * **Hard constraints** (set by the user's queried range):
+///   - `0 < dq ≤ query_range_len`          (B strictly downstream on query,
+///                                          no further than the whole range)
+///   - `0 < dt ≤ query_range_len`          (same magnitude cap on target)
+///   - `|dq − dt| ≤ query_range_len`       (no wildly discordant diagonals)
+/// * **Score** (lower is better):
+///   `W_sig × |dq − dt| + max(dq, dt)` with `W_sig ≫ 1` — diagonal
+///   match dominates; 2D proximity is the tiebreaker among equally
+///   colinear candidates.
 ///
-/// Flattens all per-visit hits' anchors into per-(target, strand)
-/// anchor lists, sorts each list by `query_pos`, and walks. For each
-/// anchor `A`, candidate chains are those where:
+/// `best_fwd[A] = B` means `B` is A's top-scoring forward buddy;
+/// `best_bwd[B] = A` is the reciprocal. An edge is formed only when
+/// both sides agree (mutual-best). Chains are the connected components
+/// of the resulting graph, computed by union-find. Each emitted chain
+/// becomes one `HomologousIntervalWithAnchors` with target-span bounds.
 ///
-/// * `|anchor_signature(A) − running_mean_sig(chain)| ≤ merge_distance`
-///   (diagonal tolerance — absorbs small-indel drift)
-/// * `A.query_pos − chain.last_anchor.query_pos ≤ positional_cap`
-///   (locality — prevents two anchors on the "same virtual diagonal"
-///   but far apart in genomic coordinates from collapsing into one
-///   chain; that's the paralog-across-chromosome pathology of pure
-///   signature clustering.)
-///
-/// If no candidate qualifies, a new chain starts with `A`. If multiple
-/// qualify, the chain with the **most similar** running mean signature
-/// wins — this keeps the correct repeat copy when several copies
-/// overlap on the query axis.
-///
-/// Each emitted `HomologousIntervalWithAnchors` represents one chain
-/// with `(start, end)` set to the anchor-supported target span
-/// `[min(target_pos), max(target_pos) + syncmer_len]`.
+/// This replaces the earlier diagonal-plus-positional-cap clustering.
+/// There is no positional-cap knob — the queried range is the cap.
 pub(crate) fn chain_anchors(
     hits: Vec<HomologousIntervalWithAnchors>,
-    merge_distance: u64,
-    positional_cap: u64,
+    query_range_len: u64,
     syncmer_len: u64,
 ) -> Vec<HomologousIntervalWithAnchors> {
     if hits.is_empty() {
         return hits;
     }
-    // `merge_distance = 0` is the CLI default and carries the classical
-    // bedtools "overlap-only" semantics: don't *gate* chaining on
-    // signature, just rely on the positional cap. Under that setting
-    // every anchor on the same (target, strand) within `positional_cap`
-    // joins one chain, independent of diagonal drift — which is what
-    // users get when they don't pass `-d` explicitly. Positive values
-    // apply signature tolerance in the natural way.
-    let sig_tol: i64 = if merge_distance == 0 {
-        i64::MAX
-    } else {
-        merge_distance as i64
-    };
 
     use std::collections::HashMap;
     let mut per_path: HashMap<(String, char), Vec<Anchor>> = HashMap::new();
@@ -150,12 +113,34 @@ pub(crate) fn chain_anchors(
             .extend(h.anchors.into_iter());
     }
 
-    struct Chain {
-        anchors: Vec<Anchor>,
-        sig_sum: i128,
-        sig_count: i64,
-        last_query_pos: u64,
+    // Iterative union-find with path compression.
+    fn uf_find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
     }
+    fn uf_union(parent: &mut [usize], rank: &mut [u32], x: usize, y: usize) {
+        let rx = uf_find(parent, x);
+        let ry = uf_find(parent, y);
+        if rx == ry {
+            return;
+        }
+        if rank[rx] < rank[ry] {
+            parent[rx] = ry;
+        } else if rank[rx] > rank[ry] {
+            parent[ry] = rx;
+        } else {
+            parent[ry] = rx;
+            rank[rx] += 1;
+        }
+    }
+
+    const W_SIG: i64 = 1_000_000;
+    let max_dq = query_range_len;
+    let max_dt = query_range_len;
+    let max_sig_diff = query_range_len;
 
     let mut out: Vec<HomologousIntervalWithAnchors> = Vec::new();
     for ((genome, strand), mut anchors) in per_path {
@@ -168,53 +153,76 @@ pub(crate) fn chain_anchors(
                 .then(a.target_pos.cmp(&b.target_pos))
         });
         anchors.dedup_by(|a, b| a.query_pos == b.query_pos && a.target_pos == b.target_pos);
+        let n = anchors.len();
 
-        let mut chains: Vec<Chain> = Vec::new();
-        for a in anchors {
-            let a_sig = anchor_signature(a, strand);
-            let mut best: Option<(usize, i64)> = None;
-            for (i, c) in chains.iter().enumerate() {
-                // Chain is always non-empty by construction.
-                let chain_mean: i64 = (c.sig_sum / c.sig_count as i128) as i64;
-                let sig_diff = (a_sig - chain_mean).abs();
-                if sig_diff > sig_tol {
+        let mut best_fwd: Vec<Option<(usize, i64)>> = vec![None; n];
+        let mut best_bwd: Vec<Option<(usize, i64)>> = vec![None; n];
+
+        for i in 0..n {
+            let a = anchors[i];
+            for j in (i + 1)..n {
+                let b = anchors[j];
+                let dq = b.query_pos.saturating_sub(a.query_pos);
+                if dq == 0 {
                     continue;
                 }
-                let pos_diff = a.query_pos.saturating_sub(c.last_query_pos);
-                if pos_diff > positional_cap {
-                    continue;
+                if dq > max_dq {
+                    // Anchors are sorted by query_pos; further j can only
+                    // have larger dq → abort inner loop.
+                    break;
                 }
-                best = match best {
-                    Some((_, bd)) if bd <= sig_diff => best,
-                    _ => Some((i, sig_diff)),
+                let dt_signed: i64 = match strand {
+                    '+' => b.target_pos as i64 - a.target_pos as i64,
+                    '-' => a.target_pos as i64 - b.target_pos as i64,
+                    _ => 0,
                 };
-            }
-            match best {
-                Some((i, _)) => {
-                    let c = &mut chains[i];
-                    c.anchors.push(a);
-                    c.sig_sum += a_sig as i128;
-                    c.sig_count += 1;
-                    c.last_query_pos = a.query_pos;
+                if dt_signed <= 0 {
+                    continue;
                 }
-                None => chains.push(Chain {
-                    anchors: vec![a],
-                    sig_sum: a_sig as i128,
-                    sig_count: 1,
-                    last_query_pos: a.query_pos,
-                }),
+                let dt = dt_signed as u64;
+                if dt > max_dt {
+                    continue;
+                }
+                let sig_diff_abs = (dq as i64 - dt as i64).unsigned_abs();
+                if sig_diff_abs > max_sig_diff {
+                    continue;
+                }
+                let prox = dq.max(dt) as i64;
+                let s = (sig_diff_abs as i64)
+                    .saturating_mul(W_SIG)
+                    .saturating_add(prox);
+                if best_fwd[i].map_or(true, |(_, bs)| s < bs) {
+                    best_fwd[i] = Some((j, s));
+                }
+                if best_bwd[j].map_or(true, |(_, bs)| s < bs) {
+                    best_bwd[j] = Some((i, s));
+                }
             }
         }
 
-        for mut c in chains {
-            c.anchors.sort_by(|a, b| {
-                a.query_pos
-                    .cmp(&b.query_pos)
-                    .then(a.target_pos.cmp(&b.target_pos))
-            });
+        let mut parent: Vec<usize> = (0..n).collect();
+        let mut rank: Vec<u32> = vec![0; n];
+        for i in 0..n {
+            if let Some((j, _)) = best_fwd[i] {
+                if let Some((k, _)) = best_bwd[j] {
+                    if k == i {
+                        uf_union(&mut parent, &mut rank, i, j);
+                    }
+                }
+            }
+        }
+
+        let mut by_root: HashMap<usize, Vec<Anchor>> = HashMap::new();
+        for i in 0..n {
+            let r = uf_find(&mut parent, i);
+            by_root.entry(r).or_default().push(anchors[i]);
+        }
+
+        for (_, mut chain) in by_root {
+            chain.sort_by(|a, b| a.query_pos.cmp(&b.query_pos));
             let mut tmin = u64::MAX;
             let mut tmax = 0u64;
-            for a in &c.anchors {
+            for a in &chain {
                 tmin = tmin.min(a.target_pos);
                 tmax = tmax.max(a.target_pos + syncmer_len);
             }
@@ -223,7 +231,7 @@ pub(crate) fn chain_anchors(
                 start: tmin,
                 end: tmax,
                 strand,
-                anchors: c.anchors,
+                anchors: chain,
             });
         }
     }
@@ -653,15 +661,12 @@ fn dedupe_strand_overlaps(
 }
 
 /// Run one hop of syng-seeded homology query.
-///
-/// `merge_distance` = bedtools `-d`. 0 = overlap-only merge.
 pub fn one_hop(
     syng_index: &SyngIndex,
     query_name: &str,
     query_start: u64,
     query_end: u64,
     padding: u64,
-    merge_distance: u64,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
     one_hop_ext(
@@ -670,16 +675,14 @@ pub fn one_hop(
         query_start,
         query_end,
         padding,
-        merge_distance,
         0,
         DEFAULT_EXTEND_BUDGET_BP,
-        DEFAULT_POSITIONAL_CAP_MULTIPLIER,
         false,
         sequence_index,
     )
 }
 
-/// [`one_hop`] with tunable source-side widening and per-cluster
+/// [`one_hop`] with tunable source-side widening and per-chain
 /// extension budget.
 #[allow(clippy::too_many_arguments)]
 pub fn one_hop_ext(
@@ -688,10 +691,8 @@ pub fn one_hop_ext(
     query_start: u64,
     query_end: u64,
     padding: u64,
-    merge_distance: u64,
     query_extension: u64,
     extend_budget: u64,
-    positional_cap_multiplier: u64,
     emit_cigar: bool,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
@@ -701,27 +702,21 @@ pub fn one_hop_ext(
         query_start,
         query_end,
         padding,
-        merge_distance,
         query_extension,
         extend_budget,
-        positional_cap_multiplier,
         emit_cigar,
         None,
         sequence_index,
     )
 }
 
-/// Core single-hop entry: chain anchors, then ends-only projection
-/// per chain.
+/// Core single-hop entry: chain anchors via mutual-best-buddy, then
+/// ends-only projection per chain.
 ///
-/// Anchors are chained by `chain_anchors` under two caps:
-/// `merge_distance` (diagonal tolerance) and `positional_cap =
-/// positional_cap_multiplier × extend_budget` (query-axis locality).
-/// Each chain produces a single `HomologousInterval` whose forward-
-/// strand `(start, end)` is refined by two ends-free BiWFA calls —
-/// one backward from the first anchor, one forward from the last —
-/// each bounded on the target axis by `extend_budget` and by the
-/// neighbor chain's target edge.
+/// Anchor chaining caps come from the queried range itself — there's
+/// no per-hop tunable beyond the range and `extend_budget`. Each chain
+/// produces one `HomologousInterval` whose forward-strand
+/// `(start, end)` is refined by two small ends-free BiWFA calls.
 #[allow(clippy::too_many_arguments)]
 pub fn one_hop_ext_visited(
     syng_index: &SyngIndex,
@@ -729,10 +724,8 @@ pub fn one_hop_ext_visited(
     query_start: u64,
     query_end: u64,
     padding: u64,
-    merge_distance: u64,
     query_extension: u64,
     extend_budget: u64,
-    positional_cap_multiplier: u64,
     emit_cigar: bool,
     visited_nodes: Option<&mut FxHashSet<u32>>,
     sequence_index: &UnifiedSequenceIndex,
@@ -741,8 +734,8 @@ pub fn one_hop_ext_visited(
         query_name, query_start, query_end, padding, query_extension, visited_nodes,
     )?;
     let syncmer_len = (syng_index.params.w + syng_index.params.k) as u64;
-    let positional_cap = positional_cap_multiplier.saturating_mul(extend_budget);
-    let hits = chain_anchors(hits, merge_distance, positional_cap, syncmer_len);
+    let query_range_len = query_end.saturating_sub(query_start);
+    let hits = chain_anchors(hits, query_range_len, syncmer_len);
     let hits = dedupe_strand_overlaps(hits);
 
     // Fetch the full query bytes ONCE per hop; projection extracts
@@ -840,7 +833,6 @@ pub fn query_transitive(
     query_end: u64,
     padding: u64,
     max_depth: u16,
-    merge_distance: u64,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
     query_transitive_ext(
@@ -850,24 +842,20 @@ pub fn query_transitive(
         query_end,
         padding,
         max_depth,
-        merge_distance,
         0,
         DEFAULT_EXTEND_BUDGET_BP,
-        DEFAULT_POSITIONAL_CAP_MULTIPLIER,
         false,
         sequence_index,
     )
 }
 
-/// [`query_transitive`] with all tunables plumbed through every hop.
+/// [`query_transitive`] with extension tunables plumbed through every hop.
 ///
 /// * `query_extension`: widens syncmer discovery on the source side at
 ///   each frontier step, so BFS can follow conserved blocks whose
 ///   endpoints fall just outside each frontier region.
 /// * `extend_budget`: per-chain bp budget for ends-free target-side
 ///   extension in projection; see [`one_hop_ext_visited`].
-/// * `positional_cap_multiplier`: scales `extend_budget` into the
-///   query-axis locality cap for [`chain_anchors`].
 /// * `emit_cigar`: attach a per-segment CIGAR to each emitted
 ///   `HomologousInterval` (approximate in the interior — exact for
 ///   the two ends-free projection runs).
@@ -879,10 +867,8 @@ pub fn query_transitive_ext(
     query_end: u64,
     padding: u64,
     max_depth: u16,
-    merge_distance: u64,
     query_extension: u64,
     extend_budget: u64,
-    positional_cap_multiplier: u64,
     emit_cigar: bool,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
@@ -913,10 +899,8 @@ pub fn query_transitive_ext(
                 *q_start,
                 *q_end,
                 padding,
-                merge_distance,
                 hop_extension,
                 extend_budget,
-                positional_cap_multiplier,
                 emit_cigar,
                 Some(&mut visited_nodes),
                 sequence_index,
@@ -1077,7 +1061,7 @@ mod tests {
 
     #[test]
     fn chain_anchors_empty_and_single() {
-        assert!(chain_anchors(Vec::new(), 1000, 4000, TEST_SYNCMER_LEN).is_empty());
+        assert!(chain_anchors(Vec::new(), 5_000, TEST_SYNCMER_LEN).is_empty());
         let hits = vec![HomologousIntervalWithAnchors {
             genome: "g".into(),
             start: 0,
@@ -1085,68 +1069,106 @@ mod tests {
             strand: '+',
             anchors: vec![mk_anchor(10, 10)],
         }];
-        let out = chain_anchors(hits, 1000, 4000, TEST_SYNCMER_LEN);
+        let out = chain_anchors(hits, 5_000, TEST_SYNCMER_LEN);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].anchors.len(), 1);
     }
 
     #[test]
-    fn chain_anchors_joins_matching_diagonal_within_positional_cap() {
-        // Colinear anchors (sig=0) spaced 50 bp apart → one chain.
-        let hits = vec![
-            HomologousIntervalWithAnchors {
-                genome: "g".into(),
-                start: 0, end: 100, strand: '+',
-                anchors: vec![mk_anchor(0, 0), mk_anchor(50, 50)],
-            },
-            HomologousIntervalWithAnchors {
-                genome: "g".into(),
-                start: 200, end: 300, strand: '+',
-                anchors: vec![mk_anchor(200, 200), mk_anchor(250, 250)],
-            },
-        ];
-        let out = chain_anchors(hits, 150, 4000, TEST_SYNCMER_LEN);
+    fn chain_anchors_colinear_forms_one_chain() {
+        // Four anchors on the primary diagonal within the queried range:
+        // mutual-best links pair (i, i+1) for every i.
+        let hits = vec![HomologousIntervalWithAnchors {
+            genome: "g".into(),
+            start: 0,
+            end: 500,
+            strand: '+',
+            anchors: vec![
+                mk_anchor(0, 0),
+                mk_anchor(50, 50),
+                mk_anchor(100, 100),
+                mk_anchor(150, 150),
+            ],
+        }];
+        let out = chain_anchors(hits, 500, TEST_SYNCMER_LEN);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].anchors.len(), 4);
     }
 
     #[test]
-    fn chain_anchors_splits_when_positional_cap_exceeded() {
-        // Two anchor clusters on the SAME diagonal (sig=0) but 10 kb
-        // apart on the query axis. positional_cap=4000 → they must
-        // split into two chains even though the signatures match
-        // perfectly. This is the test for the "same-diagonal, far-
-        // apart" pathology.
+    fn chain_anchors_range_constraint_rejects_out_of_range_pair() {
+        // Two anchors on the same diagonal but 10 kb apart on query
+        // axis. query_range_len = 1000 < 10_000 → no edge can form;
+        // each anchor is its own singleton chain.
         let hits = vec![HomologousIntervalWithAnchors {
             genome: "g".into(),
-            start: 0, end: 20_000, strand: '+',
-            anchors: vec![
-                mk_anchor(0, 0),
-                mk_anchor(100, 100),
-                mk_anchor(10_000, 10_000),
-                mk_anchor(10_100, 10_100),
-            ],
+            start: 0,
+            end: 20_000,
+            strand: '+',
+            anchors: vec![mk_anchor(0, 0), mk_anchor(10_000, 10_000)],
         }];
-        let out = chain_anchors(hits, 1000, 4000, TEST_SYNCMER_LEN);
+        let out = chain_anchors(hits, 1_000, TEST_SYNCMER_LEN);
         assert_eq!(out.len(), 2);
     }
 
     #[test]
-    fn chain_anchors_splits_when_signature_gap_exceeds_merge_distance() {
-        // Two anchor clusters in the same query locality but on
-        // different diagonals (sig=1000 vs sig=7275).
+    fn chain_anchors_mutual_best_rejects_non_colinear_triangle() {
+        // Three anchors: (0, 0) [sig 0], (100, 100) [sig 0], (100, 500)
+        // [sig 400]. (0,0)'s best forward buddy is (100, 100) — same
+        // diagonal. (100, 100) and (100, 500) have dq=0 → invalid.
+        // (0, 0)'s forward options: (100, 100) on sig 0, (100, 500) on
+        // sig 400. Mutual-best picks (100, 100). The off-diagonal
+        // anchor (100, 500) is a singleton.
         let hits = vec![HomologousIntervalWithAnchors {
             genome: "g".into(),
-            start: 0, end: 20_000, strand: '+',
+            start: 0,
+            end: 1000,
+            strand: '+',
             anchors: vec![
-                Anchor { query_pos: 100, target_pos: 1100, node_id: 1 },
-                Anchor { query_pos: 200, target_pos: 1200, node_id: 2 },
-                Anchor { query_pos: 300, target_pos: 7575, node_id: 3 },
-                Anchor { query_pos: 400, target_pos: 7675, node_id: 4 },
+                mk_anchor(0, 0),
+                mk_anchor(100, 100),
+                mk_anchor(100, 500),
             ],
         }];
-        let out = chain_anchors(hits, 3000, 4000, TEST_SYNCMER_LEN);
+        let out = chain_anchors(hits, 1000, TEST_SYNCMER_LEN);
+        // One chain of 2 (the colinear pair) + one singleton (the
+        // off-diagonal anchor).
         assert_eq!(out.len(), 2);
+        let with_two = out.iter().find(|iv| iv.anchors.len() == 2).unwrap();
+        assert_eq!(with_two.anchors[0].query_pos, 0);
+        assert_eq!(with_two.anchors[1].query_pos, 100);
+    }
+
+    #[test]
+    fn chain_anchors_tandem_emits_parallel_chains() {
+        // 3 query copies × 3 target copies at period 100. Mutual-best
+        // pairs same-copy anchors on each of 5 diagonals (shift
+        // -2, -1, 0, +1, +2). Primary diagonal (shift 0): three
+        // anchors forming a chain of length 3. Off-diagonals have
+        // fewer anchors and form shorter chains or singletons.
+        let mut anchors = Vec::new();
+        for qi in 0..3u64 {
+            for tj in 0..3u64 {
+                anchors.push(Anchor {
+                    query_pos: qi * 100,
+                    target_pos: 1000 + tj * 100,
+                    node_id: 1,
+                });
+            }
+        }
+        let hits = vec![HomologousIntervalWithAnchors {
+            genome: "g".into(),
+            start: 1000,
+            end: 1300,
+            strand: '+',
+            anchors,
+        }];
+        let out = chain_anchors(hits, 500, TEST_SYNCMER_LEN);
+        // Three diagonals (shift -1, 0, +1) have ≥2 anchors and pair up.
+        // Others are singletons. Exact count depends on tiebreak but
+        // there should be at least one chain with 3 anchors (primary).
+        let max_len = out.iter().map(|iv| iv.anchors.len()).max().unwrap();
+        assert_eq!(max_len, 3);
     }
 
     #[test]
@@ -1164,31 +1186,8 @@ mod tests {
                 anchors: vec![mk_anchor(50, 150)],
             },
         ];
-        let out = chain_anchors(hits, 10_000, 10_000, TEST_SYNCMER_LEN);
+        let out = chain_anchors(hits, 10_000, TEST_SYNCMER_LEN);
         assert_eq!(out.len(), 2);
-    }
-
-    #[test]
-    fn chain_anchors_most_similar_diagonal_tiebreak() {
-        // Three anchors: two on sig=1000, one on sig=1100. All within
-        // positional cap. With merge_distance=200, the third could
-        // join either chain — but "most similar" picks the sig=1000
-        // chain if it's closer. Here we set up so the tiebreak is
-        // clear.
-        let hits = vec![HomologousIntervalWithAnchors {
-            genome: "g".into(),
-            start: 0, end: 2000, strand: '+',
-            anchors: vec![
-                Anchor { query_pos: 100, target_pos: 1100, node_id: 1 },
-                Anchor { query_pos: 200, target_pos: 1200, node_id: 2 },
-                Anchor { query_pos: 300, target_pos: 1400, node_id: 3 },
-            ],
-        }];
-        let out = chain_anchors(hits, 200, 4000, TEST_SYNCMER_LEN);
-        // All three match diagonal within ±200 of sig=1000; positional
-        // cap permits. Result: one chain.
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].anchors.len(), 3);
     }
 
     fn mk_hit(genome: &str, start: u64, end: u64, strand: char, n_anchors: usize) -> HomologousIntervalWithAnchors {
