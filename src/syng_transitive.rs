@@ -200,13 +200,40 @@ pub(crate) fn chain_anchors(
             }
         }
 
+        // Per-root target-axis span tracking. The per-edge `dt ≤ range`
+        // constraint only bounds individual hops; without a chain-total
+        // bound, a 5-hop chain at 3 kb/hop assembles a 15 kb span on a
+        // 5 kb query. Reject unions whose combined target span would
+        // exceed `range × SPAN_SLOP`.
+        const SPAN_SLOP_NUM: u64 = 2;
+        const SPAN_SLOP_DEN: u64 = 1;
+        let max_chain_span = query_range_len
+            .saturating_mul(SPAN_SLOP_NUM)
+            .saturating_div(SPAN_SLOP_DEN)
+            .max(query_range_len);
         let mut parent: Vec<usize> = (0..n).collect();
         let mut rank: Vec<u32> = vec![0; n];
+        let mut span_lo: Vec<u64> = anchors.iter().map(|a| a.target_pos).collect();
+        let mut span_hi: Vec<u64> = anchors
+            .iter()
+            .map(|a| a.target_pos + syncmer_len)
+            .collect();
         for i in 0..n {
             if let Some((j, _)) = best_fwd[i] {
                 if let Some((k, _)) = best_bwd[j] {
                     if k == i {
-                        uf_union(&mut parent, &mut rank, i, j);
+                        let ri = uf_find(&mut parent, i);
+                        let rj = uf_find(&mut parent, j);
+                        if ri != rj {
+                            let lo = span_lo[ri].min(span_lo[rj]);
+                            let hi = span_hi[ri].max(span_hi[rj]);
+                            if hi.saturating_sub(lo) <= max_chain_span {
+                                uf_union(&mut parent, &mut rank, i, j);
+                                let r = uf_find(&mut parent, i);
+                                span_lo[r] = lo;
+                                span_hi[r] = hi;
+                            }
+                        }
                     }
                 }
             }
@@ -218,6 +245,7 @@ pub(crate) fn chain_anchors(
             by_root.entry(r).or_default().push(anchors[i]);
         }
 
+        let mut raw_chains: Vec<(u64, u64, Vec<Anchor>)> = Vec::new();
         for (_, mut chain) in by_root {
             chain.sort_by(|a, b| a.query_pos.cmp(&b.query_pos));
             let mut tmin = u64::MAX;
@@ -226,6 +254,68 @@ pub(crate) fn chain_anchors(
                 tmin = tmin.min(a.target_pos);
                 tmax = tmax.max(a.target_pos + syncmer_len);
             }
+            raw_chains.push((tmin, tmax, chain));
+        }
+
+        // Post-merge pass: two chains on the same (genome, strand) that
+        // are (a) adjacent on both axes with small bilateral gaps and
+        // (b) colinear (gaps on query and target match within
+        // tolerance) belong together. Best-buddy can fragment an
+        // otherwise-clean chain when local anchor density creates an
+        // edge where A's best forward ≠ B's best backward; this pass
+        // heals those cuts.
+        let merge_gap_cap: u64 = (query_range_len / 20).max(128);
+        // Sort by target_start for + strand, target_end for - strand —
+        // within a colinear chain, consecutive anchors have increasing
+        // target_pos on +, decreasing on -. Either sort yields
+        // physically adjacent chains for bilateral-gap checks.
+        raw_chains.sort_by_key(|c| c.0);
+        let mut merged_chains: Vec<(u64, u64, Vec<Anchor>)> = Vec::new();
+        for (cs, ce, canchors) in raw_chains {
+            if let Some(last) = merged_chains.last_mut() {
+                // Query-axis bounds per chain
+                let last_q_hi = last.2.last().map(|a| a.query_pos).unwrap_or(0);
+                let cur_q_lo = canchors.first().map(|a| a.query_pos).unwrap_or(0);
+                let last_q_lo = last.2.first().map(|a| a.query_pos).unwrap_or(0);
+                let cur_q_hi = canchors.last().map(|a| a.query_pos).unwrap_or(0);
+                let (q_gap, t_gap): (i64, i64) = match strand {
+                    '+' => (
+                        cur_q_lo as i64 - last_q_hi as i64,
+                        cs as i64 - last.1 as i64,
+                    ),
+                    '-' => {
+                        // Sort by target_start asc puts "later-on-query"
+                        // chains FIRST on '-' (target decreasing with
+                        // query). Use that: cur is upstream of last on
+                        // query, so q_gap measured from cur_q_hi to
+                        // last_q_lo.
+                        (
+                            last_q_lo as i64 - cur_q_hi as i64,
+                            cs as i64 - last.1 as i64,
+                        )
+                    }
+                    _ => (i64::MAX, i64::MAX),
+                };
+                let colinear =
+                    (q_gap - t_gap).unsigned_abs() <= merge_gap_cap
+                        && q_gap.unsigned_abs() <= merge_gap_cap
+                        && t_gap.unsigned_abs() <= merge_gap_cap
+                        && q_gap >= -(merge_gap_cap as i64)
+                        && t_gap >= -(merge_gap_cap as i64);
+                // Also enforce the chain-total span cap on the merge.
+                let merged_span = ce.max(last.1).saturating_sub(cs.min(last.0));
+                if colinear && merged_span <= max_chain_span {
+                    last.0 = last.0.min(cs);
+                    last.1 = last.1.max(ce);
+                    last.2.extend(canchors);
+                    last.2.sort_by(|a, b| a.query_pos.cmp(&b.query_pos));
+                    continue;
+                }
+            }
+            merged_chains.push((cs, ce, canchors));
+        }
+
+        for (tmin, tmax, chain) in merged_chains {
             out.push(HomologousIntervalWithAnchors {
                 genome: genome.clone(),
                 start: tmin,
