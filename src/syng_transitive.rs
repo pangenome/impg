@@ -138,9 +138,15 @@ pub(crate) fn chain_anchors(
     }
 
     const W_SIG: i64 = 1_000_000;
+    // Absolute hop caps from the queried range. TE/MEI insertions
+    // legitimately produce target:query ratios of 2-3×, so dt can
+    // exceed query_range_len; bound it loosely (3×) rather than tightly.
     let max_dq = query_range_len;
-    let max_dt = query_range_len;
-    let max_sig_diff = query_range_len;
+    let max_dt = query_range_len.saturating_mul(3);
+    // Drift ceiling is also generous — allow up to the full range.
+    // The W_SIG-weighted scoring still *prefers* colinear pairs;
+    // rejecting would block real insertion evidence.
+    let sig_diff_abs_ceiling = query_range_len.saturating_mul(3);
 
     let mut out: Vec<HomologousIntervalWithAnchors> = Vec::new();
     for ((genome, strand), mut anchors) in per_path {
@@ -184,7 +190,7 @@ pub(crate) fn chain_anchors(
                     continue;
                 }
                 let sig_diff_abs = (dq as i64 - dt as i64).unsigned_abs();
-                if sig_diff_abs > max_sig_diff {
+                if sig_diff_abs > sig_diff_abs_ceiling {
                     continue;
                 }
                 let prox = dq.max(dt) as i64;
@@ -200,12 +206,12 @@ pub(crate) fn chain_anchors(
             }
         }
 
-        // Per-root target-axis span tracking. The per-edge `dt ≤ range`
-        // constraint only bounds individual hops; without a chain-total
-        // bound, a 5-hop chain at 3 kb/hop assembles a 15 kb span on a
-        // 5 kb query. Reject unions whose combined target span would
-        // exceed `range × SPAN_SLOP`.
-        const SPAN_SLOP_NUM: u64 = 2;
+        // Per-root target-axis span tracking. Permissive cap (3×
+        // range) admits real TE/MEI insertions that legitimately
+        // stretch target:query to 2–3×. Within that envelope, the
+        // W_SIG-weighted scoring biases best-buddy toward colinear
+        // (shorter-span) partners when both options exist.
+        const SPAN_SLOP_NUM: u64 = 3;
         const SPAN_SLOP_DEN: u64 = 1;
         let max_chain_span = query_range_len
             .saturating_mul(SPAN_SLOP_NUM)
