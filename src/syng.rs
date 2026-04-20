@@ -12,28 +12,6 @@ use crate::fast_locate::FastLocate;
 use crate::syng_ffi;
 use simple_sds::serialize::Serialize as SdsSerialize;
 
-/// Maximum anchors (query-side occurrences of one syncmer node) realized
-/// per emitted `HomologousIntervalWithAnchors`.
-///
-/// For a query with `K` occurrences of some syncmer and `V` total target
-/// visits of that syncmer, the naive cross-product emits `K × V` anchors
-/// per node — which on pathological repeats (centromeric / telomeric /
-/// Ty-class syncmers) can sum to tens of GB across all nodes, OOM-killing
-/// a single query before clustering has a chance to reduce anything.
-///
-/// We cap `K` at this constant per interval. The cap is a pure
-/// summarization: the node is still emitted for every one of its `V`
-/// target visits (structure preserved), and every cluster still sees
-/// representative anchors. Downstream consumers use:
-///   - the *median* anchor signature for signature clustering (stable
-///     under any non-degenerate sample of anchors from a collinear
-///     cluster),
-///   - the *leftmost* and *rightmost* anchor `query_pos` for linear
-///     projection and sub-query windowing,
-/// both of which are well-approximated by the first 32 query positions
-/// encountered in the input's deterministic order.
-const MAX_ANCHORS_PER_INTERVAL: usize = 32;
-
 /// Sidecar table mapping `(forward_path_idx, forward_node_idx)` → `bp_pos`.
 ///
 /// FastLocate returns visits as `(gbz_seq_id, seq_offset_from_end)`. Since
@@ -325,12 +303,17 @@ impl Default for SyngNameMap {
 }
 
 /// A genomic interval on another genome that is homologous to the query region.
+///
+/// `cigar` is populated only when `SyngQueryOpts::emit_cigar` is set; byte
+/// alphabet is WFA2 convention (`M`, `=`, `X`, `I`, `D`). Empty for
+/// ends-only projections.
 #[derive(Debug, Clone)]
 pub struct HomologousInterval {
     pub genome: String,
     pub start: u64,
     pub end: u64,
     pub strand: char,
+    pub cigar: Option<Vec<u8>>,
 }
 
 /// A shared syncmer node between the query path and a target path.
@@ -937,6 +920,7 @@ impl SyngIndex {
                 start: h.start,
                 end: h.end,
                 strand: h.strand,
+                cigar: None,
             })
             .collect())
     }
@@ -1116,37 +1100,20 @@ impl SyngIndex {
                         let padded_end = (hit_end + padding).min(genome_len);
                         // Partition this visit's anchors by strand based on
                         // whether each query occurrence's orientation matches
-                        // the target-side orientation we queried.
-                        //
-                        // A repetitive syncmer with many query occurrences
-                        // (K) and many target visits (V) would otherwise
-                        // materialize K × V anchor structs per node. On
-                        // repeat-rich tiles this can add up to tens of GB
-                        // of RSS before clustering even runs. Cap K per
-                        // interval at `MAX_ANCHORS_PER_INTERVAL`; the first
-                        // N query positions are sufficient for the
-                        // downstream consumers (signature clustering uses
-                        // the median anchor signature; projection uses
-                        // leftmost/rightmost by query_pos). We don't drop
-                        // the node or any of its target visits — every V
-                        // interval is still emitted, just with a bounded
-                        // anchor summary.
+                        // the target-side orientation we queried. All K query
+                        // occurrences × V target visits are materialized —
+                        // memory is bounded by clustering's positional-cap
+                        // downstream, not by a K-cap here.
                         let mut fwd_anchors: Vec<Anchor> = Vec::new();
                         let mut rev_anchors: Vec<Anchor> = Vec::new();
                         for &(qp, q_orient) in query_positions {
                             if q_orient == t_orient {
-                                if fwd_anchors.len() >= MAX_ANCHORS_PER_INTERVAL {
-                                    continue;
-                                }
                                 fwd_anchors.push(Anchor {
                                     query_pos: qp,
                                     target_pos,
                                     node_id: query_node,
                                 });
                             } else {
-                                if rev_anchors.len() >= MAX_ANCHORS_PER_INTERVAL {
-                                    continue;
-                                }
                                 rev_anchors.push(Anchor {
                                     query_pos: qp,
                                     target_pos,
@@ -1214,21 +1181,14 @@ impl SyngIndex {
                         let padded_end = (hit_end + padding).min(genome_len);
                         let mut fwd_anchors: Vec<Anchor> = Vec::new();
                         let mut rev_anchors: Vec<Anchor> = Vec::new();
-                        // Same K-cap as the fast path — see comment above.
                         for &(qp, q_orient) in query_positions {
                             if q_orient == t_orient {
-                                if fwd_anchors.len() >= MAX_ANCHORS_PER_INTERVAL {
-                                    continue;
-                                }
                                 fwd_anchors.push(Anchor {
                                     query_pos: qp,
                                     target_pos,
                                     node_id: abs_node,
                                 });
                             } else {
-                                if rev_anchors.len() >= MAX_ANCHORS_PER_INTERVAL {
-                                    continue;
-                                }
                                 rev_anchors.push(Anchor {
                                     query_pos: qp,
                                     target_pos,

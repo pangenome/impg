@@ -1045,6 +1045,28 @@ enum Args {
         #[clap(long, value_parser, default_value_t = 1_000)]
         syng_extend_budget: u64,
 
+        /// Positional-cap multiplier for syng anchor clustering.
+        /// `positional_cap = multiplier × --syng-extend-budget`. Two
+        /// anchors assign to the same chain only if they are within
+        /// `merge_distance` in signature AND within `positional_cap` bp
+        /// on the query axis. Kills the "same-diagonal, far-apart"
+        /// pathology of pure diagonal clustering. Raise to permit
+        /// longer same-diagonal chains; lower to force more chain
+        /// breaks in dense repeats.
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, value_parser, default_value_t = 4)]
+        syng_positional_cap_multiplier: u64,
+
+        /// Emit a full CIGAR per syng segment by aggregating interior
+        /// anchor-gap BiWFA alignments + the two end-projection CIGARs.
+        /// Off by default (ends-only projection sufficient for
+        /// coordinate output). Enable to cross-check ends-only
+        /// projections against full alignment, or to pass alignments
+        /// forward to graph construction.
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, default_value_t = false)]
+        syng_emit_cigar: bool,
+
         /// Debug-only: skip boundary realignment and emit raw syncmer-resolution
         /// intervals from syng's query_region. The default --syng path runs
         /// BiWFA boundary realignment for base-pair-precise edges (and iterates
@@ -1615,6 +1637,8 @@ fn run() -> io::Result<()> {
             syng_padding,
             syng_extension,
             syng_extend_budget,
+            syng_positional_cap_multiplier,
+            syng_emit_cigar,
             syng_raw,
             query,
             output_format,
@@ -1787,6 +1811,8 @@ fn run() -> io::Result<()> {
                                     syng_merge_distance,
                                     syng_extension,
                                     syng_extend_budget,
+                                    syng_positional_cap_multiplier,
+                                    syng_emit_cigar,
                                     sequence_index.as_ref().unwrap(),
                                 )?
                             } else {
@@ -1835,6 +1861,8 @@ fn run() -> io::Result<()> {
                                             syng_merge_distance,
                                     syng_extension,
                                             syng_extend_budget,
+                                            syng_positional_cap_multiplier,
+                                            syng_emit_cigar,
                                             sequence_index.as_ref().unwrap(),
                                         )?
                                     } else {
@@ -1893,6 +1921,8 @@ fn run() -> io::Result<()> {
                                         syng_merge_distance,
                                     syng_extension,
                                         syng_extend_budget,
+                                        syng_positional_cap_multiplier,
+                                        syng_emit_cigar,
                                         sequence_index.as_ref().unwrap(),
                                     )?
                                 } else {
@@ -1942,6 +1972,8 @@ fn run() -> io::Result<()> {
                                     syng_merge_distance,
                                     syng_extension,
                                     syng_extend_budget,
+                                    syng_positional_cap_multiplier,
+                                    syng_emit_cigar,
                                     seq_idx,
                                 )?
                             } else {
@@ -1974,6 +2006,8 @@ fn run() -> io::Result<()> {
                                     syng_merge_distance,
                                     syng_extension,
                                     syng_extend_budget,
+                                    syng_positional_cap_multiplier,
+                                    syng_emit_cigar,
                                     seq_idx,
                                 )?
                             } else {

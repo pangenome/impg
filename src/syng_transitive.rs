@@ -1,25 +1,27 @@
-//! Syng-seeded homology query with per-homolog pairwise refinement.
+//! Syng-seeded homology query with ends-only projection refinement.
 //!
 //! Pipeline per hop:
 //!   1. `query_region_with_anchors` — syng returns padded syncmer-
 //!      resolution intervals per (target, strand), with anchor positions.
-//!   2. `cluster_by_signature` — group hits into homology blocks by
-//!      co-linearity signature (`target_pos − query_pos` on `+`, the
-//!      sum on `-`). Each block is one colinear chain; paralog copies
-//!      and insertions that shift signatures by > `merge_distance`
-//!      fall into separate clusters.
-//!   3. `dedupe_strand_overlaps` — per path, overlapping +/- intervals
+//!      No K-cap on anchor collection; chain-level positional cap
+//!      bounds memory downstream.
+//!   2. `chain_anchors` — flatten per-visit anchors to per-(target,
+//!      strand) anchor lists; greedy most-similar-diagonal assignment
+//!      with both a signature tolerance (`merge_distance`) and a
+//!      query-axis positional cap (`positional_cap_multiplier ×
+//!      extend_budget`). Defeats the "same-diagonal-far-apart"
+//!      pathology of pure diagonal clustering.
+//!   3. `dedupe_strand_overlaps` — per path, overlapping +/- chains
 //!      resolved by majority anchor count.
-//!   4. `refine_homolog_by_alignment` — per merged homolog, BiWFA
-//!      EndsFree between query bytes and a generously-padded target
-//!      window; the CIGAR projects qs/qe onto target forward strand
-//!      with bp precision. Linear-projection fallback when sequence
-//!      fetch or alignment fails / scores too low.
+//!   4. `refine_ends_only` — per chain, two ends-free BiWFA calls:
+//!      backward from the first anchor to the query region start, and
+//!      forward from the last anchor to the query region end. Each is
+//!      bounded by `extend_budget` on the target axis and by the
+//!      neighbor chain's target edge. The interior is trusted (every
+//!      interior anchor is a syncmer match); we do not align through
+//!      it unless `--syng-emit-cigar` is set (approximate M-fill
+//!      across the interior; interior gap-BiWFA is a follow-up).
 //!   5. Multihop outer loop.
-//!
-//! See `notes/SYNG_OPTION3_PAIRWISE_REFINE.md` for the design rationale:
-//! why anchor-only refinement was insufficient on RC homology, and how
-//! per-homolog alignment restores PAF-quality boundary precision.
 
 use std::cell::RefCell;
 use std::io;
@@ -31,6 +33,13 @@ use rustc_hash::FxHashSet;
 use crate::graph::reverse_complement;
 use crate::sequence_index::{SequenceIndex as _, UnifiedSequenceIndex};
 use crate::syng::{Anchor, HomologousInterval, HomologousIntervalWithAnchors, SyngIndex};
+
+/// Default multiplier applied to `extend_budget` to obtain the query-axis
+/// positional cap used in `chain_anchors`. Two anchors cluster into the
+/// same chain only if they are within `merge_distance` in signature AND
+/// within `positional_cap = multiplier × extend_budget` bp on the query
+/// axis.
+pub const DEFAULT_POSITIONAL_CAP_MULTIPLIER: u64 = 4;
 
 /// Minimum fraction of query bases that must align at 'M'/'=' ops for
 /// the refined homolog to be accepted. Below this, the "homolog" is
@@ -87,118 +96,138 @@ fn anchor_signature(a: Anchor, strand: char) -> i64 {
     }
 }
 
-fn interval_signature(iv: &HomologousIntervalWithAnchors) -> Option<i64> {
-    if iv.anchors.is_empty() {
-        return None;
-    }
-    let mut sigs: Vec<i64> = iv.anchors.iter().map(|&a| anchor_signature(a, iv.strand)).collect();
-    sigs.sort();
-    Some(sigs[sigs.len() / 2])
-}
-
-/// Signature-space clustering of anchored syncmer hits into homology
-/// blocks.
+/// Greedy per-anchor chaining with most-similar-diagonal assignment
+/// and a query-axis positional cap.
 ///
-/// Each hit carries a co-linearity signature (see [`anchor_signature`]):
+/// Flattens all per-visit hits' anchors into per-(target, strand)
+/// anchor lists, sorts each list by `query_pos`, and walks. For each
+/// anchor `A`, candidate chains are those where:
 ///
-/// * `'+'` strand: `signature = target_pos − query_pos`
-/// * `'-'` strand: `signature = target_pos + query_pos`
+/// * `|anchor_signature(A) − running_mean_sig(chain)| ≤ merge_distance`
+///   (diagonal tolerance — absorbs small-indel drift)
+/// * `A.query_pos − chain.last_anchor.query_pos ≤ positional_cap`
+///   (locality — prevents two anchors on the "same virtual diagonal"
+///   but far apart in genomic coordinates from collapsing into one
+///   chain; that's the paralog-across-chromosome pathology of pure
+///   signature clustering.)
 ///
-/// Along a single colinear homology the signature is invariant modulo
-/// the local indel burden. Paralog copies of the same sequence appear
-/// at structurally different signatures — a tandem array at period P
-/// has copies whose signatures differ by P; two paralogs elsewhere on
-/// the same chromosome have signatures that differ by the paralog
-/// offset. That's the right physical basis for block identity.
+/// If no candidate qualifies, a new chain starts with `A`. If multiple
+/// qualify, the chain with the **most similar** running mean signature
+/// wins — this keeps the correct repeat copy when several copies
+/// overlap on the query axis.
 ///
-/// Algorithm: group by `(genome, strand)`, sort by signature, walk the
-/// sorted list and start a new cluster whenever the signature gap
-/// between consecutive hits exceeds `merge_distance`. Each cluster
-/// becomes one `HomologousIntervalWithAnchors` spanning the union of
-/// its members' target bounds and carrying the union of their anchors.
-///
-/// `merge_distance` is the user's `-d` / `--merge-distance` flowing
-/// through unchanged. It's a single knob with a clean physical meaning:
-/// the maximum signature excursion tolerated within one block. Typical
-/// within-block jitter from small indels is tens of bp; paralog
-/// separations are kb-scale on yeast; so `-d` up to ~1 kb reliably
-/// merges within-homology chains without collapsing paralog copies.
-pub(crate) fn cluster_by_signature(
+/// Each emitted `HomologousIntervalWithAnchors` represents one chain
+/// with `(start, end)` set to the anchor-supported target span
+/// `[min(target_pos), max(target_pos) + syncmer_len]`.
+pub(crate) fn chain_anchors(
     hits: Vec<HomologousIntervalWithAnchors>,
     merge_distance: u64,
+    positional_cap: u64,
+    syncmer_len: u64,
 ) -> Vec<HomologousIntervalWithAnchors> {
-    if hits.len() <= 1 || merge_distance == 0 {
+    if hits.is_empty() {
         return hits;
     }
-    let tol = merge_distance as i64;
+    // `merge_distance = 0` is the CLI default and carries the classical
+    // bedtools "overlap-only" semantics: don't *gate* chaining on
+    // signature, just rely on the positional cap. Under that setting
+    // every anchor on the same (target, strand) within `positional_cap`
+    // joins one chain, independent of diagonal drift — which is what
+    // users get when they don't pass `-d` explicitly. Positive values
+    // apply signature tolerance in the natural way.
+    let sig_tol: i64 = if merge_distance == 0 {
+        i64::MAX
+    } else {
+        merge_distance as i64
+    };
 
-    // Partition into (genome, strand) buckets; within each, sort by
-    // signature and walk — clustering in one pass per path/strand.
     use std::collections::HashMap;
-    let mut buckets: HashMap<(String, char), Vec<HomologousIntervalWithAnchors>> = HashMap::new();
+    let mut per_path: HashMap<(String, char), Vec<Anchor>> = HashMap::new();
     for h in hits {
-        buckets
+        per_path
             .entry((h.genome.clone(), h.strand))
             .or_default()
-            .push(h);
+            .extend(h.anchors.into_iter());
+    }
+
+    struct Chain {
+        anchors: Vec<Anchor>,
+        sig_sum: i128,
+        sig_count: i64,
+        last_query_pos: u64,
     }
 
     let mut out: Vec<HomologousIntervalWithAnchors> = Vec::new();
-    for ((genome, strand), mut group) in buckets {
-        // Hits with no anchors have no signature and can't be clustered;
-        // pass them through unchanged.
-        group.sort_by_key(|h| interval_signature(h).unwrap_or(i64::MIN));
+    for ((genome, strand), mut anchors) in per_path {
+        if anchors.is_empty() {
+            continue;
+        }
+        anchors.sort_by(|a, b| {
+            a.query_pos
+                .cmp(&b.query_pos)
+                .then(a.target_pos.cmp(&b.target_pos))
+        });
+        anchors.dedup_by(|a, b| a.query_pos == b.query_pos && a.target_pos == b.target_pos);
 
-        let mut cur: Option<HomologousIntervalWithAnchors> = None;
-        let mut cur_sig: Option<i64> = None;
-        for mut iv in group {
-            let iv_sig = interval_signature(&iv);
-            let start_new = match (cur_sig, iv_sig) {
-                (Some(cs), Some(is)) => (is - cs).abs() > tol,
-                // Never collapse across the "no-signature" boundary.
-                _ => cur.is_some(),
-            };
-            if start_new {
-                if let Some(mut done) = cur.take() {
-                    finalize_cluster_anchors(&mut done);
-                    out.push(done);
+        let mut chains: Vec<Chain> = Vec::new();
+        for a in anchors {
+            let a_sig = anchor_signature(a, strand);
+            let mut best: Option<(usize, i64)> = None;
+            for (i, c) in chains.iter().enumerate() {
+                // Chain is always non-empty by construction.
+                let chain_mean: i64 = (c.sig_sum / c.sig_count as i128) as i64;
+                let sig_diff = (a_sig - chain_mean).abs();
+                if sig_diff > sig_tol {
+                    continue;
                 }
+                let pos_diff = a.query_pos.saturating_sub(c.last_query_pos);
+                if pos_diff > positional_cap {
+                    continue;
+                }
+                best = match best {
+                    Some((_, bd)) if bd <= sig_diff => best,
+                    _ => Some((i, sig_diff)),
+                };
             }
-            match cur.as_mut() {
-                Some(accum) => {
-                    accum.end = accum.end.max(iv.end);
-                    accum.start = accum.start.min(iv.start);
-                    accum.anchors.append(&mut iv.anchors);
-                    cur_sig = interval_signature(accum);
+            match best {
+                Some((i, _)) => {
+                    let c = &mut chains[i];
+                    c.anchors.push(a);
+                    c.sig_sum += a_sig as i128;
+                    c.sig_count += 1;
+                    c.last_query_pos = a.query_pos;
                 }
-                None => {
-                    cur = Some(HomologousIntervalWithAnchors {
-                        genome: genome.clone(),
-                        start: iv.start,
-                        end: iv.end,
-                        strand,
-                        anchors: std::mem::take(&mut iv.anchors),
-                    });
-                    cur_sig = iv_sig;
-                }
+                None => chains.push(Chain {
+                    anchors: vec![a],
+                    sig_sum: a_sig as i128,
+                    sig_count: 1,
+                    last_query_pos: a.query_pos,
+                }),
             }
         }
-        if let Some(mut done) = cur.take() {
-            finalize_cluster_anchors(&mut done);
-            out.push(done);
+
+        for mut c in chains {
+            c.anchors.sort_by(|a, b| {
+                a.query_pos
+                    .cmp(&b.query_pos)
+                    .then(a.target_pos.cmp(&b.target_pos))
+            });
+            let mut tmin = u64::MAX;
+            let mut tmax = 0u64;
+            for a in &c.anchors {
+                tmin = tmin.min(a.target_pos);
+                tmax = tmax.max(a.target_pos + syncmer_len);
+            }
+            out.push(HomologousIntervalWithAnchors {
+                genome: genome.clone(),
+                start: tmin,
+                end: tmax,
+                strand,
+                anchors: c.anchors,
+            });
         }
     }
     out
-}
-
-/// Sort anchors within a finished cluster by `(query_pos, target_pos)`
-/// and drop exact duplicates. Keeps projection fast and leaves the
-/// signature-stable invariant intact.
-fn finalize_cluster_anchors(iv: &mut HomologousIntervalWithAnchors) {
-    iv.anchors
-        .sort_by(|a, b| a.query_pos.cmp(&b.query_pos).then(a.target_pos.cmp(&b.target_pos)));
-    iv.anchors
-        .dedup_by(|a, b| a.query_pos == b.query_pos && a.target_pos == b.target_pos);
 }
 
 /// Linear projection from an anchor to a query position — coordinate
@@ -265,33 +294,121 @@ fn refine_by_linear_projection(
     (start.max(homolog.start), end.min(homolog.end))
 }
 
-/// BiWFA-align one cluster's anchor-extended sub-query against its
-/// anchor-extended target window. Returns refined forward-strand
-/// target bounds, or None on fetch / alignment failure or below-
-/// threshold identity.
+/// Align one end of a chain with a pinned sub-query and one-sided
+/// ends-free target. Returns `(skip_outer_bp, cigar)` on success.
 ///
-/// Anchor-and-extend, both axes:
-/// - Sub-query = `[min(anchor.query_pos) − extend_budget,
-///                 max(anchor.query_pos) + extend_budget]`, clipped to
-///   the user's query region.
-/// - Target window = `[hit.start − extend_budget, hit.end + extend_budget]`,
-///   clipped to the signature-sorted neighbor clusters'
-///   `(prev_target_end, next_target_start)` on the same `(genome,
-///   strand)` and the target chromosome edges.
+/// * `outer_end` = `Outer::Left` → text prefix is free (the target
+///   window's outer edge is its start).
+/// * `outer_end` = `Outer::Right` → text suffix is free.
 ///
-/// The neighbor clips mean extension stops naturally at syncmer-
-/// indicated block boundaries: we never extend this cluster's
-/// alignment into the territory of the next block on the same path.
-/// In unique-homology regions with no nearby clusters the extension
-/// runs out to `budget` or the query edge, whichever comes first,
-/// recovering the full conserved block.
-///
-/// BiWFA is configured End2End on the sub-query and EndsFree on the
-/// target. Leading / trailing `I` ops (WFA2 convention: `I` = text-
-/// only advance) measure how much of the target window was skipped
-/// outside the sub-query's extent; that gives refined target bounds.
+/// The sub-query is pinned End2End; the aligner can only extend or
+/// truncate the target on `outer_end`. On completion, `skip_outer_bp`
+/// is the leading (Left) or trailing (Right) `I` count, i.e. how
+/// many target bp at the outer edge were not covered by the
+/// alignment. Caller translates that back into a forward-strand
+/// refined boundary.
+#[derive(Copy, Clone)]
+enum Outer {
+    Left,
+    Right,
+}
+
 #[allow(clippy::too_many_arguments)]
-fn refine_homolog_by_alignment(
+fn project_end_align(
+    sub_query: &[u8],
+    target_fwd_start: u64,
+    target_fwd_end: u64,
+    strand: char,
+    genome: &str,
+    outer: Outer,
+    sequence_index: &UnifiedSequenceIndex,
+    want_cigar: bool,
+) -> Option<(u64, Option<Vec<u8>>)> {
+    if sub_query.is_empty() || target_fwd_end <= target_fwd_start {
+        return None;
+    }
+    let t_bytes_fwd = sequence_index
+        .fetch_sequence(genome, target_fwd_start as i32, target_fwd_end as i32)
+        .ok()?;
+    if t_bytes_fwd.is_empty() {
+        return None;
+    }
+    let t_bytes_oriented = if strand == '-' {
+        reverse_complement(&t_bytes_fwd)
+    } else {
+        t_bytes_fwd
+    };
+    let t_len = t_bytes_oriented.len() as u64;
+    // Outer end in oriented view = outer end in forward view for '+',
+    // flipped for '-'. The BiWFA call is always on the oriented
+    // sequence, so we map the desired forward outer to the oriented
+    // outer here.
+    let oriented_outer = match (strand, outer) {
+        ('+', Outer::Left) | ('-', Outer::Right) => Outer::Left,
+        ('+', Outer::Right) | ('-', Outer::Left) => Outer::Right,
+        _ => return None,
+    };
+    let (text_begin_free, text_end_free) = match oriented_outer {
+        Outer::Left => (t_len as i32, 0i32),
+        Outer::Right => (0i32, t_len as i32),
+    };
+
+    with_edge_aligner(|aligner| {
+        unsafe {
+            lib_wfa2::bindings::wfa::wavefront_aligner_set_alignment_free_ends(
+                aligner.aligner_mut(),
+                0,
+                0,
+                text_begin_free,
+                text_end_free,
+            );
+        }
+        let status = aligner.align(sub_query, &t_bytes_oriented);
+        if !matches!(status, AlignmentStatus::Completed) {
+            return None;
+        }
+        let cigar = aligner.cigar();
+        let leading_i = cigar.iter().take_while(|&&op| op == b'I').count();
+        let trailing_i = cigar.iter().rev().take_while(|&&op| op == b'I').count();
+        let core_end = cigar.len().saturating_sub(trailing_i);
+        let matches = if core_end > leading_i {
+            cigar[leading_i..core_end]
+                .iter()
+                .filter(|&&op| op == b'M' || op == b'=')
+                .count()
+        } else {
+            0
+        };
+        let denom = sub_query.len();
+        if denom == 0 || (matches as f64) / (denom as f64) < MIN_ALIGNMENT_IDENTITY {
+            return None;
+        }
+        let skip_oriented_outer_bp = match oriented_outer {
+            Outer::Left => leading_i as u64,
+            Outer::Right => trailing_i as u64,
+        };
+        if skip_oriented_outer_bp >= t_len {
+            return None;
+        }
+        Some((
+            skip_oriented_outer_bp,
+            if want_cigar { Some(cigar.to_vec()) } else { None },
+        ))
+    })
+}
+
+/// Ends-only projection of one chain: two small ends-free BiWFAs,
+/// one from the chain's first anchor backward to the query region
+/// start, one from the last anchor forward to the query region end.
+/// Each is bounded on the target axis by `extend_budget` and by the
+/// neighbor chain's target edge on the same `(genome, strand)`.
+/// Returns refined forward-strand `(ts, te)` and, when `emit_cigar`
+/// is set, an approximate per-segment CIGAR formed by concatenating
+/// the backward end-CIGAR + `M`×(interior query bp) + forward
+/// end-CIGAR. The interior is trusted (every interior anchor is a
+/// syncmer match); interior gap-BiWFA is a follow-up enhancement.
+#[allow(clippy::too_many_arguments)]
+fn refine_ends_only(
     query_bytes_full: &[u8],
     query_region_start: u64,
     query_region_end: u64,
@@ -301,144 +418,194 @@ fn refine_homolog_by_alignment(
     next_target_start: u64,
     sequence_index: &UnifiedSequenceIndex,
     target_len: u64,
-) -> Option<(u64, u64)> {
+    syncmer_len: u64,
+    emit_cigar: bool,
+) -> Option<(u64, u64, Option<Vec<u8>>)> {
     if hit.anchors.is_empty() {
         return None;
     }
-
-    // Anchor-supported query extent.
-    let mut q_lo: u64 = u64::MAX;
-    let mut q_hi: u64 = 0;
-    for a in &hit.anchors {
-        q_lo = q_lo.min(a.query_pos);
-        q_hi = q_hi.max(a.query_pos);
+    let mut a_first = hit.anchors[0];
+    let mut a_last = hit.anchors[0];
+    for &a in &hit.anchors {
+        if a.query_pos < a_first.query_pos {
+            a_first = a;
+        }
+        if a.query_pos > a_last.query_pos {
+            a_last = a;
+        }
     }
 
-    // Target window extended by budget, clipped to neighbor-cluster
-    // target bounds and the chromosome edges. Computed FIRST because
-    // the effective (neighbor-clipped) target span caps how far we
-    // should extend the sub-query: a 10 kb budget on the source with
-    // a 2 kb clipped target window forces BiWFA to squeeze a 10 kb
-    // sub-query into 2 kb target, which is the same O(s²) pathology
-    // that a priori-huge-full-query refinement had.
-    let fetch_start = hit
-        .start
-        .saturating_sub(extend_budget)
-        .max(prev_target_end);
-    let fetch_end = hit
-        .end
-        .saturating_add(extend_budget)
-        .min(next_target_start)
-        .min(target_len);
-    if fetch_end <= fetch_start {
-        return None;
-    }
-    let target_span = fetch_end - fetch_start;
-
-    // Effective per-side extension on the source: the actual budget,
-    // capped so the sub-query doesn't materially exceed the target
-    // window it has to fit inside. Neighbor-constrained repeat-array
-    // clusters get automatically small sub-queries.
-    let effective_ext = extend_budget.min(target_span.saturating_div(2).max(1));
-    let sub_lo = q_lo
-        .saturating_sub(effective_ext)
-        .max(query_region_start);
-    let sub_hi = q_hi
-        .saturating_add(effective_ext)
-        .min(query_region_end);
-    if sub_hi <= sub_lo {
-        return None;
-    }
-    let sub_q_start_idx = (sub_lo - query_region_start) as usize;
-    let sub_q_end_idx = (sub_hi - query_region_start) as usize;
-    if sub_q_end_idx <= sub_q_start_idx || sub_q_end_idx > query_bytes_full.len() {
-        return None;
-    }
-    let sub_query_bytes = &query_bytes_full[sub_q_start_idx..sub_q_end_idx];
-    let t_bytes_fwd = sequence_index
-        .fetch_sequence(&hit.genome, fetch_start as i32, fetch_end as i32)
-        .ok()?;
-    if t_bytes_fwd.is_empty() || sub_query_bytes.is_empty() {
-        return None;
-    }
-
-    let t_bytes_oriented = if hit.strand == '-' {
-        reverse_complement(&t_bytes_fwd)
-    } else {
-        t_bytes_fwd
+    // Sub-query slice helper (clip to [query_region_start, query_region_end]
+    // then index into query_bytes_full).
+    let slice_sub_q = |lo: u64, hi: u64| -> Option<&[u8]> {
+        let lo = lo.max(query_region_start);
+        let hi = hi.min(query_region_end);
+        if hi <= lo {
+            return None;
+        }
+        let a = (lo - query_region_start) as usize;
+        let b = (hi - query_region_start) as usize;
+        if b > query_bytes_full.len() {
+            return None;
+        }
+        Some(&query_bytes_full[a..b])
     };
-    let t_len = t_bytes_oriented.len() as u64;
 
-    let result = with_edge_aligner(|aligner| {
-        unsafe {
-            lib_wfa2::bindings::wfa::wavefront_aligner_set_alignment_free_ends(
-                aligner.aligner_mut(),
-                0,                // pattern (sub-query) must begin at 0
-                0,                // pattern (sub-query) must end at qe
-                t_len as i32,     // text (target) can skip any prefix
-                t_len as i32,     // text (target) can skip any suffix
-            );
-        }
-        let status = aligner.align(sub_query_bytes, &t_bytes_oriented);
-        if !matches!(status, AlignmentStatus::Completed) {
-            return None;
-        }
-        let cigar = aligner.cigar();
-        let leading_i = cigar.iter().take_while(|&&op| op == b'I').count();
-        let trailing_i = cigar.iter().rev().take_while(|&&op| op == b'I').count();
-        let core_slice_end = cigar.len().saturating_sub(trailing_i);
-        let matches = if core_slice_end > leading_i {
-            cigar[leading_i..core_slice_end]
-                .iter()
-                .filter(|&&op| op == b'M' || op == b'=')
-                .count()
-        } else {
-            0
-        };
-        let identity = matches as f64 / sub_query_bytes.len() as f64;
-        if identity < MIN_ALIGNMENT_IDENTITY {
-            return None;
-        }
-        Some((leading_i as u64, trailing_i as u64))
-    });
-
-    let (leading_i, trailing_i) = result?;
-    if leading_i + trailing_i >= t_len {
-        // Degenerate: CIGAR was entirely flanking skips — no actual
-        // alignment content.
-        return None;
-    }
-
-    // Translate oriented-CIGAR offsets back to target forward-strand
-    // coordinates.
-    //
-    // Oriented target window layout:
-    //   '+' : identical to fetched forward slice;
-    //         oriented[i] ↔ fwd[fetch_start + i].
-    //   '-' : reverse-complement of fetched forward slice;
-    //         oriented[i] (exclusive) ↔ fwd[fetch_end - i] (exclusive).
-    //
-    // Query aligns starting at oriented[leading_i] and ending at
-    // oriented[t_len - trailing_i]. So:
-    //   '+' : fwd_start = fetch_start + leading_i
-    //         fwd_end   = fetch_end - trailing_i
-    //   '-' : oriented[leading_i]        → fwd position (fetch_end - leading_i)  = forward END of homology
-    //         oriented[t_len - trailing_i] → fwd position (fetch_start + trailing_i) = forward START
-    let (refined_start, refined_end) = match hit.strand {
+    // ── Backward projection: sub-query covers [query_region_start,
+    //    a_first.query_pos + syncmer_len); its OUTER edge (toward
+    //    query_region_start) is what we're trying to place on target.
+    //    Forward-strand target span to fetch:
+    //      '+': [a_first.target_pos − extend_budget  ..  a_first.target_pos + syncmer_len]
+    //      '-': [a_first.target_pos  ..  a_first.target_pos + syncmer_len + extend_budget]
+    //    (on '-', going backward on query is going forward on forward target.)
+    let back_q_lo = query_region_start;
+    let back_q_hi = (a_first.query_pos + syncmer_len).min(query_region_end);
+    let (back_ts, back_te) = match hit.strand {
         '+' => (
-            fetch_start + leading_i,
-            fetch_end.saturating_sub(trailing_i),
+            a_first
+                .target_pos
+                .saturating_sub(extend_budget)
+                .max(prev_target_end),
+            (a_first.target_pos + syncmer_len).min(target_len),
         ),
         '-' => (
-            fetch_start + trailing_i,
-            fetch_end.saturating_sub(leading_i),
+            a_first.target_pos.min(target_len),
+            (a_first.target_pos + syncmer_len + extend_budget)
+                .min(next_target_start)
+                .min(target_len),
         ),
         _ => return None,
     };
-    if refined_end <= refined_start {
+    let back_result = slice_sub_q(back_q_lo, back_q_hi).and_then(|sq| {
+        // Backward projection: outer forward edge = Left for '+', Right for '-'.
+        let outer = match hit.strand {
+            '+' => Outer::Left,
+            '-' => Outer::Right,
+            _ => return None,
+        };
+        project_end_align(
+            sq,
+            back_ts,
+            back_te,
+            hit.strand,
+            &hit.genome,
+            outer,
+            sequence_index,
+            emit_cigar,
+        )
+    });
+
+    // ── Forward projection: sub-query covers [a_last.query_pos,
+    //    query_region_end); outer edge is toward query_region_end.
+    let fwd_q_lo = a_last.query_pos.max(query_region_start);
+    let fwd_q_hi = query_region_end;
+    let (fwd_ts, fwd_te) = match hit.strand {
+        '+' => (
+            a_last.target_pos.min(target_len),
+            (a_last.target_pos + syncmer_len + extend_budget)
+                .min(next_target_start)
+                .min(target_len),
+        ),
+        '-' => (
+            a_last
+                .target_pos
+                .saturating_sub(extend_budget)
+                .max(prev_target_end),
+            (a_last.target_pos + syncmer_len).min(target_len),
+        ),
+        _ => return None,
+    };
+    let fwd_result = slice_sub_q(fwd_q_lo, fwd_q_hi).and_then(|sq| {
+        let outer = match hit.strand {
+            '+' => Outer::Right,
+            '-' => Outer::Left,
+            _ => return None,
+        };
+        project_end_align(
+            sq,
+            fwd_ts,
+            fwd_te,
+            hit.strand,
+            &hit.genome,
+            outer,
+            sequence_index,
+            emit_cigar,
+        )
+    });
+
+    // Compose refined forward-strand bounds.
+    //
+    // Forward-strand outer edge mapping:
+    //   '+' backward → leading bp on forward target from back_ts inward
+    //       ⇒ refined start = back_ts + skip
+    //   '+' forward → trailing bp on forward target from fwd_te inward
+    //       ⇒ refined end = fwd_te - skip
+    //   '-' backward (oriented outer = Right on forward view): trailing bp
+    //       from back_te inward ⇒ refined end = back_te - skip
+    //   '-' forward (oriented outer = Left on forward view): leading bp
+    //       from fwd_ts inward ⇒ refined start = fwd_ts + skip
+    let (refined_ts, refined_te, back_cigar, fwd_cigar) = match hit.strand {
+        '+' => {
+            let ts = match back_result.as_ref() {
+                Some((skip, _)) => back_ts + *skip,
+                None => a_first.target_pos,
+            };
+            let te = match fwd_result.as_ref() {
+                Some((skip, _)) => fwd_te.saturating_sub(*skip),
+                None => (a_last.target_pos + syncmer_len).min(target_len),
+            };
+            (
+                ts,
+                te,
+                back_result.and_then(|(_, c)| c),
+                fwd_result.and_then(|(_, c)| c),
+            )
+        }
+        '-' => {
+            let te = match back_result.as_ref() {
+                Some((skip, _)) => back_te.saturating_sub(*skip),
+                None => (a_first.target_pos + syncmer_len).min(target_len),
+            };
+            let ts = match fwd_result.as_ref() {
+                Some((skip, _)) => fwd_ts + *skip,
+                None => a_last.target_pos,
+            };
+            (
+                ts,
+                te,
+                back_result.and_then(|(_, c)| c),
+                fwd_result.and_then(|(_, c)| c),
+            )
+        }
+        _ => return None,
+    };
+
+    if refined_te <= refined_ts {
         return None;
     }
-    Some((refined_start, refined_end))
+
+    let combined_cigar = if emit_cigar {
+        let mut cig: Vec<u8> = Vec::new();
+        if let Some(c) = back_cigar {
+            cig.extend_from_slice(&c);
+        }
+        // Interior fill: trust every interior anchor is a syncmer
+        // match; emit 'M' across the anchor-supported query span.
+        // This is an approximation — exact interior ops require
+        // per-gap BiWFA (tracked as future work).
+        let interior = a_last
+            .query_pos
+            .saturating_sub(a_first.query_pos + syncmer_len) as usize;
+        cig.extend(std::iter::repeat(b'M').take(interior));
+        if let Some(c) = fwd_cigar {
+            cig.extend_from_slice(&c);
+        }
+        Some(cig)
+    } else {
+        None
+    };
+
+    Some((refined_ts, refined_te, combined_cigar))
 }
 
 /// Per-path strand dedupe: if a `+` and a `-` interval on the same
@@ -506,12 +673,15 @@ pub fn one_hop(
         merge_distance,
         0,
         DEFAULT_EXTEND_BUDGET_BP,
+        DEFAULT_POSITIONAL_CAP_MULTIPLIER,
+        false,
         sequence_index,
     )
 }
 
 /// [`one_hop`] with tunable source-side widening and per-cluster
-/// anchor-and-extend budget.
+/// extension budget.
+#[allow(clippy::too_many_arguments)]
 pub fn one_hop_ext(
     syng_index: &SyngIndex,
     query_name: &str,
@@ -521,6 +691,8 @@ pub fn one_hop_ext(
     merge_distance: u64,
     query_extension: u64,
     extend_budget: u64,
+    positional_cap_multiplier: u64,
+    emit_cigar: bool,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
     one_hop_ext_visited(
@@ -532,28 +704,25 @@ pub fn one_hop_ext(
         merge_distance,
         query_extension,
         extend_budget,
+        positional_cap_multiplier,
+        emit_cigar,
         None,
         sequence_index,
     )
 }
 
-/// Core single-hop entry: anchor-and-extend refinement per cluster.
+/// Core single-hop entry: chain anchors, then ends-only projection
+/// per chain.
 ///
-/// After signature clustering + strand dedupe, each cluster is
-/// refined by BiWFA over a *sub-query* extended from its anchor extent
-/// by `extend_budget` bp on each side (clipped to the user's query
-/// region), and a *target window* extended from the cluster's hit
-/// bounds by the same budget, clipped to:
-///   - `prev_target_end` of the previous signature-sorted cluster
-///     on the same `(genome, strand)`, and
-///   - `next_target_start` of the following one.
-///
-/// This stops extension naturally at syncmer-indicated block
-/// boundaries: a neighbor cluster means "another block lives here",
-/// so we don't spill the current cluster's alignment into it. In
-/// unique-homology regions with no nearby clusters, extension runs
-/// out to the query edges on one side and `budget` on the other,
-/// recovering the full conserved-block extent.
+/// Anchors are chained by `chain_anchors` under two caps:
+/// `merge_distance` (diagonal tolerance) and `positional_cap =
+/// positional_cap_multiplier × extend_budget` (query-axis locality).
+/// Each chain produces a single `HomologousInterval` whose forward-
+/// strand `(start, end)` is refined by two ends-free BiWFA calls —
+/// one backward from the first anchor, one forward from the last —
+/// each bounded on the target axis by `extend_budget` and by the
+/// neighbor chain's target edge.
+#[allow(clippy::too_many_arguments)]
 pub fn one_hop_ext_visited(
     syng_index: &SyngIndex,
     query_name: &str,
@@ -563,23 +732,26 @@ pub fn one_hop_ext_visited(
     merge_distance: u64,
     query_extension: u64,
     extend_budget: u64,
+    positional_cap_multiplier: u64,
+    emit_cigar: bool,
     visited_nodes: Option<&mut FxHashSet<u32>>,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
     let hits = syng_index.query_region_with_anchors_ext_visited(
         query_name, query_start, query_end, padding, query_extension, visited_nodes,
     )?;
-    let hits = cluster_by_signature(hits, merge_distance);
-    let hits = dedupe_strand_overlaps(hits);
     let syncmer_len = (syng_index.params.w + syng_index.params.k) as u64;
+    let positional_cap = positional_cap_multiplier.saturating_mul(extend_budget);
+    let hits = chain_anchors(hits, merge_distance, positional_cap, syncmer_len);
+    let hits = dedupe_strand_overlaps(hits);
 
-    // Fetch the full query bytes ONCE per hop; refinement extracts
-    // the sub-range its anchors + extension budget cover.
+    // Fetch the full query bytes ONCE per hop; projection extracts
+    // the sub-ranges its anchors + extension budget cover.
     let query_bytes_cache: Option<Vec<u8>> = sequence_index
         .fetch_sequence(query_name, query_start as i32, query_end as i32)
         .ok();
 
-    // Attach per-cluster target-axis neighbors (prev_end, next_start)
+    // Attach per-chain target-axis neighbors (prev_end, next_start)
     // within each (genome, strand) bucket. These bound extension.
     let hits_with_neighbors = attach_target_neighbors(hits);
 
@@ -590,8 +762,8 @@ pub fn one_hop_ext_visited(
             .map(|l| l as u64)
             .unwrap_or(u64::MAX);
 
-        let aligned = query_bytes_cache.as_deref().and_then(|qb| {
-            refine_homolog_by_alignment(
+        let projected = query_bytes_cache.as_deref().and_then(|qb| {
+            refine_ends_only(
                 qb,
                 query_start,
                 query_end,
@@ -601,11 +773,19 @@ pub fn one_hop_ext_visited(
                 *next_start,
                 sequence_index,
                 target_len,
+                syncmer_len,
+                emit_cigar,
             )
         });
-        let (refined_start, refined_end) = aligned.unwrap_or_else(|| {
-            refine_by_linear_projection(hit, query_start, query_end, syncmer_len, target_len)
-        });
+        let (refined_start, refined_end, cigar) = match projected {
+            Some(t) => t,
+            None => {
+                let (s, e) = refine_by_linear_projection(
+                    hit, query_start, query_end, syncmer_len, target_len,
+                );
+                (s, e, None)
+            }
+        };
         if refined_end <= refined_start {
             continue;
         }
@@ -614,6 +794,7 @@ pub fn one_hop_ext_visited(
             start: refined_start,
             end: refined_end,
             strand: hit.strand,
+            cigar,
         });
     }
     Ok(out)
@@ -672,18 +853,25 @@ pub fn query_transitive(
         merge_distance,
         0,
         DEFAULT_EXTEND_BUDGET_BP,
+        DEFAULT_POSITIONAL_CAP_MULTIPLIER,
+        false,
         sequence_index,
     )
 }
 
-/// [`query_transitive`] with source-side `query_extension` and
-/// refinement `extend_budget` plumbed through every hop.
+/// [`query_transitive`] with all tunables plumbed through every hop.
 ///
 /// * `query_extension`: widens syncmer discovery on the source side at
 ///   each frontier step, so BFS can follow conserved blocks whose
 ///   endpoints fall just outside each frontier region.
-/// * `extend_budget`: per-cluster bp budget for anchor-and-extend
-///   boundary refinement; see [`one_hop_ext_visited`].
+/// * `extend_budget`: per-chain bp budget for ends-free target-side
+///   extension in projection; see [`one_hop_ext_visited`].
+/// * `positional_cap_multiplier`: scales `extend_budget` into the
+///   query-axis locality cap for [`chain_anchors`].
+/// * `emit_cigar`: attach a per-segment CIGAR to each emitted
+///   `HomologousInterval` (approximate in the interior — exact for
+///   the two ends-free projection runs).
+#[allow(clippy::too_many_arguments)]
 pub fn query_transitive_ext(
     syng_index: &SyngIndex,
     query_name: &str,
@@ -694,6 +882,8 @@ pub fn query_transitive_ext(
     merge_distance: u64,
     query_extension: u64,
     extend_budget: u64,
+    positional_cap_multiplier: u64,
+    emit_cigar: bool,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
     let mut visited: FxHashSet<(String, u64, u64, char)> = FxHashSet::default();
@@ -726,6 +916,8 @@ pub fn query_transitive_ext(
                 merge_distance,
                 hop_extension,
                 extend_budget,
+                positional_cap_multiplier,
+                emit_cigar,
                 Some(&mut visited_nodes),
                 sequence_index,
             ) {
@@ -761,30 +953,41 @@ pub fn query_transitive_ext(
 /// homologs (e.g. tandem arrays) that should stay separate.
 fn merge_overlapping_on_same_path(hits: Vec<HomologousInterval>) -> Vec<HomologousInterval> {
     use std::collections::HashMap;
-    let mut groups: HashMap<(String, char), Vec<(u64, u64)>> = HashMap::new();
+    // Merging loses CIGAR alignment context since merged coordinates
+    // don't map back to either source CIGAR. Group by (genome, strand)
+    // with (start, end, cigar); if exactly one entry ends up unmerged
+    // in its group slot, keep its cigar; otherwise set None.
+    let mut groups: HashMap<(String, char), Vec<(u64, u64, Option<Vec<u8>>)>> = HashMap::new();
     for h in hits {
-        groups.entry((h.genome, h.strand)).or_default().push((h.start, h.end));
+        groups
+            .entry((h.genome, h.strand))
+            .or_default()
+            .push((h.start, h.end, h.cigar));
     }
     let mut out: Vec<HomologousInterval> = Vec::new();
     for ((genome, strand), mut ivs) in groups {
-        ivs.sort_unstable();
+        ivs.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
         let mut iter = ivs.into_iter();
         let Some(mut cur) = iter.next() else {
             continue;
         };
+        let mut cur_merged = false;
         for next in iter {
             if next.0 < cur.1 {
                 if next.1 > cur.1 {
                     cur.1 = next.1;
                 }
+                cur_merged = true;
             } else {
                 out.push(HomologousInterval {
                     genome: genome.clone(),
                     start: cur.0,
                     end: cur.1,
                     strand,
+                    cigar: if cur_merged { None } else { cur.2.take() },
                 });
                 cur = next;
+                cur_merged = false;
             }
         }
         out.push(HomologousInterval {
@@ -792,6 +995,7 @@ fn merge_overlapping_on_same_path(hits: Vec<HomologousInterval>) -> Vec<Homologo
             start: cur.0,
             end: cur.1,
             strand,
+            cigar: if cur_merged { None } else { cur.2 },
         });
     }
     out.sort_by(|a, b| {
@@ -866,28 +1070,29 @@ mod tests {
         assert_eq!(e, 3100);
     }
 
+    // syncmer_len matches default (w + k = 10 + 20 = 30 in yeast tests;
+    // 63 in the pipeline). Tests use 63 for consistency with the
+    // production default.
+    const TEST_SYNCMER_LEN: u64 = 63;
+
     #[test]
-    fn cluster_by_signature_zero_is_noop() {
-        let hits = vec![
-            HomologousIntervalWithAnchors {
-                genome: "g".into(),
-                start: 0, end: 100, strand: '+',
-                anchors: vec![mk_anchor(0, 0)],
-            },
-            HomologousIntervalWithAnchors {
-                genome: "g".into(),
-                start: 200, end: 300, strand: '+',
-                anchors: vec![mk_anchor(200, 200)],
-            },
-        ];
-        let merged = cluster_by_signature(hits, 0);
-        assert_eq!(merged.len(), 2);
+    fn chain_anchors_empty_and_single() {
+        assert!(chain_anchors(Vec::new(), 1000, 4000, TEST_SYNCMER_LEN).is_empty());
+        let hits = vec![HomologousIntervalWithAnchors {
+            genome: "g".into(),
+            start: 0,
+            end: 100,
+            strand: '+',
+            anchors: vec![mk_anchor(10, 10)],
+        }];
+        let out = chain_anchors(hits, 1000, 4000, TEST_SYNCMER_LEN);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].anchors.len(), 1);
     }
 
     #[test]
-    fn cluster_by_signature_joins_matching_signatures() {
-        // Two hits, signatures both 0 (target == query). Any positive
-        // merge_distance should cluster them together.
+    fn chain_anchors_joins_matching_diagonal_within_positional_cap() {
+        // Colinear anchors (sig=0) spaced 50 bp apart → one chain.
         let hits = vec![
             HomologousIntervalWithAnchors {
                 genome: "g".into(),
@@ -900,17 +1105,53 @@ mod tests {
                 anchors: vec![mk_anchor(200, 200), mk_anchor(250, 250)],
             },
         ];
-        let merged = cluster_by_signature(hits, 150);
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].start, 0);
-        assert_eq!(merged[0].end, 300);
-        assert_eq!(merged[0].anchors.len(), 4);
+        let out = chain_anchors(hits, 150, 4000, TEST_SYNCMER_LEN);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].anchors.len(), 4);
     }
 
     #[test]
-    fn cluster_by_signature_respects_strand_boundaries() {
-        // +/- on the same path never co-cluster — they come from
-        // different strand semantics (distinct signatures).
+    fn chain_anchors_splits_when_positional_cap_exceeded() {
+        // Two anchor clusters on the SAME diagonal (sig=0) but 10 kb
+        // apart on the query axis. positional_cap=4000 → they must
+        // split into two chains even though the signatures match
+        // perfectly. This is the test for the "same-diagonal, far-
+        // apart" pathology.
+        let hits = vec![HomologousIntervalWithAnchors {
+            genome: "g".into(),
+            start: 0, end: 20_000, strand: '+',
+            anchors: vec![
+                mk_anchor(0, 0),
+                mk_anchor(100, 100),
+                mk_anchor(10_000, 10_000),
+                mk_anchor(10_100, 10_100),
+            ],
+        }];
+        let out = chain_anchors(hits, 1000, 4000, TEST_SYNCMER_LEN);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn chain_anchors_splits_when_signature_gap_exceeds_merge_distance() {
+        // Two anchor clusters in the same query locality but on
+        // different diagonals (sig=1000 vs sig=7275).
+        let hits = vec![HomologousIntervalWithAnchors {
+            genome: "g".into(),
+            start: 0, end: 20_000, strand: '+',
+            anchors: vec![
+                Anchor { query_pos: 100, target_pos: 1100, node_id: 1 },
+                Anchor { query_pos: 200, target_pos: 1200, node_id: 2 },
+                Anchor { query_pos: 300, target_pos: 7575, node_id: 3 },
+                Anchor { query_pos: 400, target_pos: 7675, node_id: 4 },
+            ],
+        }];
+        let out = chain_anchors(hits, 3000, 4000, TEST_SYNCMER_LEN);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn chain_anchors_respects_strand_boundaries() {
+        // +/- never co-chain.
         let hits = vec![
             HomologousIntervalWithAnchors {
                 genome: "g".into(),
@@ -923,65 +1164,31 @@ mod tests {
                 anchors: vec![mk_anchor(50, 150)],
             },
         ];
-        let merged = cluster_by_signature(hits, 10_000);
-        assert_eq!(merged.len(), 2);
+        let out = chain_anchors(hits, 10_000, 10_000, TEST_SYNCMER_LEN);
+        assert_eq!(out.len(), 2);
     }
 
     #[test]
-    fn cluster_by_signature_splits_when_sig_gap_exceeds_merge_distance() {
-        // Hit A: target-query == 1047. Hit B: target-query == 7275.
-        // Sig gap = 6228. merge_distance = 3000 < 6228 → separate clusters.
-        let hits = vec![
-            HomologousIntervalWithAnchors {
-                genome: "g".into(),
-                start: 409000, end: 410200, strand: '+',
-                anchors: vec![
-                    Anchor { query_pos: 408100, target_pos: 409147, node_id: 1 },
-                    Anchor { query_pos: 408500, target_pos: 409547, node_id: 2 },
-                    Anchor { query_pos: 409000, target_pos: 410047, node_id: 3 },
-                ],
-            },
-            HomologousIntervalWithAnchors {
-                genome: "g".into(),
-                start: 416300, end: 417400, strand: '+',
-                anchors: vec![
-                    Anchor { query_pos: 409100, target_pos: 416375, node_id: 4 },
-                    Anchor { query_pos: 409500, target_pos: 416775, node_id: 5 },
-                    Anchor { query_pos: 409900, target_pos: 417175, node_id: 6 },
-                ],
-            },
-        ];
-        let merged = cluster_by_signature(hits, 3_000);
-        assert_eq!(merged.len(), 2);
-    }
-
-    #[test]
-    fn cluster_by_signature_merges_when_sig_gap_within_merge_distance() {
-        // Same two hits as above but merge_distance = 10_000 > 6228 sig
-        // gap → user said "merge within 10 kb", so they cluster.
-        let hits = vec![
-            HomologousIntervalWithAnchors {
-                genome: "g".into(),
-                start: 409000, end: 410200, strand: '+',
-                anchors: vec![
-                    Anchor { query_pos: 408100, target_pos: 409147, node_id: 1 },
-                    Anchor { query_pos: 408500, target_pos: 409547, node_id: 2 },
-                    Anchor { query_pos: 409000, target_pos: 410047, node_id: 3 },
-                ],
-            },
-            HomologousIntervalWithAnchors {
-                genome: "g".into(),
-                start: 416300, end: 417400, strand: '+',
-                anchors: vec![
-                    Anchor { query_pos: 409100, target_pos: 416375, node_id: 4 },
-                    Anchor { query_pos: 409500, target_pos: 416775, node_id: 5 },
-                    Anchor { query_pos: 409900, target_pos: 417175, node_id: 6 },
-                ],
-            },
-        ];
-        let merged = cluster_by_signature(hits, 10_000);
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].anchors.len(), 6);
+    fn chain_anchors_most_similar_diagonal_tiebreak() {
+        // Three anchors: two on sig=1000, one on sig=1100. All within
+        // positional cap. With merge_distance=200, the third could
+        // join either chain — but "most similar" picks the sig=1000
+        // chain if it's closer. Here we set up so the tiebreak is
+        // clear.
+        let hits = vec![HomologousIntervalWithAnchors {
+            genome: "g".into(),
+            start: 0, end: 2000, strand: '+',
+            anchors: vec![
+                Anchor { query_pos: 100, target_pos: 1100, node_id: 1 },
+                Anchor { query_pos: 200, target_pos: 1200, node_id: 2 },
+                Anchor { query_pos: 300, target_pos: 1400, node_id: 3 },
+            ],
+        }];
+        let out = chain_anchors(hits, 200, 4000, TEST_SYNCMER_LEN);
+        // All three match diagonal within ±200 of sig=1000; positional
+        // cap permits. Result: one chain.
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].anchors.len(), 3);
     }
 
     fn mk_hit(genome: &str, start: u64, end: u64, strand: char, n_anchors: usize) -> HomologousIntervalWithAnchors {
