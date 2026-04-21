@@ -1045,6 +1045,16 @@ enum Args {
         #[clap(long, value_parser, default_value_t = 1_000)]
         syng_extend_budget: u64,
 
+        /// Minimum anchor count for a syng chain to be emitted. Chains
+        /// with fewer anchors than this are dropped at emission. Default
+        /// 2 filters singletons (one-anchor chains with no colinear
+        /// mutual-best partner — weakest possible evidence, mostly
+        /// noise in repeat-dense regions). Set to 1 to keep singletons
+        /// (useful when you want every syncmer match reported).
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, value_parser, default_value_t = 2)]
+        syng_min_chain_anchors: usize,
+
         /// Emit a full CIGAR per syng segment by aggregating interior
         /// anchor-gap BiWFA alignments + the two end-projection CIGARs.
         /// Off by default (ends-only projection sufficient for
@@ -1625,6 +1635,7 @@ fn run() -> io::Result<()> {
             syng_padding,
             syng_extension,
             syng_extend_budget,
+            syng_min_chain_anchors,
             syng_emit_cigar,
             syng_raw,
             query,
@@ -1793,6 +1804,7 @@ fn run() -> io::Result<()> {
                                     syng_max_depth,
                                     syng_extension,
                                     syng_extend_budget,
+                                    syng_min_chain_anchors,
                                     syng_emit_cigar,
                                     sequence_index.as_ref().unwrap(),
                                 )?
@@ -1841,6 +1853,7 @@ fn run() -> io::Result<()> {
                                             syng_max_depth,
                                             syng_extension,
                                             syng_extend_budget,
+                                            syng_min_chain_anchors,
                                             syng_emit_cigar,
                                             sequence_index.as_ref().unwrap(),
                                         )?
@@ -1899,6 +1912,7 @@ fn run() -> io::Result<()> {
                                         syng_max_depth,
                                         syng_extension,
                                         syng_extend_budget,
+                                        syng_min_chain_anchors,
                                         syng_emit_cigar,
                                         sequence_index.as_ref().unwrap(),
                                     )?
@@ -1948,6 +1962,7 @@ fn run() -> io::Result<()> {
                                     syng_max_depth,
                                     syng_extension,
                                     syng_extend_budget,
+                                    syng_min_chain_anchors,
                                     syng_emit_cigar,
                                     seq_idx,
                                 )?
@@ -1980,6 +1995,7 @@ fn run() -> io::Result<()> {
                                     syng_max_depth,
                                     syng_extension,
                                     syng_extend_budget,
+                                    syng_min_chain_anchors,
                                     syng_emit_cigar,
                                     seq_idx,
                                 )?

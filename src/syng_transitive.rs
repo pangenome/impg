@@ -30,6 +30,8 @@ use lib_wfa2::affine_wavefront::{AffineWavefronts, AlignmentStatus, Distance, Me
 use log::warn;
 use rustc_hash::FxHashSet;
 
+use rayon::prelude::*;
+
 use crate::graph::reverse_complement;
 use crate::sequence_index::{SequenceIndex as _, UnifiedSequenceIndex};
 use crate::syng::{Anchor, HomologousInterval, HomologousIntervalWithAnchors, SyngIndex};
@@ -418,6 +420,12 @@ enum Outer {
 }
 
 #[allow(clippy::too_many_arguments)]
+use std::sync::atomic::{AtomicU64, Ordering};
+static PROF_FETCH_NS: AtomicU64 = AtomicU64::new(0);
+static PROF_ALIGN_NS: AtomicU64 = AtomicU64::new(0);
+static PROF_FETCH_COUNT: AtomicU64 = AtomicU64::new(0);
+static PROF_ALIGN_COUNT: AtomicU64 = AtomicU64::new(0);
+
 fn project_end_align(
     sub_query: &[u8],
     target_fwd_start: u64,
@@ -431,9 +439,12 @@ fn project_end_align(
     if sub_query.is_empty() || target_fwd_end <= target_fwd_start {
         return None;
     }
+    let t_fetch = std::time::Instant::now();
     let t_bytes_fwd = sequence_index
         .fetch_sequence(genome, target_fwd_start as i32, target_fwd_end as i32)
         .ok()?;
+    PROF_FETCH_NS.fetch_add(t_fetch.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    PROF_FETCH_COUNT.fetch_add(1, Ordering::Relaxed);
     if t_bytes_fwd.is_empty() {
         return None;
     }
@@ -457,7 +468,8 @@ fn project_end_align(
         Outer::Right => (0i32, t_len as i32),
     };
 
-    with_edge_aligner(|aligner| {
+    let t_align = std::time::Instant::now();
+    let res = with_edge_aligner(|aligner| {
         unsafe {
             lib_wfa2::bindings::wfa::wavefront_aligner_set_alignment_free_ends(
                 aligner.aligner_mut(),
@@ -498,7 +510,10 @@ fn project_end_align(
             skip_oriented_outer_bp,
             if want_cigar { Some(cigar.to_vec()) } else { None },
         ))
-    })
+    });
+    PROF_ALIGN_NS.fetch_add(t_align.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    PROF_ALIGN_COUNT.fetch_add(1, Ordering::Relaxed);
+    res
 }
 
 /// Ends-only projection of one chain: two small ends-free BiWFAs,
@@ -717,44 +732,67 @@ fn refine_ends_only(
 /// anchor strand; drop the minority as random-syncmer-coincidence noise.
 /// Non-overlapping `+`/`-` on the same path stay separate (real
 /// inversion on a distinct region of the contig).
+///
+/// Bucket by genome first so the O(K²) cross-strand check runs per
+/// target only, not across all genomes. Without this, rDNA queries
+/// that emit millions of chains would block for hours on the global
+/// O(N²) compare.
 fn dedupe_strand_overlaps(
     hits: Vec<HomologousIntervalWithAnchors>,
 ) -> Vec<HomologousIntervalWithAnchors> {
     if hits.len() <= 1 {
         return hits;
     }
-    let n = hits.len();
-    let mut keep = vec![true; n];
-    for i in 0..n {
-        if !keep[i] {
+    use std::collections::HashMap;
+    let mut by_genome: HashMap<String, Vec<HomologousIntervalWithAnchors>> = HashMap::new();
+    for h in hits {
+        by_genome.entry(h.genome.clone()).or_default().push(h);
+    }
+    let mut out: Vec<HomologousIntervalWithAnchors> = Vec::new();
+    for (_, group) in by_genome {
+        if group.len() <= 1 {
+            out.extend(group);
             continue;
         }
-        for j in (i + 1)..n {
-            if !keep[j] {
+        let n = group.len();
+        let mut keep = vec![true; n];
+        for i in 0..n {
+            if !keep[i] {
                 continue;
             }
-            let a = &hits[i];
-            let b = &hits[j];
-            if a.genome != b.genome
-                || a.strand == b.strand
-                || a.start >= b.end
-                || b.start >= a.end
-            {
-                continue;
-            }
-            if a.anchors.len() >= b.anchors.len() {
-                keep[j] = false;
-            } else {
-                keep[i] = false;
-                break;
+            for j in (i + 1)..n {
+                if !keep[j] {
+                    continue;
+                }
+                let a = &group[i];
+                let b = &group[j];
+                // Same-genome invariant by construction; just check
+                // cross-strand overlap.
+                if a.strand == b.strand || a.start >= b.end || b.start >= a.end {
+                    continue;
+                }
+                if a.anchors.len() >= b.anchors.len() {
+                    keep[j] = false;
+                } else {
+                    keep[i] = false;
+                    break;
+                }
             }
         }
+        out.extend(
+            group
+                .into_iter()
+                .zip(keep)
+                .filter_map(|(iv, k)| if k { Some(iv) } else { None }),
+        );
     }
-    hits.into_iter()
-        .zip(keep)
-        .filter_map(|(iv, k)| if k { Some(iv) } else { None })
-        .collect()
+    out
 }
+
+/// Default minimum anchor count per chain for emission. Chains with
+/// fewer anchors (singletons = 1) are filtered out — they have no
+/// mutual-best colinear partner and are the weakest possible evidence.
+pub const DEFAULT_MIN_CHAIN_ANCHORS: usize = 2;
 
 /// Run one hop of syng-seeded homology query.
 pub fn one_hop(
@@ -773,6 +811,7 @@ pub fn one_hop(
         padding,
         0,
         DEFAULT_EXTEND_BUDGET_BP,
+        DEFAULT_MIN_CHAIN_ANCHORS,
         false,
         sequence_index,
     )
@@ -789,6 +828,7 @@ pub fn one_hop_ext(
     padding: u64,
     query_extension: u64,
     extend_budget: u64,
+    min_chain_anchors: usize,
     emit_cigar: bool,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
@@ -800,6 +840,7 @@ pub fn one_hop_ext(
         padding,
         query_extension,
         extend_budget,
+        min_chain_anchors,
         emit_cigar,
         None,
         sequence_index,
@@ -809,10 +850,8 @@ pub fn one_hop_ext(
 /// Core single-hop entry: chain anchors via mutual-best-buddy, then
 /// ends-only projection per chain.
 ///
-/// Anchor chaining caps come from the queried range itself — there's
-/// no per-hop tunable beyond the range and `extend_budget`. Each chain
-/// produces one `HomologousInterval` whose forward-strand
-/// `(start, end)` is refined by two small ends-free BiWFA calls.
+/// Chains with fewer than `min_chain_anchors` anchors are dropped at
+/// emission (default 2: singletons filtered as weak evidence).
 #[allow(clippy::too_many_arguments)]
 pub fn one_hop_ext_visited(
     syng_index: &SyngIndex,
@@ -822,69 +861,166 @@ pub fn one_hop_ext_visited(
     padding: u64,
     query_extension: u64,
     extend_budget: u64,
+    min_chain_anchors: usize,
     emit_cigar: bool,
     visited_nodes: Option<&mut FxHashSet<u32>>,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
+    use std::time::Instant;
+    let prof = std::env::var("SYNG_PROFILE").is_ok();
+    let t0 = Instant::now();
     let hits = syng_index.query_region_with_anchors_ext_visited(
         query_name, query_start, query_end, padding, query_extension, visited_nodes,
     )?;
+    if prof {
+        eprintln!(
+            "PROF emit={:?} hits={}",
+            t0.elapsed(),
+            hits.len()
+        );
+    }
     let syncmer_len = (syng_index.params.w + syng_index.params.k) as u64;
     let query_range_len = query_end.saturating_sub(query_start);
+    let t1 = Instant::now();
+    let total_anchors: usize = hits.iter().map(|h| h.anchors.len()).sum();
     let hits = chain_anchors(hits, query_range_len, syncmer_len);
+    let pre_filter = hits.len();
+    // Filter chains by anchor count. Default min=2 drops singletons
+    // (one-anchor chains with no mutual-best colinear partner — mostly
+    // noise in repeat-dense regions). Users who want to keep
+    // singletons set --syng-min-chain-anchors 1.
+    //
+    // Auto-relax for short queries: a query range shorter than
+    // 2 × syncmer_len can't physically host a chain of 2 distinct
+    // syncmer anchors, so filtering would drop everything. Fall back
+    // to min=1 when the range is too small for the requested minimum.
+    let effective_min = if query_range_len < syncmer_len.saturating_mul(min_chain_anchors as u64) {
+        1
+    } else {
+        min_chain_anchors
+    };
+    let hits: Vec<HomologousIntervalWithAnchors> = hits
+        .into_iter()
+        .filter(|h| h.anchors.len() >= effective_min)
+        .collect();
+    if prof {
+        eprintln!(
+            "PROF chain_anchors={:?} total_anchors={} chains={} after_filter={} (min={} eff={})",
+            t1.elapsed(),
+            total_anchors,
+            pre_filter,
+            hits.len(),
+            min_chain_anchors,
+            effective_min,
+        );
+    }
+    let t2 = Instant::now();
     let hits = dedupe_strand_overlaps(hits);
+    if prof {
+        eprintln!("PROF dedupe={:?} after={}", t2.elapsed(), hits.len());
+    }
 
     // Fetch the full query bytes ONCE per hop; projection extracts
     // the sub-ranges its anchors + extension budget cover.
+    let t3 = Instant::now();
     let query_bytes_cache: Option<Vec<u8>> = sequence_index
         .fetch_sequence(query_name, query_start as i32, query_end as i32)
         .ok();
+    if prof {
+        eprintln!("PROF fetch_query={:?}", t3.elapsed());
+    }
 
     // Attach per-chain target-axis neighbors (prev_end, next_start)
     // within each (genome, strand) bucket. These bound extension.
+    let t4 = Instant::now();
     let hits_with_neighbors = attach_target_neighbors(hits);
+    if prof {
+        eprintln!("PROF neighbors={:?}", t4.elapsed());
+    }
 
-    let mut out: Vec<HomologousInterval> = Vec::with_capacity(hits_with_neighbors.len());
-    for (hit, prev_end, next_start) in &hits_with_neighbors {
-        let target_len = sequence_index
-            .get_sequence_length(&hit.genome)
-            .map(|l| l as u64)
-            .unwrap_or(u64::MAX);
+    // Projection is independent per chain; drive it on rayon's global
+    // work-stealing pool. Singleton chains (one anchor) skip BiWFA —
+    // there's nothing to refine between two unanchored ends, so
+    // linear projection gives the same answer for free. Multi-anchor
+    // chains get two ends-free BiWFA calls, one per extension side.
+    //
+    // Thread-local `EDGE_ALIGNER` means each rayon worker reuses its
+    // own aligner instance — no cross-thread sharing. The global
+    // rayon pool is sized to `num_cpus::get()` by default (overridable
+    // via `RAYON_NUM_THREADS`), so CPU use stays bounded regardless of
+    // how many chains this hop emits.
+    let qb_slice = query_bytes_cache.as_deref();
+    let t5 = Instant::now();
+    let singleton_count = hits_with_neighbors.iter().filter(|(h, _, _)| h.anchors.len() < 2).count();
+    let out: Vec<HomologousInterval> = hits_with_neighbors
+        .par_iter()
+        .with_min_len(128)
+        .filter_map(|(hit, prev_end, next_start)| {
+            let target_len = sequence_index
+                .get_sequence_length(&hit.genome)
+                .map(|l| l as u64)
+                .unwrap_or(u64::MAX);
 
-        let projected = query_bytes_cache.as_deref().and_then(|qb| {
-            refine_ends_only(
-                qb,
-                query_start,
-                query_end,
-                extend_budget,
-                hit,
-                *prev_end,
-                *next_start,
-                sequence_index,
-                target_len,
-                syncmer_len,
-                emit_cigar,
-            )
-        });
-        let (refined_start, refined_end, cigar) = match projected {
-            Some(t) => t,
-            None => {
+            let (refined_start, refined_end, cigar) = if hit.anchors.len() < 2 {
+                // Singleton fast path.
                 let (s, e) = refine_by_linear_projection(
                     hit, query_start, query_end, syncmer_len, target_len,
                 );
                 (s, e, None)
+            } else {
+                let projected = qb_slice.and_then(|qb| {
+                    refine_ends_only(
+                        qb,
+                        query_start,
+                        query_end,
+                        extend_budget,
+                        hit,
+                        *prev_end,
+                        *next_start,
+                        sequence_index,
+                        target_len,
+                        syncmer_len,
+                        emit_cigar,
+                    )
+                });
+                match projected {
+                    Some(t) => t,
+                    None => {
+                        let (s, e) = refine_by_linear_projection(
+                            hit, query_start, query_end, syncmer_len, target_len,
+                        );
+                        (s, e, None)
+                    }
+                }
+            };
+            if refined_end <= refined_start {
+                return None;
             }
-        };
-        if refined_end <= refined_start {
-            continue;
-        }
-        out.push(HomologousInterval {
-            genome: hit.genome.clone(),
-            start: refined_start,
-            end: refined_end,
-            strand: hit.strand,
-            cigar,
-        });
+            Some(HomologousInterval {
+                genome: hit.genome.clone(),
+                start: refined_start,
+                end: refined_end,
+                strand: hit.strand,
+                cigar,
+            })
+        })
+        .collect();
+    if prof {
+        let fetch_ns = PROF_FETCH_NS.swap(0, Ordering::Relaxed);
+        let align_ns = PROF_ALIGN_NS.swap(0, Ordering::Relaxed);
+        let fetch_n = PROF_FETCH_COUNT.swap(0, Ordering::Relaxed);
+        let align_n = PROF_ALIGN_COUNT.swap(0, Ordering::Relaxed);
+        eprintln!(
+            "PROF refine={:?} chains={} singletons={} out={} fetch_sum={:.2}s (n={}) align_sum={:.2}s (n={})",
+            t5.elapsed(),
+            hits_with_neighbors.len(),
+            singleton_count,
+            out.len(),
+            fetch_ns as f64 / 1e9,
+            fetch_n,
+            align_ns as f64 / 1e9,
+            align_n,
+        );
     }
     Ok(out)
 }
@@ -940,6 +1076,7 @@ pub fn query_transitive(
         max_depth,
         0,
         DEFAULT_EXTEND_BUDGET_BP,
+        DEFAULT_MIN_CHAIN_ANCHORS,
         false,
         sequence_index,
     )
@@ -965,6 +1102,7 @@ pub fn query_transitive_ext(
     max_depth: u16,
     query_extension: u64,
     extend_budget: u64,
+    min_chain_anchors: usize,
     emit_cigar: bool,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
@@ -997,6 +1135,7 @@ pub fn query_transitive_ext(
                 padding,
                 hop_extension,
                 extend_budget,
+                min_chain_anchors,
                 emit_cigar,
                 Some(&mut visited_nodes),
                 sequence_index,
