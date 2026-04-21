@@ -10,6 +10,12 @@ authors = ["Andrea Guarracino <aguarracino@tgen.org>"]
 name = "gfaffix"
 path = "vendor/gfaffix/src/main.rs"
 
+# Release build with debug info for flamegraph / perf profiling.
+# Build with: cargo build --profile profiling
+[profile.profiling]
+inherits = "release"
+debug = true
+
 [dependencies]
 bincode = { version = "2.0", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }

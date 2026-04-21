@@ -19,8 +19,8 @@
 //!      bounded by `extend_budget` on the target axis and by the
 //!      neighbor chain's target edge. The interior is trusted (every
 //!      interior anchor is a syncmer match); we do not align through
-//!      it unless `--syng-emit-cigar` is set (approximate M-fill
-//!      across the interior; interior gap-BiWFA is a follow-up).
+//!      it. Real-CIGAR output would require per-anchor-pair interior
+//!      gap-BiWFA and is left for when PAF-style output is needed.
 //!   5. Multihop outer loop.
 
 use std::cell::RefCell;
@@ -505,11 +505,9 @@ fn project_end_align(
 /// start, one from the last anchor forward to the query region end.
 /// Each is bounded on the target axis by `extend_budget` and by the
 /// neighbor chain's target edge on the same `(genome, strand)`.
-/// Returns refined forward-strand `(ts, te)` and, when `emit_cigar`
-/// is set, an approximate per-segment CIGAR formed by concatenating
-/// the backward end-CIGAR + `M`×(interior query bp) + forward
-/// end-CIGAR. The interior is trusted (every interior anchor is a
-/// syncmer match); interior gap-BiWFA is a follow-up enhancement.
+/// Returns refined forward-strand `(ts, te)`. Interior anchors are
+/// trusted — no CIGAR is emitted. Real CIGAR output would require
+/// per-anchor-pair interior BiWFA and is left as a future extension.
 #[allow(clippy::too_many_arguments)]
 fn refine_ends_only(
     query_bytes_full: &[u8],
@@ -522,8 +520,7 @@ fn refine_ends_only(
     sequence_index: &UnifiedSequenceIndex,
     target_len: u64,
     syncmer_len: u64,
-    emit_cigar: bool,
-) -> Option<(u64, u64, Option<Vec<u8>>)> {
+) -> Option<(u64, u64)> {
     if hit.anchors.is_empty() {
         return None;
     }
@@ -621,17 +618,21 @@ fn refine_ends_only(
             _ => anchor_t,
         }
     };
-    let pure_linear_back = || -> (u64, Option<Vec<u8>>) {
-        let t = match hit.strand {
-            '+' => a_first.target_pos.saturating_sub(back_query_gap).max(prev_target_end),
-            '-' => (a_first.target_pos + syncmer_len + back_query_gap)
-                .min(next_target_start)
-                .min(target_len),
-            _ => a_first.target_pos,
-        };
-        (t, None)
+    let pure_linear_back = || -> u64 {
+        let t = project_query_to_target(
+            query_region_start,
+            a_first,
+            hit.strand,
+            syncmer_len,
+            target_len,
+        );
+        match hit.strand {
+            '+' => t.max(prev_target_end),
+            '-' => t.min(next_target_start),
+            _ => t,
+        }
     };
-    let try_back = |slop: u64| -> Option<(u64, Option<Vec<u8>>)> {
+    let try_back = |slop: u64| -> Option<u64> {
         if back_query_gap < SKIP_BIWFA_MIN_GAP {
             return Some(pure_linear_back());
         }
@@ -641,18 +642,15 @@ fn refine_ends_only(
             return None;
         }
         let sq = slice_sub_q(back_biwfa_q_lo, back_biwfa_q_hi)?;
-        let (skip, cigar) = project_end_align(
-            sq, ts, te, hit.strand, &hit.genome, back_outer, sequence_index, emit_cigar,
+        let (skip, _cigar) = project_end_align(
+            sq, ts, te, hit.strand, &hit.genome, back_outer, sequence_index, false,
         )?;
-        // BiWFA tells us where back_biwfa_q_lo lands on target.
         let t_at_biwfa_lo = match hit.strand {
             '+' => ts + skip,
             '-' => te.saturating_sub(skip),
             _ => return None,
         };
-        // Linearly extrapolate from back_biwfa_q_lo back to qs.
-        let refined = linear_back_from(t_at_biwfa_lo);
-        Some((refined, cigar))
+        Some(linear_back_from(t_at_biwfa_lo))
     };
     let back_result = try_back(small_slop(biwfa_back_gap))
         .or_else(|| try_back(extend_budget));
@@ -691,17 +689,21 @@ fn refine_ends_only(
             _ => anchor_t,
         }
     };
-    let pure_linear_fwd = || -> (u64, Option<Vec<u8>>) {
-        let t = match hit.strand {
-            '+' => (a_last.target_pos + syncmer_len + fwd_query_gap)
-                .min(next_target_start)
-                .min(target_len),
-            '-' => a_last.target_pos.saturating_sub(fwd_query_gap).max(prev_target_end),
-            _ => a_last.target_pos,
-        };
-        (t, None)
+    let pure_linear_fwd = || -> u64 {
+        let t = project_query_to_target(
+            query_region_end,
+            a_last,
+            hit.strand,
+            syncmer_len,
+            target_len,
+        );
+        match hit.strand {
+            '+' => t.min(next_target_start),
+            '-' => t.max(prev_target_end),
+            _ => t,
+        }
     };
-    let try_fwd = |slop: u64| -> Option<(u64, Option<Vec<u8>>)> {
+    let try_fwd = |slop: u64| -> Option<u64> {
         if fwd_query_gap < SKIP_BIWFA_MIN_GAP {
             return Some(pure_linear_fwd());
         }
@@ -711,16 +713,15 @@ fn refine_ends_only(
             return None;
         }
         let sq = slice_sub_q(fwd_biwfa_q_lo, fwd_biwfa_q_hi)?;
-        let (skip, cigar) = project_end_align(
-            sq, ts, te, hit.strand, &hit.genome, fwd_outer, sequence_index, emit_cigar,
+        let (skip, _cigar) = project_end_align(
+            sq, ts, te, hit.strand, &hit.genome, fwd_outer, sequence_index, false,
         )?;
         let t_at_biwfa_hi = match hit.strand {
             '+' => te.saturating_sub(skip),
             '-' => ts + skip,
             _ => return None,
         };
-        let refined = linear_fwd_from(t_at_biwfa_hi);
-        Some((refined, cigar))
+        Some(linear_fwd_from(t_at_biwfa_hi))
     };
     let fwd_result = try_fwd(small_slop(biwfa_fwd_gap))
         .or_else(|| try_fwd(extend_budget));
@@ -728,39 +729,15 @@ fn refine_ends_only(
     // `back_result` / `fwd_result` already hold the refined forward-
     // strand target position for whichever tier succeeded. Compose
     // into (ts, te) per strand.
-    let (refined_ts, refined_te, back_cigar, fwd_cigar) = match hit.strand {
-        '+' => {
-            let ts = back_result
-                .as_ref()
-                .map(|(r, _)| *r)
-                .unwrap_or(a_first.target_pos);
-            let te = fwd_result
-                .as_ref()
-                .map(|(r, _)| *r)
-                .unwrap_or((a_last.target_pos + syncmer_len).min(target_len));
-            (
-                ts,
-                te,
-                back_result.and_then(|(_, c)| c),
-                fwd_result.and_then(|(_, c)| c),
-            )
-        }
-        '-' => {
-            let te = back_result
-                .as_ref()
-                .map(|(r, _)| *r)
-                .unwrap_or((a_first.target_pos + syncmer_len).min(target_len));
-            let ts = fwd_result
-                .as_ref()
-                .map(|(r, _)| *r)
-                .unwrap_or(a_last.target_pos);
-            (
-                ts,
-                te,
-                back_result.and_then(|(_, c)| c),
-                fwd_result.and_then(|(_, c)| c),
-            )
-        }
+    let (refined_ts, refined_te) = match hit.strand {
+        '+' => (
+            back_result.unwrap_or(a_first.target_pos),
+            fwd_result.unwrap_or((a_last.target_pos + syncmer_len).min(target_len)),
+        ),
+        '-' => (
+            fwd_result.unwrap_or(a_last.target_pos),
+            back_result.unwrap_or((a_first.target_pos + syncmer_len).min(target_len)),
+        ),
         _ => return None,
     };
 
@@ -768,28 +745,7 @@ fn refine_ends_only(
         return None;
     }
 
-    let combined_cigar = if emit_cigar {
-        let mut cig: Vec<u8> = Vec::new();
-        if let Some(c) = back_cigar {
-            cig.extend_from_slice(&c);
-        }
-        // Interior fill: trust every interior anchor is a syncmer
-        // match; emit 'M' across the anchor-supported query span.
-        // This is an approximation — exact interior ops require
-        // per-gap BiWFA (tracked as future work).
-        let interior = a_last
-            .query_pos
-            .saturating_sub(a_first.query_pos + syncmer_len) as usize;
-        cig.extend(std::iter::repeat(b'M').take(interior));
-        if let Some(c) = fwd_cigar {
-            cig.extend_from_slice(&c);
-        }
-        Some(cig)
-    } else {
-        None
-    };
-
-    Some((refined_ts, refined_te, combined_cigar))
+    Some((refined_ts, refined_te))
 }
 
 /// Per-path strand dedupe: if a `+` and a `-` interval on the same
@@ -877,7 +833,6 @@ pub fn one_hop(
         0,
         DEFAULT_EXTEND_BUDGET_BP,
         DEFAULT_MIN_CHAIN_ANCHORS,
-        false,
         sequence_index,
     )
 }
@@ -894,7 +849,6 @@ pub fn one_hop_ext(
     query_extension: u64,
     extend_budget: u64,
     min_chain_anchors: usize,
-    emit_cigar: bool,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
     one_hop_ext_visited(
@@ -906,7 +860,6 @@ pub fn one_hop_ext(
         query_extension,
         extend_budget,
         min_chain_anchors,
-        emit_cigar,
         None,
         sequence_index,
     )
@@ -927,7 +880,6 @@ pub fn one_hop_ext_visited(
     query_extension: u64,
     extend_budget: u64,
     min_chain_anchors: usize,
-    emit_cigar: bool,
     visited_nodes: Option<&mut FxHashSet<u32>>,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
@@ -1026,12 +978,10 @@ pub fn one_hop_ext_visited(
                 .map(|l| l as u64)
                 .unwrap_or(u64::MAX);
 
-            let (refined_start, refined_end, cigar) = if hit.anchors.len() < 2 {
-                // Singleton fast path.
-                let (s, e) = refine_by_linear_projection(
+            let (refined_start, refined_end) = if hit.anchors.len() < 2 {
+                refine_by_linear_projection(
                     hit, query_start, query_end, syncmer_len, target_len,
-                );
-                (s, e, None)
+                )
             } else {
                 let projected = qb_slice.and_then(|qb| {
                     refine_ends_only(
@@ -1045,18 +995,13 @@ pub fn one_hop_ext_visited(
                         sequence_index,
                         target_len,
                         syncmer_len,
-                        emit_cigar,
                     )
                 });
-                match projected {
-                    Some(t) => t,
-                    None => {
-                        let (s, e) = refine_by_linear_projection(
-                            hit, query_start, query_end, syncmer_len, target_len,
-                        );
-                        (s, e, None)
-                    }
-                }
+                projected.unwrap_or_else(|| {
+                    refine_by_linear_projection(
+                        hit, query_start, query_end, syncmer_len, target_len,
+                    )
+                })
             };
             if refined_end <= refined_start {
                 return None;
@@ -1066,7 +1011,7 @@ pub fn one_hop_ext_visited(
                 start: refined_start,
                 end: refined_end,
                 strand: hit.strand,
-                cigar,
+                cigar: None,
             })
         })
         .collect();
@@ -1142,7 +1087,6 @@ pub fn query_transitive(
         0,
         DEFAULT_EXTEND_BUDGET_BP,
         DEFAULT_MIN_CHAIN_ANCHORS,
-        false,
         sequence_index,
     )
 }
@@ -1154,9 +1098,6 @@ pub fn query_transitive(
 ///   endpoints fall just outside each frontier region.
 /// * `extend_budget`: per-chain bp budget for ends-free target-side
 ///   extension in projection; see [`one_hop_ext_visited`].
-/// * `emit_cigar`: attach a per-segment CIGAR to each emitted
-///   `HomologousInterval` (approximate in the interior — exact for
-///   the two ends-free projection runs).
 #[allow(clippy::too_many_arguments)]
 pub fn query_transitive_ext(
     syng_index: &SyngIndex,
@@ -1168,7 +1109,6 @@ pub fn query_transitive_ext(
     query_extension: u64,
     extend_budget: u64,
     min_chain_anchors: usize,
-    emit_cigar: bool,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
     let mut visited: FxHashSet<(String, u64, u64, char)> = FxHashSet::default();
@@ -1201,7 +1141,6 @@ pub fn query_transitive_ext(
                 hop_extension,
                 extend_budget,
                 min_chain_anchors,
-                emit_cigar,
                 Some(&mut visited_nodes),
                 sequence_index,
             ) {

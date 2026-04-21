@@ -1055,16 +1055,6 @@ enum Args {
         #[clap(long, value_parser, default_value_t = 2)]
         syng_min_chain_anchors: usize,
 
-        /// Emit a full CIGAR per syng segment by aggregating interior
-        /// anchor-gap BiWFA alignments + the two end-projection CIGARs.
-        /// Off by default (ends-only projection sufficient for
-        /// coordinate output). Enable to cross-check ends-only
-        /// projections against full alignment, or to pass alignments
-        /// forward to graph construction.
-        #[arg(help_heading = "Syng input")]
-        #[clap(long, default_value_t = false)]
-        syng_emit_cigar: bool,
-
         /// Debug-only: skip boundary realignment and emit raw syncmer-resolution
         /// intervals from syng's query_region. The default --syng path runs
         /// BiWFA boundary realignment for base-pair-precise edges (and iterates
@@ -1636,7 +1626,6 @@ fn run() -> io::Result<()> {
             syng_extension,
             syng_extend_budget,
             syng_min_chain_anchors,
-            syng_emit_cigar,
             syng_raw,
             query,
             output_format,
@@ -1689,13 +1678,13 @@ fn run() -> io::Result<()> {
                 // Validate that alignment files are NOT also provided
                 // (conflicts_with_all handles this at clap level, but be explicit)
 
-                // Only bed, gfa, fasta, and gbwt output are supported for syng queries
+                // Only bed, bedpe, gfa, fasta, and gbwt output are supported for syng queries
                 let resolved_format = if output_format == "auto" { "bed" } else { output_format.as_str() };
-                if !matches!(resolved_format, "bed" | "gfa" | "fasta" | "gbwt") {
+                if !matches!(resolved_format, "bed" | "bedpe" | "gfa" | "fasta" | "gbwt") {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "--syng queries currently support 'bed', 'gfa', 'fasta', and 'gbwt' output formats, not '{}'",
+                            "--syng queries currently support 'bed', 'bedpe', 'gfa', 'fasta', and 'gbwt' output formats, not '{}'",
                             resolved_format
                         ),
                     ));
@@ -1793,7 +1782,7 @@ fn run() -> io::Result<()> {
                     info!("Syng query: {} ({}:{}-{})", name, target_name, range_start, range_end);
 
                     match resolved_format {
-                        "bed" => {
+                        "bed" | "bedpe" => {
                             let intervals = if use_boundary_realign {
                                 impg::syng_transitive::query_transitive_ext(
                                     wrapper.syng_index(),
@@ -1805,7 +1794,6 @@ fn run() -> io::Result<()> {
                                     syng_extension,
                                     syng_extend_budget,
                                     syng_min_chain_anchors,
-                                    syng_emit_cigar,
                                     sequence_index.as_ref().unwrap(),
                                 )?
                             } else {
@@ -1817,9 +1805,34 @@ fn run() -> io::Result<()> {
                                 syng_extension,
                             )?
                             };
-                            let mut out = find_output_stream(&output_prefix, "bed")?;
-                            for iv in &intervals {
-                                writeln!(out, "{}\t{}\t{}\t{}", iv.genome, iv.start, iv.end, iv.strand)?;
+                            let ext = if resolved_format == "bedpe" { "bedpe" } else { "bed" };
+                            let mut out = find_output_stream(&output_prefix, ext)?;
+                            if resolved_format == "bedpe" {
+                                // BEDPE: include the query region as the
+                                // first triple so batch queries via -b
+                                // can be grouped downstream.
+                                // Columns: q_chrom q_start q_end t_chrom t_start t_end name score q_strand t_strand
+                                for iv in &intervals {
+                                    writeln!(
+                                        out,
+                                        "{}\t{}\t{}\t{}\t{}\t{}\t.\t.\t+\t{}",
+                                        target_name,
+                                        range_start,
+                                        range_end,
+                                        iv.genome,
+                                        iv.start,
+                                        iv.end,
+                                        iv.strand,
+                                    )?;
+                                }
+                            } else {
+                                for iv in &intervals {
+                                    writeln!(
+                                        out,
+                                        "{}\t{}\t{}\t{}",
+                                        iv.genome, iv.start, iv.end, iv.strand
+                                    )?;
+                                }
                             }
                         }
                         "gfa" => {
@@ -1854,7 +1867,6 @@ fn run() -> io::Result<()> {
                                             syng_extension,
                                             syng_extend_budget,
                                             syng_min_chain_anchors,
-                                            syng_emit_cigar,
                                             sequence_index.as_ref().unwrap(),
                                         )?
                                     } else {
@@ -1913,7 +1925,6 @@ fn run() -> io::Result<()> {
                                         syng_extension,
                                         syng_extend_budget,
                                         syng_min_chain_anchors,
-                                        syng_emit_cigar,
                                         sequence_index.as_ref().unwrap(),
                                     )?
                                 } else {
@@ -1963,7 +1974,6 @@ fn run() -> io::Result<()> {
                                     syng_extension,
                                     syng_extend_budget,
                                     syng_min_chain_anchors,
-                                    syng_emit_cigar,
                                     seq_idx,
                                 )?
                             } else {
@@ -1996,7 +2006,6 @@ fn run() -> io::Result<()> {
                                     syng_extension,
                                     syng_extend_budget,
                                     syng_min_chain_anchors,
-                                    syng_emit_cigar,
                                     seq_idx,
                                 )?
                             } else {
