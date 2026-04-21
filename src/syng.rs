@@ -3,6 +3,7 @@
 //! Provides `SyngIndex` for building, loading, saving, and querying
 //! GBWT-based syncmer indices.
 
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::ffi::CString;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
@@ -1048,59 +1049,109 @@ impl SyngIndex {
         let mut per_path: FxHashMap<(usize, char), Vec<HomologousIntervalWithAnchors>> =
             FxHashMap::default();
 
+        let emit_prof = std::env::var("SYNG_EMIT_PROFILE").is_ok();
+        let mut p_nodes = 0u64;
+        let mut p_decompress_ns = 0u128;
+        let mut p_visits_raw = 0u64;
+        let mut p_visits_used = 0u64;
+        let mut p_visit_loop_ns = 0u128;
+        let mut p_emit_anchors = 0u64;
         if let (Some(fl), Some(gbz_gbwt), Some(bp_off)) =
             (self.fast_locate.as_ref(), self.gbz_gbwt.as_ref(), self.bp_offsets.as_ref())
         {
-            // Fast path: for each query node, query BOTH orientations of the
-            // GBWT encoding to catch forward and RC homology. Each target
-            // visit is tagged with the orientation it was found under; the
-            // strand is query_orient XOR target_orient.
-            for (&query_node, query_positions) in &query_node_positions {
-                // Skip syncmer nodes already consumed by earlier BFS hops —
-                // revisiting them would only redo alignment work that the
-                // prior hop already spent, producing hits that coordinate-
-                // level dedup would drop after the fact.
-                if let Some(v) = visited_nodes.as_deref() {
-                    if v.contains(&query_node) {
-                        continue;
-                    }
+            // Skip already-visited syncmer nodes up-front (serial filter,
+            // cheap), then run the heavy per-node visit loop in parallel.
+            // Updating `visited_nodes` happens after the parallel phase
+            // so rayon workers don't need shared mutable access.
+            let unvisited: Vec<(u32, &Vec<(u64, u8)>)> = query_node_positions
+                .iter()
+                .filter(|(node, _)| match visited_nodes.as_deref() {
+                    Some(v) => !v.contains(node),
+                    None => true,
+                })
+                .map(|(n, qp)| (*n, qp))
+                .collect();
+            if let Some(v) = visited_nodes.as_deref_mut() {
+                for (n, _) in &unvisited {
+                    v.insert(*n);
                 }
-                if let Some(v) = visited_nodes.as_deref_mut() {
-                    v.insert(query_node);
-                }
-                // Per-node signature dedup bucket: for each (path, strand),
-                // keep one anchor per distinct diagonal signature. A
-                // hyper-repetitive syncmer with K query occurrences and V
-                // target visits naively emits K × V anchors — all distinct
-                // (q_pos, t_pos) pairs but collapsing onto K + V − 1
-                // diagonals on a tandem array. One anchor per diagonal is
-                // all chain_anchors needs downstream; more would be
-                // redundant evidence of the same alignment frame.
-                let mut per_node: FxHashMap<(usize, char), (u64, u64, FxHashMap<i64, Anchor>)> =
-                    FxHashMap::default();
+            }
+            if emit_prof {
+                p_nodes = unvisited.len() as u64;
+            }
+
+            // Each query node is independent: its anchors are deduped
+            // into a per-node (path, strand) → signature hashmap.
+            // Parallelize across nodes on rayon's global pool. On
+            // pathological rDNA tiles this turns ~180 s of inner-loop
+            // work into ~15 s at 16-way parallelism.
+            use std::sync::atomic::{AtomicU64, Ordering};
+            let a_decompress = AtomicU64::new(0);
+            let a_visits_raw = AtomicU64::new(0);
+            let a_visits_used = AtomicU64::new(0);
+            let a_visit_loop = AtomicU64::new(0);
+            let a_emit = AtomicU64::new(0);
+
+            // Nested parallelism:
+            //   - outer par over nodes (handles non-rDNA: many small-ish
+            //     nodes share threads)
+            //   - inner par over visits for a single "monster" node (the
+            //     rDNA case where 99.99% of work lives in one node's
+            //     visit list)
+            // A visit-count threshold skips the inner fold/reduce
+            // overhead for small visit lists.
+            const PAR_VISITS_THRESHOLD: usize = 50_000;
+
+            let per_node_results: Vec<Vec<HomologousIntervalWithAnchors>> = unvisited
+                .par_iter()
+                .with_min_len(1)
+                .map(|(query_node, query_positions)| {
+                    let query_node = *query_node;
+                // Collect all visits with their t_orient.
+                let mut all_visits: Vec<(u8, usize, usize)> = Vec::new();
                 for t_orient in 0u8..=1 {
                     let encoded = ((query_node as usize) << 1) | (t_orient as usize);
                     if !gbz_gbwt.has_node(encoded) {
                         continue;
                     }
+                    let t_dec = std::time::Instant::now();
                     let visits = fl.decompress_da(gbz_gbwt, encoded);
-                    for (gbz_seq_id, seq_off_from_end) in visits {
-                        // Only forward GBWT sequences (even gbz ids). The
-                        // reverse GBWT sequence is redundant: any RC homology
-                        // it would report is already captured by the opposite
-                        // orientation hit on some forward path.
+                    if emit_prof {
+                        a_decompress
+                            .fetch_add(t_dec.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                        a_visits_raw.fetch_add(visits.len() as u64, Ordering::Relaxed);
+                    }
+                    for (sid, off) in visits {
+                        all_visits.push((t_orient, sid, off));
+                    }
+                }
+                if all_visits.is_empty() {
+                    return Vec::new();
+                }
+                let t_vloop = std::time::Instant::now();
+                let per_node: FxHashMap<
+                    (usize, char),
+                    (u64, u64, FxHashMap<i64, Anchor>),
+                > = if all_visits.len() < PAR_VISITS_THRESHOLD {
+                    let mut acc: FxHashMap<
+                        (usize, char),
+                        (u64, u64, FxHashMap<i64, Anchor>),
+                    > = FxHashMap::default();
+                    for &(t_orient, gbz_seq_id, seq_off_from_end) in &all_visits {
                         if gbz_seq_id & 1 != 0 {
                             continue;
                         }
                         let forward_path_idx = gbz_seq_id >> 1;
-                        let Some(num_nodes) = bp_off.num_forward_nodes(forward_path_idx) else {
+                        let Some(num_nodes) = bp_off.num_forward_nodes(forward_path_idx)
+                        else {
                             continue;
                         };
                         if num_nodes == 0 || seq_off_from_end >= num_nodes {
                             continue;
                         }
                         let forward_node_idx = num_nodes - 1 - seq_off_from_end;
-                        let Some(target_pos) = bp_off.bp_of(forward_path_idx, forward_node_idx)
+                        let Some(target_pos) =
+                            bp_off.bp_of(forward_path_idx, forward_node_idx)
                         else {
                             continue;
                         };
@@ -1108,16 +1159,18 @@ impl SyngIndex {
                         let hit_end = target_pos + syncmer_len;
                         let padded_start = target_pos.saturating_sub(padding);
                         let padded_end = (hit_end + padding).min(genome_len);
-                        for &(qp, q_orient) in query_positions {
+                        for &(qp, q_orient) in *query_positions {
                             let strand = if q_orient == t_orient { '+' } else { '-' };
                             let sig: i64 = if strand == '+' {
                                 target_pos as i64 - qp as i64
                             } else {
                                 target_pos as i64 + qp as i64
                             };
-                            let entry = per_node
+                            let entry = acc
                                 .entry((forward_path_idx, strand))
-                                .or_insert_with(|| (padded_start, padded_end, FxHashMap::default()));
+                                .or_insert_with(|| {
+                                    (padded_start, padded_end, FxHashMap::default())
+                                });
                             entry.0 = entry.0.min(padded_start);
                             entry.1 = entry.1.max(padded_end);
                             entry.2.entry(sig).or_insert(Anchor {
@@ -1125,25 +1178,137 @@ impl SyngIndex {
                                 target_pos,
                                 node_id: query_node,
                             });
+                            if emit_prof {
+                                a_emit.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        if emit_prof {
+                            a_visits_used.fetch_add(1, Ordering::Relaxed);
                         }
                     }
+                    acc
+                } else {
+                    all_visits
+                    .par_iter()
+                    .with_min_len(1024)
+                    .fold(
+                        FxHashMap::default,
+                        |mut acc, &(t_orient, gbz_seq_id, seq_off_from_end)| {
+                            if gbz_seq_id & 1 != 0 {
+                                return acc;
+                            }
+                            let forward_path_idx = gbz_seq_id >> 1;
+                            let Some(num_nodes) = bp_off.num_forward_nodes(forward_path_idx)
+                            else {
+                                return acc;
+                            };
+                            if num_nodes == 0 || seq_off_from_end >= num_nodes {
+                                return acc;
+                            }
+                            let forward_node_idx = num_nodes - 1 - seq_off_from_end;
+                            let Some(target_pos) =
+                                bp_off.bp_of(forward_path_idx, forward_node_idx)
+                            else {
+                                return acc;
+                            };
+                            let genome_len = self.name_map.path_to_length[forward_path_idx];
+                            let hit_end = target_pos + syncmer_len;
+                            let padded_start = target_pos.saturating_sub(padding);
+                            let padded_end = (hit_end + padding).min(genome_len);
+                            for &(qp, q_orient) in *query_positions {
+                                let strand = if q_orient == t_orient { '+' } else { '-' };
+                                let sig: i64 = if strand == '+' {
+                                    target_pos as i64 - qp as i64
+                                } else {
+                                    target_pos as i64 + qp as i64
+                                };
+                                let entry = acc
+                                    .entry((forward_path_idx, strand))
+                                    .or_insert_with(|| {
+                                        (padded_start, padded_end, FxHashMap::default())
+                                    });
+                                entry.0 = entry.0.min(padded_start);
+                                entry.1 = entry.1.max(padded_end);
+                                entry.2.entry(sig).or_insert(Anchor {
+                                    query_pos: qp,
+                                    target_pos,
+                                    node_id: query_node,
+                                });
+                                if emit_prof {
+                                    a_emit.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                            if emit_prof {
+                                a_visits_used.fetch_add(1, Ordering::Relaxed);
+                            }
+                            acc
+                        },
+                    )
+                    .reduce(
+                        FxHashMap::default,
+                        |mut a,
+                         b: FxHashMap<(usize, char), (u64, u64, FxHashMap<i64, Anchor>)>| {
+                            for (key, (bs, be, bmap)) in b {
+                                let entry = a
+                                    .entry(key)
+                                    .or_insert_with(|| (bs, be, FxHashMap::default()));
+                                entry.0 = entry.0.min(bs);
+                                entry.1 = entry.1.max(be);
+                                for (sig, anchor) in bmap {
+                                    entry.2.entry(sig).or_insert(anchor);
+                                }
+                            }
+                            a
+                        },
+                    )
+                };
+                if emit_prof {
+                    a_visit_loop
+                        .fetch_add(t_vloop.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 }
-                for ((forward_path_idx, strand), (start, end, sig_map)) in per_node {
-                    if sig_map.is_empty() {
-                        continue;
-                    }
-                    let anchors: Vec<Anchor> = sig_map.into_values().collect();
-                    per_path
-                        .entry((forward_path_idx, strand))
-                        .or_default()
-                        .push(HomologousIntervalWithAnchors {
+
+                per_node
+                    .into_iter()
+                    .filter_map(|((forward_path_idx, strand), (start, end, sig_map))| {
+                        if sig_map.is_empty() {
+                            return None;
+                        }
+                        let anchors: Vec<Anchor> = sig_map.into_values().collect();
+                        Some(HomologousIntervalWithAnchors {
                             genome: self.name_map.path_to_name[forward_path_idx].clone(),
                             start,
                             end,
                             strand,
                             anchors,
-                        });
+                        })
+                    })
+                    .collect()
+                })
+                .collect();
+
+            // Merge per-node results into the global per_path map.
+            // Re-derive forward_path_idx by name so the (usize, char)
+            // key remains consistent with the pre-parallel layout.
+            for node_result in per_node_results {
+                for hiwa in node_result {
+                    let Some(path_idx) =
+                        self.name_map.name_to_path.get(&hiwa.genome).copied()
+                    else {
+                        continue;
+                    };
+                    per_path
+                        .entry((path_idx as usize, hiwa.strand))
+                        .or_default()
+                        .push(hiwa);
                 }
+            }
+
+            if emit_prof {
+                p_decompress_ns = a_decompress.load(Ordering::Relaxed) as u128;
+                p_visits_raw = a_visits_raw.load(Ordering::Relaxed);
+                p_visits_used = a_visits_used.load(Ordering::Relaxed);
+                p_visit_loop_ns = a_visit_loop.load(Ordering::Relaxed) as u128;
+                p_emit_anchors = a_emit.load(Ordering::Relaxed);
             }
         } else {
             // Fallback: walk every forward path (the old pre-locate behavior).
@@ -1223,6 +1388,7 @@ impl SyngIndex {
         }
 
         // 3. Merge per (target, strand); different strands stay separate.
+        let t_merge = std::time::Instant::now();
         let mut merged: Vec<HomologousIntervalWithAnchors> = Vec::new();
         for (_key, mut group) in per_path {
             Self::merge_intervals_with_anchors(&mut group);
@@ -1235,6 +1401,18 @@ impl SyngIndex {
                 .then(a.strand.cmp(&b.strand))
                 .then(a.start.cmp(&b.start))
         });
+        if emit_prof {
+            eprintln!(
+                "EMITPROF nodes={} decompress={:.2}s visits_raw={} visits_used={} visit_loop={:.2}s emit_anchors={} merge_sort={:.2}s",
+                p_nodes,
+                p_decompress_ns as f64 / 1e9,
+                p_visits_raw,
+                p_visits_used,
+                p_visit_loop_ns as f64 / 1e9,
+                p_emit_anchors,
+                t_merge.elapsed().as_secs_f64(),
+            );
+        }
         Ok(merged)
     }
 
