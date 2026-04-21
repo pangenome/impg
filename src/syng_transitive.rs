@@ -44,16 +44,9 @@ use crate::syng::{Anchor, HomologousInterval, HomologousIntervalWithAnchors, Syn
 const MIN_ALIGNMENT_IDENTITY: f64 = 0.3;
 
 thread_local! {
-    /// Edit-distance aligner for per-homolog refinement.
-    ///
-    /// `MemoryMode::Low` = piggyback bidirectional WFA: O(s · log s)
-    /// working memory vs `High`'s full O(s² + n·m) DP matrix. Traceback
-    /// (which we need for leading / trailing-I counts in
-    /// `refine_homolog_by_alignment`) is preserved in all modes — only the
-    /// intermediate storage shrinks. On our hot path (thousands of per-hit
-    /// refinements, small windows) `High` was the primary reason a single
-    /// query could OOM at 77 GB RSS when a merged repeat cluster pushed
-    /// any one target window into the Mb range.
+    /// Edit-distance aligner for per-homolog refinement. `MemoryMode::Low`
+    /// (piggyback BiWFA) benchmarked faster than `High` on our short
+    /// per-projection windows despite the extra per-step allocations.
     static EDGE_ALIGNER: RefCell<Option<AffineWavefronts>> =
         const { RefCell::new(None) };
 }
@@ -567,13 +560,42 @@ fn refine_ends_only(
     // a small "homologous short-circuit" slop (~5% of gap); if that
     // alignment fails we retry with the full `extend_budget`. Both
     // caps are per-projection and independent of tile size.
+    // Target window = min(query_gap + slop, query_gap + extend_budget,
+    // 2 × extend_budget). Caps target-side BiWFA work per call.
     let target_span_for_slop = |query_gap: u64, slop: u64| -> u64 {
-        query_gap.saturating_add(slop).max(syncmer_len)
+        query_gap
+            .saturating_add(slop)
+            .min(extend_budget.saturating_mul(2))
+            .max(syncmer_len)
     };
     let small_slop = |query_gap: u64| -> u64 {
         (query_gap / 20).max(32).min(extend_budget)
     };
-    let backward_bounds = |span: u64| -> (u64, u64) {
+    // Parallel-walk projection: for each edge, do BiWFA on at most
+    // `extend_budget` bp of query closest to the anchor (where drift is
+    // informative and alignment is cheap), then linearly extrapolate
+    // the remainder of the gap along the anchor's diagonal. BiWFA
+    // cost per call is bounded; long edges get the BiWFA refinement at
+    // the near edge plus colinear extension for the far reach.
+    //
+    // Tiny gaps (< SKIP_BIWFA_MIN_GAP) skip BiWFA entirely — linear
+    // drift over <64 bp is negligible.
+    const SKIP_BIWFA_MIN_GAP: u64 = 64;
+    let back_query_gap = a_first.query_pos.saturating_sub(query_region_start);
+    let back_outer = match hit.strand {
+        '+' => Outer::Left,
+        '-' => Outer::Right,
+        _ => return None,
+    };
+    // BiWFA covers the last `biwfa_back_gap` bp before A_first; the
+    // remaining `linear_back_ext` bp are linear-extrapolated to qs.
+    let biwfa_back_gap = back_query_gap.min(extend_budget);
+    let linear_back_ext = back_query_gap - biwfa_back_gap;
+    let back_biwfa_q_lo = a_first.query_pos.saturating_sub(biwfa_back_gap).max(query_region_start);
+    let back_biwfa_q_hi = (a_first.query_pos + syncmer_len).min(query_region_end);
+    // Shift backward_bounds to be centered on biwfa_back_gap rather
+    // than the full back_query_gap.
+    let backward_bounds_bwg = |span: u64| -> (u64, u64) {
         match hit.strand {
             '+' => (
                 a_first.target_pos.saturating_sub(span).max(prev_target_end),
@@ -588,7 +610,66 @@ fn refine_ends_only(
             _ => (0, 0),
         }
     };
-    let forward_bounds = |span: u64| -> (u64, u64) {
+    let linear_back_from = |anchor_t: u64| -> u64 {
+        // Linearly extend anchor_t by linear_back_ext along the
+        // a_first diagonal, then clip to neighbor/target bounds.
+        match hit.strand {
+            '+' => anchor_t.saturating_sub(linear_back_ext).max(prev_target_end),
+            '-' => (anchor_t + linear_back_ext)
+                .min(next_target_start)
+                .min(target_len),
+            _ => anchor_t,
+        }
+    };
+    let pure_linear_back = || -> (u64, Option<Vec<u8>>) {
+        let t = match hit.strand {
+            '+' => a_first.target_pos.saturating_sub(back_query_gap).max(prev_target_end),
+            '-' => (a_first.target_pos + syncmer_len + back_query_gap)
+                .min(next_target_start)
+                .min(target_len),
+            _ => a_first.target_pos,
+        };
+        (t, None)
+    };
+    let try_back = |slop: u64| -> Option<(u64, Option<Vec<u8>>)> {
+        if back_query_gap < SKIP_BIWFA_MIN_GAP {
+            return Some(pure_linear_back());
+        }
+        let span = target_span_for_slop(biwfa_back_gap, slop);
+        let (ts, te) = backward_bounds_bwg(span);
+        if te <= ts {
+            return None;
+        }
+        let sq = slice_sub_q(back_biwfa_q_lo, back_biwfa_q_hi)?;
+        let (skip, cigar) = project_end_align(
+            sq, ts, te, hit.strand, &hit.genome, back_outer, sequence_index, emit_cigar,
+        )?;
+        // BiWFA tells us where back_biwfa_q_lo lands on target.
+        let t_at_biwfa_lo = match hit.strand {
+            '+' => ts + skip,
+            '-' => te.saturating_sub(skip),
+            _ => return None,
+        };
+        // Linearly extrapolate from back_biwfa_q_lo back to qs.
+        let refined = linear_back_from(t_at_biwfa_lo);
+        Some((refined, cigar))
+    };
+    let back_result = try_back(small_slop(biwfa_back_gap))
+        .or_else(|| try_back(extend_budget));
+
+    // ── Forward projection ──
+    let fwd_query_gap = query_region_end
+        .saturating_sub((a_last.query_pos + syncmer_len).min(query_region_end));
+    let fwd_outer = match hit.strand {
+        '+' => Outer::Right,
+        '-' => Outer::Left,
+        _ => return None,
+    };
+    let biwfa_fwd_gap = fwd_query_gap.min(extend_budget);
+    let linear_fwd_ext = fwd_query_gap - biwfa_fwd_gap;
+    let fwd_biwfa_q_lo = a_last.query_pos.max(query_region_start);
+    let fwd_biwfa_q_hi = (a_last.query_pos + syncmer_len + biwfa_fwd_gap).min(query_region_end);
+    let forward_bounds_bwg = |span: u64| -> (u64, u64) {
         match hit.strand {
             '+' => (
                 a_last.target_pos.min(target_len),
@@ -603,82 +684,45 @@ fn refine_ends_only(
             _ => (0, 0),
         }
     };
-
-    // ── Backward projection: sub-query covers [query_region_start,
-    //    a_first.query_pos + syncmer_len).
-    let back_q_lo = query_region_start;
-    let back_q_hi = (a_first.query_pos + syncmer_len).min(query_region_end);
-    let back_query_gap = a_first.query_pos.saturating_sub(query_region_start);
-    let back_outer = match hit.strand {
-        '+' => Outer::Left,
-        '-' => Outer::Right,
-        _ => return None,
-    };
-    let try_back = |slop: u64| -> Option<(u64, Option<Vec<u8>>)> {
-        let span = target_span_for_slop(back_query_gap, slop);
-        let (ts, te) = backward_bounds(span);
-        if te <= ts {
-            return None;
+    let linear_fwd_from = |anchor_t: u64| -> u64 {
+        match hit.strand {
+            '+' => (anchor_t + linear_fwd_ext).min(next_target_start).min(target_len),
+            '-' => anchor_t.saturating_sub(linear_fwd_ext).max(prev_target_end),
+            _ => anchor_t,
         }
-        let sq = slice_sub_q(back_q_lo, back_q_hi)?;
-        let (skip, cigar) = project_end_align(
-            sq,
-            ts,
-            te,
-            hit.strand,
-            &hit.genome,
-            back_outer,
-            sequence_index,
-            emit_cigar,
-        )?;
-        // Translate skip to a forward-strand target position using THIS
-        // tier's window bounds.
-        let refined = match hit.strand {
-            '+' => ts + skip,
-            '-' => te.saturating_sub(skip),
-            _ => return None,
-        };
-        Some((refined, cigar))
     };
-    let back_result = try_back(small_slop(back_query_gap))
-        .or_else(|| try_back(extend_budget));
-
-    // ── Forward projection: sub-query covers [a_last.query_pos,
-    //    query_region_end).
-    let fwd_q_lo = a_last.query_pos.max(query_region_start);
-    let fwd_q_hi = query_region_end;
-    let fwd_query_gap = query_region_end
-        .saturating_sub((a_last.query_pos + syncmer_len).min(query_region_end));
-    let fwd_outer = match hit.strand {
-        '+' => Outer::Right,
-        '-' => Outer::Left,
-        _ => return None,
+    let pure_linear_fwd = || -> (u64, Option<Vec<u8>>) {
+        let t = match hit.strand {
+            '+' => (a_last.target_pos + syncmer_len + fwd_query_gap)
+                .min(next_target_start)
+                .min(target_len),
+            '-' => a_last.target_pos.saturating_sub(fwd_query_gap).max(prev_target_end),
+            _ => a_last.target_pos,
+        };
+        (t, None)
     };
     let try_fwd = |slop: u64| -> Option<(u64, Option<Vec<u8>>)> {
-        let span = target_span_for_slop(fwd_query_gap, slop);
-        let (ts, te) = forward_bounds(span);
+        if fwd_query_gap < SKIP_BIWFA_MIN_GAP {
+            return Some(pure_linear_fwd());
+        }
+        let span = target_span_for_slop(biwfa_fwd_gap, slop);
+        let (ts, te) = forward_bounds_bwg(span);
         if te <= ts {
             return None;
         }
-        let sq = slice_sub_q(fwd_q_lo, fwd_q_hi)?;
+        let sq = slice_sub_q(fwd_biwfa_q_lo, fwd_biwfa_q_hi)?;
         let (skip, cigar) = project_end_align(
-            sq,
-            ts,
-            te,
-            hit.strand,
-            &hit.genome,
-            fwd_outer,
-            sequence_index,
-            emit_cigar,
+            sq, ts, te, hit.strand, &hit.genome, fwd_outer, sequence_index, emit_cigar,
         )?;
-        let refined = match hit.strand {
+        let t_at_biwfa_hi = match hit.strand {
             '+' => te.saturating_sub(skip),
             '-' => ts + skip,
             _ => return None,
         };
+        let refined = linear_fwd_from(t_at_biwfa_hi);
         Some((refined, cigar))
     };
-    let fwd_result = try_fwd(small_slop(fwd_query_gap))
+    let fwd_result = try_fwd(small_slop(biwfa_fwd_gap))
         .or_else(|| try_fwd(extend_budget));
 
     // `back_result` / `fwd_result` already hold the refined forward-
