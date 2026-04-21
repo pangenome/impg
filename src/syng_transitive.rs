@@ -74,32 +74,29 @@ where
 /// Mutual-best-buddy anchor chaining with range-bounded
 /// diagonal-preferring scoring.
 ///
-/// Flattens per-visit hits' anchors into per-(target, strand) anchor
-/// lists, sorts each by `query_pos`, and scores candidate forward
-/// buddies per anchor. For a pair `(A, B)` with `B` downstream of `A`
-/// on query axis (and on target axis per strand):
+/// Caps are derived from `extend_budget` rather than the queried range
+/// so chain shape (and therefore projection endpoints) are independent
+/// of tile size. Liftover of any query position is a function of local
+/// alignment evidence, not how the user chopped the query.
 ///
-/// * **Hard constraints** (set by the user's queried range):
-///   - `0 < dq ≤ query_range_len`          (B strictly downstream on query,
-///                                          no further than the whole range)
-///   - `0 < dt ≤ query_range_len`          (same magnitude cap on target)
-///   - `|dq − dt| ≤ query_range_len`       (no wildly discordant diagonals)
+/// For a pair `(A, B)` with `B` downstream of `A` on query AND target
+/// axes:
+///
+/// * **Hard constraints** (scale with `extend_budget`):
+///   - `0 < dq ≤ 3 × extend_budget`       (max hop on query axis)
+///   - `0 < dt ≤ 3 × extend_budget`       (max hop on target axis)
+///   - `|dq − dt| ≤ 3 × extend_budget`    (max diagonal drift per hop)
 /// * **Score** (lower is better):
 ///   `W_sig × |dq − dt| + max(dq, dt)` with `W_sig ≫ 1` — diagonal
-///   match dominates; 2D proximity is the tiebreaker among equally
-///   colinear candidates.
+///   match dominates; 2D proximity is the tiebreaker.
 ///
-/// `best_fwd[A] = B` means `B` is A's top-scoring forward buddy;
-/// `best_bwd[B] = A` is the reciprocal. An edge is formed only when
-/// both sides agree (mutual-best). Chains are the connected components
-/// of the resulting graph, computed by union-find. Each emitted chain
-/// becomes one `HomologousIntervalWithAnchors` with target-span bounds.
-///
-/// This replaces the earlier diagonal-plus-positional-cap clustering.
-/// There is no positional-cap knob — the queried range is the cap.
+/// Chains form by mutual-best-buddy edges; union-find assembles
+/// connected components. Chain-total span is capped at
+/// `10 × extend_budget` during union so stacked small drifts don't
+/// produce unbounded target spans.
 pub(crate) fn chain_anchors(
     hits: Vec<HomologousIntervalWithAnchors>,
-    query_range_len: u64,
+    extend_budget: u64,
     syncmer_len: u64,
 ) -> Vec<HomologousIntervalWithAnchors> {
     if hits.is_empty() {
@@ -140,15 +137,14 @@ pub(crate) fn chain_anchors(
     }
 
     const W_SIG: i64 = 1_000_000;
-    // Absolute hop caps from the queried range. TE/MEI insertions
-    // legitimately produce target:query ratios of 2-3×, so dt can
-    // exceed query_range_len; bound it loosely (3×) rather than tightly.
-    let max_dq = query_range_len;
-    let max_dt = query_range_len.saturating_mul(3);
-    // Drift ceiling is also generous — allow up to the full range.
-    // The W_SIG-weighted scoring still *prefers* colinear pairs;
-    // rejecting would block real insertion evidence.
-    let sig_diff_abs_ceiling = query_range_len.saturating_mul(3);
+    // All hop caps scale with `extend_budget`, not the tile size.
+    // `3 × budget` is a generous per-hop bound that admits normal
+    // indel drift and small TE insertions while rejecting
+    // wildly-discordant cross-paralog jumps.
+    let hop_cap = extend_budget.saturating_mul(3).max(extend_budget);
+    let max_dq = hop_cap;
+    let max_dt = hop_cap;
+    let sig_diff_abs_ceiling = hop_cap;
 
     let mut out: Vec<HomologousIntervalWithAnchors> = Vec::new();
     for ((genome, strand), mut anchors) in per_path {
@@ -208,17 +204,12 @@ pub(crate) fn chain_anchors(
             }
         }
 
-        // Per-root target-axis span tracking. Permissive cap (3×
-        // range) admits real TE/MEI insertions that legitimately
-        // stretch target:query to 2–3×. Within that envelope, the
-        // W_SIG-weighted scoring biases best-buddy toward colinear
-        // (shorter-span) partners when both options exist.
-        const SPAN_SLOP_NUM: u64 = 3;
-        const SPAN_SLOP_DEN: u64 = 1;
-        let max_chain_span = query_range_len
-            .saturating_mul(SPAN_SLOP_NUM)
-            .saturating_div(SPAN_SLOP_DEN)
-            .max(query_range_len);
+        // Per-root target-axis span cap. Scaled by `extend_budget`, not
+        // the queried range, so chain shape and projection endpoints
+        // are independent of tile size. `10 × budget` admits TE/MEI
+        // insertions plus normal homology extent; bigger chains would
+        // indicate stacked discordant hops that shouldn't co-locate.
+        let max_chain_span = extend_budget.saturating_mul(10).max(extend_budget);
         let mut parent: Vec<usize> = (0..n).collect();
         let mut rank: Vec<u32> = vec![0; n];
         let mut span_lo: Vec<u64> = anchors.iter().map(|a| a.target_pos).collect();
@@ -272,7 +263,7 @@ pub(crate) fn chain_anchors(
         // otherwise-clean chain when local anchor density creates an
         // edge where A's best forward ≠ B's best backward; this pass
         // heals those cuts.
-        let merge_gap_cap: u64 = (query_range_len / 20).max(128);
+        let merge_gap_cap: u64 = (extend_budget / 4).max(128);
         // Sort by target_start for + strand, target_end for - strand —
         // within a colinear chain, consecutive anchors have increasing
         // target_pos on +, decreasing on -. Either sort yields
@@ -570,109 +561,139 @@ fn refine_ends_only(
         Some(&query_bytes_full[a..b])
     };
 
+    // Target-span computation is a function of how far the query
+    // position sits from the anchor (`query_gap`). Target extends
+    // just that distance plus a slop budget. The first attempt uses
+    // a small "homologous short-circuit" slop (~5% of gap); if that
+    // alignment fails we retry with the full `extend_budget`. Both
+    // caps are per-projection and independent of tile size.
+    let target_span_for_slop = |query_gap: u64, slop: u64| -> u64 {
+        query_gap.saturating_add(slop).max(syncmer_len)
+    };
+    let small_slop = |query_gap: u64| -> u64 {
+        (query_gap / 20).max(32).min(extend_budget)
+    };
+    let backward_bounds = |span: u64| -> (u64, u64) {
+        match hit.strand {
+            '+' => (
+                a_first.target_pos.saturating_sub(span).max(prev_target_end),
+                (a_first.target_pos + syncmer_len).min(target_len),
+            ),
+            '-' => (
+                a_first.target_pos.min(target_len),
+                (a_first.target_pos + syncmer_len + span)
+                    .min(next_target_start)
+                    .min(target_len),
+            ),
+            _ => (0, 0),
+        }
+    };
+    let forward_bounds = |span: u64| -> (u64, u64) {
+        match hit.strand {
+            '+' => (
+                a_last.target_pos.min(target_len),
+                (a_last.target_pos + syncmer_len + span)
+                    .min(next_target_start)
+                    .min(target_len),
+            ),
+            '-' => (
+                a_last.target_pos.saturating_sub(span).max(prev_target_end),
+                (a_last.target_pos + syncmer_len).min(target_len),
+            ),
+            _ => (0, 0),
+        }
+    };
+
     // ── Backward projection: sub-query covers [query_region_start,
-    //    a_first.query_pos + syncmer_len); its OUTER edge (toward
-    //    query_region_start) is what we're trying to place on target.
-    //    Forward-strand target span to fetch:
-    //      '+': [a_first.target_pos − extend_budget  ..  a_first.target_pos + syncmer_len]
-    //      '-': [a_first.target_pos  ..  a_first.target_pos + syncmer_len + extend_budget]
-    //    (on '-', going backward on query is going forward on forward target.)
+    //    a_first.query_pos + syncmer_len).
     let back_q_lo = query_region_start;
     let back_q_hi = (a_first.query_pos + syncmer_len).min(query_region_end);
-    let (back_ts, back_te) = match hit.strand {
-        '+' => (
-            a_first
-                .target_pos
-                .saturating_sub(extend_budget)
-                .max(prev_target_end),
-            (a_first.target_pos + syncmer_len).min(target_len),
-        ),
-        '-' => (
-            a_first.target_pos.min(target_len),
-            (a_first.target_pos + syncmer_len + extend_budget)
-                .min(next_target_start)
-                .min(target_len),
-        ),
+    let back_query_gap = a_first.query_pos.saturating_sub(query_region_start);
+    let back_outer = match hit.strand {
+        '+' => Outer::Left,
+        '-' => Outer::Right,
         _ => return None,
     };
-    let back_result = slice_sub_q(back_q_lo, back_q_hi).and_then(|sq| {
-        // Backward projection: outer forward edge = Left for '+', Right for '-'.
-        let outer = match hit.strand {
-            '+' => Outer::Left,
-            '-' => Outer::Right,
-            _ => return None,
-        };
-        project_end_align(
+    let try_back = |slop: u64| -> Option<(u64, Option<Vec<u8>>)> {
+        let span = target_span_for_slop(back_query_gap, slop);
+        let (ts, te) = backward_bounds(span);
+        if te <= ts {
+            return None;
+        }
+        let sq = slice_sub_q(back_q_lo, back_q_hi)?;
+        let (skip, cigar) = project_end_align(
             sq,
-            back_ts,
-            back_te,
+            ts,
+            te,
             hit.strand,
             &hit.genome,
-            outer,
+            back_outer,
             sequence_index,
             emit_cigar,
-        )
-    });
+        )?;
+        // Translate skip to a forward-strand target position using THIS
+        // tier's window bounds.
+        let refined = match hit.strand {
+            '+' => ts + skip,
+            '-' => te.saturating_sub(skip),
+            _ => return None,
+        };
+        Some((refined, cigar))
+    };
+    let back_result = try_back(small_slop(back_query_gap))
+        .or_else(|| try_back(extend_budget));
 
     // ── Forward projection: sub-query covers [a_last.query_pos,
-    //    query_region_end); outer edge is toward query_region_end.
+    //    query_region_end).
     let fwd_q_lo = a_last.query_pos.max(query_region_start);
     let fwd_q_hi = query_region_end;
-    let (fwd_ts, fwd_te) = match hit.strand {
-        '+' => (
-            a_last.target_pos.min(target_len),
-            (a_last.target_pos + syncmer_len + extend_budget)
-                .min(next_target_start)
-                .min(target_len),
-        ),
-        '-' => (
-            a_last
-                .target_pos
-                .saturating_sub(extend_budget)
-                .max(prev_target_end),
-            (a_last.target_pos + syncmer_len).min(target_len),
-        ),
+    let fwd_query_gap = query_region_end
+        .saturating_sub((a_last.query_pos + syncmer_len).min(query_region_end));
+    let fwd_outer = match hit.strand {
+        '+' => Outer::Right,
+        '-' => Outer::Left,
         _ => return None,
     };
-    let fwd_result = slice_sub_q(fwd_q_lo, fwd_q_hi).and_then(|sq| {
-        let outer = match hit.strand {
-            '+' => Outer::Right,
-            '-' => Outer::Left,
-            _ => return None,
-        };
-        project_end_align(
+    let try_fwd = |slop: u64| -> Option<(u64, Option<Vec<u8>>)> {
+        let span = target_span_for_slop(fwd_query_gap, slop);
+        let (ts, te) = forward_bounds(span);
+        if te <= ts {
+            return None;
+        }
+        let sq = slice_sub_q(fwd_q_lo, fwd_q_hi)?;
+        let (skip, cigar) = project_end_align(
             sq,
-            fwd_ts,
-            fwd_te,
+            ts,
+            te,
             hit.strand,
             &hit.genome,
-            outer,
+            fwd_outer,
             sequence_index,
             emit_cigar,
-        )
-    });
+        )?;
+        let refined = match hit.strand {
+            '+' => te.saturating_sub(skip),
+            '-' => ts + skip,
+            _ => return None,
+        };
+        Some((refined, cigar))
+    };
+    let fwd_result = try_fwd(small_slop(fwd_query_gap))
+        .or_else(|| try_fwd(extend_budget));
 
-    // Compose refined forward-strand bounds.
-    //
-    // Forward-strand outer edge mapping:
-    //   '+' backward → leading bp on forward target from back_ts inward
-    //       ⇒ refined start = back_ts + skip
-    //   '+' forward → trailing bp on forward target from fwd_te inward
-    //       ⇒ refined end = fwd_te - skip
-    //   '-' backward (oriented outer = Right on forward view): trailing bp
-    //       from back_te inward ⇒ refined end = back_te - skip
-    //   '-' forward (oriented outer = Left on forward view): leading bp
-    //       from fwd_ts inward ⇒ refined start = fwd_ts + skip
+    // `back_result` / `fwd_result` already hold the refined forward-
+    // strand target position for whichever tier succeeded. Compose
+    // into (ts, te) per strand.
     let (refined_ts, refined_te, back_cigar, fwd_cigar) = match hit.strand {
         '+' => {
-            let ts = match back_result.as_ref() {
-                Some((skip, _)) => back_ts + *skip,
-                None => a_first.target_pos,
-            };
-            let te = match fwd_result.as_ref() {
-                Some((skip, _)) => fwd_te.saturating_sub(*skip),
-                None => (a_last.target_pos + syncmer_len).min(target_len),
-            };
+            let ts = back_result
+                .as_ref()
+                .map(|(r, _)| *r)
+                .unwrap_or(a_first.target_pos);
+            let te = fwd_result
+                .as_ref()
+                .map(|(r, _)| *r)
+                .unwrap_or((a_last.target_pos + syncmer_len).min(target_len));
             (
                 ts,
                 te,
@@ -681,14 +702,14 @@ fn refine_ends_only(
             )
         }
         '-' => {
-            let te = match back_result.as_ref() {
-                Some((skip, _)) => back_te.saturating_sub(*skip),
-                None => (a_first.target_pos + syncmer_len).min(target_len),
-            };
-            let ts = match fwd_result.as_ref() {
-                Some((skip, _)) => fwd_ts + *skip,
-                None => a_last.target_pos,
-            };
+            let te = back_result
+                .as_ref()
+                .map(|(r, _)| *r)
+                .unwrap_or((a_first.target_pos + syncmer_len).min(target_len));
+            let ts = fwd_result
+                .as_ref()
+                .map(|(r, _)| *r)
+                .unwrap_or(a_last.target_pos);
             (
                 ts,
                 te,
@@ -883,7 +904,7 @@ pub fn one_hop_ext_visited(
     let query_range_len = query_end.saturating_sub(query_start);
     let t1 = Instant::now();
     let total_anchors: usize = hits.iter().map(|h| h.anchors.len()).sum();
-    let hits = chain_anchors(hits, query_range_len, syncmer_len);
+    let hits = chain_anchors(hits, extend_budget, syncmer_len);
     let pre_filter = hits.len();
     // Filter chains by anchor count. Default min=2 drops singletons
     // (one-anchor chains with no mutual-best colinear partner — mostly
