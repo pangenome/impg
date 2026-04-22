@@ -1055,6 +1055,18 @@ enum Args {
         #[clap(long, value_parser, default_value_t = 2)]
         syng_min_chain_anchors: usize,
 
+        /// Minimum chain query-extent as a fraction of the queried
+        /// range (0.0 to 1.0). Chains whose anchor span on the query
+        /// axis covers less than `fraction × query_range_len` are
+        /// dropped. Default 0.0 keeps every chain (maximum paralog
+        /// discovery). Set 0.5 to keep only chains covering at least
+        /// half the query (good for partitioning — filters out
+        /// fragment chains in repeat regions and speeds up hard tiles
+        /// dramatically).
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, value_parser, default_value_t = 0.0)]
+        syng_min_chain_fraction: f64,
+
         /// Debug-only: skip boundary realignment and emit raw syncmer-resolution
         /// intervals from syng's query_region. The default --syng path runs
         /// BiWFA boundary realignment for base-pair-precise edges (and iterates
@@ -1626,6 +1638,7 @@ fn run() -> io::Result<()> {
             syng_extension,
             syng_extend_budget,
             syng_min_chain_anchors,
+            syng_min_chain_fraction,
             syng_raw,
             query,
             output_format,
@@ -1794,6 +1807,7 @@ fn run() -> io::Result<()> {
                                     syng_extension,
                                     syng_extend_budget,
                                     syng_min_chain_anchors,
+                                    syng_min_chain_fraction,
                                     sequence_index.as_ref().unwrap(),
                                 )?
                             } else {
@@ -1867,6 +1881,7 @@ fn run() -> io::Result<()> {
                                             syng_extension,
                                             syng_extend_budget,
                                             syng_min_chain_anchors,
+                                            syng_min_chain_fraction,
                                             sequence_index.as_ref().unwrap(),
                                         )?
                                     } else {
@@ -1925,6 +1940,7 @@ fn run() -> io::Result<()> {
                                         syng_extension,
                                         syng_extend_budget,
                                         syng_min_chain_anchors,
+                                        syng_min_chain_fraction,
                                         sequence_index.as_ref().unwrap(),
                                     )?
                                 } else {
@@ -1974,6 +1990,7 @@ fn run() -> io::Result<()> {
                                     syng_extension,
                                     syng_extend_budget,
                                     syng_min_chain_anchors,
+                                    syng_min_chain_fraction,
                                     seq_idx,
                                 )?
                             } else {
@@ -2006,6 +2023,7 @@ fn run() -> io::Result<()> {
                                     syng_extension,
                                     syng_extend_budget,
                                     syng_min_chain_anchors,
+                                    syng_min_chain_fraction,
                                     seq_idx,
                                 )?
                             } else {

@@ -833,6 +833,7 @@ pub fn one_hop(
         0,
         DEFAULT_EXTEND_BUDGET_BP,
         DEFAULT_MIN_CHAIN_ANCHORS,
+        0.0,
         sequence_index,
     )
 }
@@ -849,6 +850,7 @@ pub fn one_hop_ext(
     query_extension: u64,
     extend_budget: u64,
     min_chain_anchors: usize,
+    min_chain_fraction: f64,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
     one_hop_ext_visited(
@@ -860,6 +862,7 @@ pub fn one_hop_ext(
         query_extension,
         extend_budget,
         min_chain_anchors,
+        min_chain_fraction,
         None,
         sequence_index,
     )
@@ -868,8 +871,10 @@ pub fn one_hop_ext(
 /// Core single-hop entry: chain anchors via mutual-best-buddy, then
 /// ends-only projection per chain.
 ///
-/// Chains with fewer than `min_chain_anchors` anchors are dropped at
-/// emission (default 2: singletons filtered as weak evidence).
+/// Chains are dropped at emission when either:
+///   - anchor count < `min_chain_anchors` (default 2: drop singletons)
+///   - query-extent / query_range_len < `min_chain_fraction`
+///     (default 0.0: no length filter)
 #[allow(clippy::too_many_arguments)]
 pub fn one_hop_ext_visited(
     syng_index: &SyngIndex,
@@ -880,6 +885,7 @@ pub fn one_hop_ext_visited(
     query_extension: u64,
     extend_budget: u64,
     min_chain_anchors: usize,
+    min_chain_fraction: f64,
     visited_nodes: Option<&mut FxHashSet<u32>>,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
@@ -916,19 +922,39 @@ pub fn one_hop_ext_visited(
     } else {
         min_chain_anchors
     };
+    // Chain query-extent = a_last.query_pos + syncmer_len - a_first.query_pos.
+    // Threshold in bp; 0 means "no extent filter".
+    let min_chain_extent_bp = (query_range_len as f64 * min_chain_fraction.max(0.0)) as u64;
     let hits: Vec<HomologousIntervalWithAnchors> = hits
         .into_iter()
-        .filter(|h| h.anchors.len() >= effective_min)
+        .filter(|h| {
+            if h.anchors.len() < effective_min {
+                return false;
+            }
+            if min_chain_extent_bp == 0 {
+                return true;
+            }
+            let mut qmin = u64::MAX;
+            let mut qmax = 0u64;
+            for a in &h.anchors {
+                qmin = qmin.min(a.query_pos);
+                qmax = qmax.max(a.query_pos);
+            }
+            let extent = qmax.saturating_sub(qmin).saturating_add(syncmer_len);
+            extent >= min_chain_extent_bp
+        })
         .collect();
     if prof {
         eprintln!(
-            "PROF chain_anchors={:?} total_anchors={} chains={} after_filter={} (min={} eff={})",
+            "PROF chain_anchors={:?} total_anchors={} chains={} after_filter={} (min_anchors={} eff={} min_frac={} min_bp={})",
             t1.elapsed(),
             total_anchors,
             pre_filter,
             hits.len(),
             min_chain_anchors,
             effective_min,
+            min_chain_fraction,
+            min_chain_extent_bp,
         );
     }
     let t2 = Instant::now();
@@ -1087,6 +1113,7 @@ pub fn query_transitive(
         0,
         DEFAULT_EXTEND_BUDGET_BP,
         DEFAULT_MIN_CHAIN_ANCHORS,
+        0.0,
         sequence_index,
     )
 }
@@ -1098,6 +1125,8 @@ pub fn query_transitive(
 ///   endpoints fall just outside each frontier region.
 /// * `extend_budget`: per-chain bp budget for ends-free target-side
 ///   extension in projection; see [`one_hop_ext_visited`].
+/// * `min_chain_fraction`: drop chains whose query-extent is less than
+///   `fraction × query_range_len`. 0.0 = no filter.
 #[allow(clippy::too_many_arguments)]
 pub fn query_transitive_ext(
     syng_index: &SyngIndex,
@@ -1109,6 +1138,7 @@ pub fn query_transitive_ext(
     query_extension: u64,
     extend_budget: u64,
     min_chain_anchors: usize,
+    min_chain_fraction: f64,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
     let mut visited: FxHashSet<(String, u64, u64, char)> = FxHashSet::default();
@@ -1141,6 +1171,7 @@ pub fn query_transitive_ext(
                 hop_extension,
                 extend_budget,
                 min_chain_anchors,
+                min_chain_fraction,
                 Some(&mut visited_nodes),
                 sequence_index,
             ) {
