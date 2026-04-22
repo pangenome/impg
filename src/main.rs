@@ -1832,7 +1832,11 @@ fn run() -> io::Result<()> {
                     None
                 };
 
-                // Process each target range
+                // Process each target range. Serial outer — the
+                // per-tile query already uses the rayon pool
+                // internally (anchor emission + chain projection);
+                // an outer par_iter over tiles oversubscribes and
+                // actually slowed things down in measurement.
                 for (target_name, (range_start, range_end), name) in &target_ranges {
                     info!("Syng query: {} ({}:{}-{})", name, target_name, range_start, range_end);
 
@@ -1858,16 +1862,12 @@ fn run() -> io::Result<()> {
                                     *range_start as u64,
                                     *range_end as u64,
                                     syng_padding,
-                                syng_extension,
-                            )?
+                                    syng_extension,
+                                )?
                             };
                             let ext = if resolved_format == "bedpe" { "bedpe" } else { "bed" };
                             let mut out = find_output_stream(&output_prefix, ext)?;
                             if resolved_format == "bedpe" {
-                                // BEDPE: include the query region as the
-                                // first triple so batch queries via -b
-                                // can be grouped downstream.
-                                // Columns: q_chrom q_start q_end t_chrom t_start t_end name score q_strand t_strand
                                 for iv in &intervals {
                                     writeln!(
                                         out,

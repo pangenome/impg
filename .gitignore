@@ -17,3 +17,5 @@ demo-results
 /seqwish*
 .workgraph.1/
 .claude/
+perf.data
+perf.data.old
