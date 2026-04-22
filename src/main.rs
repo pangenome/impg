@@ -783,6 +783,41 @@ impl RefineOpts {
 
 /// Parse sequence name to extract subsequence coordinates and original sequence name
 /// Format: `seq_name:start-end` -> (original_seq_name, start_offset)
+/// Detect whether a path points to a syng index. Returns the syng
+/// prefix (base name before `.1khash` / `.1gbwt`) if one is found.
+///
+/// Accepts:
+///   - Explicit file path ending in `.1khash` or `.1gbwt` → strip suffix
+///   - Bare prefix with sibling `.1khash` on disk → return prefix as-is
+fn detect_syng_prefix(path: &str) -> Option<String> {
+    if let Some(stem) = path.strip_suffix(".1khash") {
+        return Some(stem.to_string());
+    }
+    if let Some(stem) = path.strip_suffix(".1gbwt") {
+        return Some(stem.to_string());
+    }
+    if std::path::Path::new(&format!("{path}.1khash")).exists() {
+        return Some(path.to_string());
+    }
+    None
+}
+
+/// Resolve the effective syng prefix for a command: explicit `--syng`
+/// wins; otherwise if the first alignment argument looks like a syng
+/// index path, use that.
+fn resolve_syng_prefix(syng: &Option<String>, alignment: &AlignmentOpts) -> Option<String> {
+    if syng.is_some() {
+        return syng.clone();
+    }
+    // Only probe if user gave exactly one alignment arg.
+    if alignment.alignment_files.len() == 1 {
+        if let Some(prefix) = detect_syng_prefix(&alignment.alignment_files[0]) {
+            return Some(prefix);
+        }
+    }
+    None
+}
+
 fn parse_subsequence_coordinates(seq_name: &str) -> Option<(String, i32)> {
     // Find the last colon to handle formats like "sample#hap#chr:start-end"
     if let Some(colon_pos) = seq_name.rfind(':') {
@@ -1515,8 +1550,11 @@ fn run() -> io::Result<()> {
                 ));
             }
 
+            // Allow `-a <prefix>` or `-a <prefix>.1khash` to route to syng.
+            let effective_syng = resolve_syng_prefix(&syng, &alignment);
+
             // ─── Syng-based partition path ──────────────────────────────────
-            if let Some(ref syng_prefix) = syng {
+            if let Some(ref syng_prefix) = effective_syng {
                 if approximate {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -1686,8 +1724,12 @@ fn run() -> io::Result<()> {
                 ));
             }
 
+            // Allow `-a <prefix>` or `-a <prefix>.1khash` to auto-route
+            // to the syng backend without requiring `--syng`.
+            let effective_syng = resolve_syng_prefix(&syng, &alignment);
+
             // ─── Syng query path ──────────────────────────────────────────
-            if let Some(ref syng_prefix) = syng {
+            if let Some(ref syng_prefix) = effective_syng {
                 // Validate that alignment files are NOT also provided
                 // (conflicts_with_all handles this at clap level, but be explicit)
 
