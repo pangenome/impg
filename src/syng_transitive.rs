@@ -64,30 +64,23 @@ where
     })
 }
 
-/// Mutual-best-buddy anchor chaining with range-bounded
-/// diagonal-preferring scoring.
+/// Plane-sweep chaining over anchors per (genome, strand).
 ///
-/// Caps are derived from `extend_budget` rather than the queried range
-/// so chain shape (and therefore projection endpoints) are independent
-/// of tile size. Liftover of any query position is a function of local
-/// alignment evidence, not how the user chopped the query.
+/// Walks anchors in query_pos order. Each anchor joins the nearest
+/// active chain (by current signature) if within per-hop drift
+/// tolerance AND the extension wouldn't push the chain's target span
+/// past the chain-total cap; otherwise it starts a new chain. Chains
+/// that haven't been extended within `max_hop` bp on the query axis
+/// are finalized.
 ///
-/// For a pair `(A, B)` with `B` downstream of `A` on query AND target
-/// axes:
+/// Replaces the older O(N²) mutual-best-buddy + union-find pipeline.
+/// Algorithmic budget per bucket: O(N × active_chains). On realistic
+/// inputs, active_chains stays bounded (tens to low hundreds even in
+/// repeat-dense regions), so the effective cost is O(N × small).
 ///
-/// * **Hard constraints** (scale with `extend_budget`):
-///   - `0 < dq ≤ 3 × extend_budget`       (max hop on query axis)
-///   - `0 < dt ≤ 3 × extend_budget`       (max hop on target axis)
-///   - `|dq − dt| ≤ 3 × extend_budget`    (max diagonal drift per hop)
-/// * **Score** (lower is better):
-///   `W_sig × |dq − dt| + max(dq, dt)` with `W_sig ≫ 1` — diagonal
-///   match dominates; 2D proximity is the tiebreaker.
-///
-/// Chains form by mutual-best-buddy edges; union-find assembles
-/// connected components. Chain-total span is capped at
-/// `10 × extend_budget` during union so stacked small drifts don't
-/// produce unbounded target spans.
-pub(crate) fn chain_anchors(
+/// Caps are derived from `extend_budget` only — tile size does not
+/// leak into chain shape or projection endpoints.
+pub fn chain_anchors(
     hits: Vec<HomologousIntervalWithAnchors>,
     extend_budget: u64,
     syncmer_len: u64,
@@ -105,39 +98,33 @@ pub(crate) fn chain_anchors(
             .extend(h.anchors.into_iter());
     }
 
-    // Iterative union-find with path compression.
-    fn uf_find(parent: &mut [usize], mut x: usize) -> usize {
-        while parent[x] != x {
-            parent[x] = parent[parent[x]];
-            x = parent[x];
-        }
-        x
-    }
-    fn uf_union(parent: &mut [usize], rank: &mut [u32], x: usize, y: usize) {
-        let rx = uf_find(parent, x);
-        let ry = uf_find(parent, y);
-        if rx == ry {
-            return;
-        }
-        if rank[rx] < rank[ry] {
-            parent[rx] = ry;
-        } else if rank[rx] > rank[ry] {
-            parent[ry] = rx;
-        } else {
-            parent[ry] = rx;
-            rank[rx] += 1;
+    // Per-hop signature drift tolerance: scaled to the extension
+    // budget. Absorbs real indels (incl. TE/MEI) up to this size in
+    // one hop. Cross-paralog jumps with period > budget stay distinct.
+    let drift_per_hop: i64 = extend_budget.min(i64::MAX as u64) as i64;
+    // Max query-axis hop between consecutive anchors in a chain:
+    // 3 × budget admits normal repeat density plus some slop. Beyond
+    // this, the chain is stale and gets finalized.
+    let max_hop = extend_budget.saturating_mul(3).max(extend_budget);
+    // Chain-total target span cap — same as before, ensures stacked
+    // small drifts don't assemble unbounded target extent.
+    let max_chain_span = extend_budget.saturating_mul(10).max(extend_budget);
+
+    fn anchor_sig(a: &Anchor, strand: char) -> i64 {
+        match strand {
+            '+' => a.target_pos as i64 - a.query_pos as i64,
+            '-' => a.target_pos as i64 + a.query_pos as i64,
+            _ => 0,
         }
     }
 
-    const W_SIG: i64 = 1_000_000;
-    // All hop caps scale with `extend_budget`, not the tile size.
-    // `3 × budget` is a generous per-hop bound that admits normal
-    // indel drift and small TE insertions while rejecting
-    // wildly-discordant cross-paralog jumps.
-    let hop_cap = extend_budget.saturating_mul(3).max(extend_budget);
-    let max_dq = hop_cap;
-    let max_dt = hop_cap;
-    let sig_diff_abs_ceiling = hop_cap;
+    struct ActiveChain {
+        anchors: Vec<Anchor>,
+        current_sig: i64,
+        last_query_pos: u64,
+        min_target_pos: u64,
+        max_target_pos: u64,
+    }
 
     let mut out: Vec<HomologousIntervalWithAnchors> = Vec::new();
     for ((genome, strand), mut anchors) in per_path {
@@ -150,170 +137,85 @@ pub(crate) fn chain_anchors(
                 .then(a.target_pos.cmp(&b.target_pos))
         });
         anchors.dedup_by(|a, b| a.query_pos == b.query_pos && a.target_pos == b.target_pos);
-        let n = anchors.len();
 
-        let mut best_fwd: Vec<Option<(usize, i64)>> = vec![None; n];
-        let mut best_bwd: Vec<Option<(usize, i64)>> = vec![None; n];
+        let mut active: Vec<ActiveChain> = Vec::new();
+        let mut finalized: Vec<ActiveChain> = Vec::new();
 
-        for i in 0..n {
-            let a = anchors[i];
-            for j in (i + 1)..n {
-                let b = anchors[j];
-                let dq = b.query_pos.saturating_sub(a.query_pos);
-                if dq == 0 {
+        for a in anchors {
+            let sig = anchor_sig(&a, strand);
+
+            // Flush stale chains whose last_query_pos is too far behind.
+            let mut i = 0;
+            while i < active.len() {
+                if a.query_pos.saturating_sub(active[i].last_query_pos) > max_hop {
+                    finalized.push(active.swap_remove(i));
+                } else {
+                    i += 1;
+                }
+            }
+
+            // Find best chain to extend: smallest |sig − chain.current_sig|
+            // within DRIFT_PER_HOP, and post-extension span within cap.
+            // Monotonicity on target axis is required (dt > 0 in the
+            // strand's natural direction).
+            let mut best_idx: Option<usize> = None;
+            let mut best_diff: i64 = i64::MAX;
+            for (idx, c) in active.iter().enumerate() {
+                let diff = (sig - c.current_sig).abs();
+                if diff > drift_per_hop {
                     continue;
                 }
-                if dq > max_dq {
-                    // Anchors are sorted by query_pos; further j can only
-                    // have larger dq → abort inner loop.
-                    break;
-                }
-                let dt_signed: i64 = match strand {
-                    '+' => b.target_pos as i64 - a.target_pos as i64,
-                    '-' => a.target_pos as i64 - b.target_pos as i64,
-                    _ => 0,
+                // Target-axis monotonicity per strand.
+                let dt_ok = match strand {
+                    '+' => a.target_pos >= c.max_target_pos.saturating_sub(syncmer_len),
+                    '-' => a.target_pos + syncmer_len <= c.min_target_pos.saturating_add(syncmer_len),
+                    _ => false,
                 };
-                if dt_signed <= 0 {
+                if !dt_ok {
                     continue;
                 }
-                let dt = dt_signed as u64;
-                if dt > max_dt {
+                let new_min = c.min_target_pos.min(a.target_pos);
+                let new_max = c.max_target_pos.max(a.target_pos + syncmer_len);
+                if new_max.saturating_sub(new_min) > max_chain_span {
                     continue;
                 }
-                let sig_diff_abs = (dq as i64 - dt as i64).unsigned_abs();
-                if sig_diff_abs > sig_diff_abs_ceiling {
-                    continue;
+                if diff < best_diff {
+                    best_diff = diff;
+                    best_idx = Some(idx);
                 }
-                let prox = dq.max(dt) as i64;
-                let s = (sig_diff_abs as i64)
-                    .saturating_mul(W_SIG)
-                    .saturating_add(prox);
-                if best_fwd[i].map_or(true, |(_, bs)| s < bs) {
-                    best_fwd[i] = Some((j, s));
-                }
-                if best_bwd[j].map_or(true, |(_, bs)| s < bs) {
-                    best_bwd[j] = Some((i, s));
-                }
+            }
+
+            if let Some(idx) = best_idx {
+                let c = &mut active[idx];
+                c.anchors.push(a);
+                c.current_sig = sig;
+                c.last_query_pos = a.query_pos;
+                c.min_target_pos = c.min_target_pos.min(a.target_pos);
+                c.max_target_pos = c.max_target_pos.max(a.target_pos + syncmer_len);
+            } else {
+                active.push(ActiveChain {
+                    anchors: vec![a],
+                    current_sig: sig,
+                    last_query_pos: a.query_pos,
+                    min_target_pos: a.target_pos,
+                    max_target_pos: a.target_pos + syncmer_len,
+                });
             }
         }
 
-        // Per-root target-axis span cap. Scaled by `extend_budget`, not
-        // the queried range, so chain shape and projection endpoints
-        // are independent of tile size. `10 × budget` admits TE/MEI
-        // insertions plus normal homology extent; bigger chains would
-        // indicate stacked discordant hops that shouldn't co-locate.
-        let max_chain_span = extend_budget.saturating_mul(10).max(extend_budget);
-        let mut parent: Vec<usize> = (0..n).collect();
-        let mut rank: Vec<u32> = vec![0; n];
-        let mut span_lo: Vec<u64> = anchors.iter().map(|a| a.target_pos).collect();
-        let mut span_hi: Vec<u64> = anchors
-            .iter()
-            .map(|a| a.target_pos + syncmer_len)
-            .collect();
-        for i in 0..n {
-            if let Some((j, _)) = best_fwd[i] {
-                if let Some((k, _)) = best_bwd[j] {
-                    if k == i {
-                        let ri = uf_find(&mut parent, i);
-                        let rj = uf_find(&mut parent, j);
-                        if ri != rj {
-                            let lo = span_lo[ri].min(span_lo[rj]);
-                            let hi = span_hi[ri].max(span_hi[rj]);
-                            if hi.saturating_sub(lo) <= max_chain_span {
-                                uf_union(&mut parent, &mut rank, i, j);
-                                let r = uf_find(&mut parent, i);
-                                span_lo[r] = lo;
-                                span_hi[r] = hi;
-                            }
-                        }
-                    }
-                }
+        // Finalize remaining active chains.
+        finalized.extend(active);
+
+        for c in finalized {
+            if c.anchors.is_empty() {
+                continue;
             }
-        }
-
-        let mut by_root: HashMap<usize, Vec<Anchor>> = HashMap::new();
-        for i in 0..n {
-            let r = uf_find(&mut parent, i);
-            by_root.entry(r).or_default().push(anchors[i]);
-        }
-
-        let mut raw_chains: Vec<(u64, u64, Vec<Anchor>)> = Vec::new();
-        for (_, mut chain) in by_root {
-            chain.sort_by(|a, b| a.query_pos.cmp(&b.query_pos));
-            let mut tmin = u64::MAX;
-            let mut tmax = 0u64;
-            for a in &chain {
-                tmin = tmin.min(a.target_pos);
-                tmax = tmax.max(a.target_pos + syncmer_len);
-            }
-            raw_chains.push((tmin, tmax, chain));
-        }
-
-        // Post-merge pass: two chains on the same (genome, strand) that
-        // are (a) adjacent on both axes with small bilateral gaps and
-        // (b) colinear (gaps on query and target match within
-        // tolerance) belong together. Best-buddy can fragment an
-        // otherwise-clean chain when local anchor density creates an
-        // edge where A's best forward ≠ B's best backward; this pass
-        // heals those cuts.
-        let merge_gap_cap: u64 = (extend_budget / 4).max(128);
-        // Sort by target_start for + strand, target_end for - strand —
-        // within a colinear chain, consecutive anchors have increasing
-        // target_pos on +, decreasing on -. Either sort yields
-        // physically adjacent chains for bilateral-gap checks.
-        raw_chains.sort_by_key(|c| c.0);
-        let mut merged_chains: Vec<(u64, u64, Vec<Anchor>)> = Vec::new();
-        for (cs, ce, canchors) in raw_chains {
-            if let Some(last) = merged_chains.last_mut() {
-                // Query-axis bounds per chain
-                let last_q_hi = last.2.last().map(|a| a.query_pos).unwrap_or(0);
-                let cur_q_lo = canchors.first().map(|a| a.query_pos).unwrap_or(0);
-                let last_q_lo = last.2.first().map(|a| a.query_pos).unwrap_or(0);
-                let cur_q_hi = canchors.last().map(|a| a.query_pos).unwrap_or(0);
-                let (q_gap, t_gap): (i64, i64) = match strand {
-                    '+' => (
-                        cur_q_lo as i64 - last_q_hi as i64,
-                        cs as i64 - last.1 as i64,
-                    ),
-                    '-' => {
-                        // Sort by target_start asc puts "later-on-query"
-                        // chains FIRST on '-' (target decreasing with
-                        // query). Use that: cur is upstream of last on
-                        // query, so q_gap measured from cur_q_hi to
-                        // last_q_lo.
-                        (
-                            last_q_lo as i64 - cur_q_hi as i64,
-                            cs as i64 - last.1 as i64,
-                        )
-                    }
-                    _ => (i64::MAX, i64::MAX),
-                };
-                let colinear =
-                    (q_gap - t_gap).unsigned_abs() <= merge_gap_cap
-                        && q_gap.unsigned_abs() <= merge_gap_cap
-                        && t_gap.unsigned_abs() <= merge_gap_cap
-                        && q_gap >= -(merge_gap_cap as i64)
-                        && t_gap >= -(merge_gap_cap as i64);
-                // Also enforce the chain-total span cap on the merge.
-                let merged_span = ce.max(last.1).saturating_sub(cs.min(last.0));
-                if colinear && merged_span <= max_chain_span {
-                    last.0 = last.0.min(cs);
-                    last.1 = last.1.max(ce);
-                    last.2.extend(canchors);
-                    last.2.sort_by(|a, b| a.query_pos.cmp(&b.query_pos));
-                    continue;
-                }
-            }
-            merged_chains.push((cs, ce, canchors));
-        }
-
-        for (tmin, tmax, chain) in merged_chains {
             out.push(HomologousIntervalWithAnchors {
                 genome: genome.clone(),
-                start: tmin,
-                end: tmax,
+                start: c.min_target_pos,
+                end: c.max_target_pos,
                 strand,
-                anchors: chain,
+                anchors: c.anchors,
             });
         }
     }
@@ -1382,13 +1284,13 @@ mod tests {
     }
 
     #[test]
-    fn chain_anchors_mutual_best_rejects_non_colinear_triangle() {
+    fn chain_anchors_absorbs_within_drift_tolerance() {
         // Three anchors: (0, 0) [sig 0], (100, 100) [sig 0], (100, 500)
-        // [sig 400]. (0,0)'s best forward buddy is (100, 100) — same
-        // diagonal. (100, 100) and (100, 500) have dq=0 → invalid.
-        // (0, 0)'s forward options: (100, 100) on sig 0, (100, 500) on
-        // sig 400. Mutual-best picks (100, 100). The off-diagonal
-        // anchor (100, 500) is a singleton.
+        // [sig 400]. With extend_budget=1000 the per-hop drift tolerance
+        // equals 1000, so the 400bp diagonal jump from (100,100) to
+        // (100,500) is admitted. Plane-sweep assembles one chain covering
+        // all three anchors — intentionally more permissive than the old
+        // mutual-best pipeline, which would split them.
         let hits = vec![HomologousIntervalWithAnchors {
             genome: "g".into(),
             start: 0,
@@ -1401,12 +1303,8 @@ mod tests {
             ],
         }];
         let out = chain_anchors(hits, 1000, TEST_SYNCMER_LEN);
-        // One chain of 2 (the colinear pair) + one singleton (the
-        // off-diagonal anchor).
-        assert_eq!(out.len(), 2);
-        let with_two = out.iter().find(|iv| iv.anchors.len() == 2).unwrap();
-        assert_eq!(with_two.anchors[0].query_pos, 0);
-        assert_eq!(with_two.anchors[1].query_pos, 100);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].anchors.len(), 3);
     }
 
     #[test]
@@ -1434,11 +1332,15 @@ mod tests {
             anchors,
         }];
         let out = chain_anchors(hits, 500, TEST_SYNCMER_LEN);
-        // Three diagonals (shift -1, 0, +1) have ≥2 anchors and pair up.
-        // Others are singletons. Exact count depends on tiebreak but
-        // there should be at least one chain with 3 anchors (primary).
+        // Plane-sweep with extend_budget=500 admits within-drift moves;
+        // all 9 anchors of the 3×3 grid share query_pos columns at
+        // 0/100/200 with sig range within the drift window, so they
+        // assemble into fewer, longer chains than mutual-best would.
+        // Invariant: at least one chain exists and the longest chain
+        // covers every query-column (length ≥ 3).
+        assert!(!out.is_empty());
         let max_len = out.iter().map(|iv| iv.anchors.len()).max().unwrap();
-        assert_eq!(max_len, 3);
+        assert!(max_len >= 3);
     }
 
     #[test]

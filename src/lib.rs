@@ -129,11 +129,33 @@ pub struct SyngImpgWrapper {
     syng_index: syng::SyngIndex,
     seq_index: seqidx::SequenceIndex,
     syng_padding: u64,
+    /// Optional chain filter: only chains with at least this many anchors
+    /// survive. `None` means no chain-based filtering (raw query_region).
+    /// Populated via [`Self::with_chain_filter`].
+    min_chain_anchors: Option<usize>,
+    min_chain_fraction: f64,
 }
 
 impl SyngImpgWrapper {
     pub fn new(syng_index: syng::SyngIndex, seq_index: seqidx::SequenceIndex, syng_padding: u64) -> Self {
-        Self { syng_index, seq_index, syng_padding }
+        Self {
+            syng_index,
+            seq_index,
+            syng_padding,
+            min_chain_anchors: None,
+            min_chain_fraction: 0.0,
+        }
+    }
+
+    /// Enable chain-based filtering in `query_via_syng`. When set, raw syncmer
+    /// matches are first plane-sweep-chained (same algorithm as
+    /// `query_transitive_ext`), then only chains meeting both thresholds
+    /// survive. Weaker/paralog-noise chains are dropped before partition's
+    /// union-find sees them.
+    pub fn with_chain_filter(mut self, min_chain_anchors: usize, min_chain_fraction: f64) -> Self {
+        self.min_chain_anchors = Some(min_chain_anchors.max(1));
+        self.min_chain_fraction = min_chain_fraction.clamp(0.0, 1.0);
+        self
     }
 
     /// Borrow the inner `SyngIndex` — for callers that need full
@@ -148,11 +170,34 @@ impl SyngImpgWrapper {
     }
 
     /// Convert syng query_region results into AdjustedInterval format.
+    ///
+    /// If chain filtering is enabled (via [`Self::with_chain_filter`]),
+    /// raw syncmer matches are plane-sweep-chained and filtered by anchor
+    /// count / query-coverage fraction before being emitted — otherwise the
+    /// raw per-syncmer intervals flow through unchanged.
     fn query_via_syng(&self, target_id: u32, range_start: i32, range_end: i32) -> Vec<impg::AdjustedInterval> {
         let name = match self.seq_index.get_name(target_id) {
             Some(n) => n,
             None => return vec![],
         };
+        match self.min_chain_anchors {
+            None => self.query_via_syng_raw(name, range_start, range_end),
+            Some(min_anchors) => self.query_via_syng_filtered(
+                name,
+                range_start,
+                range_end,
+                min_anchors,
+                self.min_chain_fraction,
+            ),
+        }
+    }
+
+    fn query_via_syng_raw(
+        &self,
+        name: &str,
+        range_start: i32,
+        range_end: i32,
+    ) -> Vec<impg::AdjustedInterval> {
         let intervals = match self.syng_index.query_region(
             name,
             range_start as u64,
@@ -171,6 +216,65 @@ impl SyngImpgWrapper {
                 let id = self.seq_index.get_id(&iv.genome)?;
                 let interval = coitrees::Interval::new(iv.start as i32, iv.end as i32, id);
                 Some((interval, vec![], interval))
+            })
+            .collect()
+    }
+
+    fn query_via_syng_filtered(
+        &self,
+        name: &str,
+        range_start: i32,
+        range_end: i32,
+        min_anchors: usize,
+        min_fraction: f64,
+    ) -> Vec<impg::AdjustedInterval> {
+        let hits = match self.syng_index.query_region_with_anchors_ext(
+            name,
+            range_start as u64,
+            range_end as u64,
+            self.syng_padding,
+            0,
+        ) {
+            Ok(h) => h,
+            Err(e) => {
+                log::warn!("syng query_region_with_anchors failed for {}:{}-{}: {}", name, range_start, range_end, e);
+                return vec![];
+            }
+        };
+        let syncmer_len = (self.syng_index.params.w + self.syng_index.params.k) as u64;
+        // Reuse the same extend_budget default as `query_transitive_ext`.
+        let chained = syng_transitive::chain_anchors(
+            hits,
+            syng_transitive::DEFAULT_EXTEND_BUDGET_BP,
+            syncmer_len,
+        );
+        let query_range_len = (range_end - range_start).max(0) as u64;
+        let min_extent_bp = (query_range_len as f64 * min_fraction.max(0.0)) as u64;
+        chained
+            .into_iter()
+            .filter(|c| {
+                if c.anchors.len() < min_anchors {
+                    return false;
+                }
+                if min_extent_bp == 0 {
+                    return true;
+                }
+                let mut qmin = u64::MAX;
+                let mut qmax = 0u64;
+                for a in &c.anchors {
+                    qmin = qmin.min(a.query_pos);
+                    qmax = qmax.max(a.query_pos);
+                }
+                qmax.saturating_sub(qmin).saturating_add(syncmer_len) >= min_extent_bp
+            })
+            .filter_map(|c| {
+                let tid = self.seq_index.get_id(&c.genome)?;
+                // Match raw-path AdjustedInterval shape: both fields are the
+                // target (homolog) interval. partition uses the first element
+                // as "the other genome's region that belongs in this
+                // partition" — which is the homolog, not the query region.
+                let t_iv = coitrees::Interval::new(c.start as i32, c.end as i32, tid);
+                Some((t_iv, Vec::<impg::CigarOp>::new(), t_iv))
             })
             .collect()
     }

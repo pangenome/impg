@@ -957,6 +957,21 @@ enum Args {
         #[clap(long, value_parser, default_value_t = 120)]
         syng_padding: u64,
 
+        /// Minimum anchor count required for a syng chain to become a
+        /// partition edge. Raising this drops weak/paralog-noise chains
+        /// before partition's union-find closes over them, preventing the
+        /// transitive-collapse catch-all on TE/subtelomere-rich regions.
+        /// 0 disables chain filtering (raw per-syncmer intervals).
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, value_parser, default_value_t = 0)]
+        syng_min_chain_anchors: usize,
+
+        /// Minimum fraction of the query window a syng chain must cover to
+        /// become a partition edge. 0.0 disables the extent filter.
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, value_parser, default_value_t = 0.0)]
+        syng_min_chain_fraction: f64,
+
         // --- Partition-specific ---
         /// Window size for partitioning
         #[arg(help_heading = "Partition options")]
@@ -1475,6 +1490,8 @@ fn run() -> io::Result<()> {
             alignment,
             syng,
             syng_padding,
+            syng_min_chain_anchors,
+            syng_min_chain_fraction,
             window_size,
             output_format,
             output_folder,
@@ -1588,7 +1605,14 @@ fn run() -> io::Result<()> {
                 };
 
                 let engine_config = engine_cli.build(common.threads.get())?;
-                let wrapper = impg::SyngImpgWrapper::new(syng_index, seq_index, syng_padding);
+                let wrapper = {
+                    let base = impg::SyngImpgWrapper::new(syng_index, seq_index, syng_padding);
+                    if syng_min_chain_anchors > 0 {
+                        base.with_chain_filter(syng_min_chain_anchors, syng_min_chain_fraction)
+                    } else {
+                        base
+                    }
+                };
 
                 partition::partition_alignments(
                     &wrapper,
@@ -1865,30 +1889,37 @@ fn run() -> io::Result<()> {
                                     syng_extension,
                                 )?
                             };
+                            // Unified path: convert syng output to AdjustedInterval,
+                            // flow through the shared merge + emit pipeline so `-d`
+                            // honors gap-tolerant 2D chaining.
+                            let mut results = syng_intervals_to_adjusted(
+                                &intervals,
+                                target_name,
+                                *range_start,
+                                *range_end,
+                                wrapper.seq_index(),
+                            );
                             let ext = if resolved_format == "bedpe" { "bedpe" } else { "bed" };
                             let mut out = find_output_stream(&output_prefix, ext)?;
                             if resolved_format == "bedpe" {
-                                for iv in &intervals {
-                                    writeln!(
-                                        out,
-                                        "{}\t{}\t{}\t{}\t{}\t{}\t.\t.\t+\t{}",
-                                        target_name,
-                                        range_start,
-                                        range_end,
-                                        iv.genome,
-                                        iv.start,
-                                        iv.end,
-                                        iv.strand,
-                                    )?;
-                                }
+                                output_results_bedpe(
+                                    &wrapper,
+                                    &mut results,
+                                    &mut out,
+                                    &name,
+                                    query.effective_merge_distance(),
+                                    query.original_sequence_coordinates,
+                                )?;
                             } else {
-                                for iv in &intervals {
-                                    writeln!(
-                                        out,
-                                        "{}\t{}\t{}\t{}",
-                                        iv.genome, iv.start, iv.end, iv.strand
-                                    )?;
-                                }
+                                output_results_bed(
+                                    &wrapper,
+                                    &mut results,
+                                    &mut out,
+                                    &name,
+                                    query.effective_merge_distance(),
+                                    query.merge_strands_for_output("bed"),
+                                    query.original_sequence_coordinates,
+                                )?;
                             }
                         }
                         "gfa" => {
@@ -4367,6 +4398,37 @@ fn load_subset_filter_if_provided(path: &Option<String>) -> io::Result<Option<Su
     }
 }
 
+/// Convert syng `HomologousInterval`s into `AdjustedInterval`s so syng output
+/// can flow through the common merge + emit pipeline (output_results_bed,
+/// output_results_bedpe). CIGAR is always empty — syng has no per-base
+/// alignment. Strand is encoded on the query side via orientation reversal
+/// (`first > last` ⇔ '-'), matching the impg convention used by the
+/// alignment-backed path.
+fn syng_intervals_to_adjusted(
+    intervals: &[impg::syng::HomologousInterval],
+    query_name: &str,
+    range_start: i32,
+    range_end: i32,
+    seq_index: &SequenceIndex,
+) -> Vec<AdjustedInterval> {
+    let Some(query_id) = seq_index.get_id(query_name) else {
+        return Vec::new();
+    };
+    intervals
+        .iter()
+        .filter_map(|iv| {
+            let target_id = seq_index.get_id(&iv.genome)?;
+            let query = if iv.strand == '-' {
+                Interval::new(range_end, range_start, query_id)
+            } else {
+                Interval::new(range_start, range_end, query_id)
+            };
+            let target = Interval::new(iv.start as i32, iv.end as i32, target_id);
+            Some((query, Vec::<CigarOp>::new(), target))
+        })
+        .collect()
+}
+
 fn output_results_bed(
     impg: &impl ImpgIndex,
     results: &mut Vec<AdjustedInterval>,
@@ -4376,6 +4438,13 @@ fn output_results_bed(
     merge_strands: bool,
     original_coordinates: bool,
 ) -> io::Result<()> {
+    let any_empty_cigar = results.iter().any(|(_, c, _)| c.is_empty());
+    if any_empty_cigar {
+        // 2D merge first — collapses fragmented chains on each target, then
+        // falls through to the query-axis merge so downstream BED dedupe
+        // across targets still works.
+        merge_adjusted_intervals_gap_2d(results, merge_distance);
+    }
     merge_query_adjusted_intervals(results, merge_distance, merge_strands);
 
     for (query_interval, _, _) in results {
@@ -4413,7 +4482,15 @@ fn output_results_bedpe(
     merge_distance: i32,
     original_coordinates: bool,
 ) -> io::Result<()> {
-    merge_adjusted_intervals(results, merge_distance);
+    // If any row lacks a CIGAR (syng output), use the gap-tolerant 2D merge
+    // so fragmented chains on the same (query, target, strand) collapse into
+    // one alignment. Otherwise keep the existing CIGAR-faithful merge.
+    let any_empty_cigar = results.iter().any(|(_, c, _)| c.is_empty());
+    if any_empty_cigar {
+        merge_adjusted_intervals_gap_2d(results, merge_distance);
+    } else {
+        merge_adjusted_intervals(results, merge_distance);
+    }
 
     for (overlap_query, cigar, overlap_target) in results {
         let query_name = impg.seq_index().get_name(overlap_query.metadata).unwrap();
@@ -5203,6 +5280,150 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
             info!("Collected {} merged intervals", results.len());
         }
     }
+}
+
+/// Gap-tolerant 2D merge for adjusted intervals.
+///
+/// Groups by `(query_id, target_id, query_strand)` and runs a forward-progress
+/// union-find: two intervals i,j with `i.q_start < j.q_start` merge iff
+/// `q_gap ≤ d AND t_gap ≤ d` on the strand-appropriate axes, with overlap
+/// allowed (negative gaps pass). Union-find makes merging transitive.
+///
+/// Safe on empty CIGARs (syng) — merged intervals keep an empty CIGAR.
+/// Non-empty CIGARs are concatenated in query order; the concatenation is
+/// only semantically meaningful when the merged chunks were contiguous, so
+/// PAF output should keep using `merge_adjusted_intervals`.
+fn merge_adjusted_intervals_gap_2d(
+    results: &mut Vec<AdjustedInterval>,
+    merge_distance: i32,
+) {
+    if results.len() <= 1 || merge_distance < 0 {
+        return;
+    }
+    let d = merge_distance as i64;
+    use rustc_hash::FxHashMap as Map;
+
+    let mut groups: Map<(u32, u32, bool), Vec<usize>> = Map::default();
+    for (i, (q, _, t)) in results.iter().enumerate() {
+        let strand_fwd = q.first <= q.last;
+        groups
+            .entry((q.metadata, t.metadata, strand_fwd))
+            .or_default()
+            .push(i);
+    }
+
+    let n = results.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn uf_find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+
+    for ((_, _, strand_fwd), mut indices) in groups {
+        indices.sort_by_key(|&i| {
+            let q = &results[i].0;
+            if strand_fwd { q.first } else { -q.first }
+        });
+        for a_pos in 0..indices.len() {
+            let ia = indices[a_pos];
+            let qa = results[ia].0;
+            let ta = results[ia].2;
+            let (qa_start, qa_end) = if strand_fwd {
+                (qa.first as i64, qa.last as i64)
+            } else {
+                (qa.last as i64, qa.first as i64)
+            };
+            let (ta_start, ta_end) = (ta.first as i64, ta.last as i64);
+            for b_pos in (a_pos + 1)..indices.len() {
+                let ib = indices[b_pos];
+                let qb = results[ib].0;
+                let tb = results[ib].2;
+                let qb_start = if strand_fwd { qb.first as i64 } else { qb.last as i64 };
+                // Reject strictly-backward starts only. Equal starts are fine
+                // (syng: every row shares the full query tile). Forward progress
+                // on the target axis below does the real work of ordering.
+                if qb_start < qa_start {
+                    continue;
+                }
+                let q_gap = qb_start - qa_end;
+                if q_gap > d {
+                    break;
+                }
+                let (tb_start, tb_end) = (tb.first as i64, tb.last as i64);
+                let (t_gap, t_forward) = if strand_fwd {
+                    (tb_start - ta_end, tb_start > ta_start)
+                } else {
+                    (ta_start - tb_end, tb_end < ta_end)
+                };
+                if !t_forward || t_gap > d {
+                    continue;
+                }
+                let ra = uf_find(&mut parent, ia);
+                let rb = uf_find(&mut parent, ib);
+                if ra != rb {
+                    parent[ra] = rb;
+                }
+            }
+        }
+    }
+
+    let mut buckets: Map<usize, Vec<usize>> = Map::default();
+    for i in 0..n {
+        let r = uf_find(&mut parent, i);
+        buckets.entry(r).or_default().push(i);
+    }
+
+    let mut merged: Vec<AdjustedInterval> = Vec::with_capacity(buckets.len());
+    let mut taken = vec![false; n];
+    for i in 0..n {
+        if taken[i] {
+            continue;
+        }
+        let r = uf_find(&mut parent, i);
+        let Some(members) = buckets.remove(&r) else { continue };
+        for &m in &members {
+            taken[m] = true;
+        }
+        let strand_fwd = {
+            let q = &results[members[0]].0;
+            q.first <= q.last
+        };
+        let mut ordered = members.clone();
+        ordered.sort_by_key(|&idx| {
+            let q = &results[idx].0;
+            if strand_fwd { q.first } else { -q.first }
+        });
+        let first = &results[ordered[0]];
+        let (mut q_lo, mut q_hi) = (first.0.first, first.0.last);
+        let (mut t_lo, mut t_hi) = (first.2.first, first.2.last);
+        let q_meta = first.0.metadata;
+        let t_meta = first.2.metadata;
+        let mut cigar: Vec<CigarOp> = Vec::new();
+        for &idx in &ordered {
+            let (q, c, t) = &results[idx];
+            if strand_fwd {
+                q_lo = q_lo.min(q.first);
+                q_hi = q_hi.max(q.last);
+            } else {
+                q_lo = q_lo.max(q.first);
+                q_hi = q_hi.min(q.last);
+            }
+            t_lo = t_lo.min(t.first);
+            t_hi = t_hi.max(t.last);
+            cigar.extend_from_slice(c);
+        }
+        merge_consecutive_cigar_ops(&mut cigar);
+        let q_iv = coitrees::Interval { first: q_lo, last: q_hi, metadata: q_meta };
+        let t_iv = coitrees::Interval { first: t_lo, last: t_hi, metadata: t_meta };
+        merged.push((q_iv, cigar, t_iv));
+    }
+
+    let count = merged.len();
+    *results = merged;
+    info!("Collected {} merged intervals (gap-2d, d={})", count, merge_distance);
 }
 
 // Merge consecutive operations of the same type
