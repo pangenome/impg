@@ -972,6 +972,15 @@ enum Args {
         #[clap(long, value_parser, default_value_t = 0.0)]
         syng_min_chain_fraction: f64,
 
+        /// Disable post-partition sliver rehoming. By default, singleton
+        /// partitions (slivers created by greedy masking) are iteratively
+        /// reassigned to their flank partitions — the partition that owns
+        /// the biologically contiguous context. This is source-agnostic and
+        /// runs for both syng- and alignment-backed partitioning.
+        #[arg(help_heading = "Partition options")]
+        #[clap(long, action)]
+        no_rehome_singletons: bool,
+
         // --- Partition-specific ---
         /// Window size for partitioning
         #[arg(help_heading = "Partition options")]
@@ -1492,6 +1501,7 @@ fn run() -> io::Result<()> {
             syng_padding,
             syng_min_chain_anchors,
             syng_min_chain_fraction,
+            no_rehome_singletons,
             window_size,
             output_format,
             output_folder,
@@ -1636,6 +1646,7 @@ fn run() -> io::Result<()> {
                     separate_files,
                     false, // approximate always false for syng
                     &engine_config,
+                    !no_rehome_singletons,
                 )?;
             } else {
             // ─── Normal (alignment-based) partition path ────────────────────
@@ -1689,6 +1700,7 @@ fn run() -> io::Result<()> {
                 separate_files,
                 approximate,
                 &engine_config,
+                !no_rehome_singletons,
             )?;
             }
         }
