@@ -802,20 +802,14 @@ fn detect_syng_prefix(path: &str) -> Option<String> {
     None
 }
 
-/// Resolve the effective syng prefix for a command: explicit `--syng`
-/// wins; otherwise if the first alignment argument looks like a syng
-/// index path, use that.
-fn resolve_syng_prefix(syng: &Option<String>, alignment: &AlignmentOpts) -> Option<String> {
-    if syng.is_some() {
-        return syng.clone();
-    }
-    // Only probe if user gave exactly one alignment arg.
+/// Resolve the effective syng prefix for a command: if the single
+/// alignment argument looks like a syng index path, use that.
+fn resolve_syng_prefix(alignment: &AlignmentOpts) -> Option<String> {
     if alignment.alignment_files.len() == 1 {
-        if let Some(prefix) = detect_syng_prefix(&alignment.alignment_files[0]) {
-            return Some(prefix);
-        }
+        detect_syng_prefix(&alignment.alignment_files[0])
+    } else {
+        None
     }
-    None
 }
 
 fn parse_subsequence_coordinates(seq_name: &str) -> Option<(String, i32)> {
@@ -947,11 +941,6 @@ enum Args {
         #[clap(flatten)]
         alignment: AlignmentOpts,
 
-        /// Syng index prefix (mutually exclusive with -a/--alignment-files)
-        #[arg(help_heading = "Syng input")]
-        #[clap(long, value_parser, conflicts_with_all = ["alignment_files", "alignment_list"])]
-        syng: Option<String>,
-
         /// Boundary padding in bp for syng queries (default: 120 = 2× syncmer length)
         #[arg(help_heading = "Syng input")]
         #[clap(long, value_parser, default_value_t = 120)]
@@ -1067,11 +1056,6 @@ enum Args {
         // --- Input ---
         #[clap(flatten)]
         alignment: AlignmentOpts,
-
-        /// Syng index prefix (mutually exclusive with -a/--alignment-files)
-        #[arg(help_heading = "Syng input")]
-        #[clap(long, value_parser, conflicts_with_all = ["alignment_files", "alignment_list"])]
-        syng: Option<String>,
 
         /// Boundary padding in bp for syng queries (default: 120 = 2× syncmer length)
         #[arg(help_heading = "Syng input")]
@@ -1497,7 +1481,6 @@ fn run() -> io::Result<()> {
         Args::Partition {
             common,
             alignment,
-            syng,
             syng_padding,
             syng_min_chain_anchors,
             syng_min_chain_fraction,
@@ -1578,7 +1561,7 @@ fn run() -> io::Result<()> {
             }
 
             // Allow `-a <prefix>` or `-a <prefix>.1khash` to route to syng.
-            let effective_syng = resolve_syng_prefix(&syng, &alignment);
+            let effective_syng = resolve_syng_prefix(&alignment);
 
             // ─── Syng-based partition path ──────────────────────────────────
             if let Some(ref syng_prefix) = effective_syng {
@@ -1707,7 +1690,6 @@ fn run() -> io::Result<()> {
         Args::Query {
             common,
             alignment,
-            syng,
             syng_padding,
             syng_extension,
             syng_extend_budget,
@@ -1762,7 +1744,7 @@ fn run() -> io::Result<()> {
 
             // Allow `-a <prefix>` or `-a <prefix>.1khash` to auto-route
             // to the syng backend without requiring `--syng`.
-            let effective_syng = resolve_syng_prefix(&syng, &alignment);
+            let effective_syng = resolve_syng_prefix(&alignment);
 
             // ─── Syng query path ──────────────────────────────────────────
             if let Some(ref syng_prefix) = effective_syng {
