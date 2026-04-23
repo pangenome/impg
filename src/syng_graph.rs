@@ -415,6 +415,30 @@ pub fn build_gfa_syng_native_from_sequences(
     seqs: &[(String, Vec<u8>)],
     config: &crate::commands::graph::GraphBuildConfig,
 ) -> std::io::Result<String> {
+    if seqs.is_empty() {
+        return Ok(String::from("H\tVN:Z:1.0\n"));
+    }
+    // Pair selection. Below a small cutoff, all-pairs is cheap and
+    // avoids the mash-sketch cost. Above, delegate to sweepga's
+    // tree-kNN sparsifier (k_near=3 backbone, k_far=1 novelty,
+    // random=0.01 completeness).
+    const ALL_PAIRS_CUTOFF: usize = 16;
+    let paf_content = if seqs.len() <= ALL_PAIRS_CUTOFF {
+        all_pairs_paf(seqs)
+    } else {
+        sparse_pairs_paf(seqs, 3, 1, 0.01)
+    };
+    build_gfa_from_paf_and_sequences(seqs, &paf_content, config)
+}
+
+/// Feed an arbitrary pre-generated PAF through the seqwish induction
+/// pipeline. Exposed so callers with their own alignment source
+/// (e.g. `build_paf_anchor_seeded`) can reuse the tail of the pipeline.
+pub fn build_gfa_from_paf_and_sequences(
+    seqs: &[(String, Vec<u8>)],
+    paf_content: &str,
+    config: &crate::commands::graph::GraphBuildConfig,
+) -> std::io::Result<String> {
     use std::io::{BufWriter, Write};
     if seqs.is_empty() {
         return Ok(String::from("H\tVN:Z:1.0\n"));
@@ -436,17 +460,6 @@ pub fn build_gfa_syng_native_from_sequences(
         }
         w.flush()?;
     }
-
-    // Pair selection. Below a small cutoff, all-pairs is cheap and
-    // avoids the mash-sketch cost. Above, delegate to sweepga's
-    // tree-kNN sparsifier (k_near=3 backbone, k_far=1 novelty,
-    // random=0.01 completeness).
-    const ALL_PAIRS_CUTOFF: usize = 16;
-    let paf_content = if seqs.len() <= ALL_PAIRS_CUTOFF {
-        all_pairs_paf(seqs)
-    } else {
-        sparse_pairs_paf(seqs, 3, 1, 0.01)
-    };
 
     let mut paf_file = tempfile::Builder::new()
         .suffix(".paf")
@@ -476,6 +489,196 @@ pub fn build_gfa_syng_native_from_sequences(
             format!("Invalid UTF-8 in GFA: {}", e),
         )
     })
+}
+
+/// Anchor-seeded driver: re-queries syng from a seed interval to recover
+/// anchor chains across the partition's members, then builds PAF via
+/// `anchor_seeded_biwfa_paf` on pairs where we have usable anchors,
+/// falling back to `pairwise_biwfa_paf` on pairs where anchors aren't
+/// derivable.
+///
+/// `members` are pre-fetched, strand-groomed sequences keyed by their
+/// `(chrom, fwd_start, fwd_end, strand)` interval. Anchor positions
+/// from syng are in full-chromosome coordinates on the target side,
+/// so we translate to fetched-sequence-local coords by offsetting
+/// by `fwd_start` (for '+' strand members; '-' strand members are
+/// skipped for anchor-seeded and fall back to full-pair).
+///
+/// This is conservative but correct:
+/// - '+' strand members with fresh chains overlapping our interval → use anchors
+/// - '-' strand members or members with no usable chain → full-pair BiWFA
+pub fn build_paf_anchor_seeded(
+    members: &[(String, Vec<u8>, Member)],
+    seed_chrom: &str,
+    seed_start: u64,
+    seed_end: u64,
+    syng_index: &crate::syng::SyngIndex,
+    syng_padding: u64,
+    k_near: usize,
+    k_far: usize,
+    random_fraction: f64,
+) -> String {
+    use rayon::prelude::*;
+    use std::collections::HashMap;
+
+    if members.len() < 2 {
+        return String::new();
+    }
+
+    // Re-query from seed to get anchor chains.
+    let chains = match syng_index.query_region_with_anchors_ext(
+        seed_chrom, seed_start, seed_end, syng_padding, 0,
+    ) {
+        Ok(cs) => cs,
+        Err(e) => {
+            log::debug!("syng re-query failed: {}; falling back to full-pair BiWFA", e);
+            return sparse_pairs_paf(
+                &members.iter().map(|(n, s, _)| (n.clone(), s.clone())).collect::<Vec<_>>(),
+                k_near, k_far, random_fraction,
+            );
+        }
+    };
+
+    let syncmer_len = (syng_index.params.w + syng_index.params.k) as usize;
+
+    // Index chains by their (genome, start, end) — we match a partition
+    // member to its chain by overlap: the member's interval should
+    // contain (or be contained by) the chain's interval. For simplicity
+    // we require exact match on (genome, start, end); members with
+    // no exact-match chain fall back to full-pair.
+    // Index chains by genome; multiple paralog chains may land on the
+    // same genome, so we keep a list and pick the best-overlapping one
+    // per member at lookup time.
+    let mut chains_by_genome: HashMap<String, Vec<&crate::syng::HomologousIntervalWithAnchors>> =
+        HashMap::new();
+    for c in &chains {
+        chains_by_genome.entry(c.genome.clone()).or_default().push(c);
+    }
+
+    // Diagnostic counters — emitted at end.
+    let counter_anchor = std::sync::atomic::AtomicUsize::new(0);
+    let counter_fallback = std::sync::atomic::AtomicUsize::new(0);
+
+    // Select pairs via sparsification.
+    let raw: Vec<Vec<u8>> = members.iter().map(|(_, s, _)| s.clone()).collect();
+    let pairs = sweepga::knn_graph::extract_tree_pairs(
+        &raw, k_near, k_far, random_fraction,
+        &sweepga::knn_graph::MashParams::default(),
+    );
+
+    let lines: Vec<String> = pairs
+        .par_iter()
+        .filter_map(|&(i, j)| {
+            let (a_name, a_seq, a_meta) = &members[i];
+            let (b_name, b_seq, b_meta) = &members[j];
+
+            // Try anchor-seeded when both are '+' strand and both have
+            // a fresh-chain match.
+            if a_meta.strand == '+' && b_meta.strand == '+' {
+                // Pick the '+' chain whose [c.start, c.end] overlaps this
+                // member's [fwd_start, fwd_end] the most.
+                let ac = best_overlapping_chain(
+                    chains_by_genome.get(&a_meta.chrom), a_meta.fwd_start, a_meta.fwd_end,
+                );
+                let bc = best_overlapping_chain(
+                    chains_by_genome.get(&b_meta.chrom), b_meta.fwd_start, b_meta.fwd_end,
+                );
+                if let (Some(ac), Some(bc)) = (ac, bc) {
+                    if ac.strand == '+' && bc.strand == '+' {
+                        // Derive pair anchors by shared node_id.
+                        // Translate chromosome-level target positions to
+                        // fetched-sequence-local positions.
+                        let a_start_i = a_meta.fwd_start as i64;
+                        let b_start_i = b_meta.fwd_start as i64;
+                        let a_len = a_seq.len() as i64;
+                        let b_len = b_seq.len() as i64;
+                        let mut a_by_node: HashMap<u32, i64> = HashMap::new();
+                        for a in &ac.anchors {
+                            a_by_node.insert(a.node_id, a.target_pos as i64 - a_start_i);
+                        }
+                        let mut pair_anchors: Vec<(usize, usize)> = Vec::new();
+                        for b in &bc.anchors {
+                            if let Some(&a_local) = a_by_node.get(&b.node_id) {
+                                let b_local = b.target_pos as i64 - b_start_i;
+                                // Bounds check: anchor must fit within
+                                // both fetched sequences.
+                                if a_local < 0 || b_local < 0 {
+                                    continue;
+                                }
+                                if a_local + syncmer_len as i64 > a_len
+                                    || b_local + syncmer_len as i64 > b_len
+                                {
+                                    continue;
+                                }
+                                pair_anchors.push((a_local as usize, b_local as usize));
+                            }
+                        }
+                        // Sort by a_pos, keep only colinear (monotone non-decreasing on b_pos too).
+                        pair_anchors.sort();
+                        let mut colinear: Vec<(usize, usize)> = Vec::with_capacity(pair_anchors.len());
+                        let mut last_b = 0i64;
+                        for (ap, bp) in pair_anchors {
+                            if bp as i64 >= last_b {
+                                colinear.push((ap, bp));
+                                last_b = (bp + syncmer_len) as i64;
+                            }
+                        }
+                        if !colinear.is_empty() {
+                            if let Some(line) = anchor_seeded_biwfa_paf(
+                                a_name, a_seq, b_name, b_seq, &colinear, syncmer_len,
+                            ) {
+                                counter_anchor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                return Some(line);
+                            }
+                        }
+                    }
+                }
+            }
+            // Fallback: full-pair BiWFA.
+            counter_fallback.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            pairwise_biwfa_paf(a_name, a_seq, b_name, b_seq)
+        })
+        .collect();
+
+    let anchor_used = counter_anchor.load(std::sync::atomic::Ordering::Relaxed);
+    let fallback_used = counter_fallback.load(std::sync::atomic::Ordering::Relaxed);
+    log::info!(
+        "syng_graph: anchor-seeded {} pairs, full-pair fallback {} pairs ({} members, {} fresh chains)",
+        anchor_used, fallback_used, members.len(), chains.len(),
+    );
+
+    lines.concat()
+}
+
+/// Pick the chain whose [start, end] has the largest overlap with [member_start, member_end].
+/// Returns None if no chain provided or no overlap.
+fn best_overlapping_chain<'a>(
+    chains: Option<&'a Vec<&'a crate::syng::HomologousIntervalWithAnchors>>,
+    member_start: u64,
+    member_end: u64,
+) -> Option<&'a crate::syng::HomologousIntervalWithAnchors> {
+    let chains = chains?;
+    let mut best: Option<(&crate::syng::HomologousIntervalWithAnchors, u64)> = None;
+    for &c in chains {
+        let ov_start = c.start.max(member_start);
+        let ov_end = c.end.min(member_end);
+        if ov_end > ov_start {
+            let overlap = ov_end - ov_start;
+            if best.map_or(true, |(_, b)| overlap > b) {
+                best = Some((c, overlap));
+            }
+        }
+    }
+    best.map(|(c, _)| c)
+}
+
+/// Compact per-member metadata used by `build_paf_anchor_seeded`.
+#[derive(Clone, Debug)]
+pub struct Member {
+    pub chrom: String,
+    pub fwd_start: u64,
+    pub fwd_end: u64,
+    pub strand: char,
 }
 
 #[cfg(test)]

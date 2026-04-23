@@ -515,27 +515,80 @@ fn dispatch_gfa_engine_inner(
             }
         }
         GfaEngine::SyngNative => {
-            // v0: fetch sequences for query_intervals, run all-pairs BiWFA
-            // internally (no wfmash/fastGA), feed resulting PAF through the
-            // existing seqwish induction pipeline. Sparsification +
-            // strand-groom + indel left-align + anchor-seeded gap-only BiWFA
-            // land in subsequent versions.
+            // v2.3: if we have access to the underlying syng index,
+            // re-query from the first interval as seed and use
+            // anchor-seeded gap-only BiWFA for pairs that share anchors.
+            // Otherwise fall back to the v1 full-pair path.
             let sequences = graph::prepare_sequences(impg, query_intervals, sequence_index)?;
             if sequences.is_empty() {
                 return Ok(String::from("H\tVN:Z:1.0\n"));
             }
             let seq_pairs: Vec<(String, Vec<u8>)> = sequences
-                .into_iter()
-                .map(|(seq, meta)| (meta.path_name().to_string(), seq.into_bytes()))
+                .iter()
+                .map(|(seq, meta)| (meta.path_name().to_string(), seq.as_bytes().to_vec()))
                 .collect();
-            let gfa = syng_graph::build_gfa_syng_native_from_sequences(
-                &seq_pairs,
-                &engine_opts.pipeline,
-            )?;
-            if skip_normalize {
-                Ok(gfa)
+
+            if let Some(syng_idx) = impg.syng_index_ref() {
+                // Build Member metadata alongside sequences for the
+                // anchor-seeded driver.
+                let members: Vec<(String, Vec<u8>, syng_graph::Member)> = sequences
+                    .iter()
+                    .map(|(seq, meta)| {
+                        let (fwd_start, fwd_end) = if meta.strand == '+' {
+                            (meta.start as u64, (meta.start + meta.size) as u64)
+                        } else {
+                            (
+                                (meta.total_length as i32 - meta.start - meta.size) as u64,
+                                (meta.total_length as i32 - meta.start) as u64,
+                            )
+                        };
+                        (
+                            meta.path_name().to_string(),
+                            seq.as_bytes().to_vec(),
+                            syng_graph::Member {
+                                chrom: meta.name.clone(),
+                                fwd_start,
+                                fwd_end,
+                                strand: meta.strand,
+                            },
+                        )
+                    })
+                    .collect();
+                // Pick first interval as seed. (The partition's seed
+                // isn't tracked explicitly; using the first element
+                // matches the typical greedy-expansion order.)
+                let seed = &members[0].2;
+                let paf = syng_graph::build_paf_anchor_seeded(
+                    &members,
+                    &seed.chrom,
+                    seed.fwd_start,
+                    seed.fwd_end,
+                    syng_idx,
+                    /* syng_padding */ 120,
+                    /* k_near */ 3,
+                    /* k_far */ 1,
+                    /* random_fraction */ 0.01,
+                );
+                let gfa = syng_graph::build_gfa_from_paf_and_sequences(
+                    &seq_pairs,
+                    &paf,
+                    &engine_opts.pipeline,
+                )?;
+                if skip_normalize {
+                    Ok(gfa)
+                } else {
+                    graph::normalize_and_sort(gfa, num_threads)
+                }
             } else {
-                graph::normalize_and_sort(gfa, num_threads)
+                let gfa = syng_graph::build_gfa_syng_native_from_sequences(
+                    &seq_pairs,
+                    &engine_opts.pipeline,
+                )?;
+                if skip_normalize {
+                    Ok(gfa)
+                } else {
+                    graph::normalize_and_sort(gfa, num_threads)
+                }
             }
         }
     }
