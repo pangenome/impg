@@ -20,6 +20,7 @@ pub mod sequence_index;
 pub mod smooth;
 pub mod subset_filter;
 pub mod syng_graph;
+pub mod syng_graph_norm;
 pub mod syng_transitive;
 pub mod tpa_parser;
 

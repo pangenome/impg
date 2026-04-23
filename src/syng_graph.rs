@@ -134,7 +134,7 @@ pub fn pairwise_biwfa_paf(
     //   I (insertion) consumes QUERY  — i.e. `a` when we call align(a=query, b=target)
     //   D (deletion)  consumes TARGET — i.e. `b`
     // So we must swap I↔D when converting WFA2 → PAF.
-    let paf_cigar_bytes: Vec<u8> = cigar_bytes
+    let wfa_to_paf: Vec<u8> = cigar_bytes
         .iter()
         .map(|&op| match op {
             b'I' => b'D',
@@ -142,6 +142,12 @@ pub fn pairwise_biwfa_paf(
             other => other,
         })
         .collect();
+
+    // Left-align indels in the query frame. Canonicalizes microsat and
+    // homopolymer indel placements → stops seqwish from seeing the same
+    // event as two different variants. `a` is the query by our
+    // convention, so the CIGAR is already in the query frame.
+    let paf_cigar_bytes = crate::syng_graph_norm::left_align_indels(&wfa_to_paf, a_seq, b_seq);
 
     let (matches, mismatches, ins, del) = cigar_stats(&paf_cigar_bytes);
     let block_len = matches + mismatches + ins + del;
