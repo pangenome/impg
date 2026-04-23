@@ -514,6 +514,7 @@ pub fn build_paf_anchor_seeded(
     seed_end: u64,
     syng_index: &crate::syng::SyngIndex,
     syng_padding: u64,
+    max_depth: u16,
     k_near: usize,
     k_far: usize,
     random_fraction: f64,
@@ -525,9 +526,19 @@ pub fn build_paf_anchor_seeded(
         return String::new();
     }
 
-    // Re-query from seed to get anchor chains.
-    let chains = match syng_index.query_region_with_anchors_ext(
-        seed_chrom, seed_start, seed_end, syng_padding, 0,
+    // Re-query from seed. Multi-hop BFS accumulates anchor chains
+    // across transitively-reachable members — critical for partitions
+    // whose membership came from partition's own union-find closure
+    // beyond what a single-hop syng query can reach (e.g. rDNA: many
+    // tandem paralogs included in the partition that a single seed
+    // query doesn't cover).
+    let chains = match crate::syng_transitive::query_transitive_with_anchors(
+        syng_index,
+        seed_chrom,
+        seed_start,
+        seed_end,
+        syng_padding,
+        max_depth.max(1),
     ) {
         Ok(cs) => cs,
         Err(e) => {

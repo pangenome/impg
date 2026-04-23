@@ -565,6 +565,7 @@ fn dispatch_gfa_engine_inner(
                     seed.fwd_end,
                     syng_idx,
                     /* syng_padding */ 120,
+                    /* max_depth */ 1,
                     /* k_near */ 3,
                     /* k_far */ 1,
                     /* random_fraction */ 0.01,

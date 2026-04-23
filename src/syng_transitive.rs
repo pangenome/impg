@@ -1030,6 +1030,68 @@ pub fn query_transitive(
 /// * `min_chain_fraction`: drop chains whose query-extent is less than
 ///   `fraction × query_range_len`. 0.0 = no filter.
 #[allow(clippy::too_many_arguments)]
+/// Multi-hop BFS that accumulates anchor-bearing chains across all
+/// discovered regions. Unlike [`query_transitive_ext`] this never
+/// refines via BiWFA — it just collects raw per-hop anchor chains,
+/// which is what the syng-native graph engine needs to derive pair
+/// anchors across transitively-connected members.
+///
+/// Each returned chain carries its source-side anchor positions on the
+/// *specific frontier region* it was discovered from (not the original
+/// seed). Callers that need to compose chains from different hops must
+/// track the frontier source themselves; for rDNA-like clusters where
+/// single-hop misses most paralogs, just exposing the fuller set of
+/// chains already recovers most pair-anchor opportunities.
+pub fn query_transitive_with_anchors(
+    syng_index: &SyngIndex,
+    query_name: &str,
+    query_start: u64,
+    query_end: u64,
+    padding: u64,
+    max_depth: u16,
+) -> io::Result<Vec<HomologousIntervalWithAnchors>> {
+    let mut visited: FxHashSet<(String, u64, u64, char)> = FxHashSet::default();
+    visited.insert((query_name.to_string(), query_start, query_end, '+'));
+    let mut visited_nodes: FxHashSet<u32> = FxHashSet::default();
+    let mut frontier: Vec<(String, u64, u64)> =
+        vec![(query_name.to_string(), query_start, query_end)];
+    let mut all_chains: Vec<HomologousIntervalWithAnchors> = Vec::new();
+    for _ in 0..max_depth {
+        if frontier.is_empty() {
+            break;
+        }
+        let mut next_frontier: Vec<(String, u64, u64)> = Vec::new();
+        for (q_name, q_start, q_end) in &frontier {
+            let hits = match syng_index.query_region_with_anchors_ext_visited(
+                q_name,
+                *q_start,
+                *q_end,
+                padding,
+                0,
+                Some(&mut visited_nodes),
+            ) {
+                Ok(h) => h,
+                Err(e) => {
+                    warn!(
+                        "syng transitive-with-anchors hop failed for {}:{}-{}: {}",
+                        q_name, q_start, q_end, e
+                    );
+                    continue;
+                }
+            };
+            for hit in hits {
+                let key = (hit.genome.clone(), hit.start, hit.end, hit.strand);
+                if visited.insert(key) {
+                    next_frontier.push((hit.genome.clone(), hit.start, hit.end));
+                    all_chains.push(hit);
+                }
+            }
+        }
+        frontier = next_frontier;
+    }
+    Ok(all_chains)
+}
+
 pub fn query_transitive_ext(
     syng_index: &SyngIndex,
     query_name: &str,
