@@ -372,6 +372,10 @@ impl impg_index::ImpgIndex for SyngImpgWrapper {
     fn sequence_files(&self) -> &[String] {
         &[]
     }
+
+    fn syng_index_ref(&self) -> Option<&syng::SyngIndex> {
+        Some(&self.syng_index)
+    }
 }
 
 /// Dispatch GFA generation using a SequenceIndex directly (for syng queries).
