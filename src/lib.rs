@@ -31,6 +31,20 @@ pub enum GfaEngine {
     Seqwish,
     /// Single-pass partial order alignment (POA)
     Poa,
+    /// Syng-native: anchor-seeded BiWFA between allwave-sparsified pairs,
+    /// strand-groomed to partition reference frame, indel-left-aligned,
+    /// then fed to seqwish. Fast path for many-haplotype low-divergence
+    /// partitions — skips running an external aligner (wfmash/fastGA) by
+    /// reusing the syng anchor chains the partition step already computed.
+    ///
+    /// Pipeline stages (to be filled in):
+    ///   1. per-partition distance matrix from syng shared-anchor counts
+    ///   2. pair selection via `sweepga::knn_graph::extract_tree_pairs_from_matrix`
+    ///   3. strand groom: reverse-complement members to match partition-ref frame
+    ///   4. anchor-seeded BiWFA: match blocks from syncmers, fill inter-anchor gaps
+    ///   5. left-align indels in partition-ref frame
+    ///   6. emit PAF → seqwish → GFA
+    SyngNative,
 }
 
 /// Resolved engine configuration passed to subcommand functions.
@@ -492,6 +506,33 @@ fn dispatch_gfa_engine_inner(
                 Ok(smoothed)
             } else {
                 graph::normalize_and_sort(smoothed, num_threads)
+            }
+        }
+        GfaEngine::SyngNative => {
+            // TODO(v1): per-partition anchor-seeded BiWFA + seqwish.
+            // Stages:
+            //   1. Fetch sequences for query_intervals from sequence_index
+            //   2. Re-query syng per partition to recover anchor chains
+            //      (anchors were discarded after partition's greedy assignment)
+            //   3. Build shared-anchor-count distance matrix
+            //   4. sweepga::knn_graph::extract_tree_pairs_from_matrix → pair list
+            //   5. Strand-groom pairs to partition-ref frame
+            //   6. Anchor-seeded BiWFA: match blocks + inter-anchor gap alignment
+            //   7. Indel left-align in partition-ref frame (new primitive)
+            //   8. Emit PAF → feed to existing seqwish induction path
+            //
+            // For now, fall back to the seqwish engine so the CLI accepts the
+            // flag end-to-end; swap in the real impl once the primitives land.
+            let gfa = graph::generate_gfa_seqwish_from_intervals(
+                impg,
+                query_intervals,
+                sequence_index,
+                &engine_opts.pipeline,
+            )?;
+            if skip_normalize {
+                Ok(gfa)
+            } else {
+                graph::normalize_and_sort(gfa, num_threads)
             }
         }
     }

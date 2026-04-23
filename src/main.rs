@@ -357,6 +357,26 @@ impl EngineCliOpts {
                 }
             }
             GfaEngine::Seqwish | GfaEngine::Pggb => {}
+            GfaEngine::SyngNative => {
+                // Syng-native will generate its own alignments internally
+                // from syncmer anchors + BiWFA; the external-aligner knobs
+                // don't apply. Sparsification is driven by syng anchor
+                // density and sweepga::knn_graph, not --sparsify.
+                if self.aln.sw.sparsify != SparsificationStrategy::None {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--sparsify controls external-aligner pair selection; \
+                         --gfa-engine syng-native selects pairs from syng anchor counts",
+                    ));
+                }
+                if self.aln.sw.no_filter {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--no-filter disables the post-alignment PAF filter; \
+                         --gfa-engine syng-native has no external filter step",
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -3005,6 +3025,15 @@ fn run() -> io::Result<()> {
                     }
                     GfaEngine::Seqwish => {
                         graph::run_graph_build(fasta_files, &output, graph_config)?;
+                    }
+                    GfaEngine::SyngNative => {
+                        // `impg graph` is the flat whole-FASTA entry point and
+                        // doesn't produce syng partitions. Syng-native only has
+                        // a meaning inside `partition --gfa-engine syng-native`.
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "--gfa-engine syng-native is only available under `partition` (requires a syng index); use `seqwish` or `pggb` here",
+                        ));
                     }
                     GfaEngine::Pggb => {
                         let target_poa_lengths = engine_cli.smooth.parse_target_poa_lengths()?;
