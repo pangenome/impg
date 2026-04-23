@@ -510,24 +510,21 @@ fn dispatch_gfa_engine_inner(
             }
         }
         GfaEngine::SyngNative => {
-            // TODO(v1): per-partition anchor-seeded BiWFA + seqwish.
-            // Stages:
-            //   1. Fetch sequences for query_intervals from sequence_index
-            //   2. Re-query syng per partition to recover anchor chains
-            //      (anchors were discarded after partition's greedy assignment)
-            //   3. Build shared-anchor-count distance matrix
-            //   4. sweepga::knn_graph::extract_tree_pairs_from_matrix → pair list
-            //   5. Strand-groom pairs to partition-ref frame
-            //   6. Anchor-seeded BiWFA: match blocks + inter-anchor gap alignment
-            //   7. Indel left-align in partition-ref frame (new primitive)
-            //   8. Emit PAF → feed to existing seqwish induction path
-            //
-            // For now, fall back to the seqwish engine so the CLI accepts the
-            // flag end-to-end; swap in the real impl once the primitives land.
-            let gfa = graph::generate_gfa_seqwish_from_intervals(
-                impg,
-                query_intervals,
-                sequence_index,
+            // v0: fetch sequences for query_intervals, run all-pairs BiWFA
+            // internally (no wfmash/fastGA), feed resulting PAF through the
+            // existing seqwish induction pipeline. Sparsification +
+            // strand-groom + indel left-align + anchor-seeded gap-only BiWFA
+            // land in subsequent versions.
+            let sequences = graph::prepare_sequences(impg, query_intervals, sequence_index)?;
+            if sequences.is_empty() {
+                return Ok(String::from("H\tVN:Z:1.0\n"));
+            }
+            let seq_pairs: Vec<(String, Vec<u8>)> = sequences
+                .into_iter()
+                .map(|(seq, meta)| (meta.path_name().to_string(), seq.into_bytes()))
+                .collect();
+            let gfa = syng_graph::build_gfa_syng_native_from_sequences(
+                &seq_pairs,
                 &engine_opts.pipeline,
             )?;
             if skip_normalize {

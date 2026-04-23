@@ -148,6 +148,21 @@ pub fn build_graph<W: Write>(
 ) -> io::Result<usize> {
     // 1, 2, 3) Run the shared count → combine → align → filter prelude.
     let aln_result = align_sequences(fasta_files, config)?;
+    induce_graph_from_alignment(aln_result, output, config)
+}
+
+/// Post-alignment half of [`build_graph`]: takes a combined FASTA and a
+/// filtered PAF (wrapped in `AlignmentResult`) and runs seqwish transitive
+/// closure + compaction + link derivation + GFA emission + unchop.
+///
+/// Factored out so alternative alignment backends (e.g., the syng-native
+/// pair-BiWFA driver) can produce an `AlignmentResult` without calling
+/// wfmash/fastGA and still reuse the same seqwish induction path.
+pub fn induce_graph_from_alignment<W: Write>(
+    aln_result: AlignmentResult,
+    output: &mut W,
+    config: &GraphBuildConfig,
+) -> io::Result<usize> {
     let combined_fasta = aln_result.combined_fasta;
     let filtered_paf = aln_result.filtered_paf;
 

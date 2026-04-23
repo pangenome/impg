@@ -314,11 +314,12 @@ impl EngineCliOpts {
             "pggb" => GfaEngine::Pggb,
             "seqwish" => GfaEngine::Seqwish,
             "poa" => GfaEngine::Poa,
+            "syng-native" | "syng_native" | "syng" => GfaEngine::SyngNative,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
-                        "Unknown GFA engine '{}'. Valid engines: pggb, seqwish, poa",
+                        "Unknown GFA engine '{}'. Valid engines: pggb, seqwish, poa, syng-native",
                         name
                     ),
                 ));

@@ -1,5 +1,9 @@
 //! Syng-native graph engine primitives.
 //!
+//! (end-of-file) also contains `build_gfa_syng_native_from_sequences`,
+//! which stitches the pairwise primitives into a full GFA via the existing
+//! seqwish induction pipeline.
+//!
 //! This module provides the pieces needed to turn a set of homologous
 //! sequences (e.g., members of a partition) into a variation graph without
 //! running an external pairwise aligner (wfmash, fastGA). The key operation
@@ -123,14 +127,43 @@ pub fn pairwise_biwfa_paf(
         }
         Some(aligner.cigar().to_vec())
     })?;
-    let (matches, mismatches, ins, del) = cigar_stats(&cigar_bytes);
+    // WFA2 CIGAR convention (per WFA2-lib/alignment/cigar.c:387-392):
+    //   I (insertion) consumes TEXT  — the second argument `b`
+    //   D (deletion)  consumes PATTERN — the first argument `a`
+    // PAF/SAM convention:
+    //   I (insertion) consumes QUERY  — i.e. `a` when we call align(a=query, b=target)
+    //   D (deletion)  consumes TARGET — i.e. `b`
+    // So we must swap I↔D when converting WFA2 → PAF.
+    let paf_cigar_bytes: Vec<u8> = cigar_bytes
+        .iter()
+        .map(|&op| match op {
+            b'I' => b'D',
+            b'D' => b'I',
+            other => other,
+        })
+        .collect();
+
+    let (matches, mismatches, ins, del) = cigar_stats(&paf_cigar_bytes);
     let block_len = matches + mismatches + ins + del;
     if block_len == 0 {
         return None;
     }
-    let cigar_str = compact_cigar(&cigar_bytes);
     let a_len = a_seq.len();
     let b_len = b_seq.len();
+
+    // Validate that the CIGAR consumes exactly a_len from query and
+    // b_len from target. If it doesn't, the PAF line would break seqwish's
+    // position math — drop it.
+    let q_consumed = (matches + mismatches + ins) as usize;
+    let t_consumed = (matches + mismatches + del) as usize;
+    if q_consumed != a_len || t_consumed != b_len {
+        log::debug!(
+            "syng_graph: dropping pair {}/{} — cigar consumes q={} t={} but lens are q={} t={}",
+            a_name, b_name, q_consumed, t_consumed, a_len, b_len
+        );
+        return None;
+    }
+    let cigar_str = compact_cigar(&paf_cigar_bytes);
     Some(format!(
         "{}\t{}\t{}\t{}\t+\t{}\t{}\t{}\t{}\t{}\t{}\t255\tcg:Z:{}\n",
         a_name, a_len, 0, a_len,
@@ -140,23 +173,133 @@ pub fn pairwise_biwfa_paf(
     ))
 }
 
-/// Build a PAF string from all pairs of sequences (i < j). Simplest
-/// possible sparsification: none. Intended for small partitions or as
-/// a correctness baseline; real use goes through
-/// `sweepga::knn_graph::extract_tree_pairs_from_matrix` with a distance
-/// matrix derived from syng anchor counts.
+/// Build a PAF string from all pairs of sequences (i < j). Rayon-parallel
+/// over pairs. Intended for small partitions or as a correctness baseline;
+/// larger partitions should use `sparse_pairs_paf` which selects a
+/// tree-kNN + stranger-joining + random-sample subset of pairs via
+/// `sweepga::knn_graph::extract_tree_pairs`.
 pub fn all_pairs_paf(seqs: &[(String, Vec<u8>)]) -> String {
-    let mut out = String::new();
-    for i in 0..seqs.len() {
-        for j in (i + 1)..seqs.len() {
-            if let Some(line) = pairwise_biwfa_paf(
-                &seqs[i].0, &seqs[i].1, &seqs[j].0, &seqs[j].1,
-            ) {
-                out.push_str(&line);
-            }
-        }
+    use rayon::prelude::*;
+    let pairs: Vec<(usize, usize)> = (0..seqs.len())
+        .flat_map(|i| ((i + 1)..seqs.len()).map(move |j| (i, j)))
+        .collect();
+    pairs
+        .par_iter()
+        .filter_map(|&(i, j)| {
+            pairwise_biwfa_paf(&seqs[i].0, &seqs[i].1, &seqs[j].0, &seqs[j].1)
+        })
+        .collect::<Vec<_>>()
+        .concat()
+}
+
+/// Build a PAF string from a sparsified pair set chosen via mash-distance
+/// kNN + k-farthest ("stranger-joining") + deterministic-hashed random
+/// subset. Delegates to `sweepga::knn_graph::extract_tree_pairs` for
+/// selection and runs BiWFA in parallel on the selected pairs.
+///
+/// Sensible defaults for a partitioning use case: `k_nearest=3` (MST-ish
+/// connectivity backbone), `k_farthest=1` (captures novel edges across
+/// the cluster), `random_fraction=0.01` (completeness/robustness).
+pub fn sparse_pairs_paf(
+    seqs: &[(String, Vec<u8>)],
+    k_nearest: usize,
+    k_farthest: usize,
+    random_fraction: f64,
+) -> String {
+    use rayon::prelude::*;
+    if seqs.len() < 2 {
+        return String::new();
     }
-    out
+    let raw: Vec<Vec<u8>> = seqs.iter().map(|(_, s)| s.clone()).collect();
+    let pairs = sweepga::knn_graph::extract_tree_pairs(
+        &raw,
+        k_nearest,
+        k_farthest,
+        random_fraction,
+        &sweepga::knn_graph::MashParams::default(),
+    );
+    pairs
+        .par_iter()
+        .filter_map(|&(i, j)| {
+            pairwise_biwfa_paf(&seqs[i].0, &seqs[i].1, &seqs[j].0, &seqs[j].1)
+        })
+        .collect::<Vec<_>>()
+        .concat()
+}
+
+/// Build a GFA from a set of named sequences using pairwise BiWFA for
+/// alignments, feeding the resulting PAF through the existing seqwish
+/// induction pipeline in `crate::commands::graph::induce_graph_from_alignment`.
+///
+/// v0 uses naive all-pairs. Sparsification via
+/// `sweepga::knn_graph::extract_tree_pairs_from_matrix` lands in v1.
+/// Strand grooming and indel left-align land in v2. Returned GFA is
+/// pre-normalization — callers apply `normalize_and_sort` if desired.
+pub fn build_gfa_syng_native_from_sequences(
+    seqs: &[(String, Vec<u8>)],
+    config: &crate::commands::graph::GraphBuildConfig,
+) -> std::io::Result<String> {
+    use std::io::{BufWriter, Write};
+    if seqs.is_empty() {
+        return Ok(String::from("H\tVN:Z:1.0\n"));
+    }
+
+    // Write combined FASTA to a temp file. One entry per input sequence;
+    // seqwish indexes by the header name, so names must match the PAF's
+    // query/target columns exactly.
+    let combined_fasta = tempfile::Builder::new()
+        .suffix(".fa")
+        .tempfile()
+        .map_err(|e| std::io::Error::other(format!("Failed to create temp FASTA: {}", e)))?;
+    {
+        let mut w = BufWriter::new(&combined_fasta);
+        for (name, seq) in seqs {
+            writeln!(w, ">{}", name)?;
+            w.write_all(seq)?;
+            writeln!(w)?;
+        }
+        w.flush()?;
+    }
+
+    // Pair selection. Below a small cutoff, all-pairs is cheap and
+    // avoids the mash-sketch cost. Above, delegate to sweepga's
+    // tree-kNN sparsifier (k_near=3 backbone, k_far=1 novelty,
+    // random=0.01 completeness).
+    const ALL_PAIRS_CUTOFF: usize = 16;
+    let paf_content = if seqs.len() <= ALL_PAIRS_CUTOFF {
+        all_pairs_paf(seqs)
+    } else {
+        sparse_pairs_paf(seqs, 3, 1, 0.01)
+    };
+
+    let mut paf_file = tempfile::Builder::new()
+        .suffix(".paf")
+        .tempfile()
+        .map_err(|e| std::io::Error::other(format!("Failed to create temp PAF: {}", e)))?;
+    paf_file.write_all(paf_content.as_bytes())?;
+    paf_file.flush()?;
+
+    // Hand off to the shared seqwish induction pipeline.
+    let num_seqs = seqs.len();
+    let num_genomes = seqs
+        .iter()
+        .filter_map(|(n, _)| n.split('#').next())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    let aln_result = crate::commands::graph::AlignmentResult {
+        combined_fasta,
+        filtered_paf: paf_file,
+        num_sequences: num_seqs,
+        num_genomes,
+    };
+    let mut gfa_buf: Vec<u8> = Vec::new();
+    crate::commands::graph::induce_graph_from_alignment(aln_result, &mut gfa_buf, config)?;
+    String::from_utf8(gfa_buf).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Invalid UTF-8 in GFA: {}", e),
+        )
+    })
 }
 
 #[cfg(test)]
@@ -213,6 +356,26 @@ mod tests {
     fn biwfa_empty_returns_none() {
         assert!(pairwise_biwfa_paf("a", b"", "b", b"ACGT").is_none());
         assert!(pairwise_biwfa_paf("a", b"ACGT", "b", b"").is_none());
+    }
+
+    #[test]
+    fn build_gfa_three_identical_sequences() {
+        // End-to-end: three identical short sequences should produce a
+        // GFA with exactly one segment walked by three paths.
+        let seqs = vec![
+            ("sample1#0#chr1:0-12".to_string(), b"ACGTACGTACGT".to_vec()),
+            ("sample2#0#chr1:0-12".to_string(), b"ACGTACGTACGT".to_vec()),
+            ("sample3#0#chr1:0-12".to_string(), b"ACGTACGTACGT".to_vec()),
+        ];
+        let config = crate::commands::graph::GraphBuildConfig {
+            num_threads: 1,
+            ..Default::default()
+        };
+        let gfa = build_gfa_syng_native_from_sequences(&seqs, &config).unwrap();
+        // Must have H line, at least one S line, and 3 P lines.
+        assert!(gfa.contains("H\tVN:Z"), "missing header: {gfa}");
+        let p_count = gfa.lines().filter(|l| l.starts_with("P\t")).count();
+        assert_eq!(p_count, 3, "expected 3 paths, got {p_count}:\n{gfa}");
     }
 
     #[test]
