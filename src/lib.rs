@@ -637,42 +637,90 @@ pub fn partitioned_gfa_pipeline(
         .collect();
     let total_bp: u64 = per_partition_bp.iter().sum();
 
-    // 1. Generate per-partition GFAs sequentially. We tested
-    // rayon::par_iter across partitions but each partition's own
-    // par_iter (BiWFA, mash, seqwish) thrashed under contention with
-    // 16 concurrent partitions: per-partition wall went from ~3s solo
-    // to >24 minutes, with zero completions over 24 min. Sequential
-    // outer + parallel inner uses the thread pool effectively without
-    // nested-rayon thrashing.
+    // 1. Generate per-partition GFAs with two-pool parallelism.
+    //
+    // Problem: naive nested `par_iter` thrashes. If the outer loop is a
+    // `par_iter` on the global pool AND each inner step is also a
+    // `par_iter` on the global pool, every outer task spawns inner
+    // tasks that compete with the other outer tasks for the same 16
+    // threads. On yeast235 this took wall from ~3s/partition solo to
+    // >24 min/partition with zero completions over 24 min.
+    //
+    // Fix (well-documented rayon pattern; see Piotr Kołaczkowski /
+    // Daniel Imfeld posts, and our own `smooth.rs:249` +
+    // `align.rs:1194`): two *separate* thread pools. Outer pool drives
+    // `par_iter` over partitions. Inside each partition task we
+    // `inner_pool.install(|| ...)` so every inner `par_iter` routes to
+    // the inner pool. No shared queue → no contention.
+    //
+    // Inner pool gets ALL cores; outer pool is tiny (4 threads) since
+    // each outer thread mostly blocks on `install` waiting for its
+    // partition's inner par_iter to drain on the shared inner pool.
+    // Multiple outer threads submitting `install` concurrently is fine:
+    // rayon steals pair-tasks from all of them into inner's global queue,
+    // keeping all inner threads busy across partitions.
+    use rayon::prelude::*;
+    use std::sync::Arc;
+    let total_threads = engine_opts.pipeline.num_threads.max(1);
+    let outer_threads = 4.min(total_threads);
+    let inner_threads = total_threads;
+    // 16 MB stack: default rayon stack (~2 MB on Linux) is too small for
+    // our nested seqwish + BiWFA call graph (observed stack overflow on
+    // yeast235). Matches the cost of ~16 threads × 16 MB = 256 MB
+    // reserved, which is negligible at our scale.
+    let outer_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(outer_threads)
+        .stack_size(16 * 1024 * 1024)
+        .build()
+        .map_err(|e| std::io::Error::other(format!("outer pool: {}", e)))?;
+    let inner_pool = Arc::new(
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(inner_threads)
+            .stack_size(16 * 1024 * 1024)
+            .build()
+            .map_err(|e| std::io::Error::other(format!("inner pool: {}", e)))?,
+    );
+    info!(
+        "[partitioned] Two-pool scheduling: {} outer × {} inner = {} total threads",
+        outer_threads, inner_threads, outer_threads * inner_threads,
+    );
+
     let total_partitions = partitions.len();
-    let mut sub_gfas: Vec<String> = Vec::with_capacity(total_partitions);
-    let mut total_partitioned_bp: u64 = 0;
+    let completed = std::sync::atomic::AtomicUsize::new(0);
     let pipeline_start = Instant::now();
-    for (idx, intervals) in partitions.iter().enumerate() {
-        let num_regions = intervals.len();
-        let current_partition_length = per_partition_bp[idx];
-        let part_start = Instant::now();
-        let gfa = dispatch_gfa_engine_inner(
-            impg,
-            intervals,
-            sequence_index,
-            scoring_params,
-            engine_opts,
-        )?;
-        let part_elapsed = part_start.elapsed();
-        let pipeline_elapsed = pipeline_start.elapsed();
-        info!(
-            "[partitioned] Completed partition {}/{} ({} intervals, {} bp) in {:.1}s (pipeline elapsed: {:.1}s)",
-            idx + 1,
-            total_partitions,
-            num_regions,
-            current_partition_length,
-            part_elapsed.as_secs_f64(),
-            pipeline_elapsed.as_secs_f64(),
-        );
-        sub_gfas.push(gfa);
-        total_partitioned_bp += current_partition_length;
-    }
+
+    let sub_gfas: Vec<String> = outer_pool.install(|| -> std::io::Result<Vec<String>> {
+        partitions
+            .par_iter()
+            .enumerate()
+            .map(|(idx, intervals)| -> std::io::Result<String> {
+                let num_regions = intervals.len();
+                let current_partition_length = per_partition_bp[idx];
+                let part_start = Instant::now();
+                let inner_pool = Arc::clone(&inner_pool);
+                let gfa = inner_pool.install(|| {
+                    dispatch_gfa_engine_inner(
+                        impg,
+                        intervals,
+                        sequence_index,
+                        scoring_params,
+                        engine_opts,
+                    )
+                })?;
+                let part_elapsed = part_start.elapsed();
+                let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                let pipeline_elapsed = pipeline_start.elapsed();
+                info!(
+                    "[partitioned] Completed partition {}/{} ({} intervals, {} bp) in {:.1}s (pipeline elapsed: {:.1}s)",
+                    done, total_partitions, num_regions, current_partition_length,
+                    part_elapsed.as_secs_f64(),
+                    pipeline_elapsed.as_secs_f64(),
+                );
+                Ok(gfa)
+            })
+            .collect()
+    })?;
+    let total_partitioned_bp: u64 = per_partition_bp.iter().sum();
     let _ = total_partitioned_bp;
 
     // 2. Lace all partition GFAs together
