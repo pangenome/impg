@@ -257,6 +257,24 @@ pub fn anchor_seeded_biwfa_paf(
     anchors: &[(usize, usize)],
     syncmer_len: usize,
 ) -> Option<String> {
+    anchor_seeded_biwfa_paf_strand(a_name, a_seq, b_name, b_seq, anchors, syncmer_len, '+')
+}
+
+/// Strand-aware variant. Caller passes `paf_strand` ('+' or '-') which
+/// becomes column 5 of the emitted PAF line. When `paf_strand == '-'`
+/// the caller has already reverse-complemented `b_seq` and translated
+/// anchor target positions to the rev-comp frame; the CIGAR is computed
+/// on (a_seq, rev_comp_b) but the PAF reports forward-frame target
+/// coords with strand '-' so seqwish reads it correctly.
+pub fn anchor_seeded_biwfa_paf_strand(
+    a_name: &str,
+    a_seq: &[u8],
+    b_name: &str,
+    b_seq: &[u8],
+    anchors: &[(usize, usize)],
+    syncmer_len: usize,
+    paf_strand: char,
+) -> Option<String> {
     if a_seq.is_empty() || b_seq.is_empty() || syncmer_len == 0 {
         return None;
     }
@@ -395,8 +413,8 @@ pub fn anchor_seeded_biwfa_paf(
     }
     let cigar_str = compact_cigar(&paf_cigar);
     Some(format!(
-        "{}\t{}\t{}\t{}\t+\t{}\t{}\t{}\t{}\t{}\t{}\t255\tcg:Z:{}\n",
-        a_name, a_len, 0, a_len,
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t255\tcg:Z:{}\n",
+        a_name, a_len, 0, a_len, paf_strand,
         b_name, b_len, 0, b_len,
         matches, block_len,
         cigar_str,
@@ -589,11 +607,9 @@ pub fn build_paf_anchor_seeded(
             let (a_name, a_seq, a_meta) = &members[i];
             let (b_name, b_seq, b_meta) = &members[j];
 
-            // Try anchor-seeded when both are '+' strand and both have
-            // a fresh-chain match.
+            // For syng-partitioned input, member.strand is always '+' since
+            // partition emits forward intervals; this is just a guard.
             if a_meta.strand == '+' && b_meta.strand == '+' {
-                // Pick the '+' chain whose [c.start, c.end] overlaps this
-                // member's [fwd_start, fwd_end] the most.
                 let ac = best_overlapping_chain(
                     chains_by_genome.get(&a_meta.chrom), a_meta.fwd_start, a_meta.fwd_end,
                 );
@@ -601,57 +617,82 @@ pub fn build_paf_anchor_seeded(
                     chains_by_genome.get(&b_meta.chrom), b_meta.fwd_start, b_meta.fwd_end,
                 );
                 if let (Some(ac), Some(bc)) = (ac, bc) {
-                    if ac.strand == '+' && bc.strand == '+' {
-                        // Derive pair anchors by shared node_id.
-                        // Translate chromosome-level target positions to
-                        // fetched-sequence-local positions.
-                        let a_start_i = a_meta.fwd_start as i64;
-                        let b_start_i = b_meta.fwd_start as i64;
-                        let a_len = a_seq.len() as i64;
-                        let b_len = b_seq.len() as i64;
-                        let mut a_by_node: HashMap<u32, i64> = HashMap::new();
-                        for a in &ac.anchors {
-                            a_by_node.insert(a.node_id, a.target_pos as i64 - a_start_i);
-                        }
-                        let mut pair_anchors: Vec<(usize, usize)> = Vec::new();
-                        for b in &bc.anchors {
-                            if let Some(&a_local) = a_by_node.get(&b.node_id) {
-                                let b_local = b.target_pos as i64 - b_start_i;
-                                // Bounds check: anchor must fit within
-                                // both fetched sequences.
-                                if a_local < 0 || b_local < 0 {
-                                    continue;
-                                }
-                                if a_local + syncmer_len as i64 > a_len
-                                    || b_local + syncmer_len as i64 > b_len
-                                {
-                                    continue;
-                                }
-                                pair_anchors.push((a_local as usize, b_local as usize));
+                    // Pair-relative strand: '+' if both chains agree, '-' if
+                    // they disagree. Same-strand pairs (both '+' or both '-')
+                    // align directly because both members are in the same
+                    // relative orientation w.r.t. each other (even if both
+                    // are flipped w.r.t. the seed). Mixed-strand pairs need
+                    // one side reverse-complemented.
+                    let pair_strand_relative =
+                        if ac.strand == bc.strand { '+' } else { '-' };
+
+                    let a_start_i = a_meta.fwd_start as i64;
+                    let b_start_i = b_meta.fwd_start as i64;
+                    let a_len = a_seq.len() as i64;
+                    let b_len = b_seq.len() as i64;
+                    let scl = syncmer_len as i64;
+
+                    // A's anchors → A-local fetched coords.
+                    let mut a_by_node: HashMap<u32, i64> = HashMap::new();
+                    for a in &ac.anchors {
+                        a_by_node.insert(a.node_id, a.target_pos as i64 - a_start_i);
+                    }
+                    // B's anchors → B-local coords; if pair is '-', use
+                    // rev-comp position.
+                    let mut pair_anchors: Vec<(usize, usize)> = Vec::new();
+                    for b in &bc.anchors {
+                        if let Some(&a_local) = a_by_node.get(&b.node_id) {
+                            let b_fwd_local = b.target_pos as i64 - b_start_i;
+                            let b_local = if pair_strand_relative == '+' {
+                                b_fwd_local
+                            } else {
+                                // After rev-comp(B): the syncmer occupying
+                                // [b_fwd_local, b_fwd_local + scl) on forward
+                                // ends up at [b_len - b_fwd_local - scl,
+                                // b_len - b_fwd_local) on the rev-comp.
+                                b_len - b_fwd_local - scl
+                            };
+                            if a_local < 0
+                                || b_local < 0
+                                || a_local + scl > a_len
+                                || b_local + scl > b_len
+                            {
+                                continue;
                             }
+                            pair_anchors.push((a_local as usize, b_local as usize));
                         }
-                        // Sort by a_pos, keep only colinear (monotone non-decreasing on b_pos too).
-                        pair_anchors.sort();
-                        let mut colinear: Vec<(usize, usize)> = Vec::with_capacity(pair_anchors.len());
-                        let mut last_b = 0i64;
-                        for (ap, bp) in pair_anchors {
-                            if bp as i64 >= last_b {
-                                colinear.push((ap, bp));
-                                last_b = (bp + syncmer_len) as i64;
-                            }
+                    }
+                    pair_anchors.sort();
+                    let mut colinear: Vec<(usize, usize)> = Vec::with_capacity(pair_anchors.len());
+                    let mut last_b = 0i64;
+                    for (ap, bp) in pair_anchors {
+                        if bp as i64 >= last_b {
+                            colinear.push((ap, bp));
+                            last_b = (bp + syncmer_len) as i64;
                         }
-                        if !colinear.is_empty() {
-                            if let Some(line) = anchor_seeded_biwfa_paf(
-                                a_name, a_seq, b_name, b_seq, &colinear, syncmer_len,
-                            ) {
-                                counter_anchor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                return Some(line);
-                            }
+                    }
+                    if !colinear.is_empty() {
+                        // For mixed-strand pairs, rev-comp B before BiWFA
+                        // and emit PAF strand '-'. Same-strand pairs use
+                        // forward B and strand '+'.
+                        let b_oriented_owned: Vec<u8>;
+                        let b_oriented: &[u8] = if pair_strand_relative == '-' {
+                            b_oriented_owned = crate::graph::reverse_complement(b_seq);
+                            &b_oriented_owned
+                        } else {
+                            b_seq
+                        };
+                        if let Some(line) = anchor_seeded_biwfa_paf_strand(
+                            a_name, a_seq, b_name, b_oriented, &colinear, syncmer_len,
+                            pair_strand_relative,
+                        ) {
+                            counter_anchor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            return Some(line);
                         }
                     }
                 }
             }
-            // Fallback: full-pair BiWFA.
+            // Fallback: full-pair BiWFA on forward sequences (PAF '+').
             counter_fallback.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             pairwise_biwfa_paf(a_name, a_seq, b_name, b_seq)
         })
