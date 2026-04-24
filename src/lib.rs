@@ -570,11 +570,18 @@ fn dispatch_gfa_engine_inner(
                     /* k_far */ 1,
                     /* random_fraction */ 0.01,
                 );
+                let t_induce = std::time::Instant::now();
                 let gfa = syng_graph::build_gfa_from_paf_and_sequences(
                     &seq_pairs,
                     &paf,
                     &engine_opts.pipeline,
                 )?;
+                log::info!(
+                    "syng_graph: seqwish induction {:.2}s ({} bytes PAF, {} sequences)",
+                    t_induce.elapsed().as_secs_f64(),
+                    paf.len(),
+                    seq_pairs.len(),
+                );
                 if skip_normalize {
                     Ok(gfa)
                 } else {
@@ -630,65 +637,49 @@ pub fn partitioned_gfa_pipeline(
         .collect();
     let total_bp: u64 = per_partition_bp.iter().sum();
 
-    // 1. Generate per-partition GFAs sequentially (each partition uses all threads)
+    // 1. Generate per-partition GFAs. rayon::par_iter gives us a
+    // work-stealing queue — partitions are drained as workers free
+    // up. Each partition's own par_iter (e.g. BiWFA over pairs) still
+    // runs on the same global rayon pool, so nested parallelism is
+    // managed automatically; small partitions finish fast, big ones
+    // get more effective threads under work-stealing.
+    use rayon::prelude::*;
     let total_partitions = partitions.len();
-    let mut sub_gfas: Vec<String> = Vec::with_capacity(total_partitions);
-    let mut total_partitioned_bp: u64 = 0;
     let pipeline_start = Instant::now();
-    for (idx, intervals) in partitions.iter().enumerate() {
-        let num_regions = intervals.len();
-        let current_partition_length = per_partition_bp[idx];
-        let current_percentage = if total_bp > 0 {
-            (current_partition_length as f64 / total_bp as f64) * 100.0
-        } else {
-            0.0
-        };
-        let total_percentage = if total_bp > 0 {
-            (total_partitioned_bp as f64 / total_bp as f64) * 100.0
-        } else {
-            0.0
-        };
-        let current_percentage_str = if current_percentage < 0.0001 {
-            format!("{current_percentage:.4e}%")
-        } else {
-            format!("{current_percentage:.4}%")
-        };
-        let total_percentage_str = if total_percentage < 0.0001 {
-            format!("{total_percentage:.4e}%")
-        } else {
-            format!("{total_percentage:.4}%")
-        };
-        info!(
-            "[partitioned] Building GFA for partition {}/{} with {} intervals: {} bp this partition ({}), {} bp total ({})",
-            idx + 1,
-            total_partitions,
-            num_regions,
-            current_partition_length,
-            current_percentage_str,
-            total_partitioned_bp,
-            total_percentage_str,
-        );
-        // Perf 7: per-partition elapsed time.
-        let part_start = Instant::now();
-        let gfa = dispatch_gfa_engine_inner(
-            impg,
-            intervals,
-            sequence_index,
-            scoring_params,
-            engine_opts,
-        )?;
-        let part_elapsed = part_start.elapsed();
-        let pipeline_elapsed = pipeline_start.elapsed();
-        info!(
-            "[partitioned] Completed partition {}/{} in {:.1}s (pipeline elapsed: {:.1}s)",
-            idx + 1,
-            total_partitions,
-            part_elapsed.as_secs_f64(),
-            pipeline_elapsed.as_secs_f64(),
-        );
-        sub_gfas.push(gfa);
-        total_partitioned_bp += current_partition_length;
-    }
+    let completed = std::sync::atomic::AtomicUsize::new(0);
+
+    let sub_gfas_result: std::io::Result<Vec<String>> = partitions
+        .par_iter()
+        .enumerate()
+        .map(|(idx, intervals)| -> std::io::Result<String> {
+            let num_regions = intervals.len();
+            let current_partition_length = per_partition_bp[idx];
+            let part_start = Instant::now();
+            let gfa = dispatch_gfa_engine_inner(
+                impg,
+                intervals,
+                sequence_index,
+                scoring_params,
+                engine_opts,
+            )?;
+            let part_elapsed = part_start.elapsed();
+            let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            let pipeline_elapsed = pipeline_start.elapsed();
+            info!(
+                "[partitioned] Completed partition {}/{} ({} intervals, {} bp) in {:.1}s (pipeline elapsed: {:.1}s)",
+                done,
+                total_partitions,
+                num_regions,
+                current_partition_length,
+                part_elapsed.as_secs_f64(),
+                pipeline_elapsed.as_secs_f64(),
+            );
+            Ok(gfa)
+        })
+        .collect();
+    let sub_gfas: Vec<String> = sub_gfas_result?;
+    let total_partitioned_bp: u64 = per_partition_bp.iter().sum();
+    let _ = total_partitioned_bp;
 
     // 2. Lace all partition GFAs together
     info!("[partitioned] Lacing {} partition GFAs", sub_gfas.len());

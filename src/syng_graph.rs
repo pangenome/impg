@@ -526,12 +526,8 @@ pub fn build_paf_anchor_seeded(
         return String::new();
     }
 
-    // Re-query from seed. Multi-hop BFS accumulates anchor chains
-    // across transitively-reachable members — critical for partitions
-    // whose membership came from partition's own union-find closure
-    // beyond what a single-hop syng query can reach (e.g. rDNA: many
-    // tandem paralogs included in the partition that a single seed
-    // query doesn't cover).
+    let t_total = std::time::Instant::now();
+    let t_query = std::time::Instant::now();
     let chains = match crate::syng_transitive::query_transitive_with_anchors(
         syng_index,
         seed_chrom,
@@ -549,6 +545,7 @@ pub fn build_paf_anchor_seeded(
             );
         }
     };
+    let dt_query = t_query.elapsed();
 
     let syncmer_len = (syng_index.params.w + syng_index.params.k) as usize;
 
@@ -570,13 +567,22 @@ pub fn build_paf_anchor_seeded(
     let counter_anchor = std::sync::atomic::AtomicUsize::new(0);
     let counter_fallback = std::sync::atomic::AtomicUsize::new(0);
 
-    // Select pairs via sparsification.
+    let t_pairs = std::time::Instant::now();
+    // Pair selection uses mash distance from raw sequences. We tested
+    // replacing this with an anchor-count Jaccard derived from the
+    // fresh chains (free, ~0.01s instead of mash's ~1.5s) but that
+    // selected more pairs lacking shared anchors, pushing them to
+    // full-pair BiWFA fallback and growing align cost by ~3s — net
+    // negative. The mash sketch cost is buying us better pair quality
+    // (pairs whose sequences are similar tend to share anchors).
     let raw: Vec<Vec<u8>> = members.iter().map(|(_, s, _)| s.clone()).collect();
     let pairs = sweepga::knn_graph::extract_tree_pairs(
         &raw, k_near, k_far, random_fraction,
         &sweepga::knn_graph::MashParams::default(),
     );
+    let dt_pairs = t_pairs.elapsed();
 
+    let t_align = std::time::Instant::now();
     let lines: Vec<String> = pairs
         .par_iter()
         .filter_map(|&(i, j)| {
@@ -651,10 +657,16 @@ pub fn build_paf_anchor_seeded(
         })
         .collect();
 
+    let dt_align = t_align.elapsed();
+    let dt_total = t_total.elapsed();
     let anchor_used = counter_anchor.load(std::sync::atomic::Ordering::Relaxed);
     let fallback_used = counter_fallback.load(std::sync::atomic::Ordering::Relaxed);
     log::info!(
-        "syng_graph: anchor-seeded {} pairs, full-pair fallback {} pairs ({} members, {} fresh chains)",
+        "syng_graph: PAF total {:.2}s = query {:.2}s + pair-select {:.2}s + align {:.2}s | anchor-seeded {} / fallback {} pairs ({} members, {} chains)",
+        dt_total.as_secs_f64(),
+        dt_query.as_secs_f64(),
+        dt_pairs.as_secs_f64(),
+        dt_align.as_secs_f64(),
         anchor_used, fallback_used, members.len(), chains.len(),
     );
 
