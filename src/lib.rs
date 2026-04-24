@@ -637,48 +637,42 @@ pub fn partitioned_gfa_pipeline(
         .collect();
     let total_bp: u64 = per_partition_bp.iter().sum();
 
-    // 1. Generate per-partition GFAs. rayon::par_iter gives us a
-    // work-stealing queue — partitions are drained as workers free
-    // up. Each partition's own par_iter (e.g. BiWFA over pairs) still
-    // runs on the same global rayon pool, so nested parallelism is
-    // managed automatically; small partitions finish fast, big ones
-    // get more effective threads under work-stealing.
-    use rayon::prelude::*;
+    // 1. Generate per-partition GFAs sequentially. We tested
+    // rayon::par_iter across partitions but each partition's own
+    // par_iter (BiWFA, mash, seqwish) thrashed under contention with
+    // 16 concurrent partitions: per-partition wall went from ~3s solo
+    // to >24 minutes, with zero completions over 24 min. Sequential
+    // outer + parallel inner uses the thread pool effectively without
+    // nested-rayon thrashing.
     let total_partitions = partitions.len();
+    let mut sub_gfas: Vec<String> = Vec::with_capacity(total_partitions);
+    let mut total_partitioned_bp: u64 = 0;
     let pipeline_start = Instant::now();
-    let completed = std::sync::atomic::AtomicUsize::new(0);
-
-    let sub_gfas_result: std::io::Result<Vec<String>> = partitions
-        .par_iter()
-        .enumerate()
-        .map(|(idx, intervals)| -> std::io::Result<String> {
-            let num_regions = intervals.len();
-            let current_partition_length = per_partition_bp[idx];
-            let part_start = Instant::now();
-            let gfa = dispatch_gfa_engine_inner(
-                impg,
-                intervals,
-                sequence_index,
-                scoring_params,
-                engine_opts,
-            )?;
-            let part_elapsed = part_start.elapsed();
-            let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            let pipeline_elapsed = pipeline_start.elapsed();
-            info!(
-                "[partitioned] Completed partition {}/{} ({} intervals, {} bp) in {:.1}s (pipeline elapsed: {:.1}s)",
-                done,
-                total_partitions,
-                num_regions,
-                current_partition_length,
-                part_elapsed.as_secs_f64(),
-                pipeline_elapsed.as_secs_f64(),
-            );
-            Ok(gfa)
-        })
-        .collect();
-    let sub_gfas: Vec<String> = sub_gfas_result?;
-    let total_partitioned_bp: u64 = per_partition_bp.iter().sum();
+    for (idx, intervals) in partitions.iter().enumerate() {
+        let num_regions = intervals.len();
+        let current_partition_length = per_partition_bp[idx];
+        let part_start = Instant::now();
+        let gfa = dispatch_gfa_engine_inner(
+            impg,
+            intervals,
+            sequence_index,
+            scoring_params,
+            engine_opts,
+        )?;
+        let part_elapsed = part_start.elapsed();
+        let pipeline_elapsed = pipeline_start.elapsed();
+        info!(
+            "[partitioned] Completed partition {}/{} ({} intervals, {} bp) in {:.1}s (pipeline elapsed: {:.1}s)",
+            idx + 1,
+            total_partitions,
+            num_regions,
+            current_partition_length,
+            part_elapsed.as_secs_f64(),
+            pipeline_elapsed.as_secs_f64(),
+        );
+        sub_gfas.push(gfa);
+        total_partitioned_bp += current_partition_length;
+    }
     let _ = total_partitioned_bp;
 
     // 2. Lace all partition GFAs together
