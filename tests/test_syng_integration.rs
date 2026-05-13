@@ -360,7 +360,14 @@ fn test_syng_map_cli_gaf_and_paf() {
 
     let idx_prefix = dir.join("idx");
     let build = Command::new(&bin)
-        .args(["syng", "-f", fasta_path.to_str().unwrap(), "-o", idx_prefix.to_str().unwrap()])
+        .args([
+            "syng",
+            "-f",
+            fasta_path.to_str().unwrap(),
+            "-o",
+            idx_prefix.to_str().unwrap(),
+            "--locate",
+        ])
         .output()
         .expect("failed to run impg syng");
     assert!(

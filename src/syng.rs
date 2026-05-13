@@ -2679,6 +2679,10 @@ mod tests {
             std::path::Path::new(&format!("{}.syng.names", output_prefix_str)).exists(),
             ".syng.names file should exist after CLI run"
         );
+        assert!(
+            !std::path::Path::new(&format!("{}.syng.locate", output_prefix_str)).exists(),
+            ".syng.locate should not be built unless impg syng --locate is used"
+        );
 
         // Load and verify content
         let loaded = SyngIndex::load(output_prefix_str, SyncmerParams::default()).unwrap();

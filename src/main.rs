@@ -1739,6 +1739,13 @@ enum Args {
         #[clap(short = 'o', long, value_parser)]
         output: String,
 
+        /// Also build the FastLocate sidecar needed for projected PAF mapping.
+        ///
+        /// This is a global post-pass over the finished syng paths and can be
+        /// substantially slower and larger than the online compressed build.
+        #[clap(long = "locate", action)]
+        build_fast_locate: bool,
+
         // --- Syncmer parameters ---
         /// Inner k-mer length for syncmer extraction
         #[arg(help_heading = "Syncmer parameters")]
@@ -3625,6 +3632,7 @@ fn run() -> io::Result<()> {
             syncmer_w,
             syncmer_length,
             syncmer_seed,
+            build_fast_locate,
             common,
         } => {
             initialize_threads_and_log(&common);
@@ -3789,7 +3797,7 @@ fn run() -> io::Result<()> {
                 }
 
                 info!(
-                    "Built syng paths from {} sequences ({} bp, {} syncmers) in {}; building FastLocate sidecar...",
+                    "Built syng paths from {} sequences ({} bp, {} syncmers) in {}",
                     sequence_count,
                     total_bp,
                     total_syncmers,
@@ -3892,7 +3900,7 @@ fn run() -> io::Result<()> {
                 }
 
                 info!(
-                    "Built syng paths from {} sequences ({} bp, {} syncmers) in {}; building FastLocate sidecar...",
+                    "Built syng paths from {} sequences ({} bp, {} syncmers) in {}",
                     sequence_count,
                     total_bp,
                     total_syncmers,
@@ -3903,18 +3911,25 @@ fn run() -> io::Result<()> {
                 unreachable!()
             };
 
-            let locate_start = Instant::now();
-            if let Err(e) = index.build_fast_locate() {
-                warn!(
-                    "build_fast_locate failed after {}; queries will fall back to walking every path: {}",
-                    format_duration(locate_start.elapsed()),
-                    e
-                );
+            if build_fast_locate {
+                let locate_start = Instant::now();
+                info!("Building FastLocate sidecar because --locate was set");
+                if let Err(e) = index.build_fast_locate() {
+                    warn!(
+                        "build_fast_locate failed after {}; queries will fall back to walking every path: {}",
+                        format_duration(locate_start.elapsed()),
+                        e
+                    );
+                } else {
+                    info!(
+                        "FastLocate sidecar built in {} at +{}",
+                        format_duration(locate_start.elapsed()),
+                        format_duration(total_start.elapsed())
+                    );
+                }
             } else {
                 info!(
-                    "FastLocate sidecar built in {} at +{}",
-                    format_duration(locate_start.elapsed()),
-                    format_duration(total_start.elapsed())
+                    "Skipping FastLocate sidecar; pass --locate to build projected PAF mapping support"
                 );
             }
 
