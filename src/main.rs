@@ -22,6 +22,7 @@ use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::num::NonZeroUsize;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 /// Parse a size value with optional k/m/g suffix (case-insensitive)
 /// Examples: "100" -> 100, "10k" -> 10000, "5M" -> 5000000, "1g" -> 1000000000
@@ -95,6 +96,20 @@ fn resolve_syng_syncmer_params(
         w: total_k - s,
         seed,
     })
+}
+
+fn format_duration(duration: Duration) -> String {
+    if duration.as_secs() >= 60 {
+        let mins = duration.as_secs() / 60;
+        let secs = duration.as_secs_f64() - (mins * 60) as f64;
+        format!("{}m{:.3}s", mins, secs)
+    } else if duration.as_secs() > 0 {
+        format!("{:.3}s", duration.as_secs_f64())
+    } else if duration.as_millis() > 0 {
+        format!("{:.3}ms", duration.as_secs_f64() * 1_000.0)
+    } else {
+        format!("{}us", duration.as_micros())
+    }
 }
 
 /// Resolve the `--temp-dir` value to an absolute path.
@@ -3247,17 +3262,24 @@ fn run() -> io::Result<()> {
             let paper_s = params.k;
 
             info!(
-                "Building syng index with syncmer params: paper k={}, paper s={}, internal k={}, w={}, seed={}",
+                "Building syng index with syncmer params: paper k={}, paper s={}, internal k={}, w={}, seed={}, threads={}",
                 paper_k,
                 paper_s,
                 params.k,
                 params.w,
                 syncmer_seed,
+                common.threads.get(),
             );
+            let total_start = Instant::now();
 
             let mut index = if let Some(agc_path) = agc {
                 // Stream sequences from AGC
-                info!("Reading sequences from AGC: {}", agc_path);
+                let input_start = Instant::now();
+                info!(
+                    "Reading sequences from AGC: {} at +{}",
+                    agc_path,
+                    format_duration(total_start.elapsed())
+                );
                 let config = ragc_core::DecompressorConfig { verbosity: 0 };
                 let mut decompressor =
                     ragc_core::Decompressor::open(&agc_path, config).map_err(|e| {
@@ -3268,14 +3290,29 @@ fn run() -> io::Result<()> {
                     })?;
 
                 let samples = decompressor.list_samples();
+                info!("Found {} AGC samples", samples.len());
                 let mut index = impg::syng::SyngIndex::new(params);
                 let mut sequence_count = 0usize;
                 let mut total_bp = 0u64;
-                for sample in &samples {
+                let mut total_syncmers = 0usize;
+                for (sample_idx, sample) in samples.iter().enumerate() {
+                    let sample_start = Instant::now();
                     let contigs = decompressor
                         .list_contigs_names_only(sample)
                         .unwrap_or_default();
-                    for contig in &contigs {
+                    info!(
+                        "Including sample {}/{}: {} ({} contigs) at +{}",
+                        sample_idx + 1,
+                        samples.len(),
+                        sample,
+                        contigs.len(),
+                        format_duration(total_start.elapsed())
+                    );
+                    let mut sample_sequences = 0usize;
+                    let mut sample_bp = 0u64;
+                    let mut sample_syncmers = 0usize;
+                    for (contig_idx, contig) in contigs.iter().enumerate() {
+                        let contig_start = Instant::now();
                         // NOTE: Do NOT use `decompressor.get_contig()` here — it has a
                         // bug in ragc-core where it skips the detail-reload after a
                         // `list_contigs_names_only()` call (it checks contig count, which
@@ -3331,20 +3368,57 @@ fn run() -> io::Result<()> {
                         };
                         let seq_len = seq.len();
                         info!("  Processing {} ({} bp)", name, seq_len);
-                        index.add_sequence(name, seq);
+                        let stats = index.add_sequence(name.clone(), seq);
                         sequence_count += 1;
-                        total_bp += seq_len as u64;
+                        total_bp += stats.sequence_len as u64;
+                        total_syncmers += stats.syncmers;
+                        sample_sequences += 1;
+                        sample_bp += stats.sequence_len as u64;
+                        sample_syncmers += stats.syncmers;
+                        info!(
+                            "  Indexed contig {}/{} {}: {} bp, {} syncmers, indexed={}, elapsed {}, total {} sequences / {} bp / {} syncmers at +{}",
+                            contig_idx + 1,
+                            contigs.len(),
+                            name,
+                            stats.sequence_len,
+                            stats.syncmers,
+                            stats.indexed,
+                            format_duration(contig_start.elapsed()),
+                            sequence_count,
+                            total_bp,
+                            total_syncmers,
+                            format_duration(total_start.elapsed())
+                        );
                     }
+                    info!(
+                        "Finished sample {}/{}: {} ({} sequences, {} bp, {} syncmers) in {} at +{}",
+                        sample_idx + 1,
+                        samples.len(),
+                        sample,
+                        sample_sequences,
+                        sample_bp,
+                        sample_syncmers,
+                        format_duration(sample_start.elapsed()),
+                        format_duration(total_start.elapsed())
+                    );
                 }
 
                 info!(
-                    "Built syng paths from {} sequences ({} bp); building FastLocate sidecar...",
-                    sequence_count, total_bp
+                    "Built syng paths from {} sequences ({} bp, {} syncmers) in {}; building FastLocate sidecar...",
+                    sequence_count,
+                    total_bp,
+                    total_syncmers,
+                    format_duration(input_start.elapsed())
                 );
                 index
             } else if let Some(fasta_path) = fasta {
                 // Read sequences from FASTA
-                info!("Reading sequences from FASTA: {}", fasta_path);
+                let input_start = Instant::now();
+                info!(
+                    "Reading sequences from FASTA: {} at +{}",
+                    fasta_path,
+                    format_duration(total_start.elapsed())
+                );
 
                 let file = File::open(&fasta_path)?;
                 let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
@@ -3360,23 +3434,39 @@ fn run() -> io::Result<()> {
                 let mut current_seq = Vec::new();
                 let mut sequence_count = 0usize;
                 let mut total_bp = 0u64;
+                let mut total_syncmers = 0usize;
 
                 for line in reader.lines() {
                     let line = line?;
                     if line.starts_with('>') {
                         if !current_name.is_empty() && !current_seq.is_empty() {
+                            let seq_start = Instant::now();
                             let seq_len = current_seq.len();
                             info!(
                                 "  Processing {} ({} bp)",
                                 current_name,
                                 seq_len
                             );
-                            index.add_sequence(
-                                std::mem::take(&mut current_name),
+                            let name = std::mem::take(&mut current_name);
+                            let stats = index.add_sequence(
+                                name.clone(),
                                 std::mem::take(&mut current_seq),
                             );
                             sequence_count += 1;
-                            total_bp += seq_len as u64;
+                            total_bp += stats.sequence_len as u64;
+                            total_syncmers += stats.syncmers;
+                            info!(
+                                "  Indexed {}: {} bp, {} syncmers, indexed={}, elapsed {}, total {} sequences / {} bp / {} syncmers at +{}",
+                                name,
+                                stats.sequence_len,
+                                stats.syncmers,
+                                stats.indexed,
+                                format_duration(seq_start.elapsed()),
+                                sequence_count,
+                                total_bp,
+                                total_syncmers,
+                                format_duration(total_start.elapsed())
+                            );
                         }
                         current_name = line
                             .strip_prefix('>')
@@ -3391,43 +3481,73 @@ fn run() -> io::Result<()> {
                     }
                 }
                 if !current_name.is_empty() && !current_seq.is_empty() {
+                    let seq_start = Instant::now();
                     let seq_len = current_seq.len();
                     info!(
                         "  Processing {} ({} bp)",
                         current_name,
                         seq_len
                     );
-                    index.add_sequence(current_name, current_seq);
+                    let stats = index.add_sequence(current_name.clone(), current_seq);
                     sequence_count += 1;
-                    total_bp += seq_len as u64;
+                    total_bp += stats.sequence_len as u64;
+                    total_syncmers += stats.syncmers;
+                    info!(
+                        "  Indexed {}: {} bp, {} syncmers, indexed={}, elapsed {}, total {} sequences / {} bp / {} syncmers at +{}",
+                        current_name,
+                        stats.sequence_len,
+                        stats.syncmers,
+                        stats.indexed,
+                        format_duration(seq_start.elapsed()),
+                        sequence_count,
+                        total_bp,
+                        total_syncmers,
+                        format_duration(total_start.elapsed())
+                    );
                 }
 
                 info!(
-                    "Built syng paths from {} sequences ({} bp); building FastLocate sidecar...",
-                    sequence_count, total_bp
+                    "Built syng paths from {} sequences ({} bp, {} syncmers) in {}; building FastLocate sidecar...",
+                    sequence_count,
+                    total_bp,
+                    total_syncmers,
+                    format_duration(input_start.elapsed())
                 );
                 index
             } else {
                 unreachable!()
             };
 
+            let locate_start = Instant::now();
             if let Err(e) = index.build_fast_locate() {
                 warn!(
-                    "build_fast_locate failed; queries will fall back to walking every path: {}",
+                    "build_fast_locate failed after {}; queries will fall back to walking every path: {}",
+                    format_duration(locate_start.elapsed()),
                     e
+                );
+            } else {
+                info!(
+                    "FastLocate sidecar built in {} at +{}",
+                    format_duration(locate_start.elapsed()),
+                    format_duration(total_start.elapsed())
                 );
             }
 
+            let save_start = Instant::now();
             info!("Saving index to prefix: {}", output);
             index.save(&output)?;
             info!(
-                "Index saved: {}.1khash, {}.1gbwt, {}.syng.names",
-                output, output, output,
+                "Index saved in {}: {}.1khash, {}.1gbwt, {}.syng.names",
+                format_duration(save_start.elapsed()),
+                output,
+                output,
+                output,
             );
             info!(
                 "Name map contains {} sequences",
                 index.name_map.path_to_name.len()
             );
+            info!("Total syng build time: {}", format_duration(total_start.elapsed()));
         }
     }
 

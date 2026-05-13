@@ -365,6 +365,13 @@ pub struct SyngIndex {
     bp_offsets: Option<BpOffsets>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct SyngAddSequenceStats {
+    pub sequence_len: usize,
+    pub syncmers: usize,
+    pub indexed: bool,
+}
+
 // SAFETY: The C structures are only accessed through &self or &mut self,
 // and the C library's read-only query functions are thread-safe.
 unsafe impl Send for SyngIndex {}
@@ -502,7 +509,7 @@ impl SyngIndex {
     /// This is the same per-sequence work used by [`Self::build`], exposed so
     /// large callers can stream inputs without buffering all decompressed
     /// sequences before GBWT construction.
-    pub fn add_sequence(&mut self, name: String, seq: Vec<u8>) {
+    pub fn add_sequence(&mut self, name: String, seq: Vec<u8>) -> SyngAddSequenceStats {
         self.gbz_gbwt = None;
         self.fast_locate = None;
         self.bp_offsets = None;
@@ -512,7 +519,11 @@ impl SyngIndex {
         if seq_len < syncmer_len {
             // Sequence too short for syncmer extraction — record in name map but skip
             self.name_map.add(name, seq_len as u64);
-            return;
+            return SyngAddSequenceStats {
+                sequence_len: seq_len,
+                syncmers: 0,
+                indexed: false,
+            };
         }
 
         // Convert sequence to numeric encoding (0=a, 1=c, 2=g, 3=t) for the C
@@ -560,7 +571,11 @@ impl SyngIndex {
 
         if syncmers.is_empty() {
             self.name_map.add(name, seq_len as u64);
-            return;
+            return SyngAddSequenceStats {
+                sequence_len: seq_len,
+                syncmers: 0,
+                indexed: false,
+            };
         }
 
         // Build forward GBWT path and capture start info
@@ -611,6 +626,12 @@ impl SyngIndex {
                 first_syncmer_pos: fwd_first_syncmer_pos,
             },
         );
+
+        SyngAddSequenceStats {
+            sequence_len: seq_len,
+            syncmers: syncmers.len(),
+            indexed: true,
+        }
     }
 
     /// Save the index to disk.
