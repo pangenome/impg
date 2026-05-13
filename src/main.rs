@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::type_complexity)]
 use clap::Parser;
 use coitrees::{Interval, IntervalTree};
 use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
@@ -312,11 +314,12 @@ impl EngineCliOpts {
             "pggb" => GfaEngine::Pggb,
             "seqwish" => GfaEngine::Seqwish,
             "poa" => GfaEngine::Poa,
+            "syng-native" | "syng_native" | "syng" => GfaEngine::SyngNative,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
-                        "Unknown GFA engine '{}'. Valid engines: pggb, seqwish, poa",
+                        "Unknown GFA engine '{}'. Valid engines: pggb, seqwish, poa, syng-native",
                         name
                     ),
                 ));
@@ -355,6 +358,26 @@ impl EngineCliOpts {
                 }
             }
             GfaEngine::Seqwish | GfaEngine::Pggb => {}
+            GfaEngine::SyngNative => {
+                // Syng-native will generate its own alignments internally
+                // from syncmer anchors + BiWFA; the external-aligner knobs
+                // don't apply. Sparsification is driven by syng anchor
+                // density and sweepga::knn_graph, not --sparsify.
+                if self.aln.sw.sparsify != SparsificationStrategy::None {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--sparsify controls external-aligner pair selection; \
+                         --gfa-engine syng-native selects pairs from syng anchor counts",
+                    ));
+                }
+                if self.aln.sw.no_filter {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--no-filter disables the post-alignment PAF filter; \
+                         --gfa-engine syng-native has no external filter step",
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -544,7 +567,7 @@ impl GfaMafFastaOpts {
 
         let needs_sequence_mandatory = matches!(
             output_format,
-            "gfa" | "maf" | "fasta" | "fasta-aln" | "fasta+paf"
+            "gfa" | "maf" | "fasta" | "fasta-aln" | "fasta+paf" | "gbwt"
         ) || tracepoint_needs_sequences;
         let needs_sequence_optional = output_format == "paf" && original_sequence_coordinates;
         // POA scoring is needed for gfa (all engines may use it), maf, and fasta-aln
@@ -781,6 +804,35 @@ impl RefineOpts {
 
 /// Parse sequence name to extract subsequence coordinates and original sequence name
 /// Format: `seq_name:start-end` -> (original_seq_name, start_offset)
+/// Detect whether a path points to a syng index. Returns the syng
+/// prefix (base name before `.1khash` / `.1gbwt`) if one is found.
+///
+/// Accepts:
+///   - Explicit file path ending in `.1khash` or `.1gbwt` → strip suffix
+///   - Bare prefix with sibling `.1khash` on disk → return prefix as-is
+fn detect_syng_prefix(path: &str) -> Option<String> {
+    if let Some(stem) = path.strip_suffix(".1khash") {
+        return Some(stem.to_string());
+    }
+    if let Some(stem) = path.strip_suffix(".1gbwt") {
+        return Some(stem.to_string());
+    }
+    if std::path::Path::new(&format!("{path}.1khash")).exists() {
+        return Some(path.to_string());
+    }
+    None
+}
+
+/// Resolve the effective syng prefix for a command: if the single
+/// alignment argument looks like a syng index path, use that.
+fn resolve_syng_prefix(alignment: &AlignmentOpts) -> Option<String> {
+    if alignment.alignment_files.len() == 1 {
+        detect_syng_prefix(&alignment.alignment_files[0])
+    } else {
+        None
+    }
+}
+
 fn parse_subsequence_coordinates(seq_name: &str) -> Option<(String, i32)> {
     // Find the last colon to handle formats like "sample#hap#chr:start-end"
     if let Some(colon_pos) = seq_name.rfind(':') {
@@ -910,6 +962,35 @@ enum Args {
         #[clap(flatten)]
         alignment: AlignmentOpts,
 
+        /// Boundary padding in bp for syng queries (default: 120 = 2× syncmer length)
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, value_parser, default_value_t = 120)]
+        syng_padding: u64,
+
+        /// Minimum anchor count required for a syng chain to become a
+        /// partition edge. Raising this drops weak/paralog-noise chains
+        /// before partition's union-find closes over them, preventing the
+        /// transitive-collapse catch-all on TE/subtelomere-rich regions.
+        /// 0 disables chain filtering (raw per-syncmer intervals).
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, value_parser, default_value_t = 0)]
+        syng_min_chain_anchors: usize,
+
+        /// Minimum fraction of the query window a syng chain must cover to
+        /// become a partition edge. 0.0 disables the extent filter.
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, value_parser, default_value_t = 0.0)]
+        syng_min_chain_fraction: f64,
+
+        /// Disable post-partition sliver rehoming. By default, singleton
+        /// partitions (slivers created by greedy masking) are iteratively
+        /// reassigned to their flank partitions — the partition that owns
+        /// the biologically contiguous context. This is source-agnostic and
+        /// runs for both syng- and alignment-backed partitioning.
+        #[arg(help_heading = "Partition options")]
+        #[clap(long, action)]
+        no_rehome_singletons: bool,
+
         // --- Partition-specific ---
         /// Window size for partitioning
         #[arg(help_heading = "Partition options")]
@@ -997,17 +1078,79 @@ enum Args {
         #[clap(flatten)]
         alignment: AlignmentOpts,
 
+        /// Boundary padding in bp for syng queries (default: 120 = 2× syncmer length)
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, value_parser, default_value_t = 120)]
+        syng_padding: u64,
+
+        /// Source-side window extension (bp) for syncmer lookup. Widens the
+        /// query interval during syncmer discovery only; boundaries remain
+        /// clipped by BiWFA refinement. Helps when the query lands just past
+        /// the end of a conserved syncmer block (default: 0)
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, value_parser, default_value_t = 0)]
+        syng_extension: u64,
+
+        /// Boundary-extension budget (bp) per cluster in syng queries.
+        /// `refine_homolog_by_alignment` expands the anchor-supported
+        /// sub-query and the refinement target window outward by this
+        /// amount on each side before BiWFA. Target extension clips to
+        /// neighbor-cluster bounds on the same `(genome, strand)`;
+        /// source extension clips to the user's query region and to
+        /// half the clipped target span (keeps BiWFA's two inputs
+        /// similarly-sized, avoiding the O(s²) pathology of a wide
+        /// query forced into a narrow target). The default 1 kb
+        /// recovers most indel-bounded block boundaries (typical
+        /// intra-homology indels are &lt; 500 bp) while staying
+        /// tractable on repeat-dense queries with tens of thousands
+        /// of clusters. Raise for sparser pangenomes with longer
+        /// conserved blocks.
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, value_parser, default_value_t = 1_000)]
+        syng_extend_budget: u64,
+
+        /// Minimum anchor count for a syng chain to be emitted. Chains
+        /// with fewer anchors than this are dropped at emission. Default
+        /// 2 filters singletons (one-anchor chains with no colinear
+        /// mutual-best partner — weakest possible evidence, mostly
+        /// noise in repeat-dense regions). Set to 1 to keep singletons
+        /// (useful when you want every syncmer match reported).
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, value_parser, default_value_t = 2)]
+        syng_min_chain_anchors: usize,
+
+        /// Minimum chain query-extent as a fraction of the queried
+        /// range (0.0 to 1.0). Chains whose anchor span on the query
+        /// axis covers less than `fraction × query_range_len` are
+        /// dropped. Default 0.0 keeps every chain (maximum paralog
+        /// discovery). Set 0.5 to keep only chains covering at least
+        /// half the query (good for partitioning — filters out
+        /// fragment chains in repeat regions and speeds up hard tiles
+        /// dramatically).
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, value_parser, default_value_t = 0.0)]
+        syng_min_chain_fraction: f64,
+
+        /// Debug-only: skip boundary realignment and emit raw syncmer-resolution
+        /// intervals from syng's query_region. The default syng path runs
+        /// BiWFA boundary realignment for base-pair-precise edges (and iterates
+        /// under --transitive). Use --syng-raw to inspect the underlying syng
+        /// hits without refinement.
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, default_value_t = false)]
+        syng_raw: bool,
+
         // --- Query-specific ---
         #[clap(flatten)]
         query: QueryOpts,
 
         // --- Output ---
-        /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', 'gfa', 'maf', 'fasta', or 'fasta+paf' ('gfa', 'maf', 'fasta', and 'fasta+paf' require --sequence-files or --sequence-list)
+        /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', 'gfa', 'maf', 'fasta', 'fasta+paf', or 'gbwt' (region-specific GBWT, requires --sequence-files)
         #[arg(help_heading = "Output options")]
         #[clap(short = 'o', long, value_parser, default_value = "auto")]
         output_format: String,
 
-        /// Prefix for output file (automatically appends the extension based on format)
+        /// Prefix for output file (automatically appends the extension based on format; required for 'gbwt' output)
         #[clap(short = 'O', long, value_parser, default_value = None)]
         output_prefix: Option<String>,
 
@@ -1155,6 +1298,79 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
     },
+
+    /// Generate alignment pairs with sparsification strategies
+    Align {
+        // --- Input ---
+        #[clap(flatten)]
+        fasta_input: SequenceOpts,
+
+        // --- Output ---
+        /// Output directory for alignments
+        #[clap(short = 'o', long, value_parser, default_value = "alignments")]
+        output_dir: String,
+
+        /// Output format: paf, 1aln, or joblist
+        #[clap(long, value_parser, default_value = "joblist")]
+        format: String,
+
+        /// Execute an existing joblist file (one shell command per line)
+        /// in parallel with progress/ETA logging. When set, sparsification
+        /// and sequence inputs are ignored.
+        #[clap(long, value_parser)]
+        run_joblist: Option<String>,
+
+        /// Parallel slots for `--run-joblist`. Each slot runs one command
+        /// at a time; per-command thread count is whatever the joblist line
+        /// already specifies. Defaults to `--threads`.
+        #[clap(long, value_parser)]
+        jobs: Option<usize>,
+
+        // --- Alignment ---
+        #[clap(flatten)]
+        aln: AlnOpts,
+
+        // --- General ---
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+
+    /// Build a GBWT syncmer index from sequences
+    Syng {
+        // --- Input (one required) ---
+        /// AGC archive input
+        #[clap(long, value_parser, conflicts_with = "fasta")]
+        agc: Option<String>,
+
+        /// FASTA input file
+        #[clap(short = 'f', long, value_parser, conflicts_with = "agc")]
+        fasta: Option<String>,
+
+        // --- Output ---
+        /// Output file prefix (produces .1khash, .1gbwt, .syng.names)
+        #[clap(short = 'o', long, value_parser)]
+        output: String,
+
+        // --- Syncmer parameters ---
+        /// Inner k-mer length for syncmer extraction
+        #[arg(help_heading = "Syncmer parameters")]
+        #[clap(long, value_parser, default_value_t = 8)]
+        syncmer_k: u32,
+
+        /// Window length for syncmer extraction (total syncmer length = w + k)
+        #[arg(help_heading = "Syncmer parameters")]
+        #[clap(long, value_parser, default_value_t = 55)]
+        syncmer_w: u32,
+
+        /// Hash function seed for syncmer extraction
+        #[arg(help_heading = "Syncmer parameters")]
+        #[clap(long, value_parser, default_value_t = 7)]
+        syncmer_seed: u32,
+
+        // --- General ---
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
 }
 
 fn main() {
@@ -1286,6 +1502,10 @@ fn run() -> io::Result<()> {
         Args::Partition {
             common,
             alignment,
+            syng_padding,
+            syng_min_chain_anchors,
+            syng_min_chain_fraction,
+            no_rehome_singletons,
             window_size,
             output_format,
             output_folder,
@@ -1361,6 +1581,80 @@ fn run() -> io::Result<()> {
                 ));
             }
 
+            // Allow `-a <prefix>` or `-a <prefix>.1khash` to route to syng.
+            let effective_syng = resolve_syng_prefix(&alignment);
+
+            // ─── Syng-based partition path ──────────────────────────────────
+            if let Some(ref syng_prefix) = effective_syng {
+                if approximate {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--approximate mode is not supported with syng index input",
+                    ));
+                }
+
+                info!("Loading syng index from prefix: {}", syng_prefix);
+                let syng_index = impg::syng::SyngIndex::load(syng_prefix, impg::syng::SyncmerParams::default())?;
+                let seq_index = syng_index.build_seq_index();
+
+                let reverse_complement = gfa_maf_fasta.reverse_complement;
+                let needs_sequences = matches!(output_format.as_str(), "gfa" | "maf" | "fasta");
+                let sequence_index = if needs_sequences {
+                    let si = gfa_maf_fasta.sequence.build_sequence_index()?;
+                    if si.is_none() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Sequence files are required for '{}' output with syng index input. Use --sequence-files or --sequence-list", output_format),
+                        ));
+                    }
+                    si
+                } else {
+                    None
+                };
+
+                let scoring_params = if matches!(output_format.as_str(), "gfa" | "maf") {
+                    Some(parse_poa_scoring_string(&engine_cli.poa_scoring)?)
+                } else {
+                    None
+                };
+
+                let engine_config = engine_cli.build(common.threads.get())?;
+                let wrapper = {
+                    let base = impg::SyngImpgWrapper::new(syng_index, seq_index, syng_padding);
+                    if syng_min_chain_anchors > 0 {
+                        base.with_chain_filter(syng_min_chain_anchors, syng_min_chain_fraction)
+                    } else {
+                        base
+                    }
+                };
+
+                partition::partition_alignments(
+                    &wrapper,
+                    window_size,
+                    starting_sequences_file.as_deref(),
+                    &selection_mode,
+                    merge_distance,
+                    min_result_identity,
+                    min_missing_size,
+                    min_boundary_distance,
+                    transitive_opts.transitive_dfs,
+                    transitive_opts.max_depth,
+                    transitive_opts.effective_min_transitive_len(),
+                    transitive_opts.min_distance_between_ranges,
+                    &output_format,
+                    output_folder.as_deref(),
+                    sequence_index.as_ref(),
+                    scoring_params,
+                    reverse_complement,
+                    common.verbose > 1,
+                    separate_files,
+                    false, // approximate always false for syng
+                    &engine_config,
+                    !no_rehome_singletons,
+                )?;
+            } else {
+            // ─── Normal (alignment-based) partition path ────────────────────
+
             // Resolve alignment files once (supports process substitution inputs)
             let alignment_files = resolve_alignment_files(&alignment)?;
 
@@ -1410,11 +1704,19 @@ fn run() -> io::Result<()> {
                 separate_files,
                 approximate,
                 &engine_config,
+                !no_rehome_singletons,
             )?;
+            }
         }
         Args::Query {
             common,
             alignment,
+            syng_padding,
+            syng_extension,
+            syng_extend_budget,
+            syng_min_chain_anchors,
+            syng_min_chain_fraction,
+            syng_raw,
             query,
             output_format,
             output_prefix,
@@ -1449,6 +1751,7 @@ fn run() -> io::Result<()> {
                     "fasta",
                     "fasta+paf",
                     "fasta-aln",
+                    "gbwt",
                 ],
             )?;
 
@@ -1459,6 +1762,393 @@ fn run() -> io::Result<()> {
                     "Either --target-range or --target-bed must be provided",
                 ));
             }
+
+            // Allow `-a <prefix>` or `-a <prefix>.1khash` to auto-route
+            // to the syng backend.
+            let effective_syng = resolve_syng_prefix(&alignment);
+
+            // ─── Syng query path ──────────────────────────────────────────
+            if let Some(ref syng_prefix) = effective_syng {
+                // Validate that alignment files are NOT also provided
+                // (conflicts_with_all handles this at clap level, but be explicit)
+
+                // Only bed, bedpe, gfa, fasta, and gbwt output are supported for syng queries
+                let resolved_format = if output_format == "auto" { "bed" } else { output_format.as_str() };
+                if !matches!(resolved_format, "bed" | "bedpe" | "gfa" | "fasta" | "gbwt") {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "syng index queries currently support 'bed', 'bedpe', 'gfa', 'fasta', and 'gbwt' output formats, not '{}'",
+                            resolved_format
+                        ),
+                    ));
+                }
+
+                info!("Loading syng index from prefix: {}", syng_prefix);
+                let syng_index = impg::syng::SyngIndex::load(syng_prefix, impg::syng::SyncmerParams::default())?;
+                let seq_index_built = syng_index.build_seq_index();
+                // Wrap once; wrapper owns syng_index and seq_index for the rest of the path.
+                let wrapper = impg::SyngImpgWrapper::new(syng_index, seq_index_built, syng_padding);
+
+                // Parse target ranges
+                let target_ranges: Vec<(String, (i32, i32), String)> = if let Some(ref target_range_str) = query.target_range {
+                    if target_range_str.contains(':') {
+                        vec![partition::parse_target_range(target_range_str)?]
+                    } else {
+                        // Whole sequence
+                        let seq_name = target_range_str.as_str();
+                        let seq_len = wrapper
+                            .seq_index()
+                            .get_id(seq_name)
+                            .and_then(|id| wrapper.seq_index().get_len_from_id(id))
+                            .ok_or_else(|| {
+                                io::Error::new(
+                                    io::ErrorKind::NotFound,
+                                    format!("Sequence '{}' not found in syng index", seq_name),
+                                )
+                            })? as i32;
+                        let name = format!("{}:{}-{}", seq_name, 0, seq_len);
+                        vec![(seq_name.to_string(), (0, seq_len), name)]
+                    }
+                } else if let Some(ref target_bed) = query.target_bed {
+                    partition::parse_bed_file(target_bed)?
+                } else {
+                    unreachable!();
+                };
+
+                // Boundary-realignment default path: needs a UnifiedSequenceIndex to
+                // fetch small windows around each fuzzy edge. --syng-raw opts out and
+                // uses the current syncmer-resolution pass-through. All output
+                // formats (bed, fasta, gbwt, gfa) route through realignment by
+                // default — fragmented raw intervals would otherwise feed straight
+                // into the GFA partitioning pipeline and produce a fragmented graph.
+                let use_boundary_realign = !syng_raw;
+                let syng_max_depth = if query.transitive {
+                    query.transitive_opts.max_depth.max(1)
+                } else {
+                    1
+                };
+                // Flows straight through to `cluster_by_signature`
+                // on the hot syng path. There it's interpreted as the
+                // maximum signature-space gap tolerated within one
+                // homology block: within-block jitter is tens of bp
+                // (local indels), paralog copies and long insertions
+                // sit at structurally different signatures (kb-scale
+                // on yeast). A typical `-d` up to a few kb cleanly
+                // Setup output resources for GFA/FASTA/GBWT (need sequence files).
+                // Boundary realignment also needs them for edge-window fetches.
+                let needs_sequences =
+                    matches!(resolved_format, "gfa" | "fasta" | "gbwt") || use_boundary_realign;
+                let sequence_index = if needs_sequences {
+                    let si = gfa_maf_fasta.sequence.build_sequence_index()?;
+                    if si.is_none() {
+                        let reason = if use_boundary_realign && resolved_format == "bed" {
+                            "boundary realignment (default syng behavior). Use --syng-raw for the syncmer-resolution pass-through, or".to_string()
+                        } else {
+                            format!("'{}' output with syng index input.", resolved_format)
+                        };
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Sequence files are required for {} Use --sequence-files or --sequence-list", reason),
+                        ));
+                    }
+                    si
+                } else {
+                    None
+                };
+
+                // Validate that -O is provided for gbwt output
+                if resolved_format == "gbwt" && output_prefix.is_none() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Output prefix (-O) is required for 'gbwt' output format",
+                    ));
+                }
+
+                let scoring_params = if resolved_format == "gfa" {
+                    Some(parse_poa_scoring_string(&engine_cli.poa_scoring)?)
+                } else {
+                    None
+                };
+
+                // Process each target range. Serial outer — the
+                // per-tile query already uses the rayon pool
+                // internally (anchor emission + chain projection);
+                // an outer par_iter over tiles oversubscribes and
+                // actually slowed things down in measurement.
+                for (target_name, (range_start, range_end), name) in &target_ranges {
+                    info!("Syng query: {} ({}:{}-{})", name, target_name, range_start, range_end);
+
+                    match resolved_format {
+                        "bed" | "bedpe" => {
+                            let intervals = if use_boundary_realign {
+                                impg::syng_transitive::query_transitive_ext(
+                                    wrapper.syng_index(),
+                                    target_name,
+                                    *range_start as u64,
+                                    *range_end as u64,
+                                    syng_padding,
+                                    syng_max_depth,
+                                    syng_extension,
+                                    syng_extend_budget,
+                                    syng_min_chain_anchors,
+                                    syng_min_chain_fraction,
+                                    sequence_index.as_ref().unwrap(),
+                                )?
+                            } else {
+                                wrapper.syng_index().query_region_ext(
+                                    target_name,
+                                    *range_start as u64,
+                                    *range_end as u64,
+                                    syng_padding,
+                                    syng_extension,
+                                )?
+                            };
+                            // Unified path: convert syng output to AdjustedInterval,
+                            // flow through the shared merge + emit pipeline so `-d`
+                            // honors gap-tolerant 2D chaining.
+                            let mut results = syng_intervals_to_adjusted(
+                                &intervals,
+                                target_name,
+                                *range_start,
+                                *range_end,
+                                wrapper.seq_index(),
+                            );
+                            let ext = if resolved_format == "bedpe" { "bedpe" } else { "bed" };
+                            let mut out = find_output_stream(&output_prefix, ext)?;
+                            if resolved_format == "bedpe" {
+                                output_results_bedpe(
+                                    &wrapper,
+                                    &mut results,
+                                    &mut out,
+                                    &name,
+                                    query.effective_merge_distance(),
+                                    query.original_sequence_coordinates,
+                                )?;
+                            } else {
+                                output_results_bed(
+                                    &wrapper,
+                                    &mut results,
+                                    &mut out,
+                                    &name,
+                                    query.effective_merge_distance(),
+                                    query.merge_strands_for_output("bed"),
+                                    query.original_sequence_coordinates,
+                                )?;
+                            }
+                        }
+                        "gfa" => {
+                            let engine_opts = engine_cli.build(common.threads.get())?;
+
+                            if let Some(partition_size) = engine_opts.partition_size {
+                                // ─── Sub-windowed path: syng-at-the-outer-level ───
+                                //
+                                // Split the query range into `partition_size`-bp
+                                // sub-windows, call `query_region` per sub-window
+                                // (which returns tight, small-scale intervals),
+                                // collect per-window query intervals, then run the
+                                // partitioned GFA pipeline which does a fresh local
+                                // alignment + graph induction per partition and
+                                // laces them together with a single final
+                                // gfaffix. Structurally mirrors the alignment
+                                // path's `output_results_gfa_partitioned`.
+                                let ps = partition_size as i32;
+                                let mut partitions: Vec<Vec<Interval<u32>>> = Vec::new();
+                                let mut window_start = *range_start;
+                                let mut window_idx = 0usize;
+                                while window_start < *range_end {
+                                    let window_end = (window_start + ps).min(*range_end);
+                                    let intervals = if use_boundary_realign {
+                                        impg::syng_transitive::query_transitive_ext(
+                                            wrapper.syng_index(),
+                                            target_name,
+                                            window_start as u64,
+                                            window_end as u64,
+                                            syng_padding,
+                                            syng_max_depth,
+                                            syng_extension,
+                                            syng_extend_budget,
+                                            syng_min_chain_anchors,
+                                            syng_min_chain_fraction,
+                                            sequence_index.as_ref().unwrap(),
+                                        )?
+                                    } else {
+                                        wrapper.syng_index().query_region_ext(
+                                            target_name,
+                                            window_start as u64,
+                                            window_end as u64,
+                                            syng_padding,
+                                        syng_extension,
+                                    )?
+                                    };
+                                    let window_intervals: Vec<Interval<u32>> = intervals
+                                        .iter()
+                                        .filter_map(|iv| {
+                                            let id = wrapper.seq_index().get_id(&iv.genome)?;
+                                            Some(Interval::new(iv.start as i32, iv.end as i32, id))
+                                        })
+                                        .collect();
+                                    info!(
+                                        "  [syng sub-window {}] {}:{}-{} → {} intervals",
+                                        window_idx, target_name, window_start, window_end,
+                                        window_intervals.len()
+                                    );
+                                    if !window_intervals.is_empty() {
+                                        partitions.push(window_intervals);
+                                    }
+                                    window_start = window_end;
+                                    window_idx += 1;
+                                }
+
+                                if partitions.is_empty() {
+                                    let mut out = find_output_stream(&output_prefix, "gfa")?;
+                                    writeln!(out, "H\tVN:Z:1.0")?;
+                                    continue;
+                                }
+
+                                let gfa_output = impg::partitioned_gfa_pipeline(
+                                    &partitions,
+                                    &wrapper,
+                                    sequence_index.as_ref().unwrap(),
+                                    scoring_params,
+                                    &engine_opts,
+                                )?;
+                                let mut out = find_output_stream(&output_prefix, "gfa")?;
+                                writeln!(out, "{gfa_output}")?;
+                            } else {
+                                // ─── Flat path: one query_region, one engine run ───
+                                let intervals = if use_boundary_realign {
+                                    impg::syng_transitive::query_transitive_ext(
+                                        wrapper.syng_index(),
+                                        target_name,
+                                        *range_start as u64,
+                                        *range_end as u64,
+                                        syng_padding,
+                                        syng_max_depth,
+                                        syng_extension,
+                                        syng_extend_budget,
+                                        syng_min_chain_anchors,
+                                        syng_min_chain_fraction,
+                                        sequence_index.as_ref().unwrap(),
+                                    )?
+                                } else {
+                                    wrapper.syng_index().query_region_ext(
+                                        target_name,
+                                        *range_start as u64,
+                                        *range_end as u64,
+                                        syng_padding,
+                                    syng_extension,
+                                )?
+                                };
+                                let query_intervals: Vec<coitrees::Interval<u32>> = intervals
+                                    .iter()
+                                    .filter_map(|iv| {
+                                        let id = wrapper.seq_index().get_id(&iv.genome)?;
+                                        Some(Interval::new(iv.start as i32, iv.end as i32, id))
+                                    })
+                                    .collect();
+
+                                if query_intervals.is_empty() {
+                                    let mut out = find_output_stream(&output_prefix, "gfa")?;
+                                    writeln!(out, "H\tVN:Z:1.0")?;
+                                    continue;
+                                }
+
+                                let gfa_output = impg::dispatch_gfa_engine(
+                                    &wrapper,
+                                    &query_intervals,
+                                    sequence_index.as_ref().unwrap(),
+                                    scoring_params,
+                                    &engine_opts,
+                                )?;
+                                let mut out = find_output_stream(&output_prefix, "gfa")?;
+                                writeln!(out, "{gfa_output}")?;
+                            }
+                        }
+                        "fasta" => {
+                            let seq_idx = sequence_index.as_ref().unwrap();
+                            let intervals = if use_boundary_realign {
+                                impg::syng_transitive::query_transitive_ext(
+                                    wrapper.syng_index(),
+                                    target_name,
+                                    *range_start as u64,
+                                    *range_end as u64,
+                                    syng_padding,
+                                    syng_max_depth,
+                                    syng_extension,
+                                    syng_extend_budget,
+                                    syng_min_chain_anchors,
+                                    syng_min_chain_fraction,
+                                    seq_idx,
+                                )?
+                            } else {
+                                wrapper.syng_index().query_region_ext(
+                                    target_name,
+                                    *range_start as u64,
+                                    *range_end as u64,
+                                    syng_padding,
+                                syng_extension,
+                            )?
+                            };
+                            let mut out = find_output_stream(&output_prefix, "fa")?;
+                            for iv in &intervals {
+                                let sequence = seq_idx.fetch_sequence(&iv.genome, iv.start as i32, iv.end as i32)?;
+                                writeln!(out, ">{}:{}-{}({})", iv.genome, iv.start, iv.end, iv.strand)?;
+                                out.write_all(&sequence)?;
+                                writeln!(out)?;
+                            }
+                        }
+                        "gbwt" => {
+                            let seq_idx = sequence_index.as_ref().unwrap();
+                            let intervals = if use_boundary_realign {
+                                impg::syng_transitive::query_transitive_ext(
+                                    wrapper.syng_index(),
+                                    target_name,
+                                    *range_start as u64,
+                                    *range_end as u64,
+                                    syng_padding,
+                                    syng_max_depth,
+                                    syng_extension,
+                                    syng_extend_budget,
+                                    syng_min_chain_anchors,
+                                    syng_min_chain_fraction,
+                                    seq_idx,
+                                )?
+                            } else {
+                                wrapper.syng_index().query_region_ext(
+                                    target_name,
+                                    *range_start as u64,
+                                    *range_end as u64,
+                                    syng_padding,
+                                syng_extension,
+                            )?
+                            };
+                            let gbwt_prefix = output_prefix.as_ref().unwrap();
+
+                            // Fetch sequences for all intervals
+                            let fetched: Vec<(String, Vec<u8>)> = intervals
+                                .iter()
+                                .map(|iv| {
+                                    let sequence = seq_idx.fetch_sequence(&iv.genome, iv.start as i32, iv.end as i32)?;
+                                    let seq_name = format!("{}:{}-{}({})", iv.genome, iv.start, iv.end, iv.strand);
+                                    Ok((seq_name, sequence))
+                                })
+                                .collect::<io::Result<Vec<_>>>()?;
+
+                            let seq_refs: Vec<(String, &[u8])> = fetched
+                                .iter()
+                                .map(|(name, seq)| (name.clone(), seq.as_slice()))
+                                .collect();
+
+                            wrapper.syng_index().build_region_gbwt(&seq_refs, gbwt_prefix)?;
+                            info!("Wrote region GBWT: {}.1gbwt + {}.1khash", gbwt_prefix, gbwt_prefix);
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                // Skip the rest of the normal query path
+            } else {
+            // ─── Normal (alignment-based) query path ──────────────────────
 
             // Resolve alignment files once (handles process substitution inputs)
             let alignment_files = resolve_alignment_files(&alignment)?;
@@ -1608,6 +2298,14 @@ fn run() -> io::Result<()> {
                         "--approximate mode is only compatible with 'bed' and 'bedpe' output formats, not '{}'",
                         resolved_output_format
                     ),
+                ));
+            }
+
+            // Validate gbwt output requires -O prefix
+            if resolved_output_format == "gbwt" && output_prefix.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Output prefix (-O) is required for 'gbwt' output format",
                 ));
             }
 
@@ -1768,6 +2466,48 @@ fn run() -> io::Result<()> {
                             scoring_params.unwrap(),
                         )?;
                     }
+                    "gbwt" => {
+                        let seq_idx = sequence_index.as_ref().unwrap();
+                        let gbwt_prefix = output_prefix.as_ref().ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "Output prefix (-O) is required for 'gbwt' output format",
+                            )
+                        })?;
+
+                        // Merge intervals before fetching
+                        merge_query_adjusted_intervals(
+                            &mut results,
+                            query.effective_merge_distance(),
+                            query.merge_strands_for_output("gbwt"),
+                        );
+
+                        // Fetch sequences for all result intervals
+                        let fetched: Vec<(String, Vec<u8>)> = results
+                            .iter()
+                            .map(|(qi, _, _)| {
+                                let qname = impg.seq_index().get_name(qi.metadata).unwrap();
+                                let (start, end, strand) = if qi.first <= qi.last {
+                                    (qi.first, qi.last, '+')
+                                } else {
+                                    (qi.last, qi.first, '-')
+                                };
+                                let sequence = seq_idx.fetch_sequence(qname, start, end)?;
+                                let seq_name = format!("{}:{}-{}({})", qname, start, end, strand);
+                                Ok((seq_name, sequence))
+                            })
+                            .collect::<io::Result<Vec<_>>>()?;
+
+                        let seq_refs: Vec<(String, &[u8])> = fetched
+                            .iter()
+                            .map(|(name, seq)| (name.clone(), seq.as_slice()))
+                            .collect();
+
+                        // Build region GBWT using default syncmer params
+                        let region_index = impg::syng::SyngIndex::new(impg::syng::SyncmerParams::default());
+                        region_index.build_region_gbwt(&seq_refs, gbwt_prefix)?;
+                        info!("Wrote region GBWT: {}.1gbwt + {}.1khash", gbwt_prefix, gbwt_prefix);
+                    }
                     _ => {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
@@ -1776,6 +2516,7 @@ fn run() -> io::Result<()> {
                     }
                 }
             }
+            } // end of else (normal query path)
         }
         Args::Refine {
             alignment,
@@ -2286,6 +3027,15 @@ fn run() -> io::Result<()> {
                     GfaEngine::Seqwish => {
                         graph::run_graph_build(fasta_files, &output, graph_config)?;
                     }
+                    GfaEngine::SyngNative => {
+                        // `impg graph` is the flat whole-FASTA entry point and
+                        // doesn't produce syng partitions. Syng-native only has
+                        // a meaning inside `partition --gfa-engine syng-native`.
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "--gfa-engine syng-native is only available under `partition` (requires a syng index); use `seqwish` or `pggb` here",
+                        ));
+                    }
                     GfaEngine::Pggb => {
                         let target_poa_lengths = engine_cli.smooth.parse_target_poa_lengths()?;
                         if output == "-" {
@@ -2314,6 +3064,274 @@ fn run() -> io::Result<()> {
                     }
                 }
             }
+        }
+        Args::Align {
+            fasta_input,
+            output_dir,
+            format,
+            run_joblist,
+            jobs,
+            aln,
+            common,
+        } => {
+            initialize_threads_and_log(&common);
+
+            // Short-circuit: execute a pre-generated joblist and exit.
+            if let Some(joblist_path) = run_joblist {
+                let jobs = jobs.unwrap_or_else(|| common.threads.get());
+                impg::commands::align::run_joblist(
+                    std::path::Path::new(&joblist_path),
+                    jobs,
+                )?;
+                return Ok(());
+            }
+
+            let temp_dir = resolve_temp_dir(aln.sw.tempdir.clone())?;
+            setup_temp_dir(&temp_dir)?;
+
+            let fasta_files = fasta_input.resolve_sequence_files()?;
+            if fasta_files.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "No sequence files specified. Use --sequence-files or --sequence-list",
+                ));
+            }
+
+            if aln.sw.aligner == "wfmash" && aln.sw.frequency.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--fastga-frequency is only supported with --aligner fastga; wfmash uses its own frequency estimation",
+                ));
+            }
+
+            // Parse output format
+            let output_format = match format.to_lowercase().as_str() {
+                "paf" => impg::commands::align::AlignOutputFormat::Paf,
+                "1aln" | "onealn" => impg::commands::align::AlignOutputFormat::OneAln,
+                "joblist" | "jobs" => impg::commands::align::AlignOutputFormat::JobList,
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Unknown output format: {}. Valid: paf, 1aln, joblist",
+                            format
+                        ),
+                    ));
+                }
+            };
+
+            // `aln.sw.min_identity` is a String (preset or "ani50-2" etc); for
+            // the `impg align` config we want the numeric form — default 0.0
+            // means "let sweepga decide".
+            let min_identity_f64 = aln.sw.min_identity.parse::<f64>().unwrap_or(0.0);
+
+            let config = impg::commands::align::AlignConfig {
+                num_threads: common.threads.get(),
+                sparsify: aln.sw.sparsify.clone(),
+                mash_params: sweepga::knn_graph::MashParams {
+                    kmer_size: aln.sw.mash_kmer_size,
+                    sketch_size: aln.sw.mash_sketch_size,
+                },
+                frequency_multiplier: aln.sw.fastga_frequency_multiplier,
+                frequency: aln.sw.frequency,
+                min_aln_length: aln.sw.block_length.unwrap_or(0),
+                output_format,
+                show_progress: common.verbose > 0,
+                aligner: aln.sw.aligner.clone(),
+                temp_dir: Some(temp_dir),
+                batch_bytes: aln.sw.batch_bytes.clone(),
+                no_filter: aln.sw.no_filter,
+                num_mappings: aln.sw.num_mappings.clone(),
+                scaffold_jump: aln.sw.scaffold_jump,
+                scaffold_mass: aln.sw.scaffold_mass,
+                scaffold_filter: aln.sw.scaffold_filter.clone(),
+                overlap: aln.sw.overlap,
+                min_identity: min_identity_f64,
+                scaffold_dist: aln.sw.scaffold_dist,
+                min_map_length: aln.min_map_length,
+            };
+
+            impg::commands::align::run_align(fasta_files, &output_dir, config)?;
+        }
+        Args::Syng {
+            agc,
+            fasta,
+            output,
+            syncmer_k,
+            syncmer_w,
+            syncmer_seed,
+            common,
+        } => {
+            initialize_threads_and_log(&common);
+
+            if agc.is_none() && fasta.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Either --agc or --fasta must be provided",
+                ));
+            }
+
+            let params = impg::syng::SyncmerParams {
+                k: syncmer_k,
+                w: syncmer_w,
+                seed: syncmer_seed,
+            };
+
+            info!(
+                "Building syng index with syncmer params: k={}, w={}, seed={} (syncmer length={})",
+                syncmer_k,
+                syncmer_w,
+                syncmer_seed,
+                syncmer_k + syncmer_w,
+            );
+
+            let index = if let Some(agc_path) = agc {
+                // Stream sequences from AGC
+                info!("Reading sequences from AGC: {}", agc_path);
+                let config = ragc_core::DecompressorConfig { verbosity: 0 };
+                let mut decompressor =
+                    ragc_core::Decompressor::open(&agc_path, config).map_err(|e| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Failed to open AGC file '{}': {}", agc_path, e),
+                        )
+                    })?;
+
+                let samples = decompressor.list_samples();
+                let mut sequences: Vec<(String, Vec<u8>)> = Vec::new();
+                for sample in &samples {
+                    let contigs = decompressor
+                        .list_contigs_names_only(sample)
+                        .unwrap_or_default();
+                    for contig in &contigs {
+                        // NOTE: Do NOT use `decompressor.get_contig()` here — it has a
+                        // bug in ragc-core where it skips the detail-reload after a
+                        // `list_contigs_names_only()` call (it checks contig count, which
+                        // is populated, instead of `are_details_loaded()`), and silently
+                        // returns an empty Vec. Use get_contig_length + get_contig_range
+                        // instead — both correctly reload details. Same pattern as
+                        // src/agc_index.rs.
+                        let length = decompressor
+                            .get_contig_length(sample, contig)
+                            .map_err(|e| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!(
+                                        "Failed to get length for contig '{}@{}': {}",
+                                        contig, sample, e
+                                    ),
+                                )
+                            })?;
+                        let contig_data = decompressor
+                            .get_contig_range(sample, contig, 0, length)
+                            .map_err(|e| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!(
+                                        "Failed to decompress contig '{}@{}': {}",
+                                        contig, sample, e
+                                    ),
+                                )
+                            })?;
+
+                        let seq: Vec<u8> = contig_data
+                            .iter()
+                            .map(|&b| match b {
+                                0 => b'A',
+                                1 => b'C',
+                                2 => b'G',
+                                3 => b'T',
+                                _ => b'N',
+                            })
+                            .collect();
+
+                        // If the contig name already follows PanSN convention
+                        // (sample#haplotype#contig), use it as-is — it already
+                        // embeds the sample, so appending @sample would create
+                        // a redundant suffix that makes query -r lookups fail.
+                        // Otherwise (raw contig name like `chr1`), prepend the
+                        // sample via `contig@sample` so names stay unique across
+                        // samples that share a contig name.
+                        let name = if contig.contains('#') {
+                            contig.clone()
+                        } else {
+                            format!("{}@{}", contig, sample)
+                        };
+                        info!("  Processing {} ({} bp)", name, seq.len());
+                        sequences.push((name, seq));
+                    }
+                }
+
+                info!("Building index from {} sequences...", sequences.len());
+                impg::syng::SyngIndex::build(params, sequences.into_iter())
+            } else if let Some(fasta_path) = fasta {
+                // Read sequences from FASTA
+                info!("Reading sequences from FASTA: {}", fasta_path);
+
+                let file = File::open(&fasta_path)?;
+                let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
+                    io::Error::other(format!(
+                        "Failed to open reader for '{}': {}",
+                        fasta_path, e
+                    ))
+                })?;
+                let reader = BufReader::new(reader);
+
+                let mut sequences: Vec<(String, Vec<u8>)> = Vec::new();
+                let mut current_name = String::new();
+                let mut current_seq = Vec::new();
+
+                for line in reader.lines() {
+                    let line = line?;
+                    if line.starts_with('>') {
+                        if !current_name.is_empty() && !current_seq.is_empty() {
+                            info!(
+                                "  Processing {} ({} bp)",
+                                current_name,
+                                current_seq.len()
+                            );
+                            sequences.push((
+                                std::mem::take(&mut current_name),
+                                std::mem::take(&mut current_seq),
+                            ));
+                        }
+                        current_name = line
+                            .strip_prefix('>')
+                            .unwrap_or("")
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("")
+                            .to_string();
+                        current_seq.clear();
+                    } else {
+                        current_seq.extend(line.trim().as_bytes());
+                    }
+                }
+                if !current_name.is_empty() && !current_seq.is_empty() {
+                    info!(
+                        "  Processing {} ({} bp)",
+                        current_name,
+                        current_seq.len()
+                    );
+                    sequences.push((current_name, current_seq));
+                }
+
+                info!("Building index from {} sequences...", sequences.len());
+                impg::syng::SyngIndex::build(params, sequences.into_iter())
+            } else {
+                unreachable!()
+            };
+
+            info!("Saving index to prefix: {}", output);
+            index.save(&output)?;
+            info!(
+                "Index saved: {}.1khash, {}.1gbwt, {}.syng.names",
+                output, output, output,
+            );
+            info!(
+                "Name map contains {} sequences",
+                index.name_map.path_to_name.len()
+            );
         }
     }
 
@@ -3404,6 +4422,36 @@ fn load_subset_filter_if_provided(path: &Option<String>) -> io::Result<Option<Su
     }
 }
 
+/// Convert syng `HomologousInterval`s into `AdjustedInterval`s so syng output
+/// can flow through the common merge + emit pipeline (output_results_bed,
+/// output_results_bedpe). CIGAR is always empty — syng has no per-base
+/// alignment. The first interval is the homologous result interval, matching
+/// the alignment-backed path's BED/BEDPE emitters.
+fn syng_intervals_to_adjusted(
+    intervals: &[impg::syng::HomologousInterval],
+    query_name: &str,
+    range_start: i32,
+    range_end: i32,
+    seq_index: &SequenceIndex,
+) -> Vec<AdjustedInterval> {
+    let Some(query_id) = seq_index.get_id(query_name) else {
+        return Vec::new();
+    };
+    intervals
+        .iter()
+        .filter_map(|iv| {
+            let homolog_id = seq_index.get_id(&iv.genome)?;
+            let homolog = if iv.strand == '-' {
+                Interval::new(iv.end as i32, iv.start as i32, homolog_id)
+            } else {
+                Interval::new(iv.start as i32, iv.end as i32, homolog_id)
+            };
+            let target = Interval::new(range_start, range_end, query_id);
+            Some((homolog, Vec::<CigarOp>::new(), target))
+        })
+        .collect()
+}
+
 fn output_results_bed(
     impg: &impl ImpgIndex,
     results: &mut Vec<AdjustedInterval>,
@@ -3413,6 +4461,13 @@ fn output_results_bed(
     merge_strands: bool,
     original_coordinates: bool,
 ) -> io::Result<()> {
+    let any_empty_cigar = results.iter().any(|(_, c, _)| c.is_empty());
+    if any_empty_cigar {
+        // 2D merge first — collapses fragmented chains on each target, then
+        // falls through to the query-axis merge so downstream BED dedupe
+        // across targets still works.
+        merge_adjusted_intervals_gap_2d(results, merge_distance);
+    }
     merge_query_adjusted_intervals(results, merge_distance, merge_strands);
 
     for (query_interval, _, _) in results {
@@ -3450,7 +4505,15 @@ fn output_results_bedpe(
     merge_distance: i32,
     original_coordinates: bool,
 ) -> io::Result<()> {
-    merge_adjusted_intervals(results, merge_distance);
+    // If any row lacks a CIGAR (syng output), use the gap-tolerant 2D merge
+    // so fragmented chains on the same (query, target, strand) collapse into
+    // one alignment. Otherwise keep the existing CIGAR-faithful merge.
+    let any_empty_cigar = results.iter().any(|(_, c, _)| c.is_empty());
+    if any_empty_cigar {
+        merge_adjusted_intervals_gap_2d(results, merge_distance);
+    } else {
+        merge_adjusted_intervals(results, merge_distance);
+    }
 
     for (overlap_query, cigar, overlap_target) in results {
         let query_name = impg.seq_index().get_name(overlap_query.metadata).unwrap();
@@ -4240,6 +5303,150 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
             info!("Collected {} merged intervals", results.len());
         }
     }
+}
+
+/// Gap-tolerant 2D merge for adjusted intervals.
+///
+/// Groups by `(query_id, target_id, query_strand)` and runs a forward-progress
+/// union-find: two intervals i,j with `i.q_start < j.q_start` merge iff
+/// `q_gap ≤ d AND t_gap ≤ d` on the strand-appropriate axes, with overlap
+/// allowed (negative gaps pass). Union-find makes merging transitive.
+///
+/// Safe on empty CIGARs (syng) — merged intervals keep an empty CIGAR.
+/// Non-empty CIGARs are concatenated in query order; the concatenation is
+/// only semantically meaningful when the merged chunks were contiguous, so
+/// PAF output should keep using `merge_adjusted_intervals`.
+fn merge_adjusted_intervals_gap_2d(
+    results: &mut Vec<AdjustedInterval>,
+    merge_distance: i32,
+) {
+    if results.len() <= 1 || merge_distance < 0 {
+        return;
+    }
+    let d = merge_distance as i64;
+    use rustc_hash::FxHashMap as Map;
+
+    let mut groups: Map<(u32, u32, bool), Vec<usize>> = Map::default();
+    for (i, (q, _, t)) in results.iter().enumerate() {
+        let strand_fwd = q.first <= q.last;
+        groups
+            .entry((q.metadata, t.metadata, strand_fwd))
+            .or_default()
+            .push(i);
+    }
+
+    let n = results.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn uf_find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+
+    for ((_, _, strand_fwd), mut indices) in groups {
+        indices.sort_by_key(|&i| {
+            let q = &results[i].0;
+            if strand_fwd { q.first } else { -q.first }
+        });
+        for a_pos in 0..indices.len() {
+            let ia = indices[a_pos];
+            let qa = results[ia].0;
+            let ta = results[ia].2;
+            let (qa_start, qa_end) = if strand_fwd {
+                (qa.first as i64, qa.last as i64)
+            } else {
+                (qa.last as i64, qa.first as i64)
+            };
+            let (ta_start, ta_end) = (ta.first as i64, ta.last as i64);
+            for b_pos in (a_pos + 1)..indices.len() {
+                let ib = indices[b_pos];
+                let qb = results[ib].0;
+                let tb = results[ib].2;
+                let qb_start = if strand_fwd { qb.first as i64 } else { qb.last as i64 };
+                // Reject strictly-backward starts only. Equal starts are fine
+                // (syng: every row shares the full query tile). Forward progress
+                // on the target axis below does the real work of ordering.
+                if qb_start < qa_start {
+                    continue;
+                }
+                let q_gap = qb_start - qa_end;
+                if q_gap > d {
+                    break;
+                }
+                let (tb_start, tb_end) = (tb.first as i64, tb.last as i64);
+                let (t_gap, t_forward) = if strand_fwd {
+                    (tb_start - ta_end, tb_start > ta_start)
+                } else {
+                    (ta_start - tb_end, tb_end < ta_end)
+                };
+                if !t_forward || t_gap > d {
+                    continue;
+                }
+                let ra = uf_find(&mut parent, ia);
+                let rb = uf_find(&mut parent, ib);
+                if ra != rb {
+                    parent[ra] = rb;
+                }
+            }
+        }
+    }
+
+    let mut buckets: Map<usize, Vec<usize>> = Map::default();
+    for i in 0..n {
+        let r = uf_find(&mut parent, i);
+        buckets.entry(r).or_default().push(i);
+    }
+
+    let mut merged: Vec<AdjustedInterval> = Vec::with_capacity(buckets.len());
+    let mut taken = vec![false; n];
+    for i in 0..n {
+        if taken[i] {
+            continue;
+        }
+        let r = uf_find(&mut parent, i);
+        let Some(members) = buckets.remove(&r) else { continue };
+        for &m in &members {
+            taken[m] = true;
+        }
+        let strand_fwd = {
+            let q = &results[members[0]].0;
+            q.first <= q.last
+        };
+        let mut ordered = members.clone();
+        ordered.sort_by_key(|&idx| {
+            let q = &results[idx].0;
+            if strand_fwd { q.first } else { -q.first }
+        });
+        let first = &results[ordered[0]];
+        let (mut q_lo, mut q_hi) = (first.0.first, first.0.last);
+        let (mut t_lo, mut t_hi) = (first.2.first, first.2.last);
+        let q_meta = first.0.metadata;
+        let t_meta = first.2.metadata;
+        let mut cigar: Vec<CigarOp> = Vec::new();
+        for &idx in &ordered {
+            let (q, c, t) = &results[idx];
+            if strand_fwd {
+                q_lo = q_lo.min(q.first);
+                q_hi = q_hi.max(q.last);
+            } else {
+                q_lo = q_lo.max(q.first);
+                q_hi = q_hi.min(q.last);
+            }
+            t_lo = t_lo.min(t.first);
+            t_hi = t_hi.max(t.last);
+            cigar.extend_from_slice(c);
+        }
+        merge_consecutive_cigar_ops(&mut cigar);
+        let q_iv = coitrees::Interval { first: q_lo, last: q_hi, metadata: q_meta };
+        let t_iv = coitrees::Interval { first: t_lo, last: t_hi, metadata: t_meta };
+        merged.push((q_iv, cigar, t_iv));
+    }
+
+    let count = merged.len();
+    *results = merged;
+    info!("Collected {} merged intervals (gap-2d, d={})", count, merge_distance);
 }
 
 // Merge consecutive operations of the same type

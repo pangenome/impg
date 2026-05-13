@@ -10,6 +10,12 @@ authors = ["Andrea Guarracino <aguarracino@tgen.org>"]
 name = "gfaffix"
 path = "vendor/gfaffix/src/main.rs"
 
+# Release build with debug info for flamegraph / perf profiling.
+# Build with: cargo build --profile profiling
+[profile.profiling]
+inherits = "release"
+debug = true
+
 [dependencies]
 bincode = { version = "2.0", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -25,11 +31,14 @@ log = "0.4"
 env_logger = "0.11"
 natord = "1.0"
 rustc-hash = "2.1"
+libc = "0.2"
 indexmap = { version = "2", features = ["rayon"] }
 nalgebra = "0.33"
 indicatif = "0.18"
 spoa_rs = { git = "https://github.com/AndreaGuarracino/spoa-rs.git" }
 rust-htslib = { version = "1.0.0", default-features = false, features = ["libdeflate"] }
+csv = "1.3"
+serde_json = "1.0"
 
 # Dependencies for AGC format (for sequences) support
 ragc-core = { git = "https://github.com/AndreaGuarracino/ragc", rev = "ebfa5eb243541a3d7a5e2f4e3ccb8961283149a0" }
@@ -55,13 +64,27 @@ zstd = { version = "0.13.3", features = ["zstdmt"] }
 gzp = "1.0.1"
 
 # Dependencies for graph building (sweepga + seqwish integration)
-sweepga = { git = "https://github.com/pangenome/sweepga", rev = "018e4ce49d2c125820e0ac50dc5feaa02d423683", default-features = false }
+# ddd31d3 = 2b9f749 + multi-FASTA PanSN joblist (sweepga PR #29).
+# PanSN haplotype grouping + wfmash-per-hap-pair joblist live upstream;
+# this impg tree just calls them. Handles 1 _or many_ input FASTAs.
+sweepga = { git = "https://github.com/pangenome/sweepga", rev = "ddd31d39b6a68fc972025b048076032341b66835", default-features = false }
 seqwish = { git = "https://github.com/pangenome/seqwish", branch = "rust-2" }
 
 # Dependencies for graph sorting
 gfasort = { git = "https://github.com/pangenome/gfasort", rev = "f15d8ebfdc632af2333f277cb9da0748d8fba7aa" }
 
+# GBWT + succinct data structures for FastLocate port (src/fast_locate.rs).
+# `gbz` is the jltsiren/gbwt-rs reimplementation (despite the crate name);
+# we use its GBWTBuilder to construct a classical GBWT from syng path data
+# and its BWT primitives + RLEIter to walk records run-by-run.
+gbz = "0.6"
+simple-sds = "0.4"
+
+[build-dependencies]
+cc = "1"
+
 [dev-dependencies]
+ahash = "0.8"
 
 [features]
 default = []

@@ -10,3 +10,12 @@ paper-nmeth
 demo-results
 .cargo
 .guix/bin
+# syng build scratch files (from FastGA .ktab/.1gdb/.bps/.gix and tmp tempdirs)
+# and seqwish temp dirs left in cwd after test runs
+.tmp*
+..tmp*
+/seqwish*
+.workgraph.1/
+.claude/
+perf.data
+perf.data.old

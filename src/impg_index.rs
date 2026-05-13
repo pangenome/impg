@@ -109,6 +109,15 @@ pub trait ImpgIndex: Send + Sync {
 
     /// Get the sequence files (FASTA/AGC) associated with this index.
     fn sequence_files(&self) -> &[String];
+
+    /// Access the underlying `SyngIndex` if this implementation is
+    /// backed by syng (`SyngImpgWrapper`). Used by the syng-native
+    /// graph engine to re-query anchor chains for anchor-seeded
+    /// gap-only BiWFA. Default returns `None` so alignment-backed
+    /// implementations don't need to implement this.
+    fn syng_index_ref(&self) -> Option<&crate::syng::SyngIndex> {
+        None
+    }
 }
 
 /// Enum wrapper that can hold either a single `Impg` or a `MultiImpg`.

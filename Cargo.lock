@@ -692,6 +692,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "csv"
+version = "1.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52cd9d68cf7efc6ddfaaee42e7288d3a99d613d4b50f76ce9827ae0c6e14f938"
+dependencies = [
+ "csv-core",
+ "itoa",
+ "ryu",
+ "serde_core",
+]
+
+[[package]]
+name = "csv-core"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "704a3c26996a80471189265814dbc2c257598b96b8a7feae2d31ace646bb9782"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "custom_derive"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -984,6 +1005,16 @@ name = "futures-sink"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c39754e157331b013978ec91992bde1ac089843443c49cbc7f46150b0fad0893"
+
+[[package]]
+name = "gbz"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36dfd97124efcf44c1210f8cbeb89a041e68a5c955efd9b14c3217dbb9bf9843"
+dependencies = [
+ "simple-sds",
+ "zstd",
+]
 
 [[package]]
 name = "generic-array"
@@ -1324,12 +1355,16 @@ dependencies = [
 name = "impg"
 version = "0.4.1"
 dependencies = [
+ "ahash",
  "bincode 2.0.1",
  "bitvec",
+ "cc",
  "clap",
  "coitrees",
+ "csv",
  "env_logger",
  "flate2",
+ "gbz",
  "gfa",
  "gfasort",
  "gzp",
@@ -1337,6 +1372,7 @@ dependencies = [
  "indexmap",
  "indicatif",
  "lib_wfa2",
+ "libc",
  "log",
  "nalgebra",
  "natord",
@@ -1351,6 +1387,8 @@ dependencies = [
  "rustc-hash 2.1.2",
  "seqwish",
  "serde",
+ "serde_json",
+ "simple-sds",
  "spoa_rs",
  "sweepga",
  "tempfile",
@@ -2514,6 +2552,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
 
 [[package]]
+name = "simple-sds"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "182e5cd4cd2b651f5d0f2ddf83445f6548b1fadbba6f552dd784c8b2fc34e8a3"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2592,7 +2639,7 @@ dependencies = [
 [[package]]
 name = "sweepga"
 version = "0.1.1"
-source = "git+https://github.com/pangenome/sweepga?rev=018e4ce49d2c125820e0ac50dc5feaa02d423683#018e4ce49d2c125820e0ac50dc5feaa02d423683"
+source = "git+https://github.com/pangenome/sweepga?rev=ddd31d39b6a68fc972025b048076032341b66835#ddd31d39b6a68fc972025b048076032341b66835"
 dependencies = [
  "anyhow",
  "byteorder",

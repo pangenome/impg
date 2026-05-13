@@ -2,6 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn main() {
+    // Compile syng C library
+    compile_syng();
+
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
 
     // Derive the profile directory (e.g. target/release/) from OUT_DIR.
@@ -171,3 +174,41 @@ fn set_executable(path: &Path) {
 
 #[cfg(not(unix))]
 fn set_executable(_path: &Path) {}
+
+/// Compile syng C files into libsyng.a and link it.
+fn compile_syng() {
+    let syng_dir = PathBuf::from("vendor/syng");
+
+    let c_files = [
+        "syngbwt3.c",
+        "rskip.c",
+        "kmerhash.c",
+        "seqhash.c",
+        "syncmerset.c",
+        "seqio.c",
+        "ONElib.c",
+        "utils.c",
+        "array.c",
+        "hash.c",
+        "dict.c",
+        "impg_syng_helpers.c",
+    ];
+
+    let mut build = cc::Build::new();
+    build
+        .include(&syng_dir)
+        .opt_level(3)
+        .define("ONEIO", None)
+        .warnings(false);
+
+    for file in &c_files {
+        build.file(syng_dir.join(file));
+    }
+
+    build.compile("syng");
+
+    // Link zlib (required by seqio.c)
+    println!("cargo:rustc-link-lib=z");
+    // Rerun if any syng source changes
+    println!("cargo:rerun-if-changed=vendor/syng");
+}

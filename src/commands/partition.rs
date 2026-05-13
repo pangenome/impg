@@ -27,6 +27,131 @@ fn create_output_path(output_folder: Option<&str>, filename: &str) -> io::Result
     }
 }
 
+/// Iteratively rehome singleton partitions into their flank neighbors.
+///
+/// Greedy masking during partitioning creates sliver partitions — a piece of
+/// sequence whose homolog targets were all claimed by earlier partitions. Those
+/// slivers have flanking sequence that is *already* assigned to some other
+/// partition, so the sliver belongs there too (it's the same contiguous
+/// biological context).
+///
+/// Algorithm: for each singleton region, look at the partition assignment of
+/// the immediately adjacent intervals on the same sequence; reassign the
+/// singleton to a non-singleton flank. Iterate until fixed point — pass N's
+/// reassignments become valid non-singleton flanks for pass N+1, cascading
+/// through runs of contiguous singletons.
+///
+/// Alignment-source-agnostic — works identically on syng and paf partitions.
+pub fn rehome_singleton_slivers(
+    collected_partitions: &mut Vec<(usize, Vec<Interval<u32>>)>,
+) {
+    if collected_partitions.is_empty() {
+        return;
+    }
+    type Row = (u32, i32, i32, usize, Interval<u32>);
+    let mut rows: Vec<Row> = Vec::new();
+    for (pidx, (_, ivs)) in collected_partitions.iter().enumerate() {
+        for iv in ivs {
+            let (s, e) = if iv.first <= iv.last {
+                (iv.first, iv.last)
+            } else {
+                (iv.last, iv.first)
+            };
+            rows.push((iv.metadata, s, e, pidx, *iv));
+        }
+    }
+    rows.sort_by_key(|r| (r.0, r.1, r.2));
+
+    let mut counts = vec![0usize; collected_partitions.len()];
+    for r in &rows {
+        counts[r.3] += 1;
+    }
+    let initial_singletons = counts.iter().filter(|&&c| c == 1).count();
+    if initial_singletons == 0 {
+        return;
+    }
+
+    let mut pass = 0;
+    loop {
+        pass += 1;
+        let singletons: std::collections::HashSet<usize> = counts
+            .iter()
+            .enumerate()
+            .filter(|(_, &c)| c == 1)
+            .map(|(i, _)| i)
+            .collect();
+        let mut pending: Vec<(usize, usize)> = Vec::new();
+        for i in 0..rows.len() {
+            let (c, s, e, pidx, _) = rows[i];
+            if !singletons.contains(&pidx) {
+                continue;
+            }
+            let left = if i > 0 && rows[i - 1].0 == c && rows[i - 1].2 == s {
+                Some(rows[i - 1].3)
+            } else {
+                None
+            };
+            let right = if i + 1 < rows.len() && rows[i + 1].0 == c && rows[i + 1].1 == e {
+                Some(rows[i + 1].3)
+            } else {
+                None
+            };
+            let ls = left.map(|p| !singletons.contains(&p)).unwrap_or(false);
+            let rs = right.map(|p| !singletons.contains(&p)).unwrap_or(false);
+            let target = if ls && rs {
+                let lp = left.unwrap();
+                let rp = right.unwrap();
+                if counts[lp] >= counts[rp] { lp } else { rp }
+            } else if ls {
+                left.unwrap()
+            } else if rs {
+                right.unwrap()
+            } else {
+                continue;
+            };
+            if target != pidx {
+                pending.push((i, target));
+            }
+        }
+        if pending.is_empty() || pass > 100 {
+            break;
+        }
+        for (row_idx, new_pidx) in &pending {
+            let old_pidx = rows[*row_idx].3;
+            counts[old_pidx] -= 1;
+            counts[*new_pidx] += 1;
+            rows[*row_idx].3 = *new_pidx;
+        }
+    }
+    let remaining = counts.iter().filter(|&&c| c == 1).count();
+    info!(
+        "Rehomed {} singleton slivers into flank partitions ({} → {} singletons, {} passes)",
+        initial_singletons - remaining,
+        initial_singletons,
+        remaining,
+        pass
+    );
+
+    let mut new_intervals: Vec<Vec<Interval<u32>>> =
+        (0..collected_partitions.len()).map(|_| Vec::new()).collect();
+    for (_, _, _, pidx, iv) in rows.drain(..) {
+        new_intervals[pidx].push(iv);
+    }
+    let rebuilt: Vec<(usize, Vec<Interval<u32>>)> = collected_partitions
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (pnum, _))| {
+            let ivs = std::mem::take(&mut new_intervals[i]);
+            if ivs.is_empty() {
+                None
+            } else {
+                Some((*pnum, ivs))
+            }
+        })
+        .collect();
+    *collected_partitions = rebuilt;
+}
+
 pub fn partition_alignments(
     impg: &impl ImpgIndex,
     window_size: usize,
@@ -49,6 +174,7 @@ pub fn partition_alignments(
     separate_files: bool,
     approximate_mode: bool,
     engine_config: &EngineOpts,
+    rehome_singletons: bool,
 ) -> io::Result<()> {
     // Initialize windows from starting sequences if provided
     let mut windows = Vec::<(u32, i32, i32)>::new();
@@ -500,6 +626,13 @@ pub fn partition_alignments(
 
                 Ok(())
             })?;
+    }
+
+    // Rehome singleton slivers into their flank partitions — absorbs
+    // leftover pieces created by greedy masking into the partition that owns
+    // their biological context. Alignment-source-agnostic.
+    if rehome_singletons && !separate_files && !collected_partitions.is_empty() {
+        rehome_singleton_slivers(&mut collected_partitions);
     }
 
     // Write collected partitions as single file if not using separate files

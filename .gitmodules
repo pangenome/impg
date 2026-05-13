@@ -1,3 +1,7 @@
 [submodule "vendor/gfaffix"]
 	path = vendor/gfaffix
 	url = https://github.com/marschall-lab/GFAffix
+[submodule "vendor/syng"]
+	path = vendor/syng
+	url = https://github.com/pangenome/syng
+	branch = impg-integration
