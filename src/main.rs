@@ -1161,16 +1161,13 @@ impl RefineOpts {
 /// prefix (base name before `.1khash` / `.1gbwt`) if one is found.
 ///
 /// Accepts:
-///   - Explicit file path ending in `.1khash`, `.1gbwt`, or `.syng.spos` → strip suffix
+///   - Explicit file path ending in `.1khash` or `.1gbwt` → strip suffix
 ///   - Bare prefix with sibling `.1khash` on disk → return prefix as-is
 fn detect_syng_prefix(path: &str) -> Option<String> {
     if let Some(stem) = path.strip_suffix(".1khash") {
         return Some(stem.to_string());
     }
     if let Some(stem) = path.strip_suffix(".1gbwt") {
-        return Some(stem.to_string());
-    }
-    if let Some(stem) = path.strip_suffix(".syng.spos") {
         return Some(stem.to_string());
     }
     if std::path::Path::new(&format!("{path}.1khash")).exists() {
@@ -1749,24 +1746,6 @@ enum Args {
         #[clap(long = "locate", action)]
         build_fast_locate: bool,
 
-        /// Disable the default sampled-position sidecar (.syng.spos).
-        ///
-        /// The sampled sidecar is collected online while the syng paths are
-        /// built and enables projected PAF mapping without the large legacy
-        /// FastLocate sidecar.
-        #[clap(long = "no-position-samples", action)]
-        no_position_samples: bool,
-
-        /// Sample one path occurrence per 2^N occurrences for .syng.spos.
-        #[arg(help_heading = "Position sampling")]
-        #[clap(long, value_parser, default_value_t = impg::syng::DEFAULT_POSITION_SAMPLE_SHIFT)]
-        position_sample_shift: u32,
-
-        /// Hash seed for online position sampling.
-        #[arg(help_heading = "Position sampling")]
-        #[clap(long, value_parser, default_value_t = impg::syng::DEFAULT_POSITION_SAMPLE_SEED)]
-        position_sample_seed: u64,
-
         // --- Syncmer parameters ---
         /// Inner k-mer length for syncmer extraction
         #[arg(help_heading = "Syncmer parameters")]
@@ -1792,29 +1771,6 @@ enum Args {
         #[arg(help_heading = "Syncmer parameters")]
         #[clap(long, value_parser, default_value_t = 7)]
         syncmer_seed: u32,
-
-        // --- General ---
-        #[clap(flatten)]
-        common: CommonOpts,
-    },
-
-    /// Build a sampled syng position sidecar for an existing index
-    SyngPos {
-        /// Syng index prefix or .1khash/.1gbwt path
-        #[clap(short = 'a', long, value_parser)]
-        index: String,
-
-        /// Output prefix for .syng.spos (default: same as --index)
-        #[clap(short = 'o', long, value_parser)]
-        output: Option<String>,
-
-        /// Sample one path occurrence per 2^N occurrences.
-        #[clap(long, value_parser, default_value_t = impg::syng::DEFAULT_POSITION_SAMPLE_SHIFT)]
-        position_sample_shift: u32,
-
-        /// Hash seed for position sampling.
-        #[clap(long, value_parser, default_value_t = impg::syng::DEFAULT_POSITION_SAMPLE_SEED)]
-        position_sample_seed: u64,
 
         // --- General ---
         #[clap(flatten)]
@@ -3677,9 +3633,6 @@ fn run() -> io::Result<()> {
             syncmer_length,
             syncmer_seed,
             build_fast_locate,
-            no_position_samples,
-            position_sample_shift,
-            position_sample_seed,
             common,
         } => {
             initialize_threads_and_log(&common);
@@ -3710,25 +3663,6 @@ fn run() -> io::Result<()> {
                 syncmer_seed,
                 common.threads.get(),
             );
-            let configure_position_sampling =
-                |index: &mut impg::syng::SyngIndex| -> io::Result<()> {
-                    if no_position_samples {
-                        index.disable_online_sampled_positions();
-                        info!("Online sampled position sidecar disabled by --no-position-samples");
-                    } else {
-                        index.enable_online_sampled_positions(
-                            position_sample_shift,
-                            position_sample_seed,
-                        )?;
-                        info!(
-                            "Online sampled position sidecar enabled: sample_shift={} (~1/{} path occurrences), seed={}",
-                            position_sample_shift,
-                            1u64 << position_sample_shift,
-                            position_sample_seed,
-                        );
-                    }
-                    Ok(())
-                };
             let total_start = Instant::now();
 
             let mut index = if let Some(agc_path) = agc {
@@ -3751,7 +3685,6 @@ fn run() -> io::Result<()> {
                 let samples = decompressor.list_samples();
                 info!("Found {} AGC samples", samples.len());
                 let mut index = impg::syng::SyngIndex::new(params);
-                configure_position_sampling(&mut index)?;
                 let mut sequence_count = 0usize;
                 let mut total_bp = 0u64;
                 let mut total_syncmers = 0usize;
@@ -3890,7 +3823,6 @@ fn run() -> io::Result<()> {
                 let reader = BufReader::new(reader);
 
                 let mut index = impg::syng::SyngIndex::new(params);
-                configure_position_sampling(&mut index)?;
                 let mut current_name = String::new();
                 let mut current_seq = Vec::new();
                 let mut sequence_count = 0usize;
@@ -3997,91 +3929,25 @@ fn run() -> io::Result<()> {
                 }
             } else {
                 info!(
-                    "Skipping FastLocate sidecar; sampled .syng.spos will support projected PAF mapping"
+                    "Skipping FastLocate sidecar; pass --locate to build projected PAF mapping support"
                 );
-            }
-
-            if !no_position_samples {
-                let position_start = Instant::now();
-                if let Some(stats) = index.finalize_online_sampled_positions()? {
-                    info!(
-                        "Sampled position sidecar compacted in {}: {} sampled occurrences across {} nodes from {} paths (sample_shift={} ~=1/{}) at +{}",
-                        format_duration(position_start.elapsed()),
-                        stats.sampled_occurrences,
-                        stats.sampled_nodes,
-                        stats.walked_paths,
-                        stats.sample_shift,
-                        1u64 << stats.sample_shift,
-                        format_duration(total_start.elapsed()),
-                    );
-                }
             }
 
             let save_start = Instant::now();
             info!("Saving index to prefix: {}", output);
             index.save(&output)?;
-            let sampled_suffix = if index.has_sampled_positions() {
-                format!(", {}.syng.spos", output)
-            } else {
-                String::new()
-            };
             info!(
-                "Index saved in {}: {}.1khash, {}.1gbwt, {}.syng.names{}",
+                "Index saved in {}: {}.1khash, {}.1gbwt, {}.syng.names",
                 format_duration(save_start.elapsed()),
                 output,
                 output,
                 output,
-                sampled_suffix,
             );
             info!(
                 "Name map contains {} sequences",
                 index.name_map.path_to_name.len()
             );
             info!("Total syng build time: {}", format_duration(total_start.elapsed()));
-        }
-        Args::SyngPos {
-            index,
-            output,
-            position_sample_shift,
-            position_sample_seed,
-            common,
-        } => {
-            initialize_threads_and_log(&common);
-
-            let syng_prefix = detect_syng_prefix(&index).unwrap_or(index);
-            let output_prefix = output.unwrap_or_else(|| syng_prefix.clone());
-            if position_sample_shift >= 63 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "position sample shift must be less than 63",
-                ));
-            }
-            let start = Instant::now();
-            info!(
-                "Building sampled position sidecar for syng index: {} (sample_shift={} ~=1/{}, seed={})",
-                syng_prefix,
-                position_sample_shift,
-                1u64 << position_sample_shift,
-                position_sample_seed,
-            );
-            let mut syng_index =
-                impg::syng::SyngIndex::load(&syng_prefix, impg::syng::SyncmerParams::default())?;
-            let build_start = Instant::now();
-            let stats =
-                syng_index.build_sampled_positions(position_sample_shift, position_sample_seed)?;
-            info!(
-                "Sampled positions built in {}: {} sampled occurrences across {} nodes from {} paths",
-                format_duration(build_start.elapsed()),
-                stats.sampled_occurrences,
-                stats.sampled_nodes,
-                stats.walked_paths,
-            );
-            syng_index.save_sampled_positions(&output_prefix)?;
-            info!(
-                "Sampled position sidecar saved in {}: {}.syng.spos",
-                format_duration(start.elapsed()),
-                output_prefix,
-            );
         }
     }
 

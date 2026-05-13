@@ -6,7 +6,7 @@
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::ffi::CString;
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 
 use crate::fast_locate::FastLocate;
@@ -99,419 +99,6 @@ fn read_u64<R: std::io::Read>(r: &mut R) -> io::Result<u64> {
     let mut buf = [0u8; 8];
     r.read_exact(&mut buf)?;
     Ok(u64::from_le_bytes(buf))
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct SampledPositionHit {
-    pub path_idx: usize,
-    pub target_pos: u64,
-    pub target_orient: u8,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct SampledPositionBuildStats {
-    pub sampled_occurrences: u64,
-    pub sampled_nodes: usize,
-    pub walked_paths: usize,
-    pub sample_shift: u32,
-}
-
-pub const DEFAULT_POSITION_SAMPLE_SHIFT: u32 = 8;
-pub const DEFAULT_POSITION_SAMPLE_SEED: u64 = 7;
-
-/// Succinct sampled path-position sidecar for projected syng mapping.
-///
-/// This mirrors the sampled suffix-array idea used by ropebwt3: store only a
-/// deterministic fraction of path occurrences, then resolve mapping positions
-/// from those samples instead of materializing every visit for every node.
-/// Occurrences are grouped by syncmer node id and varint delta encoded.
-pub struct SampledPositions {
-    pub sample_shift: u32,
-    pub seed: u64,
-    sample_count: u64,
-    path_starts: Vec<u64>,
-    node_ids: Vec<u32>,
-    byte_offsets: Vec<u64>,
-    data: Vec<u8>,
-}
-
-impl SampledPositions {
-    const MAGIC: u64 = 0x494D50_53504F53; // "IMPSPOS"
-    const VERSION: u64 = 1;
-
-    fn from_samples(
-        sample_shift: u32,
-        seed: u64,
-        path_lengths: &[u64],
-        mut samples: Vec<(u32, u64)>,
-    ) -> io::Result<Self> {
-        let path_starts = Self::path_starts_from_lengths(path_lengths)?;
-        samples.sort_unstable();
-        samples.dedup();
-
-        let sample_count = samples.len() as u64;
-        let mut node_ids = Vec::new();
-        let mut byte_offsets = Vec::new();
-        let mut data = Vec::new();
-        byte_offsets.push(0);
-
-        let mut i = 0usize;
-        while i < samples.len() {
-            let node_id = samples[i].0;
-            node_ids.push(node_id);
-            let mut prev = 0u64;
-            while i < samples.len() && samples[i].0 == node_id {
-                let packed = samples[i].1;
-                let delta = packed.checked_sub(prev).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "sampled positions are not sorted within node group",
-                    )
-                })?;
-                push_varint(&mut data, delta);
-                prev = packed;
-                i += 1;
-            }
-            byte_offsets.push(data.len() as u64);
-        }
-
-        Ok(Self {
-            sample_shift,
-            seed,
-            sample_count,
-            path_starts,
-            node_ids,
-            byte_offsets,
-            data,
-        })
-    }
-
-    fn path_starts_from_lengths(path_lengths: &[u64]) -> io::Result<Vec<u64>> {
-        let mut starts = Vec::with_capacity(path_lengths.len() + 1);
-        let mut acc = 0u64;
-        starts.push(acc);
-        for &len in path_lengths {
-            acc = acc.checked_add(len).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "total path length overflowed u64")
-            })?;
-            starts.push(acc);
-        }
-        Ok(starts)
-    }
-
-    pub fn sample_count(&self) -> u64 {
-        self.sample_count
-    }
-
-    pub fn node_count(&self) -> usize {
-        self.node_ids.len()
-    }
-
-    pub fn decode_node(&self, node_id: u32) -> io::Result<Vec<SampledPositionHit>> {
-        let Ok(group_idx) = self.node_ids.binary_search(&node_id) else {
-            return Ok(Vec::new());
-        };
-        let start = *self.byte_offsets.get(group_idx).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "sampled-position offset missing")
-        })? as usize;
-        let end = *self.byte_offsets.get(group_idx + 1).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "sampled-position terminal offset missing")
-        })? as usize;
-        if start > end || end > self.data.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "sampled-position byte offsets are out of range",
-            ));
-        }
-
-        let mut hits = Vec::new();
-        let mut pos = start;
-        let mut packed = 0u64;
-        while pos < end {
-            let delta = read_varint_from_slice(&self.data, &mut pos, end)?;
-            packed = packed.checked_add(delta).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "sampled position overflowed u64")
-            })?;
-            let target_orient = (packed & 1) as u8;
-            let global_pos = packed >> 1;
-            if let Some((path_idx, target_pos)) = self.path_for_global_pos(global_pos) {
-                hits.push(SampledPositionHit {
-                    path_idx,
-                    target_pos,
-                    target_orient,
-                });
-            }
-        }
-        Ok(hits)
-    }
-
-    fn path_for_global_pos(&self, global_pos: u64) -> Option<(usize, u64)> {
-        if self.path_starts.len() < 2 || global_pos >= *self.path_starts.last()? {
-            return None;
-        }
-        let upper = self.path_starts.partition_point(|&start| start <= global_pos);
-        let path_idx = upper.checked_sub(1)?;
-        Some((path_idx, global_pos - self.path_starts[path_idx]))
-    }
-
-    fn save(&self, path: &str) -> io::Result<()> {
-        let mut w = BufWriter::new(std::fs::File::create(path)?);
-        write_u64(&mut w, Self::MAGIC)?;
-        write_u64(&mut w, Self::VERSION)?;
-        write_u64(&mut w, self.sample_shift as u64)?;
-        write_u64(&mut w, self.seed)?;
-        write_u64(&mut w, self.sample_count)?;
-
-        write_u64(&mut w, self.path_starts.len() as u64)?;
-        for &start in &self.path_starts {
-            write_u64(&mut w, start)?;
-        }
-
-        write_u64(&mut w, self.node_ids.len() as u64)?;
-        for &node_id in &self.node_ids {
-            write_u64(&mut w, node_id as u64)?;
-        }
-
-        write_u64(&mut w, self.byte_offsets.len() as u64)?;
-        for &offset in &self.byte_offsets {
-            write_u64(&mut w, offset)?;
-        }
-
-        write_u64(&mut w, self.data.len() as u64)?;
-        w.write_all(&self.data)?;
-        w.flush()
-    }
-
-    fn load(path: &str) -> io::Result<Self> {
-        let mut r = BufReader::new(std::fs::File::open(path)?);
-        let magic = read_u64(&mut r)?;
-        if magic != Self::MAGIC {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("SampledPositions: bad magic 0x{:x}", magic),
-            ));
-        }
-        let version = read_u64(&mut r)?;
-        if version != Self::VERSION {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("SampledPositions: unsupported version {}", version),
-            ));
-        }
-        let sample_shift = read_u64(&mut r)? as u32;
-        let seed = read_u64(&mut r)?;
-        let sample_count = read_u64(&mut r)?;
-
-        let n_paths = read_u64(&mut r)? as usize;
-        let mut path_starts = Vec::with_capacity(n_paths);
-        for _ in 0..n_paths {
-            path_starts.push(read_u64(&mut r)?);
-        }
-
-        let n_nodes = read_u64(&mut r)? as usize;
-        let mut node_ids = Vec::with_capacity(n_nodes);
-        for _ in 0..n_nodes {
-            let node_id = read_u64(&mut r)?;
-            if node_id > u32::MAX as u64 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("SampledPositions: node id {} exceeds u32", node_id),
-                ));
-            }
-            node_ids.push(node_id as u32);
-        }
-
-        let n_offsets = read_u64(&mut r)? as usize;
-        let mut byte_offsets = Vec::with_capacity(n_offsets);
-        for _ in 0..n_offsets {
-            byte_offsets.push(read_u64(&mut r)?);
-        }
-
-        let n_data = read_u64(&mut r)? as usize;
-        let mut data = vec![0u8; n_data];
-        r.read_exact(&mut data)?;
-
-        if byte_offsets.len() != node_ids.len() + 1 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "SampledPositions: byte_offsets length must be node_ids length + 1",
-            ));
-        }
-        if byte_offsets.last().copied().unwrap_or(0) as usize != data.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "SampledPositions: final byte offset does not match data length",
-            ));
-        }
-        if path_starts.windows(2).any(|w| w[0] > w[1]) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "SampledPositions: path starts are not sorted",
-            ));
-        }
-        if node_ids.windows(2).any(|w| w[0] >= w[1]) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "SampledPositions: node ids are not strictly sorted",
-            ));
-        }
-        if byte_offsets.windows(2).any(|w| w[0] > w[1]) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "SampledPositions: byte offsets are not sorted",
-            ));
-        }
-
-        Ok(Self {
-            sample_shift,
-            seed,
-            sample_count,
-            path_starts,
-            node_ids,
-            byte_offsets,
-            data,
-        })
-    }
-}
-
-struct SampledPositionBuilder {
-    sample_shift: u32,
-    seed: u64,
-    sample_mask: u64,
-    samples: Vec<(u32, u64)>,
-    next_path_start: u64,
-    paths_seen: usize,
-    walked_paths: usize,
-}
-
-impl SampledPositionBuilder {
-    fn new(
-        sample_shift: u32,
-        seed: u64,
-        next_path_start: u64,
-        paths_seen: usize,
-    ) -> io::Result<Self> {
-        if sample_shift >= 63 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "position sample shift must be less than 63",
-            ));
-        }
-        Ok(Self {
-            sample_shift,
-            seed,
-            sample_mask: if sample_shift == 0 { 0 } else { (1u64 << sample_shift) - 1 },
-            samples: Vec::new(),
-            next_path_start,
-            paths_seen,
-            walked_paths: 0,
-        })
-    }
-
-    fn record_path(&mut self, path_idx: usize, seq_len: u64, syncmers: &[(i64, i32)]) {
-        debug_assert_eq!(
-            path_idx, self.paths_seen,
-            "online sampled-position path order drifted from name map"
-        );
-        if !syncmers.is_empty() {
-            self.walked_paths += 1;
-        }
-        let path_start = self.next_path_start;
-        for (node_idx, &(signed_node_i64, bp_pos_i32)) in syncmers.iter().enumerate() {
-            let signed_node = signed_node_i64 as i32;
-            let node_id = signed_node.unsigned_abs();
-            let bp_pos = bp_pos_i32 as u64;
-            if self.sample_shift > 0
-                && sampled_position_hash(node_id, path_idx, node_idx, bp_pos, self.seed)
-                    & self.sample_mask
-                    != 0
-            {
-                continue;
-            }
-            let global_pos = path_start
-                .checked_add(bp_pos)
-                .expect("sampled path coordinate overflowed u64");
-            let orient_bit = if signed_node >= 0 { 0u64 } else { 1u64 };
-            let packed = global_pos
-                .checked_mul(2)
-                .and_then(|p| p.checked_add(orient_bit))
-                .expect("sampled packed coordinate overflowed u64");
-            self.samples.push((node_id, packed));
-        }
-        self.next_path_start = self
-            .next_path_start
-            .checked_add(seq_len)
-            .expect("total sampled path length overflowed u64");
-        self.paths_seen += 1;
-    }
-
-    fn finish(self, path_lengths: &[u64]) -> io::Result<(SampledPositions, SampledPositionBuildStats)> {
-        let sample_shift = self.sample_shift;
-        let walked_paths = self.walked_paths;
-        let sampled_positions =
-            SampledPositions::from_samples(sample_shift, self.seed, path_lengths, self.samples)?;
-        let stats = SampledPositionBuildStats {
-            sampled_occurrences: sampled_positions.sample_count(),
-            sampled_nodes: sampled_positions.node_count(),
-            walked_paths,
-            sample_shift,
-        };
-        Ok((sampled_positions, stats))
-    }
-}
-
-fn push_varint(buf: &mut Vec<u8>, mut value: u64) {
-    while value >= 0x80 {
-        buf.push(((value as u8) & 0x7f) | 0x80);
-        value >>= 7;
-    }
-    buf.push(value as u8);
-}
-
-fn read_varint_from_slice(buf: &[u8], pos: &mut usize, end: usize) -> io::Result<u64> {
-    let mut value = 0u64;
-    let mut shift = 0u32;
-    while *pos < end {
-        let byte = buf[*pos];
-        *pos += 1;
-        value |= ((byte & 0x7f) as u64) << shift;
-        if byte & 0x80 == 0 {
-            return Ok(value);
-        }
-        shift += 7;
-        if shift >= 64 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "varint exceeds u64 width",
-            ));
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::UnexpectedEof,
-        "truncated varint in sampled positions",
-    ))
-}
-
-fn splitmix64(mut value: u64) -> u64 {
-    value = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    value ^ (value >> 31)
-}
-
-fn sampled_position_hash(
-    node_id: u32,
-    path_idx: usize,
-    node_idx: usize,
-    bp_pos: u64,
-    seed: u64,
-) -> u64 {
-    let mut value = seed;
-    value ^= (node_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    value ^= (path_idx as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    value ^= (node_idx as u64).wrapping_mul(0x94D0_49BB_1331_11EB);
-    value ^= bp_pos.rotate_left(17);
-    splitmix64(value)
 }
 
 /// Parameters controlling syncmer extraction.
@@ -799,10 +386,6 @@ pub struct SyngIndex {
     fast_locate: Option<FastLocate>,
     /// bp-offset sidecar keyed by `(forward_path_idx, forward_node_idx)`.
     bp_offsets: Option<BpOffsets>,
-    /// Succinct sampled path-position sidecar for approximate PAF projection.
-    sampled_positions: Option<SampledPositions>,
-    /// Online collector that records sampled positions while sequences are added.
-    sampled_position_builder: Option<SampledPositionBuilder>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -840,16 +423,6 @@ impl SyngIndex {
             gbz_gbwt: None,
             fast_locate: None,
             bp_offsets: None,
-            sampled_positions: None,
-            sampled_position_builder: Some(
-                SampledPositionBuilder::new(
-                    DEFAULT_POSITION_SAMPLE_SHIFT,
-                    DEFAULT_POSITION_SAMPLE_SEED,
-                    0,
-                    0,
-                )
-                .expect("default sampled-position parameters are valid"),
-            ),
         }
     }
 
@@ -925,152 +498,6 @@ impl SyngIndex {
         self.fast_locate.is_some()
     }
 
-    /// True if a sampled path-position sidecar has been built or loaded.
-    pub fn has_sampled_positions(&self) -> bool {
-        self.sampled_positions.is_some()
-    }
-
-    /// Enable online sampled-position collection for subsequently added paths.
-    ///
-    /// This should normally be called before adding any sequence. If called
-    /// later, only future paths can be collected online; use
-    /// [`Self::build_sampled_positions`] to create a sidecar for an existing
-    /// index.
-    pub fn enable_online_sampled_positions(
-        &mut self,
-        sample_shift: u32,
-        seed: u64,
-    ) -> io::Result<()> {
-        let next_path_start = self
-            .name_map
-            .path_to_length
-            .iter()
-            .try_fold(0u64, |acc, &len| acc.checked_add(len))
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "total path length overflowed u64")
-            })?;
-        self.sampled_position_builder = Some(SampledPositionBuilder::new(
-            sample_shift,
-            seed,
-            next_path_start,
-            self.name_map.path_to_name.len(),
-        )?);
-        self.sampled_positions = None;
-        Ok(())
-    }
-
-    /// Disable online sampled-position collection and drop unfinalized samples.
-    pub fn disable_online_sampled_positions(&mut self) {
-        self.sampled_position_builder = None;
-        self.sampled_positions = None;
-    }
-
-    /// Compact online samples into the `.syng.spos` representation.
-    pub fn finalize_online_sampled_positions(
-        &mut self,
-    ) -> io::Result<Option<SampledPositionBuildStats>> {
-        let Some(builder) = self.sampled_position_builder.take() else {
-            return Ok(None);
-        };
-        let (sampled_positions, stats) = builder.finish(&self.name_map.path_to_length)?;
-        self.sampled_positions = Some(sampled_positions);
-        Ok(Some(stats))
-    }
-
-    /// Build a sampled path-position sidecar from the existing syng paths.
-    ///
-    /// `sample_shift = N` keeps each path occurrence with probability
-    /// `1 / 2^N` using a deterministic hash over `(node, path, offset)`.
-    /// `sample_shift = 0` stores every occurrence and is intended only for
-    /// small tests.
-    pub fn build_sampled_positions(
-        &mut self,
-        sample_shift: u32,
-        seed: u64,
-    ) -> io::Result<SampledPositionBuildStats> {
-        if sample_shift >= 63 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "sample_shift must be less than 63",
-            ));
-        }
-
-        unsafe { syng_ffi::impg_syng_suppress_debug() };
-
-        let path_global_starts =
-            SampledPositions::path_starts_from_lengths(&self.name_map.path_to_length)?;
-        let sample_mask = if sample_shift == 0 {
-            0
-        } else {
-            (1u64 << sample_shift) - 1
-        };
-
-        let mut samples: Vec<(u32, u64)> = Vec::new();
-        let mut walked_paths = 0usize;
-        for path_idx in 0..self.name_map.path_to_name.len() {
-            let Some(ps) = self.name_map.path_starts[path_idx].as_ref() else {
-                continue;
-            };
-            walked_paths += 1;
-            let walk = self.walk_path(ps);
-            for (node_idx, &(signed_node, bp_pos)) in walk.iter().enumerate() {
-                let node_id = signed_node.unsigned_abs();
-                debug_assert!(node_id > 0, "forward walk produced zero node id");
-                if sample_shift > 0
-                    && sampled_position_hash(node_id, path_idx, node_idx, bp_pos, seed)
-                        & sample_mask
-                        != 0
-                {
-                    continue;
-                }
-                let global_pos = path_global_starts[path_idx].checked_add(bp_pos).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "sampled path coordinate overflowed u64",
-                    )
-                })?;
-                let orient_bit = if signed_node >= 0 { 0u64 } else { 1u64 };
-                let packed = global_pos
-                    .checked_mul(2)
-                    .and_then(|p| p.checked_add(orient_bit))
-                    .ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "sampled packed coordinate overflowed u64",
-                        )
-                    })?;
-                samples.push((node_id, packed));
-            }
-        }
-
-        let sampled_positions = SampledPositions::from_samples(
-            sample_shift,
-            seed,
-            &self.name_map.path_to_length,
-            samples,
-        )?;
-        let stats = SampledPositionBuildStats {
-            sampled_occurrences: sampled_positions.sample_count(),
-            sampled_nodes: sampled_positions.node_count(),
-            walked_paths,
-            sample_shift,
-        };
-        self.sampled_positions = Some(sampled_positions);
-        self.sampled_position_builder = None;
-        Ok(stats)
-    }
-
-    /// Save only the sampled path-position sidecar as `{prefix}.syng.spos`.
-    pub fn save_sampled_positions(&self, prefix: &str) -> io::Result<()> {
-        let sampled_positions = self.sampled_positions.as_ref().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "sampled positions have not been built",
-            )
-        })?;
-        sampled_positions.save(&format!("{}.syng.spos", prefix))
-    }
-
     /// Build an index progressively from an iterator of (name, sequence) pairs.
     ///
     /// For each sequence:
@@ -1109,16 +536,12 @@ impl SyngIndex {
         self.gbz_gbwt = None;
         self.fast_locate = None;
         self.bp_offsets = None;
-        self.sampled_positions = None;
 
         let syncmer_len = (self.params.w + self.params.k) as usize;
         let seq_len = seq.len();
         if seq_len < syncmer_len {
             // Sequence too short for syncmer extraction — record in name map but skip
-            let path_num = self.name_map.add(name, seq_len as u64);
-            if let Some(builder) = self.sampled_position_builder.as_mut() {
-                builder.record_path(path_num as usize, seq_len as u64, &[]);
-            }
+            self.name_map.add(name, seq_len as u64);
             return SyngAddSequenceStats {
                 sequence_len: seq_len,
                 syncmers: 0,
@@ -1170,10 +593,7 @@ impl SyngIndex {
         }
 
         if syncmers.is_empty() {
-            let path_num = self.name_map.add(name, seq_len as u64);
-            if let Some(builder) = self.sampled_position_builder.as_mut() {
-                builder.record_path(path_num as usize, seq_len as u64, &[]);
-            }
+            self.name_map.add(name, seq_len as u64);
             return SyngAddSequenceStats {
                 sequence_len: seq_len,
                 syncmers: 0,
@@ -1229,9 +649,6 @@ impl SyngIndex {
                 first_syncmer_pos: fwd_first_syncmer_pos,
             },
         );
-        if let Some(builder) = self.sampled_position_builder.as_mut() {
-            builder.record_path(path_num as usize, seq_len as u64, &syncmers);
-        }
 
         SyngAddSequenceStats {
             sequence_len: seq_len,
@@ -1246,8 +663,7 @@ impl SyngIndex {
     /// - `{prefix}.1khash` — syncmer hash (syng-compatible)
     /// - `{prefix}.1gbwt` — GBWT graph (syng-compatible)
     /// - `{prefix}.syng.names` — sequence name mapping
-    pub fn save(&mut self, prefix: &str) -> io::Result<()> {
-        let _ = self.finalize_online_sampled_positions()?;
+    pub fn save(&self, prefix: &str) -> io::Result<()> {
         let schema_text = syng_ffi::syng_schema_text();
 
         // Write .1gbwt
@@ -1324,11 +740,6 @@ impl SyngIndex {
             // 3) BpOffsets custom framing (little-endian u64-prefixed blobs)
             bp_off.save(&mut f)?;
             f.into_inner()?;
-        }
-
-        // Write .syng.spos (default sampled position sidecar for PAF projection).
-        if let Some(sampled_positions) = self.sampled_positions.as_ref() {
-            sampled_positions.save(&format!("{}.syng.spos", prefix))?;
         }
 
         Ok(())
@@ -1448,14 +859,6 @@ impl SyngIndex {
             (None, None, None)
         };
 
-        // Read optional .syng.spos sampled-position sidecar.
-        let sampled_positions_path = format!("{}.syng.spos", prefix);
-        let sampled_positions = if Path::new(&sampled_positions_path).exists() {
-            Some(SampledPositions::load(&sampled_positions_path)?)
-        } else {
-            None
-        };
-
         Ok(Self {
             gbwt,
             kmer_hash,
@@ -1465,8 +868,6 @@ impl SyngIndex {
             gbz_gbwt,
             fast_locate,
             bp_offsets,
-            sampled_positions,
-            sampled_position_builder: None,
         })
     }
 
@@ -1649,20 +1050,19 @@ impl SyngIndex {
     ) -> io::Result<Vec<SyngMapHit>> {
         unsafe { syng_ffi::impg_syng_suppress_debug() };
 
-        let exact_locate = match (
+        let (fl, gbz_gbwt, bp_off) = match (
             self.fast_locate.as_ref(),
             self.gbz_gbwt.as_ref(),
             self.bp_offsets.as_ref(),
         ) {
-            (Some(fl), Some(gbz), Some(bp)) => Some((fl, gbz, bp)),
-            _ => None,
+            (Some(fl), Some(gbz), Some(bp)) => (fl, gbz, bp),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "syng map requires a FastLocate sidecar; rebuild the syng index with this impg",
+                ));
+            }
         };
-        if exact_locate.is_none() && self.sampled_positions.is_none() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "syng map -o paf requires a positional sidecar; rebuild the syng index with this impg or run syng-pos",
-            ));
-        }
 
         let query_syncmers = self.matched_syncmers_in_sequence(query_seq);
         if query_syncmers.is_empty() {
@@ -1672,55 +1072,35 @@ impl SyngIndex {
         let syncmer_len = (self.params.w + self.params.k) as u64;
         let mut per_path: FxHashMap<(usize, char), Vec<Anchor>> = FxHashMap::default();
 
-        if let Some((fl, gbz_gbwt, bp_off)) = exact_locate {
-            for sm in query_syncmers {
-                let q_orient: u8 = if sm.signed_node >= 0 { 0 } else { 1 };
-                for t_orient in 0u8..=1 {
-                    let encoded = ((sm.node_id as usize) << 1) | (t_orient as usize);
-                    if !gbz_gbwt.has_node(encoded) {
-                        continue;
-                    }
-                    for (gbz_seq_id, seq_off_from_end) in fl.decompress_da(gbz_gbwt, encoded) {
-                        if gbz_seq_id & 1 != 0 {
-                            continue;
-                        }
-                        let forward_path_idx = gbz_seq_id >> 1;
-                        let Some(num_nodes) = bp_off.num_forward_nodes(forward_path_idx) else {
-                            continue;
-                        };
-                        if num_nodes == 0 || seq_off_from_end >= num_nodes {
-                            continue;
-                        }
-                        let forward_node_idx = num_nodes - 1 - seq_off_from_end;
-                        let Some(target_pos) = bp_off.bp_of(forward_path_idx, forward_node_idx) else {
-                            continue;
-                        };
-                        let strand = if q_orient == t_orient { '+' } else { '-' };
-                        per_path
-                            .entry((forward_path_idx, strand))
-                            .or_default()
-                            .push(Anchor {
-                                query_pos: sm.query_pos,
-                                target_pos,
-                                node_id: sm.node_id,
-                            });
-                    }
+        for sm in query_syncmers {
+            let q_orient: u8 = if sm.signed_node >= 0 { 0 } else { 1 };
+            for t_orient in 0u8..=1 {
+                let encoded = ((sm.node_id as usize) << 1) | (t_orient as usize);
+                if !gbz_gbwt.has_node(encoded) {
+                    continue;
                 }
-            }
-        } else if let Some(sampled_positions) = self.sampled_positions.as_ref() {
-            for sm in query_syncmers {
-                let q_orient: u8 = if sm.signed_node >= 0 { 0 } else { 1 };
-                for hit in sampled_positions.decode_node(sm.node_id)? {
-                    if hit.path_idx >= self.name_map.path_to_name.len() {
+                for (gbz_seq_id, seq_off_from_end) in fl.decompress_da(gbz_gbwt, encoded) {
+                    if gbz_seq_id & 1 != 0 {
                         continue;
                     }
-                    let strand = if q_orient == hit.target_orient { '+' } else { '-' };
+                    let forward_path_idx = gbz_seq_id >> 1;
+                    let Some(num_nodes) = bp_off.num_forward_nodes(forward_path_idx) else {
+                        continue;
+                    };
+                    if num_nodes == 0 || seq_off_from_end >= num_nodes {
+                        continue;
+                    }
+                    let forward_node_idx = num_nodes - 1 - seq_off_from_end;
+                    let Some(target_pos) = bp_off.bp_of(forward_path_idx, forward_node_idx) else {
+                        continue;
+                    };
+                    let strand = if q_orient == t_orient { '+' } else { '-' };
                     per_path
-                        .entry((hit.path_idx, strand))
+                        .entry((forward_path_idx, strand))
                         .or_default()
                         .push(Anchor {
                             query_pos: sm.query_pos,
-                            target_pos: hit.target_pos,
+                            target_pos,
                             node_id: sm.node_id,
                         });
                 }
@@ -2763,7 +2143,7 @@ mod tests {
             .map(|i| (format!("genome_{}", i), make_test_sequence(2000, i as u8 + 100)))
             .collect();
         let params = SyncmerParams::default();
-        let mut index = SyngIndex::build(params, seqs.into_iter());
+        let index = SyngIndex::build(params, seqs.into_iter());
 
         let dir = std::env::temp_dir().join("impg_test_syng_roundtrip");
         std::fs::create_dir_all(&dir).unwrap();
@@ -2826,7 +2206,7 @@ mod tests {
             })
             .collect();
         let params = SyncmerParams::default();
-        let mut original = SyngIndex::build(params, seqs.into_iter());
+        let original = SyngIndex::build(params, seqs.into_iter());
 
         let dir = std::env::temp_dir().join("impg_test_syng_rt_paths");
         std::fs::create_dir_all(&dir).unwrap();
@@ -2871,7 +2251,7 @@ mod tests {
             .map(|(i, n)| (n.to_string(), make_test_sequence(2000, i as u8 + 10)))
             .collect();
         let params = SyncmerParams::default();
-        let mut original = SyngIndex::build(params, seqs.into_iter());
+        let original = SyngIndex::build(params, seqs.into_iter());
 
         let dir = std::env::temp_dir().join("impg_test_syng_rt_names");
         std::fs::create_dir_all(&dir).unwrap();
@@ -2910,7 +2290,7 @@ mod tests {
             .map(|(i, &len)| (format!("seq_len_{}", len), make_test_sequence(len, i as u8)))
             .collect();
         let params = SyncmerParams::default();
-        let mut original = SyngIndex::build(params, seqs.into_iter());
+        let original = SyngIndex::build(params, seqs.into_iter());
 
         let dir = std::env::temp_dir().join("impg_test_syng_rt_lengths");
         std::fs::create_dir_all(&dir).unwrap();
@@ -3013,7 +2393,7 @@ mod tests {
 
         // Default params: k=8, w=55 (syncmer_len=63)
         let params_default = SyncmerParams::default();
-        let mut idx_default = SyngIndex::build(
+        let idx_default = SyngIndex::build(
             params_default,
             vec![("seq".to_string(), seq.clone())].into_iter(),
         );
@@ -3026,7 +2406,7 @@ mod tests {
             w: 31,
             seed: 7,
         };
-        let mut idx_short = SyngIndex::build(
+        let idx_short = SyngIndex::build(
             params_short,
             vec![("seq".to_string(), seq.clone())].into_iter(),
         );
@@ -3039,7 +2419,7 @@ mod tests {
             w: 55,
             seed: 42,
         };
-        let mut idx_alt = SyngIndex::build(
+        let idx_alt = SyngIndex::build(
             params_alt_seed,
             vec![("seq".to_string(), seq)].into_iter(),
         );
@@ -3080,7 +2460,7 @@ mod tests {
             ("s1".to_string(), make_test_sequence(2000, 1)),
             ("s2".to_string(), make_test_sequence(2000, 2)),
         ];
-        let mut index = SyngIndex::build(params, seqs.into_iter());
+        let index = SyngIndex::build(params, seqs.into_iter());
 
         let dir = std::env::temp_dir().join("impg_test_syng_default_reload");
         std::fs::create_dir_all(&dir).unwrap();
@@ -3141,7 +2521,7 @@ mod tests {
         let seq = make_test_sequence(1000, 33);
         let seqs = vec![("single".to_string(), seq)];
         let params = SyncmerParams::default();
-        let mut index = SyngIndex::build(params, seqs.into_iter());
+        let index = SyngIndex::build(params, seqs.into_iter());
         assert_eq!(index.name_map.path_to_name.len(), 1);
 
         // Save and reload to verify the single path survives
@@ -3190,7 +2570,7 @@ mod tests {
             ("normal".to_string(), make_test_sequence(2000, 42)),
         ];
         let params = SyncmerParams::default();
-        let mut index = SyngIndex::build(params, seqs.into_iter());
+        let index = SyngIndex::build(params, seqs.into_iter());
 
         let dir = std::env::temp_dir().join("impg_test_syng_edge_rt");
         std::fs::create_dir_all(&dir).unwrap();
@@ -3207,72 +2587,6 @@ mod tests {
         assert_eq!(loaded.name_map.path_to_length[1], 3);
         assert_eq!(loaded.name_map.path_to_name[2], "normal");
         assert_eq!(loaded.name_map.path_to_length[2], 2000);
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn test_online_sampled_positions_exact_mapping_roundtrip() {
-        let _guard = lock_syng();
-        let params = SyncmerParams::default();
-        let shared = make_test_sequence(1000, 42);
-        let mut seq_a = shared.clone();
-        seq_a.extend_from_slice(&make_test_sequence(400, 1));
-        let mut seq_b = shared.clone();
-        seq_b.extend_from_slice(&make_test_sequence(400, 2));
-
-        let mut index = SyngIndex::new(params);
-        index.enable_online_sampled_positions(0, 7).unwrap();
-        index.add_sequence("sampleA#0#chr1".to_string(), seq_a);
-        index.add_sequence("sampleB#0#chr1".to_string(), seq_b);
-        let stats = index.finalize_online_sampled_positions().unwrap().unwrap();
-        assert!(stats.sampled_occurrences > 0);
-        assert!(stats.sampled_nodes > 0);
-        assert!(index.has_sampled_positions());
-        assert!(!index.has_fast_locate());
-
-        let query = &shared[100..800];
-        let hits = index
-            .map_sequence("read1", query, 2, 10_000)
-            .expect("sampled-position PAF mapping should succeed");
-        assert!(
-            hits.iter().any(|h| h.target_name == "sampleA#0#chr1"),
-            "sampled mapping should include sampleA, got: {:?}",
-            hits
-        );
-        assert!(
-            hits.iter().any(|h| h.target_name == "sampleB#0#chr1"),
-            "sampled mapping should include sampleB, got: {:?}",
-            hits
-        );
-
-        let dir = std::env::temp_dir().join("impg_test_syng_spos_roundtrip");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let prefix = dir.join("idx");
-        let prefix_str = prefix.to_str().unwrap();
-        index.save(prefix_str).unwrap();
-        assert!(
-            std::path::Path::new(&format!("{}.syng.spos", prefix_str)).exists(),
-            ".syng.spos file should exist after save"
-        );
-
-        let loaded = SyngIndex::load(prefix_str, params).unwrap();
-        assert!(loaded.has_sampled_positions());
-        assert!(!loaded.has_fast_locate());
-        let loaded_hits = loaded
-            .map_sequence("read1", query, 2, 10_000)
-            .expect("loaded sampled-position PAF mapping should succeed");
-        assert!(
-            loaded_hits.iter().any(|h| h.target_name == "sampleA#0#chr1"),
-            "loaded sampled mapping should include sampleA, got: {:?}",
-            loaded_hits
-        );
-        assert!(
-            loaded_hits.iter().any(|h| h.target_name == "sampleB#0#chr1"),
-            "loaded sampled mapping should include sampleB, got: {:?}",
-            loaded_hits
-        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -3369,14 +2683,9 @@ mod tests {
             !std::path::Path::new(&format!("{}.syng.locate", output_prefix_str)).exists(),
             ".syng.locate should not be built unless impg syng --locate is used"
         );
-        assert!(
-            std::path::Path::new(&format!("{}.syng.spos", output_prefix_str)).exists(),
-            ".syng.spos should be built by default"
-        );
 
         // Load and verify content
         let loaded = SyngIndex::load(output_prefix_str, SyncmerParams::default()).unwrap();
-        assert!(loaded.has_sampled_positions());
         assert_eq!(loaded.name_map.path_to_name.len(), 3);
         assert_eq!(loaded.name_map.path_to_name[0], "HG002#1#chr1");
         assert_eq!(loaded.name_map.path_to_name[1], "HG002#2#chr1");
@@ -3626,7 +2935,7 @@ mod tests {
         let seq_a = make_test_sequence(800, 10);
         let seq_b = seq_a.clone(); // identical
 
-        let mut index = SyngIndex::build(
+        let index = SyngIndex::build(
             params,
             vec![
                 ("genome_a".to_string(), seq_a),
@@ -4564,7 +3873,7 @@ mod tests {
         let seqs: Vec<(String, Vec<u8>)> = (0..4)
             .map(|i| (format!("genome_{}", i), make_test_sequence(2000, i as u8 + 10)))
             .collect();
-        let mut full_index = SyngIndex::build(params, seqs.clone().into_iter());
+        let full_index = SyngIndex::build(params, seqs.clone().into_iter());
 
         let dir = std::env::temp_dir().join("impg_test_region_nodes_subset");
         std::fs::create_dir_all(&dir).unwrap();
@@ -4725,7 +4034,7 @@ mod tests {
         // Verify the .1gbwt file has correct ONEcode format markers
         let params = SyncmerParams::default();
         let seqs = vec![("seq1".to_string(), make_test_sequence(1000, 42))];
-        let mut index = SyngIndex::build(params, seqs.into_iter());
+        let index = SyngIndex::build(params, seqs.into_iter());
 
         let dir = std::env::temp_dir().join("impg_test_onecode_magic_gbwt");
         std::fs::create_dir_all(&dir).unwrap();
@@ -4756,7 +4065,7 @@ mod tests {
         // Verify the .1khash file has correct ONEcode format markers
         let params = SyncmerParams::default();
         let seqs = vec![("seq1".to_string(), make_test_sequence(1000, 42))];
-        let mut index = SyngIndex::build(params, seqs.into_iter());
+        let index = SyngIndex::build(params, seqs.into_iter());
 
         let dir = std::env::temp_dir().join("impg_test_onecode_magic_khash");
         std::fs::create_dir_all(&dir).unwrap();
