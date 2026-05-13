@@ -195,7 +195,7 @@ fn test_identical_sequences_get_distinct_start_counts() {
         ("seqB".to_string(), seq.clone()),
     ];
 
-    let index = SyngIndex::build(params, sequences.into_iter());
+    let mut index = SyngIndex::build(params, sequences.into_iter());
 
     let start_a = index.name_map.path_starts[0].as_ref().expect("seqA missing");
     let start_b = index.name_map.path_starts[1].as_ref().expect("seqB missing");

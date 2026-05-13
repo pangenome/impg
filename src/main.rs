@@ -21,7 +21,10 @@ use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::num::NonZeroUsize;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 /// Parse a size value with optional k/m/g suffix (case-insensitive)
 /// Examples: "100" -> 100, "10k" -> 10000, "5M" -> 5000000, "1g" -> 1000000000
@@ -42,6 +45,356 @@ fn parse_size(s: &str) -> Result<u64, String> {
         .parse::<u64>()
         .map(|n| n * multiplier)
         .map_err(|e| format!("invalid number '{}': {}", num_str, e))
+}
+
+fn resolve_syng_syncmer_params(
+    legacy_syncmer_k: Option<u32>,
+    smer_length: Option<u32>,
+    legacy_syncmer_w: Option<u32>,
+    syncmer_length: Option<u32>,
+    seed: u32,
+) -> io::Result<impg::syng::SyncmerParams> {
+    let s = smer_length.or(legacy_syncmer_k).unwrap_or(8);
+    if s == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "syng smer length must be greater than 0",
+        ));
+    }
+
+    let total_k = match (syncmer_length, legacy_syncmer_w) {
+        (Some(total), None) => total,
+        (None, Some(w)) => s.checked_add(w).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "syng syncmer length overflowed u32")
+        })?,
+        (None, None) => 63,
+        (Some(_), Some(_)) => unreachable!("clap conflicts_with prevents this"),
+    };
+
+    if total_k == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "syng syncmer length must be greater than 0",
+        ));
+    }
+    if total_k % 2 == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("syng syncmer length must be odd, got {}", total_k),
+        ));
+    }
+    if total_k <= s {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "syng syncmer length ({}) must be greater than smer length ({})",
+                total_k, s
+            ),
+        ));
+    }
+
+    Ok(impg::syng::SyncmerParams {
+        k: s,
+        w: total_k - s,
+        seed,
+    })
+}
+
+fn format_duration(duration: Duration) -> String {
+    if duration.as_secs() >= 60 {
+        let mins = duration.as_secs() / 60;
+        let secs = duration.as_secs_f64() - (mins * 60) as f64;
+        format!("{}m{:.3}s", mins, secs)
+    } else if duration.as_secs() > 0 {
+        format!("{:.3}s", duration.as_secs_f64())
+    } else if duration.as_millis() > 0 {
+        format!("{:.3}ms", duration.as_secs_f64() * 1_000.0)
+    } else {
+        format!("{}us", duration.as_micros())
+    }
+}
+
+fn parse_sequence_record_name(line: &str, marker: char) -> String {
+    line.strip_prefix(marker)
+        .unwrap_or("")
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+fn read_query_sequences(path: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
+    let file = File::open(path)?;
+    let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
+        io::Error::other(format!("Failed to open reader for '{}': {}", path, e))
+    })?;
+    let mut reader = BufReader::new(reader);
+
+    let mut first_line = String::new();
+    loop {
+        first_line.clear();
+        if reader.read_line(&mut first_line)? == 0 {
+            return Ok(Vec::new());
+        }
+        if !first_line.trim().is_empty() {
+            break;
+        }
+    }
+
+    if first_line.starts_with('>') {
+        read_fasta_records(reader, first_line)
+    } else if first_line.starts_with('@') {
+        read_fastq_records(reader, first_line)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("query file '{}' is not FASTA or FASTQ", path),
+        ))
+    }
+}
+
+fn read_fasta_records<R: BufRead>(
+    reader: R,
+    first_line: String,
+) -> io::Result<Vec<(String, Vec<u8>)>> {
+    let mut sequences = Vec::new();
+    let mut current_name = parse_sequence_record_name(&first_line, '>');
+    let mut current_seq = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        if line.starts_with('>') {
+            sequences.push((
+                std::mem::take(&mut current_name),
+                std::mem::take(&mut current_seq),
+            ));
+            current_name = parse_sequence_record_name(&line, '>');
+            current_seq.clear();
+        } else {
+            current_seq.extend(line.trim().as_bytes());
+        }
+    }
+    sequences.push((current_name, current_seq));
+    Ok(sequences)
+}
+
+fn read_fastq_records<R: BufRead>(
+    mut reader: R,
+    mut header: String,
+) -> io::Result<Vec<(String, Vec<u8>)>> {
+    let mut sequences = Vec::new();
+    loop {
+        if !header.starts_with('@') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "FASTQ record header must start with '@'",
+            ));
+        }
+        let name = parse_sequence_record_name(&header, '@');
+
+        let mut seq = String::new();
+        let mut plus = String::new();
+        let mut qual = String::new();
+        if reader.read_line(&mut seq)? == 0
+            || reader.read_line(&mut plus)? == 0
+            || reader.read_line(&mut qual)? == 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "truncated FASTQ record",
+            ));
+        }
+        if !plus.starts_with('+') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "FASTQ separator line must start with '+'",
+            ));
+        }
+        sequences.push((name, seq.trim().as_bytes().to_vec()));
+
+        header.clear();
+        loop {
+            if reader.read_line(&mut header)? == 0 {
+                return Ok(sequences);
+            }
+            if !header.trim().is_empty() {
+                break;
+            }
+            header.clear();
+        }
+    }
+}
+
+fn write_syng_map_gaf<W: Write>(
+    out: &mut W,
+    query_name: &str,
+    query_len: u64,
+    syncmer_len: u64,
+    syncmers: &[impg::syng::SyngQuerySyncmer],
+) -> io::Result<()> {
+    if syncmers.is_empty() {
+        return Ok(());
+    }
+    let qstart = syncmers.iter().map(|s| s.query_pos).min().unwrap_or(0);
+    let qend = syncmers
+        .iter()
+        .map(|s| s.query_pos.saturating_add(syncmer_len))
+        .max()
+        .unwrap_or(qstart)
+        .min(query_len);
+    let mut path = String::new();
+    for sm in syncmers {
+        let orient = if sm.signed_node >= 0 { '>' } else { '<' };
+        path.push(orient);
+        path.push_str(&sm.node_id.to_string());
+    }
+    let path_len = (syncmers.len() as u64).saturating_mul(syncmer_len);
+    let matches = path_len.min(qend.saturating_sub(qstart));
+    let block_len = qend.saturating_sub(qstart);
+    writeln!(
+        out,
+        "{}\t{}\t{}\t{}\t+\t{}\t{}\t0\t{}\t{}\t{}\t0\tan:i:{}\tsk:i:{}",
+        query_name,
+        query_len,
+        qstart,
+        qend,
+        path,
+        path_len,
+        path_len,
+        matches,
+        block_len,
+        syncmers.len(),
+        syncmer_len
+    )
+}
+
+fn write_syng_map_paf<W: Write>(
+    out: &mut W,
+    hit: &impg::syng::SyngMapHit,
+    syncmer_len: u64,
+) -> io::Result<()> {
+    let matches = (hit.anchors as u64).saturating_mul(syncmer_len);
+    let block_len = hit
+        .query_end
+        .saturating_sub(hit.query_start)
+        .max(hit.target_end.saturating_sub(hit.target_start));
+    writeln!(
+        out,
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t0\tan:i:{}\tsk:i:{}",
+        hit.query_name,
+        hit.query_len,
+        hit.query_start,
+        hit.query_end,
+        hit.strand,
+        hit.target_name,
+        hit.target_len,
+        hit.target_start,
+        hit.target_end,
+        matches,
+        block_len,
+        hit.anchors,
+        syncmer_len
+    )
+}
+
+fn emit_syng_map<W: Write>(
+    out: &mut W,
+    syng_index: &impg::syng::SyngIndex,
+    queries: Vec<(String, Vec<u8>)>,
+    output_format: &str,
+    min_anchors: usize,
+    chain_budget: u64,
+    max_hits: usize,
+) -> io::Result<()> {
+    let syncmer_len = (syng_index.params.k + syng_index.params.w) as u64;
+    match output_format {
+        "gaf" => {
+            for (query_name, query_seq) in queries {
+                let mut syncmers = syng_index.matched_syncmers_in_sequence(&query_seq);
+                if syncmers.len() < min_anchors {
+                    continue;
+                }
+                syncmers.sort_by(|a, b| {
+                    a.query_pos
+                        .cmp(&b.query_pos)
+                        .then(a.node_id.cmp(&b.node_id))
+                });
+                write_syng_map_gaf(
+                    out,
+                    &query_name,
+                    query_seq.len() as u64,
+                    syncmer_len,
+                    &syncmers,
+                )?;
+            }
+        }
+        "paf" => {
+            for (query_name, query_seq) in queries {
+                let mut hits =
+                    syng_index.map_sequence(&query_name, &query_seq, min_anchors, chain_budget)?;
+                if max_hits > 0 && hits.len() > max_hits {
+                    hits.truncate(max_hits);
+                }
+                for hit in hits {
+                    write_syng_map_paf(out, &hit, syncmer_len)?;
+                }
+            }
+        }
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unsupported map output format '{}'; expected 'gaf' or 'paf'", other),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn silence_stdout_for_process() -> io::Result<RawFd> {
+    io::stdout().flush()?;
+    unsafe {
+        libc::fflush(std::ptr::null_mut());
+    }
+    let saved_stdout = unsafe { libc::dup(libc::STDOUT_FILENO) };
+    if saved_stdout < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let devnull = std::fs::OpenOptions::new().write(true).open("/dev/null")?;
+    if unsafe { libc::dup2(devnull.as_raw_fd(), libc::STDOUT_FILENO) } < 0 {
+        let e = io::Error::last_os_error();
+        unsafe {
+            libc::close(saved_stdout);
+        }
+        return Err(e);
+    }
+    Ok(saved_stdout)
+}
+
+#[cfg(unix)]
+fn write_all_to_fd(fd: RawFd, mut buf: &[u8]) -> io::Result<()> {
+    while !buf.is_empty() {
+        let written = unsafe { libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len()) };
+        if written < 0 {
+            let e = io::Error::last_os_error();
+            if e.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(e);
+        }
+        if written == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "failed to write mapper output to stdout",
+            ));
+        }
+        buf = &buf[written as usize..];
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn silence_stdout_for_process() -> io::Result<()> {
+    Ok(())
 }
 
 /// Resolve the `--temp-dir` value to an absolute path.
@@ -808,13 +1161,16 @@ impl RefineOpts {
 /// prefix (base name before `.1khash` / `.1gbwt`) if one is found.
 ///
 /// Accepts:
-///   - Explicit file path ending in `.1khash` or `.1gbwt` → strip suffix
+///   - Explicit file path ending in `.1khash`, `.1gbwt`, or `.syng.spos` → strip suffix
 ///   - Bare prefix with sibling `.1khash` on disk → return prefix as-is
 fn detect_syng_prefix(path: &str) -> Option<String> {
     if let Some(stem) = path.strip_suffix(".1khash") {
         return Some(stem.to_string());
     }
     if let Some(stem) = path.strip_suffix(".1gbwt") {
+        return Some(stem.to_string());
+    }
+    if let Some(stem) = path.strip_suffix(".syng.spos") {
         return Some(stem.to_string());
     }
     if std::path::Path::new(&format!("{path}.1khash")).exists() {
@@ -1335,6 +1691,41 @@ enum Args {
         common: CommonOpts,
     },
 
+    /// Map sequences to a syng index using exact shared syncmers
+    Map {
+        /// Syng index prefix or .1khash/.1gbwt path
+        #[clap(short = 'a', long, value_parser)]
+        index: String,
+
+        /// Query FASTA or FASTQ file
+        #[clap(short = 'q', long, value_parser)]
+        query: String,
+
+        /// Output format: gaf (syncmer-node support) or paf (projected genome coordinates)
+        #[clap(short = 'o', long, value_parser, default_value = "paf")]
+        output_format: String,
+
+        /// Output file path (default: stdout)
+        #[clap(short = 'O', long, value_parser)]
+        output: Option<String>,
+
+        /// Minimum shared syncmer anchors required to emit a mapping
+        #[clap(long, value_parser, default_value_t = 2)]
+        min_anchors: usize,
+
+        /// Anchor chaining budget for PAF projection
+        #[clap(long, value_parser, default_value_t = 10000)]
+        chain_budget: u64,
+
+        /// Maximum PAF hits to emit per query (0 = no limit)
+        #[clap(long, value_parser, default_value_t = 0)]
+        max_hits: usize,
+
+        // --- General ---
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+
     /// Build a GBWT syncmer index from sequences
     Syng {
         // --- Input (one required) ---
@@ -1347,20 +1738,40 @@ enum Args {
         fasta: Option<String>,
 
         // --- Output ---
-        /// Output file prefix (produces .1khash, .1gbwt, .syng.names)
+        /// Output file prefix (produces .1khash, .1gbwt, .syng.names, .syng.spos)
         #[clap(short = 'o', long, value_parser)]
         output: String,
+
+        /// Sample one path occurrence per 2^N occurrences for .syng.spos.
+        #[arg(help_heading = "Position sampling")]
+        #[clap(long, value_parser, default_value_t = impg::syng::DEFAULT_POSITION_SAMPLE_SHIFT)]
+        position_sample_shift: u32,
+
+        /// Hash seed for online position sampling.
+        #[arg(help_heading = "Position sampling")]
+        #[clap(long, value_parser, default_value_t = impg::syng::DEFAULT_POSITION_SAMPLE_SEED)]
+        position_sample_seed: u64,
 
         // --- Syncmer parameters ---
         /// Inner k-mer length for syncmer extraction
         #[arg(help_heading = "Syncmer parameters")]
-        #[clap(long, value_parser, default_value_t = 8)]
-        syncmer_k: u32,
+        #[clap(long, value_parser, conflicts_with = "smer_length")]
+        syncmer_k: Option<u32>,
+
+        /// Inner smer length for syncmer extraction (`s` in the syng paper; default 8)
+        #[arg(help_heading = "Syncmer parameters")]
+        #[clap(long, value_parser, conflicts_with = "syncmer_k")]
+        smer_length: Option<u32>,
 
         /// Window length for syncmer extraction (total syncmer length = w + k)
         #[arg(help_heading = "Syncmer parameters")]
-        #[clap(long, value_parser, default_value_t = 55)]
-        syncmer_w: u32,
+        #[clap(long, value_parser, conflicts_with = "syncmer_length")]
+        syncmer_w: Option<u32>,
+
+        /// Total syncmer length (`k` in the syng paper; must be odd; default 63)
+        #[arg(help_heading = "Syncmer parameters")]
+        #[clap(long, value_parser, conflicts_with = "syncmer_w")]
+        syncmer_length: Option<u32>,
 
         /// Hash function seed for syncmer extraction
         #[arg(help_heading = "Syncmer parameters")]
@@ -3153,13 +3564,82 @@ fn run() -> io::Result<()> {
 
             impg::commands::align::run_align(fasta_files, &output_dir, config)?;
         }
+        Args::Map {
+            index,
+            query,
+            output_format,
+            output,
+            min_anchors,
+            chain_budget,
+            max_hits,
+            common,
+        } => {
+            initialize_threads_and_log(&common);
+
+            let syng_prefix = detect_syng_prefix(&index).unwrap_or(index);
+            info!("Loading syng index from prefix: {}", syng_prefix);
+            #[cfg(unix)]
+            let saved_stdout = silence_stdout_for_process()?;
+            #[cfg(not(unix))]
+            silence_stdout_for_process()?;
+
+            let syng_index =
+                impg::syng::SyngIndex::load(&syng_prefix, impg::syng::SyncmerParams::default())?;
+            let queries = read_query_sequences(&query)?;
+
+            if let Some(path) = output {
+                let mut out = BufWriter::new(File::create(path)?);
+                emit_syng_map(
+                    &mut out,
+                    &syng_index,
+                    queries,
+                    &output_format,
+                    min_anchors,
+                    chain_budget,
+                    max_hits,
+                )?;
+                out.flush()?;
+                #[cfg(unix)]
+                unsafe {
+                    libc::close(saved_stdout);
+                }
+            } else {
+                let mut out = Vec::new();
+                emit_syng_map(
+                    &mut out,
+                    &syng_index,
+                    queries,
+                    &output_format,
+                    min_anchors,
+                    chain_budget,
+                    max_hits,
+                )?;
+                #[cfg(unix)]
+                {
+                    write_all_to_fd(saved_stdout, &out)?;
+                    unsafe {
+                        libc::close(saved_stdout);
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let mut stdout = io::stdout();
+                    stdout.write_all(&out)?;
+                    stdout.flush()?;
+                }
+            }
+        }
         Args::Syng {
             agc,
             fasta,
             output,
             syncmer_k,
+            smer_length,
             syncmer_w,
+            syncmer_length,
             syncmer_seed,
+            position_sample_shift,
+            position_sample_seed,
             common,
         } => {
             initialize_threads_and_log(&common);
@@ -3171,23 +3651,49 @@ fn run() -> io::Result<()> {
                 ));
             }
 
-            let params = impg::syng::SyncmerParams {
-                k: syncmer_k,
-                w: syncmer_w,
-                seed: syncmer_seed,
-            };
+            let params = resolve_syng_syncmer_params(
+                syncmer_k,
+                smer_length,
+                syncmer_w,
+                syncmer_length,
+                syncmer_seed,
+            )?;
+            let paper_k = params.k + params.w;
+            let paper_s = params.k;
 
             info!(
-                "Building syng index with syncmer params: k={}, w={}, seed={} (syncmer length={})",
-                syncmer_k,
-                syncmer_w,
+                "Building syng index with syncmer params: paper k={}, paper s={}, internal k={}, w={}, seed={}, threads={}",
+                paper_k,
+                paper_s,
+                params.k,
+                params.w,
                 syncmer_seed,
-                syncmer_k + syncmer_w,
+                common.threads.get(),
             );
+            let configure_position_sampling =
+                |index: &mut impg::syng::SyngIndex| -> io::Result<()> {
+                    index.enable_online_sampled_positions(
+                        position_sample_shift,
+                        position_sample_seed,
+                    )?;
+                    info!(
+                        "Online sampled position sidecar enabled: sample_shift={} (~1/{} path occurrences), seed={}",
+                        position_sample_shift,
+                        1u64 << position_sample_shift,
+                        position_sample_seed,
+                    );
+                    Ok(())
+                };
+            let total_start = Instant::now();
 
-            let index = if let Some(agc_path) = agc {
+            let mut index = if let Some(agc_path) = agc {
                 // Stream sequences from AGC
-                info!("Reading sequences from AGC: {}", agc_path);
+                let input_start = Instant::now();
+                info!(
+                    "Reading sequences from AGC: {} at +{}",
+                    agc_path,
+                    format_duration(total_start.elapsed())
+                );
                 let config = ragc_core::DecompressorConfig { verbosity: 0 };
                 let mut decompressor =
                     ragc_core::Decompressor::open(&agc_path, config).map_err(|e| {
@@ -3198,12 +3704,30 @@ fn run() -> io::Result<()> {
                     })?;
 
                 let samples = decompressor.list_samples();
-                let mut sequences: Vec<(String, Vec<u8>)> = Vec::new();
-                for sample in &samples {
+                info!("Found {} AGC samples", samples.len());
+                let mut index = impg::syng::SyngIndex::new(params);
+                configure_position_sampling(&mut index)?;
+                let mut sequence_count = 0usize;
+                let mut total_bp = 0u64;
+                let mut total_syncmers = 0usize;
+                for (sample_idx, sample) in samples.iter().enumerate() {
+                    let sample_start = Instant::now();
                     let contigs = decompressor
                         .list_contigs_names_only(sample)
                         .unwrap_or_default();
-                    for contig in &contigs {
+                    info!(
+                        "Including sample {}/{}: {} ({} contigs) at +{}",
+                        sample_idx + 1,
+                        samples.len(),
+                        sample,
+                        contigs.len(),
+                        format_duration(total_start.elapsed())
+                    );
+                    let mut sample_sequences = 0usize;
+                    let mut sample_bp = 0u64;
+                    let mut sample_syncmers = 0usize;
+                    for (contig_idx, contig) in contigs.iter().enumerate() {
+                        let contig_start = Instant::now();
                         // NOTE: Do NOT use `decompressor.get_contig()` here — it has a
                         // bug in ragc-core where it skips the detail-reload after a
                         // `list_contigs_names_only()` call (it checks contig count, which
@@ -3257,16 +3781,59 @@ fn run() -> io::Result<()> {
                         } else {
                             format!("{}@{}", contig, sample)
                         };
-                        info!("  Processing {} ({} bp)", name, seq.len());
-                        sequences.push((name, seq));
+                        let seq_len = seq.len();
+                        info!("  Processing {} ({} bp)", name, seq_len);
+                        let stats = index.add_sequence(name.clone(), seq);
+                        sequence_count += 1;
+                        total_bp += stats.sequence_len as u64;
+                        total_syncmers += stats.syncmers;
+                        sample_sequences += 1;
+                        sample_bp += stats.sequence_len as u64;
+                        sample_syncmers += stats.syncmers;
+                        info!(
+                            "  Indexed contig {}/{} {}: {} bp, {} syncmers, indexed={}, elapsed {}, total {} sequences / {} bp / {} syncmers at +{}",
+                            contig_idx + 1,
+                            contigs.len(),
+                            name,
+                            stats.sequence_len,
+                            stats.syncmers,
+                            stats.indexed,
+                            format_duration(contig_start.elapsed()),
+                            sequence_count,
+                            total_bp,
+                            total_syncmers,
+                            format_duration(total_start.elapsed())
+                        );
                     }
+                    info!(
+                        "Finished sample {}/{}: {} ({} sequences, {} bp, {} syncmers) in {} at +{}",
+                        sample_idx + 1,
+                        samples.len(),
+                        sample,
+                        sample_sequences,
+                        sample_bp,
+                        sample_syncmers,
+                        format_duration(sample_start.elapsed()),
+                        format_duration(total_start.elapsed())
+                    );
                 }
 
-                info!("Building index from {} sequences...", sequences.len());
-                impg::syng::SyngIndex::build(params, sequences.into_iter())
+                info!(
+                    "Built syng paths from {} sequences ({} bp, {} syncmers) in {}",
+                    sequence_count,
+                    total_bp,
+                    total_syncmers,
+                    format_duration(input_start.elapsed())
+                );
+                index
             } else if let Some(fasta_path) = fasta {
                 // Read sequences from FASTA
-                info!("Reading sequences from FASTA: {}", fasta_path);
+                let input_start = Instant::now();
+                info!(
+                    "Reading sequences from FASTA: {} at +{}",
+                    fasta_path,
+                    format_duration(total_start.elapsed())
+                );
 
                 let file = File::open(&fasta_path)?;
                 let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
@@ -3277,23 +3844,45 @@ fn run() -> io::Result<()> {
                 })?;
                 let reader = BufReader::new(reader);
 
-                let mut sequences: Vec<(String, Vec<u8>)> = Vec::new();
+                let mut index = impg::syng::SyngIndex::new(params);
+                configure_position_sampling(&mut index)?;
                 let mut current_name = String::new();
                 let mut current_seq = Vec::new();
+                let mut sequence_count = 0usize;
+                let mut total_bp = 0u64;
+                let mut total_syncmers = 0usize;
 
                 for line in reader.lines() {
                     let line = line?;
                     if line.starts_with('>') {
                         if !current_name.is_empty() && !current_seq.is_empty() {
+                            let seq_start = Instant::now();
+                            let seq_len = current_seq.len();
                             info!(
                                 "  Processing {} ({} bp)",
                                 current_name,
-                                current_seq.len()
+                                seq_len
                             );
-                            sequences.push((
-                                std::mem::take(&mut current_name),
+                            let name = std::mem::take(&mut current_name);
+                            let stats = index.add_sequence(
+                                name.clone(),
                                 std::mem::take(&mut current_seq),
-                            ));
+                            );
+                            sequence_count += 1;
+                            total_bp += stats.sequence_len as u64;
+                            total_syncmers += stats.syncmers;
+                            info!(
+                                "  Indexed {}: {} bp, {} syncmers, indexed={}, elapsed {}, total {} sequences / {} bp / {} syncmers at +{}",
+                                name,
+                                stats.sequence_len,
+                                stats.syncmers,
+                                stats.indexed,
+                                format_duration(seq_start.elapsed()),
+                                sequence_count,
+                                total_bp,
+                                total_syncmers,
+                                format_duration(total_start.elapsed())
+                            );
                         }
                         current_name = line
                             .strip_prefix('>')
@@ -3308,30 +3897,73 @@ fn run() -> io::Result<()> {
                     }
                 }
                 if !current_name.is_empty() && !current_seq.is_empty() {
+                    let seq_start = Instant::now();
+                    let seq_len = current_seq.len();
                     info!(
                         "  Processing {} ({} bp)",
                         current_name,
-                        current_seq.len()
+                        seq_len
                     );
-                    sequences.push((current_name, current_seq));
+                    let stats = index.add_sequence(current_name.clone(), current_seq);
+                    sequence_count += 1;
+                    total_bp += stats.sequence_len as u64;
+                    total_syncmers += stats.syncmers;
+                    info!(
+                        "  Indexed {}: {} bp, {} syncmers, indexed={}, elapsed {}, total {} sequences / {} bp / {} syncmers at +{}",
+                        current_name,
+                        stats.sequence_len,
+                        stats.syncmers,
+                        stats.indexed,
+                        format_duration(seq_start.elapsed()),
+                        sequence_count,
+                        total_bp,
+                        total_syncmers,
+                        format_duration(total_start.elapsed())
+                    );
                 }
 
-                info!("Building index from {} sequences...", sequences.len());
-                impg::syng::SyngIndex::build(params, sequences.into_iter())
+                info!(
+                    "Built syng paths from {} sequences ({} bp, {} syncmers) in {}",
+                    sequence_count,
+                    total_bp,
+                    total_syncmers,
+                    format_duration(input_start.elapsed())
+                );
+                index
             } else {
                 unreachable!()
             };
 
+            let position_start = Instant::now();
+            if let Some(stats) = index.finalize_online_sampled_positions()? {
+                info!(
+                    "Sampled position sidecar compacted in {}: {} sampled occurrences across {} nodes from {} paths (sample_shift={} ~=1/{}) at +{}",
+                    format_duration(position_start.elapsed()),
+                    stats.sampled_occurrences,
+                    stats.sampled_nodes,
+                    stats.walked_paths,
+                    stats.sample_shift,
+                    1u64 << stats.sample_shift,
+                    format_duration(total_start.elapsed()),
+                );
+            }
+
+            let save_start = Instant::now();
             info!("Saving index to prefix: {}", output);
             index.save(&output)?;
             info!(
-                "Index saved: {}.1khash, {}.1gbwt, {}.syng.names",
-                output, output, output,
+                "Index saved in {}: {}.1khash, {}.1gbwt, {}.syng.names, {}.syng.spos",
+                format_duration(save_start.elapsed()),
+                output,
+                output,
+                output,
+                output,
             );
             info!(
                 "Name map contains {} sequences",
                 index.name_map.path_to_name.len()
             );
+            info!("Total syng build time: {}", format_duration(total_start.elapsed()));
         }
     }
 
@@ -5781,6 +6413,37 @@ mod tests {
         // Test with invalid format
         let result = parse_subsequence_coordinates("chr1:invalid");
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_resolve_syng_syncmer_params_defaults_match_paper() {
+        let params = resolve_syng_syncmer_params(None, None, None, None, 7).unwrap();
+        assert_eq!(params.k, 8);
+        assert_eq!(params.w, 55);
+        assert_eq!(params.k + params.w, 63);
+        assert_eq!(params.seed, 7);
+    }
+
+    #[test]
+    fn test_resolve_syng_syncmer_params_paper_names() {
+        let params = resolve_syng_syncmer_params(None, Some(8), None, Some(63), 7).unwrap();
+        assert_eq!(params.k, 8);
+        assert_eq!(params.w, 55);
+        assert_eq!(params.k + params.w, 63);
+    }
+
+    #[test]
+    fn test_resolve_syng_syncmer_params_legacy_names() {
+        let params = resolve_syng_syncmer_params(Some(8), None, Some(55), None, 7).unwrap();
+        assert_eq!(params.k, 8);
+        assert_eq!(params.w, 55);
+        assert_eq!(params.k + params.w, 63);
+    }
+
+    #[test]
+    fn test_resolve_syng_syncmer_params_rejects_even_total_length() {
+        let err = resolve_syng_syncmer_params(None, Some(8), None, Some(64), 7).unwrap_err();
+        assert!(err.to_string().contains("must be odd"));
     }
 
     #[test]

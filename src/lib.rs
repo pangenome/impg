@@ -2,7 +2,6 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
 pub mod agc_index;
-pub mod fast_locate;
 pub mod syng_ffi;
 pub mod syng;
 pub mod alignment_record;
@@ -626,7 +625,7 @@ pub fn partitioned_gfa_pipeline(
         })?;
     }
 
-    // Compute per-partition bp in a single pass, derive total from the sum.
+    // Compute per-partition bp once for deterministic output ordering below.
     let per_partition_bp: Vec<u64> = partitions
         .iter()
         .map(|ivs| {
@@ -635,7 +634,6 @@ pub fn partitioned_gfa_pipeline(
                 .sum()
         })
         .collect();
-    let total_bp: u64 = per_partition_bp.iter().sum();
 
     // 1. Generate per-partition GFAs with two-pool parallelism.
     //
