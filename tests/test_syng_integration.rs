@@ -318,6 +318,132 @@ fn test_syng_fasta_build_produces_non_empty_index() {
 }
 
 #[test]
+fn test_syng_map_cli_gaf_and_paf() {
+    let _guard = lock_syng();
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping: impg binary not built");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join("impg_test_syng_map_cli");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let backbone = numeric_to_ascii(&make_sequence_numeric(1000, 42));
+    let tail_a = numeric_to_ascii(&make_sequence_numeric(400, 1));
+    let tail_b = numeric_to_ascii(&make_sequence_numeric(400, 2));
+
+    let fasta_path = dir.join("index.fa");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        writeln!(f, ">sampleA#0#chr1").unwrap();
+        f.write_all(&backbone).unwrap();
+        f.write_all(&tail_a).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleB#0#chr1").unwrap();
+        f.write_all(&backbone).unwrap();
+        f.write_all(&tail_b).unwrap();
+        writeln!(f).unwrap();
+    }
+
+    let query_path = dir.join("query.fq");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&query_path).unwrap();
+        writeln!(f, "@read1").unwrap();
+        f.write_all(&backbone[100..800]).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, "+").unwrap();
+        writeln!(f, "{}", "I".repeat(700)).unwrap();
+    }
+
+    let idx_prefix = dir.join("idx");
+    let build = Command::new(&bin)
+        .args(["syng", "-f", fasta_path.to_str().unwrap(), "-o", idx_prefix.to_str().unwrap()])
+        .output()
+        .expect("failed to run impg syng");
+    assert!(
+        build.status.success(),
+        "impg syng failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let gaf = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            query_path.to_str().unwrap(),
+            "-o",
+            "gaf",
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o gaf");
+    assert!(
+        gaf.status.success(),
+        "impg map -o gaf failed: {}",
+        String::from_utf8_lossy(&gaf.stderr)
+    );
+    let gaf_stdout = String::from_utf8_lossy(&gaf.stdout);
+    let gaf_lines: Vec<&str> = gaf_stdout.lines().collect();
+    assert_eq!(gaf_lines.len(), 1, "expected one GAF line, got:\n{}", gaf_stdout);
+    let gaf_fields: Vec<&str> = gaf_lines[0].split('\t').collect();
+    assert!(gaf_fields.len() >= 12, "GAF line has too few fields: {}", gaf_lines[0]);
+    assert_eq!(gaf_fields[0], "read1");
+    assert!(
+        gaf_fields[5].contains('>') || gaf_fields[5].contains('<'),
+        "GAF path should contain syncmer node orientations: {}",
+        gaf_fields[5]
+    );
+
+    let paf = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            query_path.to_str().unwrap(),
+            "-o",
+            "paf",
+            "--min-anchors",
+            "2",
+            "--max-hits",
+            "10",
+        ])
+        .output()
+        .expect("failed to run impg map -o paf");
+    assert!(
+        paf.status.success(),
+        "impg map -o paf failed: {}",
+        String::from_utf8_lossy(&paf.stderr)
+    );
+    let paf_stdout = String::from_utf8_lossy(&paf.stdout);
+    let paf_lines: Vec<&str> = paf_stdout.lines().collect();
+    assert!(!paf_lines.is_empty(), "expected PAF hits, got none");
+    assert!(
+        paf_lines.iter().any(|l| l.contains("sampleA#0#chr1")),
+        "expected sampleA hit, got:\n{}",
+        paf_stdout
+    );
+    assert!(
+        paf_lines.iter().any(|l| l.contains("sampleB#0#chr1")),
+        "expected sampleB hit, got:\n{}",
+        paf_stdout
+    );
+    for line in paf_lines {
+        let fields: Vec<&str> = line.split('\t').collect();
+        assert!(fields.len() >= 12, "PAF line has too few fields: {}", line);
+        assert_eq!(fields[0], "read1");
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn test_syng_identical_sequences_build_and_query() {
     // Regression test for the vendored syng hash.c REMOVED-sentinel bug: two
     // byte-identical sequences (like AAA#0#chrIII and SGDref#0#chrIII in

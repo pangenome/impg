@@ -345,6 +345,29 @@ pub struct HomologousIntervalWithAnchors {
     pub anchors: Vec<Anchor>,
 }
 
+/// A query syncmer found in the index.
+#[derive(Debug, Clone, Copy)]
+pub struct SyngQuerySyncmer {
+    pub signed_node: i32,
+    pub node_id: u32,
+    pub query_pos: u64,
+}
+
+/// A rough syncmer-only mapping projected to a path in the syng index.
+#[derive(Debug, Clone)]
+pub struct SyngMapHit {
+    pub query_name: String,
+    pub query_len: u64,
+    pub query_start: u64,
+    pub query_end: u64,
+    pub target_name: String,
+    pub target_len: u64,
+    pub target_start: u64,
+    pub target_end: u64,
+    pub strand: char,
+    pub anchors: usize,
+}
+
 /// A loaded GBWT index with syncmer hash and name mapping.
 ///
 /// This is the primary handle for syng integration. It owns the C-allocated
@@ -958,6 +981,210 @@ impl SyngIndex {
                 cigar: None,
             })
             .collect())
+    }
+
+    /// Return query syncmers that are present in this syng index.
+    ///
+    /// The query sequence does not need to be one of the indexed paths. This
+    /// is the primitive used by `impg map -o gaf`.
+    pub fn matched_syncmers_in_sequence(&self, query_seq: &[u8]) -> Vec<SyngQuerySyncmer> {
+        let syncmer_len = (self.params.w + self.params.k) as usize;
+        if query_seq.len() < syncmer_len {
+            return Vec::new();
+        }
+
+        let mut seq_buf: Vec<u8> = Vec::with_capacity(query_seq.len() + 1);
+        seq_buf.extend(query_seq.iter().map(|&b| match b {
+            b'a' | b'A' | 0 => 0u8,
+            b'c' | b'C' | 1 => 1u8,
+            b'g' | b'G' | 2 => 2u8,
+            b't' | b'T' | 3 => 3u8,
+            _ => 0u8,
+        }));
+        seq_buf.push(0);
+
+        let mut out = Vec::new();
+        unsafe {
+            let sit = syng_ffi::syncmerIterator(
+                self.seqhash,
+                seq_buf.as_mut_ptr() as *mut i8,
+                query_seq.len() as i32,
+            );
+            let mut pos: i32 = 0;
+            while syng_ffi::syncmerNext(
+                sit,
+                std::ptr::null_mut(),
+                &mut pos,
+                std::ptr::null_mut(),
+            ) {
+                let mut kmer_index: i64 = 0;
+                if syng_ffi::kmerHashFind(
+                    self.kmer_hash,
+                    seq_buf.as_mut_ptr().add(pos as usize) as *mut i8,
+                    &mut kmer_index,
+                ) {
+                    let signed_node = kmer_index as i32;
+                    out.push(SyngQuerySyncmer {
+                        signed_node,
+                        node_id: signed_node.unsigned_abs(),
+                        query_pos: pos as u64,
+                    });
+                }
+            }
+            syng_ffi::impg_seqhashIteratorDestroy(sit);
+        }
+        out
+    }
+
+    /// Project query syncmer matches to indexed genome coordinates.
+    ///
+    /// This is intentionally simple: no base-level alignment or edge
+    /// refinement, just shared syncmer anchors grouped by path/strand and
+    /// chained with the existing anchor chainer.
+    pub fn map_sequence(
+        &self,
+        query_name: &str,
+        query_seq: &[u8],
+        min_anchors: usize,
+        chain_budget: u64,
+    ) -> io::Result<Vec<SyngMapHit>> {
+        unsafe { syng_ffi::impg_syng_suppress_debug() };
+
+        let (fl, gbz_gbwt, bp_off) = match (
+            self.fast_locate.as_ref(),
+            self.gbz_gbwt.as_ref(),
+            self.bp_offsets.as_ref(),
+        ) {
+            (Some(fl), Some(gbz), Some(bp)) => (fl, gbz, bp),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "syng map requires a FastLocate sidecar; rebuild the syng index with this impg",
+                ));
+            }
+        };
+
+        let query_syncmers = self.matched_syncmers_in_sequence(query_seq);
+        if query_syncmers.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let syncmer_len = (self.params.w + self.params.k) as u64;
+        let mut per_path: FxHashMap<(usize, char), Vec<Anchor>> = FxHashMap::default();
+
+        for sm in query_syncmers {
+            let q_orient: u8 = if sm.signed_node >= 0 { 0 } else { 1 };
+            for t_orient in 0u8..=1 {
+                let encoded = ((sm.node_id as usize) << 1) | (t_orient as usize);
+                if !gbz_gbwt.has_node(encoded) {
+                    continue;
+                }
+                for (gbz_seq_id, seq_off_from_end) in fl.decompress_da(gbz_gbwt, encoded) {
+                    if gbz_seq_id & 1 != 0 {
+                        continue;
+                    }
+                    let forward_path_idx = gbz_seq_id >> 1;
+                    let Some(num_nodes) = bp_off.num_forward_nodes(forward_path_idx) else {
+                        continue;
+                    };
+                    if num_nodes == 0 || seq_off_from_end >= num_nodes {
+                        continue;
+                    }
+                    let forward_node_idx = num_nodes - 1 - seq_off_from_end;
+                    let Some(target_pos) = bp_off.bp_of(forward_path_idx, forward_node_idx) else {
+                        continue;
+                    };
+                    let strand = if q_orient == t_orient { '+' } else { '-' };
+                    per_path
+                        .entry((forward_path_idx, strand))
+                        .or_default()
+                        .push(Anchor {
+                            query_pos: sm.query_pos,
+                            target_pos,
+                            node_id: sm.node_id,
+                        });
+                }
+            }
+        }
+
+        let mut raw_hits = Vec::new();
+        for ((path_idx, strand), mut anchors) in per_path {
+            anchors.sort_by(|a, b| {
+                a.query_pos
+                    .cmp(&b.query_pos)
+                    .then(a.target_pos.cmp(&b.target_pos))
+                    .then(a.node_id.cmp(&b.node_id))
+            });
+            anchors.dedup_by(|a, b| {
+                a.query_pos == b.query_pos
+                    && a.target_pos == b.target_pos
+                    && a.node_id == b.node_id
+            });
+            if anchors.len() < min_anchors {
+                continue;
+            }
+            let target_len = self.name_map.path_to_length[path_idx];
+            let start = anchors.iter().map(|a| a.target_pos).min().unwrap_or(0);
+            let end = anchors
+                .iter()
+                .map(|a| a.target_pos.saturating_add(syncmer_len))
+                .max()
+                .unwrap_or(start)
+                .min(target_len);
+            raw_hits.push(HomologousIntervalWithAnchors {
+                genome: self.name_map.path_to_name[path_idx].clone(),
+                start,
+                end,
+                strand,
+                anchors,
+            });
+        }
+
+        let chained = crate::syng_transitive::chain_anchors(raw_hits, chain_budget, syncmer_len);
+        let query_len = query_seq.len() as u64;
+        let mut hits: Vec<SyngMapHit> = chained
+            .into_iter()
+            .filter_map(|hit| {
+                if hit.anchors.len() < min_anchors {
+                    return None;
+                }
+                let query_start = hit.anchors.iter().map(|a| a.query_pos).min().unwrap_or(0);
+                let query_end = hit
+                    .anchors
+                    .iter()
+                    .map(|a| a.query_pos.saturating_add(syncmer_len))
+                    .max()
+                    .unwrap_or(query_start)
+                    .min(query_len);
+                let target_len = self
+                    .name_map
+                    .name_to_path
+                    .get(&hit.genome)
+                    .and_then(|idx| self.name_map.path_to_length.get(*idx as usize))
+                    .copied()
+                    .unwrap_or(hit.end);
+                Some(SyngMapHit {
+                    query_name: query_name.to_string(),
+                    query_len,
+                    query_start,
+                    query_end,
+                    target_name: hit.genome,
+                    target_len,
+                    target_start: hit.start,
+                    target_end: hit.end.min(target_len),
+                    strand: hit.strand,
+                    anchors: hit.anchors.len(),
+                })
+            })
+            .collect();
+
+        hits.sort_by(|a, b| {
+            b.anchors
+                .cmp(&a.anchors)
+                .then(a.target_name.cmp(&b.target_name))
+                .then(a.target_start.cmp(&b.target_start))
+        });
+        Ok(hits)
     }
 
     /// Query variant that preserves per-hit shared-syncmer anchor positions.

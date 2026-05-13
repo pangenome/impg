@@ -21,6 +21,8 @@ use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::num::NonZeroUsize;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -110,6 +112,234 @@ fn format_duration(duration: Duration) -> String {
     } else {
         format!("{}us", duration.as_micros())
     }
+}
+
+fn parse_sequence_record_name(line: &str, marker: char) -> String {
+    line.strip_prefix(marker)
+        .unwrap_or("")
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+fn read_query_sequences(path: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
+    let file = File::open(path)?;
+    let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
+        io::Error::other(format!("Failed to open reader for '{}': {}", path, e))
+    })?;
+    let mut reader = BufReader::new(reader);
+
+    let mut first_line = String::new();
+    loop {
+        first_line.clear();
+        if reader.read_line(&mut first_line)? == 0 {
+            return Ok(Vec::new());
+        }
+        if !first_line.trim().is_empty() {
+            break;
+        }
+    }
+
+    if first_line.starts_with('>') {
+        read_fasta_records(reader, first_line)
+    } else if first_line.starts_with('@') {
+        read_fastq_records(reader, first_line)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("query file '{}' is not FASTA or FASTQ", path),
+        ))
+    }
+}
+
+fn read_fasta_records<R: BufRead>(
+    reader: R,
+    first_line: String,
+) -> io::Result<Vec<(String, Vec<u8>)>> {
+    let mut sequences = Vec::new();
+    let mut current_name = parse_sequence_record_name(&first_line, '>');
+    let mut current_seq = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        if line.starts_with('>') {
+            sequences.push((
+                std::mem::take(&mut current_name),
+                std::mem::take(&mut current_seq),
+            ));
+            current_name = parse_sequence_record_name(&line, '>');
+            current_seq.clear();
+        } else {
+            current_seq.extend(line.trim().as_bytes());
+        }
+    }
+    sequences.push((current_name, current_seq));
+    Ok(sequences)
+}
+
+fn read_fastq_records<R: BufRead>(
+    mut reader: R,
+    mut header: String,
+) -> io::Result<Vec<(String, Vec<u8>)>> {
+    let mut sequences = Vec::new();
+    loop {
+        if !header.starts_with('@') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "FASTQ record header must start with '@'",
+            ));
+        }
+        let name = parse_sequence_record_name(&header, '@');
+
+        let mut seq = String::new();
+        let mut plus = String::new();
+        let mut qual = String::new();
+        if reader.read_line(&mut seq)? == 0
+            || reader.read_line(&mut plus)? == 0
+            || reader.read_line(&mut qual)? == 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "truncated FASTQ record",
+            ));
+        }
+        if !plus.starts_with('+') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "FASTQ separator line must start with '+'",
+            ));
+        }
+        sequences.push((name, seq.trim().as_bytes().to_vec()));
+
+        header.clear();
+        loop {
+            if reader.read_line(&mut header)? == 0 {
+                return Ok(sequences);
+            }
+            if !header.trim().is_empty() {
+                break;
+            }
+            header.clear();
+        }
+    }
+}
+
+fn write_syng_map_gaf<W: Write>(
+    out: &mut W,
+    query_name: &str,
+    query_len: u64,
+    syncmer_len: u64,
+    syncmers: &[impg::syng::SyngQuerySyncmer],
+) -> io::Result<()> {
+    if syncmers.is_empty() {
+        return Ok(());
+    }
+    let qstart = syncmers.iter().map(|s| s.query_pos).min().unwrap_or(0);
+    let qend = syncmers
+        .iter()
+        .map(|s| s.query_pos.saturating_add(syncmer_len))
+        .max()
+        .unwrap_or(qstart)
+        .min(query_len);
+    let mut path = String::new();
+    for sm in syncmers {
+        let orient = if sm.signed_node >= 0 { '>' } else { '<' };
+        path.push(orient);
+        path.push_str(&sm.node_id.to_string());
+    }
+    let path_len = (syncmers.len() as u64).saturating_mul(syncmer_len);
+    let matches = path_len.min(qend.saturating_sub(qstart));
+    let block_len = qend.saturating_sub(qstart);
+    writeln!(
+        out,
+        "{}\t{}\t{}\t{}\t+\t{}\t{}\t0\t{}\t{}\t{}\t0\tan:i:{}\tsk:i:{}",
+        query_name,
+        query_len,
+        qstart,
+        qend,
+        path,
+        path_len,
+        path_len,
+        matches,
+        block_len,
+        syncmers.len(),
+        syncmer_len
+    )
+}
+
+fn write_syng_map_paf<W: Write>(
+    out: &mut W,
+    hit: &impg::syng::SyngMapHit,
+    syncmer_len: u64,
+) -> io::Result<()> {
+    let matches = (hit.anchors as u64).saturating_mul(syncmer_len);
+    let block_len = hit
+        .query_end
+        .saturating_sub(hit.query_start)
+        .max(hit.target_end.saturating_sub(hit.target_start));
+    writeln!(
+        out,
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t0\tan:i:{}\tsk:i:{}",
+        hit.query_name,
+        hit.query_len,
+        hit.query_start,
+        hit.query_end,
+        hit.strand,
+        hit.target_name,
+        hit.target_len,
+        hit.target_start,
+        hit.target_end,
+        matches,
+        block_len,
+        hit.anchors,
+        syncmer_len
+    )
+}
+
+#[cfg(unix)]
+fn with_stdout_silenced<T, F>(f: F) -> io::Result<T>
+where
+    F: FnOnce() -> io::Result<T>,
+{
+    io::stdout().flush()?;
+    let saved_stdout = unsafe { libc::dup(libc::STDOUT_FILENO) };
+    if saved_stdout < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let devnull = File::open("/dev/null")?;
+    if unsafe { libc::dup2(devnull.as_raw_fd(), libc::STDOUT_FILENO) } < 0 {
+        let e = io::Error::last_os_error();
+        unsafe {
+            libc::close(saved_stdout);
+        }
+        return Err(e);
+    }
+    let result = f();
+    io::stdout().flush()?;
+    unsafe {
+        libc::fflush(std::ptr::null_mut());
+    }
+    let restore_result = if unsafe { libc::dup2(saved_stdout, libc::STDOUT_FILENO) } < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    };
+    unsafe {
+        libc::close(saved_stdout);
+    }
+    match (result, restore_result) {
+        (Ok(v), Ok(())) => Ok(v),
+        (Err(e), _) => Err(e),
+        (Ok(_), Err(e)) => Err(e),
+    }
+}
+
+#[cfg(not(unix))]
+fn with_stdout_silenced<T, F>(f: F) -> io::Result<T>
+where
+    F: FnOnce() -> io::Result<T>,
+{
+    f()
 }
 
 /// Resolve the `--temp-dir` value to an absolute path.
@@ -1397,6 +1627,41 @@ enum Args {
         // --- Alignment ---
         #[clap(flatten)]
         aln: AlnOpts,
+
+        // --- General ---
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+
+    /// Map sequences to a syng index using exact shared syncmers
+    Map {
+        /// Syng index prefix or .1khash/.1gbwt path
+        #[clap(short = 'a', long, value_parser)]
+        index: String,
+
+        /// Query FASTA or FASTQ file
+        #[clap(short = 'q', long, value_parser)]
+        query: String,
+
+        /// Output format: gaf (syncmer-node support) or paf (projected genome coordinates)
+        #[clap(short = 'o', long, value_parser, default_value = "paf")]
+        output_format: String,
+
+        /// Output file path (default: stdout)
+        #[clap(short = 'O', long, value_parser)]
+        output: Option<String>,
+
+        /// Minimum shared syncmer anchors required to emit a mapping
+        #[clap(long, value_parser, default_value_t = 2)]
+        min_anchors: usize,
+
+        /// Anchor chaining budget for PAF projection
+        #[clap(long, value_parser, default_value_t = 10000)]
+        chain_budget: u64,
+
+        /// Maximum PAF hits to emit per query (0 = no limit)
+        #[clap(long, value_parser, default_value_t = 0)]
+        max_hits: usize,
 
         // --- General ---
         #[clap(flatten)]
@@ -3230,6 +3495,76 @@ fn run() -> io::Result<()> {
             };
 
             impg::commands::align::run_align(fasta_files, &output_dir, config)?;
+        }
+        Args::Map {
+            index,
+            query,
+            output_format,
+            output,
+            min_anchors,
+            chain_budget,
+            max_hits,
+            common,
+        } => {
+            initialize_threads_and_log(&common);
+
+            let syng_prefix = detect_syng_prefix(&index).unwrap_or(index);
+            info!("Loading syng index from prefix: {}", syng_prefix);
+            let syng_index = with_stdout_silenced(|| {
+                impg::syng::SyngIndex::load(&syng_prefix, impg::syng::SyncmerParams::default())
+            })?;
+            let syncmer_len = (syng_index.params.k + syng_index.params.w) as u64;
+            let queries = read_query_sequences(&query)?;
+
+            let mut out: Box<dyn Write> = match output {
+                Some(path) => Box::new(BufWriter::new(File::create(path)?)),
+                None => Box::new(BufWriter::new(io::stdout())),
+            };
+
+            match output_format.as_str() {
+                "gaf" => {
+                    for (query_name, query_seq) in queries {
+                        let mut syncmers = syng_index.matched_syncmers_in_sequence(&query_seq);
+                        if syncmers.len() < min_anchors {
+                            continue;
+                        }
+                        syncmers.sort_by(|a, b| {
+                            a.query_pos
+                                .cmp(&b.query_pos)
+                                .then(a.node_id.cmp(&b.node_id))
+                        });
+                        write_syng_map_gaf(
+                            &mut out,
+                            &query_name,
+                            query_seq.len() as u64,
+                            syncmer_len,
+                            &syncmers,
+                        )?;
+                    }
+                }
+                "paf" => {
+                    for (query_name, query_seq) in queries {
+                        let mut hits = syng_index.map_sequence(
+                            &query_name,
+                            &query_seq,
+                            min_anchors,
+                            chain_budget,
+                        )?;
+                        if max_hits > 0 && hits.len() > max_hits {
+                            hits.truncate(max_hits);
+                        }
+                        for hit in hits {
+                            write_syng_map_paf(&mut out, &hit, syncmer_len)?;
+                        }
+                    }
+                }
+                other => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("unsupported map output format '{}'; expected 'gaf' or 'paf'", other),
+                    ));
+                }
+            }
         }
         Args::Syng {
             agc,
