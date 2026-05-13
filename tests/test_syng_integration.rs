@@ -128,6 +128,10 @@ fn test_syng_agc_build_produces_non_empty_index() {
             "syng",
             "--agc",
             agc_path.to_str().unwrap(),
+            "--syncmer-length",
+            "63",
+            "--smer-length",
+            "8",
             "-o",
             out_prefix.to_str().unwrap(),
         ])

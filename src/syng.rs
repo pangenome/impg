@@ -481,112 +481,9 @@ impl SyngIndex {
         sequences: impl Iterator<Item = (String, Vec<u8>)>,
     ) -> Self {
         let mut index = Self::new(params);
-        let syncmer_len = (params.w + params.k) as usize;
 
         for (name, seq) in sequences {
-            let seq_len = seq.len();
-            if seq_len < syncmer_len {
-                // Sequence too short for syncmer extraction — record in name map but skip
-                index.name_map.add(name, seq_len as u64);
-                continue;
-            }
-
-            // Convert sequence to numeric encoding (0=a, 1=c, 2=g, 3=t) for the C
-            // seqhash library.  The seqhash uses raw byte values as array indices
-            // into patternRC[4], so the values MUST be 0-3.
-            let mut seq_buf: Vec<u8> = Vec::with_capacity(seq_len + 1);
-            seq_buf.extend(seq.iter().map(|&b| match b {
-                b'a' | b'A' | 0 => 0u8,
-                b'c' | b'C' | 1 => 1u8,
-                b'g' | b'G' | 2 => 2u8,
-                b't' | b'T' | 3 => 3u8,
-                _ => 0u8, // N -> a (syng convention)
-            }));
-            seq_buf.push(0); // null terminator
-
-            // Extract syncmers and build GBWT paths
-            let mut syncmers: Vec<(i64, i32)> = Vec::new(); // (kmer_index, position)
-
-            unsafe {
-                let sit = syng_ffi::syncmerIterator(
-                    index.seqhash,
-                    seq_buf.as_mut_ptr() as *mut i8,
-                    seq_len as i32,
-                );
-
-                let mut pos: i32 = 0;
-                while syng_ffi::syncmerNext(
-                    sit,
-                    std::ptr::null_mut(),
-                    &mut pos,
-                    std::ptr::null_mut(),
-                ) {
-                    // Add the syncmer to the KmerHash (or find existing)
-                    let mut kmer_index: i64 = 0;
-                    syng_ffi::kmerHashAdd(
-                        index.kmer_hash,
-                        seq_buf.as_mut_ptr().add(pos as usize) as *mut i8,
-                        &mut kmer_index,
-                    );
-                    syncmers.push((kmer_index, pos));
-                }
-
-                syng_ffi::impg_seqhashIteratorDestroy(sit);
-            }
-
-            if syncmers.is_empty() {
-                index.name_map.add(name, seq_len as u64);
-                continue;
-            }
-
-            // Build forward GBWT path and capture start info
-            let fwd_start_node;
-            let fwd_start_count;
-            // Syng's first syncmer lands at wherever the first min k-mer
-            // appears in the initial window — anywhere in `[0, w+k)`. We
-            // record it so `walk_path` can emit absolute bp coordinates.
-            let fwd_first_syncmer_pos = syncmers[0].1 as u64;
-            unsafe {
-                let first_sync = syncmers[0].0 as i32;
-                let sbp = syng_ffi::syngBWTpathStartNew(index.gbwt, first_sync);
-                // Capture start info before any path additions modify it
-                fwd_start_node = first_sync;
-                fwd_start_count = (*sbp).j_last;
-                for i in 1..syncmers.len() {
-                    let next_sync = syncmers[i].0 as i32;
-                    let offset = (syncmers[i].1 - syncmers[i - 1].1) as u32;
-                    syng_ffi::syngBWTpathAdd(sbp, next_sync, offset);
-                }
-                syng_ffi::syngBWTpathFinish(sbp);
-            }
-
-            // Build reverse complement GBWT path
-            // Reverse: negate all syncmer indices and reverse the order.
-            // Offsets between consecutive syncmers stay the same but are
-            // computed from the reverse direction.
-            unsafe {
-                let n = syncmers.len();
-                let first_sync_rc = -(syncmers[n - 1].0 as i32);
-                let sbp = syng_ffi::syngBWTpathStartNew(index.gbwt, first_sync_rc);
-                for i in (0..n - 1).rev() {
-                    let next_sync_rc = -(syncmers[i].0 as i32);
-                    let offset = (syncmers[i + 1].1 - syncmers[i].1) as u32;
-                    syng_ffi::syngBWTpathAdd(sbp, next_sync_rc, offset);
-                }
-                syng_ffi::syngBWTpathFinish(sbp);
-            }
-
-            // Record in name map with path start info
-            let path_num = index.name_map.add(name, seq_len as u64);
-            index.name_map.set_path_start(
-                path_num,
-                GbwtPathStart {
-                    start_node: fwd_start_node,
-                    start_count: fwd_start_count,
-                    num_syncmers: syncmers.len() as u32,
-                    first_syncmer_pos: fwd_first_syncmer_pos,
-                },
-            );
+            index.add_sequence(name, seq);
         }
 
         // Eagerly build the FastLocate fast path. This makes `query_region`
@@ -598,6 +495,122 @@ impl SyngIndex {
         }
 
         index
+    }
+
+    /// Add one sequence to the syng index.
+    ///
+    /// This is the same per-sequence work used by [`Self::build`], exposed so
+    /// large callers can stream inputs without buffering all decompressed
+    /// sequences before GBWT construction.
+    pub fn add_sequence(&mut self, name: String, seq: Vec<u8>) {
+        self.gbz_gbwt = None;
+        self.fast_locate = None;
+        self.bp_offsets = None;
+
+        let syncmer_len = (self.params.w + self.params.k) as usize;
+        let seq_len = seq.len();
+        if seq_len < syncmer_len {
+            // Sequence too short for syncmer extraction — record in name map but skip
+            self.name_map.add(name, seq_len as u64);
+            return;
+        }
+
+        // Convert sequence to numeric encoding (0=a, 1=c, 2=g, 3=t) for the C
+        // seqhash library.  The seqhash uses raw byte values as array indices
+        // into patternRC[4], so the values MUST be 0-3.
+        let mut seq_buf: Vec<u8> = Vec::with_capacity(seq_len + 1);
+        seq_buf.extend(seq.iter().map(|&b| match b {
+            b'a' | b'A' | 0 => 0u8,
+            b'c' | b'C' | 1 => 1u8,
+            b'g' | b'G' | 2 => 2u8,
+            b't' | b'T' | 3 => 3u8,
+            _ => 0u8, // N -> a (syng convention)
+        }));
+        seq_buf.push(0); // null terminator
+
+        // Extract syncmers and build GBWT paths
+        let mut syncmers: Vec<(i64, i32)> = Vec::new(); // (kmer_index, position)
+
+        unsafe {
+            let sit = syng_ffi::syncmerIterator(
+                self.seqhash,
+                seq_buf.as_mut_ptr() as *mut i8,
+                seq_len as i32,
+            );
+
+            let mut pos: i32 = 0;
+            while syng_ffi::syncmerNext(
+                sit,
+                std::ptr::null_mut(),
+                &mut pos,
+                std::ptr::null_mut(),
+            ) {
+                // Add the syncmer to the KmerHash (or find existing)
+                let mut kmer_index: i64 = 0;
+                syng_ffi::kmerHashAdd(
+                    self.kmer_hash,
+                    seq_buf.as_mut_ptr().add(pos as usize) as *mut i8,
+                    &mut kmer_index,
+                );
+                syncmers.push((kmer_index, pos));
+            }
+
+            syng_ffi::impg_seqhashIteratorDestroy(sit);
+        }
+
+        if syncmers.is_empty() {
+            self.name_map.add(name, seq_len as u64);
+            return;
+        }
+
+        // Build forward GBWT path and capture start info
+        let fwd_start_node;
+        let fwd_start_count;
+        // Syng's first syncmer lands at wherever the first min k-mer
+        // appears in the initial window — anywhere in `[0, w+k)`. We
+        // record it so `walk_path` can emit absolute bp coordinates.
+        let fwd_first_syncmer_pos = syncmers[0].1 as u64;
+        unsafe {
+            let first_sync = syncmers[0].0 as i32;
+            let sbp = syng_ffi::syngBWTpathStartNew(self.gbwt, first_sync);
+            // Capture start info before any path additions modify it
+            fwd_start_node = first_sync;
+            fwd_start_count = (*sbp).j_last;
+            for i in 1..syncmers.len() {
+                let next_sync = syncmers[i].0 as i32;
+                let offset = (syncmers[i].1 - syncmers[i - 1].1) as u32;
+                syng_ffi::syngBWTpathAdd(sbp, next_sync, offset);
+            }
+            syng_ffi::syngBWTpathFinish(sbp);
+        }
+
+        // Build reverse complement GBWT path
+        // Reverse: negate all syncmer indices and reverse the order.
+        // Offsets between consecutive syncmers stay the same but are
+        // computed from the reverse direction.
+        unsafe {
+            let n = syncmers.len();
+            let first_sync_rc = -(syncmers[n - 1].0 as i32);
+            let sbp = syng_ffi::syngBWTpathStartNew(self.gbwt, first_sync_rc);
+            for i in (0..n - 1).rev() {
+                let next_sync_rc = -(syncmers[i].0 as i32);
+                let offset = (syncmers[i + 1].1 - syncmers[i].1) as u32;
+                syng_ffi::syngBWTpathAdd(sbp, next_sync_rc, offset);
+            }
+            syng_ffi::syngBWTpathFinish(sbp);
+        }
+
+        // Record in name map with path start info
+        let path_num = self.name_map.add(name, seq_len as u64);
+        self.name_map.set_path_start(
+            path_num,
+            GbwtPathStart {
+                start_node: fwd_start_node,
+                start_count: fwd_start_count,
+                num_syncmers: syncmers.len() as u32,
+                first_syncmer_pos: fwd_first_syncmer_pos,
+            },
+        );
     }
 
     /// Save the index to disk.
