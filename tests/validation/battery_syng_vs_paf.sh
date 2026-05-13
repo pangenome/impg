@@ -59,7 +59,7 @@ for region in $regions; do
     syng_bed="$tmpdir/$(echo "$region" | tr '/:' '__').syng.bed"
     paf_bed="$tmpdir/$(echo "$region" | tr '/:' '__').paf.bed"
 
-    impg query --syng "$syng_prefix" --sequence-files "$agc_path" \
+    impg query -a "$syng_prefix" --sequence-files "$agc_path" \
         -r "$region" -d 10000 -o bed \
         > "$syng_bed" 2>/dev/null || { echo "syng query failed: $region" >&2; continue; }
 

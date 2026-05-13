@@ -823,13 +823,9 @@ fn detect_syng_prefix(path: &str) -> Option<String> {
     None
 }
 
-/// Resolve the effective syng prefix for a command: explicit `--syng`
-/// wins; otherwise if the single alignment argument looks like a syng
-/// index path, use that.
-fn resolve_syng_prefix(syng: &Option<String>, alignment: &AlignmentOpts) -> Option<String> {
-    if syng.is_some() {
-        return syng.clone();
-    }
+/// Resolve the effective syng prefix for a command: if the single
+/// alignment argument looks like a syng index path, use that.
+fn resolve_syng_prefix(alignment: &AlignmentOpts) -> Option<String> {
     if alignment.alignment_files.len() == 1 {
         detect_syng_prefix(&alignment.alignment_files[0])
     } else {
@@ -966,11 +962,6 @@ enum Args {
         #[clap(flatten)]
         alignment: AlignmentOpts,
 
-        /// Syng index prefix (mutually exclusive with -a/--alignment-files)
-        #[arg(help_heading = "Syng input")]
-        #[clap(long, value_parser, conflicts_with_all = ["alignment_files", "alignment_list"])]
-        syng: Option<String>,
-
         /// Boundary padding in bp for syng queries (default: 120 = 2× syncmer length)
         #[arg(help_heading = "Syng input")]
         #[clap(long, value_parser, default_value_t = 120)]
@@ -1087,11 +1078,6 @@ enum Args {
         #[clap(flatten)]
         alignment: AlignmentOpts,
 
-        /// Syng index prefix (mutually exclusive with -a/--alignment-files)
-        #[arg(help_heading = "Syng input")]
-        #[clap(long, value_parser, conflicts_with_all = ["alignment_files", "alignment_list"])]
-        syng: Option<String>,
-
         /// Boundary padding in bp for syng queries (default: 120 = 2× syncmer length)
         #[arg(help_heading = "Syng input")]
         #[clap(long, value_parser, default_value_t = 120)]
@@ -1146,7 +1132,7 @@ enum Args {
         syng_min_chain_fraction: f64,
 
         /// Debug-only: skip boundary realignment and emit raw syncmer-resolution
-        /// intervals from syng's query_region. The default --syng path runs
+        /// intervals from syng's query_region. The default syng path runs
         /// BiWFA boundary realignment for base-pair-precise edges (and iterates
         /// under --transitive). Use --syng-raw to inspect the underlying syng
         /// hits without refinement.
@@ -1516,7 +1502,6 @@ fn run() -> io::Result<()> {
         Args::Partition {
             common,
             alignment,
-            syng,
             syng_padding,
             syng_min_chain_anchors,
             syng_min_chain_fraction,
@@ -1597,14 +1582,14 @@ fn run() -> io::Result<()> {
             }
 
             // Allow `-a <prefix>` or `-a <prefix>.1khash` to route to syng.
-            let effective_syng = resolve_syng_prefix(&syng, &alignment);
+            let effective_syng = resolve_syng_prefix(&alignment);
 
             // ─── Syng-based partition path ──────────────────────────────────
             if let Some(ref syng_prefix) = effective_syng {
                 if approximate {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        "--approximate mode is not supported with --syng",
+                        "--approximate mode is not supported with syng index input",
                     ));
                 }
 
@@ -1619,7 +1604,7 @@ fn run() -> io::Result<()> {
                     if si.is_none() {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
-                            format!("Sequence files are required for '{}' output with --syng. Use --sequence-files or --sequence-list", output_format),
+                            format!("Sequence files are required for '{}' output with syng index input. Use --sequence-files or --sequence-list", output_format),
                         ));
                     }
                     si
@@ -1726,7 +1711,6 @@ fn run() -> io::Result<()> {
         Args::Query {
             common,
             alignment,
-            syng,
             syng_padding,
             syng_extension,
             syng_extend_budget,
@@ -1780,8 +1764,8 @@ fn run() -> io::Result<()> {
             }
 
             // Allow `-a <prefix>` or `-a <prefix>.1khash` to auto-route
-            // to the syng backend without requiring `--syng`.
-            let effective_syng = resolve_syng_prefix(&syng, &alignment);
+            // to the syng backend.
+            let effective_syng = resolve_syng_prefix(&alignment);
 
             // ─── Syng query path ──────────────────────────────────────────
             if let Some(ref syng_prefix) = effective_syng {
@@ -1794,7 +1778,7 @@ fn run() -> io::Result<()> {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "--syng queries currently support 'bed', 'bedpe', 'gfa', 'fasta', and 'gbwt' output formats, not '{}'",
+                            "syng index queries currently support 'bed', 'bedpe', 'gfa', 'fasta', and 'gbwt' output formats, not '{}'",
                             resolved_format
                         ),
                     ));
@@ -1859,9 +1843,9 @@ fn run() -> io::Result<()> {
                     let si = gfa_maf_fasta.sequence.build_sequence_index()?;
                     if si.is_none() {
                         let reason = if use_boundary_realign && resolved_format == "bed" {
-                            "boundary realignment (default --syng behavior). Use --syng-raw for the syncmer-resolution pass-through, or".to_string()
+                            "boundary realignment (default syng behavior). Use --syng-raw for the syncmer-resolution pass-through, or".to_string()
                         } else {
-                            format!("'{}' output with --syng.", resolved_format)
+                            format!("'{}' output with syng index input.", resolved_format)
                         };
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,

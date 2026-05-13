@@ -4,7 +4,7 @@
 //! - `impg syng --agc` builds a non-empty index (caught a silent failure in the
 //!   yeast235 workflow where only `.syng.names` got written).
 //! - `impg syng --agc` round-trips: built index can be loaded and queried.
-//! - `impg partition --syng` runs end-to-end and produces non-empty BED.
+//! - `impg partition -a <syng-prefix>` runs end-to-end and produces non-empty BED.
 
 use ahash::AHashSet;
 use ragc_core::{StreamingQueueCompressor, StreamingQueueConfig};
@@ -394,7 +394,7 @@ fn test_syng_identical_sequences_build_and_query() {
 
 #[test]
 fn test_partition_syng_end_to_end_bed() {
-    // End-to-end: build syng index from FASTA, then run `impg partition --syng`
+    // End-to-end: build syng index from FASTA, then run `impg partition -a`
     // and verify non-empty BED output. This is the path I added but never
     // exercised via CLI until now.
     let _guard = lock_syng();
@@ -445,13 +445,13 @@ fn test_partition_syng_end_to_end_bed() {
         String::from_utf8_lossy(&build.stderr)
     );
 
-    // Step 2: run partition --syng with BED output
+    // Step 2: run partition -a with a syng index prefix and BED output
     let out_folder = dir.join("parts");
     std::fs::create_dir_all(&out_folder).unwrap();
     let part = Command::new(&bin)
         .args([
             "partition",
-            "--syng",
+            "-a",
             syng_prefix.to_str().unwrap(),
             "-w",
             "1500",
@@ -467,10 +467,10 @@ fn test_partition_syng_end_to_end_bed() {
             "1",
         ])
         .output()
-        .expect("Failed to run impg partition --syng");
+        .expect("Failed to run impg partition -a syng prefix");
     assert!(
         part.status.success(),
-        "impg partition --syng failed. stdout: {} stderr: {}",
+        "impg partition -a syng prefix failed. stdout: {} stderr: {}",
         String::from_utf8_lossy(&part.stdout),
         String::from_utf8_lossy(&part.stderr)
     );
@@ -497,7 +497,7 @@ fn test_partition_syng_end_to_end_bed() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// Regression test: `impg query --syng -o gfa --gfa-engine seqwish:X` must
+/// Regression test: `impg query -a <syng-prefix> -o gfa --gfa-engine seqwish:X` must
 /// treat `X` as a sub-window size and split the query range into per-window
 /// partitions, not silently collapse into a flat single-engine run.
 ///
@@ -572,7 +572,7 @@ fn test_query_syng_gfa_subwindow_splitter() {
     let out = Command::new(&bin)
         .args([
             "query",
-            "--syng", syng_prefix.to_str().unwrap(),
+            "-a", syng_prefix.to_str().unwrap(),
             "--sequence-files", fasta_path.to_str().unwrap(),
             "-r", "sampleA#0#chr1:0-3000",
             "-o", "gfa",

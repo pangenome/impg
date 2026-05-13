@@ -3248,20 +3248,20 @@ mod tests {
             "impg syng failed: {}", String::from_utf8_lossy(&output.stderr)
         );
 
-        // Query via --syng with BED output
+        // Query via -a syng prefix with BED output
         let output = std::process::Command::new(&bin)
             .args([
                 "query",
-                "--syng", output_prefix.to_str().unwrap(),
+                "-a", output_prefix.to_str().unwrap(),
                 "--sequence-files", fasta_path.to_str().unwrap(),
                 "-r", "genome_a:0-400",
                 "-o", "bed",
             ])
             .output()
-            .expect("Failed to run impg query --syng");
+            .expect("Failed to run impg query -a syng prefix");
         assert!(
             output.status.success(),
-            "impg query --syng failed: {}", String::from_utf8_lossy(&output.stderr)
+            "impg query -a syng prefix failed: {}", String::from_utf8_lossy(&output.stderr)
         );
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -3324,16 +3324,16 @@ mod tests {
         let output = std::process::Command::new(&bin)
             .args([
                 "query",
-                "--syng", output_prefix.to_str().unwrap(),
+                "-a", output_prefix.to_str().unwrap(),
                 "--sequence-files", fasta_path.to_str().unwrap(),
                 "-r", "genome_a:0-400",
                 "-o", "gfa",
             ])
             .output()
-            .expect("Failed to run impg query --syng -o gfa");
+            .expect("Failed to run impg query -a syng prefix -o gfa");
         assert!(
             output.status.success(),
-            "impg query --syng -o gfa failed: {}", String::from_utf8_lossy(&output.stderr)
+            "impg query -a syng prefix -o gfa failed: {}", String::from_utf8_lossy(&output.stderr)
         );
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -3344,39 +3344,6 @@ mod tests {
         // Check for path-related lines (W or P lines)
         let has_paths = stdout.lines().any(|l| l.starts_with("W\t") || l.starts_with("P\t"));
         assert!(has_paths, "GFA output should contain W or P lines. Got:\n{}", stdout);
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn test_syng_cli_mutual_exclusivity() {
-        let _guard = lock_syng();
-        // --syng + -a should produce an error
-        let dir = std::env::temp_dir().join("impg_test_syng_cli_mutex");
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let bin = find_impg_binary();
-        if bin.is_none() {
-            eprintln!("Skipping CLI test: impg binary not found");
-            std::fs::remove_dir_all(&dir).ok();
-            return;
-        }
-        let bin = bin.unwrap();
-
-        let output = std::process::Command::new(&bin)
-            .args([
-                "query",
-                "--syng", "some_prefix",
-                "-a", "some_alignment.paf",
-                "-r", "genome_a:0-100",
-            ])
-            .output()
-            .expect("Failed to run impg query");
-
-        assert!(
-            !output.status.success(),
-            "Using --syng with -a should fail"
-        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -3983,7 +3950,7 @@ mod tests {
     #[test]
     fn test_syng_cli_gbwt_output_from_syng_index() {
         let _guard = lock_syng();
-        // impg query --syng prefix -f test.fa -r region -o gbwt -O tmpdir/region
+        // impg query -a prefix -f test.fa -r region -o gbwt -O tmpdir/region
         let dir = std::env::temp_dir().join("impg_test_cli_gbwt_output");
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -4028,7 +3995,7 @@ mod tests {
         let output = std::process::Command::new(&bin)
             .args([
                 "query",
-                "--syng", idx_prefix.to_str().unwrap(),
+                "-a", idx_prefix.to_str().unwrap(),
                 "--sequence-files", fasta_path.to_str().unwrap(),
                 "-r", "genome_a:0-400",
                 "-o", "gbwt",
@@ -4038,7 +4005,7 @@ mod tests {
             .expect("Failed to run impg query -o gbwt");
         assert!(
             output.status.success(),
-            "impg query --syng -o gbwt failed: {}",
+            "impg query -a syng prefix -o gbwt failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
 
@@ -4154,7 +4121,7 @@ mod tests {
         let output = std::process::Command::new(&bin)
             .args([
                 "query",
-                "--syng", "/tmp/nonexistent_prefix",
+                "-a", "/tmp/nonexistent_prefix",
                 "-r", "genome_a:0-100",
                 "-o", "gbwt",
             ])

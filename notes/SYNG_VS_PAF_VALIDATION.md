@@ -23,7 +23,7 @@ impg query -a yeast235_vs_S288C.paf --sequence-files yeast235.agc \
     > paf_query.bed
 
 # Syng-based query
-impg query --syng yeast235 --sequence-files yeast235.agc \
+impg query -a yeast235 --sequence-files yeast235.agc \
     -r 'S288C#0#chrIV:408000-410000' -d 10000 -o bed \
     > syng_query.bed
 

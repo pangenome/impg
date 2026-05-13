@@ -142,7 +142,7 @@ handle them correctly.
   from syng; `Anchor` and `HomologousIntervalWithAnchors` types.
 - `src/syng_transitive.rs`: `distance_merge_anchored`, `project_query_to_target`,
   `refine_boundaries`, `one_hop`, `query_transitive`.
-- `src/main.rs`: `--syng` query routes through `query_transitive` for all
+- `src/main.rs`: syng-index query routes through `query_transitive` for all
   output formats (bed, fasta, gbwt, gfa) when `--syng-raw` isn't set.
   Passes `query.transitive_opts.min_distance_between_ranges` as the
   merge distance.

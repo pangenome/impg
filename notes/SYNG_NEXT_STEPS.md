@@ -27,7 +27,7 @@ bottom.
   resolved by majority anchor count; non-overlapping both kept.
 - `refine_boundaries` — BiWFA EndsFree edge realignment anchored at the
   innermost shared syncmer; linear projection fallback.
-- CLI: default `--syng` bed/fasta/gbwt/gfa all route through the
+- CLI: syng-index `-a <prefix>` bed/fasta/gbwt/gfa all route through the
   pipeline. `-d` honoured. `--syng-raw` bypass for debug.
 
 **Observed on yeast235 `S288C#0#chrIV:408000-410000 -d 10000`:**
@@ -102,7 +102,7 @@ blamed on either side.
 5. **Run the syng query on the same region.**
 
    ```bash
-   impg query --syng yeast235 \
+   impg query -a yeast235 \
        --sequence-files yeast235.agc \
        -r 'S288C#0#chrIV:408000-410000' \
        -d 10000 -o bed > syng_query.bed
@@ -158,7 +158,7 @@ is misconfigured or it has a bug the reference implementation doesn't.
   with:
 
   ```bash
-  impg query --syng yeast235 --sequence-files yeast235.agc \
+  impg query -a yeast235 --sequence-files yeast235.agc \
       -r 'S288C#0#chrIV:408000-410000' \
       -o gfa --gfa-engine seqwish -O /tmp/yeast_sw -d 10000
   ```
