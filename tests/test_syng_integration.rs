@@ -195,7 +195,15 @@ fn test_syng_agc_roundtrip_query() {
     let out_prefix_str = out_prefix.to_str().unwrap();
 
     let build_output = Command::new(&bin)
-        .args(["syng", "--agc", agc_path.to_str().unwrap(), "-o", out_prefix_str])
+        .args([
+            "syng",
+            "--agc",
+            agc_path.to_str().unwrap(),
+            "-o",
+            out_prefix_str,
+            "--position-sample-shift",
+            "0",
+        ])
         .output()
         .expect("Failed to run impg syng --agc");
     assert!(
@@ -368,7 +376,8 @@ fn test_syng_map_cli_gaf_and_paf() {
             fasta_path.to_str().unwrap(),
             "-o",
             idx_prefix.to_str().unwrap(),
-            "--locate",
+            "--position-sample-shift",
+            "0",
         ])
         .output()
         .expect("failed to run impg syng");
@@ -517,7 +526,7 @@ fn test_syng_map_cli_sampled_positions_paf() {
     );
     assert!(
         !std::path::Path::new(&format!("{}.syng.locate", idx_prefix.to_str().unwrap())).exists(),
-        "legacy FastLocate sidecar should not be built without --locate"
+        "legacy FastLocate sidecar should not be built"
     );
 
     let paf = Command::new(&bin)
@@ -552,116 +561,6 @@ fn test_syng_map_cli_sampled_positions_paf() {
     assert!(
         paf_lines.iter().any(|l| l.contains("sampleB#0#chr1")),
         "expected sampleB hit, got:\n{}",
-        paf_stdout
-    );
-
-    std::fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
-fn test_syng_pos_cli_builds_existing_sidecar() {
-    let _guard = lock_syng();
-    let Some(bin) = impg_binary() else {
-        eprintln!("Skipping: impg binary not built");
-        return;
-    };
-
-    let dir = std::env::temp_dir().join("impg_test_syng_pos_cli");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-
-    let backbone = numeric_to_ascii(&make_sequence_numeric(1000, 42));
-    let tail_a = numeric_to_ascii(&make_sequence_numeric(400, 1));
-    let tail_b = numeric_to_ascii(&make_sequence_numeric(400, 2));
-
-    let fasta_path = dir.join("index.fa");
-    {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&fasta_path).unwrap();
-        writeln!(f, ">sampleA#0#chr1").unwrap();
-        f.write_all(&backbone).unwrap();
-        f.write_all(&tail_a).unwrap();
-        writeln!(f).unwrap();
-        writeln!(f, ">sampleB#0#chr1").unwrap();
-        f.write_all(&backbone).unwrap();
-        f.write_all(&tail_b).unwrap();
-        writeln!(f).unwrap();
-    }
-
-    let query_path = dir.join("query.fa");
-    {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&query_path).unwrap();
-        writeln!(f, ">read1").unwrap();
-        f.write_all(&backbone[100..800]).unwrap();
-        writeln!(f).unwrap();
-    }
-
-    let idx_prefix = dir.join("idx");
-    let build = Command::new(&bin)
-        .args([
-            "syng",
-            "-f",
-            fasta_path.to_str().unwrap(),
-            "-o",
-            idx_prefix.to_str().unwrap(),
-            "--no-position-samples",
-        ])
-        .output()
-        .expect("failed to run impg syng without sampled positions");
-    assert!(
-        build.status.success(),
-        "impg syng failed: {}",
-        String::from_utf8_lossy(&build.stderr)
-    );
-    assert!(
-        !std::path::Path::new(&format!("{}.syng.spos", idx_prefix.to_str().unwrap())).exists(),
-        ".syng.spos should not be written with --no-position-samples"
-    );
-
-    let build_pos = Command::new(&bin)
-        .args([
-            "syng-pos",
-            "-a",
-            idx_prefix.to_str().unwrap(),
-            "--position-sample-shift",
-            "0",
-        ])
-        .output()
-        .expect("failed to run impg syng-pos");
-    assert!(
-        build_pos.status.success(),
-        "impg syng-pos failed: {}",
-        String::from_utf8_lossy(&build_pos.stderr)
-    );
-    assert!(
-        std::path::Path::new(&format!("{}.syng.spos", idx_prefix.to_str().unwrap())).exists(),
-        "syng-pos should write .syng.spos"
-    );
-
-    let paf = Command::new(&bin)
-        .args([
-            "map",
-            "-a",
-            idx_prefix.to_str().unwrap(),
-            "-q",
-            query_path.to_str().unwrap(),
-            "-o",
-            "paf",
-            "--min-anchors",
-            "2",
-        ])
-        .output()
-        .expect("failed to run impg map -o paf after syng-pos");
-    assert!(
-        paf.status.success(),
-        "impg map -o paf failed: {}",
-        String::from_utf8_lossy(&paf.stderr)
-    );
-    let paf_stdout = String::from_utf8_lossy(&paf.stdout);
-    assert!(
-        paf_stdout.contains("sampleA#0#chr1") && paf_stdout.contains("sampleB#0#chr1"),
-        "expected sampleA and sampleB hits, got:\n{}",
         paf_stdout
     );
 
@@ -704,7 +603,15 @@ fn test_syng_identical_sequences_build_and_query() {
 
     let out_prefix = dir.join("idx");
     let build = Command::new(&bin)
-        .args(["syng", "-f", fasta_path.to_str().unwrap(), "-o", out_prefix.to_str().unwrap()])
+        .args([
+            "syng",
+            "-f",
+            fasta_path.to_str().unwrap(),
+            "-o",
+            out_prefix.to_str().unwrap(),
+            "--position-sample-shift",
+            "0",
+        ])
         .output()
         .expect("impg syng failed to run");
     assert!(
@@ -791,6 +698,8 @@ fn test_partition_syng_end_to_end_bed() {
             fasta_path.to_str().unwrap(),
             "-o",
             syng_prefix.to_str().unwrap(),
+            "--position-sample-shift",
+            "0",
         ])
         .output()
         .expect("Failed to run impg syng");
@@ -906,7 +815,15 @@ fn test_query_syng_gfa_subwindow_splitter() {
     // Build syng index
     let syng_prefix = dir.join("idx");
     let build = Command::new(&bin)
-        .args(["syng", "-f", fasta_path.to_str().unwrap(), "-o", syng_prefix.to_str().unwrap()])
+        .args([
+            "syng",
+            "-f",
+            fasta_path.to_str().unwrap(),
+            "-o",
+            syng_prefix.to_str().unwrap(),
+            "--position-sample-shift",
+            "0",
+        ])
         .output()
         .expect("Failed to run impg syng");
     assert!(

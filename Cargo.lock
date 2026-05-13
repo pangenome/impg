@@ -1007,16 +1007,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c39754e157331b013978ec91992bde1ac089843443c49cbc7f46150b0fad0893"
 
 [[package]]
-name = "gbz"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36dfd97124efcf44c1210f8cbeb89a041e68a5c955efd9b14c3217dbb9bf9843"
-dependencies = [
- "simple-sds",
- "zstd",
-]
-
-[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1364,7 +1354,6 @@ dependencies = [
  "csv",
  "env_logger",
  "flate2",
- "gbz",
  "gfa",
  "gfasort",
  "gzp",
@@ -1388,7 +1377,6 @@ dependencies = [
  "seqwish",
  "serde",
  "serde_json",
- "simple-sds",
  "spoa_rs",
  "sweepga",
  "tempfile",
@@ -2550,15 +2538,6 @@ name = "simd-adler32"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
-
-[[package]]
-name = "simple-sds"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "182e5cd4cd2b651f5d0f2ddf83445f6548b1fadbba6f552dd784c8b2fc34e8a3"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "smallvec"

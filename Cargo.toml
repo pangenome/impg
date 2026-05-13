@@ -73,13 +73,6 @@ seqwish = { git = "https://github.com/pangenome/seqwish", branch = "rust-2" }
 # Dependencies for graph sorting
 gfasort = { git = "https://github.com/pangenome/gfasort", rev = "f15d8ebfdc632af2333f277cb9da0748d8fba7aa" }
 
-# GBWT + succinct data structures for FastLocate port (src/fast_locate.rs).
-# `gbz` is the jltsiren/gbwt-rs reimplementation (despite the crate name);
-# we use its GBWTBuilder to construct a classical GBWT from syng path data
-# and its BWT primitives + RLEIter to walk records run-by-run.
-gbz = "0.6"
-simple-sds = "0.4"
-
 [build-dependencies]
 cc = "1"
 
@@ -97,5 +90,4 @@ ragc-common = { git = "https://github.com/AndreaGuarracino/ragc", rev = "ebfa5eb
 # Redirect gfaffix's handlegraph = "0.7.0-alpha.9" to impg's pinned git rev (same API, 3 additive commits newer)
 [patch.crates-io]
 handlegraph = { git = "https://github.com/chfi/rs-handlegraph", rev = "3ac575e4216ce16a16667503a8875e469a40a97a" }
-
 
