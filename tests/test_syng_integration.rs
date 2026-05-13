@@ -90,10 +90,14 @@ fn create_test_agc(path: &str) {
 
 /// Locate the compiled `impg` binary for CLI tests.
 fn impg_binary() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_impg") {
+        return Some(PathBuf::from(path));
+    }
+
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     for candidate in [
-        manifest_dir.join("target/debug/impg"),
         manifest_dir.join("target/release/impg"),
+        manifest_dir.join("target/debug/impg"),
     ] {
         if candidate.exists() {
             return Some(candidate);

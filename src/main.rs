@@ -823,9 +823,13 @@ fn detect_syng_prefix(path: &str) -> Option<String> {
     None
 }
 
-/// Resolve the effective syng prefix for a command: if the single
-/// alignment argument looks like a syng index path, use that.
-fn resolve_syng_prefix(alignment: &AlignmentOpts) -> Option<String> {
+/// Resolve the effective syng prefix for a command: explicit `--syng`
+/// wins; otherwise if the single alignment argument looks like a syng
+/// index path, use that.
+fn resolve_syng_prefix(syng: &Option<String>, alignment: &AlignmentOpts) -> Option<String> {
+    if syng.is_some() {
+        return syng.clone();
+    }
     if alignment.alignment_files.len() == 1 {
         detect_syng_prefix(&alignment.alignment_files[0])
     } else {
@@ -962,6 +966,11 @@ enum Args {
         #[clap(flatten)]
         alignment: AlignmentOpts,
 
+        /// Syng index prefix (mutually exclusive with -a/--alignment-files)
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, value_parser, conflicts_with_all = ["alignment_files", "alignment_list"])]
+        syng: Option<String>,
+
         /// Boundary padding in bp for syng queries (default: 120 = 2× syncmer length)
         #[arg(help_heading = "Syng input")]
         #[clap(long, value_parser, default_value_t = 120)]
@@ -1077,6 +1086,11 @@ enum Args {
         // --- Input ---
         #[clap(flatten)]
         alignment: AlignmentOpts,
+
+        /// Syng index prefix (mutually exclusive with -a/--alignment-files)
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, value_parser, conflicts_with_all = ["alignment_files", "alignment_list"])]
+        syng: Option<String>,
 
         /// Boundary padding in bp for syng queries (default: 120 = 2× syncmer length)
         #[arg(help_heading = "Syng input")]
@@ -1502,6 +1516,7 @@ fn run() -> io::Result<()> {
         Args::Partition {
             common,
             alignment,
+            syng,
             syng_padding,
             syng_min_chain_anchors,
             syng_min_chain_fraction,
@@ -1582,7 +1597,7 @@ fn run() -> io::Result<()> {
             }
 
             // Allow `-a <prefix>` or `-a <prefix>.1khash` to route to syng.
-            let effective_syng = resolve_syng_prefix(&alignment);
+            let effective_syng = resolve_syng_prefix(&syng, &alignment);
 
             // ─── Syng-based partition path ──────────────────────────────────
             if let Some(ref syng_prefix) = effective_syng {
@@ -1711,6 +1726,7 @@ fn run() -> io::Result<()> {
         Args::Query {
             common,
             alignment,
+            syng,
             syng_padding,
             syng_extension,
             syng_extend_budget,
@@ -1765,7 +1781,7 @@ fn run() -> io::Result<()> {
 
             // Allow `-a <prefix>` or `-a <prefix>.1khash` to auto-route
             // to the syng backend without requiring `--syng`.
-            let effective_syng = resolve_syng_prefix(&alignment);
+            let effective_syng = resolve_syng_prefix(&syng, &alignment);
 
             // ─── Syng query path ──────────────────────────────────────────
             if let Some(ref syng_prefix) = effective_syng {
@@ -4425,9 +4441,8 @@ fn load_subset_filter_if_provided(path: &Option<String>) -> io::Result<Option<Su
 /// Convert syng `HomologousInterval`s into `AdjustedInterval`s so syng output
 /// can flow through the common merge + emit pipeline (output_results_bed,
 /// output_results_bedpe). CIGAR is always empty — syng has no per-base
-/// alignment. Strand is encoded on the query side via orientation reversal
-/// (`first > last` ⇔ '-'), matching the impg convention used by the
-/// alignment-backed path.
+/// alignment. The first interval is the homologous result interval, matching
+/// the alignment-backed path's BED/BEDPE emitters.
 fn syng_intervals_to_adjusted(
     intervals: &[impg::syng::HomologousInterval],
     query_name: &str,
@@ -4441,14 +4456,14 @@ fn syng_intervals_to_adjusted(
     intervals
         .iter()
         .filter_map(|iv| {
-            let target_id = seq_index.get_id(&iv.genome)?;
-            let query = if iv.strand == '-' {
-                Interval::new(range_end, range_start, query_id)
+            let homolog_id = seq_index.get_id(&iv.genome)?;
+            let homolog = if iv.strand == '-' {
+                Interval::new(iv.end as i32, iv.start as i32, homolog_id)
             } else {
-                Interval::new(range_start, range_end, query_id)
+                Interval::new(iv.start as i32, iv.end as i32, homolog_id)
             };
-            let target = Interval::new(iv.start as i32, iv.end as i32, target_id);
-            Some((query, Vec::<CigarOp>::new(), target))
+            let target = Interval::new(range_start, range_end, query_id);
+            Some((homolog, Vec::<CigarOp>::new(), target))
         })
         .collect()
 }
