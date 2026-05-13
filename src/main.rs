@@ -22,7 +22,7 @@ use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::num::NonZeroUsize;
 #[cfg(unix)]
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -296,17 +296,70 @@ fn write_syng_map_paf<W: Write>(
     )
 }
 
+fn emit_syng_map<W: Write>(
+    out: &mut W,
+    syng_index: &impg::syng::SyngIndex,
+    queries: Vec<(String, Vec<u8>)>,
+    output_format: &str,
+    min_anchors: usize,
+    chain_budget: u64,
+    max_hits: usize,
+) -> io::Result<()> {
+    let syncmer_len = (syng_index.params.k + syng_index.params.w) as u64;
+    match output_format {
+        "gaf" => {
+            for (query_name, query_seq) in queries {
+                let mut syncmers = syng_index.matched_syncmers_in_sequence(&query_seq);
+                if syncmers.len() < min_anchors {
+                    continue;
+                }
+                syncmers.sort_by(|a, b| {
+                    a.query_pos
+                        .cmp(&b.query_pos)
+                        .then(a.node_id.cmp(&b.node_id))
+                });
+                write_syng_map_gaf(
+                    out,
+                    &query_name,
+                    query_seq.len() as u64,
+                    syncmer_len,
+                    &syncmers,
+                )?;
+            }
+        }
+        "paf" => {
+            for (query_name, query_seq) in queries {
+                let mut hits =
+                    syng_index.map_sequence(&query_name, &query_seq, min_anchors, chain_budget)?;
+                if max_hits > 0 && hits.len() > max_hits {
+                    hits.truncate(max_hits);
+                }
+                for hit in hits {
+                    write_syng_map_paf(out, &hit, syncmer_len)?;
+                }
+            }
+        }
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unsupported map output format '{}'; expected 'gaf' or 'paf'", other),
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
-fn with_stdout_silenced<T, F>(f: F) -> io::Result<T>
-where
-    F: FnOnce() -> io::Result<T>,
-{
+fn silence_stdout_for_process() -> io::Result<RawFd> {
     io::stdout().flush()?;
+    unsafe {
+        libc::fflush(std::ptr::null_mut());
+    }
     let saved_stdout = unsafe { libc::dup(libc::STDOUT_FILENO) };
     if saved_stdout < 0 {
         return Err(io::Error::last_os_error());
     }
-    let devnull = File::open("/dev/null")?;
+    let devnull = std::fs::OpenOptions::new().write(true).open("/dev/null")?;
     if unsafe { libc::dup2(devnull.as_raw_fd(), libc::STDOUT_FILENO) } < 0 {
         let e = io::Error::last_os_error();
         unsafe {
@@ -314,32 +367,34 @@ where
         }
         return Err(e);
     }
-    let result = f();
-    io::stdout().flush()?;
-    unsafe {
-        libc::fflush(std::ptr::null_mut());
+    Ok(saved_stdout)
+}
+
+#[cfg(unix)]
+fn write_all_to_fd(fd: RawFd, mut buf: &[u8]) -> io::Result<()> {
+    while !buf.is_empty() {
+        let written = unsafe { libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len()) };
+        if written < 0 {
+            let e = io::Error::last_os_error();
+            if e.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(e);
+        }
+        if written == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "failed to write mapper output to stdout",
+            ));
+        }
+        buf = &buf[written as usize..];
     }
-    let restore_result = if unsafe { libc::dup2(saved_stdout, libc::STDOUT_FILENO) } < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    };
-    unsafe {
-        libc::close(saved_stdout);
-    }
-    match (result, restore_result) {
-        (Ok(v), Ok(())) => Ok(v),
-        (Err(e), _) => Err(e),
-        (Ok(_), Err(e)) => Err(e),
-    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
-fn with_stdout_silenced<T, F>(f: F) -> io::Result<T>
-where
-    F: FnOnce() -> io::Result<T>,
-{
-    f()
+fn silence_stdout_for_process() -> io::Result<()> {
+    Ok(())
 }
 
 /// Resolve the `--temp-dir` value to an absolute path.
@@ -3510,59 +3565,54 @@ fn run() -> io::Result<()> {
 
             let syng_prefix = detect_syng_prefix(&index).unwrap_or(index);
             info!("Loading syng index from prefix: {}", syng_prefix);
-            let syng_index = with_stdout_silenced(|| {
-                impg::syng::SyngIndex::load(&syng_prefix, impg::syng::SyncmerParams::default())
-            })?;
-            let syncmer_len = (syng_index.params.k + syng_index.params.w) as u64;
+            #[cfg(unix)]
+            let saved_stdout = silence_stdout_for_process()?;
+            #[cfg(not(unix))]
+            silence_stdout_for_process()?;
+
+            let syng_index =
+                impg::syng::SyngIndex::load(&syng_prefix, impg::syng::SyncmerParams::default())?;
             let queries = read_query_sequences(&query)?;
 
-            let mut out: Box<dyn Write> = match output {
-                Some(path) => Box::new(BufWriter::new(File::create(path)?)),
-                None => Box::new(BufWriter::new(io::stdout())),
-            };
-
-            match output_format.as_str() {
-                "gaf" => {
-                    for (query_name, query_seq) in queries {
-                        let mut syncmers = syng_index.matched_syncmers_in_sequence(&query_seq);
-                        if syncmers.len() < min_anchors {
-                            continue;
-                        }
-                        syncmers.sort_by(|a, b| {
-                            a.query_pos
-                                .cmp(&b.query_pos)
-                                .then(a.node_id.cmp(&b.node_id))
-                        });
-                        write_syng_map_gaf(
-                            &mut out,
-                            &query_name,
-                            query_seq.len() as u64,
-                            syncmer_len,
-                            &syncmers,
-                        )?;
+            if let Some(path) = output {
+                let mut out = BufWriter::new(File::create(path)?);
+                emit_syng_map(
+                    &mut out,
+                    &syng_index,
+                    queries,
+                    &output_format,
+                    min_anchors,
+                    chain_budget,
+                    max_hits,
+                )?;
+                out.flush()?;
+                #[cfg(unix)]
+                unsafe {
+                    libc::close(saved_stdout);
+                }
+            } else {
+                let mut out = Vec::new();
+                emit_syng_map(
+                    &mut out,
+                    &syng_index,
+                    queries,
+                    &output_format,
+                    min_anchors,
+                    chain_budget,
+                    max_hits,
+                )?;
+                #[cfg(unix)]
+                {
+                    write_all_to_fd(saved_stdout, &out)?;
+                    unsafe {
+                        libc::close(saved_stdout);
                     }
                 }
-                "paf" => {
-                    for (query_name, query_seq) in queries {
-                        let mut hits = syng_index.map_sequence(
-                            &query_name,
-                            &query_seq,
-                            min_anchors,
-                            chain_budget,
-                        )?;
-                        if max_hits > 0 && hits.len() > max_hits {
-                            hits.truncate(max_hits);
-                        }
-                        for hit in hits {
-                            write_syng_map_paf(&mut out, &hit, syncmer_len)?;
-                        }
-                    }
-                }
-                other => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("unsupported map output format '{}'; expected 'gaf' or 'paf'", other),
-                    ));
+                #[cfg(not(unix))]
+                {
+                    let mut stdout = io::stdout();
+                    stdout.write_all(&out)?;
+                    stdout.flush()?;
                 }
             }
         }
