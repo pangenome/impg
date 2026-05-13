@@ -434,7 +434,7 @@ fn sampled_position_hash(
 }
 
 /// Parameters controlling syncmer extraction.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyncmerParams {
     /// Inner k-mer length (default 8).
     pub k: u32,
@@ -464,6 +464,139 @@ impl SyncmerParams {
             seed: self.seed as i32,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SyngMetadata {
+    params: SyncmerParams,
+}
+
+impl SyngMetadata {
+    const VERSION: u32 = 1;
+
+    fn new(params: SyncmerParams) -> Self {
+        Self { params }
+    }
+
+    fn save(&self, path: &str) -> io::Result<()> {
+        let file = std::fs::File::create(path)?;
+        let mut writer = BufWriter::new(file);
+        writeln!(writer, "# impg syng metadata")?;
+        writeln!(writer, "version\t{}", Self::VERSION)?;
+        writeln!(writer, "syncmer_k\t{}", self.params.k)?;
+        writeln!(writer, "syncmer_w\t{}", self.params.w)?;
+        writeln!(writer, "syncmer_seed\t{}", self.params.seed)?;
+        writeln!(writer, "syncmer_length\t{}", self.params.k + self.params.w)?;
+        writeln!(writer, "smer_length\t{}", self.params.k)?;
+        writer.flush()
+    }
+
+    fn load(path: &str) -> io::Result<Self> {
+        let file = std::fs::File::open(path).map_err(|e| {
+            if e.kind() == io::ErrorKind::NotFound {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "syng metadata not found: {} (rebuild the syng index with this impg)",
+                        path
+                    ),
+                )
+            } else {
+                e
+            }
+        })?;
+        let reader = BufReader::new(file);
+
+        let mut version = None;
+        let mut syncmer_k = None;
+        let mut syncmer_w = None;
+        let mut syncmer_seed = None;
+
+        for (line_no, line) in reader.lines().enumerate() {
+            let line = line?;
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.split('\t');
+            let key = parts.next().unwrap_or_default();
+            let value = parts.next().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid syng metadata line {}: {}", line_no + 1, line),
+                )
+            })?;
+            if parts.next().is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid syng metadata line {}: {}", line_no + 1, line),
+                ));
+            }
+
+            match key {
+                "version" => version = Some(parse_metadata_u32(key, value, line_no + 1)?),
+                "syncmer_k" => syncmer_k = Some(parse_metadata_u32(key, value, line_no + 1)?),
+                "syncmer_w" => syncmer_w = Some(parse_metadata_u32(key, value, line_no + 1)?),
+                "syncmer_seed" => syncmer_seed = Some(parse_metadata_u32(key, value, line_no + 1)?),
+                "syncmer_length" | "smer_length" => {}
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("unknown syng metadata key '{}' on line {}", key, line_no + 1),
+                    ));
+                }
+            }
+        }
+
+        let version = version.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "syng metadata missing version")
+        })?;
+        if version != Self::VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported syng metadata version {}", version),
+            ));
+        }
+
+        let params = SyncmerParams {
+            k: syncmer_k.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "syng metadata missing syncmer_k")
+            })?,
+            w: syncmer_w.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "syng metadata missing syncmer_w")
+            })?,
+            seed: syncmer_seed.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "syng metadata missing syncmer_seed")
+            })?,
+        };
+
+        if params.k == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "syng metadata syncmer_k must be greater than 0",
+            ));
+        }
+        if params.k.checked_add(params.w).is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "syng metadata syncmer length overflowed u32",
+            ));
+        }
+
+        Ok(Self { params })
+    }
+}
+
+fn parse_metadata_u32(key: &str, value: &str, line_no: usize) -> io::Result<u32> {
+    value.parse::<u32>().map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "invalid syng metadata value for '{}' on line {}: {}",
+                key, line_no, e
+            ),
+        )
+    })
 }
 
 /// Information needed to walk a genome's forward path through the GBWT.
@@ -972,11 +1105,12 @@ impl SyngIndex {
 
     /// Save the index to disk.
     ///
-    /// Produces four files at the given prefix:
+    /// Produces five files at the given prefix:
     /// - `{prefix}.1khash` — syncmer hash (syng-compatible)
     /// - `{prefix}.1gbwt` — GBWT graph (syng-compatible)
     /// - `{prefix}.syng.names` — sequence name mapping
     /// - `{prefix}.syng.spos` — sampled path-position index
+    /// - `{prefix}.syng.meta` — syncmer extraction parameters
     pub fn save(&mut self, prefix: &str) -> io::Result<()> {
         let _ = self.finalize_online_sampled_positions()?;
         let schema_text = syng_ffi::syng_schema_text();
@@ -1049,17 +1183,24 @@ impl SyngIndex {
         })?;
         sampled_positions.save(&format!("{}.syng.spos", prefix))?;
 
+        // Write .syng.meta last so a complete index records the syncmer
+        // parameters that future query/map calls must use.
+        SyngMetadata::new(self.params).save(&format!("{}.syng.meta", prefix))?;
+
         Ok(())
     }
 
     /// Load an index from disk.
     ///
-    /// Reads four files at the given prefix:
+    /// Reads five files at the given prefix:
     /// - `{prefix}.1khash`
     /// - `{prefix}.1gbwt`
     /// - `{prefix}.syng.names`
     /// - `{prefix}.syng.spos`
-    pub fn load(prefix: &str, params: SyncmerParams) -> io::Result<Self> {
+    /// - `{prefix}.syng.meta`
+    pub fn load(prefix: &str, _params: SyncmerParams) -> io::Result<Self> {
+        let metadata = SyngMetadata::load(&format!("{}.syng.meta", prefix))?;
+        let params = metadata.params;
         let schema_text = syng_ffi::syng_schema_text();
 
         // Read .1gbwt
@@ -1157,7 +1298,17 @@ impl SyngIndex {
         // Read required .syng.spos sampled-position sidecar.
         let sampled_positions_path = format!("{}.syng.spos", prefix);
         let sampled_positions = if Path::new(&sampled_positions_path).exists() {
-            Some(SampledPositions::load(&sampled_positions_path)?)
+            match SampledPositions::load(&sampled_positions_path) {
+                Ok(sp) => Some(sp),
+                Err(e) => {
+                    unsafe {
+                        syng_ffi::syngBWTdestroy(gbwt);
+                        syng_ffi::kmerHashDestroy(kmer_hash);
+                        syng_ffi::impg_seqhashDestroy(seqhash);
+                    }
+                    return Err(e);
+                }
+            }
         } else {
             unsafe {
                 syng_ffi::syngBWTdestroy(gbwt);
@@ -2029,9 +2180,14 @@ mod tests {
             std::path::Path::new(&format!("{}.syng.names", prefix_str)).exists(),
             ".syng.names file should exist"
         );
+        assert!(
+            std::path::Path::new(&format!("{}.syng.meta", prefix_str)).exists(),
+            ".syng.meta file should exist"
+        );
 
         // Load
         let loaded = SyngIndex::load(prefix_str, params).unwrap();
+        assert_eq!(loaded.params, params);
 
         // Verify name map is intact
         assert_eq!(
@@ -2049,6 +2205,44 @@ mod tests {
         assert!(!loaded.gbwt.is_null());
         assert!(!loaded.kmer_hash.is_null());
         assert!(!loaded.seqhash.is_null());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_save_load_uses_saved_syncmer_params() {
+        let _guard = lock_syng();
+        let seq = make_test_sequence(5000, 11);
+        let params = SyncmerParams {
+            k: 6,
+            w: 31,
+            seed: 42,
+        };
+        let mut index = SyngIndex::build(params, vec![("seq".to_string(), seq)].into_iter());
+
+        let dir = std::env::temp_dir().join("impg_test_syng_saved_params");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("idx");
+        let prefix_str = prefix.to_str().unwrap();
+
+        index.save(prefix_str).unwrap();
+
+        let meta = std::fs::read_to_string(format!("{}.syng.meta", prefix_str)).unwrap();
+        assert!(meta.contains("syncmer_k\t6"));
+        assert!(meta.contains("syncmer_w\t31"));
+        assert!(meta.contains("syncmer_seed\t42"));
+
+        let loaded = SyngIndex::load(prefix_str, SyncmerParams::default()).unwrap();
+        assert_eq!(
+            loaded.params, params,
+            "load must use syncmer params stored in .syng.meta, not caller defaults"
+        );
+        let matches = loaded.matched_syncmers_in_sequence(&make_test_sequence(5000, 11));
+        assert!(
+            !matches.is_empty(),
+            "loaded index should query with the saved non-default params"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2613,6 +2807,10 @@ mod tests {
         assert!(
             std::path::Path::new(&format!("{}.syng.spos", output_prefix_str)).exists(),
             ".syng.spos should be built by default"
+        );
+        assert!(
+            std::path::Path::new(&format!("{}.syng.meta", output_prefix_str)).exists(),
+            ".syng.meta should be built by default"
         );
 
         // Load and verify content
