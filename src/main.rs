@@ -1161,7 +1161,7 @@ impl RefineOpts {
 /// prefix (base name before `.1khash` / `.1gbwt`) if one is found.
 ///
 /// Accepts:
-///   - Explicit file path ending in `.1khash`, `.1gbwt`, or `.syng.spos` → strip suffix
+///   - Explicit file path ending in `.1khash`, `.1gbwt`, `.syng.spos`, or `.syng.meta` → strip suffix
 ///   - Bare prefix with sibling `.1khash` on disk → return prefix as-is
 fn detect_syng_prefix(path: &str) -> Option<String> {
     if let Some(stem) = path.strip_suffix(".1khash") {
@@ -1171,6 +1171,9 @@ fn detect_syng_prefix(path: &str) -> Option<String> {
         return Some(stem.to_string());
     }
     if let Some(stem) = path.strip_suffix(".syng.spos") {
+        return Some(stem.to_string());
+    }
+    if let Some(stem) = path.strip_suffix(".syng.meta") {
         return Some(stem.to_string());
     }
     if std::path::Path::new(&format!("{path}.1khash")).exists() {
@@ -1693,7 +1696,7 @@ enum Args {
 
     /// Map sequences to a syng index using exact shared syncmers
     Map {
-        /// Syng index prefix or .1khash/.1gbwt path
+        /// Syng index prefix or .1khash/.1gbwt/.syng.spos/.syng.meta path
         #[clap(short = 'a', long, value_parser)]
         index: String,
 
@@ -1738,7 +1741,7 @@ enum Args {
         fasta: Option<String>,
 
         // --- Output ---
-        /// Output file prefix (produces .1khash, .1gbwt, .syng.names, .syng.spos)
+        /// Output file prefix (produces .1khash, .1gbwt, .syng.names, .syng.spos, .syng.meta)
         #[clap(short = 'o', long, value_parser)]
         output: String,
 
@@ -3952,8 +3955,9 @@ fn run() -> io::Result<()> {
             info!("Saving index to prefix: {}", output);
             index.save(&output)?;
             info!(
-                "Index saved in {}: {}.1khash, {}.1gbwt, {}.syng.names, {}.syng.spos",
+                "Index saved in {}: {}.1khash, {}.1gbwt, {}.syng.names, {}.syng.spos, {}.syng.meta",
                 format_duration(save_start.elapsed()),
+                output,
                 output,
                 output,
                 output,
