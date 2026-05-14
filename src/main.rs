@@ -1920,6 +1920,30 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
     },
+
+    /// Dump a syng index to GFA (S = syncmer, L = adjacency, P/W = path).
+    ///
+    /// Loads `<prefix>.1khash`, `<prefix>.1gbwt`, `<prefix>.syng.names`,
+    /// `<prefix>.syng.meta` (and `.syng.spos`) and writes a lossless
+    /// syncmer-graph GFA. Inter-syncmer DNA gaps are not in the index, so
+    /// links between non-overlapping syncmer pairs are emitted as `0M`.
+    Syng2gfa {
+        /// Syng index prefix (the same prefix passed to `impg syng -o`).
+        #[clap(short = 'a', long = "syng-prefix", value_parser)]
+        syng_prefix: String,
+
+        /// Output GFA path (default: stdout; use "-" for stdout)
+        #[clap(short = 'o', long, value_parser, default_value = "-")]
+        output: String,
+
+        /// GFA spec version: `1.0` (P lines, default) or `1.1` (W lines, PanSN-parsed).
+        #[clap(long, value_parser, default_value = "1.0")]
+        gfa_version: String,
+
+        // --- General ---
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
 }
 
 fn main() {
@@ -4327,6 +4351,16 @@ fn run() -> io::Result<()> {
                 index.name_map.path_to_name.len()
             );
             info!("Total syng build time: {}", format_duration(total_start.elapsed()));
+        }
+        Args::Syng2gfa {
+            syng_prefix,
+            output,
+            gfa_version,
+            common,
+        } => {
+            initialize_threads_and_log(&common);
+            let version = impg::commands::syng2gfa::GfaVersion::parse(&gfa_version)?;
+            impg::commands::syng2gfa::run(&syng_prefix, &output, version)?;
         }
     }
 
