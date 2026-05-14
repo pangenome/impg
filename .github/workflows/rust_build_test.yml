@@ -43,6 +43,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1-rust
+          cache-bin: false
 
       - name: Build
         run: cargo build --release
