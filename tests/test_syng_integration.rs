@@ -324,6 +324,66 @@ fn test_syng_agc_parallel_dictionary_roundtrip_query() {
 }
 
 #[test]
+fn test_syng_agc_parallel_reduce_roundtrip_query() {
+    let _guard = lock_syng();
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping: impg binary not built");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join("impg_test_syng_agc_parallel_reduce");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let agc_path = dir.join("test.agc");
+    create_test_agc(agc_path.to_str().unwrap());
+
+    let out_prefix = dir.join("idx");
+    let out_prefix_str = out_prefix.to_str().unwrap();
+
+    let build_output = Command::new(&bin)
+        .args([
+            "syng",
+            "--agc",
+            agc_path.to_str().unwrap(),
+            "--parallel-reduce",
+            "-o",
+            out_prefix_str,
+            "--position-sample-shift",
+            "0",
+        ])
+        .output()
+        .expect("Failed to run impg syng --agc --parallel-reduce");
+    assert!(
+        build_output.status.success(),
+        "impg syng --agc --parallel-reduce failed. stderr: {}",
+        String::from_utf8_lossy(&build_output.stderr)
+    );
+
+    let index = impg::syng::SyngIndex::load(
+        out_prefix_str,
+        impg::syng::SyncmerParams::default(),
+    )
+    .expect("Failed to load AGC parallel-reduce syng index");
+    let query_name = index
+        .name_map
+        .path_to_name
+        .iter()
+        .find(|n| n.contains("sampleA"))
+        .expect("sampleA contig should be in name map")
+        .clone();
+    let intervals = index
+        .query_region(&query_name, 0, 500, 0)
+        .expect("query_region failed");
+    assert!(
+        intervals.iter().any(|iv| iv.genome.contains("sampleB")),
+        "parallel reduce build should preserve shared-backbone query behavior"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn test_syng_fasta_build_produces_non_empty_index() {
     // Same non-empty-GBWT assertion but via the FASTA input path, to catch
     // regressions in either build path symmetrically.
@@ -444,6 +504,67 @@ fn test_syng_fasta_parallel_dictionary_build_produces_non_empty_index() {
     assert!(
         gbwt_size > 2000,
         ".1gbwt is only {} bytes from parallel FASTA build",
+        gbwt_size
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn test_syng_fasta_parallel_reduce_build_produces_non_empty_index() {
+    let _guard = lock_syng();
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping: impg binary not built");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join("impg_test_syng_fasta_parallel_reduce");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let fasta_path = dir.join("test.fa");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        let backbone = numeric_to_ascii(&make_sequence_numeric(800, 42));
+        let tail_a = numeric_to_ascii(&make_sequence_numeric(400, 1));
+        let tail_b = numeric_to_ascii(&make_sequence_numeric(400, 2));
+
+        writeln!(f, ">sampleA#chr1").unwrap();
+        f.write_all(&backbone).unwrap();
+        f.write_all(&tail_a).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleB#chr1").unwrap();
+        f.write_all(&backbone).unwrap();
+        f.write_all(&tail_b).unwrap();
+        writeln!(f).unwrap();
+    }
+
+    let out_prefix = dir.join("idx");
+    let out = Command::new(&bin)
+        .args([
+            "syng",
+            "-f",
+            fasta_path.to_str().unwrap(),
+            "--parallel-reduce",
+            "-o",
+            out_prefix.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run impg syng -f --parallel-reduce");
+    assert!(
+        out.status.success(),
+        "impg syng -f --parallel-reduce failed. stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let gbwt_size =
+        std::fs::metadata(format!("{}.1gbwt", out_prefix.to_str().unwrap()))
+            .unwrap()
+            .len();
+    assert!(
+        gbwt_size > 2000,
+        ".1gbwt is only {} bytes from parallel reduce FASTA build",
         gbwt_size
     );
 
