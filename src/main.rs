@@ -1924,9 +1924,11 @@ enum Args {
     /// Dump a syng index to GFA (S = syncmer, L = adjacency, P/W = path).
     ///
     /// Loads `<prefix>.1khash`, `<prefix>.1gbwt`, `<prefix>.syng.names`,
-    /// `<prefix>.syng.meta` (and `.syng.spos`) and writes a lossless
-    /// syncmer-graph GFA. Inter-syncmer DNA gaps are not in the index, so
-    /// links between non-overlapping syncmer pairs are emitted as `0M`.
+    /// `<prefix>.syng.meta` (and `.syng.spos`) and writes a GFA with one
+    /// segment per syncmer plus one segment per inter-syncmer gap. Gaps
+    /// are filled with real DNA when `--sequence-files` is provided
+    /// (sequence names must match the syng path names); otherwise they
+    /// are filled with `N`s and a warning is emitted.
     Syng2gfa {
         /// Syng index prefix (the same prefix passed to `impg syng -o`).
         #[clap(short = 'a', long = "syng-prefix", value_parser)]
@@ -1939,6 +1941,10 @@ enum Args {
         /// GFA spec version: `1.0` (P lines, default) or `1.1` (W lines, PanSN-parsed).
         #[clap(long, value_parser, default_value = "1.0")]
         gfa_version: String,
+
+        /// Sequence input for gap filling. Without these, gaps are filled with `N`s.
+        #[clap(flatten)]
+        sequence: SequenceOpts,
 
         // --- General ---
         #[clap(flatten)]
@@ -4356,11 +4362,13 @@ fn run() -> io::Result<()> {
             syng_prefix,
             output,
             gfa_version,
+            sequence,
             common,
         } => {
             initialize_threads_and_log(&common);
             let version = impg::commands::syng2gfa::GfaVersion::parse(&gfa_version)?;
-            impg::commands::syng2gfa::run(&syng_prefix, &output, version)?;
+            let sequence_files = sequence.resolve_sequence_files()?;
+            impg::commands::syng2gfa::run(&syng_prefix, &output, version, &sequence_files)?;
         }
     }
 
