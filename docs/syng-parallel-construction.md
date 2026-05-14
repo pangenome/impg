@@ -98,17 +98,24 @@ AGC inputs.
 
 ## Next Step: True GBWT Reduce
 
-A full parallel GBWT builder needs a new internal representation:
+The next implementation layer uses a new internal representation:
 
 ```text
 node_id -> ordered incoming/outgoing occurrence lists
 ```
 
-For a fixed global path partition order, shard-local occurrence lists for the
-same node can be concatenated in that partition order and converted to the same
-simple-node / rskip representation currently produced incrementally by
-`syngBWTpathAdd`.
+For a fixed global path order, every directed edge occurrence receives a
+deterministic rank within that edge. Each node can then be reduced
+independently:
 
-That reduce API should live below `SyngIndex`, ideally in C next to
-`syngbwt3.c`, because it needs to construct `NodeSide` / `Rskip` structures
-directly.
+- directory counts come from incoming edge ranks on that side;
+- BWT run lists are ordered by the opposite side's incoming edge ranks;
+- the run symbols are edge ids on the side being built.
+
+This is exposed as `impg syng --parallel-reduce`. Rust extracts ranked path
+occurrences and reduces each node independently; a C helper in `syngbwt3.c`
+installs the resulting edge directories and run lists directly into syng's
+`NodeSide` / `Rskip` representation. The implementation is currently in-memory:
+the next scaling step is to spill shard occurrence records and externally sort
+by `(node_id, side)` and `(directed_edge, occurrence_order)` for HPRC-scale
+construction without retaining all path occurrences at once.
