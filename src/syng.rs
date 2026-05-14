@@ -38,6 +38,43 @@ pub struct SampledPositionBuildStats {
 pub const DEFAULT_POSITION_SAMPLE_SHIFT: u32 = 8;
 pub const DEFAULT_POSITION_SAMPLE_SEED: u64 = 7;
 
+fn syng_sidecar_path(prefix: &str, suffix: &str) -> String {
+    if prefix.ends_with(".syng") {
+        format!("{prefix}.{suffix}")
+    } else {
+        format!("{prefix}.syng.{suffix}")
+    }
+}
+
+fn syng_sidecar_candidates(prefix: &str, suffix: &str) -> Vec<String> {
+    let primary = syng_sidecar_path(prefix, suffix);
+    let legacy = format!("{prefix}.syng.{suffix}");
+    if legacy == primary {
+        vec![primary]
+    } else {
+        vec![primary, legacy]
+    }
+}
+
+fn existing_syng_sidecar_path(prefix: &str, suffix: &str) -> String {
+    syng_sidecar_candidates(prefix, suffix)
+        .into_iter()
+        .find(|p| Path::new(p).exists())
+        .unwrap_or_else(|| syng_sidecar_path(prefix, suffix))
+}
+
+pub fn syng_names_path(prefix: &str) -> String {
+    syng_sidecar_path(prefix, "names")
+}
+
+pub fn syng_spos_path(prefix: &str) -> String {
+    syng_sidecar_path(prefix, "spos")
+}
+
+pub fn syng_meta_path(prefix: &str) -> String {
+    syng_sidecar_path(prefix, "meta")
+}
+
 /// Succinct sampled path-position sidecar for projected syng mapping.
 ///
 /// This mirrors the sampled suffix-array idea used by ropebwt3: store only a
@@ -1224,9 +1261,12 @@ impl SyngIndex {
     /// Produces five files at the given prefix:
     /// - `{prefix}.1khash` — syncmer hash (syng-compatible)
     /// - `{prefix}.1gbwt` — GBWT graph (syng-compatible)
-    /// - `{prefix}.syng.names` — sequence name mapping
-    /// - `{prefix}.syng.spos` — sampled path-position index
-    /// - `{prefix}.syng.meta` — syncmer extraction parameters
+    /// - `{prefix}.syng.names` or `{prefix}.names` — sequence name mapping
+    /// - `{prefix}.syng.spos` or `{prefix}.spos` — sampled path-position index
+    /// - `{prefix}.syng.meta` or `{prefix}.meta` — syncmer extraction parameters
+    ///
+    /// The shorter sidecar names are used when `prefix` already ends in
+    /// `.syng`, avoiding names like `foo.syng.syng.spos`.
     pub fn save(&mut self, prefix: &str) -> io::Result<()> {
         let _ = self.finalize_online_sampled_positions()?;
         let schema_text = syng_ffi::syng_schema_text();
@@ -1286,22 +1326,22 @@ impl SyngIndex {
             }
         }
 
-        // Write .syng.names
-        let names_path = format!("{}.syng.names", prefix);
+        // Write names sidecar.
+        let names_path = syng_names_path(prefix);
         self.name_map.save(&names_path)?;
 
-        // Write .syng.spos (required position index for query/map projection).
+        // Write position sidecar (required for query/map projection).
         let sampled_positions = self.sampled_positions.as_ref().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 "cannot save syng index without sampled positions",
             )
         })?;
-        sampled_positions.save(&format!("{}.syng.spos", prefix))?;
+        sampled_positions.save(&syng_spos_path(prefix))?;
 
-        // Write .syng.meta last so a complete index records the syncmer
+        // Write metadata last so a complete index records the syncmer
         // parameters that future query/map calls must use.
-        SyngMetadata::new(self.params).save(&format!("{}.syng.meta", prefix))?;
+        SyngMetadata::new(self.params).save(&syng_meta_path(prefix))?;
 
         Ok(())
     }
@@ -1311,11 +1351,12 @@ impl SyngIndex {
     /// Reads five files at the given prefix:
     /// - `{prefix}.1khash`
     /// - `{prefix}.1gbwt`
-    /// - `{prefix}.syng.names`
-    /// - `{prefix}.syng.spos`
-    /// - `{prefix}.syng.meta`
+    /// - `{prefix}.syng.names` or `{prefix}.names`
+    /// - `{prefix}.syng.spos` or `{prefix}.spos`
+    /// - `{prefix}.syng.meta` or `{prefix}.meta`
     pub fn load(prefix: &str, _params: SyncmerParams) -> io::Result<Self> {
-        let metadata = SyngMetadata::load(&format!("{}.syng.meta", prefix))?;
+        let metadata_path = existing_syng_sidecar_path(prefix, "meta");
+        let metadata = SyngMetadata::load(&metadata_path)?;
         let params = metadata.params;
         let schema_text = syng_ffi::syng_schema_text();
 
@@ -1393,8 +1434,8 @@ impl SyngIndex {
             kh
         };
 
-        // Read .syng.names
-        let names_path = format!("{}.syng.names", prefix);
+        // Read names sidecar.
+        let names_path = existing_syng_sidecar_path(prefix, "names");
         let name_map = match SyngNameMap::load(&names_path) {
             Ok(nm) => nm,
             Err(e) => {
@@ -1411,8 +1452,8 @@ impl SyngIndex {
             syng_ffi::impg_seqhashCreateSafe(params.k as i32, params.w as i32, params.seed as i32)
         };
 
-        // Read required .syng.spos sampled-position sidecar.
-        let sampled_positions_path = format!("{}.syng.spos", prefix);
+        // Read required sampled-position sidecar.
+        let sampled_positions_path = existing_syng_sidecar_path(prefix, "spos");
         let sampled_positions = if Path::new(&sampled_positions_path).exists() {
             match SampledPositions::load(&sampled_positions_path) {
                 Ok(sp) => Some(sp),
@@ -1794,7 +1835,7 @@ impl SyngIndex {
         end: u64,
         padding: u64,
         query_extension: u64,
-        mut visited_nodes: Option<&mut FxHashSet<u32>>,
+        visited_nodes: Option<&mut FxHashSet<u32>>,
     ) -> Result<Vec<HomologousIntervalWithAnchors>, io::Error> {
         // Suppress C debug output from syngBWTnext
         unsafe { syng_ffi::impg_syng_suppress_debug() };
@@ -1825,23 +1866,13 @@ impl SyngIndex {
             })?;
 
         // 2. Walk the query genome's path, collect nodes in [start, end)
-        //    along with (query_position, query_orientation).
-        //    Query orientation is 0 = forward (canonical), 1 = reverse
-        //    (RC traversal) — encoded in the sign of the node id from
-        //    walk_path: negative node id → reverse orientation.
-        //    A syncmer node may appear at multiple query positions (repeat
-        //    families) — we keep all of them and cross-product with target
-        //    hits downstream. Callers pick the nearest anchor per edge.
+        //    along with (query_position, query_orientation). This path is
+        //    retained for library callers that only have an index; CLI paths
+        //    with FASTA/AGC sequence input use the sequence-backed variant
+        //    below so large indexes do not depend on GBWT path traversal.
         let query_nodes = self.walk_path(query_start);
-        // Expanded syncmer-lookup window. `query_extension` pushes the filter
-        // outward so conserved blocks that end just outside the user's
-        // declared region are still discoverable; refined boundaries stay
-        // clipped to the original interval downstream.
         let expanded_start = start.saturating_sub(query_extension);
         let expanded_end = end.saturating_add(query_extension);
-        // abs_node -> Vec<(query_pos, q_orient_bit)>. q_orient_bit is 0 for
-        // forward, 1 for reverse — matching the low bit of the GBWT node
-        // encoding so we can compare directly against target visits.
         let mut query_node_positions: FxHashMap<u32, Vec<(u64, u8)>> =
             FxHashMap::default();
         for &(signed_node, pos) in &query_nodes {
@@ -1855,6 +1886,105 @@ impl SyngIndex {
             }
         }
 
+        self.query_region_from_node_positions(query_node_positions, padding, visited_nodes)
+    }
+
+    /// Query variant that takes the source sequence bytes directly.
+    ///
+    /// `query_seq` must cover the sequence interval beginning at
+    /// `query_seq_start` in source coordinates. Syncmers are extracted from
+    /// those bytes, filtered to `[start - query_extension, end + query_extension)`,
+    /// then projected through `.syng.spos`. This avoids reconstructing the
+    /// source path from the GBWT and is the preferred path when FASTA/AGC
+    /// sequence input is available.
+    #[allow(clippy::too_many_arguments)]
+    pub fn query_region_with_anchors_from_sequence_ext_visited(
+        &self,
+        query_seq: &[u8],
+        query_seq_start: u64,
+        start: u64,
+        end: u64,
+        padding: u64,
+        query_extension: u64,
+        visited_nodes: Option<&mut FxHashSet<u32>>,
+    ) -> Result<Vec<HomologousIntervalWithAnchors>, io::Error> {
+        unsafe { syng_ffi::impg_syng_suppress_debug() };
+
+        let expanded_start = start.saturating_sub(query_extension);
+        let expanded_end = end.saturating_add(query_extension);
+        let mut query_node_positions: FxHashMap<u32, Vec<(u64, u8)>> =
+            FxHashMap::default();
+
+        for sm in self.matched_syncmers_in_sequence(query_seq) {
+            let pos = query_seq_start.saturating_add(sm.query_pos);
+            if pos >= expanded_start && pos < expanded_end {
+                let q_orient: u8 = if sm.signed_node >= 0 { 0 } else { 1 };
+                query_node_positions
+                    .entry(sm.node_id)
+                    .or_default()
+                    .push((pos, q_orient));
+            }
+        }
+
+        self.query_region_from_node_positions(query_node_positions, padding, visited_nodes)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn query_region_with_anchors_from_sequence_ext(
+        &self,
+        query_seq: &[u8],
+        query_seq_start: u64,
+        start: u64,
+        end: u64,
+        padding: u64,
+        query_extension: u64,
+    ) -> Result<Vec<HomologousIntervalWithAnchors>, io::Error> {
+        self.query_region_with_anchors_from_sequence_ext_visited(
+            query_seq,
+            query_seq_start,
+            start,
+            end,
+            padding,
+            query_extension,
+            None,
+        )
+    }
+
+    pub fn query_region_from_sequence_ext(
+        &self,
+        query_seq: &[u8],
+        query_seq_start: u64,
+        start: u64,
+        end: u64,
+        padding: u64,
+        query_extension: u64,
+    ) -> Result<Vec<HomologousInterval>, io::Error> {
+        let with_anchors = self.query_region_with_anchors_from_sequence_ext(
+            query_seq,
+            query_seq_start,
+            start,
+            end,
+            padding,
+            query_extension,
+        )?;
+        Ok(with_anchors
+            .into_iter()
+            .map(|h| HomologousInterval {
+                genome: h.genome,
+                start: h.start,
+                end: h.end,
+                strand: h.strand,
+                cigar: None,
+            })
+            .collect())
+    }
+
+    fn query_region_from_node_positions(
+        &self,
+        query_node_positions: FxHashMap<u32, Vec<(u64, u8)>>,
+        padding: u64,
+        mut visited_nodes: Option<&mut FxHashSet<u32>>,
+    ) -> Result<Vec<HomologousIntervalWithAnchors>, io::Error> {
         if query_node_positions.is_empty() {
             return Ok(Vec::new());
         }
@@ -2364,6 +2494,64 @@ mod tests {
         assert!(!loaded.gbwt.is_null());
         assert!(!loaded.kmer_hash.is_null());
         assert!(!loaded.seqhash.is_null());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_syng_suffix_prefix_does_not_duplicate_sidecar_names() {
+        let _guard = lock_syng();
+        let seqs = vec![("genome".to_string(), make_test_sequence(2000, 7))];
+        let params = SyncmerParams::default();
+        let mut index = SyngIndex::build(params, seqs.into_iter());
+
+        let dir = std::env::temp_dir().join("impg_test_syng_suffix_sidecars");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("idx.syng");
+        let prefix_str = prefix.to_str().unwrap();
+
+        index.save(prefix_str).unwrap();
+
+        assert!(std::path::Path::new(&format!("{}.1gbwt", prefix_str)).exists());
+        assert!(std::path::Path::new(&format!("{}.1khash", prefix_str)).exists());
+        assert!(std::path::Path::new(&format!("{}.names", prefix_str)).exists());
+        assert!(std::path::Path::new(&format!("{}.spos", prefix_str)).exists());
+        assert!(std::path::Path::new(&format!("{}.meta", prefix_str)).exists());
+        assert!(!std::path::Path::new(&format!("{}.syng.names", prefix_str)).exists());
+        assert!(!std::path::Path::new(&format!("{}.syng.spos", prefix_str)).exists());
+        assert!(!std::path::Path::new(&format!("{}.syng.meta", prefix_str)).exists());
+
+        let loaded = SyngIndex::load(prefix_str, params).unwrap();
+        assert_eq!(loaded.name_map.path_to_name, vec!["genome".to_string()]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_syng_suffix_prefix_loads_legacy_duplicated_sidecars() {
+        let _guard = lock_syng();
+        let seqs = vec![("genome".to_string(), make_test_sequence(2000, 11))];
+        let params = SyncmerParams::default();
+        let mut index = SyngIndex::build(params, seqs.into_iter());
+
+        let dir = std::env::temp_dir().join("impg_test_syng_suffix_legacy_sidecars");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("idx.syng");
+        let prefix_str = prefix.to_str().unwrap();
+
+        index.save(prefix_str).unwrap();
+        for suffix in ["names", "spos", "meta"] {
+            std::fs::rename(
+                format!("{}.{}", prefix_str, suffix),
+                format!("{}.syng.{}", prefix_str, suffix),
+            )
+            .unwrap();
+        }
+
+        let loaded = SyngIndex::load(prefix_str, params).unwrap();
+        assert_eq!(loaded.name_map.path_to_name, vec!["genome".to_string()]);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -3076,6 +3264,36 @@ mod tests {
             "unrelated genome gd should not appear in sampled smoke test: {:?}",
             genomes
         );
+    }
+
+    #[test]
+    fn test_query_region_from_sequence_matches_path_query() {
+        let _guard = lock_syng();
+        let params = SyncmerParams::default();
+
+        let shared = make_test_sequence(600, 42);
+        let mut seq_a = shared.clone();
+        seq_a.extend_from_slice(&make_test_sequence(400, 1));
+        let mut seq_b = shared.clone();
+        seq_b.extend_from_slice(&make_test_sequence(400, 2));
+        let seqs = vec![
+            ("ga".to_string(), seq_a.clone()),
+            ("gb".to_string(), seq_b),
+        ];
+
+        let index = SyngIndex::build(params, seqs.into_iter());
+        let path_intervals = index.query_region("ga", 0, 1000, 120).unwrap();
+        let sequence_intervals = index
+            .query_region_from_sequence_ext(&seq_a, 0, 0, 1000, 120, 0)
+            .unwrap();
+
+        let to_set = |v: &[HomologousInterval]| -> std::collections::BTreeSet<(String, u64, u64, char)> {
+            v.iter()
+                .map(|iv| (iv.genome.clone(), iv.start, iv.end, iv.strand))
+                .collect()
+        };
+        assert_eq!(to_set(&path_intervals), to_set(&sequence_intervals));
+        assert!(!sequence_intervals.is_empty());
     }
 
     /// Build an index from sequences that share some content, then query a region.

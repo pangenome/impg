@@ -1282,7 +1282,7 @@ impl RefineOpts {
 /// prefix (base name before `.1khash` / `.1gbwt`) if one is found.
 ///
 /// Accepts:
-///   - Explicit file path ending in `.1khash`, `.1gbwt`, `.syng.spos`, or `.syng.meta` → strip suffix
+///   - Explicit file path ending in `.1khash`, `.1gbwt`, `.spos`, `.names`, or `.meta` → strip suffix
 ///   - Bare prefix with sibling `.1khash` on disk → return prefix as-is
 fn detect_syng_prefix(path: &str) -> Option<String> {
     if let Some(stem) = path.strip_suffix(".1khash") {
@@ -1291,11 +1291,20 @@ fn detect_syng_prefix(path: &str) -> Option<String> {
     if let Some(stem) = path.strip_suffix(".1gbwt") {
         return Some(stem.to_string());
     }
-    if let Some(stem) = path.strip_suffix(".syng.spos") {
-        return Some(stem.to_string());
+    for suffix in [".spos", ".names", ".meta"] {
+        if let Some(stem) = path.strip_suffix(suffix) {
+            if std::path::Path::new(&format!("{stem}.1khash")).exists() {
+                return Some(stem.to_string());
+            }
+        }
     }
-    if let Some(stem) = path.strip_suffix(".syng.meta") {
-        return Some(stem.to_string());
+    for suffix in [".syng.spos", ".syng.names", ".syng.meta"] {
+        if let Some(stem) = path.strip_suffix(suffix) {
+            if std::path::Path::new(&format!("{stem}.1khash")).exists() {
+                return Some(stem.to_string());
+            }
+            return Some(stem.to_string());
+        }
     }
     if std::path::Path::new(&format!("{path}.1khash")).exists() {
         return Some(path.to_string());
@@ -1817,7 +1826,7 @@ enum Args {
 
     /// Map sequences to a syng index using exact shared syncmers
     Map {
-        /// Syng index prefix or .1khash/.1gbwt/.syng.spos/.syng.meta path
+        /// Syng index prefix or .1khash/.1gbwt/.spos/.names/.meta path
         #[clap(short = 'a', long, value_parser)]
         index: String,
 
@@ -1862,7 +1871,7 @@ enum Args {
         fasta: Option<String>,
 
         // --- Output ---
-        /// Output file prefix (produces .1khash, .1gbwt, .syng.names, .syng.spos, .syng.meta)
+        /// Output file prefix (produces .1khash, .1gbwt, and syng sidecars; avoids .syng.syng.* if prefix ends in .syng)
         #[clap(short = 'o', long, value_parser)]
         output: String,
 
@@ -2377,8 +2386,12 @@ fn run() -> io::Result<()> {
                 // on yeast). A typical `-d` up to a few kb cleanly
                 // Setup output resources for GFA/FASTA/GBWT (need sequence files).
                 // Boundary realignment also needs them for edge-window fetches.
+                let sequence_files_supplied =
+                    !gfa_maf_fasta.sequence.resolve_sequence_files()?.is_empty();
                 let needs_sequences =
-                    matches!(resolved_format, "gfa" | "fasta" | "gbwt") || use_boundary_realign;
+                    matches!(resolved_format, "gfa" | "fasta" | "gbwt")
+                        || use_boundary_realign
+                        || sequence_files_supplied;
                 let sequence_index = if needs_sequences {
                     let si = gfa_maf_fasta.sequence.build_sequence_index()?;
                     if si.is_none() {
@@ -2411,6 +2424,58 @@ fn run() -> io::Result<()> {
                     None
                 };
 
+                let query_raw_syng = |
+                    target_name: &str,
+                    range_start: i32,
+                    range_end: i32,
+                    padding: u64,
+                    extension: u64,
+                | -> io::Result<Vec<impg::syng::HomologousInterval>> {
+                    if let Some(seq_idx) = sequence_index.as_ref() {
+                        let start = range_start.max(0) as u64;
+                        let end = range_end.max(range_start).max(0) as u64;
+                        let source_len = seq_idx.get_sequence_length(target_name)? as u64;
+                        let expanded_start = start.saturating_sub(extension).min(source_len);
+                        let expanded_end = end.saturating_add(extension).min(source_len);
+                        let fetch_start: i32 = expanded_start.try_into().map_err(|_| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!(
+                                    "query start {} exceeds i32 coordinate range",
+                                    expanded_start
+                                ),
+                            )
+                        })?;
+                        let fetch_end: i32 = expanded_end.try_into().map_err(|_| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!("query end {} exceeds i32 coordinate range", expanded_end),
+                            )
+                        })?;
+                        let query_seq = if fetch_end > fetch_start {
+                            seq_idx.fetch_sequence(target_name, fetch_start, fetch_end)?
+                        } else {
+                            Vec::new()
+                        };
+                        wrapper.syng_index().query_region_from_sequence_ext(
+                            &query_seq,
+                            expanded_start,
+                            start,
+                            end,
+                            padding,
+                            extension,
+                        )
+                    } else {
+                        wrapper.syng_index().query_region_ext(
+                            target_name,
+                            range_start as u64,
+                            range_end as u64,
+                            padding,
+                            extension,
+                        )
+                    }
+                };
+
                 // Process each target range. Serial outer — the
                 // per-tile query already uses the rayon pool
                 // internally (anchor emission + chain projection);
@@ -2436,10 +2501,10 @@ fn run() -> io::Result<()> {
                                     sequence_index.as_ref().unwrap(),
                                 )?
                             } else {
-                                wrapper.syng_index().query_region_ext(
+                                query_raw_syng(
                                     target_name,
-                                    *range_start as u64,
-                                    *range_end as u64,
+                                    *range_start,
+                                    *range_end,
                                     syng_padding,
                                     syng_extension,
                                 )?
@@ -2513,13 +2578,7 @@ fn run() -> io::Result<()> {
                                             sequence_index.as_ref().unwrap(),
                                         )?
                                     } else {
-                                        wrapper.syng_index().query_region_ext(
-                                            target_name,
-                                            window_start as u64,
-                                            window_end as u64,
-                                            syng_padding,
-                                        syng_extension,
-                                    )?
+                                        query_raw_syng(target_name, window_start, window_end, syng_padding, syng_extension)?
                                     };
                                     let window_intervals: Vec<Interval<u32>> = intervals
                                         .iter()
@@ -2572,13 +2631,7 @@ fn run() -> io::Result<()> {
                                         sequence_index.as_ref().unwrap(),
                                     )?
                                 } else {
-                                    wrapper.syng_index().query_region_ext(
-                                        target_name,
-                                        *range_start as u64,
-                                        *range_end as u64,
-                                        syng_padding,
-                                    syng_extension,
-                                )?
+                                    query_raw_syng(target_name, *range_start, *range_end, syng_padding, syng_extension)?
                                 };
                                 let query_intervals: Vec<coitrees::Interval<u32>> = intervals
                                     .iter()
@@ -2622,13 +2675,7 @@ fn run() -> io::Result<()> {
                                     seq_idx,
                                 )?
                             } else {
-                                wrapper.syng_index().query_region_ext(
-                                    target_name,
-                                    *range_start as u64,
-                                    *range_end as u64,
-                                    syng_padding,
-                                syng_extension,
-                            )?
+                                query_raw_syng(target_name, *range_start, *range_end, syng_padding, syng_extension)?
                             };
                             let mut out = find_output_stream(&output_prefix, "fa")?;
                             for iv in &intervals {
@@ -2655,13 +2702,7 @@ fn run() -> io::Result<()> {
                                     seq_idx,
                                 )?
                             } else {
-                                wrapper.syng_index().query_region_ext(
-                                    target_name,
-                                    *range_start as u64,
-                                    *range_end as u64,
-                                    syng_padding,
-                                syng_extension,
-                            )?
+                                query_raw_syng(target_name, *range_start, *range_end, syng_padding, syng_extension)?
                             };
                             let gbwt_prefix = output_prefix.as_ref().unwrap();
 
@@ -4273,13 +4314,13 @@ fn run() -> io::Result<()> {
             info!("Saving index to prefix: {}", output);
             index.save(&output)?;
             info!(
-                "Index saved in {}: {}.1khash, {}.1gbwt, {}.syng.names, {}.syng.spos, {}.syng.meta",
+                "Index saved in {}: {}.1khash, {}.1gbwt, {}, {}, {}",
                 format_duration(save_start.elapsed()),
                 output,
                 output,
-                output,
-                output,
-                output,
+                impg::syng::syng_names_path(&output),
+                impg::syng::syng_spos_path(&output),
+                impg::syng::syng_meta_path(&output),
             );
             info!(
                 "Name map contains {} sequences",

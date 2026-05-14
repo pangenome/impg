@@ -794,8 +794,34 @@ pub fn one_hop_ext_visited(
     use std::time::Instant;
     let prof = std::env::var("SYNG_PROFILE").is_ok();
     let t0 = Instant::now();
-    let hits = syng_index.query_region_with_anchors_ext_visited(
-        query_name, query_start, query_end, padding, query_extension, visited_nodes,
+    let source_len = sequence_index.get_sequence_length(query_name)? as u64;
+    let expanded_start = query_start.saturating_sub(query_extension).min(source_len);
+    let expanded_end = query_end.saturating_add(query_extension).min(source_len);
+    let fetch_start: i32 = expanded_start.try_into().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("query start {} exceeds i32 coordinate range", expanded_start),
+        )
+    })?;
+    let fetch_end: i32 = expanded_end.try_into().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("query end {} exceeds i32 coordinate range", expanded_end),
+        )
+    })?;
+    let query_window = if fetch_end > fetch_start {
+        sequence_index.fetch_sequence(query_name, fetch_start, fetch_end)?
+    } else {
+        Vec::new()
+    };
+    let hits = syng_index.query_region_with_anchors_from_sequence_ext_visited(
+        &query_window,
+        expanded_start,
+        query_start,
+        query_end,
+        padding,
+        query_extension,
+        visited_nodes,
     )?;
     if prof {
         eprintln!(
