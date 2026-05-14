@@ -2,7 +2,7 @@
 //! 1.1 with W lines if `--gfa-version 1.1`).
 //!
 //! Output: one S per syncmer (node id 1..N, canonical DNA from the
-//! KmerHash) plus one S per inter-syncmer gap (id `g0`, `g1`, …). When
+//! KmerHash) plus one S per inter-syncmer gap (id N+1, N+2, …). When
 //! the bp offset between two consecutive syncmers in a path exceeds the
 //! syncmer length, a gap segment of `offset - syncmer_length` bp is
 //! inserted between them. Gap bases come from `--sequence-files` if
@@ -137,8 +137,8 @@ pub fn write_gfa<W: Write>(
     let mut walked_paths: Vec<WalkedPath> =
         Vec::with_capacity(index.name_map.path_to_name.len());
     // Edge tuple: (from_id, from_sign, to_id, to_sign, overlap_bp).
-    // `String` because endpoints may be either integer syncmer IDs or
-    // alphanumeric gap IDs ("g{n}").
+    // `String` because endpoints are integer IDs (syncmers 1..N, gaps
+    // N+1, N+2, …) and we serialize them as text.
     let mut edges: FxHashSet<(String, char, String, char, u32)> = FxHashSet::default();
     let mut gap_segments: Vec<GapSegment> = Vec::new();
     let mut n_skipped = 0usize;
@@ -181,7 +181,7 @@ pub fn write_gfa<W: Write>(
                     vec![b'N'; first_pos as usize]
                 };
                 total_gap_bp += gap_seq.len() as u64;
-                let gap_id = format!("g{}", next_gap_id);
+                let gap_id = format!("{}", n_nodes as u64 + 1 + next_gap_id);
                 next_gap_id += 1;
                 let (first_id, first_sign) = signed_to_gfa(first);
                 edges.insert((
@@ -229,7 +229,7 @@ pub fn write_gfa<W: Write>(
                     vec![b'N'; gap_len as usize]
                 };
                 total_gap_bp += gap_seq.len() as u64;
-                let gap_id = format!("g{}", next_gap_id);
+                let gap_id = format!("{}", n_nodes as u64 + 1 + next_gap_id);
                 next_gap_id += 1;
                 edges.insert((
                     a_id.to_string(),
@@ -265,7 +265,7 @@ pub fn write_gfa<W: Write>(
                     vec![b'N'; (suffix_end - suffix_start) as usize]
                 };
                 total_gap_bp += gap_seq.len() as u64;
-                let gap_id = format!("g{}", next_gap_id);
+                let gap_id = format!("{}", n_nodes as u64 + 1 + next_gap_id);
                 next_gap_id += 1;
                 let (last_id, last_sign) = signed_to_gfa(last);
                 edges.insert((
