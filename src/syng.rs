@@ -970,32 +970,6 @@ impl SyngIndex {
         Ok(())
     }
 
-    /// Create an index from a prebuilt GBWT and preloaded packed dictionary.
-    ///
-    /// The returned index owns `gbwt` and will destroy it on drop.
-    pub fn from_prebuilt_gbwt(
-        params: SyncmerParams,
-        packed_syncmers: &[PackedSyncmer],
-        gbwt: *mut syng_ffi::SyngBWT,
-        name_map: SyngNameMap,
-    ) -> io::Result<Self> {
-        if gbwt.is_null() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "prebuilt SyngBWT pointer is null",
-            ));
-        }
-        let mut index = Self::new_with_packed_syncmer_dictionary(params, packed_syncmers)?;
-        unsafe {
-            syng_ffi::syngBWTdestroy(index.gbwt);
-        }
-        index.gbwt = gbwt;
-        index.name_map = name_map;
-        index.sampled_positions = None;
-        index.sampled_position_builder = None;
-        Ok(index)
-    }
-
     /// True if a sampled path-position sidecar has been built or loaded.
     pub fn has_sampled_positions(&self) -> bool {
         self.sampled_positions.is_some()
@@ -1038,23 +1012,6 @@ impl SyngIndex {
         let (sampled_positions, stats) = builder.finish(&self.name_map.path_to_length)?;
         self.sampled_positions = Some(sampled_positions);
         Ok(Some(stats))
-    }
-
-    /// Build sampled positions from already-extracted forward syncmer paths.
-    pub fn set_sampled_positions_from_paths<'a>(
-        &mut self,
-        sample_shift: u32,
-        seed: u64,
-        paths: impl IntoIterator<Item = (usize, u64, &'a [(i64, i32)])>,
-    ) -> io::Result<SampledPositionBuildStats> {
-        let mut builder = SampledPositionBuilder::new(sample_shift, seed, 0, 0)?;
-        for (path_idx, path_len, syncmers) in paths {
-            builder.record_path(path_idx, path_len, syncmers);
-        }
-        let (sampled_positions, stats) = builder.finish(&self.name_map.path_to_length)?;
-        self.sampled_positions = Some(sampled_positions);
-        self.sampled_position_builder = None;
-        Ok(stats)
     }
 
     /// Build an index progressively from an iterator of (name, sequence) pairs.
@@ -2305,50 +2262,6 @@ mod tests {
             intervals.iter().any(|interval| interval.genome == "seqB"),
             "shared-prefix sequence should be discoverable through preloaded dictionary"
         );
-    }
-
-    #[test]
-    fn test_parallel_gbwt_reduce_supports_query() {
-        let _guard = lock_syng();
-        let params = SyncmerParams::default();
-        let shared = make_test_sequence(900, 42);
-        let mut seq_a = shared.clone();
-        seq_a.extend_from_slice(&make_test_sequence(300, 1));
-        let mut seq_b = shared;
-        seq_b.extend_from_slice(&make_test_sequence(300, 2));
-        let sequences = vec![
-            ("seqA".to_string(), seq_a.clone()),
-            ("seqB".to_string(), seq_b),
-            ("seqC".to_string(), make_test_sequence(1200, 99)),
-        ];
-
-        let dictionary =
-            crate::syng_parallel::build_packed_syncmer_dictionary(params, &sequences).unwrap();
-        let sequence_paths =
-            crate::syng_parallel::extract_sequence_syncmer_paths(params, &sequences, &dictionary)
-                .unwrap();
-        let (index, stats) = crate::syng_parallel::build_index_with_parallel_gbwt_reduce(
-            params,
-            dictionary,
-            sequence_paths,
-            0,
-            DEFAULT_POSITION_SAMPLE_SEED,
-        )
-        .unwrap();
-
-        assert_eq!(stats.sequences, 3);
-        assert_eq!(stats.indexed_sequences, 3);
-        assert_eq!(stats.gbwt_paths, 6);
-        assert!(stats.reduced_nodes > 0);
-
-        let intervals = index.query_region("seqA", 0, 600, 0).unwrap();
-        assert!(
-            intervals.iter().any(|interval| interval.genome == "seqB"),
-            "parallel GBWT reduce should preserve shared-prefix query behavior"
-        );
-
-        let matches = index.matched_syncmers_in_sequence(&seq_a);
-        assert!(!matches.is_empty());
     }
 
     #[test]

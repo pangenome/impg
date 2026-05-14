@@ -124,14 +124,6 @@ pub struct KmerHash {
     pub seq_pack: *mut SeqPack,
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct ImpgSyngEdge {
-    pub sync: I32,
-    pub offset: U32,
-    pub count: U32,
-}
-
 /// Syncmer parameters (syncmerset.h: SyncmerParams).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -199,23 +191,6 @@ extern "C" {
         path: *mut I64,
         offset: *mut I64,
     ) -> bool;
-
-    pub fn impg_syngBWTsetNode(
-        sb: *mut SyngBWT,
-        node_id: I32,
-        in_edges: *const ImpgSyngEdge,
-        n_in_edge: I32,
-        in_run_sym: *const I64,
-        in_run_len: *const I64,
-        n_in_run: I64,
-        out_edges: *const ImpgSyngEdge,
-        n_out_edge: I32,
-        out_run_sym: *const I64,
-        out_run_len: *const I64,
-        n_out_run: I64,
-    );
-    pub fn impg_syngBWTstartCountAdd(sb: *mut SyngBWT, start_node: I32, count: U32);
-    pub fn impg_syngBWTlocBuild(sb: *mut SyngBWT);
 
     // --- KmerHash (kmerhash.h) ---
 

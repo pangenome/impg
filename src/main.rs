@@ -221,44 +221,6 @@ fn read_syng_agc_record(
     Ok(ragc_numeric_to_ascii(&contig_data))
 }
 
-fn extract_syng_agc_sequence_paths(
-    agc_path: &str,
-    records: &[SyngAgcRecord],
-    params: impg::syng::SyncmerParams,
-    dictionary: &[impg::syng::PackedSyncmer],
-) -> io::Result<Vec<impg::syng_parallel::SequenceSyncmerPath>> {
-    records
-        .par_iter()
-        .map_init(
-            || {
-                let config = ragc_core::DecompressorConfig { verbosity: 0 };
-                ragc_core::Decompressor::open(agc_path, config).map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("Failed to open AGC file '{}': {}", agc_path, e),
-                    )
-                })
-            },
-            |decompressor, record| {
-                let decompressor = match decompressor {
-                    Ok(decompressor) => decompressor,
-                    Err(e) => return Err(io::Error::new(e.kind(), e.to_string())),
-                };
-                let seq = read_syng_agc_record(decompressor, record)?;
-                Ok(impg::syng_parallel::SequenceSyncmerPath {
-                    name: record.name.clone(),
-                    sequence_len: seq.len() as u64,
-                    syncmers: impg::syng_parallel::extract_syncmer_path_with_dictionary(
-                        params,
-                        &seq,
-                        dictionary,
-                    )?,
-                })
-            },
-        )
-        .collect()
-}
-
 fn format_duration(duration: Duration) -> String {
     if duration.as_secs() >= 60 {
         let mins = duration.as_secs() / 60;
@@ -1918,11 +1880,6 @@ enum Args {
         #[arg(help_heading = "Construction")]
         #[clap(long, action)]
         parallel_dictionary: bool,
-
-        /// Build a deterministic global dictionary and reduce GBWT nodes from ranked path occurrences.
-        #[arg(help_heading = "Construction")]
-        #[clap(long, action)]
-        parallel_reduce: bool,
 
         // --- Syncmer parameters ---
         /// Inner k-mer length for syncmer extraction
@@ -3813,7 +3770,6 @@ fn run() -> io::Result<()> {
             position_sample_shift,
             position_sample_seed,
             parallel_dictionary,
-            parallel_reduce,
             common,
         } => {
             initialize_threads_and_log(&common);
@@ -3861,108 +3817,7 @@ fn run() -> io::Result<()> {
             let total_start = Instant::now();
 
             let mut index = if let Some(agc_path) = agc {
-                if parallel_reduce {
-                    let input_start = Instant::now();
-                    info!(
-                        "Reading AGC sequence catalog for parallel GBWT reduce build: {} at +{}",
-                        agc_path,
-                        format_duration(total_start.elapsed())
-                    );
-                    let records = collect_syng_agc_records(&agc_path)?;
-                    let total_bp: u64 = records.iter().map(|record| record.length as u64).sum();
-                    info!(
-                        "Found {} AGC sequences ({} bp) for parallel reduce prepasses",
-                        records.len(),
-                        total_bp
-                    );
-
-                    let dictionary_start = Instant::now();
-                    let agc_path_for_threads = agc_path.clone();
-                    let packed_syncmers = records
-                        .par_iter()
-                        .map_init(
-                            move || {
-                                let config = ragc_core::DecompressorConfig { verbosity: 0 };
-                                ragc_core::Decompressor::open(&agc_path_for_threads, config)
-                                    .map_err(|e| {
-                                        io::Error::new(
-                                            io::ErrorKind::InvalidData,
-                                            format!(
-                                                "Failed to open AGC file '{}': {}",
-                                                agc_path_for_threads, e
-                                            ),
-                                        )
-                                    })
-                            },
-                            |decompressor, record| {
-                                let decompressor = match decompressor {
-                                    Ok(decompressor) => decompressor,
-                                    Err(e) => {
-                                        return Err(io::Error::new(e.kind(), e.to_string()));
-                                    }
-                                };
-                                let seq = read_syng_agc_record(decompressor, record)?;
-                                impg::syng_parallel::extract_packed_syncmers(params, &seq)
-                            },
-                        )
-                        .try_reduce(Vec::new, |mut acc, mut part| {
-                            acc.append(&mut part);
-                            Ok(acc)
-                        })?;
-                    let raw_syncmers = packed_syncmers.len();
-                    let dictionary =
-                        impg::syng_parallel::sort_dedup_packed_syncmers(packed_syncmers);
-                    info!(
-                        "Built packed syncmer dictionary in {}: {} raw syncmers, {} unique syncmer nodes at +{}",
-                        format_duration(dictionary_start.elapsed()),
-                        raw_syncmers,
-                        dictionary.len(),
-                        format_duration(total_start.elapsed())
-                    );
-
-                    let path_start = Instant::now();
-                    let sequence_paths =
-                        extract_syng_agc_sequence_paths(&agc_path, &records, params, &dictionary)?;
-                    let extracted_syncmers: usize = sequence_paths
-                        .iter()
-                        .map(|path| path.syncmers.len())
-                        .sum();
-                    info!(
-                        "Extracted {} sequence syncmer paths ({} syncmers) in {} at +{}",
-                        sequence_paths.len(),
-                        extracted_syncmers,
-                        format_duration(path_start.elapsed()),
-                        format_duration(total_start.elapsed())
-                    );
-
-                    let reduce_start = Instant::now();
-                    let (index, stats) =
-                        impg::syng_parallel::build_index_with_parallel_gbwt_reduce(
-                            params,
-                            dictionary,
-                            sequence_paths,
-                            position_sample_shift,
-                            position_sample_seed,
-                        )?;
-                    info!(
-                        "Reduced GBWT nodes in {}: {} sequences, {} indexed, {} GBWT paths, {} path occurrences, {} reduced nodes, {} dictionary nodes at +{}",
-                        format_duration(reduce_start.elapsed()),
-                        stats.sequences,
-                        stats.indexed_sequences,
-                        stats.gbwt_paths,
-                        stats.syncmer_occurrences,
-                        stats.reduced_nodes,
-                        stats.dictionary_nodes,
-                        format_duration(total_start.elapsed())
-                    );
-                    info!(
-                        "Built syng paths from {} sequences ({} bp) in {}",
-                        records.len(),
-                        total_bp,
-                        format_duration(input_start.elapsed())
-                    );
-                    index
-                } else if parallel_dictionary {
+                if parallel_dictionary {
                     let input_start = Instant::now();
                     info!(
                         "Reading AGC sequence catalog for parallel dictionary build: {} at +{}",
@@ -4219,79 +4074,7 @@ fn run() -> io::Result<()> {
                 index
                 }
             } else if let Some(fasta_path) = fasta {
-                if parallel_reduce {
-                    let input_start = Instant::now();
-                    info!(
-                        "Reading sequences from FASTA for parallel GBWT reduce build: {} at +{}",
-                        fasta_path,
-                        format_duration(total_start.elapsed())
-                    );
-                    let sequences = read_syng_fasta_sequences(&fasta_path)?;
-                    let total_bp: u64 =
-                        sequences.iter().map(|(_, seq)| seq.len() as u64).sum();
-                    info!(
-                        "Read {} FASTA sequences ({} bp) for parallel reduce prepasses",
-                        sequences.len(),
-                        total_bp
-                    );
-
-                    let dictionary_start = Instant::now();
-                    let dictionary =
-                        impg::syng_parallel::build_packed_syncmer_dictionary(params, &sequences)?;
-                    info!(
-                        "Built packed syncmer dictionary in {}: {} unique syncmer nodes at +{}",
-                        format_duration(dictionary_start.elapsed()),
-                        dictionary.len(),
-                        format_duration(total_start.elapsed())
-                    );
-
-                    let path_start = Instant::now();
-                    let sequence_paths =
-                        impg::syng_parallel::extract_sequence_syncmer_paths(
-                            params,
-                            &sequences,
-                            &dictionary,
-                        )?;
-                    let extracted_syncmers: usize = sequence_paths
-                        .iter()
-                        .map(|path| path.syncmers.len())
-                        .sum();
-                    info!(
-                        "Extracted {} sequence syncmer paths ({} syncmers) in {} at +{}",
-                        sequence_paths.len(),
-                        extracted_syncmers,
-                        format_duration(path_start.elapsed()),
-                        format_duration(total_start.elapsed())
-                    );
-
-                    let reduce_start = Instant::now();
-                    let (index, stats) =
-                        impg::syng_parallel::build_index_with_parallel_gbwt_reduce(
-                            params,
-                            dictionary,
-                            sequence_paths,
-                            position_sample_shift,
-                            position_sample_seed,
-                        )?;
-                    info!(
-                        "Reduced GBWT nodes in {}: {} sequences, {} indexed, {} GBWT paths, {} path occurrences, {} reduced nodes, {} dictionary nodes at +{}",
-                        format_duration(reduce_start.elapsed()),
-                        stats.sequences,
-                        stats.indexed_sequences,
-                        stats.gbwt_paths,
-                        stats.syncmer_occurrences,
-                        stats.reduced_nodes,
-                        stats.dictionary_nodes,
-                        format_duration(total_start.elapsed())
-                    );
-                    info!(
-                        "Built syng paths from {} sequences ({} bp) in {}",
-                        sequences.len(),
-                        total_bp,
-                        format_duration(input_start.elapsed())
-                    );
-                    index
-                } else if parallel_dictionary {
+                if parallel_dictionary {
                     let input_start = Instant::now();
                     info!(
                         "Reading sequences from FASTA for parallel dictionary build: {} at +{}",
