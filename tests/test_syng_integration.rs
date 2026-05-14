@@ -96,8 +96,8 @@ fn impg_binary() -> Option<PathBuf> {
 
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     for candidate in [
-        manifest_dir.join("target/release/impg"),
         manifest_dir.join("target/debug/impg"),
+        manifest_dir.join("target/release/impg"),
     ] {
         if candidate.exists() {
             return Some(candidate);
@@ -148,12 +148,14 @@ fn test_syng_agc_build_produces_non_empty_index() {
     let khash_path = format!("{}.1khash", out_prefix.to_str().unwrap());
     let names_path = format!("{}.syng.names", out_prefix.to_str().unwrap());
     let spos_path = format!("{}.syng.spos", out_prefix.to_str().unwrap());
+    let pstep_path = format!("{}.syng.pstep", out_prefix.to_str().unwrap());
     let meta_path = format!("{}.syng.meta", out_prefix.to_str().unwrap());
 
     assert!(std::path::Path::new(&gbwt_path).exists(), ".1gbwt missing");
     assert!(std::path::Path::new(&khash_path).exists(), ".1khash missing");
     assert!(std::path::Path::new(&names_path).exists(), ".syng.names missing");
     assert!(std::path::Path::new(&spos_path).exists(), ".syng.spos missing");
+    assert!(std::path::Path::new(&pstep_path).exists(), ".syng.pstep missing");
     assert!(std::path::Path::new(&meta_path).exists(), ".syng.meta missing");
 
     // Key assertion: the GBWT must contain actual vertex data, not just a
@@ -646,6 +648,10 @@ fn test_syng_map_cli_sampled_positions_paf() {
     assert!(
         std::path::Path::new(&format!("{}.syng.spos", idx_prefix.to_str().unwrap())).exists(),
         "default sampled-position sidecar should be written"
+    );
+    assert!(
+        std::path::Path::new(&format!("{}.syng.pstep", idx_prefix.to_str().unwrap())).exists(),
+        "default sampled path-step sidecar should be written"
     );
     assert!(
         std::path::Path::new(&format!("{}.syng.meta", idx_prefix.to_str().unwrap())).exists(),

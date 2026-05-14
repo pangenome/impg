@@ -27,10 +27,33 @@ pub struct SampledPositionHit {
     pub target_orient: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SampledPathStepHit {
+    pub path_idx: usize,
+    pub step_idx: u32,
+    pub bp_pos: u64,
+    pub signed_node: i32,
+    pub prev_node: i32,
+    pub prev_offset: u32,
+    pub traversal_rank: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PathStepRecord {
+    step_idx: u32,
+    bp_pos: u64,
+    signed_node: i32,
+    prev_node: i32,
+    prev_offset: u32,
+    traversal_rank: u32,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct SampledPositionBuildStats {
     pub sampled_occurrences: u64,
     pub sampled_nodes: usize,
+    pub sampled_path_steps: u64,
+    pub sampled_step_paths: usize,
     pub walked_paths: usize,
     pub sample_shift: u32,
 }
@@ -69,6 +92,10 @@ pub fn syng_names_path(prefix: &str) -> String {
 
 pub fn syng_spos_path(prefix: &str) -> String {
     syng_sidecar_path(prefix, "spos")
+}
+
+pub fn syng_pstep_path(prefix: &str) -> String {
+    syng_sidecar_path(prefix, "pstep")
 }
 
 pub fn syng_meta_path(prefix: &str) -> String {
@@ -330,11 +357,298 @@ impl SampledPositions {
     }
 }
 
+/// Sampled checkpoints keyed by path coordinate.
+///
+/// `.spos` answers node -> path positions. This sidecar is the inverse
+/// checkpoint index: path position -> the syncmer step at or before that
+/// coordinate, including enough GBWT path state to resume walking from the
+/// sampled step.
+pub struct SampledPathSteps {
+    pub sample_shift: u32,
+    pub seed: u64,
+    sample_count: u64,
+    path_byte_offsets: Vec<u64>,
+    data: Vec<u8>,
+}
+
+impl SampledPathSteps {
+    const MAGIC: u64 = 0x494D50_50535450; // "IMPPSTP"
+    const VERSION: u64 = 1;
+
+    #[allow(dead_code)]
+    fn from_samples(
+        sample_shift: u32,
+        seed: u64,
+        path_count: usize,
+        mut samples: Vec<(usize, PathStepRecord)>,
+    ) -> io::Result<Self> {
+        samples.sort_unstable_by(|a, b| {
+            (a.0, a.1.bp_pos, a.1.step_idx).cmp(&(b.0, b.1.bp_pos, b.1.step_idx))
+        });
+        samples.dedup();
+
+        if let Some((path_idx, _)) = samples.iter().find(|(path_idx, _)| *path_idx >= path_count) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "sampled path-step path index {} exceeds path count {}",
+                    path_idx, path_count
+                ),
+            ));
+        }
+
+        let sample_count = samples.len() as u64;
+        let mut path_byte_offsets = Vec::with_capacity(path_count + 1);
+        let mut data = Vec::new();
+        let mut i = 0usize;
+        path_byte_offsets.push(0);
+        for path_idx in 0..path_count {
+            let mut prev_bp = 0u64;
+            let mut prev_step = 0u32;
+            while i < samples.len() && samples[i].0 == path_idx {
+                let record = samples[i].1;
+                let bp_delta = record.bp_pos.checked_sub(prev_bp).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "sampled path-step bp positions are not sorted within path",
+                    )
+                })?;
+                let step_delta = record.step_idx.checked_sub(prev_step).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "sampled path-step indices are not sorted within path",
+                    )
+                })?;
+                push_varint(&mut data, bp_delta);
+                push_varint(&mut data, step_delta as u64);
+                push_varint(&mut data, encode_i32(record.signed_node));
+                push_varint(&mut data, encode_i32(record.prev_node));
+                push_varint(&mut data, record.prev_offset as u64);
+                push_varint(&mut data, record.traversal_rank as u64);
+                prev_bp = record.bp_pos;
+                prev_step = record.step_idx;
+                i += 1;
+            }
+            path_byte_offsets.push(data.len() as u64);
+        }
+
+        if i != samples.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "sampled path-step samples were not assigned to a path group",
+            ));
+        }
+
+        Self::from_encoded(sample_shift, seed, sample_count, path_byte_offsets, data)
+    }
+
+    fn from_encoded(
+        sample_shift: u32,
+        seed: u64,
+        sample_count: u64,
+        path_byte_offsets: Vec<u64>,
+        data: Vec<u8>,
+    ) -> io::Result<Self> {
+        if path_byte_offsets.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "SampledPathSteps: path offsets cannot be empty",
+            ));
+        }
+        if path_byte_offsets.last().copied().unwrap_or(0) as usize != data.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "SampledPathSteps: final byte offset does not match data length",
+            ));
+        }
+        if path_byte_offsets.windows(2).any(|w| w[0] > w[1]) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "SampledPathSteps: byte offsets are not sorted",
+            ));
+        }
+
+        Ok(Self {
+            sample_shift,
+            seed,
+            sample_count,
+            path_byte_offsets,
+            data,
+        })
+    }
+
+    pub fn sample_count(&self) -> u64 {
+        self.sample_count
+    }
+
+    pub fn sampled_path_count(&self) -> usize {
+        self.path_byte_offsets
+            .windows(2)
+            .filter(|w| w[0] < w[1])
+            .count()
+    }
+
+    pub fn path_count(&self) -> usize {
+        self.path_byte_offsets.len().saturating_sub(1)
+    }
+
+    pub fn decode_path(&self, path_idx: usize) -> io::Result<Vec<SampledPathStepHit>> {
+        let start =
+            *self.path_byte_offsets.get(path_idx).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "path index out of range")
+            })? as usize;
+        let end = *self.path_byte_offsets.get(path_idx + 1).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path index terminal offset out of range",
+            )
+        })? as usize;
+        if start > end || end > self.data.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "sampled path-step byte offsets are out of range",
+            ));
+        }
+
+        let mut hits = Vec::new();
+        let mut pos = start;
+        let mut bp_pos = 0u64;
+        let mut step_idx = 0u32;
+        while pos < end {
+            let bp_delta = read_varint_from_slice(&self.data, &mut pos, end)?;
+            let step_delta = read_varint_from_slice(&self.data, &mut pos, end)?;
+            bp_pos = bp_pos.checked_add(bp_delta).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "path-step bp position overflow")
+            })?;
+            if step_delta > u32::MAX as u64 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "path-step delta exceeds u32",
+                ));
+            }
+            step_idx = step_idx.checked_add(step_delta as u32).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "path-step index overflow")
+            })?;
+            let signed_node = decode_i32(read_varint_from_slice(&self.data, &mut pos, end)?)?;
+            let prev_node = decode_i32(read_varint_from_slice(&self.data, &mut pos, end)?)?;
+            let prev_offset = read_varint_from_slice(&self.data, &mut pos, end)?;
+            let traversal_rank = read_varint_from_slice(&self.data, &mut pos, end)?;
+            if prev_offset > u32::MAX as u64 || traversal_rank > u32::MAX as u64 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "path-step traversal fields exceed u32",
+                ));
+            }
+            hits.push(SampledPathStepHit {
+                path_idx,
+                step_idx,
+                bp_pos,
+                signed_node,
+                prev_node,
+                prev_offset: prev_offset as u32,
+                traversal_rank: traversal_rank as u32,
+            });
+        }
+        Ok(hits)
+    }
+
+    pub fn checkpoint_at_or_before(
+        &self,
+        path_idx: usize,
+        bp_pos: u64,
+    ) -> io::Result<Option<SampledPathStepHit>> {
+        let hits = self.decode_path(path_idx)?;
+        let upper = hits.partition_point(|hit| hit.bp_pos <= bp_pos);
+        Ok(upper.checked_sub(1).map(|idx| hits[idx]))
+    }
+
+    fn save(&self, path: &str) -> io::Result<()> {
+        let mut w = BufWriter::new(std::fs::File::create(path)?);
+        write_u64(&mut w, Self::MAGIC)?;
+        write_u64(&mut w, Self::VERSION)?;
+        write_u64(&mut w, self.sample_shift as u64)?;
+        write_u64(&mut w, self.seed)?;
+        write_u64(&mut w, self.sample_count)?;
+
+        write_u64(&mut w, self.path_byte_offsets.len() as u64)?;
+        for &offset in &self.path_byte_offsets {
+            write_u64(&mut w, offset)?;
+        }
+
+        write_u64(&mut w, self.data.len() as u64)?;
+        w.write_all(&self.data)?;
+        w.flush()
+    }
+
+    fn load(path: &str) -> io::Result<Self> {
+        let mut r = BufReader::new(std::fs::File::open(path)?);
+        let magic = read_u64(&mut r)?;
+        if magic != Self::MAGIC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("SampledPathSteps: bad magic 0x{:x}", magic),
+            ));
+        }
+        let version = read_u64(&mut r)?;
+        if version != Self::VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("SampledPathSteps: unsupported version {}", version),
+            ));
+        }
+        let sample_shift = read_u64(&mut r)? as u32;
+        let seed = read_u64(&mut r)?;
+        let sample_count = read_u64(&mut r)?;
+
+        let n_offsets = read_u64(&mut r)? as usize;
+        let mut path_byte_offsets = Vec::with_capacity(n_offsets);
+        for _ in 0..n_offsets {
+            path_byte_offsets.push(read_u64(&mut r)?);
+        }
+
+        let n_data = read_u64(&mut r)? as usize;
+        let mut data = vec![0u8; n_data];
+        r.read_exact(&mut data)?;
+
+        if path_byte_offsets.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "SampledPathSteps: path offsets cannot be empty",
+            ));
+        }
+        if path_byte_offsets.last().copied().unwrap_or(0) as usize != data.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "SampledPathSteps: final byte offset does not match data length",
+            ));
+        }
+        if path_byte_offsets.windows(2).any(|w| w[0] > w[1]) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "SampledPathSteps: byte offsets are not sorted",
+            ));
+        }
+
+        Ok(Self {
+            sample_shift,
+            seed,
+            sample_count,
+            path_byte_offsets,
+            data,
+        })
+    }
+}
+
 struct SampledPositionBuilder {
     sample_shift: u32,
     seed: u64,
     sample_mask: u64,
-    samples: Vec<(u32, u64)>,
+    collect_positions: bool,
+    position_samples: Vec<(u32, u64)>,
+    path_step_offsets: Vec<u64>,
+    path_step_data: Vec<u8>,
+    path_step_sample_count: u64,
+    sampled_step_paths: usize,
     next_path_start: u64,
     paths_seen: usize,
     walked_paths: usize,
@@ -347,6 +661,25 @@ impl SampledPositionBuilder {
         next_path_start: u64,
         paths_seen: usize,
     ) -> io::Result<Self> {
+        Self::new_with_mode(sample_shift, seed, next_path_start, paths_seen, true)
+    }
+
+    fn new_path_steps_only(
+        sample_shift: u32,
+        seed: u64,
+        next_path_start: u64,
+        paths_seen: usize,
+    ) -> io::Result<Self> {
+        Self::new_with_mode(sample_shift, seed, next_path_start, paths_seen, false)
+    }
+
+    fn new_with_mode(
+        sample_shift: u32,
+        seed: u64,
+        next_path_start: u64,
+        paths_seen: usize,
+        collect_positions: bool,
+    ) -> io::Result<Self> {
         if sample_shift >= 63 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -356,44 +689,88 @@ impl SampledPositionBuilder {
         Ok(Self {
             sample_shift,
             seed,
-            sample_mask: if sample_shift == 0 { 0 } else { (1u64 << sample_shift) - 1 },
-            samples: Vec::new(),
+            sample_mask: if sample_shift == 0 {
+                0
+            } else {
+                (1u64 << sample_shift) - 1
+            },
+            collect_positions,
+            position_samples: Vec::new(),
+            path_step_offsets: vec![0; paths_seen + 1],
+            path_step_data: Vec::new(),
+            path_step_sample_count: 0,
+            sampled_step_paths: 0,
             next_path_start,
             paths_seen,
             walked_paths: 0,
         })
     }
 
-    fn record_path(&mut self, path_idx: usize, seq_len: u64, syncmers: &[(i64, i32)]) {
+    fn record_path(&mut self, path_idx: usize, seq_len: u64, steps: &[PathStepRecord]) {
         debug_assert_eq!(
             path_idx, self.paths_seen,
             "online sampled-position path order drifted from name map"
         );
-        if !syncmers.is_empty() {
+        if !steps.is_empty() {
             self.walked_paths += 1;
         }
+        debug_assert_eq!(
+            self.path_step_offsets.len(),
+            self.paths_seen + 1,
+            "path-step offset table drifted from online path order"
+        );
         let path_start = self.next_path_start;
-        for (node_idx, &(signed_node_i64, bp_pos_i32)) in syncmers.iter().enumerate() {
-            let signed_node = signed_node_i64 as i32;
-            let node_id = signed_node.unsigned_abs();
-            let bp_pos = bp_pos_i32 as u64;
+        let path_step_start = self.path_step_data.len();
+        let mut prev_bp = 0u64;
+        let mut prev_step = 0u32;
+        for step in steps {
+            let node_id = step.signed_node.unsigned_abs();
+            let bp_pos = step.bp_pos;
             if self.sample_shift > 0
-                && sampled_position_hash(node_id, path_idx, node_idx, bp_pos, self.seed)
-                    & self.sample_mask
+                && sampled_position_hash(
+                    node_id,
+                    path_idx,
+                    step.step_idx as usize,
+                    bp_pos,
+                    self.seed,
+                ) & self.sample_mask
                     != 0
             {
                 continue;
             }
-            let global_pos = path_start
-                .checked_add(bp_pos)
-                .expect("sampled path coordinate overflowed u64");
-            let orient_bit = if signed_node >= 0 { 0u64 } else { 1u64 };
-            let packed = global_pos
-                .checked_mul(2)
-                .and_then(|p| p.checked_add(orient_bit))
-                .expect("sampled packed coordinate overflowed u64");
-            self.samples.push((node_id, packed));
+            if self.collect_positions {
+                let global_pos = path_start
+                    .checked_add(bp_pos)
+                    .expect("sampled path coordinate overflowed u64");
+                let packed = global_pos
+                    .checked_mul(2)
+                    .and_then(|p| p.checked_add(if step.signed_node >= 0 { 0 } else { 1 }))
+                    .expect("sampled packed coordinate overflowed u64");
+                self.position_samples.push((node_id, packed));
+            }
+
+            let bp_delta = step
+                .bp_pos
+                .checked_sub(prev_bp)
+                .expect("path-step positions should be sorted within path");
+            let step_delta = step
+                .step_idx
+                .checked_sub(prev_step)
+                .expect("path-step indices should be sorted within path");
+            push_varint(&mut self.path_step_data, bp_delta);
+            push_varint(&mut self.path_step_data, step_delta as u64);
+            push_varint(&mut self.path_step_data, encode_i32(step.signed_node));
+            push_varint(&mut self.path_step_data, encode_i32(step.prev_node));
+            push_varint(&mut self.path_step_data, step.prev_offset as u64);
+            push_varint(&mut self.path_step_data, step.traversal_rank as u64);
+            prev_bp = step.bp_pos;
+            prev_step = step.step_idx;
+            self.path_step_sample_count += 1;
         }
+        if self.path_step_data.len() > path_step_start {
+            self.sampled_step_paths += 1;
+        }
+        self.path_step_offsets.push(self.path_step_data.len() as u64);
         self.next_path_start = self
             .next_path_start
             .checked_add(seq_len)
@@ -401,18 +778,95 @@ impl SampledPositionBuilder {
         self.paths_seen += 1;
     }
 
-    fn finish(self, path_lengths: &[u64]) -> io::Result<(SampledPositions, SampledPositionBuildStats)> {
-        let sample_shift = self.sample_shift;
-        let walked_paths = self.walked_paths;
-        let sampled_positions =
-            SampledPositions::from_samples(sample_shift, self.seed, path_lengths, self.samples)?;
+    fn finish(
+        self,
+        path_lengths: &[u64],
+    ) -> io::Result<(
+        SampledPositions,
+        SampledPathSteps,
+        SampledPositionBuildStats,
+    )> {
+        let SampledPositionBuilder {
+            sample_shift,
+            seed,
+            position_samples,
+            path_step_offsets,
+            path_step_data,
+            path_step_sample_count,
+            walked_paths,
+            ..
+        } = self;
+        let sampled_positions = SampledPositions::from_samples(
+            sample_shift,
+            seed,
+            path_lengths,
+            position_samples,
+        )?;
+        let sampled_path_steps = SampledPathSteps::from_encoded(
+            sample_shift,
+            seed,
+            path_step_sample_count,
+            path_step_offsets,
+            path_step_data,
+        )?;
+        if sampled_path_steps.path_count() != path_lengths.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "path-step index has offsets for {} paths, expected {}",
+                    sampled_path_steps.path_count(),
+                    path_lengths.len()
+                ),
+            ));
+        }
         let stats = SampledPositionBuildStats {
             sampled_occurrences: sampled_positions.sample_count(),
             sampled_nodes: sampled_positions.node_count(),
+            sampled_path_steps: sampled_path_steps.sample_count(),
+            sampled_step_paths: sampled_path_steps.sampled_path_count(),
             walked_paths,
             sample_shift,
         };
-        Ok((sampled_positions, stats))
+        Ok((sampled_positions, sampled_path_steps, stats))
+    }
+
+    fn finish_path_steps(
+        self,
+        path_count: usize,
+    ) -> io::Result<(SampledPathSteps, SampledPositionBuildStats)> {
+        let sample_shift = self.sample_shift;
+        let walked_paths = self.walked_paths;
+        let sampled_step_paths = self.sampled_step_paths;
+        let sampled_path_steps = self.finish_path_steps_index(path_count)?;
+        let stats = SampledPositionBuildStats {
+            sampled_occurrences: 0,
+            sampled_nodes: 0,
+            sampled_path_steps: sampled_path_steps.sample_count(),
+            sampled_step_paths,
+            walked_paths,
+            sample_shift,
+        };
+        Ok((sampled_path_steps, stats))
+    }
+
+    fn finish_path_steps_index(self, path_count: usize) -> io::Result<SampledPathSteps> {
+        if self.path_step_offsets.len() != path_count + 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "path-step index has offsets for {} paths, expected {}",
+                    self.path_step_offsets.len().saturating_sub(1),
+                    path_count
+                ),
+            ));
+        }
+        SampledPathSteps::from_encoded(
+            self.sample_shift,
+            self.seed,
+            self.path_step_sample_count,
+            self.path_step_offsets,
+            self.path_step_data,
+        )
     }
 }
 
@@ -446,6 +900,21 @@ fn read_varint_from_slice(buf: &[u8], pos: &mut usize, end: usize) -> io::Result
         io::ErrorKind::UnexpectedEof,
         "truncated varint in sampled positions",
     ))
+}
+
+fn encode_i32(value: i32) -> u64 {
+    let value = value as i64;
+    ((value << 1) ^ (value >> 31)) as u64
+}
+
+fn decode_i32(value: u64) -> io::Result<i32> {
+    let decoded = ((value >> 1) as i64) ^ (-((value & 1) as i64));
+    i32::try_from(decoded).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("zigzag-decoded value {} exceeds i32", decoded),
+        )
+    })
 }
 
 fn splitmix64(mut value: u64) -> u64 {
@@ -589,7 +1058,11 @@ impl SyngMetadata {
                 _ => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("unknown syng metadata key '{}' on line {}", key, line_no + 1),
+                        format!(
+                            "unknown syng metadata key '{}' on line {}",
+                            key,
+                            line_no + 1
+                        ),
                     ));
                 }
             }
@@ -607,13 +1080,22 @@ impl SyngMetadata {
 
         let params = SyncmerParams {
             k: syncmer_k.ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "syng metadata missing syncmer_k")
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "syng metadata missing syncmer_k",
+                )
             })?,
             w: syncmer_w.ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "syng metadata missing syncmer_w")
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "syng metadata missing syncmer_w",
+                )
             })?,
             seed: syncmer_seed.ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "syng metadata missing syncmer_seed")
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "syng metadata missing syncmer_seed",
+                )
             })?,
         };
 
@@ -788,10 +1270,8 @@ impl SyngNameMap {
                 // 7th column is optional (new in this format revision). Old
                 // files default to 0 — anchors remain off by the first
                 // syncmer's absolute position until the index is rebuilt.
-                let first_syncmer_pos: u64 = parts
-                    .get(6)
-                    .map(|s| s.parse().unwrap_or(0))
-                    .unwrap_or(0);
+                let first_syncmer_pos: u64 =
+                    parts.get(6).map(|s| s.parse().unwrap_or(0)).unwrap_or(0);
                 if num_syncmers > 0 {
                     name_map.set_path_start(
                         path_num,
@@ -892,6 +1372,8 @@ pub struct SyngIndex {
     pub params: SyncmerParams,
     /// Succinct sampled path-position sidecar for projected query/map coordinates.
     sampled_positions: Option<SampledPositions>,
+    /// Sampled path checkpoints for path-position to syncmer-step lookup.
+    sampled_path_steps: Option<SampledPathSteps>,
     /// Online collector that records sampled positions while sequences are added.
     sampled_position_builder: Option<SampledPositionBuilder>,
 }
@@ -935,6 +1417,7 @@ impl SyngIndex {
             name_map: SyngNameMap::new(),
             params,
             sampled_positions: None,
+            sampled_path_steps: None,
             sampled_position_builder: Some(
                 SampledPositionBuilder::new(
                     DEFAULT_POSITION_SAMPLE_SHIFT,
@@ -1012,6 +1495,11 @@ impl SyngIndex {
         self.sampled_positions.is_some()
     }
 
+    /// True if an inverted sampled path-step sidecar has been built or loaded.
+    pub fn has_sampled_path_steps(&self) -> bool {
+        self.sampled_path_steps.is_some()
+    }
+
     /// Enable online sampled-position collection for subsequently added paths.
     ///
     /// This should be called before adding any sequence. The sampled position
@@ -1027,7 +1515,10 @@ impl SyngIndex {
             .iter()
             .try_fold(0u64, |acc, &len| acc.checked_add(len))
             .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "total path length overflowed u64")
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "total path length overflowed u64",
+                )
             })?;
         self.sampled_position_builder = Some(SampledPositionBuilder::new(
             sample_shift,
@@ -1036,18 +1527,21 @@ impl SyngIndex {
             self.name_map.path_to_name.len(),
         )?);
         self.sampled_positions = None;
+        self.sampled_path_steps = None;
         Ok(())
     }
 
-    /// Compact online samples into the `.syng.spos` representation.
+    /// Compact online samples into the `.syng.spos` and `.syng.pstep` representations.
     pub fn finalize_online_sampled_positions(
         &mut self,
     ) -> io::Result<Option<SampledPositionBuildStats>> {
         let Some(builder) = self.sampled_position_builder.take() else {
             return Ok(None);
         };
-        let (sampled_positions, stats) = builder.finish(&self.name_map.path_to_length)?;
+        let (sampled_positions, sampled_path_steps, stats) =
+            builder.finish(&self.name_map.path_to_length)?;
         self.sampled_positions = Some(sampled_positions);
+        self.sampled_path_steps = Some(sampled_path_steps);
         Ok(Some(stats))
     }
 
@@ -1065,7 +1559,10 @@ impl SyngIndex {
     ) -> Self {
         let mut index = Self::new(params);
         if let Err(e) = index.enable_online_sampled_positions(0, DEFAULT_POSITION_SAMPLE_SEED) {
-            log::warn!("failed to enable exact sampled positions for in-memory build: {}", e);
+            log::warn!(
+                "failed to enable exact sampled positions for in-memory build: {}",
+                e
+            );
         }
 
         for (name, seq) in sequences {
@@ -1109,6 +1606,7 @@ impl SyngIndex {
         lookup_mode: SyncmerLookupMode,
     ) -> io::Result<SyngAddSequenceStats> {
         self.sampled_positions = None;
+        self.sampled_path_steps = None;
 
         let syncmer_len = (self.params.w + self.params.k) as usize;
         let seq_len = seq.len();
@@ -1149,12 +1647,7 @@ impl SyngIndex {
             );
 
             let mut pos: i32 = 0;
-            while syng_ffi::syncmerNext(
-                sit,
-                std::ptr::null_mut(),
-                &mut pos,
-                std::ptr::null_mut(),
-            ) {
+            while syng_ffi::syncmerNext(sit, std::ptr::null_mut(), &mut pos, std::ptr::null_mut()) {
                 let mut kmer_index: i64 = 0;
                 let syncmer_ptr = seq_buf.as_mut_ptr().add(pos as usize) as *mut i8;
                 match lookup_mode {
@@ -1162,11 +1655,8 @@ impl SyngIndex {
                         syng_ffi::kmerHashAdd(self.kmer_hash, syncmer_ptr, &mut kmer_index);
                     }
                     SyncmerLookupMode::RequireExisting => {
-                        let found = syng_ffi::kmerHashFind(
-                            self.kmer_hash,
-                            syncmer_ptr,
-                            &mut kmer_index,
-                        );
+                        let found =
+                            syng_ffi::kmerHashFind(self.kmer_hash, syncmer_ptr, &mut kmer_index);
                         if !found {
                             syng_ffi::impg_seqhashIteratorDestroy(sit);
                             return Err(io::Error::new(
@@ -1200,6 +1690,7 @@ impl SyngIndex {
         // Build forward GBWT path and capture start info
         let fwd_start_node;
         let fwd_start_count;
+        let mut path_steps: Vec<PathStepRecord> = Vec::with_capacity(syncmers.len());
         // Syng's first syncmer lands at wherever the first min k-mer
         // appears in the initial window — anywhere in `[0, w+k)`. We
         // record it so `walk_path` can emit absolute bp coordinates.
@@ -1210,10 +1701,26 @@ impl SyngIndex {
             // Capture start info before any path additions modify it
             fwd_start_node = first_sync;
             fwd_start_count = (*sbp).j_last;
+            path_steps.push(PathStepRecord {
+                step_idx: 0,
+                bp_pos: fwd_first_syncmer_pos,
+                signed_node: first_sync,
+                prev_node: 0,
+                prev_offset: 0,
+                traversal_rank: fwd_start_count,
+            });
             for i in 1..syncmers.len() {
                 let next_sync = syncmers[i].0 as i32;
                 let offset = (syncmers[i].1 - syncmers[i - 1].1) as u32;
                 syng_ffi::syngBWTpathAdd(sbp, next_sync, offset);
+                path_steps.push(PathStepRecord {
+                    step_idx: i as u32,
+                    bp_pos: syncmers[i].1 as u64,
+                    signed_node: next_sync,
+                    prev_node: syncmers[i - 1].0 as i32,
+                    prev_offset: offset,
+                    traversal_rank: (*sbp).j_last,
+                });
             }
             syng_ffi::syngBWTpathFinish(sbp);
         }
@@ -1246,7 +1753,7 @@ impl SyngIndex {
             },
         );
         if let Some(builder) = self.sampled_position_builder.as_mut() {
-            builder.record_path(path_num as usize, seq_len as u64, &syncmers);
+            builder.record_path(path_num as usize, seq_len as u64, &path_steps);
         }
 
         Ok(SyngAddSequenceStats {
@@ -1258,11 +1765,12 @@ impl SyngIndex {
 
     /// Save the index to disk.
     ///
-    /// Produces five files at the given prefix:
+    /// Produces six files at the given prefix:
     /// - `{prefix}.1khash` — syncmer hash (syng-compatible)
     /// - `{prefix}.1gbwt` — GBWT graph (syng-compatible)
     /// - `{prefix}.syng.names` or `{prefix}.names` — sequence name mapping
     /// - `{prefix}.syng.spos` or `{prefix}.spos` — sampled path-position index
+    /// - `{prefix}.syng.pstep` or `{prefix}.pstep` — inverted sampled path-step checkpoints
     /// - `{prefix}.syng.meta` or `{prefix}.meta` — syncmer extraction parameters
     ///
     /// The shorter sidecar names are used when `prefix` already ends in
@@ -1290,7 +1798,10 @@ impl SyngIndex {
             );
             if of.is_null() {
                 syng_ffi::oneSchemaDestroy(schema);
-                return Err(io::Error::other(format!("Failed to open {} for writing", gbwt_path)));
+                return Err(io::Error::other(format!(
+                    "Failed to open {} for writing",
+                    gbwt_path
+                )));
             }
             syng_ffi::syngBWTwrite(of, self.gbwt);
             syng_ffi::oneFileClose(of);
@@ -1305,7 +1816,9 @@ impl SyngIndex {
         unsafe {
             let schema = syng_ffi::oneSchemaCreateFromText(schema_text.as_ptr());
             if schema.is_null() {
-                return Err(io::Error::other("Failed to create ONEcode schema for khash"));
+                return Err(io::Error::other(
+                    "Failed to create ONEcode schema for khash",
+                ));
             }
             let of = syng_ffi::oneFileOpenWriteNew(
                 khash_cpath.as_ptr(),
@@ -1316,7 +1829,10 @@ impl SyngIndex {
             );
             if of.is_null() {
                 syng_ffi::oneSchemaDestroy(schema);
-                return Err(io::Error::other(format!("Failed to open {} for writing", khash_path)));
+                return Err(io::Error::other(format!(
+                    "Failed to open {} for writing",
+                    khash_path
+                )));
             }
             let ok = syng_ffi::kmerHashWriteOneFile(self.kmer_hash, of);
             syng_ffi::oneFileClose(of);
@@ -1330,14 +1846,7 @@ impl SyngIndex {
         let names_path = syng_names_path(prefix);
         self.name_map.save(&names_path)?;
 
-        // Write position sidecar (required for query/map projection).
-        let sampled_positions = self.sampled_positions.as_ref().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "cannot save syng index without sampled positions",
-            )
-        })?;
-        sampled_positions.save(&syng_spos_path(prefix))?;
+        self.save_position_sidecars(prefix)?;
 
         // Write metadata last so a complete index records the syncmer
         // parameters that future query/map calls must use.
@@ -1346,15 +1855,54 @@ impl SyngIndex {
         Ok(())
     }
 
+    /// Save only the position sidecars for an existing syng index prefix.
+    pub fn save_position_sidecars(&self, prefix: &str) -> io::Result<()> {
+        let sampled_positions = self.sampled_positions.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "cannot save syng index without sampled positions",
+            )
+        })?;
+        sampled_positions.save(&syng_spos_path(prefix))?;
+        let sampled_path_steps = self.sampled_path_steps.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "cannot save syng index without sampled path-step checkpoints",
+            )
+        })?;
+        sampled_path_steps.save(&syng_pstep_path(prefix))
+    }
+
+    /// Save only the inverted path-step sidecar for an existing syng index prefix.
+    pub fn save_path_step_sidecar(&self, prefix: &str) -> io::Result<()> {
+        let sampled_path_steps = self.sampled_path_steps.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "cannot save syng index without sampled path-step checkpoints",
+            )
+        })?;
+        sampled_path_steps.save(&syng_pstep_path(prefix))
+    }
+
     /// Load an index from disk.
     ///
-    /// Reads five files at the given prefix:
+    /// Reads syng files at the given prefix:
     /// - `{prefix}.1khash`
     /// - `{prefix}.1gbwt`
     /// - `{prefix}.syng.names` or `{prefix}.names`
     /// - `{prefix}.syng.spos` or `{prefix}.spos`
+    /// - `{prefix}.syng.pstep` or `{prefix}.pstep` if present
     /// - `{prefix}.syng.meta` or `{prefix}.meta`
     pub fn load(prefix: &str, _params: SyncmerParams) -> io::Result<Self> {
+        Self::load_with_options(prefix, true)
+    }
+
+    /// Load core syng files for sidecar repair. Missing position sidecars are allowed.
+    pub fn load_for_repair(prefix: &str, _params: SyncmerParams) -> io::Result<Self> {
+        Self::load_with_options(prefix, false)
+    }
+
+    fn load_with_options(prefix: &str, require_sampled_positions: bool) -> io::Result<Self> {
         let metadata_path = existing_syng_sidecar_path(prefix, "meta");
         let metadata = SyngMetadata::load(&metadata_path)?;
         let params = metadata.params;
@@ -1374,17 +1922,17 @@ impl SyngIndex {
         let gbwt = unsafe {
             let schema = syng_ffi::oneSchemaCreateFromText(schema_text.as_ptr());
             if schema.is_null() {
-                return Err(io::Error::other("Failed to create ONEcode schema for gbwt read"));
+                return Err(io::Error::other(
+                    "Failed to create ONEcode schema for gbwt read",
+                ));
             }
-            let of = syng_ffi::oneFileOpenRead(
-                gbwt_cpath.as_ptr(),
-                schema,
-                gbwt_type.as_ptr(),
-                1,
-            );
+            let of = syng_ffi::oneFileOpenRead(gbwt_cpath.as_ptr(), schema, gbwt_type.as_ptr(), 1);
             if of.is_null() {
                 syng_ffi::oneSchemaDestroy(schema);
-                return Err(io::Error::other(format!("Failed to open {} for reading", gbwt_path)));
+                return Err(io::Error::other(format!(
+                    "Failed to open {} for reading",
+                    gbwt_path
+                )));
             }
             let gbwt = syng_ffi::syngBWTread(of);
             syng_ffi::oneFileClose(of);
@@ -1411,18 +1959,19 @@ impl SyngIndex {
             let schema = syng_ffi::oneSchemaCreateFromText(schema_text.as_ptr());
             if schema.is_null() {
                 syng_ffi::syngBWTdestroy(gbwt);
-                return Err(io::Error::other("Failed to create ONEcode schema for khash read"));
+                return Err(io::Error::other(
+                    "Failed to create ONEcode schema for khash read",
+                ));
             }
-            let of = syng_ffi::oneFileOpenRead(
-                khash_cpath.as_ptr(),
-                schema,
-                khash_type.as_ptr(),
-                1,
-            );
+            let of =
+                syng_ffi::oneFileOpenRead(khash_cpath.as_ptr(), schema, khash_type.as_ptr(), 1);
             if of.is_null() {
                 syng_ffi::oneSchemaDestroy(schema);
                 syng_ffi::syngBWTdestroy(gbwt);
-                return Err(io::Error::other(format!("Failed to open {} for reading", khash_path)));
+                return Err(io::Error::other(format!(
+                    "Failed to open {} for reading",
+                    khash_path
+                )));
             }
             let kh = syng_ffi::kmerHashReadOneFile(of);
             syng_ffi::oneFileClose(of);
@@ -1452,7 +2001,7 @@ impl SyngIndex {
             syng_ffi::impg_seqhashCreateSafe(params.k as i32, params.w as i32, params.seed as i32)
         };
 
-        // Read required sampled-position sidecar.
+        // Read sampled-position sidecar.
         let sampled_positions_path = existing_syng_sidecar_path(prefix, "spos");
         let sampled_positions = if Path::new(&sampled_positions_path).exists() {
             match SampledPositions::load(&sampled_positions_path) {
@@ -1466,7 +2015,7 @@ impl SyngIndex {
                     return Err(e);
                 }
             }
-        } else {
+        } else if require_sampled_positions {
             unsafe {
                 syng_ffi::syngBWTdestroy(gbwt);
                 syng_ffi::kmerHashDestroy(kmer_hash);
@@ -1479,6 +2028,26 @@ impl SyngIndex {
                     sampled_positions_path
                 ),
             ));
+        } else {
+            None
+        };
+
+        // Read optional inverted path-step sidecar.
+        let sampled_path_steps_path = existing_syng_sidecar_path(prefix, "pstep");
+        let sampled_path_steps = if Path::new(&sampled_path_steps_path).exists() {
+            match SampledPathSteps::load(&sampled_path_steps_path) {
+                Ok(ps) => Some(ps),
+                Err(e) => {
+                    unsafe {
+                        syng_ffi::syngBWTdestroy(gbwt);
+                        syng_ffi::kmerHashDestroy(kmer_hash);
+                        syng_ffi::impg_seqhashDestroy(seqhash);
+                    }
+                    return Err(e);
+                }
+            }
+        } else {
+            None
         };
 
         Ok(Self {
@@ -1488,6 +2057,7 @@ impl SyngIndex {
             name_map,
             params,
             sampled_positions,
+            sampled_path_steps,
             sampled_position_builder: None,
         })
     }
@@ -1557,6 +2127,269 @@ impl SyngIndex {
         seq_index
     }
 
+    /// Return the sampled path-step checkpoint at or before `bp_pos` on `path_idx`.
+    pub fn sampled_path_step_at_or_before(
+        &self,
+        path_idx: usize,
+        bp_pos: u64,
+    ) -> io::Result<Option<SampledPathStepHit>> {
+        let sampled_path_steps = self.sampled_path_steps.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "sampled path-step sidecar is missing; run `impg syng-repair` for this index",
+            )
+        })?;
+        sampled_path_steps.checkpoint_at_or_before(path_idx, bp_pos)
+    }
+
+    /// Advance one GBWT step from a sampled path-step checkpoint.
+    pub fn next_path_step_from_checkpoint(
+        &self,
+        checkpoint: &SampledPathStepHit,
+    ) -> io::Result<Option<SampledPathStepHit>> {
+        let next_step_idx = match checkpoint.step_idx.checked_add(1) {
+            Some(step_idx) => step_idx,
+            None => return Ok(None),
+        };
+        let mut state = self.path_state_from_checkpoint(checkpoint);
+        let mut next_node: i32 = 0;
+        let mut offset: u32 = 0;
+        let has_next =
+            unsafe { syng_ffi::syngBWTpathNext(&mut state, &mut next_node, &mut offset) };
+        if !has_next {
+            return Ok(None);
+        }
+        let bp_pos = checkpoint
+            .bp_pos
+            .checked_add(offset as u64)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "path-step coordinate overflow")
+            })?;
+        Ok(Some(SampledPathStepHit {
+            path_idx: checkpoint.path_idx,
+            step_idx: next_step_idx,
+            bp_pos,
+            signed_node: next_node,
+            prev_node: state.last_node,
+            prev_offset: offset,
+            traversal_rank: state.j_last,
+        }))
+    }
+
+    /// Rebuild both sampled positional sidecars by walking existing GBWT paths.
+    ///
+    /// This repairs indexes that already have `.1gbwt`, `.1khash`, `.names`, and
+    /// `.meta`, without re-decompressing sequences or reconstructing the graph.
+    pub fn rebuild_sampled_position_indexes_from_gbwt(
+        &mut self,
+        sample_shift: u32,
+        seed: u64,
+    ) -> io::Result<SampledPositionBuildStats> {
+        unsafe { syng_ffi::impg_syng_suppress_debug() };
+        let mut builder = SampledPositionBuilder::new(sample_shift, seed, 0, 0)?;
+        let syncmer_len = (self.params.k + self.params.w) as u64;
+        for path_idx in 0..self.name_map.path_to_name.len() {
+            let seq_len = self.name_map.path_to_length[path_idx];
+            let steps = match self
+                .name_map
+                .path_starts
+                .get(path_idx)
+                .and_then(|s| s.as_ref())
+            {
+                Some(start) => self.walk_path_steps(start)?,
+                None if seq_len < syncmer_len => Vec::new(),
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "cannot rebuild positional sidecars: missing GBWT path start for {}",
+                            self.name_map.path_to_name[path_idx]
+                        ),
+                    ));
+                }
+            };
+            builder.record_path(path_idx, seq_len, &steps);
+        }
+        let (sampled_positions, sampled_path_steps, stats) =
+            builder.finish(&self.name_map.path_to_length)?;
+        self.sampled_positions = Some(sampled_positions);
+        self.sampled_path_steps = Some(sampled_path_steps);
+        Ok(stats)
+    }
+
+    /// Rebuild only the inverted path-step sidecar by walking existing GBWT paths.
+    pub fn rebuild_sampled_path_steps_from_gbwt(
+        &mut self,
+        sample_shift: u32,
+        seed: u64,
+    ) -> io::Result<SampledPositionBuildStats> {
+        unsafe { syng_ffi::impg_syng_suppress_debug() };
+        let mut builder = SampledPositionBuilder::new_path_steps_only(sample_shift, seed, 0, 0)?;
+        let syncmer_len = (self.params.k + self.params.w) as u64;
+        for path_idx in 0..self.name_map.path_to_name.len() {
+            let seq_len = self.name_map.path_to_length[path_idx];
+            let steps = match self.name_map.path_starts.get(path_idx).and_then(|s| s.as_ref()) {
+                Some(start) => self.walk_path_steps(start)?,
+                None if seq_len < syncmer_len => Vec::new(),
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "cannot rebuild path-step sidecar: missing GBWT path start for {}",
+                            self.name_map.path_to_name[path_idx]
+                        ),
+                    ));
+                }
+            };
+            builder.record_path(path_idx, seq_len, &steps);
+        }
+        let (sampled_path_steps, stats) = builder.finish_path_steps(self.name_map.path_to_name.len())?;
+        self.sampled_path_steps = Some(sampled_path_steps);
+        Ok(stats)
+    }
+
+    fn path_state_from_checkpoint(&self, checkpoint: &SampledPathStepHit) -> syng_ffi::SyngBWTpath {
+        syng_ffi::SyngBWTpath {
+            sb: self.gbwt,
+            last_node: checkpoint.prev_node,
+            this_node: checkpoint.signed_node,
+            last_off: checkpoint.prev_offset,
+            j_last: checkpoint.traversal_rank,
+            j_max: 0,
+        }
+    }
+
+    fn path_state_from_start(&self, start: &GbwtPathStart) -> syng_ffi::SyngBWTpath {
+        syng_ffi::SyngBWTpath {
+            sb: self.gbwt,
+            last_node: 0,
+            this_node: start.start_node,
+            last_off: 0,
+            j_last: start.start_count,
+            j_max: 0,
+        }
+    }
+
+    fn walk_path_steps(&self, start: &GbwtPathStart) -> io::Result<Vec<PathStepRecord>> {
+        if start.num_syncmers == 0 {
+            return Ok(Vec::new());
+        }
+        let expected_steps = start.num_syncmers as usize;
+        let mut steps = Vec::with_capacity(expected_steps);
+        let mut state = self.path_state_from_start(start);
+        let mut acc_pos = start.first_syncmer_pos;
+        steps.push(PathStepRecord {
+            step_idx: 0,
+            bp_pos: acc_pos,
+            signed_node: start.start_node,
+            prev_node: 0,
+            prev_offset: 0,
+            traversal_rank: start.start_count,
+        });
+
+        let mut next_node: i32 = 0;
+        let mut offset: u32 = 0;
+        while unsafe { syng_ffi::syngBWTpathNext(&mut state, &mut next_node, &mut offset) } {
+            if steps.len() >= expected_steps {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "GBWT path has more steps than name map reports ({})",
+                        expected_steps
+                    ),
+                ));
+            }
+            acc_pos = acc_pos.checked_add(offset as u64).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "GBWT path coordinate overflow")
+            })?;
+            steps.push(PathStepRecord {
+                step_idx: steps.len() as u32,
+                bp_pos: acc_pos,
+                signed_node: next_node,
+                prev_node: state.last_node,
+                prev_offset: offset,
+                traversal_rank: state.j_last,
+            });
+        }
+        if steps.len() != expected_steps {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "GBWT path has {} steps but name map reports {}",
+                    steps.len(),
+                    expected_steps
+                ),
+            ));
+        }
+        Ok(steps)
+    }
+
+    fn walk_path_range_from_sampled_steps(
+        &self,
+        path_idx: usize,
+        start: u64,
+        end: u64,
+    ) -> io::Result<Vec<(i32, u64)>> {
+        if end <= start {
+            return Ok(Vec::new());
+        }
+        let path_start = self
+            .name_map
+            .path_starts
+            .get(path_idx)
+            .and_then(|start| start.as_ref())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "No GBWT path start info for path {} — index may need rebuilding",
+                        path_idx
+                    ),
+                )
+            })?;
+        if path_start.num_syncmers == 0 {
+            return Ok(Vec::new());
+        }
+
+        let syncmer_len = (self.params.k + self.params.w) as u64;
+        let scan_start = start.saturating_sub(syncmer_len.saturating_sub(1));
+        let mut current =
+            if let Some(checkpoint) = self.sampled_path_step_at_or_before(path_idx, scan_start)? {
+                if checkpoint.step_idx >= path_start.num_syncmers {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "sampled path-step checkpoint is beyond path length",
+                    ));
+                }
+                checkpoint
+            } else {
+                SampledPathStepHit {
+                    path_idx,
+                    step_idx: 0,
+                    bp_pos: path_start.first_syncmer_pos,
+                    signed_node: path_start.start_node,
+                    prev_node: 0,
+                    prev_offset: 0,
+                    traversal_rank: path_start.start_count,
+                }
+            };
+
+        let mut nodes = Vec::new();
+        loop {
+            if current.bp_pos < end && current.bp_pos.saturating_add(syncmer_len) > start {
+                nodes.push((current.signed_node, current.bp_pos));
+            }
+            if current.bp_pos >= end || current.step_idx + 1 >= path_start.num_syncmers {
+                break;
+            }
+            let Some(next) = self.next_path_step_from_checkpoint(&current)? else {
+                break;
+            };
+            current = next;
+        }
+        Ok(nodes)
+    }
+
     /// Walk a genome's forward GBWT path, returning `(node_id, absolute_bp_pos)`
     /// for each syncmer in the path.
     ///
@@ -1572,11 +2405,11 @@ impl SyngIndex {
     /// `first_syncmer_pos` field, that value is 0 and the returned positions
     /// reduce to the old behaviour (relative to the first syncmer). A fresh
     /// rebuild of the index corrects this.
+    #[allow(dead_code)]
     fn walk_path(&self, start: &GbwtPathStart) -> Vec<(i32, u64)> {
         let mut nodes = Vec::with_capacity(start.num_syncmers as usize);
         unsafe {
-            let sbp =
-                syng_ffi::syngBWTpathStartOld(self.gbwt, start.start_node, start.start_count);
+            let sbp = syng_ffi::syngBWTpathStartOld(self.gbwt, start.start_node, start.start_count);
             // Anchor the bp accumulator at the first syncmer's absolute
             // position (0 for old indexes — pre-fix behaviour).
             let mut acc_pos: u64 = start.first_syncmer_pos;
@@ -1668,12 +2501,7 @@ impl SyngIndex {
                 query_seq.len() as i32,
             );
             let mut pos: i32 = 0;
-            while syng_ffi::syncmerNext(
-                sit,
-                std::ptr::null_mut(),
-                &mut pos,
-                std::ptr::null_mut(),
-            ) {
+            while syng_ffi::syncmerNext(sit, std::ptr::null_mut(), &mut pos, std::ptr::null_mut()) {
                 let mut kmer_index: i64 = 0;
                 if syng_ffi::kmerHashFind(
                     self.kmer_hash,
@@ -1728,7 +2556,11 @@ impl SyngIndex {
                 if hit.path_idx >= self.name_map.path_to_name.len() {
                     continue;
                 }
-                let strand = if q_orient == hit.target_orient { '+' } else { '-' };
+                let strand = if q_orient == hit.target_orient {
+                    '+'
+                } else {
+                    '-'
+                };
                 per_path
                     .entry((hit.path_idx, strand))
                     .or_default()
@@ -1749,9 +2581,7 @@ impl SyngIndex {
                     .then(a.node_id.cmp(&b.node_id))
             });
             anchors.dedup_by(|a, b| {
-                a.query_pos == b.query_pos
-                    && a.target_pos == b.target_pos
-                    && a.node_id == b.node_id
+                a.query_pos == b.query_pos && a.target_pos == b.target_pos && a.node_id == b.node_id
             });
             if anchors.len() < min_anchors {
                 continue;
@@ -1857,7 +2687,14 @@ impl SyngIndex {
         padding: u64,
         query_extension: u64,
     ) -> Result<Vec<HomologousIntervalWithAnchors>, io::Error> {
-        self.query_region_with_anchors_ext_visited(genome, start, end, padding, query_extension, None)
+        self.query_region_with_anchors_ext_visited(
+            genome,
+            start,
+            end,
+            padding,
+            query_extension,
+            None,
+        )
     }
 
     /// As [`query_region_with_anchors_ext`], but with an optional shared
@@ -1889,28 +2726,19 @@ impl SyngIndex {
                 )
             })?;
 
-        let query_start = self.name_map.path_starts[query_path_num as usize]
-            .as_ref()
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "No GBWT path start info for genome '{}' — index may need rebuilding",
-                        genome
-                    ),
-                )
-            })?;
-
-        // 2. Walk the query genome's path, collect nodes in [start, end)
-        //    along with (query_position, query_orientation). This path is
-        //    retained for library callers that only have an index; CLI paths
-        //    with FASTA/AGC sequence input use the sequence-backed variant
-        //    below so large indexes do not depend on GBWT path traversal.
-        let query_nodes = self.walk_path(query_start);
         let expanded_start = start.saturating_sub(query_extension);
         let expanded_end = end.saturating_add(query_extension);
-        let mut query_node_positions: FxHashMap<u32, Vec<(u64, u8)>> =
-            FxHashMap::default();
+
+        // 2. Walk only the requested query path range. The sampled path-step
+        //    index gives us a binary-search checkpoint before the leftmost
+        //    syncmer that could overlap the region, and the stored GBWT rank
+        //    lets us resume traversal from there.
+        let query_nodes = self.walk_path_range_from_sampled_steps(
+            query_path_num as usize,
+            expanded_start,
+            expanded_end,
+        )?;
+        let mut query_node_positions: FxHashMap<u32, Vec<(u64, u8)>> = FxHashMap::default();
         for &(signed_node, pos) in &query_nodes {
             if pos >= expanded_start && pos < expanded_end {
                 let abs = signed_node.unsigned_abs();
@@ -1930,9 +2758,10 @@ impl SyngIndex {
     /// `query_seq` must cover the sequence interval beginning at
     /// `query_seq_start` in source coordinates. Syncmers are extracted from
     /// those bytes, filtered to `[start - query_extension, end + query_extension)`,
-    /// then projected through `.syng.spos`. This avoids reconstructing the
-    /// source path from the GBWT and is the preferred path when FASTA/AGC
-    /// sequence input is available.
+    /// then projected through `.syng.spos`. Use this for arbitrary query
+    /// sequences that are not indexed paths. For indexed paths, use
+    /// [`Self::query_region_with_anchors_ext`], which jumps through `.syng.pstep`
+    /// and avoids re-extracting source syncmers from FASTA/AGC.
     #[allow(clippy::too_many_arguments)]
     pub fn query_region_with_anchors_from_sequence_ext_visited(
         &self,
@@ -1948,8 +2777,7 @@ impl SyngIndex {
 
         let expanded_start = start.saturating_sub(query_extension);
         let expanded_end = end.saturating_add(query_extension);
-        let mut query_node_positions: FxHashMap<u32, Vec<(u64, u8)>> =
-            FxHashMap::default();
+        let mut query_node_positions: FxHashMap<u32, Vec<(u64, u8)>> = FxHashMap::default();
 
         for sm in self.matched_syncmers_in_sequence(query_seq) {
             let pos = query_seq_start.saturating_add(sm.query_pos);
@@ -2071,7 +2899,11 @@ impl SyngIndex {
                 let padded_start = hit.target_pos.saturating_sub(padding);
                 let padded_end = (hit_end + padding).min(genome_len);
                 for &(qp, q_orient) in query_positions {
-                    let strand = if q_orient == hit.target_orient { '+' } else { '-' };
+                    let strand = if q_orient == hit.target_orient {
+                        '+'
+                    } else {
+                        '-'
+                    };
                     let sig: i64 = if strand == '+' {
                         hit.target_pos as i64 - qp as i64
                     } else {
@@ -2143,11 +2975,7 @@ impl SyngIndex {
     ///
     /// Uses the same syncmer parameters as this index (or default if
     /// called on a freshly constructed index).
-    pub fn build_region_gbwt(
-        &self,
-        sequences: &[(String, &[u8])],
-        prefix: &str,
-    ) -> io::Result<()> {
+    pub fn build_region_gbwt(&self, sequences: &[(String, &[u8])], prefix: &str) -> io::Result<()> {
         let mut region_index = SyngIndex::new(self.params);
         region_index.enable_online_sampled_positions(0, DEFAULT_POSITION_SAMPLE_SEED)?;
         for (name, seq) in sequences {
@@ -2177,8 +3005,11 @@ impl SyngIndex {
         }
         // Dedupe + sort anchors within each merged interval
         for iv in &mut merged {
-            iv.anchors
-                .sort_by(|a, b| a.query_pos.cmp(&b.query_pos).then(a.target_pos.cmp(&b.target_pos)));
+            iv.anchors.sort_by(|a, b| {
+                a.query_pos
+                    .cmp(&b.query_pos)
+                    .then(a.target_pos.cmp(&b.target_pos))
+            });
             iv.anchors
                 .dedup_by(|a, b| a.query_pos == b.query_pos && a.target_pos == b.target_pos);
         }
@@ -2222,7 +3053,10 @@ mod tests {
         let _guard = lock_syng();
         // Create a Seqhash with default params (k=8, w=55, seed=7), verify non-null, free it.
         let sh = unsafe { syng_ffi::impg_seqhashCreateSafe(8, 55, 7) };
-        assert!(!sh.is_null(), "seqhashCreate returned null for valid params");
+        assert!(
+            !sh.is_null(),
+            "seqhashCreate returned null for valid params"
+        );
         unsafe { syng_ffi::impg_seqhashDestroy(sh) };
     }
 
@@ -2406,8 +3240,7 @@ mod tests {
             crate::syng_parallel::build_packed_syncmer_dictionary(params, &sequences).unwrap();
         assert!(!dictionary.is_empty());
 
-        let mut index =
-            SyngIndex::new_with_packed_syncmer_dictionary(params, &dictionary).unwrap();
+        let mut index = SyngIndex::new_with_packed_syncmer_dictionary(params, &dictionary).unwrap();
         index
             .enable_online_sampled_positions(0, DEFAULT_POSITION_SAMPLE_SEED)
             .unwrap();
@@ -2479,7 +3312,12 @@ mod tests {
     fn test_save_load_roundtrip() {
         let _guard = lock_syng();
         let seqs: Vec<(String, Vec<u8>)> = (0..3)
-            .map(|i| (format!("genome_{}", i), make_test_sequence(2000, i as u8 + 100)))
+            .map(|i| {
+                (
+                    format!("genome_{}", i),
+                    make_test_sequence(2000, i as u8 + 100),
+                )
+            })
             .collect();
         let params = SyncmerParams::default();
         let mut index = SyngIndex::build(params, seqs.into_iter());
@@ -2506,6 +3344,14 @@ mod tests {
             ".syng.names file should exist"
         );
         assert!(
+            std::path::Path::new(&format!("{}.syng.spos", prefix_str)).exists(),
+            ".syng.spos file should exist"
+        );
+        assert!(
+            std::path::Path::new(&format!("{}.syng.pstep", prefix_str)).exists(),
+            ".syng.pstep file should exist"
+        );
+        assert!(
             std::path::Path::new(&format!("{}.syng.meta", prefix_str)).exists(),
             ".syng.meta file should exist"
         );
@@ -2516,13 +3362,11 @@ mod tests {
 
         // Verify name map is intact
         assert_eq!(
-            loaded.name_map.path_to_name,
-            index.name_map.path_to_name,
+            loaded.name_map.path_to_name, index.name_map.path_to_name,
             "Name map names should match after round-trip"
         );
         assert_eq!(
-            loaded.name_map.path_to_length,
-            index.name_map.path_to_length,
+            loaded.name_map.path_to_length, index.name_map.path_to_length,
             "Name map lengths should match after round-trip"
         );
 
@@ -2553,9 +3397,11 @@ mod tests {
         assert!(std::path::Path::new(&format!("{}.1khash", prefix_str)).exists());
         assert!(std::path::Path::new(&format!("{}.names", prefix_str)).exists());
         assert!(std::path::Path::new(&format!("{}.spos", prefix_str)).exists());
+        assert!(std::path::Path::new(&format!("{}.pstep", prefix_str)).exists());
         assert!(std::path::Path::new(&format!("{}.meta", prefix_str)).exists());
         assert!(!std::path::Path::new(&format!("{}.syng.names", prefix_str)).exists());
         assert!(!std::path::Path::new(&format!("{}.syng.spos", prefix_str)).exists());
+        assert!(!std::path::Path::new(&format!("{}.syng.pstep", prefix_str)).exists());
         assert!(!std::path::Path::new(&format!("{}.syng.meta", prefix_str)).exists());
 
         let loaded = SyngIndex::load(prefix_str, params).unwrap();
@@ -2578,7 +3424,7 @@ mod tests {
         let prefix_str = prefix.to_str().unwrap();
 
         index.save(prefix_str).unwrap();
-        for suffix in ["names", "spos", "meta"] {
+        for suffix in ["names", "spos", "pstep", "meta"] {
             std::fs::rename(
                 format!("{}.{}", prefix_str, suffix),
                 format!("{}.syng.{}", prefix_str, suffix),
@@ -2809,9 +3655,10 @@ mod tests {
         let loaded = SyngNameMap::load(path_str).unwrap();
 
         for (name, len) in &names {
-            let idx = *loaded.name_to_path.get(*name).unwrap_or_else(|| {
-                panic!("Name '{}' missing from loaded name map", name)
-            });
+            let idx = *loaded
+                .name_to_path
+                .get(*name)
+                .unwrap_or_else(|| panic!("Name '{}' missing from loaded name map", name));
             assert_eq!(loaded.path_to_length[idx as usize], *len);
         }
 
@@ -2859,10 +3706,8 @@ mod tests {
             w: 55,
             seed: 42,
         };
-        let mut idx_alt = SyngIndex::build(
-            params_alt_seed,
-            vec![("seq".to_string(), seq)].into_iter(),
-        );
+        let mut idx_alt =
+            SyngIndex::build(params_alt_seed, vec![("seq".to_string(), seq)].into_iter());
         let prefix_alt = dir.join("alt_seed");
         idx_alt.save(prefix_alt.to_str().unwrap()).unwrap();
 
@@ -2877,12 +3722,8 @@ mod tests {
         // Shorter syncmers (k=6,w=30) should yield a different-sized khash than
         // default (k=8,w=55). With a 36bp syncmer vs 63bp, the shorter one extracts
         // more syncmers.
-        let size_default = std::fs::metadata(dir.join("default.1khash"))
-            .unwrap()
-            .len();
-        let size_short = std::fs::metadata(dir.join("short.1khash"))
-            .unwrap()
-            .len();
+        let size_default = std::fs::metadata(dir.join("default.1khash")).unwrap().len();
+        let size_short = std::fs::metadata(dir.join("short.1khash")).unwrap().len();
         assert_ne!(
             size_default, size_short,
             "Different syncmer params should produce different khash sizes"
@@ -3048,7 +3889,10 @@ mod tests {
         let stats = index.finalize_online_sampled_positions().unwrap().unwrap();
         assert!(stats.sampled_occurrences > 0);
         assert!(stats.sampled_nodes > 0);
+        assert!(stats.sampled_path_steps > 0);
+        assert!(stats.sampled_step_paths > 0);
         assert!(index.has_sampled_positions());
+        assert!(index.has_sampled_path_steps());
 
         let query = &shared[100..800];
         let hits = index
@@ -3075,22 +3919,194 @@ mod tests {
             std::path::Path::new(&format!("{}.syng.spos", prefix_str)).exists(),
             ".syng.spos file should exist after save"
         );
+        assert!(
+            std::path::Path::new(&format!("{}.syng.pstep", prefix_str)).exists(),
+            ".syng.pstep file should exist after save"
+        );
 
         let loaded = SyngIndex::load(prefix_str, params).unwrap();
         assert!(loaded.has_sampled_positions());
+        assert!(loaded.has_sampled_path_steps());
         let loaded_hits = loaded
             .map_sequence("read1", query, 2, 10_000)
             .expect("loaded sampled-position PAF mapping should succeed");
         assert!(
-            loaded_hits.iter().any(|h| h.target_name == "sampleA#0#chr1"),
+            loaded_hits
+                .iter()
+                .any(|h| h.target_name == "sampleA#0#chr1"),
             "loaded sampled mapping should include sampleA, got: {:?}",
             loaded_hits
         );
         assert!(
-            loaded_hits.iter().any(|h| h.target_name == "sampleB#0#chr1"),
+            loaded_hits
+                .iter()
+                .any(|h| h.target_name == "sampleB#0#chr1"),
             "loaded sampled mapping should include sampleB, got: {:?}",
             loaded_hits
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_sampled_path_steps_resume_gbwt_traversal() {
+        let _guard = lock_syng();
+        let params = SyncmerParams::default();
+        let seq = make_test_sequence(5000, 123);
+        let mut index = SyngIndex::new(params);
+        index.enable_online_sampled_positions(0, 7).unwrap();
+        index.add_sequence("sampleA#0#chr1".to_string(), seq);
+        index.finalize_online_sampled_positions().unwrap().unwrap();
+
+        let path_idx = *index.name_map.name_to_path.get("sampleA#0#chr1").unwrap() as usize;
+        let path_steps = index
+            .sampled_path_steps
+            .as_ref()
+            .unwrap()
+            .decode_path(path_idx)
+            .unwrap();
+        assert!(
+            path_steps.len() > 8,
+            "test sequence should produce many syncmers"
+        );
+        assert_eq!(path_steps[0].step_idx, 0);
+        assert_eq!(path_steps[0].prev_node, 0);
+        assert_eq!(path_steps[0].prev_offset, 0);
+
+        for window in path_steps.windows(2).take(16) {
+            let current = window[0];
+            let expected_next = window[1];
+            let actual_next = index
+                .next_path_step_from_checkpoint(&current)
+                .unwrap()
+                .expect("checkpoint should resume to next step");
+            assert_eq!(actual_next.step_idx, expected_next.step_idx);
+            assert_eq!(actual_next.bp_pos, expected_next.bp_pos);
+            assert_eq!(actual_next.signed_node, expected_next.signed_node);
+            assert_eq!(actual_next.prev_node, expected_next.prev_node);
+            assert_eq!(actual_next.prev_offset, expected_next.prev_offset);
+            assert_eq!(actual_next.traversal_rank, expected_next.traversal_rank);
+        }
+
+        let mid = path_steps[path_steps.len() / 2];
+        let checkpoint = index
+            .sampled_path_step_at_or_before(path_idx, mid.bp_pos + 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(checkpoint, mid);
+
+        let range = index
+            .walk_path_range_from_sampled_steps(path_idx, mid.bp_pos, mid.bp_pos + 200)
+            .unwrap();
+        assert!(
+            range
+                .iter()
+                .any(|&(node, pos)| node == mid.signed_node && pos == mid.bp_pos),
+            "range walk should include the checkpoint syncmer"
+        );
+    }
+
+    #[test]
+    fn test_sampled_path_range_includes_unsampled_boundary_overlap() {
+        let _guard = lock_syng();
+        let params = SyncmerParams::default();
+        let syncmer_len = (params.k + params.w) as u64;
+        let seq = make_test_sequence(12_000, 77);
+        let mut index = SyngIndex::new(params);
+        index.enable_online_sampled_positions(4, 7).unwrap();
+        index.add_sequence("sampleA#0#chr1".to_string(), seq);
+        index.finalize_online_sampled_positions().unwrap().unwrap();
+
+        let path_idx = *index.name_map.name_to_path.get("sampleA#0#chr1").unwrap() as usize;
+        let path_start = index.name_map.path_starts[path_idx].as_ref().unwrap();
+        let full_steps = index.walk_path_steps(path_start).unwrap();
+        let sampled_steps = index
+            .sampled_path_steps
+            .as_ref()
+            .unwrap()
+            .decode_path(path_idx)
+            .unwrap();
+        assert!(
+            sampled_steps.len() < full_steps.len(),
+            "sparse test requires unsampled path steps"
+        );
+
+        let sampled_step_idxs: std::collections::BTreeSet<u32> =
+            sampled_steps.iter().map(|step| step.step_idx).collect();
+        let boundary_step = full_steps
+            .iter()
+            .find(|step| {
+                !sampled_step_idxs.contains(&step.step_idx)
+                    && step.bp_pos > syncmer_len
+                    && step.bp_pos.saturating_add(syncmer_len) < index.name_map.path_to_length[path_idx]
+            })
+            .expect("expected at least one interior unsampled syncmer");
+
+        // Query a 1 bp window at the unsampled syncmer's right edge. A range
+        // walker that starts at the checkpoint before `start` instead of before
+        // `start - syncmer_len + 1` skips this overlapping syncmer.
+        let start = boundary_step.bp_pos + syncmer_len - 1;
+        let end = start + 1;
+        let expected: Vec<(i32, u64)> = full_steps
+            .iter()
+            .filter(|step| step.bp_pos < end && step.bp_pos.saturating_add(syncmer_len) > start)
+            .map(|step| (step.signed_node, step.bp_pos))
+            .collect();
+        let observed = index
+            .walk_path_range_from_sampled_steps(path_idx, start, end)
+            .unwrap();
+
+        assert!(
+            expected
+                .iter()
+                .any(|&(node, pos)| node == boundary_step.signed_node && pos == boundary_step.bp_pos),
+            "test setup should include the unsampled boundary syncmer"
+        );
+        assert_eq!(observed, expected);
+    }
+
+    #[test]
+    fn test_rebuild_sampled_position_indexes_from_gbwt_repairs_sidecars() {
+        let _guard = lock_syng();
+        let params = SyncmerParams::default();
+        let seqs = vec![
+            ("sampleA#0#chr1".to_string(), make_test_sequence(4000, 13)),
+            ("sampleB#0#chr1".to_string(), make_test_sequence(4000, 17)),
+        ];
+        let mut index = SyngIndex::build(params, seqs.into_iter());
+
+        let dir = std::env::temp_dir().join("impg_test_syng_repair_sidecars");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("idx");
+        let prefix_str = prefix.to_str().unwrap();
+        index.save(prefix_str).unwrap();
+        std::fs::remove_file(format!("{}.syng.spos", prefix_str)).unwrap();
+        std::fs::remove_file(format!("{}.syng.pstep", prefix_str)).unwrap();
+
+        let mut repair = SyngIndex::load_for_repair(prefix_str, params).unwrap();
+        assert!(!repair.has_sampled_positions());
+        assert!(!repair.has_sampled_path_steps());
+        let stats = repair
+            .rebuild_sampled_position_indexes_from_gbwt(0, DEFAULT_POSITION_SAMPLE_SEED)
+            .unwrap();
+        assert!(stats.sampled_occurrences > 0);
+        assert_eq!(stats.sampled_occurrences, stats.sampled_path_steps);
+        repair.save_position_sidecars(prefix_str).unwrap();
+
+        assert!(std::path::Path::new(&format!("{}.syng.spos", prefix_str)).exists());
+        assert!(std::path::Path::new(&format!("{}.syng.pstep", prefix_str)).exists());
+
+        let loaded = SyngIndex::load(prefix_str, params).unwrap();
+        assert!(loaded.has_sampled_positions());
+        assert!(loaded.has_sampled_path_steps());
+        let path_idx = *loaded.name_map.name_to_path.get("sampleA#0#chr1").unwrap() as usize;
+        let checkpoint = loaded
+            .sampled_path_step_at_or_before(path_idx, 2_000)
+            .unwrap()
+            .unwrap();
+        let next = loaded.next_path_step_from_checkpoint(&checkpoint).unwrap();
+        assert!(next.is_some());
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -3145,10 +4161,7 @@ mod tests {
 
         if !bin.exists() {
             // Skip if binary not built yet — cargo test --lib won't build the binary
-            eprintln!(
-                "Skipping CLI test: impg binary not found at {:?}",
-                bin
-            );
+            eprintln!("Skipping CLI test: impg binary not found at {:?}", bin);
             std::fs::remove_dir_all(&dir).ok();
             return;
         }
@@ -3192,6 +4205,10 @@ mod tests {
             ".syng.spos should be built by default"
         );
         assert!(
+            std::path::Path::new(&format!("{}.syng.pstep", output_prefix_str)).exists(),
+            ".syng.pstep should be built by default"
+        );
+        assert!(
             std::path::Path::new(&format!("{}.syng.meta", output_prefix_str)).exists(),
             ".syng.meta should be built by default"
         );
@@ -3199,6 +4216,7 @@ mod tests {
         // Load and verify content
         let loaded = SyngIndex::load(output_prefix_str, SyncmerParams::default()).unwrap();
         assert!(loaded.has_sampled_positions());
+        assert!(loaded.has_sampled_path_steps());
         assert_eq!(loaded.name_map.path_to_name.len(), 3);
         assert_eq!(loaded.name_map.path_to_name[0], "HG002#1#chr1");
         assert_eq!(loaded.name_map.path_to_name[1], "HG002#2#chr1");
@@ -3213,7 +4231,10 @@ mod tests {
     fn test_syng_load_missing_files() {
         let _guard = lock_syng();
         let result = SyngIndex::load("/tmp/nonexistent_prefix_xyz123", SyncmerParams::default());
-        assert!(result.is_err(), "Loading from nonexistent files should fail");
+        assert!(
+            result.is_err(),
+            "Loading from nonexistent files should fail"
+        );
     }
 
     // ── 13. query_region tests ─────────────────────────────────────
@@ -3230,10 +4251,7 @@ mod tests {
         sa.extend_from_slice(&make_test_sequence(500, 1));
         let mut sb = shared.clone();
         sb.extend_from_slice(&make_test_sequence(500, 2));
-        let seqs = vec![
-            ("ga".to_string(), sa),
-            ("gb".to_string(), sb),
-        ];
+        let seqs = vec![("ga".to_string(), sa), ("gb".to_string(), sb)];
 
         let mut index = SyngIndex::build(params, seqs.into_iter());
         let in_mem = index.query_region("ga", 0, 1000, 120).unwrap();
@@ -3254,11 +4272,16 @@ mod tests {
         );
 
         let loaded = SyngIndex::load(prefix_str, params).unwrap();
-        assert!(loaded.has_sampled_positions(), "loaded index should have sampled positions");
+        assert!(
+            loaded.has_sampled_positions(),
+            "loaded index should have sampled positions"
+        );
         let reloaded = loaded.query_region("ga", 0, 1000, 120).unwrap();
 
         let to_set = |v: &[HomologousInterval]| -> std::collections::BTreeSet<(String, u64, u64)> {
-            v.iter().map(|iv| (iv.genome.clone(), iv.start, iv.end)).collect()
+            v.iter()
+                .map(|iv| (iv.genome.clone(), iv.start, iv.end))
+                .collect()
         };
         assert_eq!(to_set(&in_mem), to_set(&reloaded));
         assert!(!in_mem.is_empty());
@@ -3293,8 +4316,16 @@ mod tests {
         let genomes: std::collections::BTreeSet<&str> =
             intervals.iter().map(|iv| iv.genome.as_str()).collect();
         assert!(genomes.contains("ga"), "self hit missing: {:?}", genomes);
-        assert!(genomes.contains("gb"), "shared genome gb missing: {:?}", genomes);
-        assert!(genomes.contains("gc"), "shared genome gc missing: {:?}", genomes);
+        assert!(
+            genomes.contains("gb"),
+            "shared genome gb missing: {:?}",
+            genomes
+        );
+        assert!(
+            genomes.contains("gc"),
+            "shared genome gc missing: {:?}",
+            genomes
+        );
         assert!(
             !genomes.contains("gd"),
             "unrelated genome gd should not appear in sampled smoke test: {:?}",
@@ -3312,10 +4343,7 @@ mod tests {
         seq_a.extend_from_slice(&make_test_sequence(400, 1));
         let mut seq_b = shared.clone();
         seq_b.extend_from_slice(&make_test_sequence(400, 2));
-        let seqs = vec![
-            ("ga".to_string(), seq_a.clone()),
-            ("gb".to_string(), seq_b),
-        ];
+        let seqs = vec![("ga".to_string(), seq_a.clone()), ("gb".to_string(), seq_b)];
 
         let index = SyngIndex::build(params, seqs.into_iter());
         let path_intervals = index.query_region("ga", 0, 1000, 120).unwrap();
@@ -3323,7 +4351,8 @@ mod tests {
             .query_region_from_sequence_ext(&seq_a, 0, 0, 1000, 120, 0)
             .unwrap();
 
-        let to_set = |v: &[HomologousInterval]| -> std::collections::BTreeSet<(String, u64, u64, char)> {
+        let to_set =
+            |v: &[HomologousInterval]| -> std::collections::BTreeSet<(String, u64, u64, char)> {
             v.iter()
                 .map(|iv| (iv.genome.clone(), iv.start, iv.end, iv.strand))
                 .collect()
@@ -3341,7 +4370,11 @@ mod tests {
         // then diverge in the middle.
         let shared_len = 500;
         let total_len = 1000;
-        let params = SyncmerParams { k: 8, w: 55, seed: 7 };
+        let params = SyncmerParams {
+            k: 8,
+            w: 55,
+            seed: 7,
+        };
         // Build a shared backbone
         let backbone = make_test_sequence(shared_len, 42);
 
@@ -3376,7 +4409,9 @@ mod tests {
         }
 
         // Query the shared region on genome_a
-        let intervals = index.query_region("genome_a", 0, shared_len as u64, 0).unwrap();
+        let intervals = index
+            .query_region("genome_a", 0, shared_len as u64, 0)
+            .unwrap();
 
         // genome_a should appear (self-hit)
         let has_self = intervals.iter().any(|iv| iv.genome == "genome_a");
@@ -3392,11 +4427,15 @@ mod tests {
 
         // All intervals should have valid coordinates
         for iv in &intervals {
-            assert!(iv.end > iv.start, "interval end should be > start: {:?}", iv);
             assert!(
-                iv.end <= index.name_map.path_to_length[
-                    *index.name_map.name_to_path.get(&iv.genome).unwrap() as usize
-                ],
+                iv.end > iv.start,
+                "interval end should be > start: {:?}",
+                iv
+            );
+            assert!(
+                iv.end
+                    <= index.name_map.path_to_length
+                        [*index.name_map.name_to_path.get(&iv.genome).unwrap() as usize],
                 "interval end should be <= genome length"
             );
         }
@@ -3416,7 +4455,11 @@ mod tests {
     #[test]
     fn test_query_region_padding() {
         let _guard = lock_syng();
-        let params = SyncmerParams { k: 8, w: 55, seed: 7 };
+        let params = SyncmerParams {
+            k: 8,
+            w: 55,
+            seed: 7,
+        };
         let seq_a = make_test_sequence(1000, 42);
         let seq_b = seq_a.clone(); // identical => fully shared
 
@@ -3439,7 +4482,9 @@ mod tests {
             if np.genome == wp.genome {
                 assert!(
                     wp.start <= np.start && wp.end >= np.end,
-                    "Padded interval should be >= unpadded: {:?} vs {:?}", wp, np
+                    "Padded interval should be >= unpadded: {:?} vs {:?}",
+                    wp,
+                    np
                 );
             }
         }
@@ -3462,7 +4507,11 @@ mod tests {
     fn test_query_region_save_load_roundtrip() {
         let _guard = lock_syng();
         // Build, save, load, then query — results should match
-        let params = SyncmerParams { k: 8, w: 55, seed: 7 };
+        let params = SyncmerParams {
+            k: 8,
+            w: 55,
+            seed: 7,
+        };
         let seq_a = make_test_sequence(800, 10);
         let seq_b = seq_a.clone(); // identical
 
@@ -3554,15 +4603,18 @@ mod tests {
         // genome_a (self), genome_b, genome_c should all appear (shared backbone)
         assert!(
             genomes.contains(&"genome_a"),
-            "Self-hit expected. Found: {:?}", genomes
+            "Self-hit expected. Found: {:?}",
+            genomes
         );
         assert!(
             genomes.contains(&"genome_b"),
-            "genome_b shares backbone. Found: {:?}", genomes
+            "genome_b shares backbone. Found: {:?}",
+            genomes
         );
         assert!(
             genomes.contains(&"genome_c"),
-            "genome_c shares backbone. Found: {:?}", genomes
+            "genome_c shares backbone. Found: {:?}",
+            genomes
         );
 
         // Coordinates should be in a reasonable range (within ~syncmer_len of 0..400)
@@ -3573,7 +4625,9 @@ mod tests {
                 assert!(
                     iv.start <= syncmer_len,
                     "{}: start {} should be near 0 (within {})",
-                    iv.genome, iv.start, syncmer_len
+                    iv.genome,
+                    iv.start,
+                    syncmer_len
                 );
             }
         }
@@ -3611,7 +4665,8 @@ mod tests {
 
         assert!(
             genomes.contains(&"genome_b"),
-            "Interior of shared region should find genome_b. Found: {:?}", genomes
+            "Interior of shared region should find genome_b. Found: {:?}",
+            genomes
         );
     }
 
@@ -3648,12 +4703,14 @@ mod tests {
         assert!(
             pad_120_b.start <= no_pad_b.start,
             "Padded start {} should be <= unpadded start {}",
-            pad_120_b.start, no_pad_b.start
+            pad_120_b.start,
+            no_pad_b.start
         );
         assert!(
             pad_120_b.end >= no_pad_b.end,
             "Padded end {} should be >= unpadded end {}",
-            pad_120_b.end, no_pad_b.end
+            pad_120_b.end,
+            no_pad_b.end
         );
 
         // The difference should be approximately the padding amount
@@ -3661,11 +4718,13 @@ mod tests {
         let end_diff = pad_120_b.end as i64 - no_pad_b.end as i64;
         assert!(
             start_diff >= 0,
-            "start_diff should be non-negative: {}", start_diff
+            "start_diff should be non-negative: {}",
+            start_diff
         );
         assert!(
             end_diff >= 0,
-            "end_diff should be non-negative: {}", end_diff
+            "end_diff should be non-negative: {}",
+            end_diff
         );
     }
 
@@ -3677,11 +4736,7 @@ mod tests {
 
         let index = SyngIndex::build(
             params,
-            vec![
-                ("g1".to_string(), seq.clone()),
-                ("g2".to_string(), seq),
-            ]
-            .into_iter(),
+            vec![("g1".to_string(), seq.clone()), ("g2".to_string(), seq)].into_iter(),
         );
 
         let pad_0 = index.query_region("g1", 300, 500, 0).unwrap();
@@ -3693,10 +4748,22 @@ mod tests {
         let g2_60 = pad_60.iter().find(|iv| iv.genome == "g2").unwrap();
         let g2_120 = pad_120.iter().find(|iv| iv.genome == "g2").unwrap();
 
-        assert!(g2_60.start <= g2_0.start, "60bp pad start should be <= 0bp pad start");
-        assert!(g2_60.end >= g2_0.end, "60bp pad end should be >= 0bp pad end");
-        assert!(g2_120.start <= g2_60.start, "120bp pad start should be <= 60bp pad start");
-        assert!(g2_120.end >= g2_60.end, "120bp pad end should be >= 60bp pad end");
+        assert!(
+            g2_60.start <= g2_0.start,
+            "60bp pad start should be <= 0bp pad start"
+        );
+        assert!(
+            g2_60.end >= g2_0.end,
+            "60bp pad end should be >= 0bp pad end"
+        );
+        assert!(
+            g2_120.start <= g2_60.start,
+            "120bp pad start should be <= 60bp pad start"
+        );
+        assert!(
+            g2_120.end >= g2_60.end,
+            "120bp pad end should be >= 60bp pad end"
+        );
     }
 
     #[test]
@@ -3708,21 +4775,22 @@ mod tests {
 
         let index = SyngIndex::build(
             params,
-            vec![
-                ("g1".to_string(), seq.clone()),
-                ("g2".to_string(), seq),
-            ]
-            .into_iter(),
+            vec![("g1".to_string(), seq.clone()), ("g2".to_string(), seq)].into_iter(),
         );
 
         // Query near the start with large padding — should clamp to 0
         let intervals = index.query_region("g1", 0, 200, 10000).unwrap();
         for iv in &intervals {
-            assert!(iv.start == 0, "Start should be clamped to 0, got {}", iv.start);
+            assert!(
+                iv.start == 0,
+                "Start should be clamped to 0, got {}",
+                iv.start
+            );
             assert!(
                 iv.end <= genome_len,
                 "End {} should be <= genome length {}",
-                iv.end, genome_len
+                iv.end,
+                genome_len
             );
         }
     }
@@ -3741,7 +4809,11 @@ mod tests {
             strand: '+',
             anchors: anchors
                 .into_iter()
-                .map(|(q, t)| Anchor { query_pos: q, target_pos: t, node_id: 0 })
+                .map(|(q, t)| Anchor {
+                    query_pos: q,
+                    target_pos: t,
+                    node_id: 0,
+                })
                 .collect(),
         }
     }
@@ -3855,7 +4927,8 @@ mod tests {
         let genomes: Vec<&str> = intervals.iter().map(|iv| iv.genome.as_str()).collect();
         assert!(
             genomes.contains(&"genome_a"),
-            "Self-hit expected. Found: {:?}", genomes
+            "Self-hit expected. Found: {:?}",
+            genomes
         );
         // genome_b may or may not appear — with truly different seeds it shouldn't share syncmers.
         // But we can't 100% guarantee no accidental collision. Check that if genome_b appears,
@@ -3903,10 +4976,7 @@ mod tests {
         let params = SyncmerParams::default();
         let seq = make_test_sequence(1000, 42);
 
-        let index = SyngIndex::build(
-            params,
-            vec![("only_genome".to_string(), seq)].into_iter(),
-        );
+        let index = SyngIndex::build(params, vec![("only_genome".to_string(), seq)].into_iter());
 
         let intervals = index.query_region("only_genome", 100, 500, 0).unwrap();
         // The query must find at least a forward self-hit. Random data can
@@ -3935,16 +5005,16 @@ mod tests {
         let params = SyncmerParams::default();
         let seq = make_test_sequence(500, 42);
 
-        let index = SyngIndex::build(
-            params,
-            vec![("g1".to_string(), seq)].into_iter(),
-        );
+        let index = SyngIndex::build(params, vec![("g1".to_string(), seq)].into_iter());
 
         let intervals = index.query_region("g1", 10000, 20000, 0).unwrap();
         assert!(
             intervals.is_empty(),
             "Query beyond sequence length should return empty, got {:?}",
-            intervals.iter().map(|iv| (&iv.genome, iv.start, iv.end)).collect::<Vec<_>>()
+            intervals
+                .iter()
+                .map(|iv| (&iv.genome, iv.start, iv.end))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -3955,16 +5025,10 @@ mod tests {
         let params = SyncmerParams::default();
         let seq = make_test_sequence(500, 42);
 
-        let index = SyngIndex::build(
-            params,
-            vec![("g1".to_string(), seq)].into_iter(),
-        );
+        let index = SyngIndex::build(params, vec![("g1".to_string(), seq)].into_iter());
 
         let intervals = index.query_region("g1", 200, 200, 0).unwrap();
-        assert!(
-            intervals.is_empty(),
-            "Zero-width query should return empty"
-        );
+        assert!(intervals.is_empty(), "Zero-width query should return empty");
     }
 
     #[test]
@@ -4034,43 +5098,53 @@ mod tests {
         let output = std::process::Command::new(&bin)
             .args([
                 "syng",
-                "-f", fasta_path.to_str().unwrap(),
-                "-o", output_prefix.to_str().unwrap(),
-                "--position-sample-shift", "0",
+                "-f",
+                fasta_path.to_str().unwrap(),
+                "-o",
+                output_prefix.to_str().unwrap(),
+                "--position-sample-shift",
+                "0",
             ])
             .output()
             .expect("Failed to run impg syng");
         assert!(
             output.status.success(),
-            "impg syng failed: {}", String::from_utf8_lossy(&output.stderr)
+            "impg syng failed: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
 
         // Query via -a syng prefix with BED output
         let output = std::process::Command::new(&bin)
             .args([
                 "query",
-                "-a", output_prefix.to_str().unwrap(),
-                "--sequence-files", fasta_path.to_str().unwrap(),
-                "-r", "genome_a:0-400",
-                "-o", "bed",
+                "-a",
+                output_prefix.to_str().unwrap(),
+                "--sequence-files",
+                fasta_path.to_str().unwrap(),
+                "-r",
+                "genome_a:0-400",
+                "-o",
+                "bed",
             ])
             .output()
             .expect("Failed to run impg query -a syng prefix");
         assert!(
             output.status.success(),
-            "impg query -a syng prefix failed: {}", String::from_utf8_lossy(&output.stderr)
+            "impg query -a syng prefix failed: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let lines: Vec<&str> = stdout.lines().collect();
-        assert!(
-            !lines.is_empty(),
-            "BED output should not be empty"
-        );
+        assert!(!lines.is_empty(), "BED output should not be empty");
 
         // Should find genome_b in the output
         let has_genome_b = lines.iter().any(|l| l.starts_with("genome_b\t"));
-        assert!(has_genome_b, "BED output should contain genome_b. Got:\n{}", stdout);
+        assert!(
+            has_genome_b,
+            "BED output should contain genome_b. Got:\n{}",
+            stdout
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -4110,38 +5184,60 @@ mod tests {
         let output = std::process::Command::new(&bin)
             .args([
                 "syng",
-                "-f", fasta_path.to_str().unwrap(),
-                "-o", output_prefix.to_str().unwrap(),
-                "--position-sample-shift", "0",
+                "-f",
+                fasta_path.to_str().unwrap(),
+                "-o",
+                output_prefix.to_str().unwrap(),
+                "--position-sample-shift",
+                "0",
             ])
             .output()
             .expect("Failed to run impg syng");
-        assert!(output.status.success(), "impg syng failed: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "impg syng failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
 
         // Query with GFA output
         let output = std::process::Command::new(&bin)
             .args([
                 "query",
-                "-a", output_prefix.to_str().unwrap(),
-                "--sequence-files", fasta_path.to_str().unwrap(),
-                "-r", "genome_a:0-400",
-                "-o", "gfa",
+                "-a",
+                output_prefix.to_str().unwrap(),
+                "--sequence-files",
+                fasta_path.to_str().unwrap(),
+                "-r",
+                "genome_a:0-400",
+                "-o",
+                "gfa",
             ])
             .output()
             .expect("Failed to run impg query -a syng prefix -o gfa");
         assert!(
             output.status.success(),
-            "impg query -a syng prefix -o gfa failed: {}", String::from_utf8_lossy(&output.stderr)
+            "impg query -a syng prefix -o gfa failed: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         // GFA should have S (segment) and L (link) lines
         let has_s_lines = stdout.lines().any(|l| l.starts_with("S\t"));
-        assert!(has_s_lines, "GFA output should contain S lines. Got:\n{}", stdout);
+        assert!(
+            has_s_lines,
+            "GFA output should contain S lines. Got:\n{}",
+            stdout
+        );
 
         // Check for path-related lines (W or P lines)
-        let has_paths = stdout.lines().any(|l| l.starts_with("W\t") || l.starts_with("P\t"));
-        assert!(has_paths, "GFA output should contain W or P lines. Got:\n{}", stdout);
+        let has_paths = stdout
+            .lines()
+            .any(|l| l.starts_with("W\t") || l.starts_with("P\t"));
+        assert!(
+            has_paths,
+            "GFA output should contain W or P lines. Got:\n{}",
+            stdout
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -4165,7 +5261,12 @@ mod tests {
 
         // Build region GBWT from a subset of sequences
         let region_seqs: Vec<(String, Vec<u8>)> = (0..2)
-            .map(|i| (format!("region_seq_{}", i), make_test_sequence(500, i as u8 + 50)))
+            .map(|i| {
+                (
+                    format!("region_seq_{}", i),
+                    make_test_sequence(500, i as u8 + 50),
+                )
+            })
             .collect();
         let refs: Vec<(String, &[u8])> = region_seqs
             .iter()
@@ -4293,7 +5394,10 @@ mod tests {
 
         // Query the shared region
         let intervals = index.query_region("genome_a", 0, 500, 0).unwrap();
-        assert!(!intervals.is_empty(), "Should find intervals in shared region");
+        assert!(
+            !intervals.is_empty(),
+            "Should find intervals in shared region"
+        );
 
         // Build region GBWT from the query result sequences
         // (simulate what the CLI does: fetch sequences for each interval)
@@ -4322,7 +5426,10 @@ mod tests {
         let gbwt_path = format!("{}.1gbwt", prefix_str);
         let khash_path = format!("{}.1khash", prefix_str);
         assert!(Path::new(&gbwt_path).exists(), "Region .1gbwt should exist");
-        assert!(Path::new(&khash_path).exists(), "Region .1khash should exist");
+        assert!(
+            Path::new(&khash_path).exists(),
+            "Region .1khash should exist"
+        );
         assert!(
             std::fs::metadata(&gbwt_path).unwrap().len() > 0,
             "Region .1gbwt should be non-empty"
@@ -4385,7 +5492,10 @@ mod tests {
         // Load the region GBWT back as a SyngIndex
         let loaded = SyngIndex::load(prefix_str, params).unwrap();
         assert!(!loaded.gbwt.is_null(), "Loaded region GBWT should be valid");
-        assert!(!loaded.kmer_hash.is_null(), "Loaded region KmerHash should be valid");
+        assert!(
+            !loaded.kmer_hash.is_null(),
+            "Loaded region KmerHash should be valid"
+        );
         assert_eq!(
             loaded.name_map.path_to_name.len(),
             3,
@@ -4404,7 +5514,12 @@ mod tests {
 
         // Use the SAME sequences for both: full index from all, region from subset
         let seqs: Vec<(String, Vec<u8>)> = (0..4)
-            .map(|i| (format!("genome_{}", i), make_test_sequence(2000, i as u8 + 10)))
+            .map(|i| {
+                (
+                    format!("genome_{}", i),
+                    make_test_sequence(2000, i as u8 + 10),
+                )
+            })
             .collect();
         let mut full_index = SyngIndex::build(params, seqs.clone().into_iter());
 
@@ -4534,10 +5649,7 @@ mod tests {
         assert!(Path::new(&format!("{}.1khash", prefix_str)).exists());
 
         // Clean up the top-level temp dir
-        std::fs::remove_dir_all(
-            std::env::temp_dir().join("impg_test_region_gbwt_nested"),
-        )
-        .ok();
+        std::fs::remove_dir_all(std::env::temp_dir().join("impg_test_region_gbwt_nested")).ok();
     }
 
     #[test]
@@ -4721,7 +5833,10 @@ mod tests {
 
         // Step 4: Query the region GBWT
         let region_intervals = region_index.query_region("genome_a", 0, 500, 0).unwrap();
-        let region_genomes: Vec<&str> = region_intervals.iter().map(|iv| iv.genome.as_str()).collect();
+        let region_genomes: Vec<&str> = region_intervals
+            .iter()
+            .map(|iv| iv.genome.as_str())
+            .collect();
 
         // The region query should find the same genomes
         assert!(
@@ -4781,24 +5896,36 @@ mod tests {
         let output = std::process::Command::new(&bin)
             .args([
                 "syng",
-                "-f", fasta_path.to_str().unwrap(),
-                "-o", idx_prefix.to_str().unwrap(),
-                "--position-sample-shift", "0",
+                "-f",
+                fasta_path.to_str().unwrap(),
+                "-o",
+                idx_prefix.to_str().unwrap(),
+                "--position-sample-shift",
+                "0",
             ])
             .output()
             .expect("Failed to run impg syng");
-        assert!(output.status.success(), "impg syng failed: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "impg syng failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
 
         // Query with GBWT output
         let gbwt_output = dir.join("region_gbwt");
         let output = std::process::Command::new(&bin)
             .args([
                 "query",
-                "-a", idx_prefix.to_str().unwrap(),
-                "--sequence-files", fasta_path.to_str().unwrap(),
-                "-r", "genome_a:0-400",
-                "-o", "gbwt",
-                "-O", gbwt_output.to_str().unwrap(),
+                "-a",
+                idx_prefix.to_str().unwrap(),
+                "--sequence-files",
+                fasta_path.to_str().unwrap(),
+                "-r",
+                "genome_a:0-400",
+                "-o",
+                "gbwt",
+                "-O",
+                gbwt_output.to_str().unwrap(),
             ])
             .output()
             .expect("Failed to run impg query -o gbwt");
@@ -4883,11 +6010,16 @@ mod tests {
         let output = std::process::Command::new(&bin)
             .args([
                 "query",
-                "-a", paf_path.to_str().unwrap(),
-                "--sequence-files", fasta_path.to_str().unwrap(),
-                "-r", "genome_a:100-500",
-                "-o", "gbwt",
-                "-O", gbwt_output.to_str().unwrap(),
+                "-a",
+                paf_path.to_str().unwrap(),
+                "--sequence-files",
+                fasta_path.to_str().unwrap(),
+                "-r",
+                "genome_a:100-500",
+                "-o",
+                "gbwt",
+                "-O",
+                gbwt_output.to_str().unwrap(),
             ])
             .output()
             .expect("Failed to run impg query -i paf -o gbwt");
@@ -4900,8 +6032,14 @@ mod tests {
         // Verify output files exist
         let gbwt_file = format!("{}.1gbwt", gbwt_output.to_str().unwrap());
         let khash_file = format!("{}.1khash", gbwt_output.to_str().unwrap());
-        assert!(Path::new(&gbwt_file).exists(), "PAF-based .1gbwt should exist");
-        assert!(Path::new(&khash_file).exists(), "PAF-based .1khash should exist");
+        assert!(
+            Path::new(&gbwt_file).exists(),
+            "PAF-based .1gbwt should exist"
+        );
+        assert!(
+            Path::new(&khash_file).exists(),
+            "PAF-based .1khash should exist"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -4920,9 +6058,12 @@ mod tests {
         let output = std::process::Command::new(&bin)
             .args([
                 "query",
-                "-a", "/tmp/nonexistent_prefix",
-                "-r", "genome_a:0-100",
-                "-o", "gbwt",
+                "-a",
+                "/tmp/nonexistent_prefix",
+                "-r",
+                "genome_a:0-100",
+                "-o",
+                "gbwt",
             ])
             .output()
             .expect("Failed to run impg query");

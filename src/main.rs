@@ -1282,7 +1282,7 @@ impl RefineOpts {
 /// prefix (base name before `.1khash` / `.1gbwt`) if one is found.
 ///
 /// Accepts:
-///   - Explicit file path ending in `.1khash`, `.1gbwt`, `.spos`, `.names`, or `.meta` → strip suffix
+///   - Explicit file path ending in `.1khash`, `.1gbwt`, `.spos`, `.pstep`, `.names`, or `.meta` → strip suffix
 ///   - Bare prefix with sibling `.1khash` on disk → return prefix as-is
 fn detect_syng_prefix(path: &str) -> Option<String> {
     if let Some(stem) = path.strip_suffix(".1khash") {
@@ -1291,14 +1291,14 @@ fn detect_syng_prefix(path: &str) -> Option<String> {
     if let Some(stem) = path.strip_suffix(".1gbwt") {
         return Some(stem.to_string());
     }
-    for suffix in [".spos", ".names", ".meta"] {
+    for suffix in [".spos", ".pstep", ".names", ".meta"] {
         if let Some(stem) = path.strip_suffix(suffix) {
             if std::path::Path::new(&format!("{stem}.1khash")).exists() {
                 return Some(stem.to_string());
             }
         }
     }
-    for suffix in [".syng.spos", ".syng.names", ".syng.meta"] {
+    for suffix in [".syng.spos", ".syng.pstep", ".syng.names", ".syng.meta"] {
         if let Some(stem) = path.strip_suffix(suffix) {
             if std::path::Path::new(&format!("{stem}.1khash")).exists() {
                 return Some(stem.to_string());
@@ -1826,7 +1826,7 @@ enum Args {
 
     /// Map sequences to a syng index using exact shared syncmers
     Map {
-        /// Syng index prefix or .1khash/.1gbwt/.spos/.names/.meta path
+        /// Syng index prefix or .1khash/.1gbwt/.spos/.pstep/.names/.meta path
         #[clap(short = 'a', long, value_parser)]
         index: String,
 
@@ -1945,6 +1945,31 @@ enum Args {
         /// Sequence input for gap filling. Without these, gaps are filled with `N`s.
         #[clap(flatten)]
         sequence: SequenceOpts,
+
+        // --- General ---
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+
+    /// Repair or create sampled positional sidecars for an existing syng index
+    SyngRepair {
+        /// Syng index prefix or .1khash/.1gbwt/.spos/.pstep/.names/.meta path
+        #[clap(short = 'a', long, value_parser)]
+        index: String,
+
+        /// Resample and overwrite existing position sidecars.
+        #[clap(long, action)]
+        force: bool,
+
+        /// Sample one path occurrence per 2^N occurrences.
+        #[arg(help_heading = "Position sampling")]
+        #[clap(long, value_parser, default_value_t = impg::syng::DEFAULT_POSITION_SAMPLE_SHIFT)]
+        position_sample_shift: u32,
+
+        /// Hash seed for position sampling.
+        #[arg(help_heading = "Position sampling")]
+        #[clap(long, value_parser, default_value_t = impg::syng::DEFAULT_POSITION_SAMPLE_SEED)]
+        position_sample_seed: u64,
 
         // --- General ---
         #[clap(flatten)]
@@ -2461,49 +2486,15 @@ fn run() -> io::Result<()> {
                     padding: u64,
                     extension: u64,
                 | -> io::Result<Vec<impg::syng::HomologousInterval>> {
-                    if let Some(seq_idx) = sequence_index.as_ref() {
-                        let start = range_start.max(0) as u64;
-                        let end = range_end.max(range_start).max(0) as u64;
-                        let source_len = seq_idx.get_sequence_length(target_name)? as u64;
-                        let expanded_start = start.saturating_sub(extension).min(source_len);
-                        let expanded_end = end.saturating_add(extension).min(source_len);
-                        let fetch_start: i32 = expanded_start.try_into().map_err(|_| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                format!(
-                                    "query start {} exceeds i32 coordinate range",
-                                    expanded_start
-                                ),
-                            )
-                        })?;
-                        let fetch_end: i32 = expanded_end.try_into().map_err(|_| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                format!("query end {} exceeds i32 coordinate range", expanded_end),
-                            )
-                        })?;
-                        let query_seq = if fetch_end > fetch_start {
-                            seq_idx.fetch_sequence(target_name, fetch_start, fetch_end)?
-                        } else {
-                            Vec::new()
-                        };
-                        wrapper.syng_index().query_region_from_sequence_ext(
-                            &query_seq,
-                            expanded_start,
-                            start,
-                            end,
-                            padding,
-                            extension,
-                        )
-                    } else {
-                        wrapper.syng_index().query_region_ext(
-                            target_name,
-                            range_start as u64,
-                            range_end as u64,
-                            padding,
-                            extension,
-                        )
-                    }
+                    let start = range_start.max(0) as u64;
+                    let end = range_end.max(range_start).max(0) as u64;
+                    wrapper.syng_index().query_region_ext(
+                        target_name,
+                        start,
+                        end,
+                        padding,
+                        extension,
+                    )
                 };
 
                 // Process each target range. Serial outer — the
@@ -4329,10 +4320,12 @@ fn run() -> io::Result<()> {
             let position_start = Instant::now();
             if let Some(stats) = index.finalize_online_sampled_positions()? {
                 info!(
-                    "Sampled position sidecar compacted in {}: {} sampled occurrences across {} nodes from {} paths (sample_shift={} ~=1/{}) at +{}",
+                    "Sampled position sidecars compacted in {}: {} node-position samples across {} nodes; {} path-step checkpoints across {} paths from {} walked paths (sample_shift={} ~=1/{}) at +{}",
                     format_duration(position_start.elapsed()),
                     stats.sampled_occurrences,
                     stats.sampled_nodes,
+                    stats.sampled_path_steps,
+                    stats.sampled_step_paths,
                     stats.walked_paths,
                     stats.sample_shift,
                     1u64 << stats.sample_shift,
@@ -4344,12 +4337,13 @@ fn run() -> io::Result<()> {
             info!("Saving index to prefix: {}", output);
             index.save(&output)?;
             info!(
-                "Index saved in {}: {}.1khash, {}.1gbwt, {}, {}, {}",
+                "Index saved in {}: {}.1khash, {}.1gbwt, {}, {}, {}, {}",
                 format_duration(save_start.elapsed()),
                 output,
                 output,
                 impg::syng::syng_names_path(&output),
                 impg::syng::syng_spos_path(&output),
+                impg::syng::syng_pstep_path(&output),
                 impg::syng::syng_meta_path(&output),
             );
             info!(
@@ -4369,6 +4363,121 @@ fn run() -> io::Result<()> {
             let version = impg::commands::syng2gfa::GfaVersion::parse(&gfa_version)?;
             let sequence_files = sequence.resolve_sequence_files()?;
             impg::commands::syng2gfa::run(&syng_prefix, &output, version, &sequence_files)?;
+        }
+        Args::SyngRepair {
+            index,
+            force,
+            position_sample_shift,
+            position_sample_seed,
+            common,
+        } => {
+            initialize_threads_and_log(&common);
+            let prefix = detect_syng_prefix(&index).unwrap_or(index);
+            let spos_path = impg::syng::syng_spos_path(&prefix);
+            let pstep_path = impg::syng::syng_pstep_path(&prefix);
+            let have_spos = std::path::Path::new(&spos_path).exists();
+            let have_pstep = std::path::Path::new(&pstep_path).exists();
+            if !force && have_spos && have_pstep {
+                info!(
+                    "Syng position sidecars already exist: {}, {}. Use --force to rebuild.",
+                    spos_path, pstep_path
+                );
+                return Ok(());
+            }
+
+            let total_start = Instant::now();
+            info!(
+                "Loading syng index for positional sidecar repair from prefix: {}",
+                prefix
+            );
+            #[cfg(unix)]
+            let saved_stdout = silence_stdout_for_process()?;
+            #[cfg(not(unix))]
+            silence_stdout_for_process()?;
+            let mut syng_index = impg::syng::SyngIndex::load_for_repair(
+                &prefix,
+                impg::syng::SyncmerParams::default(),
+            )?;
+            #[cfg(unix)]
+            {
+                if unsafe { libc::dup2(saved_stdout, libc::STDOUT_FILENO) } < 0 {
+                    let e = io::Error::last_os_error();
+                    unsafe {
+                        libc::close(saved_stdout);
+                    }
+                    return Err(e);
+                }
+                unsafe {
+                    libc::close(saved_stdout);
+                }
+            }
+
+            let rebuild_start = Instant::now();
+            if position_sample_shift >= 63 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--position-sample-shift must be less than 63",
+                ));
+            }
+            let sample_period = 1u64 << position_sample_shift;
+            if have_spos && !force {
+                info!(
+                    "Rebuilding sampled path-step sidecar: sample_shift={} (~1/{} path occurrences), seed={}",
+                    position_sample_shift,
+                    sample_period,
+                    position_sample_seed
+                );
+                let stats = syng_index.rebuild_sampled_path_steps_from_gbwt(
+                    position_sample_shift,
+                    position_sample_seed,
+                )?;
+                info!(
+                    "Rebuilt sampled path-step sidecar in {}: {} checkpoints across {} paths from {} walked paths",
+                    format_duration(rebuild_start.elapsed()),
+                    stats.sampled_path_steps,
+                    stats.sampled_step_paths,
+                    stats.walked_paths
+                );
+                let save_start = Instant::now();
+                syng_index.save_path_step_sidecar(&prefix)?;
+                info!(
+                    "Saved path-step sidecar in {}: {}",
+                    format_duration(save_start.elapsed()),
+                    impg::syng::syng_pstep_path(&prefix)
+                );
+            } else {
+                info!(
+                    "Rebuilding sampled position sidecars: sample_shift={} (~1/{} path occurrences), seed={}",
+                    position_sample_shift,
+                    sample_period,
+                    position_sample_seed
+                );
+                let stats = syng_index.rebuild_sampled_position_indexes_from_gbwt(
+                    position_sample_shift,
+                    position_sample_seed,
+                )?;
+                info!(
+                    "Rebuilt sampled position sidecars in {}: {} node-position samples across {} nodes; {} path-step checkpoints across {} paths from {} walked paths",
+                    format_duration(rebuild_start.elapsed()),
+                    stats.sampled_occurrences,
+                    stats.sampled_nodes,
+                    stats.sampled_path_steps,
+                    stats.sampled_step_paths,
+                    stats.walked_paths
+                );
+                let save_start = Instant::now();
+                syng_index.save_position_sidecars(&prefix)?;
+                info!(
+                    "Saved positional sidecars in {}: {}, {}",
+                    format_duration(save_start.elapsed()),
+                    impg::syng::syng_spos_path(&prefix),
+                    impg::syng::syng_pstep_path(&prefix)
+                );
+            }
+            info!(
+                "Total syng sidecar repair time: {}",
+                format_duration(total_start.elapsed())
+            );
         }
     }
 
