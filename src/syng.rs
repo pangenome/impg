@@ -73,11 +73,10 @@ pub struct SampledPositionBuildStats {
     pub sampled_path_steps: u64,
     pub sampled_step_paths: usize,
     pub walked_paths: usize,
-    pub sample_shift: u32,
+    pub sample_rate: u32,
 }
 
-pub const DEFAULT_POSITION_SAMPLE_SHIFT: u32 = 8;
-pub const DEFAULT_POSITION_SAMPLE_SEED: u64 = 7;
+pub const DEFAULT_POSITION_SAMPLE_RATE: u32 = 256;
 
 fn syng_sidecar_path(prefix: &str, suffix: &str) -> String {
     if prefix.ends_with(".syng") {
@@ -127,8 +126,7 @@ pub fn syng_meta_path(prefix: &str) -> String {
 /// samples instead of materializing every visit for every node. Occurrences are
 /// grouped by syncmer node id and varint delta encoded.
 pub struct SampledPositions {
-    pub sample_shift: u32,
-    pub seed: u64,
+    pub sample_rate: u32,
     sample_count: u64,
     path_starts: Vec<u64>,
     node_ids: Vec<u32>,
@@ -138,14 +136,14 @@ pub struct SampledPositions {
 
 impl SampledPositions {
     const MAGIC: u64 = 0x494D50_53504F53; // "IMPSPOS"
-    const VERSION: u64 = 2;
+    const VERSION: u64 = 3;
 
     fn from_samples(
-        sample_shift: u32,
-        seed: u64,
+        sample_rate: u32,
         path_lengths: &[u64],
         mut samples: Vec<(u32, u64)>,
     ) -> io::Result<Self> {
+        validate_position_sample_rate(sample_rate)?;
         let path_starts = Self::path_starts_from_lengths(path_lengths)?;
         samples.sort_unstable();
         samples.dedup();
@@ -177,8 +175,7 @@ impl SampledPositions {
         }
 
         Ok(Self {
-            sample_shift,
-            seed,
+            sample_rate,
             sample_count,
             path_starts,
             node_ids,
@@ -259,8 +256,7 @@ impl SampledPositions {
         let mut w = BufWriter::new(std::fs::File::create(path)?);
         write_u64(&mut w, Self::MAGIC)?;
         write_u64(&mut w, Self::VERSION)?;
-        write_u64(&mut w, self.sample_shift as u64)?;
-        write_u64(&mut w, self.seed)?;
+        write_u64(&mut w, self.sample_rate as u64)?;
         write_u64(&mut w, self.sample_count)?;
 
         write_u64(&mut w, self.path_starts.len() as u64)?;
@@ -308,8 +304,8 @@ impl SampledPositions {
                 format!("SampledPositions: unsupported version {}", version),
             ));
         }
-        let sample_shift = read_u64(&mut r)? as u32;
-        let seed = read_u64(&mut r)?;
+        let sample_rate = read_u64(&mut r)? as u32;
+        validate_position_sample_rate(sample_rate)?;
         let sample_count = read_u64(&mut r)?;
 
         let n_paths = read_u64(&mut r)? as usize;
@@ -373,8 +369,7 @@ impl SampledPositions {
         }
 
         Ok(Self {
-            sample_shift,
-            seed,
+            sample_rate,
             sample_count,
             path_starts,
             node_ids,
@@ -391,8 +386,7 @@ impl SampledPositions {
 /// coordinate, including enough GBWT path state to resume walking from the
 /// sampled step.
 pub struct SampledPathSteps {
-    pub sample_shift: u32,
-    pub seed: u64,
+    pub sample_rate: u32,
     sample_count: u64,
     path_byte_offsets: Vec<u64>,
     data: Vec<u8>,
@@ -400,15 +394,15 @@ pub struct SampledPathSteps {
 
 impl SampledPathSteps {
     const MAGIC: u64 = 0x494D50_50535450; // "IMPPSTP"
-    const VERSION: u64 = 2;
+    const VERSION: u64 = 3;
 
     #[allow(dead_code)]
     fn from_samples(
-        sample_shift: u32,
-        seed: u64,
+        sample_rate: u32,
         path_count: usize,
         mut samples: Vec<(usize, PathStepRecord)>,
     ) -> io::Result<Self> {
+        validate_position_sample_rate(sample_rate)?;
         samples.sort_unstable_by(|a, b| {
             (a.0, a.1.bp_pos, a.1.step_idx).cmp(&(b.0, b.1.bp_pos, b.1.step_idx))
         });
@@ -466,16 +460,16 @@ impl SampledPathSteps {
             ));
         }
 
-        Self::from_encoded(sample_shift, seed, sample_count, path_byte_offsets, data)
+        Self::from_encoded(sample_rate, sample_count, path_byte_offsets, data)
     }
 
     fn from_encoded(
-        sample_shift: u32,
-        seed: u64,
+        sample_rate: u32,
         sample_count: u64,
         path_byte_offsets: Vec<u64>,
         data: Vec<u8>,
     ) -> io::Result<Self> {
+        validate_position_sample_rate(sample_rate)?;
         if path_byte_offsets.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -496,8 +490,7 @@ impl SampledPathSteps {
         }
 
         Ok(Self {
-            sample_shift,
-            seed,
+            sample_rate,
             sample_count,
             path_byte_offsets,
             data,
@@ -593,8 +586,7 @@ impl SampledPathSteps {
         let mut w = BufWriter::new(std::fs::File::create(path)?);
         write_u64(&mut w, Self::MAGIC)?;
         write_u64(&mut w, Self::VERSION)?;
-        write_u64(&mut w, self.sample_shift as u64)?;
-        write_u64(&mut w, self.seed)?;
+        write_u64(&mut w, self.sample_rate as u64)?;
         write_u64(&mut w, self.sample_count)?;
 
         write_u64(&mut w, self.path_byte_offsets.len() as u64)?;
@@ -632,8 +624,8 @@ impl SampledPathSteps {
                 format!("SampledPathSteps: unsupported version {}", version),
             ));
         }
-        let sample_shift = read_u64(&mut r)? as u32;
-        let seed = read_u64(&mut r)?;
+        let sample_rate = read_u64(&mut r)? as u32;
+        validate_position_sample_rate(sample_rate)?;
         let sample_count = read_u64(&mut r)?;
 
         let n_offsets = read_u64(&mut r)? as usize;
@@ -666,8 +658,7 @@ impl SampledPathSteps {
         }
 
         Ok(Self {
-            sample_shift,
-            seed,
+            sample_rate,
             sample_count,
             path_byte_offsets,
             data,
@@ -676,8 +667,7 @@ impl SampledPathSteps {
 }
 
 struct SampledPositionBuilder {
-    sample_shift: u32,
-    seed: u64,
+    sample_rate: u32,
     collect_positions: bool,
     position_samples: Vec<(u32, u64)>,
     path_step_offsets: Vec<u64>,
@@ -691,39 +681,30 @@ struct SampledPositionBuilder {
 
 impl SampledPositionBuilder {
     fn new(
-        sample_shift: u32,
-        seed: u64,
+        sample_rate: u32,
         next_path_start: u64,
         paths_seen: usize,
     ) -> io::Result<Self> {
-        Self::new_with_mode(sample_shift, seed, next_path_start, paths_seen, true)
+        Self::new_with_mode(sample_rate, next_path_start, paths_seen, true)
     }
 
     fn new_path_steps_only(
-        sample_shift: u32,
-        seed: u64,
+        sample_rate: u32,
         next_path_start: u64,
         paths_seen: usize,
     ) -> io::Result<Self> {
-        Self::new_with_mode(sample_shift, seed, next_path_start, paths_seen, false)
+        Self::new_with_mode(sample_rate, next_path_start, paths_seen, false)
     }
 
     fn new_with_mode(
-        sample_shift: u32,
-        seed: u64,
+        sample_rate: u32,
         next_path_start: u64,
         paths_seen: usize,
         collect_positions: bool,
     ) -> io::Result<Self> {
-        if sample_shift >= 63 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "position sample shift must be less than 63",
-            ));
-        }
+        validate_position_sample_rate(sample_rate)?;
         Ok(Self {
-            sample_shift,
-            seed,
+            sample_rate,
             collect_positions,
             position_samples: Vec::new(),
             path_step_offsets: vec![0; paths_seen + 1],
@@ -756,7 +737,7 @@ impl SampledPositionBuilder {
         for step in steps {
             let node_id = step.signed_node.unsigned_abs();
             let bp_pos = step.bp_pos;
-            if !sample_regular_path_step(step.step_idx, self.sample_shift) {
+            if !sample_regular_path_step(step.step_idx, self.sample_rate) {
                 continue;
             }
             if self.collect_positions {
@@ -808,8 +789,7 @@ impl SampledPositionBuilder {
         SampledPositionBuildStats,
     )> {
         let SampledPositionBuilder {
-            sample_shift,
-            seed,
+            sample_rate,
             position_samples,
             path_step_offsets,
             path_step_data,
@@ -818,14 +798,12 @@ impl SampledPositionBuilder {
             ..
         } = self;
         let sampled_positions = SampledPositions::from_samples(
-            sample_shift,
-            seed,
+            sample_rate,
             path_lengths,
             position_samples,
         )?;
         let sampled_path_steps = SampledPathSteps::from_encoded(
-            sample_shift,
-            seed,
+            sample_rate,
             path_step_sample_count,
             path_step_offsets,
             path_step_data,
@@ -846,7 +824,7 @@ impl SampledPositionBuilder {
             sampled_path_steps: sampled_path_steps.sample_count(),
             sampled_step_paths: sampled_path_steps.sampled_path_count(),
             walked_paths,
-            sample_shift,
+            sample_rate,
         };
         Ok((sampled_positions, sampled_path_steps, stats))
     }
@@ -855,7 +833,7 @@ impl SampledPositionBuilder {
         self,
         path_count: usize,
     ) -> io::Result<(SampledPathSteps, SampledPositionBuildStats)> {
-        let sample_shift = self.sample_shift;
+        let sample_rate = self.sample_rate;
         let walked_paths = self.walked_paths;
         let sampled_step_paths = self.sampled_step_paths;
         let sampled_path_steps = self.finish_path_steps_index(path_count)?;
@@ -865,7 +843,7 @@ impl SampledPositionBuilder {
             sampled_path_steps: sampled_path_steps.sample_count(),
             sampled_step_paths,
             walked_paths,
-            sample_shift,
+            sample_rate,
         };
         Ok((sampled_path_steps, stats))
     }
@@ -882,8 +860,7 @@ impl SampledPositionBuilder {
             ));
         }
         SampledPathSteps::from_encoded(
-            self.sample_shift,
-            self.seed,
+            self.sample_rate,
             self.path_step_sample_count,
             self.path_step_offsets,
             self.path_step_data,
@@ -938,19 +915,24 @@ fn decode_i32(value: u64) -> io::Result<i32> {
     })
 }
 
-fn sample_regular_path_step(step_idx: u32, sample_shift: u32) -> bool {
-    if sample_shift == 0 {
-        true
-    } else {
-        let period = 1u64 << sample_shift;
-        (step_idx as u64) % period == 0
+fn validate_position_sample_rate(sample_rate: u32) -> io::Result<()> {
+    if sample_rate == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "position sample rate must be greater than zero",
+        ));
     }
+    Ok(())
+}
+
+fn sample_regular_path_step(step_idx: u32, sample_rate: u32) -> bool {
+    (step_idx as u64) % (sample_rate as u64) == 0
 }
 
 #[allow(clippy::too_many_arguments)]
 fn encode_regular_position_sample_if_selected(
     path_start: u64,
-    sample_shift: u32,
+    sample_rate: u32,
     collect_positions: bool,
     step: PathStepRecord,
     prev_sample_bp: &mut u64,
@@ -959,7 +941,7 @@ fn encode_regular_position_sample_if_selected(
     position_samples: &mut Vec<(u32, u64)>,
     path_step_data: &mut Vec<u8>,
 ) -> io::Result<()> {
-    if !sample_regular_path_step(step.step_idx, sample_shift) {
+    if !sample_regular_path_step(step.step_idx, sample_rate) {
         return Ok(());
     }
 
@@ -1491,12 +1473,7 @@ impl SyngIndex {
             sampled_positions: None,
             sampled_path_steps: None,
             sampled_position_builder: Some(
-                SampledPositionBuilder::new(
-                    DEFAULT_POSITION_SAMPLE_SHIFT,
-                    DEFAULT_POSITION_SAMPLE_SEED,
-                    0,
-                    0,
-                )
+                SampledPositionBuilder::new(DEFAULT_POSITION_SAMPLE_RATE, 0, 0)
                 .expect("default sampled-position parameters are valid"),
             ),
         }
@@ -1572,15 +1549,21 @@ impl SyngIndex {
         self.sampled_path_steps.is_some()
     }
 
+    /// Sampling interval for the node-to-position sidecar, if present.
+    pub fn sampled_positions_rate(&self) -> Option<u32> {
+        self.sampled_positions.as_ref().map(|positions| positions.sample_rate)
+    }
+
+    /// Sampling interval for the path-step checkpoint sidecar, if present.
+    pub fn sampled_path_steps_rate(&self) -> Option<u32> {
+        self.sampled_path_steps.as_ref().map(|steps| steps.sample_rate)
+    }
+
     /// Enable online sampled-position collection for subsequently added paths.
     ///
     /// This should be called before adding any sequence. The sampled position
     /// index is intentionally built online as part of syng construction.
-    pub fn enable_online_sampled_positions(
-        &mut self,
-        sample_shift: u32,
-        seed: u64,
-    ) -> io::Result<()> {
+    pub fn enable_online_sampled_positions(&mut self, sample_rate: u32) -> io::Result<()> {
         let next_path_start = self
             .name_map
             .path_to_length
@@ -1593,8 +1576,7 @@ impl SyngIndex {
                 )
             })?;
         self.sampled_position_builder = Some(SampledPositionBuilder::new(
-            sample_shift,
-            seed,
+            sample_rate,
             next_path_start,
             self.name_map.path_to_name.len(),
         )?);
@@ -1630,7 +1612,7 @@ impl SyngIndex {
         sequences: impl Iterator<Item = (String, Vec<u8>)>,
     ) -> Self {
         let mut index = Self::new(params);
-        if let Err(e) = index.enable_online_sampled_positions(0, DEFAULT_POSITION_SAMPLE_SEED) {
+        if let Err(e) = index.enable_online_sampled_positions(1) {
             log::warn!(
                 "failed to enable exact sampled positions for in-memory build: {}",
                 e
@@ -2272,11 +2254,10 @@ impl SyngIndex {
     /// `.meta`, without re-decompressing sequences or reconstructing the graph.
     pub fn rebuild_sampled_position_indexes_from_gbwt(
         &mut self,
-        sample_shift: u32,
-        seed: u64,
+        sample_rate: u32,
     ) -> io::Result<SampledPositionBuildStats> {
         unsafe { syng_ffi::impg_syng_suppress_debug() };
-        let mut builder = SampledPositionBuilder::new(sample_shift, seed, 0, 0)?;
+        let mut builder = SampledPositionBuilder::new(sample_rate, 0, 0)?;
         let syncmer_len = (self.params.k + self.params.w) as u64;
         for path_idx in 0..self.name_map.path_to_name.len() {
             let seq_len = self.name_map.path_to_length[path_idx];
@@ -2310,11 +2291,10 @@ impl SyngIndex {
     /// Rebuild only the inverted path-step sidecar by walking existing GBWT paths.
     pub fn rebuild_sampled_path_steps_from_gbwt(
         &mut self,
-        sample_shift: u32,
-        seed: u64,
+        sample_rate: u32,
     ) -> io::Result<SampledPositionBuildStats> {
         unsafe { syng_ffi::impg_syng_suppress_debug() };
-        let mut builder = SampledPositionBuilder::new_path_steps_only(sample_shift, seed, 0, 0)?;
+        let mut builder = SampledPositionBuilder::new_path_steps_only(sample_rate, 0, 0)?;
         let syncmer_len = (self.params.k + self.params.w) as u64;
         for path_idx in 0..self.name_map.path_to_name.len() {
             let seq_len = self.name_map.path_to_length[path_idx];
@@ -2342,14 +2322,12 @@ impl SyngIndex {
     /// in parallel. Sampling is a regular per-path syncmer-step grid.
     pub fn rebuild_sampled_position_indexes_from_gbwt_parallel(
         &mut self,
-        sample_shift: u32,
-        seed: u64,
+        sample_rate: u32,
         progress_interval: usize,
     ) -> io::Result<SampledPositionBuildStats> {
         let (sampled_positions, sampled_path_steps, stats) =
             self.rebuild_sampled_position_chunks_from_gbwt_parallel(
-                sample_shift,
-                seed,
+                sample_rate,
                 true,
                 progress_interval,
             )?;
@@ -2368,13 +2346,11 @@ impl SyngIndex {
     /// paths in parallel. Sampling is a regular per-path syncmer-step grid.
     pub fn rebuild_sampled_path_steps_from_gbwt_parallel(
         &mut self,
-        sample_shift: u32,
-        seed: u64,
+        sample_rate: u32,
         progress_interval: usize,
     ) -> io::Result<SampledPositionBuildStats> {
         let (_, sampled_path_steps, stats) = self.rebuild_sampled_position_chunks_from_gbwt_parallel(
-            sample_shift,
-            seed,
+            sample_rate,
             false,
             progress_interval,
         )?;
@@ -2384,8 +2360,7 @@ impl SyngIndex {
 
     fn rebuild_sampled_position_chunks_from_gbwt_parallel(
         &self,
-        sample_shift: u32,
-        seed: u64,
+        sample_rate: u32,
         collect_positions: bool,
         progress_interval: usize,
     ) -> io::Result<(
@@ -2393,12 +2368,7 @@ impl SyngIndex {
         SampledPathSteps,
         SampledPositionBuildStats,
     )> {
-        if sample_shift >= 63 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "position sample shift must be less than 63",
-            ));
-        }
+        validate_position_sample_rate(sample_rate)?;
         unsafe { syng_ffi::impg_syng_suppress_debug() };
 
         let path_count = self.name_map.path_to_name.len();
@@ -2412,12 +2382,11 @@ impl SyngIndex {
             .filter_map(|start| start.as_ref())
             .map(|start| start.num_syncmers as u64)
             .sum();
-        let period = 1u64 << sample_shift;
         log::info!(
             "Parallel regular sampled-position rebuild: {} paths, {} syncmer steps, grid period {}, {} rayon threads",
             path_count,
             total_steps,
-            period,
+            sample_rate,
             rayon::current_num_threads()
         );
 
@@ -2431,7 +2400,7 @@ impl SyngIndex {
                     Some(start) => self.encode_regular_position_sample_chunk(
                         path_start,
                         start,
-                        sample_shift,
+                        sample_rate,
                         collect_positions,
                     ),
                     None if seq_len < syncmer_len => Ok(EncodedPositionSampleChunk {
@@ -2551,16 +2520,14 @@ impl SyngIndex {
         }
 
         let sampled_path_steps = SampledPathSteps::from_encoded(
-            sample_shift,
-            seed,
+            sample_rate,
             path_step_sample_count,
             path_step_offsets,
             path_step_data,
         )?;
         let sampled_positions = if collect_positions {
             Some(SampledPositions::from_samples(
-                sample_shift,
-                seed,
+                sample_rate,
                 &self.name_map.path_to_length,
                 position_samples,
             )?)
@@ -2579,7 +2546,7 @@ impl SyngIndex {
             sampled_path_steps: sampled_path_steps.sample_count(),
             sampled_step_paths,
             walked_paths,
-            sample_shift,
+            sample_rate,
         };
         Ok((sampled_positions, sampled_path_steps, stats))
     }
@@ -2588,7 +2555,7 @@ impl SyngIndex {
         &self,
         path_start: u64,
         start: &GbwtPathStart,
-        sample_shift: u32,
+        sample_rate: u32,
         collect_positions: bool,
     ) -> io::Result<EncodedPositionSampleChunk> {
         if start.num_syncmers == 0 {
@@ -2620,7 +2587,7 @@ impl SyngIndex {
         };
         encode_regular_position_sample_if_selected(
             path_start,
-            sample_shift,
+            sample_rate,
             collect_positions,
             first_step,
             &mut prev_sample_bp,
@@ -2656,7 +2623,7 @@ impl SyngIndex {
             };
             encode_regular_position_sample_if_selected(
                 path_start,
-                sample_shift,
+                sample_rate,
                 collect_positions,
                 step,
                 &mut prev_sample_bp,
@@ -3414,7 +3381,7 @@ impl SyngIndex {
     /// called on a freshly constructed index).
     pub fn build_region_gbwt(&self, sequences: &[(String, &[u8])], prefix: &str) -> io::Result<()> {
         let mut region_index = SyngIndex::new(self.params);
-        region_index.enable_online_sampled_positions(0, DEFAULT_POSITION_SAMPLE_SEED)?;
+        region_index.enable_online_sampled_positions(1)?;
         for (name, seq) in sequences {
             region_index.add_sequence(name.clone(), seq.to_vec());
         }
@@ -3679,7 +3646,7 @@ mod tests {
 
         let mut index = SyngIndex::new_with_packed_syncmer_dictionary(params, &dictionary).unwrap();
         index
-            .enable_online_sampled_positions(0, DEFAULT_POSITION_SAMPLE_SEED)
+            .enable_online_sampled_positions(1)
             .unwrap();
         for (name, seq) in sequences {
             let stats = index
@@ -4320,7 +4287,7 @@ mod tests {
         seq_b.extend_from_slice(&make_test_sequence(400, 2));
 
         let mut index = SyngIndex::new(params);
-        index.enable_online_sampled_positions(0, 7).unwrap();
+        index.enable_online_sampled_positions(1).unwrap();
         index.add_sequence("sampleA#0#chr1".to_string(), seq_a);
         index.add_sequence("sampleB#0#chr1".to_string(), seq_b);
         let stats = index.finalize_online_sampled_positions().unwrap().unwrap();
@@ -4391,7 +4358,7 @@ mod tests {
         let params = SyncmerParams::default();
         let seq = make_test_sequence(5000, 123);
         let mut index = SyngIndex::new(params);
-        index.enable_online_sampled_positions(0, 7).unwrap();
+        index.enable_online_sampled_positions(1).unwrap();
         index.add_sequence("sampleA#0#chr1".to_string(), seq);
         index.finalize_online_sampled_positions().unwrap().unwrap();
 
@@ -4450,7 +4417,7 @@ mod tests {
         let syncmer_len = (params.k + params.w) as u64;
         let seq = make_test_sequence(12_000, 77);
         let mut index = SyngIndex::new(params);
-        index.enable_online_sampled_positions(4, 7).unwrap();
+        index.enable_online_sampled_positions(16).unwrap();
         index.add_sequence("sampleA#0#chr1".to_string(), seq);
         index.finalize_online_sampled_positions().unwrap().unwrap();
 
@@ -4507,7 +4474,7 @@ mod tests {
         let _guard = lock_syng();
         let params = SyncmerParams::default();
         let mut index = SyngIndex::new(params);
-        index.enable_online_sampled_positions(3, 999).unwrap();
+        index.enable_online_sampled_positions(8).unwrap();
         index.add_sequence(
             "sampleA#0#chr1".to_string(),
             make_test_sequence(12_000, 91),
@@ -4564,7 +4531,7 @@ mod tests {
         assert!(!repair.has_sampled_positions());
         assert!(!repair.has_sampled_path_steps());
         let stats = repair
-            .rebuild_sampled_position_indexes_from_gbwt(0, DEFAULT_POSITION_SAMPLE_SEED)
+            .rebuild_sampled_position_indexes_from_gbwt(1)
             .unwrap();
         assert!(stats.sampled_occurrences > 0);
         assert_eq!(stats.sampled_occurrences, stats.sampled_path_steps);
@@ -4608,11 +4575,11 @@ mod tests {
 
         let mut serial = SyngIndex::load_for_repair(prefix_str, params).unwrap();
         let serial_stats = serial
-            .rebuild_sampled_position_indexes_from_gbwt(3, 11)
+            .rebuild_sampled_position_indexes_from_gbwt(8)
             .unwrap();
         let mut parallel = SyngIndex::load_for_repair(prefix_str, params).unwrap();
         let parallel_stats = parallel
-            .rebuild_sampled_position_indexes_from_gbwt_parallel(3, 11, 0)
+            .rebuild_sampled_position_indexes_from_gbwt_parallel(8, 0)
             .unwrap();
 
         assert_eq!(
@@ -5646,8 +5613,8 @@ mod tests {
                 fasta_path.to_str().unwrap(),
                 "-o",
                 output_prefix.to_str().unwrap(),
-                "--position-sample-shift",
-                "0",
+                "--position-sample-rate",
+                "1",
             ])
             .output()
             .expect("Failed to run impg syng");
@@ -5732,8 +5699,8 @@ mod tests {
                 fasta_path.to_str().unwrap(),
                 "-o",
                 output_prefix.to_str().unwrap(),
-                "--position-sample-shift",
-                "0",
+                "--position-sample-rate",
+                "1",
             ])
             .output()
             .expect("Failed to run impg syng");
@@ -6444,8 +6411,8 @@ mod tests {
                 fasta_path.to_str().unwrap(),
                 "-o",
                 idx_prefix.to_str().unwrap(),
-                "--position-sample-shift",
-                "0",
+                "--position-sample-rate",
+                "1",
             ])
             .output()
             .expect("Failed to run impg syng");

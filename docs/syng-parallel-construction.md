@@ -95,7 +95,7 @@ AGC inputs.
 - The frozen dictionary rejects duplicate packed syncmers.
 - Replay fails if any extracted syncmer is absent from the frozen dictionary.
 - Positional sampling uses a regular per-path syncmer-step grid. For
-  `sample_shift = s`, sampled steps are `0, 2^s, 2*2^s, ...` on each path.
+  `sample_rate = r`, sampled steps are `0, r, 2*r, ...` on each path.
   `.syng.spos` stores sampled node-to-position records and `.syng.pstep`
   stores the inverse path-position checkpoints for the same sampled steps.
 
