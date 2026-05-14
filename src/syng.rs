@@ -3,10 +3,12 @@
 //! Provides `SyngIndex` for building, loading, saving, and querying
 //! GBWT-based syncmer indices.
 
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::ffi::CString;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::Path;
+use std::sync::Mutex;
 
 use crate::syng_ffi;
 
@@ -46,6 +48,22 @@ struct PathStepRecord {
     prev_node: i32,
     prev_offset: u32,
     traversal_rank: u32,
+}
+
+#[derive(Debug)]
+struct EncodedPositionSampleChunk {
+    position_samples: Vec<(u32, u64)>,
+    path_step_data: Vec<u8>,
+    path_step_sample_count: u64,
+    walked_steps: u64,
+}
+
+#[derive(Debug, Default)]
+struct PositionRepairProgress {
+    completed_paths: usize,
+    completed_steps: u64,
+    completed_position_samples: u64,
+    completed_path_step_samples: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -104,10 +122,10 @@ pub fn syng_meta_path(prefix: &str) -> String {
 
 /// Succinct sampled path-position sidecar for projected syng mapping.
 ///
-/// This mirrors the sampled suffix-array idea used by ropebwt3: store only a
-/// deterministic fraction of path occurrences, then resolve mapping positions
-/// from those samples instead of materializing every visit for every node.
-/// Occurrences are grouped by syncmer node id and varint delta encoded.
+/// This mirrors the sampled suffix-array idea used by ropebwt3: store a regular
+/// per-path grid of occurrences, then resolve mapping positions from those
+/// samples instead of materializing every visit for every node. Occurrences are
+/// grouped by syncmer node id and varint delta encoded.
 pub struct SampledPositions {
     pub sample_shift: u32,
     pub seed: u64,
@@ -120,7 +138,7 @@ pub struct SampledPositions {
 
 impl SampledPositions {
     const MAGIC: u64 = 0x494D50_53504F53; // "IMPSPOS"
-    const VERSION: u64 = 1;
+    const VERSION: u64 = 2;
 
     fn from_samples(
         sample_shift: u32,
@@ -265,6 +283,15 @@ impl SampledPositions {
         w.flush()
     }
 
+    fn save_atomic(&self, path: &str) -> io::Result<()> {
+        let tmp_path = format!("{}.tmp.{}", path, std::process::id());
+        self.save(&tmp_path)?;
+        std::fs::rename(&tmp_path, path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            e
+        })
+    }
+
     fn load(path: &str) -> io::Result<Self> {
         let mut r = BufReader::new(std::fs::File::open(path)?);
         let magic = read_u64(&mut r)?;
@@ -373,7 +400,7 @@ pub struct SampledPathSteps {
 
 impl SampledPathSteps {
     const MAGIC: u64 = 0x494D50_50535450; // "IMPPSTP"
-    const VERSION: u64 = 1;
+    const VERSION: u64 = 2;
 
     #[allow(dead_code)]
     fn from_samples(
@@ -580,6 +607,15 @@ impl SampledPathSteps {
         w.flush()
     }
 
+    fn save_atomic(&self, path: &str) -> io::Result<()> {
+        let tmp_path = format!("{}.tmp.{}", path, std::process::id());
+        self.save(&tmp_path)?;
+        std::fs::rename(&tmp_path, path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            e
+        })
+    }
+
     fn load(path: &str) -> io::Result<Self> {
         let mut r = BufReader::new(std::fs::File::open(path)?);
         let magic = read_u64(&mut r)?;
@@ -642,7 +678,6 @@ impl SampledPathSteps {
 struct SampledPositionBuilder {
     sample_shift: u32,
     seed: u64,
-    sample_mask: u64,
     collect_positions: bool,
     position_samples: Vec<(u32, u64)>,
     path_step_offsets: Vec<u64>,
@@ -689,11 +724,6 @@ impl SampledPositionBuilder {
         Ok(Self {
             sample_shift,
             seed,
-            sample_mask: if sample_shift == 0 {
-                0
-            } else {
-                (1u64 << sample_shift) - 1
-            },
             collect_positions,
             position_samples: Vec::new(),
             path_step_offsets: vec![0; paths_seen + 1],
@@ -726,16 +756,7 @@ impl SampledPositionBuilder {
         for step in steps {
             let node_id = step.signed_node.unsigned_abs();
             let bp_pos = step.bp_pos;
-            if self.sample_shift > 0
-                && sampled_position_hash(
-                    node_id,
-                    path_idx,
-                    step.step_idx as usize,
-                    bp_pos,
-                    self.seed,
-                ) & self.sample_mask
-                    != 0
-            {
+            if !sample_regular_path_step(step.step_idx, self.sample_shift) {
                 continue;
             }
             if self.collect_positions {
@@ -917,26 +938,77 @@ fn decode_i32(value: u64) -> io::Result<i32> {
     })
 }
 
-fn splitmix64(mut value: u64) -> u64 {
-    value = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    value ^ (value >> 31)
+fn sample_regular_path_step(step_idx: u32, sample_shift: u32) -> bool {
+    if sample_shift == 0 {
+        true
+    } else {
+        let period = 1u64 << sample_shift;
+        (step_idx as u64) % period == 0
+    }
 }
 
-fn sampled_position_hash(
-    node_id: u32,
-    path_idx: usize,
-    node_idx: usize,
-    bp_pos: u64,
-    seed: u64,
-) -> u64 {
-    let mut value = seed;
-    value ^= (node_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    value ^= (path_idx as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    value ^= (node_idx as u64).wrapping_mul(0x94D0_49BB_1331_11EB);
-    value ^= bp_pos.rotate_left(17);
-    splitmix64(value)
+#[allow(clippy::too_many_arguments)]
+fn encode_regular_position_sample_if_selected(
+    path_start: u64,
+    sample_shift: u32,
+    collect_positions: bool,
+    step: PathStepRecord,
+    prev_sample_bp: &mut u64,
+    prev_sample_step: &mut u32,
+    path_step_sample_count: &mut u64,
+    position_samples: &mut Vec<(u32, u64)>,
+    path_step_data: &mut Vec<u8>,
+) -> io::Result<()> {
+    if !sample_regular_path_step(step.step_idx, sample_shift) {
+        return Ok(());
+    }
+
+    if collect_positions {
+        let global_pos = path_start.checked_add(step.bp_pos).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "sampled path coordinate overflowed u64",
+            )
+        })?;
+        let packed = global_pos
+            .checked_mul(2)
+            .and_then(|p| p.checked_add(if step.signed_node >= 0 { 0 } else { 1 }))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "sampled packed coordinate overflowed u64",
+                )
+            })?;
+        position_samples.push((step.signed_node.unsigned_abs(), packed));
+    }
+
+    let bp_delta = step.bp_pos.checked_sub(*prev_sample_bp).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "sampled path-step bp positions are not sorted within path",
+        )
+    })?;
+    let step_delta = step.step_idx.checked_sub(*prev_sample_step).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "sampled path-step indices are not sorted within path",
+        )
+    })?;
+    push_varint(path_step_data, bp_delta);
+    push_varint(path_step_data, step_delta as u64);
+    push_varint(path_step_data, encode_i32(step.signed_node));
+    push_varint(path_step_data, encode_i32(step.prev_node));
+    push_varint(path_step_data, step.prev_offset as u64);
+    push_varint(path_step_data, step.traversal_rank as u64);
+    *prev_sample_bp = step.bp_pos;
+    *prev_sample_step = step.step_idx;
+    *path_step_sample_count = path_step_sample_count.checked_add(1).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "path-step sample count overflowed u64",
+        )
+    })?;
+    Ok(())
 }
 
 /// Parameters controlling syncmer extraction.
@@ -1863,14 +1935,14 @@ impl SyngIndex {
                 "cannot save syng index without sampled positions",
             )
         })?;
-        sampled_positions.save(&syng_spos_path(prefix))?;
+        sampled_positions.save_atomic(&syng_spos_path(prefix))?;
         let sampled_path_steps = self.sampled_path_steps.as_ref().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 "cannot save syng index without sampled path-step checkpoints",
             )
         })?;
-        sampled_path_steps.save(&syng_pstep_path(prefix))
+        sampled_path_steps.save_atomic(&syng_pstep_path(prefix))
     }
 
     /// Save only the inverted path-step sidecar for an existing syng index prefix.
@@ -1881,7 +1953,7 @@ impl SyngIndex {
                 "cannot save syng index without sampled path-step checkpoints",
             )
         })?;
-        sampled_path_steps.save(&syng_pstep_path(prefix))
+        sampled_path_steps.save_atomic(&syng_pstep_path(prefix))
     }
 
     /// Load an index from disk.
@@ -2007,12 +2079,21 @@ impl SyngIndex {
             match SampledPositions::load(&sampled_positions_path) {
                 Ok(sp) => Some(sp),
                 Err(e) => {
-                    unsafe {
-                        syng_ffi::syngBWTdestroy(gbwt);
-                        syng_ffi::kmerHashDestroy(kmer_hash);
-                        syng_ffi::impg_seqhashDestroy(seqhash);
+                    if !require_sampled_positions {
+                        log::warn!(
+                            "ignoring sampled-position sidecar during repair: {} ({})",
+                            sampled_positions_path,
+                            e
+                        );
+                        None
+                    } else {
+                        unsafe {
+                            syng_ffi::syngBWTdestroy(gbwt);
+                            syng_ffi::kmerHashDestroy(kmer_hash);
+                            syng_ffi::impg_seqhashDestroy(seqhash);
+                        }
+                        return Err(e);
                     }
-                    return Err(e);
                 }
             }
         } else if require_sampled_positions {
@@ -2038,12 +2119,21 @@ impl SyngIndex {
             match SampledPathSteps::load(&sampled_path_steps_path) {
                 Ok(ps) => Some(ps),
                 Err(e) => {
-                    unsafe {
-                        syng_ffi::syngBWTdestroy(gbwt);
-                        syng_ffi::kmerHashDestroy(kmer_hash);
-                        syng_ffi::impg_seqhashDestroy(seqhash);
+                    if !require_sampled_positions {
+                        log::warn!(
+                            "ignoring sampled path-step sidecar during repair: {} ({})",
+                            sampled_path_steps_path,
+                            e
+                        );
+                        None
+                    } else {
+                        unsafe {
+                            syng_ffi::syngBWTdestroy(gbwt);
+                            syng_ffi::kmerHashDestroy(kmer_hash);
+                            syng_ffi::impg_seqhashDestroy(seqhash);
+                        }
+                        return Err(e);
                     }
-                    return Err(e);
                 }
             }
         } else {
@@ -2246,6 +2336,353 @@ impl SyngIndex {
         let (sampled_path_steps, stats) = builder.finish_path_steps(self.name_map.path_to_name.len())?;
         self.sampled_path_steps = Some(sampled_path_steps);
         Ok(stats)
+    }
+
+    /// Rebuild both sampled positional sidecars by walking existing GBWT paths
+    /// in parallel. Sampling is a regular per-path syncmer-step grid.
+    pub fn rebuild_sampled_position_indexes_from_gbwt_parallel(
+        &mut self,
+        sample_shift: u32,
+        seed: u64,
+        progress_interval: usize,
+    ) -> io::Result<SampledPositionBuildStats> {
+        let (sampled_positions, sampled_path_steps, stats) =
+            self.rebuild_sampled_position_chunks_from_gbwt_parallel(
+                sample_shift,
+                seed,
+                true,
+                progress_interval,
+            )?;
+        let sampled_positions = sampled_positions.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "parallel positional repair did not build sampled positions",
+            )
+        })?;
+        self.sampled_positions = Some(sampled_positions);
+        self.sampled_path_steps = Some(sampled_path_steps);
+        Ok(stats)
+    }
+
+    /// Rebuild only the inverted path-step sidecar by walking existing GBWT
+    /// paths in parallel. Sampling is a regular per-path syncmer-step grid.
+    pub fn rebuild_sampled_path_steps_from_gbwt_parallel(
+        &mut self,
+        sample_shift: u32,
+        seed: u64,
+        progress_interval: usize,
+    ) -> io::Result<SampledPositionBuildStats> {
+        let (_, sampled_path_steps, stats) = self.rebuild_sampled_position_chunks_from_gbwt_parallel(
+            sample_shift,
+            seed,
+            false,
+            progress_interval,
+        )?;
+        self.sampled_path_steps = Some(sampled_path_steps);
+        Ok(stats)
+    }
+
+    fn rebuild_sampled_position_chunks_from_gbwt_parallel(
+        &self,
+        sample_shift: u32,
+        seed: u64,
+        collect_positions: bool,
+        progress_interval: usize,
+    ) -> io::Result<(
+        Option<SampledPositions>,
+        SampledPathSteps,
+        SampledPositionBuildStats,
+    )> {
+        if sample_shift >= 63 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "position sample shift must be less than 63",
+            ));
+        }
+        unsafe { syng_ffi::impg_syng_suppress_debug() };
+
+        let path_count = self.name_map.path_to_name.len();
+        let path_starts =
+            SampledPositions::path_starts_from_lengths(&self.name_map.path_to_length)?;
+        let syncmer_len = (self.params.k + self.params.w) as u64;
+        let total_steps: u64 = self
+            .name_map
+            .path_starts
+            .iter()
+            .filter_map(|start| start.as_ref())
+            .map(|start| start.num_syncmers as u64)
+            .sum();
+        let period = 1u64 << sample_shift;
+        log::info!(
+            "Parallel regular sampled-position rebuild: {} paths, {} syncmer steps, grid period {}, {} rayon threads",
+            path_count,
+            total_steps,
+            period,
+            rayon::current_num_threads()
+        );
+
+        let progress = Mutex::new(PositionRepairProgress::default());
+        let results: Vec<io::Result<EncodedPositionSampleChunk>> = (0..path_count)
+            .into_par_iter()
+            .map(|path_idx| {
+                let seq_len = self.name_map.path_to_length[path_idx];
+                let path_start = path_starts[path_idx];
+                let result = match self.name_map.path_starts.get(path_idx).and_then(|s| s.as_ref()) {
+                    Some(start) => self.encode_regular_position_sample_chunk(
+                        path_start,
+                        start,
+                        sample_shift,
+                        collect_positions,
+                    ),
+                    None if seq_len < syncmer_len => Ok(EncodedPositionSampleChunk {
+                        position_samples: Vec::new(),
+                        path_step_data: Vec::new(),
+                        path_step_sample_count: 0,
+                        walked_steps: 0,
+                    }),
+                    None => Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "cannot rebuild positional sidecars: missing GBWT path start for {}",
+                            self.name_map.path_to_name[path_idx]
+                        ),
+                    )),
+                };
+
+                if let Ok(chunk) = &result {
+                    let mut progress = progress.lock().map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::Other,
+                            "sampled-position repair progress lock was poisoned",
+                        )
+                    })?;
+                    progress.completed_paths += 1;
+                    progress.completed_steps =
+                        progress.completed_steps.checked_add(chunk.walked_steps).ok_or_else(
+                            || {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "sampled-position progress step count overflowed u64",
+                                )
+                            },
+                        )?;
+                    progress.completed_position_samples = progress
+                        .completed_position_samples
+                        .checked_add(chunk.position_samples.len() as u64)
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "sampled-position progress count overflowed u64",
+                            )
+                        })?;
+                    progress.completed_path_step_samples = progress
+                        .completed_path_step_samples
+                        .checked_add(chunk.path_step_sample_count)
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "path-step progress count overflowed u64",
+                            )
+                        })?;
+                    let done = progress.completed_paths;
+                    if progress_interval > 0
+                        && (done == path_count || done % progress_interval == 0)
+                    {
+                        let path_pct = if path_count > 0 {
+                            (done as f64 * 100.0) / path_count as f64
+                        } else {
+                            100.0
+                        };
+                        let step_pct = if total_steps > 0 {
+                            (progress.completed_steps as f64 * 100.0) / total_steps as f64
+                        } else {
+                            100.0
+                        };
+                        log::info!(
+                            "Sampled-position repair progress: {}/{} paths complete ({:.1}%), {}/{} syncmer steps ({:.1}%), {} node-position samples, {} path-step checkpoints; completed path {}/{} {}",
+                            done,
+                            path_count,
+                            path_pct,
+                            progress.completed_steps,
+                            total_steps,
+                            step_pct,
+                            progress.completed_position_samples,
+                            progress.completed_path_step_samples,
+                            path_idx + 1,
+                            path_count,
+                            self.name_map.path_to_name[path_idx]
+                        );
+                    }
+                }
+
+                result
+            })
+            .collect();
+
+        let mut position_samples = Vec::new();
+        let mut path_step_offsets = Vec::with_capacity(path_count + 1);
+        let mut path_step_data = Vec::new();
+        let mut path_step_sample_count = 0u64;
+        let mut sampled_step_paths = 0usize;
+        let mut walked_paths = 0usize;
+        path_step_offsets.push(0);
+
+        for result in results {
+            let chunk = result?;
+            if chunk.walked_steps > 0 {
+                walked_paths += 1;
+            }
+            if !chunk.path_step_data.is_empty() {
+                sampled_step_paths += 1;
+            }
+            path_step_sample_count = path_step_sample_count
+                .checked_add(chunk.path_step_sample_count)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "path-step sample count overflowed u64",
+                    )
+                })?;
+            if collect_positions {
+                position_samples.extend_from_slice(&chunk.position_samples);
+            }
+            path_step_data.extend_from_slice(&chunk.path_step_data);
+            path_step_offsets.push(path_step_data.len() as u64);
+        }
+
+        let sampled_path_steps = SampledPathSteps::from_encoded(
+            sample_shift,
+            seed,
+            path_step_sample_count,
+            path_step_offsets,
+            path_step_data,
+        )?;
+        let sampled_positions = if collect_positions {
+            Some(SampledPositions::from_samples(
+                sample_shift,
+                seed,
+                &self.name_map.path_to_length,
+                position_samples,
+            )?)
+        } else {
+            None
+        };
+        let stats = SampledPositionBuildStats {
+            sampled_occurrences: sampled_positions
+                .as_ref()
+                .map(|sp| sp.sample_count())
+                .unwrap_or(0),
+            sampled_nodes: sampled_positions
+                .as_ref()
+                .map(|sp| sp.node_count())
+                .unwrap_or(0),
+            sampled_path_steps: sampled_path_steps.sample_count(),
+            sampled_step_paths,
+            walked_paths,
+            sample_shift,
+        };
+        Ok((sampled_positions, sampled_path_steps, stats))
+    }
+
+    fn encode_regular_position_sample_chunk(
+        &self,
+        path_start: u64,
+        start: &GbwtPathStart,
+        sample_shift: u32,
+        collect_positions: bool,
+    ) -> io::Result<EncodedPositionSampleChunk> {
+        if start.num_syncmers == 0 {
+            return Ok(EncodedPositionSampleChunk {
+                position_samples: Vec::new(),
+                path_step_data: Vec::new(),
+                path_step_sample_count: 0,
+                walked_steps: 0,
+            });
+        }
+
+        let expected_steps = start.num_syncmers as usize;
+        let mut position_samples = Vec::new();
+        let mut path_step_data = Vec::new();
+        let mut path_step_sample_count = 0u64;
+        let mut prev_sample_bp = 0u64;
+        let mut prev_sample_step = 0u32;
+        let mut steps_seen = 0usize;
+
+        let mut state = self.path_state_from_start(start);
+        let mut acc_pos = start.first_syncmer_pos;
+        let first_step = PathStepRecord {
+            step_idx: 0,
+            bp_pos: acc_pos,
+            signed_node: start.start_node,
+            prev_node: 0,
+            prev_offset: 0,
+            traversal_rank: start.start_count,
+        };
+        encode_regular_position_sample_if_selected(
+            path_start,
+            sample_shift,
+            collect_positions,
+            first_step,
+            &mut prev_sample_bp,
+            &mut prev_sample_step,
+            &mut path_step_sample_count,
+            &mut position_samples,
+            &mut path_step_data,
+        )?;
+        steps_seen += 1;
+
+        let mut next_node: i32 = 0;
+        let mut offset: u32 = 0;
+        while unsafe { syng_ffi::syngBWTpathNext(&mut state, &mut next_node, &mut offset) } {
+            if steps_seen >= expected_steps {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "GBWT path has more steps than name map reports ({})",
+                        expected_steps
+                    ),
+                ));
+            }
+            acc_pos = acc_pos.checked_add(offset as u64).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "GBWT path coordinate overflow")
+            })?;
+            let step = PathStepRecord {
+                step_idx: steps_seen as u32,
+                bp_pos: acc_pos,
+                signed_node: next_node,
+                prev_node: state.last_node,
+                prev_offset: offset,
+                traversal_rank: state.j_last,
+            };
+            encode_regular_position_sample_if_selected(
+                path_start,
+                sample_shift,
+                collect_positions,
+                step,
+                &mut prev_sample_bp,
+                &mut prev_sample_step,
+                &mut path_step_sample_count,
+                &mut position_samples,
+                &mut path_step_data,
+            )?;
+            steps_seen += 1;
+        }
+        if steps_seen != expected_steps {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "GBWT path has {} steps but name map reports {}",
+                    steps_seen, expected_steps
+                ),
+            ));
+        }
+
+        Ok(EncodedPositionSampleChunk {
+            position_samples,
+            path_step_data,
+            path_step_sample_count,
+            walked_steps: steps_seen as u64,
+        })
     }
 
     fn path_state_from_checkpoint(&self, checkpoint: &SampledPathStepHit) -> syng_ffi::SyngBWTpath {
@@ -4066,6 +4503,45 @@ mod tests {
     }
 
     #[test]
+    fn test_regular_sampled_positions_use_step_grid() {
+        let _guard = lock_syng();
+        let params = SyncmerParams::default();
+        let mut index = SyngIndex::new(params);
+        index.enable_online_sampled_positions(3, 999).unwrap();
+        index.add_sequence(
+            "sampleA#0#chr1".to_string(),
+            make_test_sequence(12_000, 91),
+        );
+        index.finalize_online_sampled_positions().unwrap().unwrap();
+
+        let path_idx = *index.name_map.name_to_path.get("sampleA#0#chr1").unwrap() as usize;
+        let sampled_steps = index
+            .sampled_path_steps
+            .as_ref()
+            .unwrap()
+            .decode_path(path_idx)
+            .unwrap();
+        assert!(
+            sampled_steps.len() > 4,
+            "test sequence should produce several regular checkpoints"
+        );
+        assert_eq!(sampled_steps[0].step_idx, 0);
+        for step in &sampled_steps {
+            assert_eq!(
+                step.step_idx % 8,
+                0,
+                "regular sampled checkpoint is off-grid: {:?}",
+                step
+            );
+        }
+        assert_eq!(
+            index.sampled_positions.as_ref().unwrap().sample_count(),
+            index.sampled_path_steps.as_ref().unwrap().sample_count(),
+            "forward and inverted sidecars should sample the same path steps"
+        );
+    }
+
+    #[test]
     fn test_rebuild_sampled_position_indexes_from_gbwt_repairs_sidecars() {
         let _guard = lock_syng();
         let params = SyncmerParams::default();
@@ -4111,6 +4587,73 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn test_parallel_regular_position_rebuild_matches_serial() {
+        let _guard = lock_syng();
+        let params = SyncmerParams::default();
+        let seqs = vec![
+            ("sampleA#0#chr1".to_string(), make_test_sequence(5000, 21)),
+            ("sampleB#0#chr1".to_string(), make_test_sequence(4200, 22)),
+            ("sampleC#0#chr1".to_string(), make_test_sequence(3500, 23)),
+            ("short".to_string(), make_test_sequence(12, 24)),
+        ];
+        let mut index = SyngIndex::build(params, seqs.into_iter());
+
+        let dir = std::env::temp_dir().join("impg_test_syng_parallel_regular_repair");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("idx");
+        let prefix_str = prefix.to_str().unwrap();
+        index.save(prefix_str).unwrap();
+
+        let mut serial = SyngIndex::load_for_repair(prefix_str, params).unwrap();
+        let serial_stats = serial
+            .rebuild_sampled_position_indexes_from_gbwt(3, 11)
+            .unwrap();
+        let mut parallel = SyngIndex::load_for_repair(prefix_str, params).unwrap();
+        let parallel_stats = parallel
+            .rebuild_sampled_position_indexes_from_gbwt_parallel(3, 11, 0)
+            .unwrap();
+
+        assert_eq!(
+            serial_stats.sampled_occurrences,
+            parallel_stats.sampled_occurrences
+        );
+        assert_eq!(serial_stats.sampled_nodes, parallel_stats.sampled_nodes);
+        assert_eq!(
+            serial_stats.sampled_path_steps,
+            parallel_stats.sampled_path_steps
+        );
+        assert_eq!(
+            serial_stats.sampled_step_paths,
+            parallel_stats.sampled_step_paths
+        );
+        assert_eq!(serial_stats.walked_paths, parallel_stats.walked_paths);
+
+        let serial_positions = serial.sampled_positions.as_ref().unwrap();
+        let parallel_positions = parallel.sampled_positions.as_ref().unwrap();
+        assert_eq!(serial_positions.sample_count, parallel_positions.sample_count);
+        assert_eq!(serial_positions.path_starts, parallel_positions.path_starts);
+        assert_eq!(serial_positions.node_ids, parallel_positions.node_ids);
+        assert_eq!(serial_positions.byte_offsets, parallel_positions.byte_offsets);
+        assert_eq!(serial_positions.data, parallel_positions.data);
+
+        let serial_steps = serial.sampled_path_steps.as_ref().unwrap();
+        let parallel_steps = parallel.sampled_path_steps.as_ref().unwrap();
+        assert_eq!(serial_steps.sample_count(), parallel_steps.sample_count());
+        assert_eq!(serial_steps.path_count(), parallel_steps.path_count());
+        for path_idx in 0..serial_steps.path_count() {
+            assert_eq!(
+                serial_steps.decode_path(path_idx).unwrap(),
+                parallel_steps.decode_path(path_idx).unwrap(),
+                "path-step checkpoints differ for path {}",
+                path_idx
+            );
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     // ── 11. CLI integration test ────────────────────────────────────
 
     #[test]
@@ -4119,6 +4662,7 @@ mod tests {
         // Run `impg syng -f <fasta> -o <prefix>` via Command,
         // verify output files exist.
         let dir = std::env::temp_dir().join("impg_test_syng_cli");
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
         // Write a small synthetic FASTA

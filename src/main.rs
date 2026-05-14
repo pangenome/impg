@@ -1875,12 +1875,12 @@ enum Args {
         #[clap(short = 'o', long, value_parser)]
         output: String,
 
-        /// Sample one path occurrence per 2^N occurrences for .syng.spos.
+        /// Sample every 2^N syncmer steps per path for positional sidecars.
         #[arg(help_heading = "Position sampling")]
         #[clap(long, value_parser, default_value_t = impg::syng::DEFAULT_POSITION_SAMPLE_SHIFT)]
         position_sample_shift: u32,
 
-        /// Hash seed for online position sampling.
+        /// Compatibility seed stored in sidecars; regular-grid sampling ignores it.
         #[arg(help_heading = "Position sampling")]
         #[clap(long, value_parser, default_value_t = impg::syng::DEFAULT_POSITION_SAMPLE_SEED)]
         position_sample_seed: u64,
@@ -1961,15 +1961,25 @@ enum Args {
         #[clap(long, action)]
         force: bool,
 
-        /// Sample one path occurrence per 2^N occurrences.
+        /// Sample every 2^N syncmer steps per path for positional sidecars.
         #[arg(help_heading = "Position sampling")]
         #[clap(long, value_parser, default_value_t = impg::syng::DEFAULT_POSITION_SAMPLE_SHIFT)]
         position_sample_shift: u32,
 
-        /// Hash seed for position sampling.
+        /// Compatibility seed stored in sidecars; regular-grid sampling ignores it.
         #[arg(help_heading = "Position sampling")]
         #[clap(long, value_parser, default_value_t = impg::syng::DEFAULT_POSITION_SAMPLE_SEED)]
         position_sample_seed: u64,
+
+        /// Rebuild sidecars serially instead of walking paths in parallel.
+        #[arg(help_heading = "Position sampling")]
+        #[clap(long, action)]
+        serial_position_sampling: bool,
+
+        /// Log positional repair progress after this many completed paths (0 disables).
+        #[arg(help_heading = "Position sampling")]
+        #[clap(long, value_parser, default_value_t = 1)]
+        position_progress_interval: usize,
 
         // --- General ---
         #[clap(flatten)]
@@ -3869,10 +3879,9 @@ fn run() -> io::Result<()> {
                         position_sample_seed,
                     )?;
                     info!(
-                        "Online sampled position sidecar enabled: sample_shift={} (~1/{} path occurrences), seed={}",
+                        "Online regular sampled position sidecars enabled: sample_shift={} (every {} syncmer steps per path)",
                         position_sample_shift,
                         1u64 << position_sample_shift,
-                        position_sample_seed,
                     );
                     Ok(())
                 };
@@ -4320,7 +4329,7 @@ fn run() -> io::Result<()> {
             let position_start = Instant::now();
             if let Some(stats) = index.finalize_online_sampled_positions()? {
                 info!(
-                    "Sampled position sidecars compacted in {}: {} node-position samples across {} nodes; {} path-step checkpoints across {} paths from {} walked paths (sample_shift={} ~=1/{}) at +{}",
+                    "Regular sampled position sidecars compacted in {}: {} node-position samples across {} nodes; {} path-step checkpoints across {} paths from {} walked paths (sample_shift={}, period={} syncmer steps) at +{}",
                     format_duration(position_start.elapsed()),
                     stats.sampled_occurrences,
                     stats.sampled_nodes,
@@ -4369,6 +4378,8 @@ fn run() -> io::Result<()> {
             force,
             position_sample_shift,
             position_sample_seed,
+            serial_position_sampling,
+            position_progress_interval,
             common,
         } => {
             initialize_threads_and_log(&common);
@@ -4379,7 +4390,7 @@ fn run() -> io::Result<()> {
             let have_pstep = std::path::Path::new(&pstep_path).exists();
             if !force && have_spos && have_pstep {
                 info!(
-                    "Syng position sidecars already exist: {}, {}. Use --force to rebuild.",
+                    "Syng position sidecars already exist: {}, {}. Use --force to rebuild regular-grid sidecars.",
                     spos_path, pstep_path
                 );
                 return Ok(());
@@ -4422,15 +4433,22 @@ fn run() -> io::Result<()> {
             let sample_period = 1u64 << position_sample_shift;
             if have_spos && !force {
                 info!(
-                    "Rebuilding sampled path-step sidecar: sample_shift={} (~1/{} path occurrences), seed={}",
+                    "Rebuilding regular sampled path-step sidecar: sample_shift={} (every {} syncmer steps per path)",
                     position_sample_shift,
                     sample_period,
-                    position_sample_seed
                 );
-                let stats = syng_index.rebuild_sampled_path_steps_from_gbwt(
-                    position_sample_shift,
-                    position_sample_seed,
-                )?;
+                let stats = if serial_position_sampling {
+                    syng_index.rebuild_sampled_path_steps_from_gbwt(
+                        position_sample_shift,
+                        position_sample_seed,
+                    )?
+                } else {
+                    syng_index.rebuild_sampled_path_steps_from_gbwt_parallel(
+                        position_sample_shift,
+                        position_sample_seed,
+                        position_progress_interval,
+                    )?
+                };
                 info!(
                     "Rebuilt sampled path-step sidecar in {}: {} checkpoints across {} paths from {} walked paths",
                     format_duration(rebuild_start.elapsed()),
@@ -4447,15 +4465,22 @@ fn run() -> io::Result<()> {
                 );
             } else {
                 info!(
-                    "Rebuilding sampled position sidecars: sample_shift={} (~1/{} path occurrences), seed={}",
+                    "Rebuilding regular sampled position sidecars: sample_shift={} (every {} syncmer steps per path)",
                     position_sample_shift,
                     sample_period,
-                    position_sample_seed
                 );
-                let stats = syng_index.rebuild_sampled_position_indexes_from_gbwt(
-                    position_sample_shift,
-                    position_sample_seed,
-                )?;
+                let stats = if serial_position_sampling {
+                    syng_index.rebuild_sampled_position_indexes_from_gbwt(
+                        position_sample_shift,
+                        position_sample_seed,
+                    )?
+                } else {
+                    syng_index.rebuild_sampled_position_indexes_from_gbwt_parallel(
+                        position_sample_shift,
+                        position_sample_seed,
+                        position_progress_interval,
+                    )?
+                };
                 info!(
                     "Rebuilt sampled position sidecars in {}: {} node-position samples across {} nodes; {} path-step checkpoints across {} paths from {} walked paths",
                     format_duration(rebuild_start.elapsed()),
