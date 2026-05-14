@@ -284,6 +284,9 @@ impg stats -a f1.paf f2.1aln
 Parameters follow the syng paper: `--smer-length` (`s`, default 8) and `--syncmer-length` (`k`, must be odd, default 63). `--parallel-dictionary` adds a deterministic prepass for large inputs.
 
 `impg map` projects FASTA/FASTQ queries onto a syng index via shared syncmers: PAF (projected genome coords) or GAF (syncmer-node walk).
+See `docs/syng-map-query-sampling.md` for the current map/query contract and
+the distinction between pseudorandom occurrence sampling and fixed-period
+path-step checkpoints.
 
 End-to-end walkthrough using ODGI's C4 test GFA (90 HPRC haplotypes, ~6.9 Mb total):
 
