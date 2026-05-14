@@ -3,9 +3,98 @@
 
 use impg::syng::{SyncmerParams, SyngIndex};
 use impg::syng_ffi;
+use std::ffi::CString;
+use std::path::Path;
 
 static SYNG_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
+unsafe fn walk_first_step(
+    gbwt: *mut syng_ffi::SyngBWT,
+    start_node: i32,
+    start_count: u32,
+) -> (i32, u32) {
+    let sbp = syng_ffi::syngBWTpathStartOld(gbwt, start_node, start_count);
+    let mut next_node = 0i32;
+    let mut offset = 0u32;
+    assert!(syng_ffi::syngBWTpathNext(sbp, &mut next_node, &mut offset));
+    syng_ffi::syngBWTpathDestroy(sbp);
+    (next_node, offset)
+}
+
+unsafe fn roundtrip_gbwt(gbwt: *mut syng_ffi::SyngBWT, path: &Path) -> *mut syng_ffi::SyngBWT {
+    let schema_text = syng_ffi::syng_schema_text();
+    let schema = syng_ffi::oneSchemaCreateFromText(schema_text.as_ptr());
+    assert!(!schema.is_null());
+
+    let path_c = CString::new(path.to_str().unwrap()).unwrap();
+    let type_c = CString::new("gbwt").unwrap();
+
+    let out = syng_ffi::oneFileOpenWriteNew(path_c.as_ptr(), schema, type_c.as_ptr(), true, 1);
+    assert!(!out.is_null());
+    syng_ffi::syngBWTwrite(out, gbwt);
+    syng_ffi::oneFileClose(out);
+
+    let input = syng_ffi::oneFileOpenRead(path_c.as_ptr(), schema, type_c.as_ptr(), 1);
+    assert!(!input.is_null());
+    let loaded = syng_ffi::syngBWTread(input);
+    syng_ffi::oneFileClose(input);
+    syng_ffi::oneSchemaDestroy(schema);
+
+    assert!(!loaded.is_null());
+    loaded
+}
+
+#[test]
+fn test_path_offset_above_u16_is_preserved() {
+    let _guard = SYNG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    unsafe {
+        syng_ffi::impg_syng_suppress_debug();
+        let gbwt = syng_ffi::syngBWTcreate(63, 0);
+        let sbp = syng_ffi::syngBWTpathStartNew(gbwt, 1);
+        syng_ffi::syngBWTpathAdd(sbp, 2, 70_000);
+        syng_ffi::syngBWTpathFinish(sbp);
+
+        assert_eq!(walk_first_step(gbwt, 1, 0), (2, 70_000));
+
+        let dir = std::env::temp_dir().join("impg_test_syng_large_offset");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let loaded = roundtrip_gbwt(gbwt, &dir.join("idx.1gbwt"));
+        syng_ffi::syngBWTdestroy(gbwt);
+
+        assert_eq!(walk_first_step(loaded, 1, 0), (2, 70_000));
+        syng_ffi::syngBWTdestroy(loaded);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[test]
+fn test_one_edge_rskip_side_survives_load() {
+    let _guard = SYNG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    unsafe {
+        syng_ffi::impg_syng_suppress_debug();
+        let gbwt = syng_ffi::syngBWTcreate(63, 0);
+        let n_paths = 70_000u32;
+        for _ in 0..n_paths {
+            let sbp = syng_ffi::syngBWTpathStartNew(gbwt, 1);
+            syng_ffi::syngBWTpathAdd(sbp, 2, 10);
+            syng_ffi::syngBWTpathFinish(sbp);
+        }
+
+        let dir = std::env::temp_dir().join("impg_test_syng_one_edge_rskip_load");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let loaded = roundtrip_gbwt(gbwt, &dir.join("idx.1gbwt"));
+        syng_ffi::syngBWTdestroy(gbwt);
+
+        assert_eq!(walk_first_step(loaded, 1, n_paths - 1), (2, 10));
+        syng_ffi::syngBWTdestroy(loaded);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
 
 #[test]
 fn test_start_count_increments_on_second_path() {
