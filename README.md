@@ -23,6 +23,8 @@ alignment, or a graph builder like `pggb` or `minigraph-cactus` — and
 can also emit GFA directly by chaining sweepga + seqwish + smoothxg-style
 smoothing.
 
+`impg` also embeds [syng](https://github.com/richarddurbin/syng) as a second backend: build a syncmer GBWT index once from a FASTA or AGC, then `query` / `partition` against it without ever running an aligner. Shared syncmers act as anchors; transitive chains define homology. Same output formats as the alignment path. `impg map` projects short reads onto a syng index in GAF or PAF form.
+
 ## How does it work?
 
 `impg` uses [coitrees](https://github.com/dcjones/coitrees) (cache-oblivious
@@ -124,6 +126,9 @@ impg query -a aln.paf -r chr1:1000-2000 -x --subset-sequence-list seqs.txt
 
 # Fast approximate mode (.1aln only; bed/bedpe output)
 impg query -a aln.1aln -r chr1:1000-2000 --approximate
+
+# Alignment-free path: -a accepts a syng index prefix (see `syng` below)
+impg query -a pan.syng -r chr1:1000-2000 --sequence-files genomes.fa
 ```
 
 GFA / MAF / FASTA outputs need `--sequence-files` (FASTA or AGC
@@ -271,6 +276,64 @@ first read.
 impg stats -a aln.paf
 impg stats -a f1.paf f2.1aln
 ```
+
+### `syng` and `map` — alignment-free syncmer backend
+
+`impg syng` builds a [syng](https://github.com/richarddurbin/syng) index from FASTA or AGC. Five sidecars are written under one prefix (`<prefix>.1khash` dictionary, `.1gbwt` GBWT, `.syng.names`, `.syng.spos` sampled positions, `.syng.meta` parameters — auto-loaded on read). Any later `impg query` / `partition` / `map` can then point `-a` at the prefix (or any sidecar) and skip pairwise alignment.
+
+Parameters follow the syng paper: `--smer-length` (`s`, default 8) and `--syncmer-length` (`k`, must be odd, default 63). `--parallel-dictionary` adds a deterministic prepass for large inputs.
+
+`impg map` projects FASTA/FASTQ queries onto a syng index via shared syncmers: PAF (projected genome coords) or GAF (syncmer-node walk).
+
+End-to-end walkthrough using ODGI's C4 test GFA (90 HPRC haplotypes, ~6.9 Mb total):
+
+```bash
+# 1. Get the C4 GFA from odgi/test/, dump paths to FASTA
+curl -sL -O https://raw.githubusercontent.com/pangenome/odgi/master/test/chr6.C4.gfa
+odgi paths -i chr6.C4.gfa -f > chr6.C4.fa
+samtools faidx chr6.C4.fa
+
+# 2. Build the syng index (~80 ms on this dataset, 4 threads)
+impg syng -f chr6.C4.fa -o c4.syng \
+          --syncmer-length 63 --smer-length 8 --syncmer-seed 7 \
+          --position-sample-shift 8 --position-sample-seed 7 -t 4
+# writes c4.syng.1khash / .1gbwt / .syng.names / .syng.spos / .syng.meta
+
+# 3. Query a 10 kb grch38 sub-window onto all 90 haplotypes
+impg query -a c4.syng -r 'grch38#chr6:31972046-32055647:0-10000' \
+           --sequence-files chr6.C4.fa | head -3
+# HG00673#1#JAHBBZ010000030.1:31835924-31919525  0  10000  grch38...:0-10000  .  +
+# HG01123#2#JAGYYY010000050.1:31954985-32038586  0  10001  grch38...:0-10000  .  +
+# HG01243#1#JAHEOY010000117.1:3252171-3329407    0   9999  grch38...:0-10000  .  +
+
+# 4. Whole grch38 C4 path (length from .fai) → 36 hits, FASTA out
+LEN=$(awk -F'\t' '$1=="grch38#chr6:31972046-32055647"{print $2}' chr6.C4.fa.fai)
+impg query -a c4.syng -r "grch38#chr6:31972046-32055647:0-${LEN}" \
+           --sequence-files chr6.C4.fa -o fasta > c4.homologs.fa
+
+# 5. Map a 2 kb probe back onto the index
+samtools faidx chr6.C4.fa 'grch38#chr6:31972046-32055647:5000-7000' > probe.fa
+impg map -a c4.syng -q probe.fa -o paf
+# grch38...:5000-7000  2001  1302  1833  +  HG02109#1#...  77232  6300  6831  126 531 0 an:i:2 sk:i:63
+impg map -a c4.syng -q probe.fa -o gaf | cut -f1-6 | head -1
+# grch38...:5000-7000  2001  16  1979  +  <264>265>266<267<268>...
+```
+
+`-r` splits on the **last** `:`. Path names from `odgi paths -f`
+already contain coordinates (`grch38#chr6:31972046-32055647`), so a
+whole-sequence query still needs an explicit trailing sub-range
+(`:0-${LEN}`) — otherwise impg parses `grch38#chr6` as the sequence
+and the bare `31972046-32055647` as the range, and the genome lookup
+fails.
+
+Default query mode runs BiWFA boundary refinement and so requires
+`--sequence-files`. Pass `--syng-raw` for the raw syncmer-resolution
+pass-through. Tune via `--syng-padding`, `--syng-min-chain-anchors`
+(lower → more paralog hits; default `2` is conservative on duplicated
+loci like C4), `--syng-min-chain-fraction`. `query -o gbwt` emits a
+region-specific sub-GBWT. The syng prefix passed to `-a` is resolved
+relative to cwd, so either `cd` to the index directory or pass an
+absolute path.
 
 ## GFA engines
 
