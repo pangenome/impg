@@ -179,45 +179,6 @@ pub fn smooth_gfa(gfa_content: &str, config: &SmoothConfig) -> io::Result<String
     Ok(current)
 }
 
-/// DIAGNOSTIC: for each path in a GFA string, walk its P-line steps,
-/// look up node lengths, log step_count + bp_sum. Used to pin which
-/// stage (unchop/sort) drops bp.
-fn log_path_bp(stage: &str, gfa: &str) {
-    let mut node_lens: FxHashMap<u64, usize> = FxHashMap::default();
-    for line in gfa.lines() {
-        if !line.starts_with("S\t") {
-            continue;
-        }
-        let mut it = line.split('\t');
-        it.next(); // 'S'
-        let id_str = match it.next() { Some(s) => s, None => continue };
-        let seq = match it.next() { Some(s) => s, None => continue };
-        if let Ok(id) = id_str.parse::<u64>() {
-            node_lens.insert(id, seq.len());
-        }
-    }
-    for line in gfa.lines() {
-        if !line.starts_with("P\t") {
-            continue;
-        }
-        let mut it = line.split('\t');
-        it.next(); // 'P'
-        let name = match it.next() { Some(s) => s, None => continue };
-        let steps_str = match it.next() { Some(s) => s, None => continue };
-        let mut step_count = 0usize;
-        let mut bp_sum = 0usize;
-        for step in steps_str.split(',') {
-            if step.is_empty() { continue; }
-            let id_part = &step[..step.len().saturating_sub(1)];
-            if let Ok(id) = id_part.parse::<u64>() {
-                step_count += 1;
-                bp_sum += *node_lens.get(&id).unwrap_or(&0);
-            }
-        }
-        log::info!("[{}] {} steps={} bp={}", stage, name, step_count, bp_sum);
-    }
-}
-
 /// Run a single smoothing pass on a (not yet sorted) GFA string.
 ///
 /// `pre_sorted` — skip the unchop+sort step (true only for the first pass when the
@@ -235,20 +196,7 @@ fn smooth_gfa_pass(
     let sorted_gfa = if pre_sorted {
         gfa_content.to_string()
     } else {
-        // DIAGNOSTIC: trace bp before/after unchop/sort
-        let do_trace = std::env::var("IMPG_SMOOTH_TRACE").is_ok();
-        if do_trace {
-            log_path_bp("STAGE-IN ", gfa_content);
-        }
-        let unchopped = unchop_gfa(gfa_content)?;
-        if do_trace {
-            log_path_bp("UNCHOPPED", &unchopped);
-        }
-        let sorted = sort_gfa(&unchopped, config.num_threads)?;
-        if do_trace {
-            log_path_bp("SORTED   ", &sorted);
-        }
-        sorted
+        sort_gfa(&unchop_gfa(gfa_content)?, config.num_threads)?
     };
 
     // Step 2: Parse sorted GFA
@@ -259,14 +207,6 @@ fn smooth_gfa_pass(
         "[smooth] Parsed sorted GFA: {} nodes, {} paths",
         num_nodes_before_chop, num_paths
     );
-
-    // DIAGNOSTIC: per-path bp at parse-time (post unchop+sort, pre-chop)
-    if std::env::var("IMPG_SMOOTH_TRACE").is_ok() {
-        for path in &graph.paths {
-            let bp: usize = path.steps.iter().map(|&(n, _)| graph.nodes[n].len()).sum();
-            log::info!("[TRACE-PARSE] {} steps={} bp={}", path.name, path.steps.len(), bp);
-        }
-    }
 
     if graph.nodes.is_empty() || graph.paths.is_empty() {
         return Ok(gfa_content.to_string());
@@ -281,30 +221,11 @@ fn smooth_gfa_pass(
         config.max_node_length
     );
 
-    // DIAGNOSTIC: per-path bp post-chop (chop_graph splits nodes; bp should be preserved)
-    if std::env::var("IMPG_SMOOTH_TRACE").is_ok() {
-        for path in &graph.paths {
-            let bp: usize = path.steps.iter().map(|&(n, _)| graph.nodes[n].len()).sum();
-            log::info!("[TRACE-CHOP] {} steps={} bp={}", path.name, path.steps.len(), bp);
-        }
-    }
-
     // Step 4: Build inverse index (node → path steps)
     let node_step_index = build_node_step_index(&graph);
 
     // Step 5: Compute cumulative path positions
     let path_positions = compute_path_positions(&graph);
-
-    // DIAGNOSTIC: per-path path_positions[last] (should equal path's full bp)
-    if std::env::var("IMPG_SMOOTH_TRACE").is_ok() {
-        for (path_idx, path) in graph.paths.iter().enumerate() {
-            let n = path.steps.len();
-            log::info!(
-                "[TRACE-POS] {} steps={} positions[N]={}",
-                path.name, n, path_positions[path_idx][n]
-            );
-        }
-    }
 
     // Step 6: Block decomposition
     let mut blocks = smoothable_blocks(
@@ -322,41 +243,6 @@ fn smooth_gfa_pass(
         blocks.len(),
         blocks.iter().map(|b| b.path_ranges.len()).sum::<usize>()
     );
-
-    // DIAGNOSTIC: which path-steps survived block decomposition?
-    if std::env::var("IMPG_SMOOTH_TRACE").is_ok() {
-        let mut in_blocks: Vec<BitVec> = graph
-            .paths
-            .iter()
-            .map(|p| bitvec![0; p.steps.len()])
-            .collect();
-        for block in blocks.iter() {
-            for range in &block.path_ranges {
-                for step_idx in range.begin_step..range.end_step {
-                    in_blocks[range.path_idx].set(step_idx, true);
-                }
-            }
-        }
-        for (path_idx, path) in graph.paths.iter().enumerate() {
-            let n_steps = path.steps.len();
-            let n_covered = in_blocks[path_idx].count_ones();
-            let n_missing = n_steps - n_covered;
-            // Compute bp lost (sum node_len for missing steps)
-            let mut bp_missing = 0usize;
-            for step_idx in 0..n_steps {
-                if !in_blocks[path_idx][step_idx] {
-                    let (node_idx, _) = path.steps[step_idx];
-                    bp_missing += graph.nodes[node_idx].len();
-                }
-            }
-            if n_missing > 0 {
-                info!(
-                    "[TRACE-BLOCKS] {} → {} of {} steps NOT in any block (missing {} bp)",
-                    path.name, n_missing, n_steps, bp_missing
-                );
-            }
-        }
-    }
 
     // Step 8: Per-block SPOA smoothing (parallelized).
     //
@@ -392,88 +278,21 @@ fn smooth_gfa_pass(
                         true
                     }
                 };
-                let mode;
-                let out: Option<String> = if !needs_passthrough {
+                if !needs_passthrough {
                     n_smoothed.fetch_add(1, Ordering::Relaxed);
-                    mode = "smooth";
-                    smooth_result.ok()
-                } else {
-                    mode = "passthrough";
-                    match passthrough_block_gfa(block, &graph, &path_positions) {
-                        Ok(s) if !s.is_empty() => {
-                            n_passthrough.fetch_add(1, Ordering::Relaxed);
-                            Some(s)
-                        }
-                        Ok(_) => None,
-                        Err(e) => {
-                            log::warn!("[smooth] Block {} passthrough failed: {}", i, e);
-                            None
-                        }
+                    return smooth_result.ok();
+                }
+                match passthrough_block_gfa(block, &graph, &path_positions) {
+                    Ok(s) if !s.is_empty() => {
+                        n_passthrough.fetch_add(1, Ordering::Relaxed);
+                        Some(s)
                     }
-                };
-                // DIAGNOSTIC: per-block bp accounting.
-                // Compare input range bp (length field, sum of step node lengths in
-                // the source graph) against the *actual walked bp* in the output
-                // sub-GFA (sum of S-line lengths along each P-line's step list).
-                // Catches mismatches between P-line names and their content.
-                if std::env::var("IMPG_SMOOTH_TRACE").is_ok() {
-                    let input_bp: usize = block.path_ranges.iter().map(|r| r.length).sum();
-                    let n_input_ranges = block.path_ranges.len();
-                    let (n_output_p, name_bp, walked_bp) = match &out {
-                        Some(g) => {
-                            // Build node-length map from S-lines
-                            let mut nl: FxHashMap<u64, usize> = FxHashMap::default();
-                            for line in g.lines() {
-                                if !line.starts_with("S\t") { continue; }
-                                let mut it = line.split('\t');
-                                it.next();
-                                if let (Some(id_s), Some(seq)) = (it.next(), it.next()) {
-                                    if let Ok(id) = id_s.parse::<u64>() {
-                                        nl.insert(id, seq.len());
-                                    }
-                                }
-                            }
-                            let mut p_count = 0usize;
-                            let mut name_sum = 0usize;
-                            let mut walked_sum = 0usize;
-                            for line in g.lines() {
-                                if !line.starts_with("P\t") { continue; }
-                                p_count += 1;
-                                let mut it = line.split('\t');
-                                it.next();
-                                let name = it.next().unwrap_or("");
-                                let steps = it.next().unwrap_or("");
-                                if let Some(lc) = name.rfind(':') {
-                                    let rs = &name[lc+1..];
-                                    if let Some((s, e)) = rs.split_once('-') {
-                                        if let (Ok(s), Ok(e)) = (s.parse::<usize>(), e.parse::<usize>()) {
-                                            name_sum += e.saturating_sub(s);
-                                        }
-                                    }
-                                }
-                                for st in steps.split(',') {
-                                    if st.is_empty() { continue; }
-                                    let id_part = &st[..st.len().saturating_sub(1)];
-                                    if let Ok(id) = id_part.parse::<u64>() {
-                                        walked_sum += *nl.get(&id).unwrap_or(&0);
-                                    }
-                                }
-                            }
-                            (p_count, name_sum, walked_sum)
-                        }
-                        None => (0, 0, 0),
-                    };
-                    let name_delta = input_bp as i64 - name_bp as i64;
-                    let walked_delta = input_bp as i64 - walked_bp as i64;
-                    if walked_delta != 0 || name_delta != 0 || n_output_p != n_input_ranges {
-                        log::info!(
-                            "[TRACE-BLK#{}] mode={} ranges_in={} P_out={} bp_in={} name_bp={} walked_bp={} name_delta={} walked_delta={}",
-                            i, mode, n_input_ranges, n_output_p,
-                            input_bp, name_bp, walked_bp, name_delta, walked_delta,
-                        );
+                    Ok(_) => None,
+                    Err(e) => {
+                        log::warn!("[smooth] Block {} passthrough failed: {}", i, e);
+                        None
                     }
                 }
-                out
             })
             .collect()
     });
@@ -484,43 +303,6 @@ fn smooth_gfa_pass(
         n_passthrough.load(Ordering::Relaxed),
     );
 
-    // DIAGNOSTIC: pre-lace per-path bp coverage from emitted block sub-GFAs
-    if std::env::var("IMPG_SMOOTH_TRACE").is_ok() {
-        let mut pre_lace_cov: FxHashMap<String, (usize, usize, usize)> = FxHashMap::default();
-        // key -> (frag_count, total_bp_covered, max_end)
-        let mut pre_lace_p_count: usize = 0;
-        for gfa in &block_gfas {
-            for line in gfa.lines() {
-                if !line.starts_with("P\t") {
-                    continue;
-                }
-                pre_lace_p_count += 1;
-                let name = line.split('\t').nth(1).unwrap_or("");
-                if let Some(last_colon) = name.rfind(':') {
-                    let (key, range_str) = name.split_at(last_colon);
-                    let range_str = &range_str[1..];
-                    if let Some((s, e)) = range_str.split_once('-') {
-                        if let (Ok(s), Ok(e)) = (s.parse::<usize>(), e.parse::<usize>()) {
-                            let entry = pre_lace_cov.entry(key.to_string()).or_insert((0, 0, 0));
-                            entry.0 += 1;
-                            entry.1 += e.saturating_sub(s);
-                            if e > entry.2 {
-                                entry.2 = e;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        let mut keys: Vec<&String> = pre_lace_cov.keys().collect();
-        keys.sort();
-        info!("[TRACE] pre-lace: {} block-GFA P-lines across {} distinct path keys", pre_lace_p_count, pre_lace_cov.len());
-        for key in keys.iter() {
-            let v = pre_lace_cov[*key];
-            info!("[TRACE-PRE]   {} → {} frags, {} bp covered, max_end {}", key, v.0, v.1, v.2);
-        }
-    }
-
     if block_gfas.is_empty() {
         return Ok(String::from("H\tVN:Z:1.0\n"));
     }
@@ -529,41 +311,6 @@ fn smooth_gfa_pass(
     // Per-block gfaffix already normalized each block; the caller's normalize_and_sort
     // (gfaffix + sort) handles any remaining redundancies introduced at lacing boundaries.
     let laced = crate::commands::lace::lace_subgraphs(&block_gfas, config.temp_dir.as_deref())?;
-
-    // DIAGNOSTIC: post-lace per-path bp coverage
-    if std::env::var("IMPG_SMOOTH_TRACE").is_ok() {
-        let mut post_lace_cov: FxHashMap<String, (usize, usize, usize)> = FxHashMap::default();
-        let mut post_lace_p_count: usize = 0;
-        for line in laced.lines() {
-            if !line.starts_with("P\t") {
-                continue;
-            }
-            post_lace_p_count += 1;
-            let name = line.split('\t').nth(1).unwrap_or("");
-            if let Some(last_colon) = name.rfind(':') {
-                let (key, range_str) = name.split_at(last_colon);
-                let range_str = &range_str[1..];
-                if let Some((s, e)) = range_str.split_once('-') {
-                    if let (Ok(s), Ok(e)) = (s.parse::<usize>(), e.parse::<usize>()) {
-                        let entry = post_lace_cov.entry(key.to_string()).or_insert((0, 0, 0));
-                        entry.0 += 1;
-                        entry.1 += e.saturating_sub(s);
-                        if e > entry.2 {
-                            entry.2 = e;
-                        }
-                    }
-                }
-            }
-        }
-        let mut keys: Vec<&String> = post_lace_cov.keys().collect();
-        keys.sort();
-        info!("[TRACE] post-lace: {} P-lines across {} distinct path keys", post_lace_p_count, post_lace_cov.len());
-        for key in keys.iter() {
-            let v = post_lace_cov[*key];
-            info!("[TRACE-POST]  {} → {} frags, {} bp covered, max_end {}", key, v.0, v.1, v.2);
-        }
-    }
-
     info!("[smooth] Lacing complete");
 
     Ok(laced)
