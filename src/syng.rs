@@ -2351,8 +2351,10 @@ impl SyngIndex {
             return Ok(Vec::new());
         }
 
+        let syncmer_len = (self.params.k + self.params.w) as u64;
+        let scan_start = start.saturating_sub(syncmer_len.saturating_sub(1));
         let mut current =
-            if let Some(checkpoint) = self.sampled_path_step_at_or_before(path_idx, start)? {
+            if let Some(checkpoint) = self.sampled_path_step_at_or_before(path_idx, scan_start)? {
                 if checkpoint.step_idx >= path_start.num_syncmers {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -2374,9 +2376,9 @@ impl SyngIndex {
 
         let mut nodes = Vec::new();
         loop {
-            if current.bp_pos >= start && current.bp_pos < end {
+            if current.bp_pos < end && current.bp_pos.saturating_add(syncmer_len) > start {
                 nodes.push((current.signed_node, current.bp_pos));
-        }
+            }
             if current.bp_pos >= end || current.step_idx + 1 >= path_start.num_syncmers {
                 break;
             }
@@ -2728,8 +2730,9 @@ impl SyngIndex {
         let expanded_end = end.saturating_add(query_extension);
 
         // 2. Walk only the requested query path range. The sampled path-step
-        //    index gives us a binary-search checkpoint before the region, and
-        //    the stored GBWT rank lets us resume traversal from there.
+        //    index gives us a binary-search checkpoint before the leftmost
+        //    syncmer that could overlap the region, and the stored GBWT rank
+        //    lets us resume traversal from there.
         let query_nodes = self.walk_path_range_from_sampled_steps(
             query_path_num as usize,
             expanded_start,
@@ -2755,9 +2758,10 @@ impl SyngIndex {
     /// `query_seq` must cover the sequence interval beginning at
     /// `query_seq_start` in source coordinates. Syncmers are extracted from
     /// those bytes, filtered to `[start - query_extension, end + query_extension)`,
-    /// then projected through `.syng.spos`. This avoids reconstructing the
-    /// source path from the GBWT and is the preferred path when FASTA/AGC
-    /// sequence input is available.
+    /// then projected through `.syng.spos`. Use this for arbitrary query
+    /// sequences that are not indexed paths. For indexed paths, use
+    /// [`Self::query_region_with_anchors_ext`], which jumps through `.syng.pstep`
+    /// and avoids re-extracting source syncmers from FASTA/AGC.
     #[allow(clippy::too_many_arguments)]
     pub fn query_region_with_anchors_from_sequence_ext_visited(
         &self,
@@ -4000,6 +4004,65 @@ mod tests {
                 .any(|&(node, pos)| node == mid.signed_node && pos == mid.bp_pos),
             "range walk should include the checkpoint syncmer"
         );
+    }
+
+    #[test]
+    fn test_sampled_path_range_includes_unsampled_boundary_overlap() {
+        let _guard = lock_syng();
+        let params = SyncmerParams::default();
+        let syncmer_len = (params.k + params.w) as u64;
+        let seq = make_test_sequence(12_000, 77);
+        let mut index = SyngIndex::new(params);
+        index.enable_online_sampled_positions(4, 7).unwrap();
+        index.add_sequence("sampleA#0#chr1".to_string(), seq);
+        index.finalize_online_sampled_positions().unwrap().unwrap();
+
+        let path_idx = *index.name_map.name_to_path.get("sampleA#0#chr1").unwrap() as usize;
+        let path_start = index.name_map.path_starts[path_idx].as_ref().unwrap();
+        let full_steps = index.walk_path_steps(path_start).unwrap();
+        let sampled_steps = index
+            .sampled_path_steps
+            .as_ref()
+            .unwrap()
+            .decode_path(path_idx)
+            .unwrap();
+        assert!(
+            sampled_steps.len() < full_steps.len(),
+            "sparse test requires unsampled path steps"
+        );
+
+        let sampled_step_idxs: std::collections::BTreeSet<u32> =
+            sampled_steps.iter().map(|step| step.step_idx).collect();
+        let boundary_step = full_steps
+            .iter()
+            .find(|step| {
+                !sampled_step_idxs.contains(&step.step_idx)
+                    && step.bp_pos > syncmer_len
+                    && step.bp_pos.saturating_add(syncmer_len) < index.name_map.path_to_length[path_idx]
+            })
+            .expect("expected at least one interior unsampled syncmer");
+
+        // Query a 1 bp window at the unsampled syncmer's right edge. A range
+        // walker that starts at the checkpoint before `start` instead of before
+        // `start - syncmer_len + 1` skips this overlapping syncmer.
+        let start = boundary_step.bp_pos + syncmer_len - 1;
+        let end = start + 1;
+        let expected: Vec<(i32, u64)> = full_steps
+            .iter()
+            .filter(|step| step.bp_pos < end && step.bp_pos.saturating_add(syncmer_len) > start)
+            .map(|step| (step.signed_node, step.bp_pos))
+            .collect();
+        let observed = index
+            .walk_path_range_from_sampled_steps(path_idx, start, end)
+            .unwrap();
+
+        assert!(
+            expected
+                .iter()
+                .any(|&(node, pos)| node == boundary_step.signed_node && pos == boundary_step.bp_pos),
+            "test setup should include the unsampled boundary syncmer"
+        );
+        assert_eq!(observed, expected);
     }
 
     #[test]

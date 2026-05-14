@@ -2486,49 +2486,15 @@ fn run() -> io::Result<()> {
                     padding: u64,
                     extension: u64,
                 | -> io::Result<Vec<impg::syng::HomologousInterval>> {
-                    if let Some(seq_idx) = sequence_index.as_ref() {
-                        let start = range_start.max(0) as u64;
-                        let end = range_end.max(range_start).max(0) as u64;
-                        let source_len = seq_idx.get_sequence_length(target_name)? as u64;
-                        let expanded_start = start.saturating_sub(extension).min(source_len);
-                        let expanded_end = end.saturating_add(extension).min(source_len);
-                        let fetch_start: i32 = expanded_start.try_into().map_err(|_| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                format!(
-                                    "query start {} exceeds i32 coordinate range",
-                                    expanded_start
-                                ),
-                            )
-                        })?;
-                        let fetch_end: i32 = expanded_end.try_into().map_err(|_| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                format!("query end {} exceeds i32 coordinate range", expanded_end),
-                            )
-                        })?;
-                        let query_seq = if fetch_end > fetch_start {
-                            seq_idx.fetch_sequence(target_name, fetch_start, fetch_end)?
-                        } else {
-                            Vec::new()
-                        };
-                        wrapper.syng_index().query_region_from_sequence_ext(
-                            &query_seq,
-                            expanded_start,
-                            start,
-                            end,
-                            padding,
-                            extension,
-                        )
-                    } else {
-                        wrapper.syng_index().query_region_ext(
-                            target_name,
-                            range_start as u64,
-                            range_end as u64,
-                            padding,
-                            extension,
-                        )
-                    }
+                    let start = range_start.max(0) as u64;
+                    let end = range_end.max(range_start).max(0) as u64;
+                    wrapper.syng_index().query_region_ext(
+                        target_name,
+                        start,
+                        end,
+                        padding,
+                        extension,
+                    )
                 };
 
                 // Process each target range. Serial outer — the
