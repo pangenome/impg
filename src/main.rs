@@ -1971,6 +1971,21 @@ enum Args {
         #[clap(long, value_parser, default_value_t = impg::syng::DEFAULT_POSITION_SAMPLE_SEED)]
         position_sample_seed: u64,
 
+        /// Rebuild .pstep serially instead of walking paths in parallel.
+        #[arg(help_heading = "Position sampling")]
+        #[clap(long, action)]
+        serial_path_steps: bool,
+
+        /// Log path-step repair progress after this many completed paths (0 disables).
+        #[arg(help_heading = "Position sampling")]
+        #[clap(long, value_parser, default_value_t = 1)]
+        path_step_progress_interval: usize,
+
+        /// Write rebuilt .pstep to this explicit path instead of the index sidecar path.
+        #[arg(help_heading = "Position sampling")]
+        #[clap(long, value_parser)]
+        path_step_output: Option<String>,
+
         // --- General ---
         #[clap(flatten)]
         common: CommonOpts,
@@ -4369,6 +4384,9 @@ fn run() -> io::Result<()> {
             force,
             position_sample_shift,
             position_sample_seed,
+            serial_path_steps,
+            path_step_progress_interval,
+            path_step_output,
             common,
         } => {
             initialize_threads_and_log(&common);
@@ -4377,7 +4395,22 @@ fn run() -> io::Result<()> {
             let pstep_path = impg::syng::syng_pstep_path(&prefix);
             let have_spos = std::path::Path::new(&spos_path).exists();
             let have_pstep = std::path::Path::new(&pstep_path).exists();
-            if !force && have_spos && have_pstep {
+            if path_step_output.is_some() && !have_spos {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--path-step-output requires an existing .spos sidecar so only .pstep is rebuilt",
+                ));
+            }
+            if let Some(output) = path_step_output.as_ref() {
+                if !force && std::path::Path::new(output).exists() {
+                    info!(
+                        "Requested path-step output already exists: {}. Use --force to overwrite.",
+                        output
+                    );
+                    return Ok(());
+                }
+            }
+            if !force && have_spos && have_pstep && path_step_output.is_none() {
                 info!(
                     "Syng position sidecars already exist: {}, {}. Use --force to rebuild.",
                     spos_path, pstep_path
@@ -4420,17 +4453,25 @@ fn run() -> io::Result<()> {
                 ));
             }
             let sample_period = 1u64 << position_sample_shift;
-            if have_spos && !force {
+            if have_spos && (!force || path_step_output.is_some()) {
                 info!(
                     "Rebuilding sampled path-step sidecar: sample_shift={} (~1/{} path occurrences), seed={}",
                     position_sample_shift,
                     sample_period,
                     position_sample_seed
                 );
-                let stats = syng_index.rebuild_sampled_path_steps_from_gbwt(
-                    position_sample_shift,
-                    position_sample_seed,
-                )?;
+                let stats = if serial_path_steps {
+                    syng_index.rebuild_sampled_path_steps_from_gbwt(
+                        position_sample_shift,
+                        position_sample_seed,
+                    )?
+                } else {
+                    syng_index.rebuild_sampled_path_steps_from_gbwt_parallel(
+                        position_sample_shift,
+                        position_sample_seed,
+                        path_step_progress_interval,
+                    )?
+                };
                 info!(
                     "Rebuilt sampled path-step sidecar in {}: {} checkpoints across {} paths from {} walked paths",
                     format_duration(rebuild_start.elapsed()),
@@ -4439,11 +4480,12 @@ fn run() -> io::Result<()> {
                     stats.walked_paths
                 );
                 let save_start = Instant::now();
-                syng_index.save_path_step_sidecar(&prefix)?;
+                let output_path = path_step_output.as_deref().unwrap_or(&pstep_path);
+                syng_index.save_path_step_sidecar_to_path(output_path)?;
                 info!(
                     "Saved path-step sidecar in {}: {}",
                     format_duration(save_start.elapsed()),
-                    impg::syng::syng_pstep_path(&prefix)
+                    output_path
                 );
             } else {
                 info!(

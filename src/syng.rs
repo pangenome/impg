@@ -4,9 +4,11 @@
 //! GBWT-based syncmer indices.
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use rayon::prelude::*;
 use std::ffi::CString;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::Path;
+use std::sync::Mutex;
 
 use crate::syng_ffi;
 
@@ -46,6 +48,20 @@ struct PathStepRecord {
     prev_node: i32,
     prev_offset: u32,
     traversal_rank: u32,
+}
+
+#[derive(Debug)]
+struct EncodedPathStepChunk {
+    data: Vec<u8>,
+    sample_count: u64,
+    walked_steps: u64,
+}
+
+#[derive(Debug, Default)]
+struct PathStepRepairProgress {
+    completed_paths: usize,
+    completed_steps: u64,
+    completed_samples: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -578,6 +594,15 @@ impl SampledPathSteps {
         write_u64(&mut w, self.data.len() as u64)?;
         w.write_all(&self.data)?;
         w.flush()
+    }
+
+    fn save_atomic(&self, path: &str) -> io::Result<()> {
+        let tmp_path = format!("{}.tmp.{}", path, std::process::id());
+        self.save(&tmp_path)?;
+        std::fs::rename(&tmp_path, path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            e
+        })
     }
 
     fn load(path: &str) -> io::Result<Self> {
@@ -1875,13 +1900,18 @@ impl SyngIndex {
 
     /// Save only the inverted path-step sidecar for an existing syng index prefix.
     pub fn save_path_step_sidecar(&self, prefix: &str) -> io::Result<()> {
+        self.save_path_step_sidecar_to_path(&syng_pstep_path(prefix))
+    }
+
+    /// Save the inverted path-step sidecar to an explicit path.
+    pub fn save_path_step_sidecar_to_path(&self, path: &str) -> io::Result<()> {
         let sampled_path_steps = self.sampled_path_steps.as_ref().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 "cannot save syng index without sampled path-step checkpoints",
             )
         })?;
-        sampled_path_steps.save(&syng_pstep_path(prefix))
+        sampled_path_steps.save_atomic(path)
     }
 
     /// Load an index from disk.
@@ -2246,6 +2276,325 @@ impl SyngIndex {
         let (sampled_path_steps, stats) = builder.finish_path_steps(self.name_map.path_to_name.len())?;
         self.sampled_path_steps = Some(sampled_path_steps);
         Ok(stats)
+    }
+
+    /// Rebuild only the inverted path-step sidecar by walking existing GBWT paths
+    /// in parallel and reducing encoded per-path chunks in path order.
+    pub fn rebuild_sampled_path_steps_from_gbwt_parallel(
+        &mut self,
+        sample_shift: u32,
+        seed: u64,
+        progress_interval: usize,
+    ) -> io::Result<SampledPositionBuildStats> {
+        if sample_shift >= 63 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "position sample shift must be less than 63",
+            ));
+        }
+        unsafe { syng_ffi::impg_syng_suppress_debug() };
+
+        let path_count = self.name_map.path_to_name.len();
+        let syncmer_len = (self.params.k + self.params.w) as u64;
+        let total_steps: u64 = self
+            .name_map
+            .path_starts
+            .iter()
+            .filter_map(|start| start.as_ref())
+            .map(|start| start.num_syncmers as u64)
+            .sum();
+        log::info!(
+            "Parallel sampled path-step rebuild: {} paths, {} syncmer steps, {} rayon threads",
+            path_count,
+            total_steps,
+            rayon::current_num_threads()
+        );
+
+        let progress = Mutex::new(PathStepRepairProgress::default());
+        let results: Vec<io::Result<EncodedPathStepChunk>> = (0..path_count)
+            .into_par_iter()
+            .map(|path_idx| {
+                let seq_len = self.name_map.path_to_length[path_idx];
+                let result = match self.name_map.path_starts.get(path_idx).and_then(|s| s.as_ref()) {
+                    Some(start) => {
+                        self.encode_sampled_path_step_chunk(path_idx, start, sample_shift, seed)
+                    }
+                    None if seq_len < syncmer_len => Ok(EncodedPathStepChunk {
+                        data: Vec::new(),
+                        sample_count: 0,
+                        walked_steps: 0,
+                    }),
+                    None => Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "cannot rebuild path-step sidecar: missing GBWT path start for {}",
+                            self.name_map.path_to_name[path_idx]
+                        ),
+                    )),
+                };
+
+                if let Ok(chunk) = &result {
+                    let mut progress = progress.lock().map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::Other,
+                            "path-step repair progress lock was poisoned",
+                        )
+                    })?;
+                    progress.completed_paths += 1;
+                    progress.completed_steps =
+                        progress.completed_steps.checked_add(chunk.walked_steps).ok_or_else(
+                            || {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "path-step progress step count overflowed u64",
+                                )
+                            },
+                        )?;
+                    progress.completed_samples = progress
+                        .completed_samples
+                        .checked_add(chunk.sample_count)
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "path-step progress sample count overflowed u64",
+                            )
+                        })?;
+                    let done = progress.completed_paths;
+                    if progress_interval > 0
+                        && (done == path_count || done % progress_interval == 0)
+                    {
+                        let path_pct = if path_count > 0 {
+                            (done as f64 * 100.0) / path_count as f64
+                        } else {
+                            100.0
+                        };
+                        let step_pct = if total_steps > 0 {
+                            (progress.completed_steps as f64 * 100.0) / total_steps as f64
+                        } else {
+                            100.0
+                        };
+                        log::info!(
+                            "Path-step repair progress: {}/{} paths complete ({:.1}%), {}/{} syncmer steps ({:.1}%), {} checkpoints; completed path {}/{} {}",
+                            done,
+                            path_count,
+                            path_pct,
+                            progress.completed_steps,
+                            total_steps,
+                            step_pct,
+                            progress.completed_samples,
+                            path_idx + 1,
+                            path_count,
+                            self.name_map.path_to_name[path_idx]
+                        );
+                    }
+                }
+
+                result
+            })
+            .collect();
+
+        let mut path_step_offsets = Vec::with_capacity(path_count + 1);
+        let mut path_step_data = Vec::new();
+        let mut path_step_sample_count = 0u64;
+        let mut sampled_step_paths = 0usize;
+        let mut walked_paths = 0usize;
+        path_step_offsets.push(0);
+        for result in results {
+            let chunk = result?;
+            if chunk.walked_steps > 0 {
+                walked_paths += 1;
+            }
+            if !chunk.data.is_empty() {
+                sampled_step_paths += 1;
+            }
+            path_step_sample_count =
+                path_step_sample_count
+                    .checked_add(chunk.sample_count)
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "path-step sample count overflowed u64",
+                        )
+                    })?;
+            path_step_data.extend_from_slice(&chunk.data);
+            path_step_offsets.push(path_step_data.len() as u64);
+        }
+
+        let sampled_path_steps = SampledPathSteps::from_encoded(
+            sample_shift,
+            seed,
+            path_step_sample_count,
+            path_step_offsets,
+            path_step_data,
+        )?;
+        let stats = SampledPositionBuildStats {
+            sampled_occurrences: 0,
+            sampled_nodes: 0,
+            sampled_path_steps: sampled_path_steps.sample_count(),
+            sampled_step_paths,
+            walked_paths,
+            sample_shift,
+        };
+        self.sampled_path_steps = Some(sampled_path_steps);
+        Ok(stats)
+    }
+
+    fn encode_sampled_path_step_chunk(
+        &self,
+        path_idx: usize,
+        start: &GbwtPathStart,
+        sample_shift: u32,
+        seed: u64,
+    ) -> io::Result<EncodedPathStepChunk> {
+        let sample_mask = if sample_shift == 0 {
+            0
+        } else {
+            (1u64 << sample_shift) - 1
+        };
+        if start.num_syncmers == 0 {
+            return Ok(EncodedPathStepChunk {
+                data: Vec::new(),
+                sample_count: 0,
+                walked_steps: 0,
+            });
+        }
+
+        let expected_steps = start.num_syncmers as usize;
+        let mut data = Vec::new();
+        let mut sample_count = 0u64;
+        let mut prev_sample_bp = 0u64;
+        let mut prev_sample_step = 0u32;
+        let mut steps_seen = 0usize;
+
+        let mut state = self.path_state_from_start(start);
+        let mut acc_pos = start.first_syncmer_pos;
+        let first_step = PathStepRecord {
+            step_idx: 0,
+            bp_pos: acc_pos,
+            signed_node: start.start_node,
+            prev_node: 0,
+            prev_offset: 0,
+            traversal_rank: start.start_count,
+        };
+        Self::encode_sampled_path_step_if_selected(
+            path_idx,
+            sample_shift,
+            sample_mask,
+            seed,
+            first_step,
+            &mut prev_sample_bp,
+            &mut prev_sample_step,
+            &mut sample_count,
+            &mut data,
+        )?;
+        steps_seen += 1;
+
+        let mut next_node: i32 = 0;
+        let mut offset: u32 = 0;
+        while unsafe { syng_ffi::syngBWTpathNext(&mut state, &mut next_node, &mut offset) } {
+            if steps_seen >= expected_steps {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "GBWT path has more steps than name map reports ({})",
+                        expected_steps
+                    ),
+                ));
+            }
+            acc_pos = acc_pos.checked_add(offset as u64).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "GBWT path coordinate overflow")
+            })?;
+            let step = PathStepRecord {
+                step_idx: steps_seen as u32,
+                bp_pos: acc_pos,
+                signed_node: next_node,
+                prev_node: state.last_node,
+                prev_offset: offset,
+                traversal_rank: state.j_last,
+            };
+            Self::encode_sampled_path_step_if_selected(
+                path_idx,
+                sample_shift,
+                sample_mask,
+                seed,
+                step,
+                &mut prev_sample_bp,
+                &mut prev_sample_step,
+                &mut sample_count,
+                &mut data,
+            )?;
+            steps_seen += 1;
+        }
+        if steps_seen != expected_steps {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "GBWT path has {} steps but name map reports {}",
+                    steps_seen, expected_steps
+                ),
+            ));
+        }
+
+        Ok(EncodedPathStepChunk {
+            data,
+            sample_count,
+            walked_steps: steps_seen as u64,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_sampled_path_step_if_selected(
+        path_idx: usize,
+        sample_shift: u32,
+        sample_mask: u64,
+        seed: u64,
+        step: PathStepRecord,
+        prev_sample_bp: &mut u64,
+        prev_sample_step: &mut u32,
+        sample_count: &mut u64,
+        data: &mut Vec<u8>,
+    ) -> io::Result<()> {
+        let node_id = step.signed_node.unsigned_abs();
+        if sample_shift > 0
+            && sampled_position_hash(
+                node_id,
+                path_idx,
+                step.step_idx as usize,
+                step.bp_pos,
+                seed,
+            ) & sample_mask
+                != 0
+        {
+            return Ok(());
+        }
+
+        let bp_delta = step.bp_pos.checked_sub(*prev_sample_bp).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "sampled path-step bp positions are not sorted within path",
+            )
+        })?;
+        let step_delta = step.step_idx.checked_sub(*prev_sample_step).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "sampled path-step indices are not sorted within path",
+            )
+        })?;
+        push_varint(data, bp_delta);
+        push_varint(data, step_delta as u64);
+        push_varint(data, encode_i32(step.signed_node));
+        push_varint(data, encode_i32(step.prev_node));
+        push_varint(data, step.prev_offset as u64);
+        push_varint(data, step.traversal_rank as u64);
+        *prev_sample_bp = step.bp_pos;
+        *prev_sample_step = step.step_idx;
+        *sample_count = sample_count.checked_add(1).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "path-step sample count overflowed u64",
+            )
+        })?;
+        Ok(())
     }
 
     fn path_state_from_checkpoint(&self, checkpoint: &SampledPathStepHit) -> syng_ffi::SyngBWTpath {
@@ -4107,6 +4456,60 @@ mod tests {
             .unwrap();
         let next = loaded.next_path_step_from_checkpoint(&checkpoint).unwrap();
         assert!(next.is_some());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_parallel_path_step_rebuild_matches_serial() {
+        let _guard = lock_syng();
+        let params = SyncmerParams::default();
+        let seqs = vec![
+            ("sampleA#0#chr1".to_string(), make_test_sequence(5000, 21)),
+            ("sampleB#0#chr1".to_string(), make_test_sequence(4200, 22)),
+            ("sampleC#0#chr1".to_string(), make_test_sequence(3500, 23)),
+            ("short".to_string(), make_test_sequence(12, 24)),
+        ];
+        let mut index = SyngIndex::build(params, seqs.into_iter());
+
+        let dir = std::env::temp_dir().join("impg_test_syng_parallel_pstep_repair");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("idx");
+        let prefix_str = prefix.to_str().unwrap();
+        index.save(prefix_str).unwrap();
+
+        let mut serial = SyngIndex::load(prefix_str, params).unwrap();
+        let serial_stats = serial
+            .rebuild_sampled_path_steps_from_gbwt(3, 11)
+            .unwrap();
+        let mut parallel = SyngIndex::load(prefix_str, params).unwrap();
+        let parallel_stats = parallel
+            .rebuild_sampled_path_steps_from_gbwt_parallel(3, 11, 0)
+            .unwrap();
+
+        assert_eq!(
+            serial_stats.sampled_path_steps,
+            parallel_stats.sampled_path_steps
+        );
+        assert_eq!(
+            serial_stats.sampled_step_paths,
+            parallel_stats.sampled_step_paths
+        );
+        assert_eq!(serial_stats.walked_paths, parallel_stats.walked_paths);
+
+        let serial_steps = serial.sampled_path_steps.as_ref().unwrap();
+        let parallel_steps = parallel.sampled_path_steps.as_ref().unwrap();
+        assert_eq!(serial_steps.sample_count(), parallel_steps.sample_count());
+        assert_eq!(serial_steps.path_count(), parallel_steps.path_count());
+        for path_idx in 0..serial_steps.path_count() {
+            assert_eq!(
+                serial_steps.decode_path(path_idx).unwrap(),
+                parallel_steps.decode_path(path_idx).unwrap(),
+                "path-step checkpoints differ for path {}",
+                path_idx
+            );
+        }
 
         std::fs::remove_dir_all(&dir).ok();
     }
