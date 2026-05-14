@@ -244,30 +244,64 @@ fn smooth_gfa_pass(
         blocks.iter().map(|b| b.path_ranges.len()).sum::<usize>()
     );
 
-    // Step 8: Per-block SPOA smoothing (parallelized)
+    // Step 8: Per-block SPOA smoothing (parallelized).
+    //
+    // When SPOA produces nothing usable (degenerate padding trim, SPOA error,
+    // empty entries), the block's path-steps are already marked seen by
+    // `finalize_block`. Dropping the block would leave a hole in path-bp
+    // coverage and the lacer (which only joins ranges where `prev.end ==
+    // next.start`) would emit two adjacent path-name fragments instead of one
+    // contiguous path. On the C4 dataset (90 seqs) this fragmented the post-
+    // pass-1 graph from 90 paths to 732. Solution: emit the un-smoothed sub-
+    // graph as that block's output. The seam stays bp-contiguous, lacing
+    // re-joins it, and the final gfaffix pass collapses any block-boundary
+    // redundancy.
     use rayon::prelude::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(config.num_threads)
         .build()
         .map_err(|e| io::Error::other(format!("failed to build thread pool: {}", e)))?;
+    let n_smoothed = AtomicUsize::new(0);
+    let n_passthrough = AtomicUsize::new(0);
     let block_gfas: Vec<String> = pool.install(|| {
         blocks
             .par_iter()
             .enumerate()
-            .filter_map(
-                |(i, block)| match smooth_block(block, &graph, config, &path_positions) {
-                    Ok(gfa) if !gfa.is_empty() => Some(gfa),
+            .filter_map(|(i, block)| {
+                let smooth_result = smooth_block(block, &graph, config, &path_positions);
+                let needs_passthrough = match &smooth_result {
+                    Ok(s) if s.is_empty() => true,
+                    Ok(_) => false,
+                    Err(e) => {
+                        log::debug!("[smooth] Block {} SPOA failed: {} — passthrough", i, e);
+                        true
+                    }
+                };
+                if !needs_passthrough {
+                    n_smoothed.fetch_add(1, Ordering::Relaxed);
+                    return smooth_result.ok();
+                }
+                match passthrough_block_gfa(block, &graph, &path_positions) {
+                    Ok(s) if !s.is_empty() => {
+                        n_passthrough.fetch_add(1, Ordering::Relaxed);
+                        Some(s)
+                    }
                     Ok(_) => None,
                     Err(e) => {
-                        log::warn!("[smooth] Block {} failed: {}", i, e);
+                        log::warn!("[smooth] Block {} passthrough failed: {}", i, e);
                         None
                     }
-                },
-            )
+                }
+            })
             .collect()
     });
 
-    info!("[smooth] Smoothed {} blocks successfully", block_gfas.len());
+    info!(
+        "[smooth] Smoothed {} blocks ({} passthrough)",
+        n_smoothed.load(Ordering::Relaxed),
+        n_passthrough.load(Ordering::Relaxed),
+    );
 
     if block_gfas.is_empty() {
         return Ok(String::from("H\tVN:Z:1.0\n"));
@@ -936,6 +970,89 @@ fn detect_repeat(
 // Per-block SPOA smoothing
 // ---------------------------------------------------------------------------
 
+/// Emit a block's path-ranges as a sub-GFA using the **un-smoothed** input
+/// sequence content. Called when [`smooth_block`] returns an empty/Err result
+/// so the block's bp coverage stays in the laced graph rather than vanishing.
+///
+/// Node IDs are local to the emitted sub-GFA (1..=N over the unique input
+/// nodes touched). The lacer assigns globally fresh IDs anyway, so local
+/// numbering doesn't collide. Edges include only step-to-step transitions
+/// taken inside the block's path ranges — the parent graph's full edge set
+/// would carry unrelated traversals through these nodes.
+fn passthrough_block_gfa(
+    block: &Block,
+    graph: &SmoothGraph,
+    path_positions: &[Vec<usize>],
+) -> io::Result<String> {
+    if block.path_ranges.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut node_remap: FxHashMap<usize, u64> = FxHashMap::default();
+    let mut next_id: u64 = 1;
+    let mut out = String::new();
+
+    for range in &block.path_ranges {
+        let path = &graph.paths[range.path_idx];
+        for step_idx in range.begin_step..range.end_step {
+            let (node_idx, _) = path.steps[step_idx];
+            if let std::collections::hash_map::Entry::Vacant(e) = node_remap.entry(node_idx) {
+                e.insert(next_id);
+                let seq = std::str::from_utf8(&graph.nodes[node_idx]).map_err(|err| {
+                    io::Error::other(format!("non-UTF8 node sequence: {}", err))
+                })?;
+                out.push_str(&format!("S\t{}\t{}\n", next_id, seq));
+                next_id += 1;
+            }
+        }
+    }
+
+    let mut edges: FxHashSet<(u64, bool, u64, bool)> = FxHashSet::default();
+    for range in &block.path_ranges {
+        let path = &graph.paths[range.path_idx];
+        for window_start in range.begin_step..range.end_step.saturating_sub(1) {
+            let (from_idx, from_rev) = path.steps[window_start];
+            let (to_idx, to_rev) = path.steps[window_start + 1];
+            if let (Some(&from_id), Some(&to_id)) =
+                (node_remap.get(&from_idx), node_remap.get(&to_idx))
+            {
+                edges.insert((from_id, from_rev, to_id, to_rev));
+            }
+        }
+    }
+    for (from_id, from_rev, to_id, to_rev) in &edges {
+        out.push_str(&format!(
+            "L\t{}\t{}\t{}\t{}\t0M\n",
+            from_id,
+            if *from_rev { "-" } else { "+" },
+            to_id,
+            if *to_rev { "-" } else { "+" },
+        ));
+    }
+
+    for range in &block.path_ranges {
+        let path = &graph.paths[range.path_idx];
+        let (path_key, path_start) = parse_path_coords(&path.name);
+        let range_start_bp = path_start + path_positions[range.path_idx][range.begin_step];
+        let range_end_bp = path_start + path_positions[range.path_idx][range.end_step];
+        let mut steps_str = String::new();
+        for step_idx in range.begin_step..range.end_step {
+            let (node_idx, is_rev) = path.steps[step_idx];
+            let nid = node_remap[&node_idx];
+            if !steps_str.is_empty() {
+                steps_str.push(',');
+            }
+            steps_str.push_str(&format!("{}{}", nid, if is_rev { "-" } else { "+" }));
+        }
+        out.push_str(&format!(
+            "P\t{}:{}-{}\t{}\t*\n",
+            path_key, range_start_bp, range_end_bp, steps_str,
+        ));
+    }
+
+    Ok(out)
+}
+
 /// Smooth a single block: extract sequences → SPOA → GFA.
 fn smooth_block(
     block: &Block,
@@ -1090,13 +1207,30 @@ fn smooth_block(
     let msa_bytes: Vec<&[u8]> = msa.iter().map(|s| s.as_bytes()).collect();
 
     let mut core_sequences: Vec<String> = Vec::with_capacity(nseqs);
+    let mut n_empty_core = 0usize;
     for row in &msa_bytes[..nseqs] {
         let core_seq: String = row[core_start..core_end]
             .iter()
             .filter(|&&b| b != b'-')
             .map(|&b| b as char)
             .collect();
+        if core_seq.is_empty() {
+            n_empty_core += 1;
+        }
         core_sequences.push(core_seq);
+    }
+
+    // Bail out when the MAX/MIN core trim collapsed onto a region that
+    // most sequences don't reach. SPOA silently emits no path for an empty
+    // input sequence, so those entries' path-ranges disappear from the
+    // laced graph and the input paths fragment at the holes. Observed on
+    // C4: a block with 60 entries had 58 empty cores → only 2 P-lines
+    // emitted, dropping 96% of the block's bp coverage. The empty-Ok
+    // return below routes the block through `passthrough_block_gfa` in the
+    // dispatch (see smooth_gfa_pass), which preserves the un-smoothed
+    // sub-graph so the lacer can stitch.
+    if n_empty_core * 2 > nseqs {
+        return Ok(String::new());
     }
 
     // Build fresh SPOA graph from core sequences
@@ -1343,5 +1477,58 @@ P\tseq2:0-6\t1+,2+\t*
         // Should produce 1 block (total weight is small)
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].path_ranges.len(), 2);
+    }
+
+    #[test]
+    fn test_passthrough_block_gfa_preserves_path_coverage() {
+        // Regression for the smooth fragmentation bug: when smooth_block
+        // returns Ok("") (degenerate-padding or many-empty-cores case), the
+        // dispatch in smooth_gfa_pass routes the block through
+        // passthrough_block_gfa so its path-ranges survive to the lacer.
+        //
+        // Verifies: (1) one P-line per input path-range, (2) names use the
+        // path's bp coords, (3) emitted node IDs are local (no clash with
+        // other blocks during lacing), (4) edges link consecutive steps.
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tACGT
+S\t2\tTGCA
+S\t3\tGGGG
+P\tchr1:100-108\t1+,2+\t*
+P\tchr2:200-212\t1+,2+,3+\t*
+";
+        let graph = parse_gfa(gfa);
+        let path_positions = compute_path_positions(&graph);
+        let block = Block {
+            path_ranges: vec![
+                PathRange {
+                    path_idx: 0,
+                    begin_step: 0,
+                    end_step: 2,
+                    length: 8,
+                },
+                PathRange {
+                    path_idx: 1,
+                    begin_step: 0,
+                    end_step: 3,
+                    length: 12,
+                },
+            ],
+        };
+        let out =
+            passthrough_block_gfa(&block, &graph, &path_positions).expect("passthrough failed");
+        let p_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("P\t")).collect();
+        assert_eq!(p_lines.len(), 2, "one P-line per path-range");
+        // Names carry full input bp range, so the lacer sees consecutive ranges
+        // and can join across blocks.
+        let names: Vec<&str> = p_lines.iter().map(|l| l.split('\t').nth(1).unwrap()).collect();
+        assert!(names.iter().any(|n| *n == "chr1:100-108"), "got {:?}", names);
+        assert!(names.iter().any(|n| *n == "chr2:200-212"), "got {:?}", names);
+        // 3 distinct nodes touched → 3 S-lines with local IDs 1..=3.
+        let s_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("S\t")).collect();
+        assert_eq!(s_lines.len(), 3);
+        // At least two L-lines: edges 1→2 (both paths) and 2→3 (chr2 only).
+        let l_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("L\t")).collect();
+        assert!(l_lines.len() >= 2, "edges: {:?}", l_lines);
     }
 }
