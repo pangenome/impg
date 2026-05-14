@@ -179,6 +179,45 @@ pub fn smooth_gfa(gfa_content: &str, config: &SmoothConfig) -> io::Result<String
     Ok(current)
 }
 
+/// DIAGNOSTIC: for each path in a GFA string, walk its P-line steps,
+/// look up node lengths, log step_count + bp_sum. Used to pin which
+/// stage (unchop/sort) drops bp.
+fn log_path_bp(stage: &str, gfa: &str) {
+    let mut node_lens: FxHashMap<u64, usize> = FxHashMap::default();
+    for line in gfa.lines() {
+        if !line.starts_with("S\t") {
+            continue;
+        }
+        let mut it = line.split('\t');
+        it.next(); // 'S'
+        let id_str = match it.next() { Some(s) => s, None => continue };
+        let seq = match it.next() { Some(s) => s, None => continue };
+        if let Ok(id) = id_str.parse::<u64>() {
+            node_lens.insert(id, seq.len());
+        }
+    }
+    for line in gfa.lines() {
+        if !line.starts_with("P\t") {
+            continue;
+        }
+        let mut it = line.split('\t');
+        it.next(); // 'P'
+        let name = match it.next() { Some(s) => s, None => continue };
+        let steps_str = match it.next() { Some(s) => s, None => continue };
+        let mut step_count = 0usize;
+        let mut bp_sum = 0usize;
+        for step in steps_str.split(',') {
+            if step.is_empty() { continue; }
+            let id_part = &step[..step.len().saturating_sub(1)];
+            if let Ok(id) = id_part.parse::<u64>() {
+                step_count += 1;
+                bp_sum += *node_lens.get(&id).unwrap_or(&0);
+            }
+        }
+        log::info!("[{}] {} steps={} bp={}", stage, name, step_count, bp_sum);
+    }
+}
+
 /// Run a single smoothing pass on a (not yet sorted) GFA string.
 ///
 /// `pre_sorted` — skip the unchop+sort step (true only for the first pass when the
@@ -196,7 +235,20 @@ fn smooth_gfa_pass(
     let sorted_gfa = if pre_sorted {
         gfa_content.to_string()
     } else {
-        sort_gfa(&unchop_gfa(gfa_content)?, config.num_threads)?
+        // DIAGNOSTIC: trace bp before/after unchop/sort
+        let do_trace = std::env::var("IMPG_SMOOTH_TRACE").is_ok();
+        if do_trace {
+            log_path_bp("STAGE-IN ", gfa_content);
+        }
+        let unchopped = unchop_gfa(gfa_content)?;
+        if do_trace {
+            log_path_bp("UNCHOPPED", &unchopped);
+        }
+        let sorted = sort_gfa(&unchopped, config.num_threads)?;
+        if do_trace {
+            log_path_bp("SORTED   ", &sorted);
+        }
+        sorted
     };
 
     // Step 2: Parse sorted GFA
@@ -207,6 +259,14 @@ fn smooth_gfa_pass(
         "[smooth] Parsed sorted GFA: {} nodes, {} paths",
         num_nodes_before_chop, num_paths
     );
+
+    // DIAGNOSTIC: per-path bp at parse-time (post unchop+sort, pre-chop)
+    if std::env::var("IMPG_SMOOTH_TRACE").is_ok() {
+        for path in &graph.paths {
+            let bp: usize = path.steps.iter().map(|&(n, _)| graph.nodes[n].len()).sum();
+            log::info!("[TRACE-PARSE] {} steps={} bp={}", path.name, path.steps.len(), bp);
+        }
+    }
 
     if graph.nodes.is_empty() || graph.paths.is_empty() {
         return Ok(gfa_content.to_string());
@@ -221,11 +281,30 @@ fn smooth_gfa_pass(
         config.max_node_length
     );
 
+    // DIAGNOSTIC: per-path bp post-chop (chop_graph splits nodes; bp should be preserved)
+    if std::env::var("IMPG_SMOOTH_TRACE").is_ok() {
+        for path in &graph.paths {
+            let bp: usize = path.steps.iter().map(|&(n, _)| graph.nodes[n].len()).sum();
+            log::info!("[TRACE-CHOP] {} steps={} bp={}", path.name, path.steps.len(), bp);
+        }
+    }
+
     // Step 4: Build inverse index (node → path steps)
     let node_step_index = build_node_step_index(&graph);
 
     // Step 5: Compute cumulative path positions
     let path_positions = compute_path_positions(&graph);
+
+    // DIAGNOSTIC: per-path path_positions[last] (should equal path's full bp)
+    if std::env::var("IMPG_SMOOTH_TRACE").is_ok() {
+        for (path_idx, path) in graph.paths.iter().enumerate() {
+            let n = path.steps.len();
+            log::info!(
+                "[TRACE-POS] {} steps={} positions[N]={}",
+                path.name, n, path_positions[path_idx][n]
+            );
+        }
+    }
 
     // Step 6: Block decomposition
     let mut blocks = smoothable_blocks(
@@ -332,36 +411,65 @@ fn smooth_gfa_pass(
                         }
                     }
                 };
-                // DIAGNOSTIC: per-block bp accounting
+                // DIAGNOSTIC: per-block bp accounting.
+                // Compare input range bp (length field, sum of step node lengths in
+                // the source graph) against the *actual walked bp* in the output
+                // sub-GFA (sum of S-line lengths along each P-line's step list).
+                // Catches mismatches between P-line names and their content.
                 if std::env::var("IMPG_SMOOTH_TRACE").is_ok() {
                     let input_bp: usize = block.path_ranges.iter().map(|r| r.length).sum();
                     let n_input_ranges = block.path_ranges.len();
-                    let (n_output_p, output_bp) = match &out {
+                    let (n_output_p, name_bp, walked_bp) = match &out {
                         Some(g) => {
+                            // Build node-length map from S-lines
+                            let mut nl: FxHashMap<u64, usize> = FxHashMap::default();
+                            for line in g.lines() {
+                                if !line.starts_with("S\t") { continue; }
+                                let mut it = line.split('\t');
+                                it.next();
+                                if let (Some(id_s), Some(seq)) = (it.next(), it.next()) {
+                                    if let Ok(id) = id_s.parse::<u64>() {
+                                        nl.insert(id, seq.len());
+                                    }
+                                }
+                            }
                             let mut p_count = 0usize;
-                            let mut bp_sum = 0usize;
+                            let mut name_sum = 0usize;
+                            let mut walked_sum = 0usize;
                             for line in g.lines() {
                                 if !line.starts_with("P\t") { continue; }
                                 p_count += 1;
-                                let name = line.split('\t').nth(1).unwrap_or("");
+                                let mut it = line.split('\t');
+                                it.next();
+                                let name = it.next().unwrap_or("");
+                                let steps = it.next().unwrap_or("");
                                 if let Some(lc) = name.rfind(':') {
                                     let rs = &name[lc+1..];
                                     if let Some((s, e)) = rs.split_once('-') {
                                         if let (Ok(s), Ok(e)) = (s.parse::<usize>(), e.parse::<usize>()) {
-                                            bp_sum += e.saturating_sub(s);
+                                            name_sum += e.saturating_sub(s);
                                         }
                                     }
                                 }
+                                for st in steps.split(',') {
+                                    if st.is_empty() { continue; }
+                                    let id_part = &st[..st.len().saturating_sub(1)];
+                                    if let Ok(id) = id_part.parse::<u64>() {
+                                        walked_sum += *nl.get(&id).unwrap_or(&0);
+                                    }
+                                }
                             }
-                            (p_count, bp_sum)
+                            (p_count, name_sum, walked_sum)
                         }
-                        None => (0, 0),
+                        None => (0, 0, 0),
                     };
-                    if output_bp + 100 < input_bp || n_output_p != n_input_ranges {
+                    let name_delta = input_bp as i64 - name_bp as i64;
+                    let walked_delta = input_bp as i64 - walked_bp as i64;
+                    if walked_delta != 0 || name_delta != 0 || n_output_p != n_input_ranges {
                         log::info!(
-                            "[TRACE-BLK#{}] mode={} ranges_in={} P_out={} bp_in={} bp_out={} delta={}",
-                            i, mode, n_input_ranges, n_output_p, input_bp, output_bp,
-                            input_bp as i64 - output_bp as i64,
+                            "[TRACE-BLK#{}] mode={} ranges_in={} P_out={} bp_in={} name_bp={} walked_bp={} name_delta={} walked_delta={}",
+                            i, mode, n_input_ranges, n_output_p,
+                            input_bp, name_bp, walked_bp, name_delta, walked_delta,
                         );
                     }
                 }
@@ -1372,6 +1480,31 @@ fn smooth_block(
     // contract is "every input range survives somewhere". Route the whole
     // block through passthrough rather than emit partial smoothed output.
     if n_empty_core > 0 {
+        return Ok(String::new());
+    }
+
+    // Stronger check: `find_core_column_range`'s MAX-of-left-pad-end /
+    // MIN-of-right-pad-start can collapse the core to a tiny intersection
+    // when sequences have very different padding/length ratios — even when
+    // no single core is empty. SPOA then emits P-lines whose name claims
+    // the full input bp range (set above from path_positions) but whose
+    // step walk covers only the tiny core. The lacer trusts the name, the
+    // next pass parses the GFA and sees a shorter path: observed on C4
+    // `impg graph`, block #160 named 60,802 bp but walked 1,962 bp (97%
+    // silent shrinkage). The contract — name's bp range == walked content
+    // bp — must hold. If the sum of trimmed core bp is far less than the
+    // sum of input range bp, route the block through passthrough.
+    let total_core_bp: usize = core_sequences.iter().map(|s| s.len()).sum();
+    let total_input_bp: usize = entries
+        .iter()
+        .take(nseqs)
+        .map(|e| e.sequence.len() - e.left_pad - e.right_pad)
+        .sum();
+    // Strict equality. Any bp loss from MSA-trim ends up as a P-line
+    // whose name claims input bp coords but whose step walk is shorter.
+    // The lacer trusts the name and so does the next pass — the bp
+    // shortfall becomes a real coordinate error in the output graph.
+    if total_core_bp != total_input_bp {
         return Ok(String::new());
     }
 
