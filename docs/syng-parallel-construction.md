@@ -10,6 +10,7 @@ must produce a normal syng index:
 - `{prefix}.1gbwt`
 - `{prefix}.syng.names`
 - `{prefix}.syng.spos`
+- `{prefix}.syng.pstep`
 - `{prefix}.syng.meta`
 
 The output does not need to assign the same numeric syncmer node ids as the
@@ -46,8 +47,8 @@ Every path is then encoded as signed global node ids:
 P_p = [(strand_i * phi(x_i), pos_i)]
 ```
 
-The GBWT and sampled-position sidecar are functions of the ordered collection
-of `P_p` streams. A parallel build is correct if all shards use the same `phi`
+The GBWT and positional sidecars are functions of the ordered collection of
+`P_p` streams. A parallel build is correct if all shards use the same `phi`
 and the final path order is the chosen global path order.
 
 ## Production Algorithm
@@ -59,10 +60,10 @@ The clean end-state is a two-pass parallel dictionary plus per-node reduce:
 3. Sort/deduplicate the union and assign global ids.
 4. In parallel, stream inputs again and map syncmers through the global
    dictionary.
-5. For each shard, emit per-node occurrence records and sampled-position
-   records using global node ids and global path coordinates.
+5. For each shard, emit per-node occurrence records and regular-grid
+   positional samples using global node ids and global path coordinates.
 6. Reduce per-node occurrence records into the final GBWT node structures.
-7. Sort/group sampled-position records and write `.syng.spos`.
+7. Sort/group sampled-position records and write `.syng.spos` plus `.syng.pstep`.
 
 Step 6 is the only part not exposed by the current syng C API. The existing
 API has one mutable `syngBWTpathAdd` stream, but no `syngBWTmerge` or builder
@@ -93,8 +94,11 @@ AGC inputs.
   `kmerHashAdd`.
 - The frozen dictionary rejects duplicate packed syncmers.
 - Replay fails if any extracted syncmer is absent from the frozen dictionary.
-- `.syng.spos` sampling uses global path ids and positions, so it remains
-  merge-compatible.
+- Positional sampling uses a regular per-path syncmer-step grid plus each
+  path's terminal syncmer. For `sample_rate = r`, sampled steps are
+  `0, r, 2*r, ...` plus the final syncmer step on each path.
+  `.syng.spos` stores sampled node-to-position records and `.syng.pstep`
+  stores the inverse path-position checkpoints for the same sampled steps.
 
 ## Next Step: True GBWT Reduce
 

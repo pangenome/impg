@@ -205,8 +205,8 @@ fn test_syng_agc_roundtrip_query() {
             agc_path.to_str().unwrap(),
             "-o",
             out_prefix_str,
-            "--position-sample-shift",
-            "0",
+            "--position-sample-rate",
+            "1",
         ])
         .output()
         .expect("Failed to run impg syng --agc");
@@ -291,8 +291,8 @@ fn test_syng_agc_parallel_dictionary_roundtrip_query() {
             "--parallel-dictionary",
             "-o",
             out_prefix_str,
-            "--position-sample-shift",
-            "0",
+            "--position-sample-rate",
+            "1",
         ])
         .output()
         .expect("Failed to run impg syng --agc --parallel-dictionary");
@@ -501,8 +501,8 @@ fn test_syng_map_cli_gaf_and_paf() {
             fasta_path.to_str().unwrap(),
             "-o",
             idx_prefix.to_str().unwrap(),
-            "--position-sample-shift",
-            "0",
+            "--position-sample-rate",
+            "1",
         ])
         .output()
         .expect("failed to run impg syng");
@@ -635,8 +635,8 @@ fn test_syng_map_cli_sampled_positions_paf() {
             fasta_path.to_str().unwrap(),
             "-o",
             idx_prefix.to_str().unwrap(),
-            "--position-sample-shift",
-            "0",
+            "--position-sample-rate",
+            "1",
         ])
         .output()
         .expect("failed to run impg syng with sampled positions");
@@ -742,8 +742,8 @@ fn test_syng_identical_sequences_build_and_query() {
             fasta_path.to_str().unwrap(),
             "-o",
             out_prefix.to_str().unwrap(),
-            "--position-sample-shift",
-            "0",
+            "--position-sample-rate",
+            "1",
         ])
         .output()
         .expect("impg syng failed to run");
@@ -831,8 +831,8 @@ fn test_partition_syng_end_to_end_bed() {
             fasta_path.to_str().unwrap(),
             "-o",
             syng_prefix.to_str().unwrap(),
-            "--position-sample-shift",
-            "0",
+            "--position-sample-rate",
+            "1",
         ])
         .output()
         .expect("Failed to run impg syng");
@@ -954,8 +954,8 @@ fn test_query_syng_gfa_subwindow_splitter() {
             fasta_path.to_str().unwrap(),
             "-o",
             syng_prefix.to_str().unwrap(),
-            "--position-sample-shift",
-            "0",
+            "--position-sample-rate",
+            "1",
         ])
         .output()
         .expect("Failed to run impg syng");

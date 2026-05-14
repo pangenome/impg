@@ -1875,15 +1875,10 @@ enum Args {
         #[clap(short = 'o', long, value_parser)]
         output: String,
 
-        /// Sample one path occurrence per 2^N occurrences for .syng.spos.
+        /// Sample every N syncmer steps plus each path's terminal syncmer.
         #[arg(help_heading = "Position sampling")]
-        #[clap(long, value_parser, default_value_t = impg::syng::DEFAULT_POSITION_SAMPLE_SHIFT)]
-        position_sample_shift: u32,
-
-        /// Hash seed for online position sampling.
-        #[arg(help_heading = "Position sampling")]
-        #[clap(long, value_parser, default_value_t = impg::syng::DEFAULT_POSITION_SAMPLE_SEED)]
-        position_sample_seed: u64,
+        #[clap(long, value_parser, default_value_t = impg::syng::DEFAULT_POSITION_SAMPLE_RATE)]
+        position_sample_rate: u32,
 
         /// Build a deterministic global syncmer dictionary in a parallel prepass, then replay paths through it.
         #[arg(help_heading = "Construction")]
@@ -1961,15 +1956,20 @@ enum Args {
         #[clap(long, action)]
         force: bool,
 
-        /// Sample one path occurrence per 2^N occurrences.
+        /// Sample every N syncmer steps plus each path's terminal syncmer.
         #[arg(help_heading = "Position sampling")]
-        #[clap(long, value_parser, default_value_t = impg::syng::DEFAULT_POSITION_SAMPLE_SHIFT)]
-        position_sample_shift: u32,
+        #[clap(long, value_parser, default_value_t = impg::syng::DEFAULT_POSITION_SAMPLE_RATE)]
+        position_sample_rate: u32,
 
-        /// Hash seed for position sampling.
+        /// Rebuild sidecars serially instead of walking paths in parallel.
         #[arg(help_heading = "Position sampling")]
-        #[clap(long, value_parser, default_value_t = impg::syng::DEFAULT_POSITION_SAMPLE_SEED)]
-        position_sample_seed: u64,
+        #[clap(long, action)]
+        serial_position_sampling: bool,
+
+        /// Log positional repair progress after this many completed paths (0 disables).
+        #[arg(help_heading = "Position sampling")]
+        #[clap(long, value_parser, default_value_t = 1)]
+        position_progress_interval: usize,
 
         // --- General ---
         #[clap(flatten)]
@@ -3829,8 +3829,7 @@ fn run() -> io::Result<()> {
             syncmer_w,
             syncmer_length,
             syncmer_seed,
-            position_sample_shift,
-            position_sample_seed,
+            position_sample_rate,
             parallel_dictionary,
             common,
         } => {
@@ -3862,17 +3861,18 @@ fn run() -> io::Result<()> {
                 syncmer_seed,
                 common.threads.get(),
             );
+            if position_sample_rate == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--position-sample-rate must be greater than zero",
+                ));
+            }
             let configure_position_sampling =
                 |index: &mut impg::syng::SyngIndex| -> io::Result<()> {
-                    index.enable_online_sampled_positions(
-                        position_sample_shift,
-                        position_sample_seed,
-                    )?;
+                    index.enable_online_sampled_positions(position_sample_rate)?;
                     info!(
-                        "Online sampled position sidecar enabled: sample_shift={} (~1/{} path occurrences), seed={}",
-                        position_sample_shift,
-                        1u64 << position_sample_shift,
-                        position_sample_seed,
+                        "Online regular sampled position sidecars enabled: every {} syncmer steps per path",
+                        position_sample_rate,
                     );
                     Ok(())
                 };
@@ -4320,15 +4320,14 @@ fn run() -> io::Result<()> {
             let position_start = Instant::now();
             if let Some(stats) = index.finalize_online_sampled_positions()? {
                 info!(
-                    "Sampled position sidecars compacted in {}: {} node-position samples across {} nodes; {} path-step checkpoints across {} paths from {} walked paths (sample_shift={} ~=1/{}) at +{}",
+                    "Regular sampled position sidecars compacted in {}: {} node-position samples across {} nodes; {} path-step checkpoints across {} paths from {} walked paths (sample_rate={} syncmer steps) at +{}",
                     format_duration(position_start.elapsed()),
                     stats.sampled_occurrences,
                     stats.sampled_nodes,
                     stats.sampled_path_steps,
                     stats.sampled_step_paths,
                     stats.walked_paths,
-                    stats.sample_shift,
-                    1u64 << stats.sample_shift,
+                    stats.sample_rate,
                     format_duration(total_start.elapsed()),
                 );
             }
@@ -4367,23 +4366,15 @@ fn run() -> io::Result<()> {
         Args::SyngRepair {
             index,
             force,
-            position_sample_shift,
-            position_sample_seed,
+            position_sample_rate,
+            serial_position_sampling,
+            position_progress_interval,
             common,
         } => {
             initialize_threads_and_log(&common);
             let prefix = detect_syng_prefix(&index).unwrap_or(index);
             let spos_path = impg::syng::syng_spos_path(&prefix);
             let pstep_path = impg::syng::syng_pstep_path(&prefix);
-            let have_spos = std::path::Path::new(&spos_path).exists();
-            let have_pstep = std::path::Path::new(&pstep_path).exists();
-            if !force && have_spos && have_pstep {
-                info!(
-                    "Syng position sidecars already exist: {}, {}. Use --force to rebuild.",
-                    spos_path, pstep_path
-                );
-                return Ok(());
-            }
 
             let total_start = Instant::now();
             info!(
@@ -4413,24 +4404,37 @@ fn run() -> io::Result<()> {
             }
 
             let rebuild_start = Instant::now();
-            if position_sample_shift >= 63 {
+            if position_sample_rate == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "--position-sample-shift must be less than 63",
+                    "--position-sample-rate must be greater than zero",
                 ));
             }
-            let sample_period = 1u64 << position_sample_shift;
-            if have_spos && !force {
+            let have_requested_spos =
+                syng_index.sampled_positions_rate() == Some(position_sample_rate);
+            let have_requested_pstep =
+                syng_index.sampled_path_steps_rate() == Some(position_sample_rate);
+            if !force && have_requested_spos && have_requested_pstep {
                 info!(
-                    "Rebuilding sampled path-step sidecar: sample_shift={} (~1/{} path occurrences), seed={}",
-                    position_sample_shift,
-                    sample_period,
-                    position_sample_seed
+                    "Syng position sidecars already exist at sample rate {}: {}, {}. Use --force to rebuild.",
+                    position_sample_rate, spos_path, pstep_path
                 );
-                let stats = syng_index.rebuild_sampled_path_steps_from_gbwt(
-                    position_sample_shift,
-                    position_sample_seed,
-                )?;
+                return Ok(());
+            }
+
+            if !force && have_requested_spos {
+                info!(
+                    "Rebuilding regular sampled path-step sidecar: every {} syncmer steps per path",
+                    position_sample_rate,
+                );
+                let stats = if serial_position_sampling {
+                    syng_index.rebuild_sampled_path_steps_from_gbwt(position_sample_rate)?
+                } else {
+                    syng_index.rebuild_sampled_path_steps_from_gbwt_parallel(
+                        position_sample_rate,
+                        position_progress_interval,
+                    )?
+                };
                 info!(
                     "Rebuilt sampled path-step sidecar in {}: {} checkpoints across {} paths from {} walked paths",
                     format_duration(rebuild_start.elapsed()),
@@ -4447,15 +4451,17 @@ fn run() -> io::Result<()> {
                 );
             } else {
                 info!(
-                    "Rebuilding sampled position sidecars: sample_shift={} (~1/{} path occurrences), seed={}",
-                    position_sample_shift,
-                    sample_period,
-                    position_sample_seed
+                    "Rebuilding regular sampled position sidecars: every {} syncmer steps per path",
+                    position_sample_rate,
                 );
-                let stats = syng_index.rebuild_sampled_position_indexes_from_gbwt(
-                    position_sample_shift,
-                    position_sample_seed,
-                )?;
+                let stats = if serial_position_sampling {
+                    syng_index.rebuild_sampled_position_indexes_from_gbwt(position_sample_rate)?
+                } else {
+                    syng_index.rebuild_sampled_position_indexes_from_gbwt_parallel(
+                        position_sample_rate,
+                        position_progress_interval,
+                    )?
+                };
                 info!(
                     "Rebuilt sampled position sidecars in {}: {} node-position samples across {} nodes; {} path-step checkpoints across {} paths from {} walked paths",
                     format_duration(rebuild_start.elapsed()),
