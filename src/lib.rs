@@ -4,6 +4,7 @@
 pub mod agc_index;
 pub mod syng_ffi;
 pub mod syng;
+pub mod syng_parallel;
 pub mod alignment_record;
 pub mod commands;
 pub mod faidx;

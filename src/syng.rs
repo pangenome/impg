@@ -444,6 +444,16 @@ pub struct SyncmerParams {
     pub seed: u32,
 }
 
+/// Packed canonical full-syncmer sequence used for prebuilt KmerHash dictionaries.
+///
+/// This is the same 2-bit little-endian packing used by syng's `seqPack()`,
+/// stored as `kmerHash` expects it: `(syncmer_len + 31) / 32` u64 words.
+pub type PackedSyncmer = Vec<u64>;
+
+pub fn packed_syncmer_word_len(params: SyncmerParams) -> usize {
+    ((params.w + params.k + 31) / 32) as usize
+}
+
 impl Default for SyncmerParams {
     fn default() -> Self {
         Self {
@@ -856,6 +866,12 @@ pub struct SyngAddSequenceStats {
     pub indexed: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum SyncmerLookupMode {
+    AddMissing,
+    RequireExisting,
+}
+
 // SAFETY: The C structures are only accessed through &self or &mut self,
 // and the C library's read-only query functions are thread-safe.
 unsafe impl Send for SyngIndex {}
@@ -892,6 +908,66 @@ impl SyngIndex {
                 .expect("default sampled-position parameters are valid"),
             ),
         }
+    }
+
+    /// Create an index and preload its syncmer dictionary.
+    ///
+    /// Paths can then be replayed with [`Self::add_sequence_with_existing_syncmers`].
+    /// The supplied dictionary must already be canonicalized, deduplicated, and
+    /// in the intended global ID order.
+    pub fn new_with_packed_syncmer_dictionary(
+        params: SyncmerParams,
+        packed_syncmers: &[PackedSyncmer],
+    ) -> io::Result<Self> {
+        let mut index = Self::new(params);
+        index.add_packed_syncmer_dictionary(packed_syncmers)?;
+        Ok(index)
+    }
+
+    /// Preload packed canonical syncmers into the C KmerHash in order.
+    pub fn add_packed_syncmer_dictionary(
+        &mut self,
+        packed_syncmers: &[PackedSyncmer],
+    ) -> io::Result<()> {
+        let expected_words = packed_syncmer_word_len(self.params);
+        for (i, packed) in packed_syncmers.iter().enumerate() {
+            if packed.len() != expected_words {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "packed syncmer {} has {} words, expected {}",
+                        i,
+                        packed.len(),
+                        expected_words
+                    ),
+                ));
+            }
+            let mut index: i64 = 0;
+            let added = unsafe {
+                syng_ffi::kmerHashAddPacked(
+                    self.kmer_hash,
+                    packed.as_ptr() as *mut syng_ffi::U64,
+                    &mut index,
+                )
+            };
+            if !added {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("duplicate packed syncmer at dictionary offset {}", i),
+                ));
+            }
+            let expected_index = i as i64 + 1;
+            if index != expected_index {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "packed syncmer dictionary assigned id {}, expected {}",
+                        index, expected_index
+                    ),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// True if a sampled path-position sidecar has been built or loaded.
@@ -972,6 +1048,29 @@ impl SyngIndex {
     /// large callers can stream inputs without buffering all decompressed
     /// sequences before GBWT construction.
     pub fn add_sequence(&mut self, name: String, seq: Vec<u8>) -> SyngAddSequenceStats {
+        self.add_sequence_internal(name, seq, SyncmerLookupMode::AddMissing)
+            .expect("adding new syncmers to KmerHash should not fail")
+    }
+
+    /// Add one sequence using a preloaded dictionary.
+    ///
+    /// Returns an error if any extracted syncmer is absent from the current
+    /// KmerHash. This is used by two-pass/parallel construction to replay paths
+    /// through a frozen global syncmer ID assignment.
+    pub fn add_sequence_with_existing_syncmers(
+        &mut self,
+        name: String,
+        seq: Vec<u8>,
+    ) -> io::Result<SyngAddSequenceStats> {
+        self.add_sequence_internal(name, seq, SyncmerLookupMode::RequireExisting)
+    }
+
+    fn add_sequence_internal(
+        &mut self,
+        name: String,
+        seq: Vec<u8>,
+        lookup_mode: SyncmerLookupMode,
+    ) -> io::Result<SyngAddSequenceStats> {
         self.sampled_positions = None;
 
         let syncmer_len = (self.params.w + self.params.k) as usize;
@@ -982,11 +1081,11 @@ impl SyngIndex {
             if let Some(builder) = self.sampled_position_builder.as_mut() {
                 builder.record_path(path_num as usize, seq_len as u64, &[]);
             }
-            return SyngAddSequenceStats {
+            return Ok(SyngAddSequenceStats {
                 sequence_len: seq_len,
                 syncmers: 0,
                 indexed: false,
-            };
+            });
         }
 
         // Convert sequence to numeric encoding (0=a, 1=c, 2=g, 3=t) for the C
@@ -1019,13 +1118,30 @@ impl SyngIndex {
                 &mut pos,
                 std::ptr::null_mut(),
             ) {
-                // Add the syncmer to the KmerHash (or find existing)
                 let mut kmer_index: i64 = 0;
-                syng_ffi::kmerHashAdd(
-                    self.kmer_hash,
-                    seq_buf.as_mut_ptr().add(pos as usize) as *mut i8,
-                    &mut kmer_index,
-                );
+                let syncmer_ptr = seq_buf.as_mut_ptr().add(pos as usize) as *mut i8;
+                match lookup_mode {
+                    SyncmerLookupMode::AddMissing => {
+                        syng_ffi::kmerHashAdd(self.kmer_hash, syncmer_ptr, &mut kmer_index);
+                    }
+                    SyncmerLookupMode::RequireExisting => {
+                        let found = syng_ffi::kmerHashFind(
+                            self.kmer_hash,
+                            syncmer_ptr,
+                            &mut kmer_index,
+                        );
+                        if !found {
+                            syng_ffi::impg_seqhashIteratorDestroy(sit);
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!(
+                                    "syncmer at {}:{} is absent from the preloaded dictionary",
+                                    name, pos
+                                ),
+                            ));
+                        }
+                    }
+                }
                 syncmers.push((kmer_index, pos));
             }
 
@@ -1037,11 +1153,11 @@ impl SyngIndex {
             if let Some(builder) = self.sampled_position_builder.as_mut() {
                 builder.record_path(path_num as usize, seq_len as u64, &[]);
             }
-            return SyngAddSequenceStats {
+            return Ok(SyngAddSequenceStats {
                 sequence_len: seq_len,
                 syncmers: 0,
                 indexed: false,
-            };
+            });
         }
 
         // Build forward GBWT path and capture start info
@@ -1096,11 +1212,11 @@ impl SyngIndex {
             builder.record_path(path_num as usize, seq_len as u64, &syncmers);
         }
 
-        SyngAddSequenceStats {
+        Ok(SyngAddSequenceStats {
             sequence_len: seq_len,
             syncmers: syncmers.len(),
             indexed: true,
-        }
+        })
     }
 
     /// Save the index to disk.
@@ -2103,6 +2219,49 @@ mod tests {
             seq.push(bases[((state >> 16) % 4) as usize]);
         }
         seq
+    }
+
+    #[test]
+    fn test_preloaded_dictionary_replay_supports_query() {
+        let _guard = lock_syng();
+        let params = SyncmerParams::default();
+        let shared = make_test_sequence(800, 42);
+        let mut seq_a = shared.clone();
+        seq_a.extend_from_slice(&make_test_sequence(300, 1));
+        let mut seq_b = shared;
+        seq_b.extend_from_slice(&make_test_sequence(300, 2));
+        let sequences = vec![
+            ("seqA".to_string(), seq_a.clone()),
+            ("seqB".to_string(), seq_b),
+            ("seqC".to_string(), make_test_sequence(1100, 99)),
+        ];
+
+        let dictionary =
+            crate::syng_parallel::build_packed_syncmer_dictionary(params, &sequences).unwrap();
+        assert!(!dictionary.is_empty());
+
+        let mut index =
+            SyngIndex::new_with_packed_syncmer_dictionary(params, &dictionary).unwrap();
+        index
+            .enable_online_sampled_positions(0, DEFAULT_POSITION_SAMPLE_SEED)
+            .unwrap();
+        for (name, seq) in sequences {
+            let stats = index
+                .add_sequence_with_existing_syncmers(name, seq)
+                .unwrap();
+            assert!(stats.indexed);
+            assert!(stats.syncmers > 0);
+        }
+        index.finalize_online_sampled_positions().unwrap();
+
+        let matches = index.matched_syncmers_in_sequence(&seq_a);
+        assert!(!matches.is_empty());
+
+        let intervals = index.query_region("seqA", 0, 500, 0).unwrap();
+        assert!(
+            intervals.iter().any(|interval| interval.genome == "seqB"),
+            "shared-prefix sequence should be discoverable through preloaded dictionary"
+        );
     }
 
     #[test]

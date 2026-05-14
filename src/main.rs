@@ -100,6 +100,127 @@ fn resolve_syng_syncmer_params(
     })
 }
 
+#[derive(Debug, Clone)]
+struct SyngAgcRecord {
+    sample: String,
+    contig: String,
+    name: String,
+    length: usize,
+}
+
+fn syng_sequence_name(sample: &str, contig: &str) -> String {
+    if contig.contains('#') {
+        contig.to_string()
+    } else {
+        format!("{}@{}", contig, sample)
+    }
+}
+
+fn ragc_numeric_to_ascii(seq: &[u8]) -> Vec<u8> {
+    seq.iter()
+        .map(|&b| match b {
+            0 => b'A',
+            1 => b'C',
+            2 => b'G',
+            3 => b'T',
+            _ => b'N',
+        })
+        .collect()
+}
+
+fn read_syng_fasta_sequences(fasta_path: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
+    let file = File::open(fasta_path)?;
+    let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
+        io::Error::other(format!(
+            "Failed to open reader for '{}': {}",
+            fasta_path, e
+        ))
+    })?;
+    let reader = BufReader::new(reader);
+
+    let mut sequences = Vec::new();
+    let mut current_name = String::new();
+    let mut current_seq = Vec::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.starts_with('>') {
+            if !current_name.is_empty() && !current_seq.is_empty() {
+                sequences.push((
+                    std::mem::take(&mut current_name),
+                    std::mem::take(&mut current_seq),
+                ));
+            }
+            current_name = line
+                .strip_prefix('>')
+                .unwrap_or("")
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_string();
+            current_seq.clear();
+        } else {
+            current_seq.extend(line.trim().as_bytes());
+        }
+    }
+    if !current_name.is_empty() && !current_seq.is_empty() {
+        sequences.push((current_name, current_seq));
+    }
+
+    Ok(sequences)
+}
+
+fn collect_syng_agc_records(agc_path: &str) -> io::Result<Vec<SyngAgcRecord>> {
+    let config = ragc_core::DecompressorConfig { verbosity: 0 };
+    let mut decompressor = ragc_core::Decompressor::open(agc_path, config).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Failed to open AGC file '{}': {}", agc_path, e),
+        )
+    })?;
+
+    let samples = decompressor.list_samples();
+    let mut records = Vec::new();
+    for sample in samples {
+        let contigs = decompressor
+            .list_contigs_names_only(&sample)
+            .unwrap_or_default();
+        for contig in contigs {
+            let length = decompressor.get_contig_length(&sample, &contig).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Failed to get length for contig '{}@{}': {}", contig, sample, e),
+                )
+            })?;
+            records.push(SyngAgcRecord {
+                name: syng_sequence_name(&sample, &contig),
+                sample: sample.clone(),
+                contig,
+                length,
+            });
+        }
+    }
+    Ok(records)
+}
+
+fn read_syng_agc_record(
+    decompressor: &mut ragc_core::Decompressor,
+    record: &SyngAgcRecord,
+) -> io::Result<Vec<u8>> {
+    let contig_data = decompressor
+        .get_contig_range(&record.sample, &record.contig, 0, record.length)
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Failed to decompress contig '{}@{}': {}",
+                    record.contig, record.sample, e
+                ),
+            )
+        })?;
+    Ok(ragc_numeric_to_ascii(&contig_data))
+}
+
 fn format_duration(duration: Duration) -> String {
     if duration.as_secs() >= 60 {
         let mins = duration.as_secs() / 60;
@@ -1754,6 +1875,11 @@ enum Args {
         #[arg(help_heading = "Position sampling")]
         #[clap(long, value_parser, default_value_t = impg::syng::DEFAULT_POSITION_SAMPLE_SEED)]
         position_sample_seed: u64,
+
+        /// Build a deterministic global syncmer dictionary in a parallel prepass, then replay paths through it.
+        #[arg(help_heading = "Construction")]
+        #[clap(long, action)]
+        parallel_dictionary: bool,
 
         // --- Syncmer parameters ---
         /// Inner k-mer length for syncmer extraction
@@ -3643,6 +3769,7 @@ fn run() -> io::Result<()> {
             syncmer_seed,
             position_sample_shift,
             position_sample_seed,
+            parallel_dictionary,
             common,
         } => {
             initialize_threads_and_log(&common);
@@ -3690,6 +3817,122 @@ fn run() -> io::Result<()> {
             let total_start = Instant::now();
 
             let mut index = if let Some(agc_path) = agc {
+                if parallel_dictionary {
+                    let input_start = Instant::now();
+                    info!(
+                        "Reading AGC sequence catalog for parallel dictionary build: {} at +{}",
+                        agc_path,
+                        format_duration(total_start.elapsed())
+                    );
+                    let records = collect_syng_agc_records(&agc_path)?;
+                    let total_bp: u64 = records.iter().map(|record| record.length as u64).sum();
+                    info!(
+                        "Found {} AGC sequences ({} bp) for dictionary prepass",
+                        records.len(),
+                        total_bp
+                    );
+
+                    let dictionary_start = Instant::now();
+                    let agc_path_for_threads = agc_path.clone();
+                    let packed_syncmers = records
+                        .par_iter()
+                        .map_init(
+                            move || {
+                                let config = ragc_core::DecompressorConfig { verbosity: 0 };
+                                ragc_core::Decompressor::open(&agc_path_for_threads, config)
+                                    .map_err(|e| {
+                                        io::Error::new(
+                                            io::ErrorKind::InvalidData,
+                                            format!(
+                                                "Failed to open AGC file '{}': {}",
+                                                agc_path_for_threads, e
+                                            ),
+                                        )
+                                    })
+                            },
+                            |decompressor, record| {
+                                let decompressor = match decompressor {
+                                    Ok(decompressor) => decompressor,
+                                    Err(e) => {
+                                        return Err(io::Error::new(e.kind(), e.to_string()));
+                                    }
+                                };
+                                let seq = read_syng_agc_record(decompressor, record)?;
+                                impg::syng_parallel::extract_packed_syncmers(params, &seq)
+                            },
+                        )
+                        .try_reduce(Vec::new, |mut acc, mut part| {
+                            acc.append(&mut part);
+                            Ok(acc)
+                        })?;
+                    let raw_syncmers = packed_syncmers.len();
+                    let dictionary =
+                        impg::syng_parallel::sort_dedup_packed_syncmers(packed_syncmers);
+                    info!(
+                        "Built packed syncmer dictionary in {}: {} raw syncmers, {} unique syncmer nodes at +{}",
+                        format_duration(dictionary_start.elapsed()),
+                        raw_syncmers,
+                        dictionary.len(),
+                        format_duration(total_start.elapsed())
+                    );
+
+                    let preload_start = Instant::now();
+                    let mut index = impg::syng::SyngIndex::new_with_packed_syncmer_dictionary(
+                        params,
+                        &dictionary,
+                    )?;
+                    configure_position_sampling(&mut index)?;
+                    info!(
+                        "Preloaded {} syncmer nodes into KmerHash in {}",
+                        dictionary.len(),
+                        format_duration(preload_start.elapsed())
+                    );
+
+                    let config = ragc_core::DecompressorConfig { verbosity: 0 };
+                    let mut decompressor =
+                        ragc_core::Decompressor::open(&agc_path, config).map_err(|e| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("Failed to open AGC file '{}': {}", agc_path, e),
+                            )
+                        })?;
+                    let mut sequence_count = 0usize;
+                    let mut indexed_bp = 0u64;
+                    let mut total_syncmers = 0usize;
+                    for (record_idx, record) in records.iter().enumerate() {
+                        let contig_start = Instant::now();
+                        let seq = read_syng_agc_record(&mut decompressor, record)?;
+                        info!("  Processing {} ({} bp)", record.name, seq.len());
+                        let stats = index
+                            .add_sequence_with_existing_syncmers(record.name.clone(), seq)?;
+                        sequence_count += 1;
+                        indexed_bp += stats.sequence_len as u64;
+                        total_syncmers += stats.syncmers;
+                        info!(
+                            "  Indexed contig {}/{} {}: {} bp, {} syncmers, indexed={}, elapsed {}, total {} sequences / {} bp / {} syncmers at +{}",
+                            record_idx + 1,
+                            records.len(),
+                            record.name,
+                            stats.sequence_len,
+                            stats.syncmers,
+                            stats.indexed,
+                            format_duration(contig_start.elapsed()),
+                            sequence_count,
+                            indexed_bp,
+                            total_syncmers,
+                            format_duration(total_start.elapsed())
+                        );
+                    }
+
+                    info!(
+                        "Built syng paths from {} sequences ({} bp, {} syncmers) in {}",
+                        sequence_count,
+                        indexed_bp,
+                        total_syncmers,
+                        format_duration(input_start.elapsed())
+                    );
+                    index
+                } else {
                 // Stream sequences from AGC
                 let input_start = Instant::now();
                 info!(
@@ -3829,7 +4072,81 @@ fn run() -> io::Result<()> {
                     format_duration(input_start.elapsed())
                 );
                 index
+                }
             } else if let Some(fasta_path) = fasta {
+                if parallel_dictionary {
+                    let input_start = Instant::now();
+                    info!(
+                        "Reading sequences from FASTA for parallel dictionary build: {} at +{}",
+                        fasta_path,
+                        format_duration(total_start.elapsed())
+                    );
+                    let sequences = read_syng_fasta_sequences(&fasta_path)?;
+                    let total_sequences = sequences.len();
+                    let total_bp: u64 =
+                        sequences.iter().map(|(_, seq)| seq.len() as u64).sum();
+                    info!(
+                        "Read {} FASTA sequences ({} bp) for dictionary prepass",
+                        sequences.len(),
+                        total_bp
+                    );
+
+                    let dictionary_start = Instant::now();
+                    let dictionary =
+                        impg::syng_parallel::build_packed_syncmer_dictionary(params, &sequences)?;
+                    info!(
+                        "Built packed syncmer dictionary in {}: {} unique syncmer nodes at +{}",
+                        format_duration(dictionary_start.elapsed()),
+                        dictionary.len(),
+                        format_duration(total_start.elapsed())
+                    );
+
+                    let preload_start = Instant::now();
+                    let mut index = impg::syng::SyngIndex::new_with_packed_syncmer_dictionary(
+                        params,
+                        &dictionary,
+                    )?;
+                    configure_position_sampling(&mut index)?;
+                    info!(
+                        "Preloaded {} syncmer nodes into KmerHash in {}",
+                        dictionary.len(),
+                        format_duration(preload_start.elapsed())
+                    );
+
+                    let mut sequence_count = 0usize;
+                    let mut total_syncmers = 0usize;
+                    for (seq_idx, (name, seq)) in sequences.into_iter().enumerate() {
+                        let seq_start = Instant::now();
+                        let seq_len = seq.len();
+                        info!("  Processing {} ({} bp)", name, seq_len);
+                        let stats = index.add_sequence_with_existing_syncmers(name.clone(), seq)?;
+                        sequence_count += 1;
+                        total_syncmers += stats.syncmers;
+                        info!(
+                            "  Indexed sequence {}/{} {}: {} bp, {} syncmers, indexed={}, elapsed {}, total {} sequences / {} bp / {} syncmers at +{}",
+                            seq_idx + 1,
+                            total_sequences,
+                            name,
+                            stats.sequence_len,
+                            stats.syncmers,
+                            stats.indexed,
+                            format_duration(seq_start.elapsed()),
+                            sequence_count,
+                            total_bp,
+                            total_syncmers,
+                            format_duration(total_start.elapsed())
+                        );
+                    }
+
+                    info!(
+                        "Built syng paths from {} sequences ({} bp, {} syncmers) in {}",
+                        sequence_count,
+                        total_bp,
+                        total_syncmers,
+                        format_duration(input_start.elapsed())
+                    );
+                    index
+                } else {
                 // Read sequences from FASTA
                 let input_start = Instant::now();
                 info!(
@@ -3933,6 +4250,7 @@ fn run() -> io::Result<()> {
                     format_duration(input_start.elapsed())
                 );
                 index
+                }
             } else {
                 unreachable!()
             };
