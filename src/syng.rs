@@ -136,7 +136,7 @@ pub struct SampledPositions {
 
 impl SampledPositions {
     const MAGIC: u64 = 0x494D50_53504F53; // "IMPSPOS"
-    const VERSION: u64 = 3;
+    const VERSION: u64 = 4;
 
     fn from_samples(
         sample_rate: u32,
@@ -394,7 +394,7 @@ pub struct SampledPathSteps {
 
 impl SampledPathSteps {
     const MAGIC: u64 = 0x494D50_50535450; // "IMPPSTP"
-    const VERSION: u64 = 3;
+    const VERSION: u64 = 4;
 
     #[allow(dead_code)]
     fn from_samples(
@@ -734,10 +734,11 @@ impl SampledPositionBuilder {
         let path_step_start = self.path_step_data.len();
         let mut prev_bp = 0u64;
         let mut prev_step = 0u32;
+        let last_step_idx = steps.last().map(|step| step.step_idx).unwrap_or(0);
         for step in steps {
             let node_id = step.signed_node.unsigned_abs();
             let bp_pos = step.bp_pos;
-            if !sample_regular_path_step(step.step_idx, self.sample_rate) {
+            if !sample_path_step(step.step_idx, self.sample_rate, last_step_idx) {
                 continue;
             }
             if self.collect_positions {
@@ -925,14 +926,15 @@ fn validate_position_sample_rate(sample_rate: u32) -> io::Result<()> {
     Ok(())
 }
 
-fn sample_regular_path_step(step_idx: u32, sample_rate: u32) -> bool {
-    (step_idx as u64) % (sample_rate as u64) == 0
+fn sample_path_step(step_idx: u32, sample_rate: u32, last_step_idx: u32) -> bool {
+    (step_idx as u64) % (sample_rate as u64) == 0 || step_idx == last_step_idx
 }
 
 #[allow(clippy::too_many_arguments)]
 fn encode_regular_position_sample_if_selected(
     path_start: u64,
     sample_rate: u32,
+    last_step_idx: u32,
     collect_positions: bool,
     step: PathStepRecord,
     prev_sample_bp: &mut u64,
@@ -941,7 +943,7 @@ fn encode_regular_position_sample_if_selected(
     position_samples: &mut Vec<(u32, u64)>,
     path_step_data: &mut Vec<u8>,
 ) -> io::Result<()> {
-    if !sample_regular_path_step(step.step_idx, sample_rate) {
+    if !sample_path_step(step.step_idx, sample_rate, last_step_idx) {
         return Ok(());
     }
 
@@ -2568,6 +2570,12 @@ impl SyngIndex {
         }
 
         let expected_steps = start.num_syncmers as usize;
+        let last_step_idx = u32::try_from(expected_steps - 1).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "GBWT path step count exceeds u32",
+            )
+        })?;
         let mut position_samples = Vec::new();
         let mut path_step_data = Vec::new();
         let mut path_step_sample_count = 0u64;
@@ -2588,6 +2596,7 @@ impl SyngIndex {
         encode_regular_position_sample_if_selected(
             path_start,
             sample_rate,
+            last_step_idx,
             collect_positions,
             first_step,
             &mut prev_sample_bp,
@@ -2624,6 +2633,7 @@ impl SyngIndex {
             encode_regular_position_sample_if_selected(
                 path_start,
                 sample_rate,
+                last_step_idx,
                 collect_positions,
                 step,
                 &mut prev_sample_bp,
@@ -4470,7 +4480,7 @@ mod tests {
     }
 
     #[test]
-    fn test_regular_sampled_positions_use_step_grid() {
+    fn test_regular_sampled_positions_use_step_grid_and_terminal_step() {
         let _guard = lock_syng();
         let params = SyncmerParams::default();
         let mut index = SyngIndex::new(params);
@@ -4482,6 +4492,9 @@ mod tests {
         index.finalize_online_sampled_positions().unwrap().unwrap();
 
         let path_idx = *index.name_map.name_to_path.get("sampleA#0#chr1").unwrap() as usize;
+        let path_start = index.name_map.path_starts[path_idx].as_ref().unwrap();
+        let full_steps = index.walk_path_steps(path_start).unwrap();
+        let last_step_idx = full_steps.last().unwrap().step_idx;
         let sampled_steps = index
             .sampled_path_steps
             .as_ref()
@@ -4493,10 +4506,10 @@ mod tests {
             "test sequence should produce several regular checkpoints"
         );
         assert_eq!(sampled_steps[0].step_idx, 0);
+        assert_eq!(sampled_steps.last().unwrap().step_idx, last_step_idx);
         for step in &sampled_steps {
-            assert_eq!(
-                step.step_idx % 8,
-                0,
+            assert!(
+                step.step_idx % 8 == 0 || step.step_idx == last_step_idx,
                 "regular sampled checkpoint is off-grid: {:?}",
                 step
             );
@@ -4505,6 +4518,40 @@ mod tests {
             index.sampled_positions.as_ref().unwrap().sample_count(),
             index.sampled_path_steps.as_ref().unwrap().sample_count(),
             "forward and inverted sidecars should sample the same path steps"
+        );
+    }
+
+    #[test]
+    fn test_terminal_sampled_for_short_paths() {
+        let _guard = lock_syng();
+        let params = SyncmerParams::default();
+        let mut index = SyngIndex::new(params);
+        index.enable_online_sampled_positions(256).unwrap();
+        index.add_sequence(
+            "sampleA#0#chr1".to_string(),
+            make_test_sequence(2_000, 92),
+        );
+        index.finalize_online_sampled_positions().unwrap().unwrap();
+
+        let path_idx = *index.name_map.name_to_path.get("sampleA#0#chr1").unwrap() as usize;
+        let path_start = index.name_map.path_starts[path_idx].as_ref().unwrap();
+        let full_steps = index.walk_path_steps(path_start).unwrap();
+        assert!(
+            full_steps.len() > 1 && full_steps.len() < 256,
+            "test setup should produce a short nonempty syncmer path"
+        );
+
+        let sampled_steps = index
+            .sampled_path_steps
+            .as_ref()
+            .unwrap()
+            .decode_path(path_idx)
+            .unwrap();
+        assert_eq!(sampled_steps.len(), 2);
+        assert_eq!(sampled_steps[0].step_idx, 0);
+        assert_eq!(
+            sampled_steps[1].step_idx,
+            full_steps.last().unwrap().step_idx
         );
     }
 
@@ -4854,12 +4901,15 @@ mod tests {
         seq_a.extend_from_slice(&make_test_sequence(400, 1));
         let mut seq_b = shared.clone();
         seq_b.extend_from_slice(&make_test_sequence(400, 2));
-        let seqs = vec![("ga".to_string(), seq_a.clone()), ("gb".to_string(), seq_b)];
+        let mut index = SyngIndex::new(params);
+        index.enable_online_sampled_positions(16).unwrap();
+        index.add_sequence("ga".to_string(), seq_a.clone());
+        index.add_sequence("gb".to_string(), seq_b);
+        index.finalize_online_sampled_positions().unwrap().unwrap();
 
-        let index = SyngIndex::build(params, seqs.into_iter());
-        let path_intervals = index.query_region("ga", 0, 1000, 120).unwrap();
+        let path_intervals = index.query_region("ga", 200, 800, 120).unwrap();
         let sequence_intervals = index
-            .query_region_from_sequence_ext(&seq_a, 0, 0, 1000, 120, 0)
+            .query_region_from_sequence_ext(&seq_a, 0, 200, 800, 120, 0)
             .unwrap();
 
         let to_set =

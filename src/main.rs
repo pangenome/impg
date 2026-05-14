@@ -1875,7 +1875,7 @@ enum Args {
         #[clap(short = 'o', long, value_parser)]
         output: String,
 
-        /// Sample every N syncmer steps per path for positional sidecars.
+        /// Sample every N syncmer steps plus each path's terminal syncmer.
         #[arg(help_heading = "Position sampling")]
         #[clap(long, value_parser, default_value_t = impg::syng::DEFAULT_POSITION_SAMPLE_RATE)]
         position_sample_rate: u32,
@@ -1956,7 +1956,7 @@ enum Args {
         #[clap(long, action)]
         force: bool,
 
-        /// Sample every N syncmer steps per path for positional sidecars.
+        /// Sample every N syncmer steps plus each path's terminal syncmer.
         #[arg(help_heading = "Position sampling")]
         #[clap(long, value_parser, default_value_t = impg::syng::DEFAULT_POSITION_SAMPLE_RATE)]
         position_sample_rate: u32,
