@@ -1507,6 +1507,42 @@ impl SyngIndex {
         self.seqhash
     }
 
+    /// Number of syncmer nodes stored in the KmerHash (valid IDs are `1..=N`).
+    pub fn num_syncmer_nodes(&self) -> usize {
+        unsafe { (*self.kmer_hash).max as usize }
+    }
+
+    /// Syncmer node length in bp (= `w + k`).
+    pub fn syncmer_length_bp(&self) -> usize {
+        unsafe { (*self.kmer_hash).len as usize }
+    }
+
+    /// Unpack a syncmer node's DNA sequence (uppercase ASCII A/C/G/T).
+    ///
+    /// `signed_node_id` follows syng's convention: positive returns the
+    /// canonical sequence, negative returns its reverse complement.
+    /// IDs are 1-based; `signed_node_id.abs()` must be in `1..=num_syncmer_nodes()`.
+    pub fn syncmer_seq(&self, signed_node_id: i32) -> Vec<u8> {
+        let len = self.syncmer_length_bp();
+        let mut buf = vec![0u8; len];
+        unsafe {
+            syng_ffi::kmerHashSeq(
+                self.kmer_hash,
+                signed_node_id as i64,
+                buf.as_mut_ptr() as *mut std::os::raw::c_char,
+            );
+        }
+        buf
+    }
+
+    /// Public wrapper around the internal forward GBWT walk.
+    ///
+    /// Returns `(signed_node_id, absolute_bp_pos)` for every syncmer in the
+    /// forward path.
+    pub fn walk_forward_path(&self, start: &GbwtPathStart) -> Vec<(i32, u64)> {
+        self.walk_path(start)
+    }
+
     /// Build a SequenceIndex from the name map (for interop with graph engines).
     pub fn build_seq_index(&self) -> crate::seqidx::SequenceIndex {
         let mut seq_index = crate::seqidx::SequenceIndex::new();
