@@ -5945,6 +5945,8 @@ mod tests {
         let output = std::process::Command::new(&bin)
             .args([
                 "query",
+                "-d",
+                "0",
                 "-a",
                 output_prefix.to_str().unwrap(),
                 "--sequence-files",
@@ -6031,6 +6033,8 @@ mod tests {
         let output = std::process::Command::new(&bin)
             .args([
                 "query",
+                "-d",
+                "0",
                 "-a",
                 output_prefix.to_str().unwrap(),
                 "--sequence-files",
@@ -6744,6 +6748,8 @@ mod tests {
         let output = std::process::Command::new(&bin)
             .args([
                 "query",
+                "-d",
+                "0",
                 "-a",
                 idx_prefix.to_str().unwrap(),
                 "--sequence-files",
@@ -6838,6 +6844,8 @@ mod tests {
         let output = std::process::Command::new(&bin)
             .args([
                 "query",
+                "-d",
+                "0",
                 "-a",
                 paf_path.to_str().unwrap(),
                 "--sequence-files",
@@ -6886,6 +6894,8 @@ mod tests {
         let output = std::process::Command::new(&bin)
             .args([
                 "query",
+                "-d",
+                "0",
                 "-a",
                 "/tmp/nonexistent_prefix",
                 "-r",

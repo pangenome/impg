@@ -1106,6 +1106,34 @@ impl TransitiveOpts {
     }
 }
 
+const MERGE_DISTANCE_REQUIRED_TEXT: &str = "\
+-d/--merge-distance is required. It merges ranges gathered during query before \
+output or partitioning: ranges separated by at most D bp are treated as one \
+range. D is also the largest internal gap/SV that a one-hop query can absorb \
+inside one reported interval; larger gaps remain split. Pick D for your locus \
+(use 0 for only overlapping/touching ranges).";
+
+fn missing_merge_distance_error(command: &str, allow_no_merge: bool) -> io::Error {
+    let mut msg =
+        format!("{MERGE_DISTANCE_REQUIRED_TEXT}\n\nFor `impg {command}`, pass `-d <bp>`.");
+    if allow_no_merge {
+        msg.push_str(" Use `--no-merge` to explicitly disable merging.");
+    }
+    io::Error::new(io::ErrorKind::InvalidInput, msg)
+}
+
+fn require_merge_distance(
+    command: &str,
+    merge_distance: Option<i32>,
+    no_merge: bool,
+) -> io::Result<i32> {
+    if no_merge {
+        Ok(-1)
+    } else {
+        merge_distance.ok_or_else(|| missing_merge_distance_error(command, true))
+    }
+}
+
 /// Common query and filtering options
 #[derive(Parser, Debug, Clone)]
 struct QueryOpts {
@@ -1119,18 +1147,15 @@ struct QueryOpts {
     #[clap(short = 'b', long, value_parser, conflicts_with = "target_range")]
     target_bed: Option<String>,
 
-    /// Maximum distance between regions to merge
+    /// Required. Merge query-gathered ranges separated by at most this many bp.
+    /// This also sets the largest internal gap/SV one query hop can absorb into
+    /// one reported interval; larger gaps stay split. Use 0 for only
+    /// overlapping/touching ranges, or --no-merge to disable merging.
     #[arg(help_heading = "Filtering and merging")]
-    #[clap(
-        short = 'd',
-        long,
-        value_parser,
-        conflicts_with = "no_merge",
-        default_value_t = 0
-    )]
-    merge_distance: i32,
+    #[clap(short = 'd', long, value_parser, conflicts_with = "no_merge")]
+    merge_distance: Option<i32>,
 
-    /// Disable merging for all output formats
+    /// Explicitly disable merging for all output formats
     #[arg(help_heading = "Filtering and merging")]
     #[clap(long, action, conflicts_with = "merge_distance")]
     no_merge: bool,
@@ -1175,13 +1200,14 @@ struct QueryOpts {
 }
 
 impl QueryOpts {
+    fn validate_merge_distance(&self, command: &str) -> io::Result<()> {
+        require_merge_distance(command, self.merge_distance, self.no_merge).map(|_| ())
+    }
+
     /// Get effective merge distance (-1 if merging is disabled)
     fn effective_merge_distance(&self) -> i32 {
-        if self.no_merge {
-            -1
-        } else {
-            self.merge_distance
-        }
+        require_merge_distance("query", self.merge_distance, self.no_merge)
+            .expect("merge distance should be validated before use")
     }
 
     /// Whether merged intervals should collapse opposite strands for a given output format
@@ -1521,10 +1547,19 @@ enum Args {
         separate_files: bool,
 
         // --- Filtering and merging ---
-        /// Maximum distance between regions to merge
+        /// Required. Merge query-gathered ranges separated by at most this many bp
+        /// before partition assignment. This sets the largest internal gap/SV a
+        /// one-hop query can absorb into one partition interval; larger gaps stay
+        /// split. Use 0 for only overlapping/touching ranges, or --no-merge to
+        /// disable merging.
         #[arg(help_heading = "Filtering and merging")]
-        #[clap(short = 'd', long, value_parser, default_value_t = 100000)]
-        merge_distance: i32,
+        #[clap(short = 'd', long, value_parser, conflicts_with = "no_merge")]
+        merge_distance: Option<i32>,
+
+        /// Explicitly disable merging before partition assignment
+        #[arg(help_heading = "Filtering and merging")]
+        #[clap(long, action, conflicts_with = "merge_distance")]
+        no_merge: bool,
 
         /// Minimum gap-compressed identity threshold (0.0-1.0)
         #[arg(help_heading = "Filtering and merging")]
@@ -2116,6 +2151,7 @@ fn run() -> io::Result<()> {
             gfa_maf_fasta,
             engine_cli,
             merge_distance,
+            no_merge,
             min_result_identity,
             transitive_opts,
             starting_sequences_file,
@@ -2126,6 +2162,8 @@ fn run() -> io::Result<()> {
             approximate,
         } => {
             initialize_threads_and_log(&common);
+
+            let merge_distance = require_merge_distance("partition", merge_distance, no_merge)?;
 
             validate_selection_mode(&selection_mode)?;
             validate_output_format(&output_format, &["bed", "gfa", "maf", "fasta"])?;
@@ -2328,6 +2366,7 @@ fn run() -> io::Result<()> {
             engine_cli,
         } => {
             initialize_threads_and_log(&common);
+            query.validate_merge_distance("query")?;
 
             // Migration errors for removed format strings
             if output_format == "gfa-poa" {
@@ -3127,6 +3166,7 @@ fn run() -> io::Result<()> {
         } => {
             initialize_threads_and_log(&common);
             refine.validate()?;
+            refine.query.validate_merge_distance("refine")?;
 
             let alignment_files = resolve_alignment_files(&alignment)?;
             let sequence_files = refine.sequence.resolve_sequence_files()?;
@@ -3299,6 +3339,7 @@ fn run() -> io::Result<()> {
             engine_cli,
         } => {
             initialize_threads_and_log(&common);
+            query.validate_merge_distance("similarity")?;
 
             // Validate delim_pos
             if delim_pos < 1 {
@@ -6964,6 +7005,45 @@ mod tests {
     fn test_resolve_syng_syncmer_params_rejects_even_total_length() {
         let err = resolve_syng_syncmer_params(None, Some(8), None, Some(64), 7).unwrap_err();
         assert!(err.to_string().contains("must be odd"));
+    }
+
+    fn minimal_query_opts(merge_distance: Option<i32>, no_merge: bool) -> QueryOpts {
+        QueryOpts {
+            target_range: Some("chr1:0-100".to_string()),
+            target_bed: None,
+            merge_distance,
+            no_merge,
+            min_result_identity: None,
+            min_output_length: None,
+            subset_sequence_list: None,
+            transitive: false,
+            transitive_opts: TransitiveOpts {
+                transitive_dfs: false,
+                max_depth: 2,
+                min_transitive_len: None,
+                min_distance_between_ranges: 10,
+            },
+            original_sequence_coordinates: false,
+            approximate: false,
+            consider_strandness: false,
+        }
+    }
+
+    #[test]
+    fn test_query_merge_distance_requires_explicit_choice() {
+        let err = minimal_query_opts(None, false)
+            .validate_merge_distance("query")
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("-d/--merge-distance is required"));
+        assert!(msg.contains("largest internal gap/SV"));
+    }
+
+    #[test]
+    fn test_query_no_merge_is_explicit_choice() {
+        let opts = minimal_query_opts(None, true);
+        opts.validate_merge_distance("query").unwrap();
+        assert_eq!(opts.effective_merge_distance(), -1);
     }
 
     #[test]

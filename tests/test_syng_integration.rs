@@ -848,6 +848,8 @@ fn test_partition_syng_end_to_end_bed() {
     let part = Command::new(&bin)
         .args([
             "partition",
+            "-d",
+            "100000",
             "-a",
             syng_prefix.to_str().unwrap(),
             "-w",
@@ -977,6 +979,8 @@ fn test_query_syng_gfa_subwindow_splitter() {
     let out = Command::new(&bin)
         .args([
             "query",
+            "-d",
+            "0",
             "-a", syng_prefix.to_str().unwrap(),
             "--sequence-files", fasta_path.to_str().unwrap(),
             "-r", "sampleA#0#chr1:0-3000",
