@@ -470,6 +470,34 @@ fn emit_syng_map<W: Write>(
     Ok(())
 }
 
+fn emit_syng_map_gaf<W: Write>(
+    out: &mut W,
+    syng_matcher: &impg::syng::SyngMatcher,
+    queries: Vec<(String, Vec<u8>)>,
+    min_anchors: usize,
+) -> io::Result<()> {
+    let syncmer_len = (syng_matcher.params.k + syng_matcher.params.w) as u64;
+    for (query_name, query_seq) in queries {
+        let mut syncmers = syng_matcher.matched_syncmers_in_sequence(&query_seq);
+        if syncmers.len() < min_anchors {
+            continue;
+        }
+        syncmers.sort_by(|a, b| {
+            a.query_pos
+                .cmp(&b.query_pos)
+                .then(a.node_id.cmp(&b.node_id))
+        });
+        write_syng_map_gaf(
+            out,
+            &query_name,
+            query_seq.len() as u64,
+            syncmer_len,
+            &syncmers,
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn silence_stdout_for_process() -> io::Result<RawFd> {
     io::stdout().flush()?;
@@ -3809,27 +3837,51 @@ fn run() -> io::Result<()> {
             initialize_threads_and_log(&common);
 
             let syng_prefix = detect_syng_prefix(&index).unwrap_or(index);
-            info!("Loading syng index from prefix: {}", syng_prefix);
+            if !matches!(output_format.as_str(), "gaf" | "paf") {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "unsupported map output format '{}'; expected 'gaf' or 'paf'",
+                        output_format
+                    ),
+                ));
+            }
             #[cfg(unix)]
             let saved_stdout = silence_stdout_for_process()?;
             #[cfg(not(unix))]
             silence_stdout_for_process()?;
 
-            let syng_index =
-                impg::syng::SyngIndex::load(&syng_prefix, impg::syng::SyncmerParams::default())?;
             let queries = read_query_sequences(&query)?;
 
             if let Some(path) = output {
                 let mut out = BufWriter::new(File::create(path)?);
-                emit_syng_map(
-                    &mut out,
-                    &syng_index,
-                    queries,
-                    &output_format,
-                    min_anchors,
-                    chain_budget,
-                    max_hits,
-                )?;
+                match output_format.as_str() {
+                    "gaf" => {
+                        info!("Loading syng syncmer dictionary from prefix: {}", syng_prefix);
+                        let syng_matcher = impg::syng::SyngMatcher::load(
+                            &syng_prefix,
+                            impg::syng::SyncmerParams::default(),
+                        )?;
+                        emit_syng_map_gaf(&mut out, &syng_matcher, queries, min_anchors)?;
+                    }
+                    "paf" => {
+                        info!("Loading syng index from prefix: {}", syng_prefix);
+                        let syng_index = impg::syng::SyngIndex::load(
+                            &syng_prefix,
+                            impg::syng::SyncmerParams::default(),
+                        )?;
+                        emit_syng_map(
+                            &mut out,
+                            &syng_index,
+                            queries,
+                            &output_format,
+                            min_anchors,
+                            chain_budget,
+                            max_hits,
+                        )?;
+                    }
+                    _ => unreachable!(),
+                }
                 out.flush()?;
                 #[cfg(unix)]
                 unsafe {
@@ -3837,15 +3889,33 @@ fn run() -> io::Result<()> {
                 }
             } else {
                 let mut out = Vec::new();
-                emit_syng_map(
-                    &mut out,
-                    &syng_index,
-                    queries,
-                    &output_format,
-                    min_anchors,
-                    chain_budget,
-                    max_hits,
-                )?;
+                match output_format.as_str() {
+                    "gaf" => {
+                        info!("Loading syng syncmer dictionary from prefix: {}", syng_prefix);
+                        let syng_matcher = impg::syng::SyngMatcher::load(
+                            &syng_prefix,
+                            impg::syng::SyncmerParams::default(),
+                        )?;
+                        emit_syng_map_gaf(&mut out, &syng_matcher, queries, min_anchors)?;
+                    }
+                    "paf" => {
+                        info!("Loading syng index from prefix: {}", syng_prefix);
+                        let syng_index = impg::syng::SyngIndex::load(
+                            &syng_prefix,
+                            impg::syng::SyncmerParams::default(),
+                        )?;
+                        emit_syng_map(
+                            &mut out,
+                            &syng_index,
+                            queries,
+                            &output_format,
+                            min_anchors,
+                            chain_budget,
+                            max_hits,
+                        )?;
+                    }
+                    _ => unreachable!(),
+                }
                 #[cfg(unix)]
                 {
                     write_all_to_fd(saved_stdout, &out)?;

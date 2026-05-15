@@ -128,6 +128,53 @@ fn existing_syng_sidecar_path(prefix: &str, suffix: &str) -> String {
         .unwrap_or_else(|| syng_sidecar_path(prefix, suffix))
 }
 
+fn read_kmer_hash_from_prefix(prefix: &str) -> io::Result<*mut syng_ffi::KmerHash> {
+    let schema_text = syng_ffi::syng_schema_text();
+    let khash_path = format!("{}.1khash", prefix);
+    if !Path::new(&khash_path).exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("KmerHash file not found: {}", khash_path),
+        ));
+    }
+    let khash_cpath = CString::new(khash_path.as_str())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let khash_type = CString::new("khash").unwrap();
+    unsafe {
+        let schema = syng_ffi::oneSchemaCreateFromText(schema_text.as_ptr());
+        if schema.is_null() {
+            return Err(io::Error::other(
+                "Failed to create ONEcode schema for khash read",
+            ));
+        }
+        let of = syng_ffi::oneFileOpenRead(khash_cpath.as_ptr(), schema, khash_type.as_ptr(), 1);
+        if of.is_null() {
+            syng_ffi::oneSchemaDestroy(schema);
+            return Err(io::Error::other(format!(
+                "Failed to open {} for reading",
+                khash_path
+            )));
+        }
+        let kh = syng_ffi::kmerHashReadOneFile(of);
+        syng_ffi::oneFileClose(of);
+        syng_ffi::oneSchemaDestroy(schema);
+        if kh.is_null() {
+            return Err(io::Error::other("kmerHashReadOneFile returned null"));
+        }
+        Ok(kh)
+    }
+}
+
+fn encode_query_base(base: u8) -> (u8, bool) {
+    match base {
+        b'a' | b'A' | 0 => (0, true),
+        b'c' | b'C' | 1 => (1, true),
+        b'g' | b'G' | 2 => (2, true),
+        b't' | b'T' | 3 => (3, true),
+        _ => (0, false),
+    }
+}
+
 pub fn syng_names_path(prefix: &str) -> String {
     syng_sidecar_path(prefix, "names")
 }
@@ -1441,6 +1488,109 @@ pub struct SyngMapHit {
     pub anchors: usize,
 }
 
+fn matched_syncmers_in_sequence_impl(
+    seqhash: *mut syng_ffi::Seqhash,
+    kmer_hash: *mut syng_ffi::KmerHash,
+    params: SyncmerParams,
+    query_seq: &[u8],
+) -> Vec<SyngQuerySyncmer> {
+    let syncmer_len = (params.w + params.k) as usize;
+    if query_seq.len() < syncmer_len {
+        return Vec::new();
+    }
+
+    let mut seq_buf: Vec<u8> = Vec::with_capacity(query_seq.len() + 1);
+    let mut valid_prefix: Vec<usize> = Vec::with_capacity(query_seq.len() + 1);
+    valid_prefix.push(0);
+    for &base in query_seq {
+        let (encoded, valid) = encode_query_base(base);
+        seq_buf.push(encoded);
+        let prev = *valid_prefix.last().unwrap();
+        valid_prefix.push(prev + usize::from(valid));
+    }
+    seq_buf.push(0);
+
+    let mut out = Vec::new();
+    unsafe {
+        let sit = syng_ffi::syncmerIterator(
+            seqhash,
+            seq_buf.as_mut_ptr() as *mut i8,
+            query_seq.len() as i32,
+        );
+        let mut pos: i32 = 0;
+        while syng_ffi::syncmerNext(sit, std::ptr::null_mut(), &mut pos, std::ptr::null_mut()) {
+            if pos < 0 {
+                continue;
+            }
+            let start = pos as usize;
+            let Some(end) = start.checked_add(syncmer_len) else {
+                continue;
+            };
+            if end > query_seq.len() || valid_prefix[end] - valid_prefix[start] != syncmer_len {
+                continue;
+            }
+
+            let mut kmer_index: i64 = 0;
+            if syng_ffi::kmerHashFind(
+                kmer_hash,
+                seq_buf.as_mut_ptr().add(start) as *mut i8,
+                &mut kmer_index,
+            ) {
+                let signed_node = kmer_index as i32;
+                out.push(SyngQuerySyncmer {
+                    signed_node,
+                    node_id: signed_node.unsigned_abs(),
+                    query_pos: start as u64,
+                });
+            }
+        }
+        syng_ffi::impg_seqhashIteratorDestroy(sit);
+    }
+    out
+}
+
+/// Lightweight syng syncmer dictionary handle for read-to-node matching.
+///
+/// This loads only `.syng.meta` and `.1khash`. It deliberately does not load
+/// the GBWT, names, or positional sidecars, so `impg map -o gaf` can run as a
+/// fast syncmer membership query without requiring coordinate indexes.
+pub struct SyngMatcher {
+    kmer_hash: *mut syng_ffi::KmerHash,
+    seqhash: *mut syng_ffi::Seqhash,
+    pub params: SyncmerParams,
+}
+
+// SAFETY: The matcher only uses read-only C query functions with local iterators.
+unsafe impl Send for SyngMatcher {}
+// SAFETY: See `Send`; shared access does not mutate the underlying dictionary.
+unsafe impl Sync for SyngMatcher {}
+
+impl SyngMatcher {
+    pub fn load(prefix: &str, _params: SyncmerParams) -> io::Result<Self> {
+        let metadata_path = existing_syng_sidecar_path(prefix, "meta");
+        let metadata = SyngMetadata::load(&metadata_path)?;
+        let params = metadata.params;
+        let kmer_hash = read_kmer_hash_from_prefix(prefix)?;
+        let seqhash = unsafe {
+            syng_ffi::impg_seqhashCreateSafe(params.k as i32, params.w as i32, params.seed as i32)
+        };
+        if seqhash.is_null() {
+            unsafe { syng_ffi::kmerHashDestroy(kmer_hash) };
+            return Err(io::Error::other("impg_seqhashCreateSafe returned null"));
+        }
+        Ok(Self {
+            kmer_hash,
+            seqhash,
+            params,
+        })
+    }
+
+    /// Return query syncmers that are present in this syng dictionary.
+    pub fn matched_syncmers_in_sequence(&self, query_seq: &[u8]) -> Vec<SyngQuerySyncmer> {
+        matched_syncmers_in_sequence_impl(self.seqhash, self.kmer_hash, self.params, query_seq)
+    }
+}
+
 /// A loaded GBWT index with syncmer hash and name mapping.
 ///
 /// This is the primary handle for syng integration. It owns the C-allocated
@@ -2037,44 +2187,12 @@ impl SyngIndex {
             gbwt
         };
 
-        // Read .1khash
-        let khash_path = format!("{}.1khash", prefix);
-        if !Path::new(&khash_path).exists() {
-            unsafe { syng_ffi::syngBWTdestroy(gbwt) };
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("KmerHash file not found: {}", khash_path),
-            ));
-        }
-        let khash_cpath = CString::new(khash_path.as_str())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        let khash_type = CString::new("khash").unwrap();
-        let kmer_hash = unsafe {
-            let schema = syng_ffi::oneSchemaCreateFromText(schema_text.as_ptr());
-            if schema.is_null() {
-                syng_ffi::syngBWTdestroy(gbwt);
-                return Err(io::Error::other(
-                    "Failed to create ONEcode schema for khash read",
-                ));
+        let kmer_hash = match read_kmer_hash_from_prefix(prefix) {
+            Ok(kh) => kh,
+            Err(e) => {
+                unsafe { syng_ffi::syngBWTdestroy(gbwt) };
+                return Err(e);
             }
-            let of =
-                syng_ffi::oneFileOpenRead(khash_cpath.as_ptr(), schema, khash_type.as_ptr(), 1);
-            if of.is_null() {
-                syng_ffi::oneSchemaDestroy(schema);
-                syng_ffi::syngBWTdestroy(gbwt);
-                return Err(io::Error::other(format!(
-                    "Failed to open {} for reading",
-                    khash_path
-                )));
-            }
-            let kh = syng_ffi::kmerHashReadOneFile(of);
-            syng_ffi::oneFileClose(of);
-            syng_ffi::oneSchemaDestroy(schema);
-            if kh.is_null() {
-                syng_ffi::syngBWTdestroy(gbwt);
-                return Err(io::Error::other("kmerHashReadOneFile returned null"));
-            }
-            kh
         };
 
         // Read names sidecar.
@@ -3110,47 +3228,7 @@ impl SyngIndex {
     /// The query sequence does not need to be one of the indexed paths. This
     /// is the primitive used by `impg map -o gaf`.
     pub fn matched_syncmers_in_sequence(&self, query_seq: &[u8]) -> Vec<SyngQuerySyncmer> {
-        let syncmer_len = (self.params.w + self.params.k) as usize;
-        if query_seq.len() < syncmer_len {
-            return Vec::new();
-        }
-
-        let mut seq_buf: Vec<u8> = Vec::with_capacity(query_seq.len() + 1);
-        seq_buf.extend(query_seq.iter().map(|&b| match b {
-            b'a' | b'A' | 0 => 0u8,
-            b'c' | b'C' | 1 => 1u8,
-            b'g' | b'G' | 2 => 2u8,
-            b't' | b'T' | 3 => 3u8,
-            _ => 0u8,
-        }));
-        seq_buf.push(0);
-
-        let mut out = Vec::new();
-        unsafe {
-            let sit = syng_ffi::syncmerIterator(
-                self.seqhash,
-                seq_buf.as_mut_ptr() as *mut i8,
-                query_seq.len() as i32,
-            );
-            let mut pos: i32 = 0;
-            while syng_ffi::syncmerNext(sit, std::ptr::null_mut(), &mut pos, std::ptr::null_mut()) {
-                let mut kmer_index: i64 = 0;
-                if syng_ffi::kmerHashFind(
-                    self.kmer_hash,
-                    seq_buf.as_mut_ptr().add(pos as usize) as *mut i8,
-                    &mut kmer_index,
-                ) {
-                    let signed_node = kmer_index as i32;
-                    out.push(SyngQuerySyncmer {
-                        signed_node,
-                        node_id: signed_node.unsigned_abs(),
-                        query_pos: pos as u64,
-                    });
-                }
-            }
-            syng_ffi::impg_seqhashIteratorDestroy(sit);
-        }
-        out
+        matched_syncmers_in_sequence_impl(self.seqhash, self.kmer_hash, self.params, query_seq)
     }
 
     /// Project query syncmer matches to indexed genome coordinates.
@@ -3613,6 +3691,19 @@ impl Drop for SyngIndex {
     }
 }
 
+impl Drop for SyngMatcher {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.kmer_hash.is_null() {
+                syng_ffi::kmerHashDestroy(self.kmer_hash);
+            }
+            if !self.seqhash.is_null() {
+                syng_ffi::impg_seqhashDestroy(self.seqhash);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3840,6 +3931,50 @@ mod tests {
         assert!(
             intervals.iter().any(|interval| interval.genome == "seqB"),
             "shared-prefix sequence should be discoverable through preloaded dictionary"
+        );
+    }
+
+    #[test]
+    fn test_matched_syncmers_skip_ambiguous_query_bases() {
+        let _guard = lock_syng();
+        let params = SyncmerParams::default();
+        let seq = make_test_sequence(1000, 42);
+        let index = SyngIndex::build(
+            params,
+            vec![("sample#0#chr1".to_string(), seq.clone())].into_iter(),
+        );
+        let baseline = index.matched_syncmers_in_sequence(&seq);
+        assert!(
+            !baseline.is_empty(),
+            "test sequence should produce indexed syncmer matches"
+        );
+
+        let syncmer_len = (params.w + params.k) as usize;
+        let (chosen, invalid_pos) = baseline
+            .iter()
+            .find_map(|sm| {
+                let start = sm.query_pos as usize;
+                let end = (start + syncmer_len).min(seq.len());
+                (start..end).find(|&pos| seq[pos] == b'A').map(|pos| (*sm, pos))
+            })
+            .expect("at least one matched syncmer should contain an A base");
+        assert!(
+            chosen.query_pos <= invalid_pos as u64
+                && (invalid_pos as u64)
+                    < chosen.query_pos.saturating_add(syncmer_len as u64)
+        );
+
+        let mut query = seq.clone();
+        query[invalid_pos] = b'N';
+        let matches = index.matched_syncmers_in_sequence(&query);
+        assert!(
+            matches.iter().all(|sm| {
+                !(sm.query_pos <= invalid_pos as u64
+                    && (invalid_pos as u64)
+                        < sm.query_pos.saturating_add(syncmer_len as u64))
+            }),
+            "matched syncmers must not span ambiguous query bases: {:?}",
+            matches
         );
     }
 

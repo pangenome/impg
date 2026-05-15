@@ -583,6 +583,36 @@ fn test_syng_map_cli_gaf_and_paf() {
         assert_eq!(fields[0], "read1");
     }
 
+    for suffix in ["1gbwt", "syng.names", "syng.spos", "syng.pstep"] {
+        std::fs::remove_file(dir.join(format!("idx.{suffix}"))).ok();
+    }
+    let gaf_khash_only = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            query_path.to_str().unwrap(),
+            "-o",
+            "gaf",
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o gaf with only khash");
+    assert!(
+        gaf_khash_only.status.success(),
+        "impg map -o gaf should only require .1khash/.meta, stderr: {}",
+        String::from_utf8_lossy(&gaf_khash_only.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&gaf_khash_only.stdout)
+            .lines()
+            .collect::<Vec<_>>()
+            .is_empty(),
+        "expected GAF output with only .1khash/.meta present"
+    );
+
     std::fs::remove_dir_all(&dir).ok();
 }
 
