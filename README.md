@@ -72,12 +72,15 @@ your LLVM install (see `env -i … LIBCLANG_PATH=…`).
 ## Quick start
 
 ```bash
-impg query -a cerevisiae.pan.paf.gz -r S288C#1#chrI:50000-100000 -x
+impg query -a cerevisiae.pan.paf.gz -r S288C#1#chrI:50000-100000 -d 1000 -x
 ```
 
 - `-a` — alignment file (PAF / 1ALN / TPA). PAF must use `=`/`X` CIGAR ops
   (from `wfmash` or `minimap2 --eqx`).
 - `-r` — target range, `seq:start-end`.
+- `-d` — merge query-gathered ranges separated by up to this many bp.
+  This is also the largest internal gap/SV one query hop can absorb into
+  one reported interval.
 - `-x` — walk the transitive closure: find everything aligned to the
   initial result, recursively.
 
@@ -104,31 +107,31 @@ exhaustive flag list — this section covers the flags you'll actually turn.
 
 ```bash
 # A single range
-impg query -a aln.paf -r chr1:1000-2000
+impg query -a aln.paf -r chr1:1000-2000 -d 100
 
 # Transitive closure (depth 2 by default)
-impg query -a aln.paf -r chr1:1000-2000 -x -m 3
+impg query -a aln.paf -r chr1:1000-2000 -d 100 -x -m 3
 
 # Many regions from a BED, mixed PAF + 1ALN
-impg query -a f1.paf f2.1aln -b regions.bed
+impg query -a f1.paf f2.1aln -b regions.bed -d 100
 
 # Output formats: auto | bed | bedpe | paf | gfa | maf | fasta | fasta+paf | fasta-aln
-impg query -a aln.paf -r chr1:1000-2000 -o bed
-impg query -a aln.paf -r chr1:1000-2000 -o gfa --sequence-files genomes.fa
-impg query -a aln.1aln -r chr1:1000-2000 -o fasta --sequence-files *.fa \
+impg query -a aln.paf -r chr1:1000-2000 -d 100 -o bed
+impg query -a aln.paf -r chr1:1000-2000 -d 100 -o gfa --sequence-files genomes.fa
+impg query -a aln.1aln -r chr1:1000-2000 -d 100 -o fasta --sequence-files *.fa \
            --reverse-complement
 
 # Filter / shape the result
 impg query -a aln.paf -r chr1:1000-2000 --min-identity 0.9 -l 5000 -d 1000
 
 # Restrict to a sequence whitelist (also filters transitive intermediates)
-impg query -a aln.paf -r chr1:1000-2000 -x --subset-sequence-list seqs.txt
+impg query -a aln.paf -r chr1:1000-2000 -d 100 -x --subset-sequence-list seqs.txt
 
 # Fast approximate mode (.1aln only; bed/bedpe output)
-impg query -a aln.1aln -r chr1:1000-2000 --approximate
+impg query -a aln.1aln -r chr1:1000-2000 -d 100 --approximate
 
 # Alignment-free path: -a accepts a syng index prefix (see `syng` below)
-impg query -a pan.syng -r chr1:1000-2000 --sequence-files genomes.fa
+impg query -a pan.syng -r chr1:1000-2000 -d 100 --sequence-files genomes.fa
 ```
 
 GFA / MAF / FASTA outputs need `--sequence-files` (FASTA or AGC
@@ -162,26 +165,26 @@ sequence files for `query`; FASTAs directly for `graph`).
 
 ```bash
 # 1Mb windows, single BED output
-impg partition -a aln.paf -w 1000000
+impg partition -a aln.paf -w 1000000 -d 100000
 
 # One FASTA per partition (for downstream pipelines)
-impg partition -a aln.1aln -w 1000000 -o fasta --sequence-files *.fa \
+impg partition -a aln.1aln -w 1000000 -d 100000 -o fasta --sequence-files *.fa \
                --separate-files --output-folder partitions/
 
 # Selection strategies pick the next starting sequence
-impg partition -a aln.paf -w 1000000 --selection-mode longest     # default
-impg partition -a aln.paf -w 1000000 --selection-mode sample      # PanSN sample
-impg partition -a aln.paf -w 1000000 --selection-mode haplotype   # PanSN haplotype
+impg partition -a aln.paf -w 1000000 -d 100000 --selection-mode longest     # default
+impg partition -a aln.paf -w 1000000 -d 100000 --selection-mode sample      # PanSN sample
+impg partition -a aln.paf -w 1000000 -d 100000 --selection-mode haplotype   # PanSN haplotype
 
 # Start from a fixed list of sequences
-impg partition -a aln.paf -w 1000000 --starting-sequences-file seqs.txt
+impg partition -a aln.paf -w 1000000 -d 100000 --starting-sequences-file seqs.txt
 
 # GFA output per partition; engines: pggb | seqwish | poa
-impg partition -a aln.paf -w 1000000 -o gfa --gfa-engine pggb \
+impg partition -a aln.paf -w 1000000 -d 100000 -o gfa --gfa-engine pggb \
                --sequence-files *.fa --separate-files --output-folder gfas/
 
 # Fully partitioned pipeline: build → lace → one gfaffix pass
-impg partition -a aln.paf -w 100000 -o gfa --gfa-engine pggb:10000 \
+impg partition -a aln.paf -w 100000 -d 100000 -o gfa --gfa-engine pggb:10000 \
                --sequence-files *.fa --output-folder results/
 ```
 
@@ -303,7 +306,7 @@ impg syng -f chr6.C4.fa -o c4.syng \
 
 # 3. Query a 10 kb grch38 sub-window onto all 90 haplotypes
 impg query -a c4.syng -r 'grch38#chr6:31972046-32055647:0-10000' \
-           --sequence-files chr6.C4.fa | head -3
+           -d 150 --sequence-files chr6.C4.fa | head -3
 # HG00673#1#JAHBBZ010000030.1:31835924-31919525  0  10000  grch38...:0-10000  .  +
 # HG01123#2#JAGYYY010000050.1:31954985-32038586  0  10001  grch38...:0-10000  .  +
 # HG01243#1#JAHEOY010000117.1:3252171-3329407    0   9999  grch38...:0-10000  .  +
@@ -311,7 +314,7 @@ impg query -a c4.syng -r 'grch38#chr6:31972046-32055647:0-10000' \
 # 4. Whole grch38 C4 path (length from .fai) → 36 hits, FASTA out
 LEN=$(awk -F'\t' '$1=="grch38#chr6:31972046-32055647"{print $2}' chr6.C4.fa.fai)
 impg query -a c4.syng -r "grch38#chr6:31972046-32055647:0-${LEN}" \
-           --sequence-files chr6.C4.fa -o fasta > c4.homologs.fa
+           -d 150 --sequence-files chr6.C4.fa -o fasta > c4.homologs.fa
 
 # 5. Map a 2 kb probe back onto the index
 samtools faidx chr6.C4.fa 'grch38#chr6:31972046-32055647:5000-7000' > probe.fa
@@ -354,9 +357,9 @@ Append `:WINDOW` to any engine to build per-window and lace:
 
 ```bash
 impg query    -a aln.paf -r chr1:0-500000 -o gfa \
-              --gfa-engine pggb:10000 --sequence-files *.fa -O out
+              -d 1000 --gfa-engine pggb:10000 --sequence-files *.fa -O out
 impg graph    --sequence-files *.fa -g out.gfa --gfa-engine seqwish:10000
-impg partition -a aln.paf -w 100000 -o gfa --gfa-engine pggb:10000 \
+impg partition -a aln.paf -w 100000 -d 100000 -o gfa --gfa-engine pggb:10000 \
                --sequence-files *.fa --output-folder results/
 ```
 
@@ -412,7 +415,9 @@ with `--fastga-frequency` is rejected at parse time.
 - `-i / --index` — existing IMPG index.
 - `-f / --force-reindex` — rebuild even if the index is up-to-date.
 - `-t / --threads` — default `4`.
-- `-d / --merge-distance` — merge nearby hits within this gap (bp).
+- `-d / --merge-distance` — required for query/partition/refine/similarity:
+  merge query-gathered ranges within this gap (bp). This is the largest
+  internal gap/SV one query hop can absorb into one reported interval.
 - `--no-merge` — disable merging.
 - `--consider-strandness` — keep strands separate during merge.
 - `--subset-sequence-list` — restrict results to listed sequences.
@@ -435,7 +440,7 @@ impg index -a "$PAF" -i yeast.impg -t "$THREADS"
 # 2. Partition into 100kb windows, one FASTA per window
 mkdir -p partitions gfas
 impg partition -i yeast.impg -w 100000 \
-    --sequence-files "$FASTA" -o fasta \
+    -d 100000 --sequence-files "$FASTA" -o fasta \
     --separate-files --output-folder partitions -t "$THREADS"
 
 # 3. Build per-partition GFAs in parallel
@@ -467,7 +472,7 @@ interactive HTML MSA using [react-msa](https://github.com/GMOD/JBrowseMSA)
 or [ProSeqViewer](https://github.com/BioComputingUP/ProSeqViewer).
 
 ```bash
-impg query -a aln.paf -r chr1:1000-2000 -o fasta-aln --sequence-files *.fa \
+impg query -a aln.paf -r chr1:1000-2000 -d 100 -o fasta-aln --sequence-files *.fa \
   | python scripts/faln2html.py -i - -o alignment.html [--tool proseqviewer]
 ```
 
