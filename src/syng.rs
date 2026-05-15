@@ -7,6 +7,7 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::ffi::CString;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
+use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
@@ -1493,6 +1494,7 @@ fn matched_syncmers_in_sequence_impl(
     kmer_hash: *mut syng_ffi::KmerHash,
     params: SyncmerParams,
     query_seq: &[u8],
+    kmer_buf: &mut [u64],
 ) -> Vec<SyngQuerySyncmer> {
     let syncmer_len = (params.w + params.k) as usize;
     if query_seq.len() < syncmer_len {
@@ -1531,10 +1533,11 @@ fn matched_syncmers_in_sequence_impl(
             }
 
             let mut kmer_index: i64 = 0;
-            if syng_ffi::kmerHashFind(
+            if syng_ffi::kmerHashFindThreadSafe(
                 kmer_hash,
                 seq_buf.as_mut_ptr().add(start) as *mut i8,
                 &mut kmer_index,
+                kmer_buf.as_mut_ptr(),
             ) {
                 let signed_node = kmer_index as i32;
                 out.push(SyngQuerySyncmer {
@@ -1560,10 +1563,20 @@ pub struct SyngMatcher {
     pub params: SyncmerParams,
 }
 
-// SAFETY: The matcher only uses read-only C query functions with local iterators.
+pub struct SyngMatcherWorker<'a> {
+    kmer_hash: *mut syng_ffi::KmerHash,
+    seqhash: *mut syng_ffi::Seqhash,
+    kmer_buf: Vec<u64>,
+    params: SyncmerParams,
+    _owner: PhantomData<&'a SyngMatcher>,
+}
+
+// SAFETY: The matcher owns its C handles and only creates worker-local query state.
 unsafe impl Send for SyngMatcher {}
-// SAFETY: See `Send`; shared access does not mutate the underlying dictionary.
+// SAFETY: Shared matcher access creates independent worker-local Seqhash handles.
 unsafe impl Sync for SyngMatcher {}
+// SAFETY: A worker is used by one Rayon worker at a time and owns its Seqhash handle.
+unsafe impl Send for SyngMatcherWorker<'_> {}
 
 impl SyngMatcher {
     pub fn load(prefix: &str, _params: SyncmerParams) -> io::Result<Self> {
@@ -1587,7 +1600,47 @@ impl SyngMatcher {
 
     /// Return query syncmers that are present in this syng dictionary.
     pub fn matched_syncmers_in_sequence(&self, query_seq: &[u8]) -> Vec<SyngQuerySyncmer> {
-        matched_syncmers_in_sequence_impl(self.seqhash, self.kmer_hash, self.params, query_seq)
+        let mut kmer_buf = vec![0u64; unsafe { (*self.kmer_hash).plen as usize }];
+        matched_syncmers_in_sequence_impl(
+            self.seqhash,
+            self.kmer_hash,
+            self.params,
+            query_seq,
+            &mut kmer_buf,
+        )
+    }
+
+    pub fn worker(&self) -> io::Result<SyngMatcherWorker<'_>> {
+        let seqhash = unsafe {
+            syng_ffi::impg_seqhashCreateSafe(
+                self.params.k as i32,
+                self.params.w as i32,
+                self.params.seed as i32,
+            )
+        };
+        if seqhash.is_null() {
+            return Err(io::Error::other("impg_seqhashCreateSafe returned null"));
+        }
+        Ok(SyngMatcherWorker {
+            kmer_hash: self.kmer_hash,
+            seqhash,
+            kmer_buf: vec![0u64; unsafe { (*self.kmer_hash).plen as usize }],
+            params: self.params,
+            _owner: PhantomData,
+        })
+    }
+}
+
+impl SyngMatcherWorker<'_> {
+    /// Return query syncmers using this worker's thread-local syng iterator state.
+    pub fn matched_syncmers_in_sequence(&mut self, query_seq: &[u8]) -> Vec<SyngQuerySyncmer> {
+        matched_syncmers_in_sequence_impl(
+            self.seqhash,
+            self.kmer_hash,
+            self.params,
+            query_seq,
+            &mut self.kmer_buf,
+        )
     }
 }
 
@@ -3228,7 +3281,14 @@ impl SyngIndex {
     /// The query sequence does not need to be one of the indexed paths. This
     /// is the primitive used by `impg map -o gaf`.
     pub fn matched_syncmers_in_sequence(&self, query_seq: &[u8]) -> Vec<SyngQuerySyncmer> {
-        matched_syncmers_in_sequence_impl(self.seqhash, self.kmer_hash, self.params, query_seq)
+        let mut kmer_buf = vec![0u64; unsafe { (*self.kmer_hash).plen as usize }];
+        matched_syncmers_in_sequence_impl(
+            self.seqhash,
+            self.kmer_hash,
+            self.params,
+            query_seq,
+            &mut kmer_buf,
+        )
     }
 
     /// Project query syncmer matches to indexed genome coordinates.
@@ -3697,6 +3757,16 @@ impl Drop for SyngMatcher {
             if !self.kmer_hash.is_null() {
                 syng_ffi::kmerHashDestroy(self.kmer_hash);
             }
+            if !self.seqhash.is_null() {
+                syng_ffi::impg_seqhashDestroy(self.seqhash);
+            }
+        }
+    }
+}
+
+impl Drop for SyngMatcherWorker<'_> {
+    fn drop(&mut self) {
+        unsafe {
             if !self.seqhash.is_null() {
                 syng_ffi::impg_seqhashDestroy(self.seqhash);
             }

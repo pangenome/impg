@@ -2,6 +2,7 @@
 #![allow(clippy::type_complexity)]
 use clap::Parser;
 use coitrees::{Interval, IntervalTree};
+use crossbeam_channel as channel;
 use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
 use impg::commands::{graph, lace, partition, refine, similarity};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
@@ -16,7 +17,7 @@ use log::{debug, error, info, warn};
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use rustc_hash::FxHashMap;
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{hash_map::DefaultHasher, BTreeMap};
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
@@ -417,6 +418,22 @@ fn write_syng_map_paf<W: Write>(
     )
 }
 
+const SYNG_GAF_MAP_CHUNK_READS: usize = 4096;
+
+struct SyngGafMapChunk {
+    bytes: Vec<u8>,
+    queries: usize,
+    records: usize,
+    anchors: usize,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct SyngGafMapStats {
+    queries: usize,
+    records: usize,
+    anchors: usize,
+}
+
 fn emit_syng_map<W: Write>(
     out: &mut W,
     syng_index: &impg::syng::SyngIndex,
@@ -470,15 +487,17 @@ fn emit_syng_map<W: Write>(
     Ok(())
 }
 
-fn emit_syng_map_gaf<W: Write>(
-    out: &mut W,
-    syng_matcher: &impg::syng::SyngMatcher,
-    queries: Vec<(String, Vec<u8>)>,
+fn build_syng_map_gaf_chunk(
+    syng_matcher: &mut impg::syng::SyngMatcherWorker<'_>,
+    chunk: &[(String, Vec<u8>)],
     min_anchors: usize,
-) -> io::Result<()> {
-    let syncmer_len = (syng_matcher.params.k + syng_matcher.params.w) as u64;
-    for (query_name, query_seq) in queries {
-        let mut syncmers = syng_matcher.matched_syncmers_in_sequence(&query_seq);
+    syncmer_len: u64,
+) -> SyngGafMapChunk {
+    let mut bytes = Vec::new();
+    let mut records = 0usize;
+    let mut anchors = 0usize;
+    for (query_name, query_seq) in chunk {
+        let mut syncmers = syng_matcher.matched_syncmers_in_sequence(query_seq);
         if syncmers.len() < min_anchors {
             continue;
         }
@@ -487,14 +506,324 @@ fn emit_syng_map_gaf<W: Write>(
                 .cmp(&b.query_pos)
                 .then(a.node_id.cmp(&b.node_id))
         });
+        anchors += syncmers.len();
+        records += 1;
         write_syng_map_gaf(
-            out,
-            &query_name,
+            &mut bytes,
+            query_name,
             query_seq.len() as u64,
             syncmer_len,
             &syncmers,
-        )?;
+        )
+        .expect("writing GAF to a Vec should not fail");
     }
+    SyngGafMapChunk {
+        bytes,
+        queries: chunk.len(),
+        records,
+        anchors,
+    }
+}
+
+fn write_ordered_syng_gaf_chunks<W: Write>(
+    out: &mut W,
+    rx: channel::Receiver<(usize, SyngGafMapChunk)>,
+) -> io::Result<SyngGafMapStats> {
+    let mut pending: BTreeMap<usize, SyngGafMapChunk> = BTreeMap::new();
+    let mut next_chunk = 0usize;
+    let mut stats = SyngGafMapStats::default();
+
+    for (idx, chunk) in rx {
+        pending.insert(idx, chunk);
+        while let Some(chunk) = pending.remove(&next_chunk) {
+            out.write_all(&chunk.bytes)?;
+            stats.queries += chunk.queries;
+            stats.records += chunk.records;
+            stats.anchors += chunk.anchors;
+            next_chunk += 1;
+        }
+    }
+
+    if !pending.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!(
+                "GAF worker channel closed before chunk {} was written",
+                next_chunk
+            ),
+        ));
+    }
+
+    Ok(stats)
+}
+
+fn flush_query_chunk<F>(
+    chunk_idx: &mut usize,
+    chunk: &mut Vec<(String, Vec<u8>)>,
+    on_chunk: &mut F,
+) -> io::Result<()>
+where
+    F: FnMut(usize, Vec<(String, Vec<u8>)>) -> io::Result<()>,
+{
+    if chunk.is_empty() {
+        return Ok(());
+    }
+    let to_send = std::mem::replace(chunk, Vec::with_capacity(SYNG_GAF_MAP_CHUNK_READS));
+    on_chunk(*chunk_idx, to_send)?;
+    *chunk_idx += 1;
+    Ok(())
+}
+
+fn stream_fasta_query_chunks<R, F>(
+    reader: R,
+    first_line: String,
+    on_chunk: &mut F,
+) -> io::Result<()>
+where
+    R: BufRead,
+    F: FnMut(usize, Vec<(String, Vec<u8>)>) -> io::Result<()>,
+{
+    let mut chunk_idx = 0usize;
+    let mut chunk = Vec::with_capacity(SYNG_GAF_MAP_CHUNK_READS);
+    let mut current_name = parse_sequence_record_name(&first_line, '>');
+    let mut current_seq = Vec::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.starts_with('>') {
+            chunk.push((
+                std::mem::take(&mut current_name),
+                std::mem::take(&mut current_seq),
+            ));
+            if chunk.len() >= SYNG_GAF_MAP_CHUNK_READS {
+                flush_query_chunk(&mut chunk_idx, &mut chunk, on_chunk)?;
+            }
+            current_name = parse_sequence_record_name(&line, '>');
+        } else {
+            current_seq.extend(line.trim().as_bytes());
+        }
+    }
+
+    chunk.push((current_name, current_seq));
+    flush_query_chunk(&mut chunk_idx, &mut chunk, on_chunk)
+}
+
+fn stream_fastq_query_chunks<R, F>(
+    mut reader: R,
+    mut header: String,
+    on_chunk: &mut F,
+) -> io::Result<()>
+where
+    R: BufRead,
+    F: FnMut(usize, Vec<(String, Vec<u8>)>) -> io::Result<()>,
+{
+    let mut chunk_idx = 0usize;
+    let mut chunk = Vec::with_capacity(SYNG_GAF_MAP_CHUNK_READS);
+
+    loop {
+        if !header.starts_with('@') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "FASTQ record header must start with '@'",
+            ));
+        }
+        let name = parse_sequence_record_name(&header, '@');
+
+        let mut seq = String::new();
+        let mut plus = String::new();
+        let mut qual = String::new();
+        if reader.read_line(&mut seq)? == 0
+            || reader.read_line(&mut plus)? == 0
+            || reader.read_line(&mut qual)? == 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "truncated FASTQ record",
+            ));
+        }
+        if !plus.starts_with('+') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "FASTQ separator line must start with '+'",
+            ));
+        }
+
+        chunk.push((name, seq.trim().as_bytes().to_vec()));
+        if chunk.len() >= SYNG_GAF_MAP_CHUNK_READS {
+            flush_query_chunk(&mut chunk_idx, &mut chunk, on_chunk)?;
+        }
+
+        header.clear();
+        loop {
+            if reader.read_line(&mut header)? == 0 {
+                return flush_query_chunk(&mut chunk_idx, &mut chunk, on_chunk);
+            }
+            if !header.trim().is_empty() {
+                break;
+            }
+            header.clear();
+        }
+    }
+}
+
+fn stream_query_chunks_with<F>(path: &str, mut on_chunk: F) -> io::Result<()>
+where
+    F: FnMut(usize, Vec<(String, Vec<u8>)>) -> io::Result<()>,
+{
+    let file = File::open(path)?;
+    let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
+        io::Error::other(format!("Failed to open reader for '{}': {}", path, e))
+    })?;
+    let mut reader = BufReader::new(reader);
+
+    let mut first_line = String::new();
+    loop {
+        first_line.clear();
+        if reader.read_line(&mut first_line)? == 0 {
+            return Ok(());
+        }
+        if !first_line.trim().is_empty() {
+            break;
+        }
+    }
+
+    if first_line.starts_with('>') {
+        stream_fasta_query_chunks(reader, first_line, &mut on_chunk)
+    } else if first_line.starts_with('@') {
+        stream_fastq_query_chunks(reader, first_line, &mut on_chunk)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("query file '{}' is not FASTA or FASTQ", path),
+        ))
+    }
+}
+
+fn stream_query_chunks(
+    path: &str,
+    tx: &channel::Sender<(usize, Vec<(String, Vec<u8>)>)>,
+) -> io::Result<()> {
+    stream_query_chunks_with(path, |idx, chunk| {
+        tx.send((idx, chunk)).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "failed to send query chunk to GAF workers",
+            )
+        })
+    })
+}
+
+fn emit_syng_map_gaf_sequential<W: Write>(
+    out: &mut W,
+    syng_matcher: &impg::syng::SyngMatcher,
+    query_path: &str,
+    min_anchors: usize,
+    syncmer_len: u64,
+) -> io::Result<SyngGafMapStats> {
+    let mut worker = syng_matcher.worker().map_err(|e| {
+        io::Error::new(e.kind(), format!("failed to create syng GAF worker: {e}"))
+    })?;
+    let mut stats = SyngGafMapStats::default();
+
+    stream_query_chunks_with(query_path, |_, chunk| {
+        let mapped = build_syng_map_gaf_chunk(&mut worker, &chunk, min_anchors, syncmer_len);
+        out.write_all(&mapped.bytes)?;
+        stats.queries += mapped.queries;
+        stats.records += mapped.records;
+        stats.anchors += mapped.anchors;
+        Ok(())
+    })?;
+
+    Ok(stats)
+}
+
+fn emit_syng_map_gaf<W: Write + Send>(
+    out: &mut W,
+    syng_matcher: &impg::syng::SyngMatcher,
+    query_path: &str,
+    min_anchors: usize,
+) -> io::Result<()> {
+    let syncmer_len = (syng_matcher.params.k + syng_matcher.params.w) as u64;
+    let start = Instant::now();
+    let threads = rayon::current_num_threads();
+
+    if threads <= 1 {
+        let stats =
+            emit_syng_map_gaf_sequential(out, syng_matcher, query_path, min_anchors, syncmer_len)?;
+        info!(
+            "Mapped {} query sequences to {} GAF records ({} syncmer anchors) in {:.3}s using {} thread",
+            stats.queries,
+            stats.records,
+            stats.anchors,
+            start.elapsed().as_secs_f64(),
+            threads
+        );
+        return Ok(());
+    }
+
+    let queue_capacity = threads.saturating_mul(4).max(1);
+    let (query_tx, query_rx) =
+        channel::bounded::<(usize, Vec<(String, Vec<u8>)>)>(queue_capacity);
+    let (result_tx, result_rx) =
+        channel::bounded::<(usize, SyngGafMapChunk)>(queue_capacity);
+
+    let stats = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || write_ordered_syng_gaf_chunks(out, result_rx));
+
+        let mut workers = Vec::with_capacity(threads);
+        for _ in 0..threads {
+            let query_rx = query_rx.clone();
+            let result_tx = result_tx.clone();
+            workers.push(scope.spawn(move || -> io::Result<()> {
+                let mut worker = syng_matcher.worker().map_err(|e| {
+                    io::Error::new(e.kind(), format!("failed to create syng GAF worker: {e}"))
+                })?;
+                for (idx, chunk) in query_rx.iter() {
+                    let chunk =
+                        build_syng_map_gaf_chunk(&mut worker, &chunk, min_anchors, syncmer_len);
+                    result_tx.send((idx, chunk)).map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::BrokenPipe,
+                            "failed to send GAF chunk to writer",
+                        )
+                    })?;
+                }
+                Ok(())
+            }));
+        }
+        drop(query_rx);
+        drop(result_tx);
+
+        let reader_result = stream_query_chunks(query_path, &query_tx);
+        drop(query_tx);
+
+        let mut worker_errors = Vec::new();
+        for worker in workers {
+            match worker.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => worker_errors.push(e.to_string()),
+                Err(_) => worker_errors.push("GAF worker thread panicked".to_string()),
+            }
+        }
+
+        let writer_result = writer
+            .join()
+            .map_err(|_| io::Error::other("GAF writer thread panicked"))?;
+        reader_result?;
+        if !worker_errors.is_empty() {
+            return Err(io::Error::other(worker_errors.join("; ")));
+        }
+        writer_result
+    })?;
+
+    info!(
+        "Mapped {} query sequences to {} GAF records ({} syncmer anchors) in {:.3}s using {} threads",
+        stats.queries,
+        stats.records,
+        stats.anchors,
+        start.elapsed().as_secs_f64(),
+        threads
+    );
     Ok(())
 }
 
@@ -3851,8 +4180,6 @@ fn run() -> io::Result<()> {
             #[cfg(not(unix))]
             silence_stdout_for_process()?;
 
-            let queries = read_query_sequences(&query)?;
-
             if let Some(path) = output {
                 let mut out = BufWriter::new(File::create(path)?);
                 match output_format.as_str() {
@@ -3862,7 +4189,7 @@ fn run() -> io::Result<()> {
                             &syng_prefix,
                             impg::syng::SyncmerParams::default(),
                         )?;
-                        emit_syng_map_gaf(&mut out, &syng_matcher, queries, min_anchors)?;
+                        emit_syng_map_gaf(&mut out, &syng_matcher, &query, min_anchors)?;
                     }
                     "paf" => {
                         info!("Loading syng index from prefix: {}", syng_prefix);
@@ -3870,6 +4197,7 @@ fn run() -> io::Result<()> {
                             &syng_prefix,
                             impg::syng::SyncmerParams::default(),
                         )?;
+                        let queries = read_query_sequences(&query)?;
                         emit_syng_map(
                             &mut out,
                             &syng_index,
@@ -3896,7 +4224,7 @@ fn run() -> io::Result<()> {
                             &syng_prefix,
                             impg::syng::SyncmerParams::default(),
                         )?;
-                        emit_syng_map_gaf(&mut out, &syng_matcher, queries, min_anchors)?;
+                        emit_syng_map_gaf(&mut out, &syng_matcher, &query, min_anchors)?;
                     }
                     "paf" => {
                         info!("Loading syng index from prefix: {}", syng_prefix);
@@ -3904,6 +4232,7 @@ fn run() -> io::Result<()> {
                             &syng_prefix,
                             impg::syng::SyncmerParams::default(),
                         )?;
+                        let queries = read_query_sequences(&query)?;
                         emit_syng_map(
                             &mut out,
                             &syng_index,

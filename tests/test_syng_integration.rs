@@ -492,6 +492,18 @@ fn test_syng_map_cli_gaf_and_paf() {
         writeln!(f, "+").unwrap();
         writeln!(f, "{}", "I".repeat(700)).unwrap();
     }
+    let query_multi_path = dir.join("query_multi.fq");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&query_multi_path).unwrap();
+        for i in 0..2050 {
+            writeln!(f, "@read{}", i).unwrap();
+            f.write_all(&backbone[100..800]).unwrap();
+            writeln!(f).unwrap();
+            writeln!(f, "+").unwrap();
+            writeln!(f, "{}", "I".repeat(700)).unwrap();
+        }
+    }
 
     let idx_prefix = dir.join("idx");
     let build = Command::new(&bin)
@@ -611,6 +623,57 @@ fn test_syng_map_cli_gaf_and_paf() {
             .collect::<Vec<_>>()
             .is_empty(),
         "expected GAF output with only .1khash/.meta present"
+    );
+    let gaf_threads_1 = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            query_multi_path.to_str().unwrap(),
+            "-o",
+            "gaf",
+            "--min-anchors",
+            "2",
+            "-t",
+            "1",
+        ])
+        .output()
+        .expect("failed to run impg map -o gaf with one thread");
+    assert!(
+        gaf_threads_1.status.success(),
+        "single-threaded GAF mapping failed: {}",
+        String::from_utf8_lossy(&gaf_threads_1.stderr)
+    );
+    let gaf_threads_2 = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            query_multi_path.to_str().unwrap(),
+            "-o",
+            "gaf",
+            "--min-anchors",
+            "2",
+            "-t",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o gaf with two threads");
+    assert!(
+        gaf_threads_2.status.success(),
+        "two-threaded GAF mapping failed: {}",
+        String::from_utf8_lossy(&gaf_threads_2.stderr)
+    );
+    assert_eq!(
+        gaf_threads_1.stdout, gaf_threads_2.stdout,
+        "parallel GAF mapping should preserve deterministic output order"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&gaf_threads_2.stdout).lines().count(),
+        2050,
+        "expected one GAF record per repeated query read"
     );
 
     std::fs::remove_dir_all(&dir).ok();
