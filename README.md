@@ -279,7 +279,7 @@ impg stats -a f1.paf f2.1aln
 
 ### `syng` and `map` — alignment-free syncmer backend
 
-`impg syng` builds a [syng](https://github.com/richarddurbin/syng) index from FASTA or AGC. Six sidecars are written under one prefix (`<prefix>.1khash` dictionary, `.1gbwt` GBWT, `.syng.names`, `.syng.spos` sampled node positions, `.syng.pstep` sampled path-step checkpoints, `.syng.meta` parameters — auto-loaded on read). Any later `impg query` / `partition` / `map` can then point `-a` at the prefix (or any sidecar) and skip pairwise alignment.
+`impg syng` builds a [syng](https://github.com/richarddurbin/syng) index from FASTA or AGC. Six sidecars are written under one prefix (`<prefix>.1khash` dictionary, `.1gbwt` GBWT, `.syng.names`, `.syng.spos` sampled node positions, `.syng.pstep` sampled path-step checkpoints, `.syng.meta` parameters — auto-loaded on read). Any later `impg query` / `partition` / `map` can then point `-a` at the prefix (or any sidecar) and skip pairwise alignment. Exact target coordinates are located by walking GBWT occurrences forward to the next `.syng.pstep` checkpoint; `.syng.spos` is only a sampled sidecar, not the final query answer.
 
 Parameters follow the syng paper: `--smer-length` (`s`, default 8) and `--syncmer-length` (`k`, must be odd, default 63). Position sidecars use a regular per-path syncmer-step grid plus the terminal syncmer: `--position-sample-rate 256` samples steps `0, 256, 512, ...` and the final step on each path. `--parallel-dictionary` adds a deterministic prepass for large inputs.
 

@@ -180,6 +180,22 @@ extern "C" {
         low: *mut U32,
         high: *mut U32,
     ) -> bool;
+    pub fn syngBWTincomingRank(
+        sb: *mut SyngBWT,
+        node: I32,
+        prev_node: I32,
+        prev_off: U32,
+        rank: U32,
+        abs_rank: *mut U32,
+    ) -> bool;
+    pub fn syngBWTadvanceRank(
+        sb: *mut SyngBWT,
+        node: I32,
+        abs_rank: U32,
+        next_node: *mut I32,
+        next_off: *mut U32,
+        next_abs_rank: *mut U32,
+    ) -> bool;
 
     pub fn syngBWTpathDestroy(sbp: *mut SyngBWTpath);
     pub fn syngBWTstat(sb: *mut SyngBWT);
