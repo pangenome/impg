@@ -72,6 +72,7 @@ seqwish = { git = "https://github.com/pangenome/seqwish", branch = "rust-2" }
 
 # Dependencies for graph sorting
 gfasort = { git = "https://github.com/pangenome/gfasort", rev = "f15d8ebfdc632af2333f277cb9da0748d8fba7aa" }
+bluntg = { git = "https://github.com/pangenome/bluntg", rev = "21ed8bf76d9b26322adfb9a5ad24589a2c60cb23" }
 
 [build-dependencies]
 cc = "1"

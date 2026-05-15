@@ -272,6 +272,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bluntg"
+version = "0.1.0"
+source = "git+https://github.com/pangenome/bluntg?rev=21ed8bf76d9b26322adfb9a5ad24589a2c60cb23#21ed8bf76d9b26322adfb9a5ad24589a2c60cb23"
+dependencies = [
+ "flate2",
+]
+
+[[package]]
 name = "boomphf"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1348,6 +1356,7 @@ dependencies = [
  "ahash",
  "bincode 2.0.1",
  "bitvec",
+ "bluntg",
  "cc",
  "clap",
  "coitrees",

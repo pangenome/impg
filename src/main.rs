@@ -1916,6 +1916,73 @@ enum Args {
         common: CommonOpts,
     },
 
+    /// Extract a local syng subgraph + GFA for a query region.
+    ///
+    /// Runs a raw syng query against the full index, pads and merges the
+    /// returned target ranges, pulls those slices from FASTA/AGC (named
+    /// `contig:start-end` so coordinates are preserved), builds a fresh
+    /// syng index over the slices, and writes:
+    ///   `<o>.regions.bed`, `<o>.local.fa`, `<o>.{1gbwt,1khash,syng.*}`, `<o>.gfa`.
+    Subgraph {
+        /// Full syng index prefix (or any of its sidecar files).
+        #[clap(short = 'a', long, value_parser)]
+        index: String,
+
+        /// Query region as `seq_name:start-end`.
+        #[clap(short = 'r', long = "region", value_parser)]
+        region: String,
+
+        /// Output prefix for `.regions.bed`, `.local.fa`, syng sidecars, and `.gfa`.
+        #[clap(short = 'o', long = "output-prefix", value_parser)]
+        output_prefix: String,
+
+        /// Boundary padding (bp) forwarded to the full-index syng query.
+        #[arg(help_heading = "Full-index query")]
+        #[clap(long, value_parser, default_value_t = 120)]
+        syng_padding: u64,
+
+        /// Source-side window extension (bp) forwarded to the full-index syng query.
+        #[arg(help_heading = "Full-index query")]
+        #[clap(long, value_parser, default_value_t = 0)]
+        syng_extension: u64,
+
+        /// Slop (bp) added to each side of every target hit before merging.
+        #[arg(help_heading = "Region extraction")]
+        #[clap(long, value_parser, default_value_t = 500)]
+        pad: u64,
+
+        /// Merge padded ranges within this distance (bp). Defaults to `--pad`.
+        #[arg(help_heading = "Region extraction")]
+        #[clap(long, value_parser)]
+        merge_distance: Option<u64>,
+
+        /// GFA spec version: `1.0` (P lines) or `1.1` (W lines, PanSN-parsed).
+        #[arg(help_heading = "Local index")]
+        #[clap(long, value_parser, default_value = "1.0")]
+        gfa_version: String,
+
+        /// Position sample rate for the local syng index.
+        #[arg(help_heading = "Local index")]
+        #[clap(long, value_parser, default_value_t = 1)]
+        position_sample_rate: u32,
+
+        /// Also emit `<o>.blunt.gfa` (zero-overlap, via bluntg). Requires
+        /// `--gfa-version 1.0`. Note: variable-overlap bluntification trims by
+        /// the max incident half-overlap per side, so path spellings are not
+        /// base-exact at branching nodes.
+        #[arg(help_heading = "Local index")]
+        #[clap(long, default_value_t = false)]
+        blunt: bool,
+
+        /// Genome sequences (FASTA/AGC) for region extraction.
+        #[clap(flatten)]
+        sequence: SequenceOpts,
+
+        // --- General ---
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+
     /// Dump a syng index to GFA (S = syncmer, L = adjacency, P/W = path).
     ///
     /// Loads `<prefix>.1khash`, `<prefix>.1gbwt`, `<prefix>.syng.names`,
@@ -4350,6 +4417,38 @@ fn run() -> io::Result<()> {
                 index.name_map.path_to_name.len()
             );
             info!("Total syng build time: {}", format_duration(total_start.elapsed()));
+        }
+        Args::Subgraph {
+            index,
+            region,
+            output_prefix,
+            syng_padding,
+            syng_extension,
+            pad,
+            merge_distance,
+            gfa_version,
+            position_sample_rate,
+            blunt,
+            sequence,
+            common,
+        } => {
+            initialize_threads_and_log(&common);
+            let prefix = detect_syng_prefix(&index).unwrap_or(index);
+            let version = impg::commands::syng2gfa::GfaVersion::parse(&gfa_version)?;
+            let sequence_files = sequence.resolve_sequence_files()?;
+            impg::commands::subgraph::run(impg::commands::subgraph::SubgraphOpts {
+                index_prefix: prefix,
+                sequence_files,
+                region,
+                syng_padding,
+                syng_extension,
+                pad,
+                merge_distance,
+                output_prefix,
+                gfa_version: version,
+                position_sample_rate,
+                blunt,
+            })?;
         }
         Args::Syng2gfa {
             syng_prefix,

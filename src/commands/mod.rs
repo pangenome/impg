@@ -4,6 +4,7 @@ pub mod lace;
 pub mod partition;
 pub mod refine;
 pub mod similarity;
+pub mod subgraph;
 pub mod syng2gfa;
 
 use std::io::{self, BufRead, BufReader};
