@@ -25,6 +25,10 @@ use std::num::NonZeroUsize;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
+use std::sync::{
+    atomic::{AtomicU64, AtomicUsize, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 /// Parse a size value with optional k/m/g suffix (case-insensitive)
@@ -245,12 +249,35 @@ fn parse_sequence_record_name(line: &str, marker: char) -> String {
         .to_string()
 }
 
+fn sequence_record_name_bytes(line: &[u8], marker: u8) -> &[u8] {
+    let start = usize::from(line.first() == Some(&marker));
+    let end = line[start..]
+        .iter()
+        .position(|b| b.is_ascii_whitespace())
+        .map(|pos| start + pos)
+        .unwrap_or(line.len());
+    &line[start..end]
+}
+
+fn strip_line_ending_bytes(line: &mut Vec<u8>) {
+    if line.ends_with(b"\n") {
+        line.pop();
+        if line.ends_with(b"\r") {
+            line.pop();
+        }
+    }
+}
+
+fn is_blank_line_bytes(line: &[u8]) -> bool {
+    line.iter().all(|b| b.is_ascii_whitespace())
+}
+
 fn read_query_sequences(path: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
     let file = File::open(path)?;
     let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
         io::Error::other(format!("Failed to open reader for '{}': {}", path, e))
     })?;
-    let mut reader = BufReader::new(reader);
+    let mut reader = BufReader::with_capacity(8 * 1024 * 1024, reader);
 
     let mut first_line = String::new();
     loop {
@@ -348,7 +375,7 @@ fn read_fastq_records<R: BufRead>(
 
 fn write_syng_map_gaf<W: Write>(
     out: &mut W,
-    query_name: &str,
+    query_name: &[u8],
     query_len: u64,
     syncmer_len: u64,
     syncmers: &[impg::syng::SyngQuerySyncmer],
@@ -372,10 +399,10 @@ fn write_syng_map_gaf<W: Write>(
     let path_len = (syncmers.len() as u64).saturating_mul(syncmer_len);
     let matches = path_len.min(qend.saturating_sub(qstart));
     let block_len = qend.saturating_sub(qstart);
+    out.write_all(query_name)?;
     writeln!(
         out,
-        "{}\t{}\t{}\t{}\t+\t{}\t{}\t0\t{}\t{}\t{}\t0\tan:i:{}\tsk:i:{}",
-        query_name,
+        "\t{}\t{}\t{}\t+\t{}\t{}\t0\t{}\t{}\t{}\t0\tan:i:{}\tsk:i:{}",
         query_len,
         qstart,
         qend,
@@ -419,6 +446,54 @@ fn write_syng_map_paf<W: Write>(
 }
 
 const SYNG_GAF_MAP_CHUNK_READS: usize = 4096;
+const SYNG_GAF_MAP_AVG_NAME_LEN: usize = 32;
+const SYNG_GAF_MAP_AVG_SEQ_LEN: usize = 256;
+
+struct SyngGafQueryRecord {
+    name_start: usize,
+    name_end: usize,
+    seq_start: usize,
+    seq_end: usize,
+}
+
+struct SyngGafQueryChunk {
+    names: Vec<u8>,
+    seqs: Vec<u8>,
+    records: Vec<SyngGafQueryRecord>,
+}
+
+impl SyngGafQueryChunk {
+    fn with_capacity() -> Self {
+        Self {
+            names: Vec::with_capacity(SYNG_GAF_MAP_CHUNK_READS * SYNG_GAF_MAP_AVG_NAME_LEN),
+            seqs: Vec::with_capacity(SYNG_GAF_MAP_CHUNK_READS * SYNG_GAF_MAP_AVG_SEQ_LEN),
+            records: Vec::with_capacity(SYNG_GAF_MAP_CHUNK_READS),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    fn push(&mut self, name: &[u8], seq: &[u8]) {
+        let name_start = self.names.len();
+        self.names.extend_from_slice(name);
+        let name_end = self.names.len();
+        let seq_start = self.seqs.len();
+        self.seqs.extend_from_slice(seq);
+        let seq_end = self.seqs.len();
+        self.records.push(SyngGafQueryRecord {
+            name_start,
+            name_end,
+            seq_start,
+            seq_end,
+        });
+    }
+}
 
 struct SyngGafMapChunk {
     bytes: Vec<u8>,
@@ -432,6 +507,33 @@ struct SyngGafMapStats {
     queries: usize,
     records: usize,
     anchors: usize,
+}
+
+#[derive(Default)]
+struct SyngGafMapProfile {
+    reader_total_ns: AtomicU64,
+    reader_send_wait_ns: AtomicU64,
+    worker_recv_wait_ns: AtomicU64,
+    worker_compute_ns: AtomicU64,
+    worker_send_wait_ns: AtomicU64,
+    writer_recv_wait_ns: AtomicU64,
+    writer_write_ns: AtomicU64,
+    query_chunks: AtomicUsize,
+    worker_chunks: AtomicUsize,
+    writer_chunks: AtomicUsize,
+    output_bytes: AtomicU64,
+}
+
+fn add_profile_duration(counter: &AtomicU64, duration: Duration) {
+    counter.fetch_add(duration.as_nanos().min(u128::from(u64::MAX)) as u64, Ordering::Relaxed);
+}
+
+fn add_profile_len(counter: &AtomicU64, len: usize) {
+    counter.fetch_add(len.min(u64::MAX as usize) as u64, Ordering::Relaxed);
+}
+
+fn profile_duration(counter: &AtomicU64) -> Duration {
+    Duration::from_nanos(counter.load(Ordering::Relaxed))
 }
 
 fn emit_syng_map<W: Write>(
@@ -458,7 +560,7 @@ fn emit_syng_map<W: Write>(
                 });
                 write_syng_map_gaf(
                     out,
-                    &query_name,
+                    query_name.as_bytes(),
                     query_seq.len() as u64,
                     syncmer_len,
                     &syncmers,
@@ -489,15 +591,18 @@ fn emit_syng_map<W: Write>(
 
 fn build_syng_map_gaf_chunk(
     syng_matcher: &mut impg::syng::SyngMatcherWorker<'_>,
-    chunk: &[(String, Vec<u8>)],
+    chunk: &SyngGafQueryChunk,
     min_anchors: usize,
     syncmer_len: u64,
 ) -> SyngGafMapChunk {
     let mut bytes = Vec::new();
     let mut records = 0usize;
     let mut anchors = 0usize;
-    for (query_name, query_seq) in chunk {
-        let mut syncmers = syng_matcher.matched_syncmers_in_sequence(query_seq);
+    let mut syncmers = Vec::new();
+    for record in &chunk.records {
+        let query_name = &chunk.names[record.name_start..record.name_end];
+        let query_seq = &chunk.seqs[record.seq_start..record.seq_end];
+        syng_matcher.matched_syncmers_in_sequence_into(query_seq, &mut syncmers);
         if syncmers.len() < min_anchors {
             continue;
         }
@@ -528,15 +633,29 @@ fn build_syng_map_gaf_chunk(
 fn write_ordered_syng_gaf_chunks<W: Write>(
     out: &mut W,
     rx: channel::Receiver<(usize, SyngGafMapChunk)>,
+    profile: Option<Arc<SyngGafMapProfile>>,
 ) -> io::Result<SyngGafMapStats> {
     let mut pending: BTreeMap<usize, SyngGafMapChunk> = BTreeMap::new();
     let mut next_chunk = 0usize;
     let mut stats = SyngGafMapStats::default();
 
-    for (idx, chunk) in rx {
+    loop {
+        let recv_start = Instant::now();
+        let Ok((idx, chunk)) = rx.recv() else {
+            break;
+        };
+        if let Some(profile) = &profile {
+            add_profile_duration(&profile.writer_recv_wait_ns, recv_start.elapsed());
+        }
         pending.insert(idx, chunk);
         while let Some(chunk) = pending.remove(&next_chunk) {
+            let write_start = Instant::now();
             out.write_all(&chunk.bytes)?;
+            if let Some(profile) = &profile {
+                add_profile_duration(&profile.writer_write_ns, write_start.elapsed());
+                profile.writer_chunks.fetch_add(1, Ordering::Relaxed);
+                add_profile_len(&profile.output_bytes, chunk.bytes.len());
+            }
             stats.queries += chunk.queries;
             stats.records += chunk.records;
             stats.anchors += chunk.anchors;
@@ -559,16 +678,16 @@ fn write_ordered_syng_gaf_chunks<W: Write>(
 
 fn flush_query_chunk<F>(
     chunk_idx: &mut usize,
-    chunk: &mut Vec<(String, Vec<u8>)>,
+    chunk: &mut SyngGafQueryChunk,
     on_chunk: &mut F,
 ) -> io::Result<()>
 where
-    F: FnMut(usize, Vec<(String, Vec<u8>)>) -> io::Result<()>,
+    F: FnMut(usize, SyngGafQueryChunk) -> io::Result<()>,
 {
     if chunk.is_empty() {
         return Ok(());
     }
-    let to_send = std::mem::replace(chunk, Vec::with_capacity(SYNG_GAF_MAP_CHUNK_READS));
+    let to_send = std::mem::replace(chunk, SyngGafQueryChunk::with_capacity());
     on_chunk(*chunk_idx, to_send)?;
     *chunk_idx += 1;
     Ok(())
@@ -581,84 +700,86 @@ fn stream_fasta_query_chunks<R, F>(
 ) -> io::Result<()>
 where
     R: BufRead,
-    F: FnMut(usize, Vec<(String, Vec<u8>)>) -> io::Result<()>,
+    F: FnMut(usize, SyngGafQueryChunk) -> io::Result<()>,
 {
     let mut chunk_idx = 0usize;
-    let mut chunk = Vec::with_capacity(SYNG_GAF_MAP_CHUNK_READS);
+    let mut chunk = SyngGafQueryChunk::with_capacity();
     let mut current_name = parse_sequence_record_name(&first_line, '>');
     let mut current_seq = Vec::new();
 
     for line in reader.lines() {
         let line = line?;
         if line.starts_with('>') {
-            chunk.push((
-                std::mem::take(&mut current_name),
-                std::mem::take(&mut current_seq),
-            ));
+            chunk.push(current_name.as_bytes(), &current_seq);
             if chunk.len() >= SYNG_GAF_MAP_CHUNK_READS {
                 flush_query_chunk(&mut chunk_idx, &mut chunk, on_chunk)?;
             }
             current_name = parse_sequence_record_name(&line, '>');
+            current_seq.clear();
         } else {
             current_seq.extend(line.trim().as_bytes());
         }
     }
 
-    chunk.push((current_name, current_seq));
+    chunk.push(current_name.as_bytes(), &current_seq);
     flush_query_chunk(&mut chunk_idx, &mut chunk, on_chunk)
 }
 
 fn stream_fastq_query_chunks<R, F>(
     mut reader: R,
-    mut header: String,
+    mut header: Vec<u8>,
     on_chunk: &mut F,
 ) -> io::Result<()>
 where
     R: BufRead,
-    F: FnMut(usize, Vec<(String, Vec<u8>)>) -> io::Result<()>,
+    F: FnMut(usize, SyngGafQueryChunk) -> io::Result<()>,
 {
     let mut chunk_idx = 0usize;
-    let mut chunk = Vec::with_capacity(SYNG_GAF_MAP_CHUNK_READS);
+    let mut chunk = SyngGafQueryChunk::with_capacity();
+    let mut seq = Vec::with_capacity(512);
+    let mut plus = Vec::with_capacity(128);
+    let mut qual = Vec::with_capacity(512);
 
     loop {
-        if !header.starts_with('@') {
+        if !header.starts_with(b"@") {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "FASTQ record header must start with '@'",
             ));
         }
-        let name = parse_sequence_record_name(&header, '@');
+        let name = sequence_record_name_bytes(&header, b'@');
 
-        let mut seq = String::new();
-        let mut plus = String::new();
-        let mut qual = String::new();
-        if reader.read_line(&mut seq)? == 0
-            || reader.read_line(&mut plus)? == 0
-            || reader.read_line(&mut qual)? == 0
+        seq.clear();
+        plus.clear();
+        qual.clear();
+        if reader.read_until(b'\n', &mut seq)? == 0
+            || reader.read_until(b'\n', &mut plus)? == 0
+            || reader.read_until(b'\n', &mut qual)? == 0
         {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "truncated FASTQ record",
             ));
         }
-        if !plus.starts_with('+') {
+        if !plus.starts_with(b"+") {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "FASTQ separator line must start with '+'",
             ));
         }
+        strip_line_ending_bytes(&mut seq);
 
-        chunk.push((name, seq.trim().as_bytes().to_vec()));
+        chunk.push(name, &seq);
         if chunk.len() >= SYNG_GAF_MAP_CHUNK_READS {
             flush_query_chunk(&mut chunk_idx, &mut chunk, on_chunk)?;
         }
 
         header.clear();
         loop {
-            if reader.read_line(&mut header)? == 0 {
+            if reader.read_until(b'\n', &mut header)? == 0 {
                 return flush_query_chunk(&mut chunk_idx, &mut chunk, on_chunk);
             }
-            if !header.trim().is_empty() {
+            if !is_blank_line_bytes(&header) {
                 break;
             }
             header.clear();
@@ -668,28 +789,34 @@ where
 
 fn stream_query_chunks_with<F>(path: &str, mut on_chunk: F) -> io::Result<()>
 where
-    F: FnMut(usize, Vec<(String, Vec<u8>)>) -> io::Result<()>,
+    F: FnMut(usize, SyngGafQueryChunk) -> io::Result<()>,
 {
     let file = File::open(path)?;
     let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
         io::Error::other(format!("Failed to open reader for '{}': {}", path, e))
     })?;
-    let mut reader = BufReader::new(reader);
+    let mut reader = BufReader::with_capacity(8 * 1024 * 1024, reader);
 
-    let mut first_line = String::new();
+    let mut first_line = Vec::new();
     loop {
         first_line.clear();
-        if reader.read_line(&mut first_line)? == 0 {
+        if reader.read_until(b'\n', &mut first_line)? == 0 {
             return Ok(());
         }
-        if !first_line.trim().is_empty() {
+        if !is_blank_line_bytes(&first_line) {
             break;
         }
     }
 
-    if first_line.starts_with('>') {
+    if first_line.starts_with(b">") {
+        let first_line = String::from_utf8(first_line).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("FASTA header in '{}' is not valid UTF-8: {}", path, e),
+            )
+        })?;
         stream_fasta_query_chunks(reader, first_line, &mut on_chunk)
-    } else if first_line.starts_with('@') {
+    } else if first_line.starts_with(b"@") {
         stream_fastq_query_chunks(reader, first_line, &mut on_chunk)
     } else {
         Err(io::Error::new(
@@ -701,16 +828,30 @@ where
 
 fn stream_query_chunks(
     path: &str,
-    tx: &channel::Sender<(usize, Vec<(String, Vec<u8>)>)>,
+    tx: &channel::Sender<(usize, SyngGafQueryChunk)>,
+    profile: Option<&Arc<SyngGafMapProfile>>,
 ) -> io::Result<()> {
-    stream_query_chunks_with(path, |idx, chunk| {
-        tx.send((idx, chunk)).map_err(|_| {
+    let reader_start = Instant::now();
+    let result = stream_query_chunks_with(path, |idx, chunk| {
+        if let Some(profile) = profile {
+            profile.query_chunks.fetch_add(1, Ordering::Relaxed);
+        }
+        let send_start = Instant::now();
+        let result = tx.send((idx, chunk)).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "failed to send query chunk to GAF workers",
             )
-        })
-    })
+        });
+        if let Some(profile) = profile {
+            add_profile_duration(&profile.reader_send_wait_ns, send_start.elapsed());
+        }
+        result
+    });
+    if let Some(profile) = profile {
+        add_profile_duration(&profile.reader_total_ns, reader_start.elapsed());
+    }
+    result
 }
 
 fn emit_syng_map_gaf_sequential<W: Write>(
@@ -762,31 +903,52 @@ fn emit_syng_map_gaf<W: Write + Send>(
     }
 
     let queue_capacity = threads.saturating_mul(4).max(1);
-    let (query_tx, query_rx) =
-        channel::bounded::<(usize, Vec<(String, Vec<u8>)>)>(queue_capacity);
+    let (query_tx, query_rx) = channel::bounded::<(usize, SyngGafQueryChunk)>(queue_capacity);
     let (result_tx, result_rx) =
         channel::bounded::<(usize, SyngGafMapChunk)>(queue_capacity);
+    let profile = std::env::var_os("IMPG_PROFILE_MAP")
+        .map(|_| Arc::new(SyngGafMapProfile::default()));
 
     let stats = std::thread::scope(|scope| {
-        let writer = scope.spawn(move || write_ordered_syng_gaf_chunks(out, result_rx));
+        let writer_profile = profile.clone();
+        let writer =
+            scope.spawn(move || write_ordered_syng_gaf_chunks(out, result_rx, writer_profile));
 
         let mut workers = Vec::with_capacity(threads);
         for _ in 0..threads {
             let query_rx = query_rx.clone();
             let result_tx = result_tx.clone();
+            let worker_profile = profile.clone();
             workers.push(scope.spawn(move || -> io::Result<()> {
                 let mut worker = syng_matcher.worker().map_err(|e| {
                     io::Error::new(e.kind(), format!("failed to create syng GAF worker: {e}"))
                 })?;
-                for (idx, chunk) in query_rx.iter() {
+                loop {
+                    let recv_start = Instant::now();
+                    let Ok((idx, chunk)) = query_rx.recv() else {
+                        break;
+                    };
+                    if let Some(profile) = &worker_profile {
+                        add_profile_duration(&profile.worker_recv_wait_ns, recv_start.elapsed());
+                    }
+                    let compute_start = Instant::now();
                     let chunk =
                         build_syng_map_gaf_chunk(&mut worker, &chunk, min_anchors, syncmer_len);
-                    result_tx.send((idx, chunk)).map_err(|_| {
+                    if let Some(profile) = &worker_profile {
+                        add_profile_duration(&profile.worker_compute_ns, compute_start.elapsed());
+                        profile.worker_chunks.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let send_start = Instant::now();
+                    let result = result_tx.send((idx, chunk)).map_err(|_| {
                         io::Error::new(
                             io::ErrorKind::BrokenPipe,
                             "failed to send GAF chunk to writer",
                         )
-                    })?;
+                    });
+                    if let Some(profile) = &worker_profile {
+                        add_profile_duration(&profile.worker_send_wait_ns, send_start.elapsed());
+                    }
+                    result?;
                 }
                 Ok(())
             }));
@@ -794,7 +956,7 @@ fn emit_syng_map_gaf<W: Write + Send>(
         drop(query_rx);
         drop(result_tx);
 
-        let reader_result = stream_query_chunks(query_path, &query_tx);
+        let reader_result = stream_query_chunks(query_path, &query_tx, profile.as_ref());
         drop(query_tx);
 
         let mut worker_errors = Vec::new();
@@ -824,6 +986,26 @@ fn emit_syng_map_gaf<W: Write + Send>(
         start.elapsed().as_secs_f64(),
         threads
     );
+    if let Some(profile) = &profile {
+        let reader_total = profile_duration(&profile.reader_total_ns);
+        let reader_send_wait = profile_duration(&profile.reader_send_wait_ns);
+        let reader_scan = reader_total.saturating_sub(reader_send_wait);
+        info!(
+            "Syng GAF pipeline profile: query_chunks={}, worker_chunks={}, writer_chunks={}, output_bytes={}, reader_total={}, reader_scan={}, reader_send_wait={}, worker_recv_wait_sum={}, worker_compute_sum={}, worker_send_wait_sum={}, writer_recv_wait={}, writer_write={}",
+            profile.query_chunks.load(Ordering::Relaxed),
+            profile.worker_chunks.load(Ordering::Relaxed),
+            profile.writer_chunks.load(Ordering::Relaxed),
+            profile.output_bytes.load(Ordering::Relaxed),
+            format_duration(reader_total),
+            format_duration(reader_scan),
+            format_duration(reader_send_wait),
+            format_duration(profile_duration(&profile.worker_recv_wait_ns)),
+            format_duration(profile_duration(&profile.worker_compute_ns)),
+            format_duration(profile_duration(&profile.worker_send_wait_ns)),
+            format_duration(profile_duration(&profile.writer_recv_wait_ns)),
+            format_duration(profile_duration(&profile.writer_write_ns)),
+        );
+    }
     Ok(())
 }
 

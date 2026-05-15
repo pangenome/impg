@@ -1495,14 +1495,20 @@ fn matched_syncmers_in_sequence_impl(
     params: SyncmerParams,
     query_seq: &[u8],
     kmer_buf: &mut [u64],
-) -> Vec<SyngQuerySyncmer> {
+    seq_buf: &mut Vec<u8>,
+    valid_prefix: &mut Vec<usize>,
+    out: &mut Vec<SyngQuerySyncmer>,
+) {
+    out.clear();
     let syncmer_len = (params.w + params.k) as usize;
     if query_seq.len() < syncmer_len {
-        return Vec::new();
+        return;
     }
 
-    let mut seq_buf: Vec<u8> = Vec::with_capacity(query_seq.len() + 1);
-    let mut valid_prefix: Vec<usize> = Vec::with_capacity(query_seq.len() + 1);
+    seq_buf.clear();
+    valid_prefix.clear();
+    seq_buf.reserve(query_seq.len() + 1);
+    valid_prefix.reserve(query_seq.len() + 1);
     valid_prefix.push(0);
     for &base in query_seq {
         let (encoded, valid) = encode_query_base(base);
@@ -1512,7 +1518,6 @@ fn matched_syncmers_in_sequence_impl(
     }
     seq_buf.push(0);
 
-    let mut out = Vec::new();
     unsafe {
         let sit = syng_ffi::syncmerIterator(
             seqhash,
@@ -1549,7 +1554,6 @@ fn matched_syncmers_in_sequence_impl(
         }
         syng_ffi::impg_seqhashIteratorDestroy(sit);
     }
-    out
 }
 
 /// Lightweight syng syncmer dictionary handle for read-to-node matching.
@@ -1567,6 +1571,8 @@ pub struct SyngMatcherWorker<'a> {
     kmer_hash: *mut syng_ffi::KmerHash,
     seqhash: *mut syng_ffi::Seqhash,
     kmer_buf: Vec<u64>,
+    seq_buf: Vec<u8>,
+    valid_prefix: Vec<usize>,
     params: SyncmerParams,
     _owner: PhantomData<&'a SyngMatcher>,
 }
@@ -1601,13 +1607,20 @@ impl SyngMatcher {
     /// Return query syncmers that are present in this syng dictionary.
     pub fn matched_syncmers_in_sequence(&self, query_seq: &[u8]) -> Vec<SyngQuerySyncmer> {
         let mut kmer_buf = vec![0u64; unsafe { (*self.kmer_hash).plen as usize }];
+        let mut seq_buf = Vec::with_capacity(query_seq.len() + 1);
+        let mut valid_prefix = Vec::with_capacity(query_seq.len() + 1);
+        let mut out = Vec::new();
         matched_syncmers_in_sequence_impl(
             self.seqhash,
             self.kmer_hash,
             self.params,
             query_seq,
             &mut kmer_buf,
-        )
+            &mut seq_buf,
+            &mut valid_prefix,
+            &mut out,
+        );
+        out
     }
 
     pub fn worker(&self) -> io::Result<SyngMatcherWorker<'_>> {
@@ -1625,6 +1638,8 @@ impl SyngMatcher {
             kmer_hash: self.kmer_hash,
             seqhash,
             kmer_buf: vec![0u64; unsafe { (*self.kmer_hash).plen as usize }],
+            seq_buf: Vec::new(),
+            valid_prefix: Vec::new(),
             params: self.params,
             _owner: PhantomData,
         })
@@ -1634,13 +1649,26 @@ impl SyngMatcher {
 impl SyngMatcherWorker<'_> {
     /// Return query syncmers using this worker's thread-local syng iterator state.
     pub fn matched_syncmers_in_sequence(&mut self, query_seq: &[u8]) -> Vec<SyngQuerySyncmer> {
+        let mut out = Vec::new();
+        self.matched_syncmers_in_sequence_into(query_seq, &mut out);
+        out
+    }
+
+    pub fn matched_syncmers_in_sequence_into(
+        &mut self,
+        query_seq: &[u8],
+        out: &mut Vec<SyngQuerySyncmer>,
+    ) {
         matched_syncmers_in_sequence_impl(
             self.seqhash,
             self.kmer_hash,
             self.params,
             query_seq,
             &mut self.kmer_buf,
-        )
+            &mut self.seq_buf,
+            &mut self.valid_prefix,
+            out,
+        );
     }
 }
 
@@ -3282,13 +3310,20 @@ impl SyngIndex {
     /// is the primitive used by `impg map -o gaf`.
     pub fn matched_syncmers_in_sequence(&self, query_seq: &[u8]) -> Vec<SyngQuerySyncmer> {
         let mut kmer_buf = vec![0u64; unsafe { (*self.kmer_hash).plen as usize }];
+        let mut seq_buf = Vec::with_capacity(query_seq.len() + 1);
+        let mut valid_prefix = Vec::with_capacity(query_seq.len() + 1);
+        let mut out = Vec::new();
         matched_syncmers_in_sequence_impl(
             self.seqhash,
             self.kmer_hash,
             self.params,
             query_seq,
             &mut kmer_buf,
-        )
+            &mut seq_buf,
+            &mut valid_prefix,
+            &mut out,
+        );
+        out
     }
 
     /// Project query syncmer matches to indexed genome coordinates.
