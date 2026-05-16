@@ -1351,6 +1351,7 @@ dependencies = [
  "cc",
  "clap",
  "coitrees",
+ "crossbeam-channel",
  "csv",
  "env_logger",
  "flate2",

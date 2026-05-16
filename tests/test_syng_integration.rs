@@ -492,6 +492,29 @@ fn test_syng_map_cli_gaf_and_paf() {
         writeln!(f, "+").unwrap();
         writeln!(f, "{}", "I".repeat(700)).unwrap();
     }
+    let query_rc_path = dir.join("query_rc.fq");
+    {
+        use std::io::Write;
+        let rc = impg::graph::reverse_complement(&backbone[100..800]);
+        let mut f = std::fs::File::create(&query_rc_path).unwrap();
+        writeln!(f, "@read_rc").unwrap();
+        f.write_all(&rc).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, "+").unwrap();
+        writeln!(f, "{}", "I".repeat(700)).unwrap();
+    }
+    let query_multi_path = dir.join("query_multi.fq");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&query_multi_path).unwrap();
+        for i in 0..2050 {
+            writeln!(f, "@read{}", i).unwrap();
+            f.write_all(&backbone[100..800]).unwrap();
+            writeln!(f).unwrap();
+            writeln!(f, "+").unwrap();
+            writeln!(f, "{}", "I".repeat(700)).unwrap();
+        }
+    }
 
     let idx_prefix = dir.join("idx");
     let build = Command::new(&bin)
@@ -542,6 +565,258 @@ fn test_syng_map_cli_gaf_and_paf() {
         "GAF path should contain syncmer node orientations: {}",
         gaf_fields[5]
     );
+    let mut expected_pack_nodes = std::collections::BTreeSet::new();
+    let mut node_digits = String::new();
+    for ch in gaf_fields[5].chars() {
+        if ch == '>' || ch == '<' {
+            if !node_digits.is_empty() {
+                expected_pack_nodes.insert(node_digits.parse::<u32>().unwrap());
+                node_digits.clear();
+            }
+        } else if ch.is_ascii_digit() {
+            node_digits.push(ch);
+        }
+    }
+    if !node_digits.is_empty() {
+        expected_pack_nodes.insert(node_digits.parse::<u32>().unwrap());
+    }
+
+    let default_gaf = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            query_path.to_str().unwrap(),
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map with default output");
+    assert!(
+        default_gaf.status.success(),
+        "impg map default output failed: {}",
+        String::from_utf8_lossy(&default_gaf.stderr)
+    );
+    assert_eq!(
+        default_gaf.stdout, gaf.stdout,
+        "impg map should default to GAF output"
+    );
+
+    let pack = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            query_path.to_str().unwrap(),
+            "-o",
+            "pack",
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o pack");
+    assert!(
+        pack.status.success(),
+        "impg map -o pack failed: {}",
+        String::from_utf8_lossy(&pack.stderr)
+    );
+    let pack_stdout = String::from_utf8_lossy(&pack.stdout);
+    let pack_lines: Vec<&str> = pack_stdout.lines().collect();
+    assert_eq!(
+        pack_lines.first().copied(),
+        Some("#node_id\tcount"),
+        "pack output should start with a TSV header, got:\n{}",
+        pack_stdout
+    );
+    assert_eq!(
+        pack_lines.len().saturating_sub(1),
+        expected_pack_nodes.len(),
+        "pack output should have one row per distinct GAF node"
+    );
+    for line in pack_lines.iter().skip(1) {
+        let fields: Vec<&str> = line.split('\t').collect();
+        assert_eq!(fields.len(), 2, "pack line should have two fields: {}", line);
+        let node_id = fields[0].parse::<u32>().unwrap();
+        let count = fields[1].parse::<u64>().unwrap();
+        assert!(
+            expected_pack_nodes.contains(&node_id),
+            "pack emitted unexpected node {} in:\n{}",
+            node_id,
+            pack_stdout
+        );
+        assert_eq!(count, 1, "single-read pack count should be 1 for {}", node_id);
+    }
+    let pack_zst_path = dir.join("pack.tsv.zst");
+    let pack_zst = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            query_path.to_str().unwrap(),
+            "-o",
+            "pack",
+            "-O",
+            pack_zst_path.to_str().unwrap(),
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o pack -O pack.tsv.zst");
+    assert!(
+        pack_zst.status.success(),
+        "impg map -o pack -O pack.tsv.zst failed: {}",
+        String::from_utf8_lossy(&pack_zst.stderr)
+    );
+    assert!(
+        pack_zst.stdout.is_empty(),
+        "pack output should go to -O path, got stdout: {}",
+        String::from_utf8_lossy(&pack_zst.stdout)
+    );
+    let compressed = std::fs::read(&pack_zst_path).unwrap();
+    assert!(
+        compressed.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]),
+        "pack .zst output should have zstd magic bytes"
+    );
+    let mut decoder =
+        zstd::stream::read::Decoder::new(std::fs::File::open(&pack_zst_path).unwrap()).unwrap();
+    let mut decoded_pack = String::new();
+    {
+        use std::io::Read;
+        decoder.read_to_string(&mut decoded_pack).unwrap();
+    }
+    assert_eq!(
+        decoded_pack, pack_stdout,
+        ".zst-compressed pack output should decompress to plain pack TSV"
+    );
+
+    let packbin_path = dir.join("pack.ipack");
+    let packbin = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            query_path.to_str().unwrap(),
+            "-o",
+            "packbin",
+            "-O",
+            packbin_path.to_str().unwrap(),
+            "--pack-compression-level",
+            "3",
+            "--pack-block-size",
+            "64",
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o packbin");
+    assert!(
+        packbin.status.success(),
+        "impg map -o packbin failed: {}",
+        String::from_utf8_lossy(&packbin.stderr)
+    );
+    assert!(
+        packbin.stdout.is_empty(),
+        "packbin output should go to -O path, got stdout bytes: {}",
+        packbin.stdout.len()
+    );
+    let packbin_bytes = std::fs::read(&packbin_path).unwrap();
+    assert_eq!(&packbin_bytes[..8], b"IMPGPKB1");
+    let read_u32 = |offset: usize| -> u32 {
+        u32::from_le_bytes(packbin_bytes[offset..offset + 4].try_into().unwrap())
+    };
+    let read_i32 = |offset: usize| -> i32 {
+        i32::from_le_bytes(packbin_bytes[offset..offset + 4].try_into().unwrap())
+    };
+    let read_u64 = |offset: usize| -> u64 {
+        u64::from_le_bytes(packbin_bytes[offset..offset + 8].try_into().unwrap())
+    };
+    assert_eq!(read_u32(8), 1, "packbin version should be 1");
+    let header_len = read_u32(12) as usize;
+    assert_eq!(header_len, 96);
+    let universe_nodes = read_u64(16) as usize;
+    let nonzero_nodes = read_u64(24) as usize;
+    let retained_reads = read_u64(32);
+    let anchors = read_u64(40);
+    let block_size = read_u32(48) as usize;
+    let zstd_level = read_i32(52);
+    let block_count = read_u64(56) as usize;
+    let overflow_count = read_u64(64) as usize;
+    let block_index_offset = read_u64(72) as usize;
+    let overflow_offset = read_u64(80) as usize;
+    let data_offset = read_u64(88) as usize;
+    assert_eq!(nonzero_nodes, expected_pack_nodes.len());
+    assert_eq!(retained_reads, 1);
+    assert!(anchors >= expected_pack_nodes.len() as u64);
+    assert_eq!(block_size, 64);
+    assert_eq!(zstd_level, 3);
+    assert_eq!(overflow_count, 0);
+    assert_eq!(block_index_offset, header_len);
+    assert!(overflow_offset >= block_index_offset);
+    assert!(data_offset >= overflow_offset);
+    assert_eq!(block_count, universe_nodes.div_ceil(block_size));
+
+    let mut block_offsets = Vec::with_capacity(block_count + 1);
+    for i in 0..=block_count {
+        block_offsets.push(read_u64(block_index_offset + i * 8) as usize);
+    }
+    let mut dense = Vec::with_capacity(universe_nodes);
+    for block_idx in 0..block_count {
+        let compressed_start = data_offset + block_offsets[block_idx];
+        let compressed_end = data_offset + block_offsets[block_idx + 1];
+        let expected_len = (universe_nodes - block_idx * block_size).min(block_size);
+        let block = zstd::bulk::decompress(
+            &packbin_bytes[compressed_start..compressed_end],
+            expected_len,
+        )
+        .unwrap();
+        assert_eq!(block.len(), expected_len);
+        dense.extend_from_slice(&block);
+    }
+    assert_eq!(dense.len(), universe_nodes);
+    assert_eq!(
+        dense.iter().filter(|&&count| count != 0).count(),
+        expected_pack_nodes.len()
+    );
+    for &node_id in &expected_pack_nodes {
+        assert_eq!(dense[(node_id - 1) as usize], 1, "packbin count for {}", node_id);
+    }
+
+    let gaf_rc = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            query_rc_path.to_str().unwrap(),
+            "-o",
+            "gaf",
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o gaf on reverse-complement read");
+    assert!(
+        gaf_rc.status.success(),
+        "impg map -o gaf failed on reverse-complement read: {}",
+        String::from_utf8_lossy(&gaf_rc.stderr)
+    );
+    let gaf_rc_stdout = String::from_utf8_lossy(&gaf_rc.stdout);
+    let gaf_rc_lines: Vec<&str> = gaf_rc_stdout.lines().collect();
+    assert_eq!(
+        gaf_rc_lines.len(),
+        1,
+        "expected one reverse-complement GAF line, got:\n{}",
+        gaf_rc_stdout
+    );
+    assert!(
+        gaf_rc_lines[0].starts_with("read_rc\t"),
+        "reverse-complement GAF should report the read name, got: {}",
+        gaf_rc_lines[0]
+    );
 
     let paf = Command::new(&bin)
         .args([
@@ -582,6 +857,111 @@ fn test_syng_map_cli_gaf_and_paf() {
         assert!(fields.len() >= 12, "PAF line has too few fields: {}", line);
         assert_eq!(fields[0], "read1");
     }
+
+    for suffix in ["1gbwt", "syng.names", "syng.spos", "syng.pstep"] {
+        std::fs::remove_file(dir.join(format!("idx.{suffix}"))).ok();
+    }
+    let gaf_khash_only = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            query_path.to_str().unwrap(),
+            "-o",
+            "gaf",
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o gaf with only khash");
+    assert!(
+        gaf_khash_only.status.success(),
+        "impg map -o gaf should only require .1khash/.meta, stderr: {}",
+        String::from_utf8_lossy(&gaf_khash_only.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&gaf_khash_only.stdout)
+            .lines()
+            .collect::<Vec<_>>()
+            .is_empty(),
+        "expected GAF output with only .1khash/.meta present"
+    );
+    let pack_khash_only = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            query_path.to_str().unwrap(),
+            "-o",
+            "pack",
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o pack with only khash");
+    assert!(
+        pack_khash_only.status.success(),
+        "impg map -o pack should only require .1khash/.meta, stderr: {}",
+        String::from_utf8_lossy(&pack_khash_only.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&pack_khash_only.stdout).lines().next(),
+        Some("#node_id\tcount"),
+        "expected pack header with only .1khash/.meta present"
+    );
+    let gaf_threads_1 = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            query_multi_path.to_str().unwrap(),
+            "-o",
+            "gaf",
+            "--min-anchors",
+            "2",
+            "-t",
+            "1",
+        ])
+        .output()
+        .expect("failed to run impg map -o gaf with one thread");
+    assert!(
+        gaf_threads_1.status.success(),
+        "single-threaded GAF mapping failed: {}",
+        String::from_utf8_lossy(&gaf_threads_1.stderr)
+    );
+    let gaf_threads_2 = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            query_multi_path.to_str().unwrap(),
+            "-o",
+            "gaf",
+            "--min-anchors",
+            "2",
+            "-t",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o gaf with two threads");
+    assert!(
+        gaf_threads_2.status.success(),
+        "two-threaded GAF mapping failed: {}",
+        String::from_utf8_lossy(&gaf_threads_2.stderr)
+    );
+    assert_eq!(
+        gaf_threads_1.stdout, gaf_threads_2.stdout,
+        "parallel GAF mapping should preserve deterministic output order"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&gaf_threads_2.stdout).lines().count(),
+        2050,
+        "expected one GAF record per repeated query read"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }
