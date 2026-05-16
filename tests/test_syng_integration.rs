@@ -648,6 +648,49 @@ fn test_syng_map_cli_gaf_and_paf() {
         );
         assert_eq!(count, 1, "single-read pack count should be 1 for {}", node_id);
     }
+    let pack_zst_path = dir.join("pack.tsv.zst");
+    let pack_zst = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            query_path.to_str().unwrap(),
+            "-o",
+            "pack",
+            "-O",
+            pack_zst_path.to_str().unwrap(),
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o pack -O pack.tsv.zst");
+    assert!(
+        pack_zst.status.success(),
+        "impg map -o pack -O pack.tsv.zst failed: {}",
+        String::from_utf8_lossy(&pack_zst.stderr)
+    );
+    assert!(
+        pack_zst.stdout.is_empty(),
+        "pack output should go to -O path, got stdout: {}",
+        String::from_utf8_lossy(&pack_zst.stdout)
+    );
+    let compressed = std::fs::read(&pack_zst_path).unwrap();
+    assert!(
+        compressed.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]),
+        "pack .zst output should have zstd magic bytes"
+    );
+    let mut decoder =
+        zstd::stream::read::Decoder::new(std::fs::File::open(&pack_zst_path).unwrap()).unwrap();
+    let mut decoded_pack = String::new();
+    {
+        use std::io::Read;
+        decoder.read_to_string(&mut decoded_pack).unwrap();
+    }
+    assert_eq!(
+        decoded_pack, pack_stdout,
+        ".zst-compressed pack output should decompress to plain pack TSV"
+    );
 
     let gaf_rc = Command::new(&bin)
         .args([

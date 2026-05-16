@@ -536,6 +536,22 @@ fn profile_duration(counter: &AtomicU64) -> Duration {
     Duration::from_nanos(counter.load(Ordering::Relaxed))
 }
 
+fn create_map_output_writer(path: &str) -> io::Result<Box<dyn Write + Send>> {
+    let file = File::create(path)?;
+    let writer: Box<dyn Write + Send> =
+        Box::new(BufWriter::with_capacity(1024 * 1024, file));
+    if path.ends_with(".zst") || path.ends_with(".zstd") {
+        niffler::send::get_writer(
+            writer,
+            niffler::send::compression::Format::Zstd,
+            niffler::Level::Six,
+        )
+        .map_err(io::Error::other)
+    } else {
+        Ok(writer)
+    }
+}
+
 fn emit_syng_map<W: Write>(
     out: &mut W,
     syng_index: &impg::syng::SyngIndex,
@@ -3013,7 +3029,7 @@ enum Args {
         #[clap(short = 'o', long, value_parser, default_value = "gaf")]
         output_format: String,
 
-        /// Output file path (default: stdout)
+        /// Output file path (default: stdout; .zst/.zstd enables zstd compression)
         #[clap(short = 'O', long, value_parser)]
         output: Option<String>,
 
@@ -4991,7 +5007,7 @@ fn run() -> io::Result<()> {
             silence_stdout_for_process()?;
 
             if let Some(path) = output {
-                let mut out = BufWriter::new(File::create(path)?);
+                let mut out = create_map_output_writer(&path)?;
                 match output_format.as_str() {
                     "gaf" => {
                         info!("Loading syng syncmer dictionary from prefix: {}", syng_prefix);
