@@ -18,7 +18,7 @@ use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use rustc_hash::FxHashMap;
 use std::collections::{hash_map::DefaultHasher, BTreeMap};
-use std::fs::File;
+use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::num::NonZeroUsize;
@@ -1010,6 +1010,85 @@ fn emit_syng_map_gaf<W: Write + Send>(
 }
 
 const READ_SYNCMER_INDEX_VERSION: u32 = 1;
+const READ_SYNCMER_SPLIT_INDEX_VERSION: u32 = 1;
+const READ_ORDER_KEY_NODES: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadSyncmerIndexCodec {
+    Classic,
+    SplitZstd,
+}
+
+impl ReadSyncmerIndexCodec {
+    fn parse(value: &str) -> io::Result<Self> {
+        match value {
+            "classic" => Ok(Self::Classic),
+            "split-zstd" => Ok(Self::SplitZstd),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unsupported read-index codec '{value}' (expected classic or split-zstd)"),
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Classic => "classic",
+            Self::SplitZstd => "split-zstd",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadSyncmerReadOrder {
+    Fastq,
+    MinNode,
+    LexNode,
+}
+
+impl ReadSyncmerReadOrder {
+    fn parse(value: &str) -> io::Result<Self> {
+        match value {
+            "fastq" => Ok(Self::Fastq),
+            "min-node" => Ok(Self::MinNode),
+            "lex-node" => Ok(Self::LexNode),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "unsupported read-index read order '{value}' (expected fastq, min-node, or lex-node)"
+                ),
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Fastq => "fastq",
+            Self::MinNode => "min-node",
+            Self::LexNode => "lex-node",
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ReadOrderStats {
+    reordered_reads: u64,
+}
+
+#[derive(Clone, Copy)]
+struct ReadLexKey {
+    len: u8,
+    nodes: [u32; READ_ORDER_KEY_NODES],
+}
+
+impl Default for ReadLexKey {
+    fn default() -> Self {
+        Self {
+            len: 0,
+            nodes: [u32::MAX; READ_ORDER_KEY_NODES],
+        }
+    }
+}
 
 #[derive(Debug, Default, Clone, Copy)]
 struct ReadSyncmerIndexStats {
@@ -1043,12 +1122,39 @@ struct ReadSyncmerPairChunk {
     stats: ReadSyncmerIndexStats,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct ReadSyncmerSplitIndexStats {
+    nodes: u64,
+    singleton_nodes: u64,
+    multi_nodes: u64,
+    multi_postings: u64,
+    nodes_raw_bytes: u64,
+    counts_raw_bytes: u64,
+    singleton_raw_bytes: u64,
+    multi_raw_bytes: u64,
+    nodes_bytes: u64,
+    counts_bytes: u64,
+    singleton_bytes: u64,
+    multi_bytes: u64,
+}
+
 fn read_syncmer_index_base(prefix: &str) -> &str {
     prefix.strip_suffix(".r2s").unwrap_or(prefix)
 }
 
 fn read_syncmer_index_path(prefix: &str, extension: &str) -> String {
     format!("{}.r2s.{}", read_syncmer_index_base(prefix), extension)
+}
+
+fn read_syncmer_split_index_base(prefix: &str) -> &str {
+    prefix
+        .strip_suffix(".r2s2")
+        .or_else(|| prefix.strip_suffix(".r2s"))
+        .unwrap_or(prefix)
+}
+
+fn read_syncmer_split_index_path(prefix: &str, extension: &str) -> String {
+    format!("{}.r2s2.{}", read_syncmer_split_index_base(prefix), extension)
 }
 
 fn pack_read_syncmer_pair(node_id: u32, read_ordinal: u64) -> io::Result<u64> {
@@ -1067,6 +1173,92 @@ fn packed_read_syncmer_node(pair: u64) -> u32 {
 
 fn packed_read_syncmer_read(pair: u64) -> u64 {
     pair & u64::from(u32::MAX)
+}
+
+fn remap_read_syncmer_pairs(
+    pairs: &mut [u64],
+    read_count: u64,
+    read_order: ReadSyncmerReadOrder,
+) -> io::Result<ReadOrderStats> {
+    if read_order == ReadSyncmerReadOrder::Fastq {
+        return Ok(ReadOrderStats::default());
+    }
+    if read_count > u64::from(u32::MAX) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "read-index read reassignment currently supports at most 2^32 reads",
+        ));
+    }
+    let read_count_usize = usize::try_from(read_count).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "read count does not fit in memory address space",
+        )
+    })?;
+
+    let mut order: Vec<u32> = (0..read_count_usize)
+        .map(|read| read as u32)
+        .collect();
+    match read_order {
+        ReadSyncmerReadOrder::Fastq => unreachable!(),
+        ReadSyncmerReadOrder::MinNode => {
+            let mut min_nodes = vec![u32::MAX; read_count_usize];
+            for &pair in pairs.iter() {
+                let read = packed_read_syncmer_read(pair) as usize;
+                let node = packed_read_syncmer_node(pair);
+                if node < min_nodes[read] {
+                    min_nodes[read] = node;
+                }
+            }
+            order.par_sort_unstable_by(|&a, &b| {
+                let a_key = min_nodes[a as usize];
+                let b_key = min_nodes[b as usize];
+                (a_key == u32::MAX, a_key, a).cmp(&(b_key == u32::MAX, b_key, b))
+            });
+        }
+        ReadSyncmerReadOrder::LexNode => {
+            let mut keys = vec![ReadLexKey::default(); read_count_usize];
+            for &pair in pairs.iter() {
+                let read = packed_read_syncmer_read(pair) as usize;
+                let key = &mut keys[read];
+                let len = key.len as usize;
+                if len < READ_ORDER_KEY_NODES {
+                    key.nodes[len] = packed_read_syncmer_node(pair);
+                    key.len += 1;
+                }
+            }
+            order.par_sort_unstable_by(|&a, &b| {
+                let a_key = keys[a as usize];
+                let b_key = keys[b as usize];
+                let a_mapped = a_key.len > 0;
+                let b_mapped = b_key.len > 0;
+                (
+                    !a_mapped,
+                    &a_key.nodes[..a_key.len as usize],
+                    a,
+                )
+                    .cmp(&(
+                        !b_mapped,
+                        &b_key.nodes[..b_key.len as usize],
+                        b,
+                    ))
+            });
+        }
+    }
+
+    let mut remap = vec![0u32; read_count_usize];
+    for (new_read, &old_read) in order.iter().enumerate() {
+        remap[old_read as usize] = new_read as u32;
+    }
+    for pair in pairs.iter_mut() {
+        let node = packed_read_syncmer_node(*pair);
+        let read = packed_read_syncmer_read(*pair) as usize;
+        *pair = pack_read_syncmer_pair(node, u64::from(remap[read]))?;
+    }
+
+    Ok(ReadOrderStats {
+        reordered_reads: read_count,
+    })
 }
 
 fn write_varint<W: Write>(out: &mut W, mut value: u64) -> io::Result<u64> {
@@ -1174,6 +1366,7 @@ fn write_read_syncmer_index_files(
     params: impg::syng::SyncmerParams,
     min_syncmers: usize,
     node_sample_rate: u32,
+    read_order: ReadSyncmerReadOrder,
     pairs: &[u64],
     mut stats: ReadSyncmerIndexStats,
     build_seconds: f64,
@@ -1249,6 +1442,7 @@ fn write_read_syncmer_index_files(
         },
         "min_distinct_syncmers_per_read": min_syncmers,
         "node_sample_rate": node_sample_rate,
+        "read_order": read_order.as_str(),
         "read_ordinal_bits": 32,
         "reads": stats.reads,
         "retained_reads": stats.retained_reads,
@@ -1273,6 +1467,156 @@ fn write_read_syncmer_index_files(
     Ok(stats)
 }
 
+fn compressed_file_len(path: &str) -> io::Result<u64> {
+    Ok(fs::metadata(path)?.len())
+}
+
+fn finish_zstd_encoder<W: Write>(
+    encoder: zstd::stream::write::Encoder<'_, W>,
+) -> io::Result<W> {
+    encoder.finish().map_err(io::Error::other)
+}
+
+fn write_read_syncmer_split_zstd_index_files(
+    output_prefix: &str,
+    syng_prefix: &str,
+    query_paths: &[String],
+    params: impg::syng::SyncmerParams,
+    min_syncmers: usize,
+    read_order: ReadSyncmerReadOrder,
+    pairs: &[u64],
+    stats: ReadSyncmerIndexStats,
+    build_seconds: f64,
+) -> io::Result<ReadSyncmerSplitIndexStats> {
+    let nodes_path = read_syncmer_split_index_path(output_prefix, "nodes.zst");
+    let counts_path = read_syncmer_split_index_path(output_prefix, "counts.zst");
+    let singleton_path = read_syncmer_split_index_path(output_prefix, "singletons.zst");
+    let multi_path = read_syncmer_split_index_path(output_prefix, "multi.zst");
+    let meta_path = read_syncmer_split_index_path(output_prefix, "meta");
+
+    let write_start = Instant::now();
+    let nodes_file = BufWriter::new(File::create(&nodes_path)?);
+    let counts_file = BufWriter::new(File::create(&counts_path)?);
+    let singleton_file = BufWriter::new(File::create(&singleton_path)?);
+    let multi_file = BufWriter::new(File::create(&multi_path)?);
+    let mut nodes_out = zstd::stream::write::Encoder::new(nodes_file, 3).map_err(io::Error::other)?;
+    let mut counts_out =
+        zstd::stream::write::Encoder::new(counts_file, 3).map_err(io::Error::other)?;
+    let mut singleton_out =
+        zstd::stream::write::Encoder::new(singleton_file, 3).map_err(io::Error::other)?;
+    let mut multi_out = zstd::stream::write::Encoder::new(multi_file, 3).map_err(io::Error::other)?;
+
+    let mut split_stats = ReadSyncmerSplitIndexStats::default();
+    let mut i = 0usize;
+    let mut previous_node_id = 0u32;
+    while i < pairs.len() {
+        let node_id = packed_read_syncmer_node(pairs[i]);
+        let node_delta = node_id.checked_sub(previous_node_id).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "node ids are not sorted")
+        })?;
+        let group_start = i;
+        while i < pairs.len() && packed_read_syncmer_node(pairs[i]) == node_id {
+            i += 1;
+        }
+        let count = (i - group_start) as u64;
+
+        split_stats.nodes_raw_bytes += write_varint(&mut nodes_out, u64::from(node_delta))?;
+        split_stats.counts_raw_bytes += write_varint(&mut counts_out, count)?;
+        split_stats.nodes += 1;
+        if count == 1 {
+            let read_ordinal = packed_read_syncmer_read(pairs[group_start]);
+            let read = u32::try_from(read_ordinal).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "read ordinal exceeds u32")
+            })?;
+            singleton_out.write_all(&read.to_le_bytes())?;
+            split_stats.singleton_raw_bytes += 4;
+            split_stats.singleton_nodes += 1;
+        } else {
+            let mut prev_read = 0u64;
+            for &pair in &pairs[group_start..i] {
+                let read_ordinal = packed_read_syncmer_read(pair);
+                let delta = read_ordinal.checked_sub(prev_read).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "read ordinals are not sorted")
+                })?;
+                split_stats.multi_raw_bytes += write_varint(&mut multi_out, delta)?;
+                prev_read = read_ordinal;
+            }
+            split_stats.multi_nodes += 1;
+            split_stats.multi_postings += count;
+        }
+        previous_node_id = node_id;
+    }
+
+    finish_zstd_encoder(nodes_out)?;
+    finish_zstd_encoder(counts_out)?;
+    finish_zstd_encoder(singleton_out)?;
+    finish_zstd_encoder(multi_out)?;
+    split_stats.nodes_bytes = compressed_file_len(&nodes_path)?;
+    split_stats.counts_bytes = compressed_file_len(&counts_path)?;
+    split_stats.singleton_bytes = compressed_file_len(&singleton_path)?;
+    split_stats.multi_bytes = compressed_file_len(&multi_path)?;
+
+    let meta = serde_json::json!({
+        "format": "impg-r2s2",
+        "version": READ_SYNCMER_SPLIT_INDEX_VERSION,
+        "description": "experimental split zstd read-to-syncmer index; streams are node-major and read ordinals follow read_order",
+        "codec": "split-zstd",
+        "syng_prefix": syng_prefix,
+        "query_files": query_paths,
+        "syncmer": {
+            "smer_length": params.k,
+            "syncmer_length": params.k + params.w,
+            "seed": params.seed,
+        },
+        "min_distinct_syncmers_per_read": min_syncmers,
+        "read_order": read_order.as_str(),
+        "read_order_key_nodes": READ_ORDER_KEY_NODES,
+        "read_ordinal_bits": 32,
+        "reads": stats.reads,
+        "retained_reads": stats.retained_reads,
+        "matched_syncmers": stats.matched_syncmers,
+        "postings": stats.postings,
+        "nodes": split_stats.nodes,
+        "singleton_nodes": split_stats.singleton_nodes,
+        "multi_nodes": split_stats.multi_nodes,
+        "multi_postings": split_stats.multi_postings,
+        "raw_bytes": {
+            "nodes": split_stats.nodes_raw_bytes,
+            "counts": split_stats.counts_raw_bytes,
+            "singletons": split_stats.singleton_raw_bytes,
+            "multi": split_stats.multi_raw_bytes,
+            "total": split_stats.nodes_raw_bytes
+                + split_stats.counts_raw_bytes
+                + split_stats.singleton_raw_bytes
+                + split_stats.multi_raw_bytes,
+        },
+        "compressed_bytes": {
+            "nodes": split_stats.nodes_bytes,
+            "counts": split_stats.counts_bytes,
+            "singletons": split_stats.singleton_bytes,
+            "multi": split_stats.multi_bytes,
+            "total": split_stats.nodes_bytes
+                + split_stats.counts_bytes
+                + split_stats.singleton_bytes
+                + split_stats.multi_bytes,
+        },
+        "build_seconds": build_seconds,
+        "write_seconds": write_start.elapsed().as_secs_f64(),
+        "files": {
+            "nodes": nodes_path,
+            "counts": counts_path,
+            "singletons": singleton_path,
+            "multi": multi_path,
+        }
+    });
+    let mut meta_out = BufWriter::new(File::create(&meta_path)?);
+    serde_json::to_writer_pretty(&mut meta_out, &meta).map_err(io::Error::other)?;
+    meta_out.write_all(b"\n")?;
+    meta_out.flush()?;
+
+    Ok(split_stats)
+}
+
 fn build_read_syncmer_index(
     syng_prefix: &str,
     syng_matcher: &impg::syng::SyngMatcher,
@@ -1280,6 +1624,8 @@ fn build_read_syncmer_index(
     output_prefix: &str,
     min_syncmers: usize,
     node_sample_rate: u32,
+    codec: ReadSyncmerIndexCodec,
+    read_order: ReadSyncmerReadOrder,
 ) -> io::Result<ReadSyncmerIndexStats> {
     if min_syncmers == 0 {
         return Err(io::Error::new(
@@ -1388,20 +1734,70 @@ fn build_read_syncmer_index(
         sort_start.elapsed().as_secs_f64()
     );
 
+    if read_order != ReadSyncmerReadOrder::Fastq {
+        info!(
+            "Reassigning read ordinals with {} order for {} reads",
+            read_order.as_str(),
+            stats.reads
+        );
+        let reorder_start = Instant::now();
+        let order_stats = remap_read_syncmer_pairs(&mut pairs, stats.reads, read_order)?;
+        pairs.par_sort_unstable();
+        pairs.dedup();
+        stats.postings = pairs.len() as u64;
+        info!(
+            "Reassigned {} reads and resorted {} postings in {:.3}s",
+            order_stats.reordered_reads,
+            stats.postings,
+            reorder_start.elapsed().as_secs_f64()
+        );
+    }
+
     let build_seconds = start.elapsed().as_secs_f64();
-    let stats = write_read_syncmer_index_files(
-        output_prefix,
-        syng_prefix,
-        query_paths,
-        syng_matcher.params,
-        min_syncmers,
-        node_sample_rate,
-        &pairs,
-        stats,
-        build_seconds,
-    )?;
+    let stats = match codec {
+        ReadSyncmerIndexCodec::Classic => write_read_syncmer_index_files(
+            output_prefix,
+            syng_prefix,
+            query_paths,
+            syng_matcher.params,
+            min_syncmers,
+            node_sample_rate,
+            read_order,
+            &pairs,
+            stats,
+            build_seconds,
+        )?,
+        ReadSyncmerIndexCodec::SplitZstd => {
+            let split_stats = write_read_syncmer_split_zstd_index_files(
+                output_prefix,
+                syng_prefix,
+                query_paths,
+                syng_matcher.params,
+                min_syncmers,
+                read_order,
+                &pairs,
+                stats,
+                build_seconds,
+            )?;
+            let total_bytes = split_stats.nodes_bytes
+                + split_stats.counts_bytes
+                + split_stats.singleton_bytes
+                + split_stats.multi_bytes;
+            stats.nodes = split_stats.nodes;
+            stats.post_bytes = total_bytes;
+            stats.sample_bytes = 0;
+            info!(
+                "Built split-zstd read-index: nodes {}, singletons {}, multi_nodes {}, compressed_bytes {}",
+                split_stats.nodes,
+                split_stats.singleton_nodes,
+                split_stats.multi_nodes,
+                total_bytes
+            );
+            stats
+        }
+    };
     info!(
-        "Built read-index for {} reads: retained {}, nodes {}, samples {}, postings {}, post_bytes {}, sample_bytes {} in {:.3}s",
+        "Built read-index for {} reads: retained {}, nodes {}, samples {}, postings {}, post_bytes {}, sample_bytes {}, codec {}, read_order {} in {:.3}s",
         stats.reads,
         stats.retained_reads,
         stats.nodes,
@@ -1409,6 +1805,8 @@ fn build_read_syncmer_index(
         stats.postings,
         stats.post_bytes,
         stats.sample_bytes,
+        codec.as_str(),
+        read_order.as_str(),
         start.elapsed().as_secs_f64()
     );
     Ok(stats)
@@ -2859,6 +3257,14 @@ enum Args {
         /// Sample every N observed syncmer nodes for random-access lookup
         #[clap(long, value_parser, default_value_t = 256)]
         node_sample_rate: u32,
+
+        /// Read-index codec: classic or split-zstd
+        #[clap(long, value_parser, default_value = "classic")]
+        codec: String,
+
+        /// Read ordinal order: fastq, min-node, or lex-node
+        #[clap(long, value_parser, default_value = "fastq")]
+        read_order: String,
 
         // --- General ---
         #[clap(flatten)]
@@ -4880,9 +5286,13 @@ fn run() -> io::Result<()> {
             output,
             min_syncmers,
             node_sample_rate,
+            codec,
+            read_order,
             common,
         } => {
             initialize_threads_and_log(&common);
+            let codec = ReadSyncmerIndexCodec::parse(&codec)?;
+            let read_order = ReadSyncmerReadOrder::parse(&read_order)?;
 
             let syng_prefix = detect_syng_prefix(&index).unwrap_or(index);
             info!("Loading syng syncmer dictionary from prefix: {}", syng_prefix);
@@ -4895,6 +5305,8 @@ fn run() -> io::Result<()> {
                 &output,
                 min_syncmers,
                 node_sample_rate,
+                codec,
+                read_order,
             )?;
         }
         Args::Syng {
@@ -8124,6 +8536,14 @@ mod tests {
             read_syncmer_index_path("sample.r2s", "post"),
             "sample.r2s.post"
         );
+        assert_eq!(
+            read_syncmer_split_index_path("sample", "nodes.zst"),
+            "sample.r2s2.nodes.zst"
+        );
+        assert_eq!(
+            read_syncmer_split_index_path("sample.r2s2", "nodes.zst"),
+            "sample.r2s2.nodes.zst"
+        );
     }
 
     #[test]
@@ -8165,6 +8585,7 @@ mod tests {
             },
             2,
             1,
+            ReadSyncmerReadOrder::Fastq,
             &pairs,
             stats,
             0.25,
@@ -8191,6 +8612,74 @@ mod tests {
         let meta = std::fs::read_to_string(read_syncmer_index_path(&output, "meta")).unwrap();
         assert!(meta.contains("\"format\": \"impg-r2s\""));
         assert!(meta.contains("\"postings\": 3"));
+    }
+
+    #[test]
+    fn test_remap_read_syncmer_pairs_min_node_order() {
+        let mut pairs = vec![
+            pack_read_syncmer_pair(30, 0).unwrap(),
+            pack_read_syncmer_pair(10, 1).unwrap(),
+            pack_read_syncmer_pair(20, 2).unwrap(),
+            pack_read_syncmer_pair(10, 2).unwrap(),
+        ];
+        pairs.sort_unstable();
+        remap_read_syncmer_pairs(&mut pairs, 3, ReadSyncmerReadOrder::MinNode).unwrap();
+        pairs.sort_unstable();
+
+        let decoded: Vec<(u32, u64)> = pairs
+            .iter()
+            .map(|&pair| (packed_read_syncmer_node(pair), packed_read_syncmer_read(pair)))
+            .collect();
+        assert_eq!(decoded, vec![(10, 0), (10, 1), (20, 1), (30, 2)]);
+    }
+
+    #[test]
+    fn test_write_read_syncmer_split_zstd_index_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("tiny.r2s2");
+        let output = output.to_string_lossy().to_string();
+        let pairs = vec![
+            pack_read_syncmer_pair(10, 0).unwrap(),
+            pack_read_syncmer_pair(10, 5).unwrap(),
+            pack_read_syncmer_pair(11, 2).unwrap(),
+        ];
+        let stats = ReadSyncmerIndexStats {
+            reads: 6,
+            retained_reads: 3,
+            matched_syncmers: 3,
+            postings: pairs.len() as u64,
+            ..ReadSyncmerIndexStats::default()
+        };
+
+        let split_stats = write_read_syncmer_split_zstd_index_files(
+            &output,
+            "tiny.syng",
+            &["reads.fq".to_string()],
+            impg::syng::SyncmerParams {
+                k: 8,
+                w: 55,
+                seed: 7,
+            },
+            2,
+            ReadSyncmerReadOrder::Fastq,
+            &pairs,
+            stats,
+            0.25,
+        )
+        .unwrap();
+        assert_eq!(split_stats.nodes, 2);
+        assert_eq!(split_stats.singleton_nodes, 1);
+        assert_eq!(split_stats.multi_nodes, 1);
+        assert_eq!(split_stats.multi_postings, 2);
+
+        for extension in ["nodes.zst", "counts.zst", "singletons.zst", "multi.zst"] {
+            let path = read_syncmer_split_index_path(&output, extension);
+            assert!(std::fs::metadata(path).unwrap().len() > 0);
+        }
+        let meta =
+            std::fs::read_to_string(read_syncmer_split_index_path(&output, "meta")).unwrap();
+        assert!(meta.contains("\"format\": \"impg-r2s2\""));
+        assert!(meta.contains("\"codec\": \"split-zstd\""));
     }
 
     #[test]

@@ -137,6 +137,33 @@ Relevant literature:
 The current corrected prototype scales to roughly 10 GB per 30x genome.
 That is a baseline, not the target.
 
+An initial split-stream prototype was tested on the corrected HG002 shard:
+
+```text
+format                         shard size    scaled 30x estimate
+classic .r2s raw               26.1 MB       10.4 GB
+classic .r2s zstd -3           10.0 MB        4.0 GB
+split-zstd, FASTQ order         9.2 MB        3.7 GB
+split-zstd, min-node order      6.4 MB        2.6 GB
+split-zstd, lex-node order      6.4 MB        2.6 GB
+```
+
+The split format separates observed nodes, counts, singleton read IDs,
+and multi-read posting payloads. This matters because the shard is
+singleton-heavy:
+
+```text
+observed nodes       4,865,284
+singleton nodes      4,717,788
+multi-read nodes       147,496
+postings             5,258,318
+```
+
+The result is a useful first reduction, but not the final target. The
+largest remaining payload is singleton read IDs. To drive this lower, read
+IDs need to follow real syng/genomic coordinate order, not just syng node
+ID order.
+
 Expected improvement layers:
 
 ```text
