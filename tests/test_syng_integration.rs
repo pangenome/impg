@@ -492,6 +492,17 @@ fn test_syng_map_cli_gaf_and_paf() {
         writeln!(f, "+").unwrap();
         writeln!(f, "{}", "I".repeat(700)).unwrap();
     }
+    let query_rc_path = dir.join("query_rc.fq");
+    {
+        use std::io::Write;
+        let rc = impg::graph::reverse_complement(&backbone[100..800]);
+        let mut f = std::fs::File::create(&query_rc_path).unwrap();
+        writeln!(f, "@read_rc").unwrap();
+        f.write_all(&rc).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, "+").unwrap();
+        writeln!(f, "{}", "I".repeat(700)).unwrap();
+    }
     let query_multi_path = dir.join("query_multi.fq");
     {
         use std::io::Write;
@@ -553,6 +564,39 @@ fn test_syng_map_cli_gaf_and_paf() {
         gaf_fields[5].contains('>') || gaf_fields[5].contains('<'),
         "GAF path should contain syncmer node orientations: {}",
         gaf_fields[5]
+    );
+
+    let gaf_rc = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            query_rc_path.to_str().unwrap(),
+            "-o",
+            "gaf",
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o gaf on reverse-complement read");
+    assert!(
+        gaf_rc.status.success(),
+        "impg map -o gaf failed on reverse-complement read: {}",
+        String::from_utf8_lossy(&gaf_rc.stderr)
+    );
+    let gaf_rc_stdout = String::from_utf8_lossy(&gaf_rc.stdout);
+    let gaf_rc_lines: Vec<&str> = gaf_rc_stdout.lines().collect();
+    assert_eq!(
+        gaf_rc_lines.len(),
+        1,
+        "expected one reverse-complement GAF line, got:\n{}",
+        gaf_rc_stdout
+    );
+    assert!(
+        gaf_rc_lines[0].starts_with("read_rc\t"),
+        "reverse-complement GAF should report the read name, got: {}",
+        gaf_rc_lines[0]
     );
 
     let paf = Command::new(&bin)

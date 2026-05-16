@@ -1556,6 +1556,82 @@ fn matched_syncmers_in_sequence_impl(
     }
 }
 
+fn reverse_complement_into(seq: &[u8], out: &mut Vec<u8>) {
+    out.clear();
+    out.reserve(seq.len());
+    for &base in seq.iter().rev() {
+        out.push(match base {
+            b'A' | b'a' => b'T',
+            b'T' | b't' => b'A',
+            b'C' | b'c' => b'G',
+            b'G' | b'g' => b'C',
+            b'N' | b'n' => b'N',
+            _ => base,
+        });
+    }
+}
+
+fn orient_reverse_query_syncmers(
+    syncmers: &mut [SyngQuerySyncmer],
+    query_len: usize,
+    syncmer_len: usize,
+) {
+    let query_len = query_len as u64;
+    let syncmer_len = syncmer_len as u64;
+    for syncmer in syncmers {
+        syncmer.signed_node = -syncmer.signed_node;
+        syncmer.query_pos = query_len - syncmer.query_pos - syncmer_len;
+    }
+}
+
+fn matched_syncmers_best_query_orientation_impl(
+    seqhash: *mut syng_ffi::Seqhash,
+    kmer_hash: *mut syng_ffi::KmerHash,
+    params: SyncmerParams,
+    query_seq: &[u8],
+    kmer_buf: &mut [u64],
+    seq_buf: &mut Vec<u8>,
+    valid_prefix: &mut Vec<usize>,
+    rc_seq: &mut Vec<u8>,
+    rc_syncmers: &mut Vec<SyngQuerySyncmer>,
+    out: &mut Vec<SyngQuerySyncmer>,
+) {
+    // Syng's closed-syncmer extraction is not symmetric under reverse
+    // complementation when applied to a read in isolation. Try both read
+    // orientations and keep the one that is coherent with the graph.
+    matched_syncmers_in_sequence_impl(
+        seqhash,
+        kmer_hash,
+        params,
+        query_seq,
+        kmer_buf,
+        seq_buf,
+        valid_prefix,
+        out,
+    );
+
+    reverse_complement_into(query_seq, rc_seq);
+    matched_syncmers_in_sequence_impl(
+        seqhash,
+        kmer_hash,
+        params,
+        rc_seq,
+        kmer_buf,
+        seq_buf,
+        valid_prefix,
+        rc_syncmers,
+    );
+
+    if rc_syncmers.len() > out.len() {
+        orient_reverse_query_syncmers(
+            rc_syncmers,
+            query_seq.len(),
+            (params.w + params.k) as usize,
+        );
+        std::mem::swap(out, rc_syncmers);
+    }
+}
+
 /// Lightweight syng syncmer dictionary handle for read-to-node matching.
 ///
 /// This loads only `.syng.meta` and `.1khash`. It deliberately does not load
@@ -1573,6 +1649,8 @@ pub struct SyngMatcherWorker<'a> {
     kmer_buf: Vec<u64>,
     seq_buf: Vec<u8>,
     valid_prefix: Vec<usize>,
+    rc_seq: Vec<u8>,
+    rc_syncmers: Vec<SyngQuerySyncmer>,
     params: SyncmerParams,
     _owner: PhantomData<&'a SyngMatcher>,
 }
@@ -1609,8 +1687,10 @@ impl SyngMatcher {
         let mut kmer_buf = vec![0u64; unsafe { (*self.kmer_hash).plen as usize }];
         let mut seq_buf = Vec::with_capacity(query_seq.len() + 1);
         let mut valid_prefix = Vec::with_capacity(query_seq.len() + 1);
+        let mut rc_seq = Vec::with_capacity(query_seq.len());
+        let mut rc_syncmers = Vec::new();
         let mut out = Vec::new();
-        matched_syncmers_in_sequence_impl(
+        matched_syncmers_best_query_orientation_impl(
             self.seqhash,
             self.kmer_hash,
             self.params,
@@ -1618,6 +1698,8 @@ impl SyngMatcher {
             &mut kmer_buf,
             &mut seq_buf,
             &mut valid_prefix,
+            &mut rc_seq,
+            &mut rc_syncmers,
             &mut out,
         );
         out
@@ -1640,6 +1722,8 @@ impl SyngMatcher {
             kmer_buf: vec![0u64; unsafe { (*self.kmer_hash).plen as usize }],
             seq_buf: Vec::new(),
             valid_prefix: Vec::new(),
+            rc_seq: Vec::new(),
+            rc_syncmers: Vec::new(),
             params: self.params,
             _owner: PhantomData,
         })
@@ -1659,7 +1743,7 @@ impl SyngMatcherWorker<'_> {
         query_seq: &[u8],
         out: &mut Vec<SyngQuerySyncmer>,
     ) {
-        matched_syncmers_in_sequence_impl(
+        matched_syncmers_best_query_orientation_impl(
             self.seqhash,
             self.kmer_hash,
             self.params,
@@ -1667,6 +1751,8 @@ impl SyngMatcherWorker<'_> {
             &mut self.kmer_buf,
             &mut self.seq_buf,
             &mut self.valid_prefix,
+            &mut self.rc_seq,
+            &mut self.rc_syncmers,
             out,
         );
     }
@@ -3312,8 +3398,10 @@ impl SyngIndex {
         let mut kmer_buf = vec![0u64; unsafe { (*self.kmer_hash).plen as usize }];
         let mut seq_buf = Vec::with_capacity(query_seq.len() + 1);
         let mut valid_prefix = Vec::with_capacity(query_seq.len() + 1);
+        let mut rc_seq = Vec::with_capacity(query_seq.len());
+        let mut rc_syncmers = Vec::new();
         let mut out = Vec::new();
-        matched_syncmers_in_sequence_impl(
+        matched_syncmers_best_query_orientation_impl(
             self.seqhash,
             self.kmer_hash,
             self.params,
@@ -3321,6 +3409,8 @@ impl SyngIndex {
             &mut kmer_buf,
             &mut seq_buf,
             &mut valid_prefix,
+            &mut rc_seq,
+            &mut rc_syncmers,
             &mut out,
         );
         out
@@ -4081,6 +4171,37 @@ mod tests {
             "matched syncmers must not span ambiguous query bases: {:?}",
             matches
         );
+    }
+
+    #[test]
+    fn test_matched_syncmers_orients_reverse_complement_query() {
+        let _guard = lock_syng();
+        let params = SyncmerParams::default();
+        let seq = make_test_sequence(5000, 42);
+        let index = SyngIndex::build(
+            params,
+            vec![("sample#0#chr1".to_string(), seq.clone())].into_iter(),
+        );
+
+        let forward_matches = index.matched_syncmers_in_sequence(&seq);
+        assert!(
+            forward_matches.len() >= 2,
+            "test sequence should produce multiple syncmer matches"
+        );
+
+        let rc_seq = crate::graph::reverse_complement(&seq);
+        let rc_matches = index.matched_syncmers_in_sequence(&rc_seq);
+        assert_eq!(
+            rc_matches.len(),
+            forward_matches.len(),
+            "reverse-complement query should recover the graph-compatible syncmer orientation"
+        );
+
+        let mut forward_nodes: Vec<_> = forward_matches.iter().map(|sm| sm.node_id).collect();
+        let mut rc_nodes: Vec<_> = rc_matches.iter().map(|sm| sm.node_id).collect();
+        forward_nodes.sort_unstable();
+        rc_nodes.sort_unstable();
+        assert_eq!(rc_nodes, forward_nodes);
     }
 
     #[test]
