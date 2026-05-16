@@ -967,6 +967,186 @@ fn test_syng_map_cli_gaf_and_paf() {
 }
 
 #[test]
+fn test_syng_genotype_cosigt_packbin_heterozygote() {
+    let _guard = lock_syng();
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping: impg binary not built");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join("impg_test_syng_genotype_cosigt");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let left = numeric_to_ascii(&make_sequence_numeric(700, 11));
+    let allele_a = numeric_to_ascii(&make_sequence_numeric(700, 12));
+    let allele_b = numeric_to_ascii(&make_sequence_numeric(700, 13));
+    let right = numeric_to_ascii(&make_sequence_numeric(700, 14));
+    let mut hap_a = Vec::new();
+    hap_a.extend_from_slice(&left);
+    hap_a.extend_from_slice(&allele_a);
+    hap_a.extend_from_slice(&right);
+    let mut hap_b = Vec::new();
+    hap_b.extend_from_slice(&left);
+    hap_b.extend_from_slice(&allele_b);
+    hap_b.extend_from_slice(&right);
+
+    let fasta_path = dir.join("index.fa");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        writeln!(f, ">sampleA#0#chr1").unwrap();
+        f.write_all(&hap_a).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleB#0#chr1").unwrap();
+        f.write_all(&hap_b).unwrap();
+        writeln!(f).unwrap();
+    }
+
+    let idx_prefix = dir.join("idx");
+    let build = Command::new(&bin)
+        .args([
+            "syng",
+            "-f",
+            fasta_path.to_str().unwrap(),
+            "-o",
+            idx_prefix.to_str().unwrap(),
+            "--position-sample-rate",
+            "1",
+        ])
+        .output()
+        .expect("failed to run impg syng");
+    assert!(
+        build.status.success(),
+        "impg syng failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let reads_path = dir.join("reads.fq");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&reads_path).unwrap();
+        writeln!(f, "@read_a").unwrap();
+        f.write_all(&hap_a).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, "+").unwrap();
+        writeln!(f, "{}", "I".repeat(hap_a.len())).unwrap();
+        writeln!(f, "@read_b").unwrap();
+        f.write_all(&hap_b).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, "+").unwrap();
+        writeln!(f, "{}", "I".repeat(hap_b.len())).unwrap();
+    }
+
+    let packbin_path = dir.join("sample.packbin");
+    let map = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            reads_path.to_str().unwrap(),
+            "-o",
+            "packbin",
+            "-O",
+            packbin_path.to_str().unwrap(),
+            "--pack-compression-level",
+            "3",
+            "--pack-block-size",
+            "64",
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o packbin");
+    assert!(
+        map.status.success(),
+        "impg map -o packbin failed: {}",
+        String::from_utf8_lossy(&map.stderr)
+    );
+
+    let gt = Command::new(&bin)
+        .args([
+            "genotype",
+            "cosigt",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-p",
+            packbin_path.to_str().unwrap(),
+            "-r",
+            "sampleA#0#chr1:0-2100",
+            "--top-n",
+            "3",
+            "--candidate-top-k",
+            "10",
+            "--min-anchors",
+            "2",
+            "--min-span-fraction",
+            "0.7",
+        ])
+        .output()
+        .expect("failed to run impg genotype cosigt");
+    assert!(
+        gt.status.success(),
+        "impg genotype cosigt failed: {}",
+        String::from_utf8_lossy(&gt.stderr)
+    );
+    let gt_stdout = String::from_utf8_lossy(&gt.stdout);
+    let top = gt_stdout
+        .lines()
+        .find(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .expect("expected at least one COSIGT result row");
+    let fields: Vec<&str> = top.split('\t').collect();
+    assert!(
+        fields.len() >= 12,
+        "COSIGT row should have at least 12 fields: {}",
+        top
+    );
+    assert_eq!(fields[0], "1");
+    assert_eq!(fields[1], "cosigt");
+    assert_eq!(fields[2], "2");
+    let similarity = fields[3].parse::<f64>().unwrap();
+    assert!(
+        similarity > 0.99,
+        "expected near-perfect heterozygous COSIGT score, got {}\n{}",
+        similarity,
+        gt_stdout
+    );
+    assert!(
+        fields[8].contains("sampleA#0#chr1") && fields[8].contains("sampleB#0#chr1"),
+        "top COSIGT haplotypes should contain both haplotypes, got:\n{}",
+        gt_stdout
+    );
+
+    let gt_alias = Command::new(&bin)
+        .args([
+            "gt",
+            "cosigt",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-p",
+            packbin_path.to_str().unwrap(),
+            "-r",
+            "sampleA#0#chr1:0-2100",
+            "--top-n",
+            "1",
+            "--candidate-top-k",
+            "10",
+            "--min-span-fraction",
+            "0.7",
+        ])
+        .output()
+        .expect("failed to run impg gt cosigt");
+    assert!(
+        gt_alias.status.success(),
+        "impg gt cosigt alias failed: {}",
+        String::from_utf8_lossy(&gt_alias.stderr)
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn test_syng_map_cli_sampled_positions_paf() {
     let _guard = lock_syng();
     let Some(bin) = impg_binary() else {

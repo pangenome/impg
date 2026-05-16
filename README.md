@@ -337,6 +337,24 @@ counts above 255. `--pack-compression-level` defaults to 12; level 19 is a
 compact cohort/archive setting that is slower to write but just as fast to
 read in practice.
 
+`impg genotype` (`impg gt`) is the namespace for graph-based genotyping
+methods. The first method is COSIGT-style cosine genotyping over syng node
+coverage:
+
+```bash
+impg genotype cosigt -a c4.syng -p sample.packbin \
+  -r 'grch38#chr6:31972046-32055647:0-10000' \
+  --ploidy 2 --top-n 20
+```
+
+`cosigt` extracts haplotype candidates from the requested reference path range,
+builds traversal-count vectors over the candidate syncmer nodes, and ranks
+ploidy-sized haplotype combinations against the sample `pack`/`packbin`
+coverage vector by cosine similarity. The default candidate mode is
+`spanning`: candidates must have shared anchors spanning the requested
+reference interval. Use `--candidate-mode overlapping` to score each gathered
+candidate interval independently.
+
 `-r` splits on the **last** `:`. Path names from `odgi paths -f`
 already contain coordinates (`grch38#chr6:31972046-32055647`), so a
 whole-sequence query still needs an explicit trailing sub-range

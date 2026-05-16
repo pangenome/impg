@@ -1,6 +1,6 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
-use clap::Parser;
+use clap::{Parser, Subcommand, ValueEnum};
 use coitrees::{Interval, IntervalTree};
 use crossbeam_channel as channel;
 use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
@@ -20,7 +20,7 @@ use rustc_hash::FxHashMap;
 use std::collections::{hash_map::DefaultHasher, BTreeMap};
 use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::num::NonZeroUsize;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
@@ -1068,6 +1068,24 @@ fn write_u64_le<W: Write>(out: &mut W, value: u64) -> io::Result<()> {
     out.write_all(&value.to_le_bytes())
 }
 
+fn read_u32_le<R: Read>(input: &mut R) -> io::Result<u32> {
+    let mut bytes = [0u8; 4];
+    input.read_exact(&mut bytes)?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn read_i32_le<R: Read>(input: &mut R) -> io::Result<i32> {
+    let mut bytes = [0u8; 4];
+    input.read_exact(&mut bytes)?;
+    Ok(i32::from_le_bytes(bytes))
+}
+
+fn read_u64_le<R: Read>(input: &mut R) -> io::Result<u64> {
+    let mut bytes = [0u8; 8];
+    input.read_exact(&mut bytes)?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
 fn build_syng_map_pack_chunk(
     syng_matcher: &mut impg::syng::SyngMatcherWorker<'_>,
     chunk: &SyngGafQueryChunk,
@@ -1389,6 +1407,690 @@ fn emit_syng_map_pack_binary<W: Write + Send>(
         compression_level,
         block_size
     );
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum GenotypeCandidateMode {
+    /// Keep path candidates whose shared anchors span the requested reference range.
+    Spanning,
+    /// Score every query-gathered candidate interval independently.
+    Overlapping,
+}
+
+#[derive(Debug)]
+struct SyngPackCoverage {
+    counts: FxHashMap<u32, u64>,
+    universe_nodes: Option<u64>,
+    nonzero_nodes: u64,
+    retained_reads: Option<u64>,
+    syncmer_anchors: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct SyngGenotypeCandidate {
+    path_name: String,
+    start: u64,
+    end: u64,
+    strand: char,
+    anchors: usize,
+    query_span_fraction: f64,
+    nodes: Vec<(u32, u64)>,
+    single_similarity: f64,
+}
+
+#[derive(Debug)]
+struct SyngGenotypeCandidateGroup {
+    start: u64,
+    end: u64,
+    anchors: Vec<impg::syng::Anchor>,
+}
+
+#[derive(Debug)]
+struct CosigtResult {
+    combination: Vec<usize>,
+    similarity: f64,
+    qv: f64,
+    dot: f64,
+    sample_norm: f64,
+    genotype_norm: f64,
+}
+
+fn read_syng_pack_counts(path: &str) -> io::Result<SyngPackCoverage> {
+    let mut file = File::open(path)?;
+    let mut magic = [0u8; 8];
+    let n = file.read(&mut magic)?;
+    if n == SYNG_PACK_BINARY_MAGIC.len() && &magic == SYNG_PACK_BINARY_MAGIC {
+        read_syng_pack_binary_counts(file)
+    } else {
+        read_syng_pack_tsv_counts(path)
+    }
+}
+
+fn read_syng_pack_tsv_counts(path: &str) -> io::Result<SyngPackCoverage> {
+    let reader = get_auto_reader(path)?;
+    let mut counts = FxHashMap::default();
+    for (line_no, line) in reader.lines().enumerate() {
+        let line = line?;
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.split('\t');
+        let node_id = fields
+            .next()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("pack TSV line {} is missing node_id", line_no + 1),
+                )
+            })?
+            .parse::<u32>()
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid pack TSV node_id on line {}: {}", line_no + 1, e),
+                )
+            })?;
+        let count = fields
+            .next()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("pack TSV line {} is missing count", line_no + 1),
+                )
+            })?
+            .parse::<u64>()
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid pack TSV count on line {}: {}", line_no + 1, e),
+                )
+            })?;
+        if count > 0 {
+            counts.insert(node_id, count);
+        }
+    }
+    Ok(SyngPackCoverage {
+        nonzero_nodes: counts.len() as u64,
+        counts,
+        universe_nodes: None,
+        retained_reads: None,
+        syncmer_anchors: None,
+    })
+}
+
+fn read_syng_pack_binary_counts(mut file: File) -> io::Result<SyngPackCoverage> {
+    let version = read_u32_le(&mut file)?;
+    if version != SYNG_PACK_BINARY_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported packbin version {}", version),
+        ));
+    }
+    let header_len = read_u32_le(&mut file)?;
+    if header_len != SYNG_PACK_BINARY_HEADER_LEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "unsupported packbin header length {}; expected {}",
+                header_len, SYNG_PACK_BINARY_HEADER_LEN
+            ),
+        ));
+    }
+    let universe_nodes = read_u64_le(&mut file)?;
+    let nonzero_nodes = read_u64_le(&mut file)?;
+    let retained_reads = read_u64_le(&mut file)?;
+    let syncmer_anchors = read_u64_le(&mut file)?;
+    let block_size = read_u32_le(&mut file)? as usize;
+    let _zstd_level = read_i32_le(&mut file)?;
+    let block_count = read_u64_le(&mut file)? as usize;
+    let overflow_count = read_u64_le(&mut file)? as usize;
+    let block_index_offset = read_u64_le(&mut file)?;
+    let overflow_offset = read_u64_le(&mut file)?;
+    let data_offset = read_u64_le(&mut file)?;
+
+    if block_size == 0 && universe_nodes > 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "packbin block size is zero",
+        ));
+    }
+
+    file.seek(SeekFrom::Start(block_index_offset))?;
+    let mut block_offsets = Vec::with_capacity(block_count + 1);
+    for _ in 0..=block_count {
+        block_offsets.push(read_u64_le(&mut file)?);
+    }
+
+    file.seek(SeekFrom::Start(overflow_offset))?;
+    let mut overflow = FxHashMap::default();
+    for _ in 0..overflow_count {
+        let node_id = read_u32_le(&mut file)?;
+        let count = read_u64_le(&mut file)?;
+        overflow.insert(node_id, count);
+    }
+
+    let mut counts = FxHashMap::default();
+    for block_idx in 0..block_count {
+        let start = block_offsets[block_idx];
+        let end = block_offsets[block_idx + 1];
+        if end < start {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "packbin block offsets are not monotonic",
+            ));
+        }
+        let compressed_len = (end - start) as usize;
+        file.seek(SeekFrom::Start(data_offset + start))?;
+        let mut compressed = vec![0u8; compressed_len];
+        file.read_exact(&mut compressed)?;
+        let remaining = (universe_nodes as usize).saturating_sub(block_idx * block_size);
+        let expected_len = remaining.min(block_size);
+        let block = zstd::bulk::decompress(&compressed, expected_len)?;
+        if block.len() != expected_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "packbin block decompressed to unexpected length",
+            ));
+        }
+        for (offset, &count) in block.iter().enumerate() {
+            if count == 0 {
+                continue;
+            }
+            let node_id = (block_idx * block_size + offset + 1) as u32;
+            counts.insert(node_id, u64::from(count));
+        }
+    }
+    for (node_id, count) in overflow {
+        counts.insert(node_id, count);
+    }
+
+    Ok(SyngPackCoverage {
+        counts,
+        universe_nodes: Some(universe_nodes),
+        nonzero_nodes,
+        retained_reads: Some(retained_reads),
+        syncmer_anchors: Some(syncmer_anchors),
+    })
+}
+
+fn syng_anchor_span_fraction(
+    anchors: &[impg::syng::Anchor],
+    region_start: u64,
+    region_end: u64,
+    syncmer_len: u64,
+) -> f64 {
+    if anchors.is_empty() || region_end <= region_start {
+        return 0.0;
+    }
+    let anchor_start = anchors.iter().map(|a| a.query_pos).min().unwrap_or(region_start);
+    let anchor_end = anchors
+        .iter()
+        .map(|a| a.query_pos.saturating_add(syncmer_len))
+        .max()
+        .unwrap_or(anchor_start);
+    let clipped_start = anchor_start.max(region_start);
+    let clipped_end = anchor_end.min(region_end);
+    if clipped_end <= clipped_start {
+        return 0.0;
+    }
+    (clipped_end - clipped_start) as f64 / (region_end - region_start) as f64
+}
+
+fn syng_candidate_node_counts(
+    syng_index: &impg::syng::SyngIndex,
+    path_name: &str,
+    start: u64,
+    end: u64,
+) -> io::Result<Vec<(u32, u64)>> {
+    let path_idx = syng_index
+        .name_map
+        .name_to_path
+        .get(path_name)
+        .copied()
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("candidate path '{}' is missing from syng name map", path_name),
+            )
+        })? as usize;
+    let mut counts: FxHashMap<u32, u64> = FxHashMap::default();
+    for (signed_node, _) in syng_index.walk_path_range(path_idx, start, end)? {
+        *counts.entry(signed_node.unsigned_abs()).or_insert(0) += 1;
+    }
+    let mut nodes: Vec<(u32, u64)> = counts.into_iter().collect();
+    nodes.sort_unstable_by_key(|&(node_id, _)| node_id);
+    Ok(nodes)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_syng_genotype_candidates(
+    syng_index: &impg::syng::SyngIndex,
+    target_name: &str,
+    region_start: u64,
+    region_end: u64,
+    padding: u64,
+    extension: u64,
+    mode: GenotypeCandidateMode,
+    min_anchors: usize,
+    min_span_fraction: f64,
+) -> io::Result<Vec<SyngGenotypeCandidate>> {
+    let syncmer_len = syng_index.syncmer_length_bp() as u64;
+    let hits = syng_index.query_region_with_anchors_ext(
+        target_name,
+        region_start,
+        region_end,
+        padding,
+        extension,
+    )?;
+    let mut candidates = Vec::new();
+
+    match mode {
+        GenotypeCandidateMode::Overlapping => {
+            for hit in hits {
+                if hit.anchors.len() < min_anchors || hit.end <= hit.start {
+                    continue;
+                }
+                let query_span_fraction =
+                    syng_anchor_span_fraction(&hit.anchors, region_start, region_end, syncmer_len);
+                let nodes =
+                    syng_candidate_node_counts(syng_index, &hit.genome, hit.start, hit.end)?;
+                if nodes.is_empty() {
+                    continue;
+                }
+                candidates.push(SyngGenotypeCandidate {
+                    path_name: hit.genome,
+                    start: hit.start,
+                    end: hit.end,
+                    strand: hit.strand,
+                    anchors: hit.anchors.len(),
+                    query_span_fraction,
+                    nodes,
+                    single_similarity: 0.0,
+                });
+            }
+        }
+        GenotypeCandidateMode::Spanning => {
+            let mut groups: BTreeMap<(String, char), SyngGenotypeCandidateGroup> = BTreeMap::new();
+            for hit in hits {
+                if hit.end <= hit.start {
+                    continue;
+                }
+                let entry = groups
+                    .entry((hit.genome, hit.strand))
+                    .or_insert_with(|| SyngGenotypeCandidateGroup {
+                        start: u64::MAX,
+                        end: 0,
+                        anchors: Vec::new(),
+                    });
+                entry.start = entry.start.min(hit.start);
+                entry.end = entry.end.max(hit.end);
+                entry.anchors.extend(hit.anchors);
+            }
+
+            for ((path_name, strand), mut group) in groups {
+                group.anchors.sort_by(|a, b| {
+                    a.query_pos
+                        .cmp(&b.query_pos)
+                        .then(a.target_pos.cmp(&b.target_pos))
+                });
+                group.anchors.dedup_by(|a, b| {
+                    a.query_pos == b.query_pos
+                        && a.target_pos == b.target_pos
+                        && a.node_id == b.node_id
+                });
+                let query_span_fraction = syng_anchor_span_fraction(
+                    &group.anchors,
+                    region_start,
+                    region_end,
+                    syncmer_len,
+                );
+                if group.anchors.len() < min_anchors || query_span_fraction < min_span_fraction {
+                    continue;
+                }
+                let nodes =
+                    syng_candidate_node_counts(syng_index, &path_name, group.start, group.end)?;
+                if nodes.is_empty() {
+                    continue;
+                }
+                candidates.push(SyngGenotypeCandidate {
+                    path_name,
+                    start: group.start,
+                    end: group.end,
+                    strand,
+                    anchors: group.anchors.len(),
+                    query_span_fraction,
+                    nodes,
+                    single_similarity: 0.0,
+                });
+            }
+        }
+    }
+
+    candidates.sort_by(|a, b| {
+        a.path_name
+            .cmp(&b.path_name)
+            .then(a.strand.cmp(&b.strand))
+            .then(a.start.cmp(&b.start))
+            .then(a.end.cmp(&b.end))
+    });
+    Ok(candidates)
+}
+
+fn syng_locus_nodes(candidates: &[SyngGenotypeCandidate]) -> Vec<u32> {
+    let mut seen: FxHashMap<u32, ()> = FxHashMap::default();
+    for candidate in candidates {
+        for &(node_id, _) in &candidate.nodes {
+            seen.insert(node_id, ());
+        }
+    }
+    let mut nodes: Vec<u32> = seen.into_keys().collect();
+    nodes.sort_unstable();
+    nodes
+}
+
+fn sample_norm_sq_for_nodes(sample_counts: &FxHashMap<u32, u64>, locus_nodes: &[u32]) -> f64 {
+    locus_nodes
+        .iter()
+        .map(|node_id| sample_counts.get(node_id).copied().unwrap_or(0) as f64)
+        .map(|v| v * v)
+        .sum()
+}
+
+fn cosine_for_candidate_nodes(
+    candidate_nodes: &[(u32, u64)],
+    sample_counts: &FxHashMap<u32, u64>,
+    sample_norm_sq: f64,
+) -> f64 {
+    if sample_norm_sq == 0.0 {
+        return 0.0;
+    }
+    let mut dot = 0.0;
+    let mut genotype_norm_sq = 0.0;
+    for &(node_id, count) in candidate_nodes {
+        let g = count as f64;
+        genotype_norm_sq += g * g;
+        dot += g * sample_counts.get(&node_id).copied().unwrap_or(0) as f64;
+    }
+    if genotype_norm_sq == 0.0 {
+        0.0
+    } else {
+        dot / (sample_norm_sq.sqrt() * genotype_norm_sq.sqrt())
+    }
+}
+
+fn score_cosigt_combination(
+    combination: &[usize],
+    candidates: &[SyngGenotypeCandidate],
+    sample_counts: &FxHashMap<u32, u64>,
+    sample_norm_sq: f64,
+) -> CosigtResult {
+    let mut genotype_counts: FxHashMap<u32, u64> = FxHashMap::default();
+    for &idx in combination {
+        for &(node_id, count) in &candidates[idx].nodes {
+            *genotype_counts.entry(node_id).or_insert(0) += count;
+        }
+    }
+
+    let mut dot = 0.0;
+    let mut genotype_norm_sq = 0.0;
+    for (node_id, count) in genotype_counts {
+        let g = count as f64;
+        genotype_norm_sq += g * g;
+        dot += g * sample_counts.get(&node_id).copied().unwrap_or(0) as f64;
+    }
+
+    let sample_norm = sample_norm_sq.sqrt();
+    let genotype_norm = genotype_norm_sq.sqrt();
+    let similarity = if sample_norm == 0.0 || genotype_norm == 0.0 {
+        0.0
+    } else {
+        dot / (sample_norm * genotype_norm)
+    };
+    let qv = if similarity >= 1.0 {
+        999.0
+    } else if similarity <= 0.0 {
+        0.0
+    } else {
+        -10.0 * (1.0 - similarity).log10()
+    };
+
+    CosigtResult {
+        combination: combination.to_vec(),
+        similarity,
+        qv,
+        dot,
+        sample_norm,
+        genotype_norm,
+    }
+}
+
+struct CosigtSearch<'a> {
+    candidates: &'a [SyngGenotypeCandidate],
+    sample_counts: &'a FxHashMap<u32, u64>,
+    sample_norm_sq: f64,
+    ploidy: usize,
+    max_combinations: u64,
+    visited: u64,
+    results: Vec<CosigtResult>,
+}
+
+impl CosigtSearch<'_> {
+    fn run(mut self) -> io::Result<Vec<CosigtResult>> {
+        let mut current = Vec::with_capacity(self.ploidy);
+        self.visit(0, &mut current)?;
+        self.results.sort_by(|a, b| {
+            b.similarity
+                .total_cmp(&a.similarity)
+                .then_with(|| b.dot.total_cmp(&a.dot))
+                .then_with(|| a.combination.cmp(&b.combination))
+        });
+        Ok(self.results)
+    }
+
+    fn visit(&mut self, start: usize, current: &mut Vec<usize>) -> io::Result<()> {
+        if current.len() == self.ploidy {
+            self.visited += 1;
+            if self.visited > self.max_combinations {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "genotype combination search exceeded --max-combinations ({})",
+                        self.max_combinations
+                    ),
+                ));
+            }
+            self.results.push(score_cosigt_combination(
+                current,
+                self.candidates,
+                self.sample_counts,
+                self.sample_norm_sq,
+            ));
+            return Ok(());
+        }
+
+        for idx in start..self.candidates.len() {
+            current.push(idx);
+            self.visit(idx, current)?;
+            current.pop();
+        }
+        Ok(())
+    }
+}
+
+fn format_genotype_candidate_region(candidate: &SyngGenotypeCandidate) -> String {
+    format!(
+        "{}:{}-{}({})",
+        candidate.path_name, candidate.start, candidate.end, candidate.strand
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_syng_genotype_cosigt<W: Write>(
+    out: &mut W,
+    syng_prefix: &str,
+    pack_path: &str,
+    target_range: &str,
+    candidate_mode: GenotypeCandidateMode,
+    ploidy: usize,
+    top_n: usize,
+    candidate_top_k: usize,
+    max_combinations: u64,
+    syng_padding: u64,
+    syng_extension: u64,
+    min_anchors: usize,
+    min_span_fraction: f64,
+) -> io::Result<()> {
+    if ploidy == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--ploidy must be greater than 0",
+        ));
+    }
+    if top_n == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--top-n must be greater than 0",
+        ));
+    }
+    if !(0.0..=1.0).contains(&min_span_fraction) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--min-span-fraction must be between 0 and 1",
+        ));
+    }
+
+    let (target_name, (range_start, range_end), region_name) =
+        partition::parse_target_range(target_range)?;
+    if range_start < 0 || range_end <= range_start {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("target range must be non-empty with non-negative coordinates: {target_range}"),
+        ));
+    }
+    let region_start = range_start as u64;
+    let region_end = range_end as u64;
+
+    info!("Loading syng index from prefix: {}", syng_prefix);
+    let syng_index = impg::syng::SyngIndex::load(syng_prefix, impg::syng::SyncmerParams::default())?;
+    info!("Loading sample pack coverage from {}", pack_path);
+    let pack = read_syng_pack_counts(pack_path)?;
+
+    let mut candidates = collect_syng_genotype_candidates(
+        &syng_index,
+        &target_name,
+        region_start,
+        region_end,
+        syng_padding,
+        syng_extension,
+        candidate_mode,
+        min_anchors,
+        min_span_fraction,
+    )?;
+    if candidates.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "no syng genotype candidates were found for the requested range",
+        ));
+    }
+
+    let all_locus_nodes = syng_locus_nodes(&candidates);
+    let all_sample_norm_sq = sample_norm_sq_for_nodes(&pack.counts, &all_locus_nodes);
+    for candidate in &mut candidates {
+        candidate.single_similarity =
+            cosine_for_candidate_nodes(&candidate.nodes, &pack.counts, all_sample_norm_sq);
+    }
+    candidates.sort_by(|a, b| {
+        b.single_similarity
+            .total_cmp(&a.single_similarity)
+            .then(b.anchors.cmp(&a.anchors))
+            .then(a.path_name.cmp(&b.path_name))
+            .then(a.start.cmp(&b.start))
+    });
+    if candidate_top_k > 0 && candidates.len() > candidate_top_k {
+        candidates.truncate(candidate_top_k);
+    }
+
+    let locus_nodes = syng_locus_nodes(&candidates);
+    let sample_norm_sq = sample_norm_sq_for_nodes(&pack.counts, &locus_nodes);
+    if sample_norm_sq == 0.0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "sample pack has zero coverage over candidate syng nodes",
+        ));
+    }
+
+    let search = CosigtSearch {
+        candidates: &candidates,
+        sample_counts: &pack.counts,
+        sample_norm_sq,
+        ploidy,
+        max_combinations,
+        visited: 0,
+        results: Vec::new(),
+    };
+    let mut results = search.run()?;
+    results.truncate(top_n);
+
+    writeln!(out, "#impg genotype cosigt")?;
+    writeln!(out, "#region\t{}", region_name)?;
+    writeln!(out, "#candidate_mode\t{:?}", candidate_mode)?;
+    writeln!(out, "#ploidy\t{}", ploidy)?;
+    writeln!(out, "#candidates\t{}", candidates.len())?;
+    writeln!(out, "#locus_nodes\t{}", locus_nodes.len())?;
+    writeln!(out, "#pack_nonzero_nodes\t{}", pack.nonzero_nodes)?;
+    if let Some(universe_nodes) = pack.universe_nodes {
+        writeln!(out, "#pack_universe_nodes\t{}", universe_nodes)?;
+    }
+    if let Some(retained_reads) = pack.retained_reads {
+        writeln!(out, "#pack_retained_reads\t{}", retained_reads)?;
+    }
+    if let Some(syncmer_anchors) = pack.syncmer_anchors {
+        writeln!(out, "#pack_syncmer_anchors\t{}", syncmer_anchors)?;
+    }
+    writeln!(
+        out,
+        "#rank\tmethod\tploidy\tsimilarity\tqv\tdot\tsample_norm\tgenotype_norm\thaplotypes\tregions\tcandidate_anchors\tcandidate_span_fractions"
+    )?;
+    for (rank, result) in results.iter().enumerate() {
+        let haplotypes: Vec<&str> = result
+            .combination
+            .iter()
+            .map(|&idx| candidates[idx].path_name.as_str())
+            .collect();
+        let regions: Vec<String> = result
+            .combination
+            .iter()
+            .map(|&idx| format_genotype_candidate_region(&candidates[idx]))
+            .collect();
+        let anchors: Vec<String> = result
+            .combination
+            .iter()
+            .map(|&idx| candidates[idx].anchors.to_string())
+            .collect();
+        let spans: Vec<String> = result
+            .combination
+            .iter()
+            .map(|&idx| format!("{:.6}", candidates[idx].query_span_fraction))
+            .collect();
+        writeln!(
+            out,
+            "{}\tcosigt\t{}\t{:.9}\t{:.3}\t{:.3}\t{:.6}\t{:.6}\t{}\t{}\t{}\t{}",
+            rank + 1,
+            ploidy,
+            result.similarity,
+            result.qv,
+            result.dot,
+            result.sample_norm,
+            result.genotype_norm,
+            haplotypes.join(","),
+            regions.join(","),
+            anchors.join(","),
+            spans.join(","),
+        )?;
+    }
+
     Ok(())
 }
 
@@ -2629,6 +3331,68 @@ impl RefineOpts {
     }
 }
 
+#[derive(Subcommand, Debug)]
+enum GenotypeCommand {
+    /// Genotype a syng locus by COSIGT cosine similarity over pack coverage
+    Cosigt {
+        /// Syng index prefix or .1khash/.1gbwt/.spos/.pstep/.names/.meta path
+        #[clap(short = 'a', long, value_parser)]
+        index: String,
+
+        /// Sample coverage produced by `impg map -o pack` or `impg map -o packbin`
+        #[clap(short = 'p', long, value_parser)]
+        pack: String,
+
+        /// Reference path range to genotype, in the format `seq_name:start-end`
+        #[clap(short = 'r', long, value_parser)]
+        target_range: String,
+
+        /// Candidate extraction mode
+        #[clap(long, value_enum, default_value_t = GenotypeCandidateMode::Spanning)]
+        candidate_mode: GenotypeCandidateMode,
+
+        /// Ploidy for genotype combinations
+        #[clap(long, value_parser, default_value_t = 2)]
+        ploidy: usize,
+
+        /// Number of genotype combinations to emit
+        #[clap(long, value_parser, default_value_t = 20)]
+        top_n: usize,
+
+        /// Keep only the best N single-haplotype candidates before combination search (0 = keep all)
+        #[clap(long, value_parser, default_value_t = 200)]
+        candidate_top_k: usize,
+
+        /// Maximum haplotype combinations to score
+        #[clap(long, value_parser, default_value_t = 1_000_000)]
+        max_combinations: u64,
+
+        /// Target-side padding in bp for syng candidate discovery
+        #[clap(long, value_parser, default_value_t = 0)]
+        syng_padding: u64,
+
+        /// Source-side extension in bp for syng candidate discovery
+        #[clap(long, value_parser, default_value_t = 0)]
+        syng_extension: u64,
+
+        /// Minimum shared syncmer anchors required for a candidate
+        #[clap(long, value_parser, default_value_t = 2)]
+        min_anchors: usize,
+
+        /// For spanning mode, minimum fraction of the requested reference range covered by shared anchors
+        #[clap(long, value_parser, default_value_t = 0.8)]
+        min_span_fraction: f64,
+
+        /// Output file path (default: stdout; .zst/.zstd enables zstd compression)
+        #[clap(short = 'O', long, value_parser)]
+        output: Option<String>,
+
+        // --- General ---
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+}
+
 /// Parse sequence name to extract subsequence coordinates and original sequence name
 /// Format: `seq_name:start-end` -> (original_seq_name, start_offset)
 /// Detect whether a path points to a syng index. Returns the syng
@@ -3106,6 +3870,13 @@ enum Args {
         // --- General ---
         #[clap(flatten)]
         common: CommonOpts,
+    },
+
+    /// Genotype a locus from graph-derived sample evidence
+    #[command(alias = "gt")]
+    Genotype {
+        #[command(subcommand)]
+        command: GenotypeCommand,
     },
 
     /// Print alignment statistics
@@ -4905,6 +5676,86 @@ fn run() -> io::Result<()> {
                 polarize_guide_samples.as_deref(),
             )?;
         }
+        Args::Genotype { command } => match command {
+            GenotypeCommand::Cosigt {
+                index,
+                pack,
+                target_range,
+                candidate_mode,
+                ploidy,
+                top_n,
+                candidate_top_k,
+                max_combinations,
+                syng_padding,
+                syng_extension,
+                min_anchors,
+                min_span_fraction,
+                output,
+                common,
+            } => {
+                initialize_threads_and_log(&common);
+                let syng_prefix = detect_syng_prefix(&index).unwrap_or(index);
+
+                #[cfg(unix)]
+                let saved_stdout = silence_stdout_for_process()?;
+                #[cfg(not(unix))]
+                silence_stdout_for_process()?;
+
+                if let Some(path) = output {
+                    let mut out = create_map_output_writer(&path)?;
+                    emit_syng_genotype_cosigt(
+                        &mut out,
+                        &syng_prefix,
+                        &pack,
+                        &target_range,
+                        candidate_mode,
+                        ploidy,
+                        top_n,
+                        candidate_top_k,
+                        max_combinations,
+                        syng_padding,
+                        syng_extension,
+                        min_anchors,
+                        min_span_fraction,
+                    )?;
+                    out.flush()?;
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::close(saved_stdout);
+                    }
+                } else {
+                    let mut out = Vec::new();
+                    emit_syng_genotype_cosigt(
+                        &mut out,
+                        &syng_prefix,
+                        &pack,
+                        &target_range,
+                        candidate_mode,
+                        ploidy,
+                        top_n,
+                        candidate_top_k,
+                        max_combinations,
+                        syng_padding,
+                        syng_extension,
+                        min_anchors,
+                        min_span_fraction,
+                    )?;
+                    #[cfg(unix)]
+                    {
+                        write_all_to_fd(saved_stdout, &out)?;
+                        unsafe {
+                            libc::close(saved_stdout);
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let mut stdout = io::stdout();
+                        stdout.write_all(&out)?;
+                        stdout.flush()?;
+                    }
+                }
+            }
+        },
         Args::Stats {
             common,
             alignment,
