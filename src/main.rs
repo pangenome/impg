@@ -1009,6 +1009,411 @@ fn emit_syng_map_gaf<W: Write + Send>(
     Ok(())
 }
 
+const READ_SYNCMER_INDEX_VERSION: u32 = 1;
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ReadSyncmerIndexStats {
+    reads: u64,
+    retained_reads: u64,
+    matched_syncmers: u64,
+    postings: u64,
+    chunks: u64,
+    nodes: u64,
+    post_bytes: u64,
+    samples: u64,
+    sample_bytes: u64,
+}
+
+impl ReadSyncmerIndexStats {
+    fn add(&mut self, other: Self) {
+        self.reads += other.reads;
+        self.retained_reads += other.retained_reads;
+        self.matched_syncmers += other.matched_syncmers;
+        self.postings += other.postings;
+        self.chunks += other.chunks;
+        self.nodes += other.nodes;
+        self.post_bytes += other.post_bytes;
+        self.samples += other.samples;
+        self.sample_bytes += other.sample_bytes;
+    }
+}
+
+struct ReadSyncmerPairChunk {
+    pairs: Vec<u64>,
+    stats: ReadSyncmerIndexStats,
+}
+
+fn read_syncmer_index_base(prefix: &str) -> &str {
+    prefix.strip_suffix(".r2s").unwrap_or(prefix)
+}
+
+fn read_syncmer_index_path(prefix: &str, extension: &str) -> String {
+    format!("{}.r2s.{}", read_syncmer_index_base(prefix), extension)
+}
+
+fn pack_read_syncmer_pair(node_id: u32, read_ordinal: u64) -> io::Result<u64> {
+    if read_ordinal > u64::from(u32::MAX) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "read-index currently supports at most 2^32 reads",
+        ));
+    }
+    Ok((u64::from(node_id) << 32) | read_ordinal)
+}
+
+fn packed_read_syncmer_node(pair: u64) -> u32 {
+    (pair >> 32) as u32
+}
+
+fn packed_read_syncmer_read(pair: u64) -> u64 {
+    pair & u64::from(u32::MAX)
+}
+
+fn write_varint<W: Write>(out: &mut W, mut value: u64) -> io::Result<u64> {
+    let mut written = 0u64;
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        out.write_all(&[byte])?;
+        written += 1;
+        if value == 0 {
+            return Ok(written);
+        }
+    }
+}
+
+fn write_node_sample_entry<W: Write>(
+    out: &mut W,
+    first_node_id: u32,
+    previous_node_id: u32,
+    offset: u64,
+) -> io::Result<()> {
+    out.write_all(&first_node_id.to_le_bytes())?;
+    out.write_all(&previous_node_id.to_le_bytes())?;
+    out.write_all(&offset.to_le_bytes())?;
+    Ok(())
+}
+
+fn build_read_syncmer_pair_chunk(
+    syng_matcher: &mut impg::syng::SyngMatcherWorker<'_>,
+    base_read_ordinal: u64,
+    chunk: &SyngGafQueryChunk,
+    min_syncmers: usize,
+) -> io::Result<ReadSyncmerPairChunk> {
+    let mut stats = ReadSyncmerIndexStats {
+        reads: chunk.len() as u64,
+        chunks: 1,
+        ..ReadSyncmerIndexStats::default()
+    };
+    let mut pairs = Vec::with_capacity(chunk.len().saturating_mul(4));
+    let mut syncmers = Vec::new();
+    let mut node_ids = Vec::new();
+
+    for (read_offset, record) in chunk.records.iter().enumerate() {
+        let query_seq = &chunk.seqs[record.seq_start..record.seq_end];
+        syng_matcher.matched_syncmers_in_sequence_into(query_seq, &mut syncmers);
+        stats.matched_syncmers += syncmers.len() as u64;
+
+        node_ids.clear();
+        node_ids.extend(syncmers.iter().map(|syncmer| syncmer.node_id));
+        node_ids.sort_unstable();
+        node_ids.dedup();
+        if node_ids.len() < min_syncmers {
+            continue;
+        }
+
+        let read_ordinal = base_read_ordinal + read_offset as u64;
+        for &node_id in &node_ids {
+            pairs.push(pack_read_syncmer_pair(node_id, read_ordinal)?);
+        }
+        stats.retained_reads += 1;
+        stats.postings += node_ids.len() as u64;
+    }
+
+    Ok(ReadSyncmerPairChunk { pairs, stats })
+}
+
+fn stream_read_syncmer_index_query_paths(
+    paths: &[String],
+    tx: &channel::Sender<(u64, SyngGafQueryChunk)>,
+) -> io::Result<u64> {
+    let mut next_read_ordinal = 0u64;
+    for path in paths {
+        let file_start = Instant::now();
+        let start_read_ordinal = next_read_ordinal;
+        info!("Streaming read-index query file: {}", path);
+        stream_query_chunks_with(path, |_, chunk| {
+            let base_read_ordinal = next_read_ordinal;
+            next_read_ordinal = next_read_ordinal
+                .checked_add(chunk.len() as u64)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "read count overflow"))?;
+            tx.send((base_read_ordinal, chunk)).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "failed to send query chunk to read-index workers",
+                )
+            })
+        })?;
+        info!(
+            "Streamed {} reads from {} in {:.3}s",
+            next_read_ordinal - start_read_ordinal,
+            path,
+            file_start.elapsed().as_secs_f64()
+        );
+    }
+    Ok(next_read_ordinal)
+}
+
+fn write_read_syncmer_index_files(
+    output_prefix: &str,
+    syng_prefix: &str,
+    query_paths: &[String],
+    params: impg::syng::SyncmerParams,
+    min_syncmers: usize,
+    node_sample_rate: u32,
+    pairs: &[u64],
+    mut stats: ReadSyncmerIndexStats,
+    build_seconds: f64,
+) -> io::Result<ReadSyncmerIndexStats> {
+    let sample_path = read_syncmer_index_path(output_prefix, "sample");
+    let post_path = read_syncmer_index_path(output_prefix, "post");
+    let meta_path = read_syncmer_index_path(output_prefix, "meta");
+
+    let write_start = Instant::now();
+    let mut sample_out = BufWriter::new(File::create(&sample_path)?);
+    let mut post_out = BufWriter::new(File::create(&post_path)?);
+    let mut post_offset = 0u64;
+    let mut i = 0usize;
+    let mut previous_node_id = 0u32;
+
+    while i < pairs.len() {
+        let node_id = packed_read_syncmer_node(pairs[i]);
+        if stats.nodes % u64::from(node_sample_rate) == 0 {
+            write_node_sample_entry(
+                &mut sample_out,
+                node_id,
+                previous_node_id,
+                post_offset,
+            )?;
+            stats.samples += 1;
+        }
+
+        let node_delta = node_id.checked_sub(previous_node_id).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "node ids are not sorted")
+        })?;
+        let group_start = i;
+        while i < pairs.len() && packed_read_syncmer_node(pairs[i]) == node_id {
+            i += 1;
+        }
+        let count = (i - group_start) as u64;
+        post_offset += write_varint(&mut post_out, u64::from(node_delta))?;
+        post_offset += write_varint(&mut post_out, count)?;
+
+        let mut prev_read = 0u64;
+        let mut first_read = true;
+        for &pair in &pairs[group_start..i] {
+            let read_ordinal = packed_read_syncmer_read(pair);
+            let delta = if first_read {
+                read_ordinal
+            } else {
+                read_ordinal.checked_sub(prev_read).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "read ordinals are not sorted")
+                })?
+            };
+            post_offset += write_varint(&mut post_out, delta)?;
+            prev_read = read_ordinal;
+            first_read = false;
+        }
+        stats.nodes += 1;
+        previous_node_id = node_id;
+    }
+
+    sample_out.flush()?;
+    post_out.flush()?;
+    stats.post_bytes = post_offset;
+    stats.sample_bytes = stats.samples * 16;
+
+    let meta = serde_json::json!({
+        "format": "impg-r2s",
+        "version": READ_SYNCMER_INDEX_VERSION,
+        "description": "sampled node-major read-to-syncmer postings; read ordinals follow query file order",
+        "syng_prefix": syng_prefix,
+        "query_files": query_paths,
+        "syncmer": {
+            "smer_length": params.k,
+            "syncmer_length": params.k + params.w,
+            "seed": params.seed,
+        },
+        "min_distinct_syncmers_per_read": min_syncmers,
+        "node_sample_rate": node_sample_rate,
+        "read_ordinal_bits": 32,
+        "reads": stats.reads,
+        "retained_reads": stats.retained_reads,
+        "matched_syncmers": stats.matched_syncmers,
+        "postings": stats.postings,
+        "nodes": stats.nodes,
+        "samples": stats.samples,
+        "post_bytes": stats.post_bytes,
+        "sample_bytes": stats.sample_bytes,
+        "build_seconds": build_seconds,
+        "write_seconds": write_start.elapsed().as_secs_f64(),
+        "files": {
+            "sample": sample_path,
+            "post": post_path,
+        }
+    });
+    let mut meta_out = BufWriter::new(File::create(&meta_path)?);
+    serde_json::to_writer_pretty(&mut meta_out, &meta).map_err(io::Error::other)?;
+    meta_out.write_all(b"\n")?;
+    meta_out.flush()?;
+
+    Ok(stats)
+}
+
+fn build_read_syncmer_index(
+    syng_prefix: &str,
+    syng_matcher: &impg::syng::SyngMatcher,
+    query_paths: &[String],
+    output_prefix: &str,
+    min_syncmers: usize,
+    node_sample_rate: u32,
+) -> io::Result<ReadSyncmerIndexStats> {
+    if min_syncmers == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--min-syncmers must be greater than 0",
+        ));
+    }
+    if node_sample_rate == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--node-sample-rate must be greater than 0",
+        ));
+    }
+
+    let start = Instant::now();
+    let threads = rayon::current_num_threads();
+    let queue_capacity = threads.saturating_mul(4).max(1);
+    let (query_tx, query_rx) = channel::bounded::<(u64, SyngGafQueryChunk)>(queue_capacity);
+    let (pair_tx, pair_rx) = channel::bounded::<ReadSyncmerPairChunk>(queue_capacity);
+
+    let (mut pairs, mut stats) = std::thread::scope(|scope| {
+        let collector = scope.spawn(move || -> io::Result<(Vec<u64>, ReadSyncmerIndexStats)> {
+            let mut pairs = Vec::new();
+            let mut stats = ReadSyncmerIndexStats::default();
+            let mut next_log_reads = 10_000_000u64;
+            while let Ok(chunk) = pair_rx.recv() {
+                stats.add(chunk.stats);
+                pairs.extend(chunk.pairs);
+                if stats.reads >= next_log_reads {
+                    info!(
+                        "Read-index matched {} reads, retained {}, postings {}",
+                        stats.reads, stats.retained_reads, stats.postings
+                    );
+                    while next_log_reads <= stats.reads {
+                        next_log_reads += 10_000_000;
+                    }
+                }
+            }
+            Ok((pairs, stats))
+        });
+
+        let mut workers = Vec::with_capacity(threads);
+        for _ in 0..threads {
+            let query_rx = query_rx.clone();
+            let pair_tx = pair_tx.clone();
+            workers.push(scope.spawn(move || -> io::Result<()> {
+                let mut worker = syng_matcher.worker().map_err(|e| {
+                    io::Error::new(
+                        e.kind(),
+                        format!("failed to create read-index syng worker: {e}"),
+                    )
+                })?;
+                while let Ok((base_read_ordinal, chunk)) = query_rx.recv() {
+                    let pair_chunk = build_read_syncmer_pair_chunk(
+                        &mut worker,
+                        base_read_ordinal,
+                        &chunk,
+                        min_syncmers,
+                    )?;
+                    pair_tx.send(pair_chunk).map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::BrokenPipe,
+                            "failed to send read-index pair chunk to collector",
+                        )
+                    })?;
+                }
+                Ok(())
+            }));
+        }
+        drop(query_rx);
+        drop(pair_tx);
+
+        let reader_result = stream_read_syncmer_index_query_paths(query_paths, &query_tx);
+        drop(query_tx);
+
+        let mut worker_errors = Vec::new();
+        for worker in workers {
+            match worker.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => worker_errors.push(e.to_string()),
+                Err(_) => worker_errors.push("read-index worker thread panicked".to_string()),
+            }
+        }
+
+        let collector_result = collector
+            .join()
+            .map_err(|_| io::Error::other("read-index collector thread panicked"))?;
+        reader_result?;
+        if !worker_errors.is_empty() {
+            return Err(io::Error::other(worker_errors.join("; ")));
+        }
+        collector_result
+    })?;
+
+    info!(
+        "Sorting {} read-index postings across {} retained reads",
+        pairs.len(),
+        stats.retained_reads
+    );
+    let sort_start = Instant::now();
+    pairs.par_sort_unstable();
+    pairs.dedup();
+    stats.postings = pairs.len() as u64;
+    info!(
+        "Sorted and deduplicated read-index postings in {:.3}s",
+        sort_start.elapsed().as_secs_f64()
+    );
+
+    let build_seconds = start.elapsed().as_secs_f64();
+    let stats = write_read_syncmer_index_files(
+        output_prefix,
+        syng_prefix,
+        query_paths,
+        syng_matcher.params,
+        min_syncmers,
+        node_sample_rate,
+        &pairs,
+        stats,
+        build_seconds,
+    )?;
+    info!(
+        "Built read-index for {} reads: retained {}, nodes {}, samples {}, postings {}, post_bytes {}, sample_bytes {} in {:.3}s",
+        stats.reads,
+        stats.retained_reads,
+        stats.nodes,
+        stats.samples,
+        stats.postings,
+        stats.post_bytes,
+        stats.sample_bytes,
+        start.elapsed().as_secs_f64()
+    );
+    Ok(stats)
+}
+
 #[cfg(unix)]
 fn silence_stdout_for_process() -> io::Result<RawFd> {
     io::stdout().flush()?;
@@ -2427,6 +2832,33 @@ enum Args {
         /// Maximum PAF hits to emit per query (0 = no limit)
         #[clap(long, value_parser, default_value_t = 0)]
         max_hits: usize,
+
+        // --- General ---
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+
+    /// Build a compact read-to-syncmer inverted index
+    ReadIndex {
+        /// Syng index prefix or .1khash/.meta path
+        #[clap(short = 'a', long, value_parser)]
+        index: String,
+
+        /// Query FASTA/FASTQ file(s). Repeat -q or pass multiple paths after one -q.
+        #[clap(short = 'q', long, value_parser, required = true, num_args = 1..)]
+        query: Vec<String>,
+
+        /// Output prefix (produces .r2s.meta, .r2s.sample, .r2s.post)
+        #[clap(short = 'o', long, value_parser)]
+        output: String,
+
+        /// Minimum distinct syng syncmer nodes required to keep a read
+        #[clap(long, value_parser, default_value_t = 2)]
+        min_syncmers: usize,
+
+        /// Sample every N observed syncmer nodes for random-access lookup
+        #[clap(long, value_parser, default_value_t = 256)]
+        node_sample_rate: u32,
 
         // --- General ---
         #[clap(flatten)]
@@ -4441,6 +4873,29 @@ fn run() -> io::Result<()> {
                     stdout.flush()?;
                 }
             }
+        }
+        Args::ReadIndex {
+            index,
+            query,
+            output,
+            min_syncmers,
+            node_sample_rate,
+            common,
+        } => {
+            initialize_threads_and_log(&common);
+
+            let syng_prefix = detect_syng_prefix(&index).unwrap_or(index);
+            info!("Loading syng syncmer dictionary from prefix: {}", syng_prefix);
+            let syng_matcher =
+                impg::syng::SyngMatcher::load(&syng_prefix, impg::syng::SyncmerParams::default())?;
+            build_read_syncmer_index(
+                &syng_prefix,
+                &syng_matcher,
+                &query,
+                &output,
+                min_syncmers,
+                node_sample_rate,
+            )?;
         }
         Args::Syng {
             agc,
@@ -7625,6 +8080,117 @@ mod tests {
         let opts = minimal_query_opts(None, true);
         opts.validate_merge_distance("query").unwrap();
         assert_eq!(opts.effective_merge_distance(), -1);
+    }
+
+    fn decode_test_varints(bytes: &[u8]) -> Vec<u64> {
+        let mut values = Vec::new();
+        let mut value = 0u64;
+        let mut shift = 0u32;
+        for &byte in bytes {
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                values.push(value);
+                value = 0;
+                shift = 0;
+            } else {
+                shift += 7;
+            }
+        }
+        assert_eq!(shift, 0, "unterminated test varint");
+        values
+    }
+
+    fn read_test_u32_le(bytes: &[u8], offset: &mut usize) -> u32 {
+        let end = *offset + 4;
+        let value = u32::from_le_bytes(bytes[*offset..end].try_into().unwrap());
+        *offset = end;
+        value
+    }
+
+    fn read_test_u64_le(bytes: &[u8], offset: &mut usize) -> u64 {
+        let end = *offset + 8;
+        let value = u64::from_le_bytes(bytes[*offset..end].try_into().unwrap());
+        *offset = end;
+        value
+    }
+
+    #[test]
+    fn test_read_syncmer_index_path_avoids_double_suffix() {
+        assert_eq!(
+            read_syncmer_index_path("sample", "post"),
+            "sample.r2s.post"
+        );
+        assert_eq!(
+            read_syncmer_index_path("sample.r2s", "post"),
+            "sample.r2s.post"
+        );
+    }
+
+    #[test]
+    fn test_read_syncmer_varint_roundtrip() {
+        let values = [0, 1, 127, 128, 16_384, u64::from(u32::MAX)];
+        let mut bytes = Vec::new();
+        for value in values {
+            write_varint(&mut bytes, value).unwrap();
+        }
+        assert_eq!(decode_test_varints(&bytes), values);
+    }
+
+    #[test]
+    fn test_write_read_syncmer_index_files_encodes_postings() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("tiny.r2s");
+        let output = output.to_string_lossy().to_string();
+        let pairs = vec![
+            pack_read_syncmer_pair(10, 0).unwrap(),
+            pack_read_syncmer_pair(10, 5).unwrap(),
+            pack_read_syncmer_pair(11, 2).unwrap(),
+        ];
+        let stats = ReadSyncmerIndexStats {
+            reads: 6,
+            retained_reads: 3,
+            matched_syncmers: 3,
+            postings: pairs.len() as u64,
+            ..ReadSyncmerIndexStats::default()
+        };
+
+        let stats = write_read_syncmer_index_files(
+            &output,
+            "tiny.syng",
+            &["reads.fq".to_string()],
+            impg::syng::SyncmerParams {
+                k: 8,
+                w: 55,
+                seed: 7,
+            },
+            2,
+            1,
+            &pairs,
+            stats,
+            0.25,
+        )
+        .unwrap();
+        assert_eq!(stats.nodes, 2);
+        assert_eq!(stats.samples, 2);
+        assert_eq!(stats.postings, 3);
+        assert_eq!(stats.post_bytes, 7);
+        assert_eq!(stats.sample_bytes, 32);
+
+        let samples = std::fs::read(read_syncmer_index_path(&output, "sample")).unwrap();
+        assert_eq!(samples.len(), 32);
+        let mut offset = 0usize;
+        assert_eq!(read_test_u32_le(&samples, &mut offset), 10);
+        assert_eq!(read_test_u32_le(&samples, &mut offset), 0);
+        assert_eq!(read_test_u64_le(&samples, &mut offset), 0);
+        assert_eq!(read_test_u32_le(&samples, &mut offset), 11);
+        assert_eq!(read_test_u32_le(&samples, &mut offset), 10);
+        assert_eq!(read_test_u64_le(&samples, &mut offset), 4);
+
+        let post = std::fs::read(read_syncmer_index_path(&output, "post")).unwrap();
+        assert_eq!(decode_test_varints(&post), vec![10, 2, 0, 5, 1, 1, 2]);
+        let meta = std::fs::read_to_string(read_syncmer_index_path(&output, "meta")).unwrap();
+        assert!(meta.contains("\"format\": \"impg-r2s\""));
+        assert!(meta.contains("\"postings\": 3"));
     }
 
     #[test]
