@@ -2822,7 +2822,7 @@ enum Args {
         output: Option<String>,
 
         /// Minimum shared syncmer anchors required to emit a mapping
-        #[clap(long, value_parser, default_value_t = 2)]
+        #[clap(long, value_parser, default_value_t = 1)]
         min_anchors: usize,
 
         /// Anchor chaining budget for PAF projection
@@ -2853,7 +2853,7 @@ enum Args {
         output: String,
 
         /// Minimum distinct syng syncmer nodes required to keep a read
-        #[clap(long, value_parser, default_value_t = 2)]
+        #[clap(long, value_parser, default_value_t = 1)]
         min_syncmers: usize,
 
         /// Sample every N observed syncmer nodes for random-access lookup
