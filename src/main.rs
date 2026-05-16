@@ -582,7 +582,10 @@ fn emit_syng_map<W: Write>(
         other => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("unsupported map output format '{}'; expected 'gaf' or 'paf'", other),
+                format!(
+                    "unsupported map output format '{}'; expected 'gaf', 'paf', or 'pack'",
+                    other
+                ),
             ));
         }
     }
@@ -1006,6 +1009,199 @@ fn emit_syng_map_gaf<W: Write + Send>(
             format_duration(profile_duration(&profile.writer_write_ns)),
         );
     }
+    Ok(())
+}
+
+struct SyngPackMapChunk {
+    counts: FxHashMap<u32, u64>,
+    queries: usize,
+    records: usize,
+    anchors: usize,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct SyngPackMapStats {
+    queries: usize,
+    records: usize,
+    anchors: usize,
+}
+
+fn build_syng_map_pack_chunk(
+    syng_matcher: &mut impg::syng::SyngMatcherWorker<'_>,
+    chunk: &SyngGafQueryChunk,
+    min_anchors: usize,
+) -> SyngPackMapChunk {
+    let mut counts = FxHashMap::default();
+    let mut records = 0usize;
+    let mut anchors = 0usize;
+    let mut syncmers = Vec::new();
+    let mut node_ids = Vec::new();
+
+    for record in &chunk.records {
+        let query_seq = &chunk.seqs[record.seq_start..record.seq_end];
+        syng_matcher.matched_syncmers_in_sequence_into(query_seq, &mut syncmers);
+
+        node_ids.clear();
+        node_ids.extend(syncmers.iter().map(|syncmer| syncmer.node_id));
+        node_ids.sort_unstable();
+        node_ids.dedup();
+        if node_ids.len() < min_anchors {
+            continue;
+        }
+
+        for &node_id in &node_ids {
+            *counts.entry(node_id).or_insert(0) += 1;
+        }
+        anchors += syncmers.len();
+        records += 1;
+    }
+
+    SyngPackMapChunk {
+        counts,
+        queries: chunk.len(),
+        records,
+        anchors,
+    }
+}
+
+fn merge_syng_pack_counts(dst: &mut FxHashMap<u32, u64>, src: FxHashMap<u32, u64>) {
+    for (node_id, count) in src {
+        *dst.entry(node_id).or_insert(0) += count;
+    }
+}
+
+fn write_syng_map_pack<W: Write>(out: &mut W, counts: FxHashMap<u32, u64>) -> io::Result<usize> {
+    writeln!(out, "#node_id\tcount")?;
+    let mut rows: Vec<(u32, u64)> = counts.into_iter().collect();
+    rows.sort_unstable_by_key(|&(node_id, _)| node_id);
+    for (node_id, count) in &rows {
+        writeln!(out, "{node_id}\t{count}")?;
+    }
+    Ok(rows.len())
+}
+
+fn emit_syng_map_pack_sequential<W: Write>(
+    out: &mut W,
+    syng_matcher: &impg::syng::SyngMatcher,
+    query_path: &str,
+    min_anchors: usize,
+) -> io::Result<SyngPackMapStats> {
+    let mut worker = syng_matcher.worker().map_err(|e| {
+        io::Error::new(e.kind(), format!("failed to create syng pack worker: {e}"))
+    })?;
+    let mut counts = FxHashMap::default();
+    let mut stats = SyngPackMapStats::default();
+
+    stream_query_chunks_with(query_path, |_, chunk| {
+        let packed = build_syng_map_pack_chunk(&mut worker, &chunk, min_anchors);
+        stats.queries += packed.queries;
+        stats.records += packed.records;
+        stats.anchors += packed.anchors;
+        merge_syng_pack_counts(&mut counts, packed.counts);
+        Ok(())
+    })?;
+
+    let nodes = write_syng_map_pack(out, counts)?;
+    info!(
+        "Mapped {} query sequences to pack coverage over {} nodes ({} retained reads, {} syncmer anchors)",
+        stats.queries, nodes, stats.records, stats.anchors
+    );
+    Ok(stats)
+}
+
+fn emit_syng_map_pack<W: Write + Send>(
+    out: &mut W,
+    syng_matcher: &impg::syng::SyngMatcher,
+    query_path: &str,
+    min_anchors: usize,
+) -> io::Result<()> {
+    let start = Instant::now();
+    let threads = rayon::current_num_threads();
+
+    if threads <= 1 {
+        emit_syng_map_pack_sequential(out, syng_matcher, query_path, min_anchors)?;
+        return Ok(());
+    }
+
+    let queue_capacity = threads.saturating_mul(4).max(1);
+    let (query_tx, query_rx) = channel::bounded::<(usize, SyngGafQueryChunk)>(queue_capacity);
+    let (result_tx, result_rx) = channel::bounded::<SyngPackMapChunk>(queue_capacity);
+
+    let (counts, stats) = std::thread::scope(|scope| {
+        let collector = scope.spawn(move || -> io::Result<(FxHashMap<u32, u64>, SyngPackMapStats)> {
+            let mut counts = FxHashMap::default();
+            let mut stats = SyngPackMapStats::default();
+            while let Ok(chunk) = result_rx.recv() {
+                stats.queries += chunk.queries;
+                stats.records += chunk.records;
+                stats.anchors += chunk.anchors;
+                merge_syng_pack_counts(&mut counts, chunk.counts);
+            }
+            Ok((counts, stats))
+        });
+
+        let mut workers = Vec::with_capacity(threads);
+        for _ in 0..threads {
+            let query_rx = query_rx.clone();
+            let result_tx = result_tx.clone();
+            workers.push(scope.spawn(move || -> io::Result<()> {
+                let mut worker = syng_matcher.worker().map_err(|e| {
+                    io::Error::new(e.kind(), format!("failed to create syng pack worker: {e}"))
+                })?;
+                while let Ok((_, chunk)) = query_rx.recv() {
+                    let packed = build_syng_map_pack_chunk(&mut worker, &chunk, min_anchors);
+                    result_tx.send(packed).map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::BrokenPipe,
+                            "failed to send pack chunk to collector",
+                        )
+                    })?;
+                }
+                Ok(())
+            }));
+        }
+        drop(query_rx);
+        drop(result_tx);
+
+        let reader_result = stream_query_chunks_with(query_path, |idx, chunk| {
+            query_tx.send((idx, chunk)).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "failed to send query chunk to pack workers",
+                )
+            })
+        });
+        drop(query_tx);
+
+        let mut worker_errors = Vec::new();
+        for worker in workers {
+            match worker.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => worker_errors.push(e.to_string()),
+                Err(_) => worker_errors.push("pack worker thread panicked".to_string()),
+            }
+        }
+
+        let collector_result = collector
+            .join()
+            .map_err(|_| io::Error::other("pack collector thread panicked"))?;
+        reader_result?;
+        if !worker_errors.is_empty() {
+            return Err(io::Error::other(worker_errors.join("; ")));
+        }
+        collector_result
+    })?;
+
+    let nodes = write_syng_map_pack(out, counts)?;
+    info!(
+        "Mapped {} query sequences to pack coverage over {} nodes ({} retained reads, {} syncmer anchors) in {:.3}s using {} threads",
+        stats.queries,
+        nodes,
+        stats.records,
+        stats.anchors,
+        start.elapsed().as_secs_f64(),
+        threads
+    );
     Ok(())
 }
 
@@ -2813,7 +3009,7 @@ enum Args {
         #[clap(short = 'q', long, value_parser)]
         query: String,
 
-        /// Output format: gaf (syncmer-node support) or paf (projected genome coordinates)
+        /// Output format: gaf (syncmer-node support), paf (projected genome coordinates), or pack (node coverage)
         #[clap(short = 'o', long, value_parser, default_value = "gaf")]
         output_format: String,
 
@@ -4780,11 +4976,11 @@ fn run() -> io::Result<()> {
             initialize_threads_and_log(&common);
 
             let syng_prefix = detect_syng_prefix(&index).unwrap_or(index);
-            if !matches!(output_format.as_str(), "gaf" | "paf") {
+            if !matches!(output_format.as_str(), "gaf" | "paf" | "pack") {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
-                        "unsupported map output format '{}'; expected 'gaf' or 'paf'",
+                        "unsupported map output format '{}'; expected 'gaf', 'paf', or 'pack'",
                         output_format
                     ),
                 ));
@@ -4804,6 +5000,14 @@ fn run() -> io::Result<()> {
                             impg::syng::SyncmerParams::default(),
                         )?;
                         emit_syng_map_gaf(&mut out, &syng_matcher, &query, min_anchors)?;
+                    }
+                    "pack" => {
+                        info!("Loading syng syncmer dictionary from prefix: {}", syng_prefix);
+                        let syng_matcher = impg::syng::SyngMatcher::load(
+                            &syng_prefix,
+                            impg::syng::SyncmerParams::default(),
+                        )?;
+                        emit_syng_map_pack(&mut out, &syng_matcher, &query, min_anchors)?;
                     }
                     "paf" => {
                         info!("Loading syng index from prefix: {}", syng_prefix);
@@ -4839,6 +5043,14 @@ fn run() -> io::Result<()> {
                             impg::syng::SyncmerParams::default(),
                         )?;
                         emit_syng_map_gaf(&mut out, &syng_matcher, &query, min_anchors)?;
+                    }
+                    "pack" => {
+                        info!("Loading syng syncmer dictionary from prefix: {}", syng_prefix);
+                        let syng_matcher = impg::syng::SyngMatcher::load(
+                            &syng_prefix,
+                            impg::syng::SyncmerParams::default(),
+                        )?;
+                        emit_syng_map_pack(&mut out, &syng_matcher, &query, min_anchors)?;
                     }
                     "paf" => {
                         info!("Loading syng index from prefix: {}", syng_prefix);

@@ -565,6 +565,21 @@ fn test_syng_map_cli_gaf_and_paf() {
         "GAF path should contain syncmer node orientations: {}",
         gaf_fields[5]
     );
+    let mut expected_pack_nodes = std::collections::BTreeSet::new();
+    let mut node_digits = String::new();
+    for ch in gaf_fields[5].chars() {
+        if ch == '>' || ch == '<' {
+            if !node_digits.is_empty() {
+                expected_pack_nodes.insert(node_digits.parse::<u32>().unwrap());
+                node_digits.clear();
+            }
+        } else if ch.is_ascii_digit() {
+            node_digits.push(ch);
+        }
+    }
+    if !node_digits.is_empty() {
+        expected_pack_nodes.insert(node_digits.parse::<u32>().unwrap());
+    }
 
     let default_gaf = Command::new(&bin)
         .args([
@@ -587,6 +602,52 @@ fn test_syng_map_cli_gaf_and_paf() {
         default_gaf.stdout, gaf.stdout,
         "impg map should default to GAF output"
     );
+
+    let pack = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            query_path.to_str().unwrap(),
+            "-o",
+            "pack",
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o pack");
+    assert!(
+        pack.status.success(),
+        "impg map -o pack failed: {}",
+        String::from_utf8_lossy(&pack.stderr)
+    );
+    let pack_stdout = String::from_utf8_lossy(&pack.stdout);
+    let pack_lines: Vec<&str> = pack_stdout.lines().collect();
+    assert_eq!(
+        pack_lines.first().copied(),
+        Some("#node_id\tcount"),
+        "pack output should start with a TSV header, got:\n{}",
+        pack_stdout
+    );
+    assert_eq!(
+        pack_lines.len().saturating_sub(1),
+        expected_pack_nodes.len(),
+        "pack output should have one row per distinct GAF node"
+    );
+    for line in pack_lines.iter().skip(1) {
+        let fields: Vec<&str> = line.split('\t').collect();
+        assert_eq!(fields.len(), 2, "pack line should have two fields: {}", line);
+        let node_id = fields[0].parse::<u32>().unwrap();
+        let count = fields[1].parse::<u64>().unwrap();
+        assert!(
+            expected_pack_nodes.contains(&node_id),
+            "pack emitted unexpected node {} in:\n{}",
+            node_id,
+            pack_stdout
+        );
+        assert_eq!(count, 1, "single-read pack count should be 1 for {}", node_id);
+    }
 
     let gaf_rc = Command::new(&bin)
         .args([
@@ -689,6 +750,30 @@ fn test_syng_map_cli_gaf_and_paf() {
             .collect::<Vec<_>>()
             .is_empty(),
         "expected GAF output with only .1khash/.meta present"
+    );
+    let pack_khash_only = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            query_path.to_str().unwrap(),
+            "-o",
+            "pack",
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o pack with only khash");
+    assert!(
+        pack_khash_only.status.success(),
+        "impg map -o pack should only require .1khash/.meta, stderr: {}",
+        String::from_utf8_lossy(&pack_khash_only.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&pack_khash_only.stdout).lines().next(),
+        Some("#node_id\tcount"),
+        "expected pack header with only .1khash/.meta present"
     );
     let gaf_threads_1 = Command::new(&bin)
         .args([
