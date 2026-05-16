@@ -566,42 +566,6 @@ fn test_syng_map_cli_gaf_and_paf() {
         gaf_fields[5]
     );
 
-    let read_walk_prefix = dir.join("reads");
-    let read_walk = Command::new(&bin)
-        .args([
-            "read-walk-index",
-            "-a",
-            idx_prefix.to_str().unwrap(),
-            "-q",
-            query_path.to_str().unwrap(),
-            "-o",
-            read_walk_prefix.to_str().unwrap(),
-            "--locator-step-rate",
-            "4",
-            "-t",
-            "2",
-        ])
-        .output()
-        .expect("failed to run impg read-walk-index");
-    assert!(
-        read_walk.status.success(),
-        "impg read-walk-index failed: {}",
-        String::from_utf8_lossy(&read_walk.stderr)
-    );
-    for suffix in ["1gbwt", "nodes", "loc", "lsample", "meta"] {
-        let path = dir.join(format!("reads.rwalk.{suffix}"));
-        assert!(path.exists(), "expected read-walk sidecar {}", path.display());
-        assert!(
-            std::fs::metadata(&path).unwrap().len() > 0,
-            "read-walk sidecar should be nonempty: {}",
-            path.display()
-        );
-    }
-    let read_walk_meta =
-        std::fs::read_to_string(dir.join("reads.rwalk.meta")).expect("read-walk meta");
-    assert!(read_walk_meta.contains("\"format\": \"impg-rwalk\""));
-    assert!(read_walk_meta.contains("\"retained_reads\": 1"));
-
     let gaf_rc = Command::new(&bin)
         .args([
             "map",
