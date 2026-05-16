@@ -353,7 +353,8 @@ ploidy-sized haplotype combinations against the sample `pack`/`packbin`
 coverage vector by cosine similarity. The default candidate mode is
 `spanning`: candidates must have shared anchors spanning the requested
 reference interval. Use `--candidate-mode overlapping` to score each gathered
-candidate interval independently.
+candidate interval independently. See `docs/genotype-architecture.md` for the
+graph-feature evidence model this is built around.
 
 `-r` splits on the **last** `:`. Path names from `odgi paths -f`
 already contain coordinates (`grch38#chr6:31972046-32055647`), so a

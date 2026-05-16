@@ -1,4 +1,5 @@
 pub mod align;
+pub mod genotype;
 pub mod graph;
 pub mod lace;
 pub mod partition;
