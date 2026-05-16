@@ -1705,6 +1705,11 @@ impl SyngMatcher {
         out
     }
 
+    /// Number of syncmer nodes stored in the KmerHash (valid IDs are `1..=N`).
+    pub fn num_syncmer_nodes(&self) -> usize {
+        unsafe { (*self.kmer_hash).max as usize }
+    }
+
     pub fn worker(&self) -> io::Result<SyngMatcherWorker<'_>> {
         let seqhash = unsafe {
             syng_ffi::impg_seqhashCreateSafe(

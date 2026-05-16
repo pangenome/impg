@@ -181,6 +181,15 @@ not store short reads as GBWT paths by default. A read-walk GBWT can stay
 as a separate experimental branch for exploring path-level read queries,
 but it is not the compact support index.
 
+The `.r2s` / future `.s2r` read-syncmer postings are working indexes for
+read retrieval and subgraph-to-read support queries. They are not the
+primary long-term cohort archive for per-sample coverage. For storage at
+tens of thousands of samples, the compact archive target is the
+node-coverage vector (`impg map -o packbin`): exact per-node counts,
+internally block-compressed with zstd, random-accessible by syncmer node
+ID, and cheap to regenerate from reads when a read-level support index is
+needed.
+
 ## References
 
 - Sebastiano Vigna. "Quasi-Succinct Indices."

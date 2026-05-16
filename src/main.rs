@@ -552,6 +552,11 @@ fn create_map_output_writer(path: &str) -> io::Result<Box<dyn Write + Send>> {
     }
 }
 
+fn create_plain_map_output_writer(path: &str) -> io::Result<Box<dyn Write + Send>> {
+    let file = File::create(path)?;
+    Ok(Box::new(BufWriter::with_capacity(1024 * 1024, file)))
+}
+
 fn emit_syng_map<W: Write>(
     out: &mut W,
     syng_index: &impg::syng::SyngIndex,
@@ -1042,6 +1047,27 @@ struct SyngPackMapStats {
     anchors: usize,
 }
 
+const SYNG_PACK_BINARY_MAGIC: &[u8; 8] = b"IMPGPKB1";
+const SYNG_PACK_BINARY_VERSION: u32 = 1;
+const SYNG_PACK_BINARY_HEADER_LEN: u32 = 96;
+const DEFAULT_PACK_BINARY_BLOCK_SIZE: usize = 1 << 20;
+
+fn is_pack_binary_format(output_format: &str) -> bool {
+    matches!(output_format, "packbin" | "pack-bin" | "bpack")
+}
+
+fn write_u32_le<W: Write>(out: &mut W, value: u32) -> io::Result<()> {
+    out.write_all(&value.to_le_bytes())
+}
+
+fn write_i32_le<W: Write>(out: &mut W, value: i32) -> io::Result<()> {
+    out.write_all(&value.to_le_bytes())
+}
+
+fn write_u64_le<W: Write>(out: &mut W, value: u64) -> io::Result<()> {
+    out.write_all(&value.to_le_bytes())
+}
+
 fn build_syng_map_pack_chunk(
     syng_matcher: &mut impg::syng::SyngMatcherWorker<'_>,
     chunk: &SyngGafQueryChunk,
@@ -1096,12 +1122,118 @@ fn write_syng_map_pack<W: Write>(out: &mut W, counts: FxHashMap<u32, u64>) -> io
     Ok(rows.len())
 }
 
-fn emit_syng_map_pack_sequential<W: Write>(
+fn write_syng_map_pack_binary<W: Write>(
     out: &mut W,
+    counts: FxHashMap<u32, u64>,
+    stats: SyngPackMapStats,
+    universe_nodes: usize,
+    compression_level: i32,
+    block_size: usize,
+) -> io::Result<usize> {
+    if !(1..=22).contains(&compression_level) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("--pack-compression-level must be in 1..=22, got {compression_level}"),
+        ));
+    }
+    if block_size == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--pack-block-size must be greater than 0",
+        ));
+    }
+    if block_size > u32::MAX as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--pack-block-size must fit in u32",
+        ));
+    }
+    if universe_nodes > u32::MAX as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "packbin currently supports at most 2^32 syncmer nodes",
+        ));
+    }
+
+    let mut dense = vec![0u8; universe_nodes];
+    let mut overflow = Vec::new();
+    for (&node_id, &count) in &counts {
+        if node_id == 0 || node_id as usize > universe_nodes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("pack count node {node_id} is outside 1..={universe_nodes}"),
+            ));
+        }
+        dense[(node_id - 1) as usize] = count.min(255) as u8;
+        if count > 255 {
+            overflow.push((node_id, count));
+        }
+    }
+    overflow.sort_unstable_by_key(|&(node_id, _)| node_id);
+
+    let block_count = dense.len().div_ceil(block_size);
+    let mut block_offsets = Vec::with_capacity(block_count + 1);
+    let mut compressed_blocks = Vec::with_capacity(block_count);
+    let mut compressed_offset = 0u64;
+    block_offsets.push(compressed_offset);
+    for block in dense.chunks(block_size) {
+        let compressed = zstd::bulk::compress(block, compression_level)?;
+        compressed_offset = compressed_offset
+            .checked_add(compressed.len() as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "packbin offset overflow"))?;
+        block_offsets.push(compressed_offset);
+        compressed_blocks.push(compressed);
+    }
+
+    let header_len = u64::from(SYNG_PACK_BINARY_HEADER_LEN);
+    let block_index_offset = header_len;
+    let block_index_bytes = (block_offsets.len() as u64)
+        .checked_mul(8)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "packbin index overflow"))?;
+    let overflow_offset = block_index_offset
+        .checked_add(block_index_bytes)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "packbin offset overflow"))?;
+    let overflow_bytes = (overflow.len() as u64)
+        .checked_mul(12)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "packbin overflow overflow"))?;
+    let data_offset = overflow_offset
+        .checked_add(overflow_bytes)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "packbin data offset overflow"))?;
+
+    out.write_all(SYNG_PACK_BINARY_MAGIC)?;
+    write_u32_le(out, SYNG_PACK_BINARY_VERSION)?;
+    write_u32_le(out, SYNG_PACK_BINARY_HEADER_LEN)?;
+    write_u64_le(out, universe_nodes as u64)?;
+    write_u64_le(out, counts.len() as u64)?;
+    write_u64_le(out, stats.records as u64)?;
+    write_u64_le(out, stats.anchors as u64)?;
+    write_u32_le(out, block_size as u32)?;
+    write_i32_le(out, compression_level)?;
+    write_u64_le(out, block_count as u64)?;
+    write_u64_le(out, overflow.len() as u64)?;
+    write_u64_le(out, block_index_offset)?;
+    write_u64_le(out, overflow_offset)?;
+    write_u64_le(out, data_offset)?;
+
+    for offset in block_offsets {
+        write_u64_le(out, offset)?;
+    }
+    for (node_id, count) in overflow {
+        write_u32_le(out, node_id)?;
+        write_u64_le(out, count)?;
+    }
+    for block in compressed_blocks {
+        out.write_all(&block)?;
+    }
+
+    Ok(counts.len())
+}
+
+fn collect_syng_map_pack_counts_sequential(
     syng_matcher: &impg::syng::SyngMatcher,
     query_path: &str,
     min_anchors: usize,
-) -> io::Result<SyngPackMapStats> {
+) -> io::Result<(FxHashMap<u32, u64>, SyngPackMapStats)> {
     let mut worker = syng_matcher.worker().map_err(|e| {
         io::Error::new(e.kind(), format!("failed to create syng pack worker: {e}"))
     })?;
@@ -1117,33 +1249,25 @@ fn emit_syng_map_pack_sequential<W: Write>(
         Ok(())
     })?;
 
-    let nodes = write_syng_map_pack(out, counts)?;
-    info!(
-        "Mapped {} query sequences to pack coverage over {} nodes ({} retained reads, {} syncmer anchors)",
-        stats.queries, nodes, stats.records, stats.anchors
-    );
-    Ok(stats)
+    Ok((counts, stats))
 }
 
-fn emit_syng_map_pack<W: Write + Send>(
-    out: &mut W,
+fn collect_syng_map_pack_counts(
     syng_matcher: &impg::syng::SyngMatcher,
     query_path: &str,
     min_anchors: usize,
-) -> io::Result<()> {
-    let start = Instant::now();
+) -> io::Result<(FxHashMap<u32, u64>, SyngPackMapStats)> {
     let threads = rayon::current_num_threads();
 
     if threads <= 1 {
-        emit_syng_map_pack_sequential(out, syng_matcher, query_path, min_anchors)?;
-        return Ok(());
+        return collect_syng_map_pack_counts_sequential(syng_matcher, query_path, min_anchors);
     }
 
     let queue_capacity = threads.saturating_mul(4).max(1);
     let (query_tx, query_rx) = channel::bounded::<(usize, SyngGafQueryChunk)>(queue_capacity);
     let (result_tx, result_rx) = channel::bounded::<SyngPackMapChunk>(queue_capacity);
 
-    let (counts, stats) = std::thread::scope(|scope| {
+    std::thread::scope(|scope| {
         let collector = scope.spawn(move || -> io::Result<(FxHashMap<u32, u64>, SyngPackMapStats)> {
             let mut counts = FxHashMap::default();
             let mut stats = SyngPackMapStats::default();
@@ -1206,8 +1330,19 @@ fn emit_syng_map_pack<W: Write + Send>(
             return Err(io::Error::other(worker_errors.join("; ")));
         }
         collector_result
-    })?;
+    })
+}
 
+fn emit_syng_map_pack<W: Write + Send>(
+    out: &mut W,
+    syng_matcher: &impg::syng::SyngMatcher,
+    query_path: &str,
+    min_anchors: usize,
+) -> io::Result<()> {
+    let start = Instant::now();
+    let threads = rayon::current_num_threads();
+    let (counts, stats) =
+        collect_syng_map_pack_counts(syng_matcher, query_path, min_anchors)?;
     let nodes = write_syng_map_pack(out, counts)?;
     info!(
         "Mapped {} query sequences to pack coverage over {} nodes ({} retained reads, {} syncmer anchors) in {:.3}s using {} threads",
@@ -1217,6 +1352,42 @@ fn emit_syng_map_pack<W: Write + Send>(
         stats.anchors,
         start.elapsed().as_secs_f64(),
         threads
+    );
+    Ok(())
+}
+
+fn emit_syng_map_pack_binary<W: Write + Send>(
+    out: &mut W,
+    syng_matcher: &impg::syng::SyngMatcher,
+    query_path: &str,
+    min_anchors: usize,
+    compression_level: i32,
+    block_size: usize,
+) -> io::Result<()> {
+    let start = Instant::now();
+    let threads = rayon::current_num_threads();
+    let universe_nodes = syng_matcher.num_syncmer_nodes();
+    let (counts, stats) =
+        collect_syng_map_pack_counts(syng_matcher, query_path, min_anchors)?;
+    let nodes = write_syng_map_pack_binary(
+        out,
+        counts,
+        stats,
+        universe_nodes,
+        compression_level,
+        block_size,
+    )?;
+    info!(
+        "Mapped {} query sequences to binary pack coverage over {} nodes in {}-node universe ({} retained reads, {} syncmer anchors) in {:.3}s using {} threads; zstd level {}, block_size {}",
+        stats.queries,
+        nodes,
+        universe_nodes,
+        stats.records,
+        stats.anchors,
+        start.elapsed().as_secs_f64(),
+        threads,
+        compression_level,
+        block_size
     );
     Ok(())
 }
@@ -3025,7 +3196,7 @@ enum Args {
         #[clap(short = 'q', long, value_parser)]
         query: String,
 
-        /// Output format: gaf (syncmer-node support), paf (projected genome coordinates), or pack (node coverage)
+        /// Output format: gaf (syncmer-node support), paf (projected genome coordinates), pack (TSV node coverage), or packbin (binary node coverage)
         #[clap(short = 'o', long, value_parser, default_value = "gaf")]
         output_format: String,
 
@@ -3044,6 +3215,14 @@ enum Args {
         /// Maximum PAF hits to emit per query (0 = no limit)
         #[clap(long, value_parser, default_value_t = 0)]
         max_hits: usize,
+
+        /// Zstd compression level for binary pack output (1..=22; 19 is compact but slower)
+        #[clap(long, value_parser, default_value_t = 12)]
+        pack_compression_level: i32,
+
+        /// Dense node-count block size for binary pack random access
+        #[clap(long, value_parser, default_value_t = DEFAULT_PACK_BINARY_BLOCK_SIZE)]
+        pack_block_size: usize,
 
         // --- General ---
         #[clap(flatten)]
@@ -4987,19 +5166,40 @@ fn run() -> io::Result<()> {
             min_anchors,
             chain_budget,
             max_hits,
+            pack_compression_level,
+            pack_block_size,
             common,
         } => {
             initialize_threads_and_log(&common);
 
             let syng_prefix = detect_syng_prefix(&index).unwrap_or(index);
-            if !matches!(output_format.as_str(), "gaf" | "paf" | "pack") {
+            if !matches!(output_format.as_str(), "gaf" | "paf" | "pack")
+                && !is_pack_binary_format(&output_format)
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
-                        "unsupported map output format '{}'; expected 'gaf', 'paf', or 'pack'",
+                        "unsupported map output format '{}'; expected 'gaf', 'paf', 'pack', or 'packbin'",
                         output_format
                     ),
                 ));
+            }
+            if is_pack_binary_format(&output_format) {
+                if !(1..=22).contains(&pack_compression_level) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "--pack-compression-level must be in 1..=22, got {}",
+                            pack_compression_level
+                        ),
+                    ));
+                }
+                if pack_block_size == 0 || pack_block_size > u32::MAX as usize {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--pack-block-size must be in 1..=4294967295",
+                    ));
+                }
             }
             #[cfg(unix)]
             let saved_stdout = silence_stdout_for_process()?;
@@ -5007,7 +5207,11 @@ fn run() -> io::Result<()> {
             silence_stdout_for_process()?;
 
             if let Some(path) = output {
-                let mut out = create_map_output_writer(&path)?;
+                let mut out = if is_pack_binary_format(&output_format) {
+                    create_plain_map_output_writer(&path)?
+                } else {
+                    create_map_output_writer(&path)?
+                };
                 match output_format.as_str() {
                     "gaf" => {
                         info!("Loading syng syncmer dictionary from prefix: {}", syng_prefix);
@@ -5024,6 +5228,21 @@ fn run() -> io::Result<()> {
                             impg::syng::SyncmerParams::default(),
                         )?;
                         emit_syng_map_pack(&mut out, &syng_matcher, &query, min_anchors)?;
+                    }
+                    format if is_pack_binary_format(format) => {
+                        info!("Loading syng syncmer dictionary from prefix: {}", syng_prefix);
+                        let syng_matcher = impg::syng::SyngMatcher::load(
+                            &syng_prefix,
+                            impg::syng::SyncmerParams::default(),
+                        )?;
+                        emit_syng_map_pack_binary(
+                            &mut out,
+                            &syng_matcher,
+                            &query,
+                            min_anchors,
+                            pack_compression_level,
+                            pack_block_size,
+                        )?;
                     }
                     "paf" => {
                         info!("Loading syng index from prefix: {}", syng_prefix);
@@ -5067,6 +5286,21 @@ fn run() -> io::Result<()> {
                             impg::syng::SyncmerParams::default(),
                         )?;
                         emit_syng_map_pack(&mut out, &syng_matcher, &query, min_anchors)?;
+                    }
+                    format if is_pack_binary_format(format) => {
+                        info!("Loading syng syncmer dictionary from prefix: {}", syng_prefix);
+                        let syng_matcher = impg::syng::SyngMatcher::load(
+                            &syng_prefix,
+                            impg::syng::SyncmerParams::default(),
+                        )?;
+                        emit_syng_map_pack_binary(
+                            &mut out,
+                            &syng_matcher,
+                            &query,
+                            min_anchors,
+                            pack_compression_level,
+                            pack_block_size,
+                        )?;
                     }
                     "paf" => {
                         info!("Loading syng index from prefix: {}", syng_prefix);

@@ -286,7 +286,7 @@ impg stats -a f1.paf f2.1aln
 
 Parameters follow the syng paper: `--smer-length` (`s`, default 8) and `--syncmer-length` (`k`, must be odd, default 63). Position sidecars use a regular per-path syncmer-step grid plus the terminal syncmer: `--position-sample-rate 256` samples steps `0, 256, 512, ...` and the final step on each path. `--parallel-dictionary` adds a deterministic prepass for large inputs.
 
-`impg map` projects FASTA/FASTQ queries onto a syng index via shared syncmers. The default output is GAF (syncmer-node walk); pass `-o paf` for projected genome coordinates or `-o pack` for a node coverage vector. Map output written with `-O` is compressed automatically when the filename ends in `.zst` or `.zstd`.
+`impg map` projects FASTA/FASTQ queries onto a syng index via shared syncmers. The default output is GAF (syncmer-node walk); pass `-o paf` for projected genome coordinates, `-o pack` for a TSV node coverage vector, or `-o packbin` for a compact binary node coverage vector. Text map output written with `-O` is compressed automatically when the filename ends in `.zst` or `.zstd`; `packbin` uses internal block zstd compression for random access by node ID.
 
 Use `impg syng-repair -a <prefix> --position-sample-rate <N> --force` to rebuild or resample `.syng.spos` and `.syng.pstep` from an existing `.1gbwt` / `.1khash` syng index without re-reading the original sequences.
 
@@ -325,9 +325,17 @@ impg map -a c4.syng -q probe.fa -o pack | head
 # 264      1
 # 265      1
 impg map -a c4.syng -q probe.fa -o pack -O probe.pack.tsv.zst
+impg map -a c4.syng -q probe.fa -o packbin -O probe.packbin \
+         --pack-compression-level 12
 impg map -a c4.syng -q probe.fa -o paf
 # grch38...:5000-7000  2001  1302  1833  +  HG02109#1#...  77232  6300  6831  126 531 0 an:i:2 sk:i:63
 ```
+
+`packbin` stores a dense u8 count vector over syng node IDs, zstd-compressed
+in independently addressable blocks, plus a small overflow table for node
+counts above 255. `--pack-compression-level` defaults to 12; level 19 is a
+compact cohort/archive setting that is slower to write but just as fast to
+read in practice.
 
 `-r` splits on the **last** `:`. Path names from `odgi paths -f`
 already contain coordinates (`grch38#chr6:31972046-32055647`), so a

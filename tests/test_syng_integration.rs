@@ -692,6 +692,99 @@ fn test_syng_map_cli_gaf_and_paf() {
         ".zst-compressed pack output should decompress to plain pack TSV"
     );
 
+    let packbin_path = dir.join("pack.ipack");
+    let packbin = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            query_path.to_str().unwrap(),
+            "-o",
+            "packbin",
+            "-O",
+            packbin_path.to_str().unwrap(),
+            "--pack-compression-level",
+            "3",
+            "--pack-block-size",
+            "64",
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o packbin");
+    assert!(
+        packbin.status.success(),
+        "impg map -o packbin failed: {}",
+        String::from_utf8_lossy(&packbin.stderr)
+    );
+    assert!(
+        packbin.stdout.is_empty(),
+        "packbin output should go to -O path, got stdout bytes: {}",
+        packbin.stdout.len()
+    );
+    let packbin_bytes = std::fs::read(&packbin_path).unwrap();
+    assert_eq!(&packbin_bytes[..8], b"IMPGPKB1");
+    let read_u32 = |offset: usize| -> u32 {
+        u32::from_le_bytes(packbin_bytes[offset..offset + 4].try_into().unwrap())
+    };
+    let read_i32 = |offset: usize| -> i32 {
+        i32::from_le_bytes(packbin_bytes[offset..offset + 4].try_into().unwrap())
+    };
+    let read_u64 = |offset: usize| -> u64 {
+        u64::from_le_bytes(packbin_bytes[offset..offset + 8].try_into().unwrap())
+    };
+    assert_eq!(read_u32(8), 1, "packbin version should be 1");
+    let header_len = read_u32(12) as usize;
+    assert_eq!(header_len, 96);
+    let universe_nodes = read_u64(16) as usize;
+    let nonzero_nodes = read_u64(24) as usize;
+    let retained_reads = read_u64(32);
+    let anchors = read_u64(40);
+    let block_size = read_u32(48) as usize;
+    let zstd_level = read_i32(52);
+    let block_count = read_u64(56) as usize;
+    let overflow_count = read_u64(64) as usize;
+    let block_index_offset = read_u64(72) as usize;
+    let overflow_offset = read_u64(80) as usize;
+    let data_offset = read_u64(88) as usize;
+    assert_eq!(nonzero_nodes, expected_pack_nodes.len());
+    assert_eq!(retained_reads, 1);
+    assert!(anchors >= expected_pack_nodes.len() as u64);
+    assert_eq!(block_size, 64);
+    assert_eq!(zstd_level, 3);
+    assert_eq!(overflow_count, 0);
+    assert_eq!(block_index_offset, header_len);
+    assert!(overflow_offset >= block_index_offset);
+    assert!(data_offset >= overflow_offset);
+    assert_eq!(block_count, universe_nodes.div_ceil(block_size));
+
+    let mut block_offsets = Vec::with_capacity(block_count + 1);
+    for i in 0..=block_count {
+        block_offsets.push(read_u64(block_index_offset + i * 8) as usize);
+    }
+    let mut dense = Vec::with_capacity(universe_nodes);
+    for block_idx in 0..block_count {
+        let compressed_start = data_offset + block_offsets[block_idx];
+        let compressed_end = data_offset + block_offsets[block_idx + 1];
+        let expected_len = (universe_nodes - block_idx * block_size).min(block_size);
+        let block = zstd::bulk::decompress(
+            &packbin_bytes[compressed_start..compressed_end],
+            expected_len,
+        )
+        .unwrap();
+        assert_eq!(block.len(), expected_len);
+        dense.extend_from_slice(&block);
+    }
+    assert_eq!(dense.len(), universe_nodes);
+    assert_eq!(
+        dense.iter().filter(|&&count| count != 0).count(),
+        expected_pack_nodes.len()
+    );
+    for &node_id in &expected_pack_nodes {
+        assert_eq!(dense[(node_id - 1) as usize], 1, "packbin count for {}", node_id);
+    }
+
     let gaf_rc = Command::new(&bin)
         .args([
             "map",
