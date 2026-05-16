@@ -566,6 +566,28 @@ fn test_syng_map_cli_gaf_and_paf() {
         gaf_fields[5]
     );
 
+    let default_gaf = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            query_path.to_str().unwrap(),
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map with default output");
+    assert!(
+        default_gaf.status.success(),
+        "impg map default output failed: {}",
+        String::from_utf8_lossy(&default_gaf.stderr)
+    );
+    assert_eq!(
+        default_gaf.stdout, gaf.stdout,
+        "impg map should default to GAF output"
+    );
+
     let gaf_rc = Command::new(&bin)
         .args([
             "map",

@@ -3212,7 +3212,7 @@ enum Args {
         query: String,
 
         /// Output format: gaf (syncmer-node support) or paf (projected genome coordinates)
-        #[clap(short = 'o', long, value_parser, default_value = "paf")]
+        #[clap(short = 'o', long, value_parser, default_value = "gaf")]
         output_format: String,
 
         /// Output file path (default: stdout)
