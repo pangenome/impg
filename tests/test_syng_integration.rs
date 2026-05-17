@@ -3019,6 +3019,174 @@ fn test_syng_infer_nested_sv_noisy_low_coverage_phase_blocks() {
 }
 
 #[test]
+fn test_syng_infer_read_walk_emission_resolves_order_decoy() {
+    let _guard = lock_syng();
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping: impg binary not built");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join("impg_test_syng_infer_read_walk_emission");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let left = numeric_to_ascii(&make_sequence_numeric(420, 151));
+    let x = numeric_to_ascii(&make_sequence_numeric(540, 152));
+    let y = numeric_to_ascii(&make_sequence_numeric(540, 153));
+    let right = numeric_to_ascii(&make_sequence_numeric(420, 154));
+
+    let mut hap_ref = Vec::new();
+    hap_ref.extend_from_slice(&left);
+    hap_ref.extend_from_slice(&x);
+    hap_ref.extend_from_slice(&y);
+    hap_ref.extend_from_slice(&x);
+    hap_ref.extend_from_slice(&y);
+    hap_ref.extend_from_slice(&right);
+
+    // Same node-count projection as the target interval, but with the repeated
+    // copies in a different order. Read-walk adjacent-step evidence should
+    // break the pack/cos tie in favor of the true X-Y-X-Y order.
+    let mut hap_decoy = Vec::new();
+    hap_decoy.extend_from_slice(&left);
+    hap_decoy.extend_from_slice(&y);
+    hap_decoy.extend_from_slice(&x);
+    hap_decoy.extend_from_slice(&y);
+    hap_decoy.extend_from_slice(&x);
+    hap_decoy.extend_from_slice(&right);
+
+    let fasta_path = dir.join("index.fa");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        writeln!(f, ">sampleRef#0#chr1").unwrap();
+        f.write_all(&hap_ref).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleADecoy#0#chr1").unwrap();
+        f.write_all(&hap_decoy).unwrap();
+        writeln!(f).unwrap();
+    }
+
+    let idx_prefix = dir.join("idx");
+    let build = Command::new(&bin)
+        .args([
+            "syng",
+            "-f",
+            fasta_path.to_str().unwrap(),
+            "-o",
+            idx_prefix.to_str().unwrap(),
+            "--position-sample-rate",
+            "1",
+        ])
+        .output()
+        .expect("failed to run impg syng");
+    assert!(
+        build.status.success(),
+        "impg syng failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let reads_path = dir.join("ordered_repeat_reads.fq");
+    {
+        let mut f = std::fs::File::create(&reads_path).unwrap();
+        write_tiled_fastq(&mut f, "ordered", &hap_ref, 900, 120).unwrap();
+    }
+
+    let proj_path = dir.join("ordered.proj");
+    let map = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            reads_path.to_str().unwrap(),
+            "-o",
+            "proj",
+            "-O",
+            proj_path.to_str().unwrap(),
+            "--pack-compression-level",
+            "3",
+            "--pack-block-size",
+            "64",
+            "--min-anchors",
+            "1",
+        ])
+        .output()
+        .expect("failed to run impg map -o proj for ordered repeat reads");
+    assert!(
+        map.status.success(),
+        "impg map -o proj for ordered repeat reads failed: {}",
+        String::from_utf8_lossy(&map.stderr)
+    );
+
+    let target_range = format!(
+        "sampleRef#0#chr1:{}-{}",
+        left.len(),
+        hap_ref.len() - right.len()
+    );
+    let mosaic_path = dir.join("ordered_repeat_mosaic.tsv");
+    let infer = Command::new(&bin)
+        .args([
+            "infer",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "--proj",
+            proj_path.to_str().unwrap(),
+            "-r",
+            &target_range,
+            "--ploidy",
+            "1",
+            "--candidate-mode",
+            "spanning",
+            "--top-n",
+            "16",
+            "--candidate-top-k",
+            "80",
+            "--min-anchors",
+            "1",
+            "--min-read-link-anchors",
+            "1",
+            "--min-span-fraction",
+            "0.15",
+            "--stitch",
+            "beam",
+            "--stitch-beam",
+            "1000",
+            "--read-link-weight",
+            "6",
+            "--emit-mosaic",
+            mosaic_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run impg infer on read-walk order decoy");
+    assert!(
+        infer.status.success(),
+        "impg infer on read-walk order decoy failed: {}\nstdout:\n{}",
+        String::from_utf8_lossy(&infer.stderr),
+        String::from_utf8_lossy(&infer.stdout)
+    );
+
+    let mosaic = std::fs::read_to_string(&mosaic_path).unwrap();
+    let rows: Vec<Vec<&str>> = mosaic
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .map(|line| line.split('\t').collect())
+        .collect();
+    assert_eq!(rows.len(), 1, "expected a single stitched interval:\n{}", mosaic);
+    assert!(
+        rows[0][5] == "sampleRef#0#chr1" && rows[0][19].parse::<f64>().unwrap() > 0.0,
+        "read-walk emission should choose the true X-Y-X-Y path and expose support:\n{}",
+        mosaic
+    );
+    assert!(
+        !rows.iter().any(|row| row[5] == "sampleADecoy#0#chr1"),
+        "node-count-equivalent order decoy should not win once read-walk pairs are scored:\n{}",
+        mosaic
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn test_syng_infer_paralogous_swapped_copies_avoid_decoy_collapse() {
     let _guard = lock_syng();
     let Some(bin) = impg_binary() else {
