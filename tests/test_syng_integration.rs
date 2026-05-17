@@ -636,7 +636,7 @@ fn test_syng_map_cli_gaf_and_paf() {
         "impg map should default to GAF output"
     );
 
-    let pack = Command::new(&bin)
+    let pack_tsv = Command::new(&bin)
         .args([
             "map",
             "-a",
@@ -644,29 +644,29 @@ fn test_syng_map_cli_gaf_and_paf() {
             "-q",
             query_path.to_str().unwrap(),
             "-o",
-            "pack",
+            "pack-tsv",
             "--min-anchors",
             "2",
         ])
         .output()
-        .expect("failed to run impg map -o pack");
+        .expect("failed to run impg map -o pack-tsv");
     assert!(
-        pack.status.success(),
-        "impg map -o pack failed: {}",
-        String::from_utf8_lossy(&pack.stderr)
+        pack_tsv.status.success(),
+        "impg map -o pack-tsv failed: {}",
+        String::from_utf8_lossy(&pack_tsv.stderr)
     );
-    let pack_stdout = String::from_utf8_lossy(&pack.stdout);
+    let pack_stdout = String::from_utf8_lossy(&pack_tsv.stdout);
     let pack_lines: Vec<&str> = pack_stdout.lines().collect();
     assert_eq!(
         pack_lines.first().copied(),
         Some("#node_id\tcount"),
-        "pack output should start with a TSV header, got:\n{}",
+        "pack-tsv output should start with a TSV header, got:\n{}",
         pack_stdout
     );
     assert_eq!(
         pack_lines.len().saturating_sub(1),
         expected_pack_nodes.len(),
-        "pack output should have one row per distinct GAF node"
+        "pack-tsv output should have one row per distinct GAF node"
     );
     for line in pack_lines.iter().skip(1) {
         let fields: Vec<&str> = line.split('\t').collect();
@@ -675,7 +675,7 @@ fn test_syng_map_cli_gaf_and_paf() {
         let count = fields[1].parse::<u64>().unwrap();
         assert!(
             expected_pack_nodes.contains(&node_id),
-            "pack emitted unexpected node {} in:\n{}",
+            "pack-tsv emitted unexpected node {} in:\n{}",
             node_id,
             pack_stdout
         );
@@ -690,22 +690,22 @@ fn test_syng_map_cli_gaf_and_paf() {
             "-q",
             query_path.to_str().unwrap(),
             "-o",
-            "pack",
+            "pack-tsv",
             "-O",
             pack_zst_path.to_str().unwrap(),
             "--min-anchors",
             "2",
         ])
         .output()
-        .expect("failed to run impg map -o pack -O pack.tsv.zst");
+        .expect("failed to run impg map -o pack-tsv -O pack.tsv.zst");
     assert!(
         pack_zst.status.success(),
-        "impg map -o pack -O pack.tsv.zst failed: {}",
+        "impg map -o pack-tsv -O pack.tsv.zst failed: {}",
         String::from_utf8_lossy(&pack_zst.stderr)
     );
     assert!(
         pack_zst.stdout.is_empty(),
-        "pack output should go to -O path, got stdout: {}",
+        "pack-tsv output should go to -O path, got stdout: {}",
         String::from_utf8_lossy(&pack_zst.stdout)
     );
     let compressed = std::fs::read(&pack_zst_path).unwrap();
@@ -722,7 +722,7 @@ fn test_syng_map_cli_gaf_and_paf() {
     }
     assert_eq!(
         decoded_pack, pack_stdout,
-        ".zst-compressed pack output should decompress to plain pack TSV"
+        ".zst-compressed pack-tsv output should decompress to plain pack TSV"
     );
 
     let packbin_path = dir.join("pack.ipack");
@@ -734,7 +734,7 @@ fn test_syng_map_cli_gaf_and_paf() {
             "-q",
             query_path.to_str().unwrap(),
             "-o",
-            "packbin",
+            "pack",
             "-O",
             packbin_path.to_str().unwrap(),
             "--pack-compression-level",
@@ -745,15 +745,15 @@ fn test_syng_map_cli_gaf_and_paf() {
             "2",
         ])
         .output()
-        .expect("failed to run impg map -o packbin");
+        .expect("failed to run impg map -o pack");
     assert!(
         packbin.status.success(),
-        "impg map -o packbin failed: {}",
+        "impg map -o pack failed: {}",
         String::from_utf8_lossy(&packbin.stderr)
     );
     assert!(
         packbin.stdout.is_empty(),
-        "packbin output should go to -O path, got stdout bytes: {}",
+        "pack output should go to -O path, got stdout bytes: {}",
         packbin.stdout.len()
     );
     let packbin_bytes = std::fs::read(&packbin_path).unwrap();
@@ -817,6 +817,47 @@ fn test_syng_map_cli_gaf_and_paf() {
     for &node_id in &expected_pack_nodes {
         assert_eq!(dense[(node_id - 1) as usize], 1, "packbin count for {}", node_id);
     }
+
+    let proj_path = dir.join("sample.proj");
+    let proj = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            query_path.to_str().unwrap(),
+            "-o",
+            "proj",
+            "-O",
+            proj_path.to_str().unwrap(),
+            "--pack-compression-level",
+            "3",
+            "--pack-block-size",
+            "64",
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o proj");
+    assert!(
+        proj.status.success(),
+        "impg map -o proj failed: {}",
+        String::from_utf8_lossy(&proj.stderr)
+    );
+    assert!(proj_path.join("manifest.json").exists());
+    assert_eq!(&std::fs::read(proj_path.join("sample.pack")).unwrap()[..8], b"IMPGPKB1");
+    let mut gaf_decoder =
+        zstd::stream::read::Decoder::new(std::fs::File::open(proj_path.join("reads.gaf.zst")).unwrap()).unwrap();
+    let mut projected_gaf = String::new();
+    {
+        use std::io::Read;
+        gaf_decoder.read_to_string(&mut projected_gaf).unwrap();
+    }
+    assert!(
+        projected_gaf.starts_with("read1\t"),
+        "projection should include GAF read walks, got:\n{}",
+        projected_gaf
+    );
 
     let gaf_rc = Command::new(&bin)
         .args([
@@ -928,15 +969,15 @@ fn test_syng_map_cli_gaf_and_paf() {
             "-q",
             query_path.to_str().unwrap(),
             "-o",
-            "pack",
+            "pack-tsv",
             "--min-anchors",
             "2",
         ])
         .output()
-        .expect("failed to run impg map -o pack with only khash");
+        .expect("failed to run impg map -o pack-tsv with only khash");
     assert!(
         pack_khash_only.status.success(),
-        "impg map -o pack should only require .1khash/.meta, stderr: {}",
+        "impg map -o pack-tsv should only require .1khash/.meta, stderr: {}",
         String::from_utf8_lossy(&pack_khash_only.stderr)
     );
     assert_eq!(
@@ -1071,7 +1112,7 @@ fn test_syng_genotype_cos_cli_permutations() {
         writeln!(f, "{}", "I".repeat(hap_b.len())).unwrap();
     }
 
-    let packbin_path = dir.join("sample.packbin");
+    let proj_path = dir.join("sample.proj");
     let map = Command::new(&bin)
         .args([
             "map",
@@ -1080,9 +1121,9 @@ fn test_syng_genotype_cos_cli_permutations() {
             "-q",
             reads_path.to_str().unwrap(),
             "-o",
-            "packbin",
+            "proj",
             "-O",
-            packbin_path.to_str().unwrap(),
+            proj_path.to_str().unwrap(),
             "--pack-compression-level",
             "3",
             "--pack-block-size",
@@ -1091,12 +1132,13 @@ fn test_syng_genotype_cos_cli_permutations() {
             "2",
         ])
         .output()
-        .expect("failed to run impg map -o packbin");
+        .expect("failed to run impg map -o proj");
     assert!(
         map.status.success(),
-        "impg map -o packbin failed: {}",
+        "impg map -o proj failed: {}",
         String::from_utf8_lossy(&map.stderr)
     );
+    let compact_pack_path = proj_path.join("sample.pack");
 
     let pack_path = dir.join("sample.pack.tsv");
     let map_pack = Command::new(&bin)
@@ -1107,17 +1149,17 @@ fn test_syng_genotype_cos_cli_permutations() {
             "-q",
             reads_path.to_str().unwrap(),
             "-o",
-            "pack",
+            "pack-tsv",
             "-O",
             pack_path.to_str().unwrap(),
             "--min-anchors",
             "2",
         ])
         .output()
-        .expect("failed to run impg map -o pack");
+        .expect("failed to run impg map -o pack-tsv");
     assert!(
         map_pack.status.success(),
-        "impg map -o pack failed: {}",
+        "impg map -o pack-tsv failed: {}",
         String::from_utf8_lossy(&map_pack.stderr)
     );
 
@@ -1130,17 +1172,17 @@ fn test_syng_genotype_cos_cli_permutations() {
             "-q",
             reads_path.to_str().unwrap(),
             "-o",
-            "pack",
+            "pack-tsv",
             "-O",
             pack_zst_path.to_str().unwrap(),
             "--min-anchors",
             "2",
         ])
         .output()
-        .expect("failed to run impg map -o pack -O sample.pack.tsv.zst");
+        .expect("failed to run impg map -o pack-tsv -O sample.pack.tsv.zst");
     assert!(
         map_pack_zst.status.success(),
-        "impg map -o pack -O sample.pack.tsv.zst failed: {}",
+        "impg map -o pack-tsv -O sample.pack.tsv.zst failed: {}",
         String::from_utf8_lossy(&map_pack_zst.stderr)
     );
     let compressed_pack = std::fs::read(&pack_zst_path).unwrap();
@@ -1187,9 +1229,9 @@ fn test_syng_genotype_cos_cli_permutations() {
     let methods = ["cos", "cosigt"];
     let candidate_modes = ["spanning", "overlapping"];
     let packs = [
-        ("pack", "pack", pack_path.as_path()),
-        ("pack.zst", "pack", pack_zst_path.as_path()),
-        ("packbin", "packbin", packbin_path.as_path()),
+        ("pack-tsv", "pack", pack_path.as_path()),
+        ("pack-tsv.zst", "pack", pack_zst_path.as_path()),
+        ("pack", "packbin", compact_pack_path.as_path()),
     ];
     let mut expected_by_pack_mode: std::collections::BTreeMap<(String, String), String> =
         std::collections::BTreeMap::new();
@@ -1302,8 +1344,37 @@ fn test_syng_genotype_cos_cli_permutations() {
     }
     assert_eq!(checked, 24, "expected to exercise the full genotype CLI matrix");
 
+    let genotype_proj = Command::new(&bin)
+        .args([
+            "genotype",
+            "cos",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "--proj",
+            proj_path.to_str().unwrap(),
+            "-r",
+            "sampleA#0#chr1:0-2100",
+            "--top-n",
+            "1",
+            "--candidate-top-k",
+            "10",
+            "--min-span-fraction",
+            "0.7",
+        ])
+        .output()
+        .expect("failed to run impg genotype cos --proj");
+    assert!(
+        genotype_proj.status.success(),
+        "impg genotype cos --proj failed: {}",
+        String::from_utf8_lossy(&genotype_proj.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&genotype_proj.stdout).contains("#impg genotype cos"),
+        "genotype --proj should emit cos output"
+    );
+
     let idx_prefix_str = idx_prefix.to_str().unwrap();
-    let packbin_str = packbin_path.to_str().unwrap();
+    let packbin_str = compact_pack_path.to_str().unwrap();
     let target_range = "sampleA#0#chr1:0-2100";
     let run_gt = |extra: &[&str]| {
         let mut args = vec![
@@ -1722,7 +1793,7 @@ fn test_syng_infer_pack_partitions_and_discovery() {
         write_tiled_fastq(&mut f, "hapB", &hap_b, 250, 25).unwrap();
     }
 
-    let packbin_path = dir.join("sample.packbin");
+    let proj_path = dir.join("sample.proj");
     let map = Command::new(&bin)
         .args([
             "map",
@@ -1731,9 +1802,9 @@ fn test_syng_infer_pack_partitions_and_discovery() {
             "-q",
             reads_path.to_str().unwrap(),
             "-o",
-            "packbin",
+            "proj",
             "-O",
-            packbin_path.to_str().unwrap(),
+            proj_path.to_str().unwrap(),
             "--pack-compression-level",
             "3",
             "--pack-block-size",
@@ -1742,10 +1813,10 @@ fn test_syng_infer_pack_partitions_and_discovery() {
             "2",
         ])
         .output()
-        .expect("failed to run impg map -o packbin");
+        .expect("failed to run impg map -o proj");
     assert!(
         map.status.success(),
-        "impg map -o packbin failed: {}",
+        "impg map -o proj failed: {}",
         String::from_utf8_lossy(&map.stderr)
     );
 
@@ -1755,8 +1826,8 @@ fn test_syng_infer_pack_partitions_and_discovery() {
             "infer",
             "-a",
             idx_prefix.to_str().unwrap(),
-            "-p",
-            packbin_path.to_str().unwrap(),
+            "--proj",
+            proj_path.to_str().unwrap(),
             "-r",
             &target_range,
             "--top-n",
@@ -1814,8 +1885,8 @@ fn test_syng_infer_pack_partitions_and_discovery() {
             "infer",
             "-a",
             idx_prefix.to_str().unwrap(),
-            "-p",
-            packbin_path.to_str().unwrap(),
+            "--proj",
+            proj_path.to_str().unwrap(),
             "--target-bed",
             target_bed.to_str().unwrap(),
             "--top-n",
@@ -1866,8 +1937,8 @@ fn test_syng_infer_pack_partitions_and_discovery() {
             "infer",
             "-a",
             idx_prefix.to_str().unwrap(),
-            "-p",
-            packbin_path.to_str().unwrap(),
+            "--proj",
+            proj_path.to_str().unwrap(),
             "--partitions",
             partitions_path.to_str().unwrap(),
             "--top-n",
@@ -1876,6 +1947,16 @@ fn test_syng_infer_pack_partitions_and_discovery() {
             "10",
             "--min-span-fraction",
             "0.7",
+            "--stitch",
+            "beam",
+            "--emit-mosaic",
+            dir.join("mosaic.tsv").to_str().unwrap(),
+            "--emit-fasta",
+            dir.join("mosaic.fa").to_str().unwrap(),
+            "--emit-gfa",
+            dir.join("mosaic.gfa").to_str().unwrap(),
+            "--sequence-files",
+            fasta_path.to_str().unwrap(),
         ])
         .output()
         .expect("failed to run impg infer --partitions");
@@ -1904,14 +1985,24 @@ fn test_syng_infer_pack_partitions_and_discovery() {
         "{}",
         partition_stdout
     );
+    let mosaic_tsv = std::fs::read_to_string(dir.join("mosaic.tsv")).unwrap();
+    assert!(mosaic_tsv.contains("#impg infer mosaic"), "{}", mosaic_tsv);
+    assert!(mosaic_tsv.contains("sampleA#0#chr1"), "{}", mosaic_tsv);
+    let mosaic_fa = std::fs::read_to_string(dir.join("mosaic.fa")).unwrap();
+    assert!(mosaic_fa.contains(">impg_phase_0"), "{}", mosaic_fa);
+    assert!(mosaic_fa.contains(">impg_phase_1"), "{}", mosaic_fa);
+    let mosaic_gfa = std::fs::read_to_string(dir.join("mosaic.gfa")).unwrap();
+    assert!(mosaic_gfa.starts_with("H\tVN:Z:1.0"), "{}", mosaic_gfa);
+    assert!(mosaic_gfa.contains("\nS\tphase0_"), "{}", mosaic_gfa);
+    assert!(mosaic_gfa.contains("\nP\timpg_phase_0"), "{}", mosaic_gfa);
 
     let no_d = Command::new(&bin)
         .args([
             "infer",
             "-a",
             idx_prefix.to_str().unwrap(),
-            "-p",
-            packbin_path.to_str().unwrap(),
+            "--proj",
+            proj_path.to_str().unwrap(),
         ])
         .output()
         .expect("failed to run impg infer without target inputs");
@@ -1930,8 +2021,8 @@ fn test_syng_infer_pack_partitions_and_discovery() {
             "infer",
             "-a",
             idx_prefix.to_str().unwrap(),
-            "-p",
-            packbin_path.to_str().unwrap(),
+            "--proj",
+            proj_path.to_str().unwrap(),
             "-w",
             "1500",
             "-d",

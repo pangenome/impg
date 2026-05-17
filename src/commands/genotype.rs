@@ -73,6 +73,7 @@ pub struct SyngCosigtQuery<'a> {
     pub min_span_fraction: f64,
 }
 
+#[derive(Debug)]
 pub struct SyngCosigtOutput {
     pub region_name: String,
     pub candidate_mode: CandidateMode,

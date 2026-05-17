@@ -286,7 +286,7 @@ impg stats -a f1.paf f2.1aln
 
 Parameters follow the syng paper: `--smer-length` (`s`, default 8) and `--syncmer-length` (`k`, must be odd, default 63). Position sidecars use a regular per-path syncmer-step grid plus the terminal syncmer: `--position-sample-rate 256` samples steps `0, 256, 512, ...` and the final step on each path. `--parallel-dictionary` adds a deterministic prepass for large inputs.
 
-`impg map` projects FASTA/FASTQ queries onto a syng index via shared syncmers. The default output is GAF (syncmer-node walk); pass `-o paf` for projected genome coordinates, `-o pack` for a TSV node coverage vector, or `-o packbin` for a compact binary node coverage vector. Text map output written with `-O` is compressed automatically when the filename ends in `.zst` or `.zstd`; `packbin` uses internal block zstd compression for random access by node ID.
+`impg map` projects FASTA/FASTQ queries onto a syng index via shared syncmers. The default output is GAF (per-read syncmer-node walks); pass `-o paf` for projected genome coordinates, `-o pack` for a compact binary node support vector, `-o pack-tsv` for a human-readable TSV support vector, or `-o proj` for a sample projection bundle containing both `sample.pack` and `reads.gaf.zst`. Text map output written with `-O` is compressed automatically when the filename ends in `.zst` or `.zstd`; `pack` uses internal block zstd compression for random access by node ID. `packbin` remains accepted as a compatibility alias for compact pack output.
 
 Use `impg syng-repair -a <prefix> --position-sample-rate <N> --force` to rebuild or resample `.syng.spos` and `.syng.pstep` from an existing `.1gbwt` / `.1khash` syng index without re-reading the original sequences.
 
@@ -320,29 +320,43 @@ impg query -a c4.syng -r "grch38#chr6:31972046-32055647:0-${LEN}" \
 samtools faidx chr6.C4.fa 'grch38#chr6:31972046-32055647:5000-7000' > probe.fa
 impg map -a c4.syng -q probe.fa | cut -f1-6 | head -1
 # grch38...:5000-7000  2001  16  1979  +  <264>265>266<267<268>...
-impg map -a c4.syng -q probe.fa -o pack | head
+impg map -a c4.syng -q probe.fa -o pack-tsv | head
 # #node_id  count
 # 264      1
 # 265      1
-impg map -a c4.syng -q probe.fa -o pack -O probe.pack.tsv.zst
-impg map -a c4.syng -q probe.fa -o packbin -O probe.packbin \
+impg map -a c4.syng -q probe.fa -o pack-tsv -O probe.pack.tsv.zst
+impg map -a c4.syng -q probe.fa -o pack -O probe.pack \
          --pack-compression-level 12
+impg map -a c4.syng -q probe.fa -o proj -O probe.proj
 impg map -a c4.syng -q probe.fa -o paf
 # grch38...:5000-7000  2001  1302  1833  +  HG02109#1#...  77232  6300  6831  126 531 0 an:i:2 sk:i:63
 ```
 
-`packbin` stores a dense u8 count vector over syng node IDs, zstd-compressed
+`pack` stores a dense u8 count vector over syng node IDs, zstd-compressed
 in independently addressable blocks, plus a small overflow table for node
 counts above 255. `--pack-compression-level` defaults to 12; level 19 is a
 compact cohort/archive setting that is slower to write but just as fast to
 read in practice.
+
+A `proj` directory is the richer sample projection object:
+
+```text
+sample.proj/
+  manifest.json
+  sample.pack
+  reads.gaf.zst
+```
+
+Use `pack` when aggregate graph support is enough or when storing many
+samples. Use `proj` when inference should also have read-walk linkage evidence
+available.
 
 `impg genotype` (`impg gt`) is the namespace for graph-based genotyping
 methods. The first listed method is `cos`: cosine genotyping over graph-feature
 coverage, following the COSIGT/LikeGT scoring model:
 
 ```bash
-impg genotype cos -a c4.syng -p sample.packbin \
+impg genotype cos -a c4.syng -p sample.pack \
   -r 'grch38#chr6:31972046-32055647:0-10000' \
   --ploidy 2 --top-n 20
 ```
@@ -350,7 +364,7 @@ impg genotype cos -a c4.syng -p sample.packbin \
 `cosigt` is accepted as an alias for `cos` to make the paper/tool lineage
 clear. `cos` extracts haplotype candidates from the requested reference path
 range, builds traversal-count vectors over the candidate syncmer nodes, and ranks
-ploidy-sized haplotype combinations against the sample `pack`/`packbin`
+ploidy-sized haplotype combinations against the sample `pack`
 coverage vector by cosine similarity. The default candidate mode is
 `spanning`: candidates must have shared anchors spanning the requested
 reference interval. Use `--candidate-mode overlapping` to score each gathered
@@ -361,16 +375,18 @@ graph-feature evidence model this is built around.
 emits allele calls over genomic intervals:
 
 ```bash
-impg infer -a hprc.syng -p sample.packbin \
+impg infer -a hprc.syng --proj sample.proj \
   --partitions partitions.bed --top-n 1 -O sample.infer.tsv.zst
 ```
 
 Inputs choose the operation mode: `-r/--target-range` types one range,
 `--target-bed` types a BED-like range list, `--partitions` consumes ready
 `impg partition` BED output, and omitting all three runs internal syng partition
-discovery, which requires `-d/--merge-distance`. The first evidence backend is
-native `pack`/`packbin` from `impg map`; the design intentionally keeps BWA/local
-realignment evidence as future pack-producing backends. See
+discovery, which requires `-d/--merge-distance`. `infer` can consume `--pack`
+for aggregate graph support or `--proj` for a bundle that also carries read
+walks. Add `--stitch beam --emit-mosaic out.tsv --emit-fasta haps.fa
+--emit-gfa diplotype.gfa --sequence-files panel.fa-or.agc` to stitch local
+calls into phased mosaic paths and materialize sequence. See
 `docs/infer-design.md`.
 
 `-r` splits on the **last** `:`. Path names from `odgi paths -f`

@@ -25,7 +25,8 @@ reads / alignments
 For modern WGS, the first-class evidence path is native:
 
 ```text
-FASTQ + impg map -a panel.syng -o packbin -> sample.packbin
+FASTQ + impg map -a panel.syng -o pack -> sample.pack
+FASTQ + impg map -a panel.syng -o proj -> sample.proj/
 ```
 
 For ancient DNA or very short degraded reads, the intended path is:
@@ -54,8 +55,8 @@ mode if we add one later). This is the same biological knob as in
 `query`/`partition`: it defines the maximum internal gap/SV that one query hop
 can absorb into one typed range.
 
-The initial implementation supports pack-based evidence. BWA/local-realignment
-is a backend, not a separate genotyping model.
+The initial implementation supports pack-based evidence and projection bundles.
+BWA/local-realignment is a backend, not a separate genotyping model.
 
 ## Partitions
 
@@ -65,13 +66,13 @@ The first implementation reuses `impg partition` semantics:
 
 ```bash
 impg partition -a panel.syng -w 1000000 -d 10000 -o bed --output-folder parts
-impg infer -a panel.syng -p sample.packbin --partitions parts/partitions.bed
+impg infer -a panel.syng --proj sample.proj --partitions parts/partitions.bed
 ```
 
 `infer` may also run the partition step internally:
 
 ```bash
-impg infer -a panel.syng -p sample.packbin --window-size 1000000 -d 10000
+impg infer -a panel.syng -p sample.pack --window-size 1000000 -d 10000
 ```
 
 Internal partition discovery writes temporary partitions, parses them back, then
@@ -108,6 +109,23 @@ weighting / normalization
 The important invariant is compatibility: candidate allele vectors and sample
 evidence vectors must live in the same feature space.
 
+## Projections
+
+A projection is the native sample evidence object produced by `impg map -o
+proj`. The first directory-backed format contains:
+
+```text
+sample.proj/
+  manifest.json
+  sample.pack
+  reads.gaf.zst
+```
+
+`sample.pack` is the aggregate support vector. `reads.gaf.zst` is the per-read
+syncmer walk layer that can later supply linkage/phase evidence. Commands should
+prefer `--proj` when both layers are available, while still accepting `--pack`
+for large cohort-scale aggregate workflows.
+
 ## Scoring
 
 The first scoring method is `cos`, the same cosine scorer used by
@@ -127,7 +145,8 @@ likelihoods, learned scoring functions, or GBWT/panel-based imputers.
 
 ## Genome-Wide Inference
 
-The first implementation emits independent local calls per range/partition.
+The first implementation emits independent local calls per range/partition and
+can optionally stitch retained local states into a phased mosaic.
 
 The next layer should stitch those local calls into a haplotype mosaic:
 
@@ -140,6 +159,13 @@ best genome = argmax sum_j emission_j + transition_j
 
 This can start as beam search over the top local genotype states, then move to
 more principled HMM/Viterbi inference.
+
+Current stitching is the conservative first layer: retained local calls are
+expanded into ordered ploidy states, same-path continuation is cheap, and
+haplotype switches pay a configurable `--switch-penalty`. This is a panel
+copying prior over local calls, not yet a full read-link imputer. Projection GAF
+walks are carried through the interface so read-link transition evidence can be
+added without changing the user workflow.
 
 ## Output
 
@@ -156,6 +182,19 @@ The first output is a TSV of allele calls over ranges:
 Each row is a local genotype state. Adjacent rows with compatible inferred
 haplotypes can later be merged into longer genome segments.
 
+With `--stitch beam`, side outputs can be requested:
+
+```bash
+impg infer -a panel.syng --proj sample.proj --partitions parts/partitions.bed \
+  --stitch beam --emit-mosaic sample.mosaic.tsv \
+  --sequence-files panel.agc \
+  --emit-fasta sample.haps.fa --emit-gfa sample.diplotype.gfa
+```
+
+The FASTA writer concatenates phase tracks and inserts `N`s at uncertain joins
+unless `--strict-stitch` is set. The GFA writer emits one segment per selected
+haplotype interval and path lines for the inferred phases.
+
 ## Testing Strategy
 
 Tests should cover:
@@ -164,7 +203,7 @@ Tests should cover:
 - BED/range list input
 - ready partition BED input
 - internal partition discovery requiring `-d`
-- pack, compressed pack, and packbin evidence
+- pack, pack-tsv, compressed pack-tsv, compatibility packbin, and projection evidence
 - short-read simulation against a panel with a decoy haplotype
 - invalid CLI combinations
 - output compression and deterministic row shape
