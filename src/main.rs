@@ -2518,8 +2518,9 @@ impl RefineOpts {
 
 #[derive(Subcommand, Debug)]
 enum GenotypeCommand {
-    /// Genotype a syng locus by COSIGT cosine similarity over pack coverage
-    Cosigt {
+    /// Genotype a locus by cosine similarity over graph-feature coverage
+    #[command(alias = "cosigt")]
+    Cos {
         /// Syng index prefix or .1khash/.1gbwt/.spos/.pstep/.names/.meta path
         #[clap(short = 'a', long, value_parser)]
         index: String,
@@ -4862,7 +4863,7 @@ fn run() -> io::Result<()> {
             )?;
         }
         Args::Genotype { command } => match command {
-            GenotypeCommand::Cosigt {
+            GenotypeCommand::Cos {
                 index,
                 pack,
                 target_range,

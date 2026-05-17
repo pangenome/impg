@@ -489,8 +489,11 @@ pub fn run_syng_cosigt<W: Write>(out: &mut W, config: &SyngCosigtConfig<'_>) -> 
         config.max_combinations,
     )?;
 
-    writeln!(out, "#impg genotype cosigt")?;
+    writeln!(out, "#impg genotype cos")?;
     writeln!(out, "#region\t{}", region_name)?;
+    writeln!(out, "#method\tcos")?;
+    writeln!(out, "#metric\tcosine")?;
+    writeln!(out, "#alias\tcosigt")?;
     writeln!(out, "#feature_space\tsyng-syncmer-node")?;
     writeln!(out, "#candidate_mode\t{:?}", config.candidate_mode)?;
     writeln!(out, "#ploidy\t{}", config.ploidy)?;
@@ -533,7 +536,7 @@ pub fn run_syng_cosigt<W: Write>(out: &mut W, config: &SyngCosigtConfig<'_>) -> 
             .collect();
         writeln!(
             out,
-            "{}\tcosigt\t{}\t{:.9}\t{:.3}\t{:.3}\t{:.6}\t{:.6}\t{}\t{}\t{}\t{}",
+            "{}\tcos\t{}\t{:.9}\t{:.3}\t{:.3}\t{:.6}\t{:.6}\t{}\t{}\t{}\t{}",
             rank + 1,
             config.ploidy,
             result.similarity,

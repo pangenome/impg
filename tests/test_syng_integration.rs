@@ -967,14 +967,14 @@ fn test_syng_map_cli_gaf_and_paf() {
 }
 
 #[test]
-fn test_syng_genotype_cosigt_packbin_heterozygote() {
+fn test_syng_genotype_cos_packbin_heterozygote() {
     let _guard = lock_syng();
     let Some(bin) = impg_binary() else {
         eprintln!("Skipping: impg binary not built");
         return;
     };
 
-    let dir = std::env::temp_dir().join("impg_test_syng_genotype_cosigt");
+    let dir = std::env::temp_dir().join("impg_test_syng_genotype_cos");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -1068,7 +1068,7 @@ fn test_syng_genotype_cosigt_packbin_heterozygote() {
     let gt = Command::new(&bin)
         .args([
             "genotype",
-            "cosigt",
+            "cos",
             "-a",
             idx_prefix.to_str().unwrap(),
             "-p",
@@ -1085,10 +1085,10 @@ fn test_syng_genotype_cosigt_packbin_heterozygote() {
             "0.7",
         ])
         .output()
-        .expect("failed to run impg genotype cosigt");
+        .expect("failed to run impg genotype cos");
     assert!(
         gt.status.success(),
-        "impg genotype cosigt failed: {}",
+        "impg genotype cos failed: {}",
         String::from_utf8_lossy(&gt.stderr)
     );
     let gt_stdout = String::from_utf8_lossy(&gt.stdout);
@@ -1103,7 +1103,7 @@ fn test_syng_genotype_cosigt_packbin_heterozygote() {
         top
     );
     assert_eq!(fields[0], "1");
-    assert_eq!(fields[1], "cosigt");
+    assert_eq!(fields[1], "cos");
     assert_eq!(fields[2], "2");
     let similarity = fields[3].parse::<f64>().unwrap();
     assert!(

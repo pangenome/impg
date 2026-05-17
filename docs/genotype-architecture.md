@@ -11,7 +11,9 @@ The shared model is:
 4. Represent the sample as a coverage/support vector over the same feature IDs.
 5. Score ploidy-sized candidate combinations.
 
-For `impg genotype cosigt`, the scoring step is COSIGT-style cosine similarity:
+For `impg genotype cos`, the scoring step is COSIGT/LikeGT-style cosine
+similarity over graph-feature coverage. `cosigt` is accepted as an alias for
+`cos` to make that lineage explicit:
 
 ```text
 sample vector S
