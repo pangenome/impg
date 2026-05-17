@@ -1121,6 +1121,34 @@ fn test_syng_genotype_cos_cli_permutations() {
         String::from_utf8_lossy(&map_pack.stderr)
     );
 
+    let pack_zst_path = dir.join("sample.pack.tsv.zst");
+    let map_pack_zst = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            reads_path.to_str().unwrap(),
+            "-o",
+            "pack",
+            "-O",
+            pack_zst_path.to_str().unwrap(),
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o pack -O sample.pack.tsv.zst");
+    assert!(
+        map_pack_zst.status.success(),
+        "impg map -o pack -O sample.pack.tsv.zst failed: {}",
+        String::from_utf8_lossy(&map_pack_zst.stderr)
+    );
+    let compressed_pack = std::fs::read(&pack_zst_path).unwrap();
+    assert!(
+        compressed_pack.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]),
+        "compressed pack should have zstd magic bytes"
+    );
+
     let genotype_help = Command::new(&bin)
         .args(["genotype", "--help"])
         .output()
@@ -1159,8 +1187,9 @@ fn test_syng_genotype_cos_cli_permutations() {
     let methods = ["cos", "cosigt"];
     let candidate_modes = ["spanning", "overlapping"];
     let packs = [
-        ("pack", pack_path.as_path()),
-        ("packbin", packbin_path.as_path()),
+        ("pack", "pack", pack_path.as_path()),
+        ("pack.zst", "pack", pack_zst_path.as_path()),
+        ("packbin", "packbin", packbin_path.as_path()),
     ];
     let mut expected_by_pack_mode: std::collections::BTreeMap<(String, String), String> =
         std::collections::BTreeMap::new();
@@ -1168,7 +1197,7 @@ fn test_syng_genotype_cos_cli_permutations() {
 
     for root in command_roots {
         for method in methods {
-            for (pack_label, pack_path) in packs {
+            for (pack_label, compare_label, pack_path) in packs {
                 for candidate_mode in candidate_modes {
                     checked += 1;
                     let output = Command::new(&bin)
@@ -1257,7 +1286,7 @@ fn test_syng_genotype_cos_cli_permutations() {
                         );
                     }
 
-                    let key = (pack_label.to_string(), candidate_mode.to_string());
+                    let key = (compare_label.to_string(), candidate_mode.to_string());
                     if let Some(expected) = expected_by_pack_mode.get(&key) {
                         assert_eq!(
                             &stdout, expected,
@@ -1271,7 +1300,183 @@ fn test_syng_genotype_cos_cli_permutations() {
             }
         }
     }
-    assert_eq!(checked, 16, "expected to exercise the full genotype CLI matrix");
+    assert_eq!(checked, 24, "expected to exercise the full genotype CLI matrix");
+
+    let idx_prefix_str = idx_prefix.to_str().unwrap();
+    let packbin_str = packbin_path.to_str().unwrap();
+    let target_range = "sampleA#0#chr1:0-2100";
+    let run_gt = |extra: &[&str]| {
+        let mut args = vec![
+            "genotype",
+            "cos",
+            "-a",
+            idx_prefix_str,
+            "-p",
+            packbin_str,
+            "-r",
+            target_range,
+        ];
+        args.extend_from_slice(extra);
+        Command::new(&bin)
+            .args(args)
+            .output()
+            .expect("failed to run impg genotype cos")
+    };
+
+    let custom = run_gt(&[
+        "--ploidy",
+        "1",
+        "--top-n",
+        "1",
+        "--candidate-top-k",
+        "0",
+        "--syng-padding",
+        "12",
+        "--syng-extension",
+        "12",
+        "--min-anchors",
+        "1",
+        "--min-span-fraction",
+        "0.5",
+    ]);
+    assert!(
+        custom.status.success(),
+        "non-default genotype options failed: {}",
+        String::from_utf8_lossy(&custom.stderr)
+    );
+    let custom_stdout = String::from_utf8_lossy(&custom.stdout);
+    assert!(custom_stdout.contains("#ploidy\t1"), "{}", custom_stdout);
+    let custom_rows: Vec<&str> = custom_stdout
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .collect();
+    assert_eq!(custom_rows.len(), 1, "top-n 1 should emit one row");
+    assert_eq!(custom_rows[0].split('\t').nth(2), Some("1"));
+
+    let ploidy3 = run_gt(&[
+        "--ploidy",
+        "3",
+        "--top-n",
+        "2",
+        "--candidate-top-k",
+        "0",
+        "--min-span-fraction",
+        "0.7",
+    ]);
+    assert!(
+        ploidy3.status.success(),
+        "ploidy 3 genotype options failed: {}",
+        String::from_utf8_lossy(&ploidy3.stderr)
+    );
+    let ploidy3_stdout = String::from_utf8_lossy(&ploidy3.stdout);
+    assert!(ploidy3_stdout.contains("#ploidy\t3"), "{}", ploidy3_stdout);
+    let ploidy3_rows: Vec<&str> = ploidy3_stdout
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .collect();
+    assert_eq!(ploidy3_rows.len(), 2, "top-n 2 should emit two rows");
+    assert!(ploidy3_rows
+        .iter()
+        .all(|row| row.split('\t').nth(2) == Some("3")));
+
+    let stdout_for_output = run_gt(&["--top-n", "2", "--candidate-top-k", "10"]);
+    assert!(
+        stdout_for_output.status.success(),
+        "stdout genotype baseline failed: {}",
+        String::from_utf8_lossy(&stdout_for_output.stderr)
+    );
+    let output_zst_path = dir.join("genotype.tsv.zst");
+    let output_to_file = Command::new(&bin)
+        .args([
+            "genotype",
+            "cos",
+            "-a",
+            idx_prefix_str,
+            "-p",
+            packbin_str,
+            "-r",
+            target_range,
+            "--top-n",
+            "2",
+            "--candidate-top-k",
+            "10",
+            "-O",
+            output_zst_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run impg genotype cos -O genotype.tsv.zst");
+    assert!(
+        output_to_file.status.success(),
+        "compressed genotype output failed: {}",
+        String::from_utf8_lossy(&output_to_file.stderr)
+    );
+    assert!(
+        output_to_file.stdout.is_empty(),
+        "genotype -O should not write result rows to stdout"
+    );
+    let compressed_output = std::fs::read(&output_zst_path).unwrap();
+    assert!(
+        compressed_output.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]),
+        "genotype .zst output should have zstd magic bytes"
+    );
+    let mut decoder =
+        zstd::stream::read::Decoder::new(std::fs::File::open(&output_zst_path).unwrap()).unwrap();
+    let mut decoded_output = String::new();
+    {
+        use std::io::Read;
+        decoder.read_to_string(&mut decoded_output).unwrap();
+    }
+    assert_eq!(
+        decoded_output,
+        String::from_utf8_lossy(&stdout_for_output.stdout),
+        "compressed genotype output should match stdout output"
+    );
+
+    for (label, extra, expected) in [
+        (
+            "ploidy zero",
+            &["--ploidy", "0"][..],
+            "--ploidy must be greater than 0",
+        ),
+        (
+            "top-n zero",
+            &["--top-n", "0"][..],
+            "--top-n must be greater than 0",
+        ),
+        (
+            "bad min-span-fraction",
+            &["--min-span-fraction", "1.1"][..],
+            "--min-span-fraction must be between 0 and 1",
+        ),
+        (
+            "search budget",
+            &[
+                "--candidate-top-k",
+                "10",
+                "--max-combinations",
+                "1",
+                "--min-span-fraction",
+                "0.7",
+            ][..],
+            "genotype combination search exceeded --max-combinations",
+        ),
+    ] {
+        let failed = run_gt(extra);
+        assert!(
+            !failed.status.success(),
+            "{} should fail but succeeded with stdout:\n{}",
+            label,
+            String::from_utf8_lossy(&failed.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&failed.stderr);
+        assert!(
+            stderr.contains(expected),
+            "{} should report '{}', got:\n{}",
+            label,
+            expected,
+            stderr
+        );
+    }
 
     std::fs::remove_dir_all(&dir).ok();
 }
