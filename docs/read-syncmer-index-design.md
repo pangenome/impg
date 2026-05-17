@@ -185,7 +185,7 @@ The `.r2s` / future `.s2r` read-syncmer postings are working indexes for
 read retrieval and subgraph-to-read support queries. They are not the
 primary long-term cohort archive for per-sample coverage. For storage at
 tens of thousands of samples, the compact archive target is the
-node-coverage vector (`impg map -o packbin`): exact per-node counts,
+node-coverage vector (`impg map -o pack`): exact per-node counts,
 internally block-compressed with zstd, random-accessible by syncmer node
 ID, and cheap to regenerate from reads when a read-level support index is
 needed.

@@ -25,7 +25,8 @@ score = cosine(S, G)
 The current backend is syng:
 
 - graph features are syng syncmer node IDs
-- sample evidence comes from `impg map -o pack` or `impg map -o packbin`
+- sample evidence comes from `impg map -o pack` or a projection bundle from
+  `impg map -o proj`
 - candidates are path intervals gathered by querying a reference path range
 - candidate vectors are syncmer-node traversal counts through those intervals
 
@@ -37,7 +38,8 @@ methods should be able to feed the same `pack` abstraction:
 - read alignment to extracted haplotypes for short or damaged ancient DNA
 - condensed graph or bubble-level features
 
-`packbin` is the binary coverage-vector format used by the current syng path,
-but the abstraction is feature coverage. Future versions should carry graph
-identity metadata so packs cannot be accidentally combined with the wrong graph
-or feature namespace.
+`pack` is the compact binary coverage-vector format used by the current syng
+path. `pack-tsv` is the human-readable export of the same abstraction, and
+`packbin` remains a compatibility alias for compact pack output. Projection
+bundles add metadata and read-walk evidence around the pack so packs cannot be
+accidentally combined with the wrong graph or feature namespace.

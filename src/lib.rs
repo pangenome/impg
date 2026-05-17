@@ -16,6 +16,7 @@ pub mod multi_impg;
 pub mod onealn;
 pub mod pack;
 pub mod paf;
+pub mod projection;
 pub mod seqidx;
 pub mod sequence_index;
 pub mod smooth;

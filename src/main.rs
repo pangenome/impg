@@ -24,7 +24,7 @@ use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::num::NonZeroUsize;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicU64, AtomicUsize, Ordering},
     Arc,
@@ -1279,6 +1279,59 @@ fn emit_syng_map_pack_binary<W: Write + Send>(
     Ok(())
 }
 
+fn emit_syng_map_projection(
+    output_dir: &str,
+    syng_prefix: &str,
+    syng_matcher: &impg::syng::SyngMatcher,
+    query_path: &str,
+    min_anchors: usize,
+    compression_level: i32,
+    block_size: usize,
+) -> io::Result<()> {
+    let root = PathBuf::from(output_dir);
+    std::fs::create_dir_all(&root)?;
+    let pack_name = "sample.pack";
+    let gaf_name = "reads.gaf.zst";
+    let pack_path = root.join(pack_name);
+    let gaf_path = root.join(gaf_name);
+
+    info!(
+        "Writing sample projection to {} (pack + GAF walks)",
+        root.display()
+    );
+    {
+        let mut pack_out = create_plain_map_output_writer(
+            pack_path
+                .to_str()
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "projection pack path is not UTF-8")
+                })?,
+        )?;
+        emit_syng_map_pack_binary(
+            &mut pack_out,
+            syng_matcher,
+            query_path,
+            min_anchors,
+            compression_level,
+            block_size,
+        )?;
+        pack_out.flush()?;
+    }
+    {
+        let mut gaf_out = create_map_output_writer(
+            gaf_path
+                .to_str()
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "projection GAF path is not UTF-8")
+                })?,
+        )?;
+        emit_syng_map_gaf(&mut gaf_out, syng_matcher, query_path, min_anchors)?;
+        gaf_out.flush()?;
+    }
+    impg::projection::write_manifest(&root, syng_prefix, pack_name, Some(gaf_name))?;
+    Ok(())
+}
+
 const READ_SYNCMER_INDEX_VERSION: u32 = 1;
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -2525,9 +2578,13 @@ enum GenotypeCommand {
         #[clap(short = 'a', long, value_parser)]
         index: String,
 
-        /// Sample coverage produced by `impg map -o pack` or `impg map -o packbin`
+        /// Sample support vector produced by `impg map -o pack`
         #[clap(short = 'p', long, value_parser)]
-        pack: String,
+        pack: Option<String>,
+
+        /// Sample projection bundle produced by `impg map -o proj`
+        #[clap(long, value_parser, conflicts_with = "pack")]
+        proj: Option<String>,
 
         /// Reference path range to genotype, in the format `seq_name:start-end`
         #[clap(short = 'r', long, value_parser)]
@@ -3071,9 +3128,17 @@ enum Args {
         #[clap(short = 'a', long, value_parser)]
         index: String,
 
-        /// Sample evidence produced by `impg map -o pack` or `impg map -o packbin`
+        /// Sample support vector produced by `impg map -o pack`
         #[clap(short = 'p', long, value_parser)]
-        pack: String,
+        pack: Option<String>,
+
+        /// Sample projection bundle produced by `impg map -o proj`
+        #[clap(long, value_parser, conflicts_with = "pack")]
+        proj: Option<String>,
+
+        /// Per-read GAF syncmer walks produced by `impg map -o gaf`
+        #[clap(long, value_parser)]
+        gaf: Option<String>,
 
         /// Type exactly one target range, in the format `seq_name:start-end`
         #[clap(short = 'r', long, value_parser, conflicts_with_all = ["target_bed", "partitions"])]
@@ -3171,6 +3236,41 @@ enum Args {
         #[clap(short = 'O', long, value_parser)]
         output: Option<String>,
 
+        /// Stitch local calls into phased mosaic paths
+        #[clap(long, value_enum, default_value_t = infer::StitchMode::None)]
+        stitch: infer::StitchMode,
+
+        /// Number of partial mosaics retained during beam stitching
+        #[clap(long, value_parser, default_value_t = 200)]
+        stitch_beam: usize,
+
+        /// Cost of switching panel haplotypes in the stitched mosaic
+        #[clap(long, value_parser, default_value_t = 20.0)]
+        switch_penalty: f64,
+
+        /// Maximum same-path adjacency gap before marking a stitch uncertain
+        #[clap(long, value_parser, default_value_t = 1000)]
+        stitch_gap: u64,
+
+        /// Reject uncertain FASTA/GFA sequence joins instead of labeling or padding them
+        #[clap(long, action)]
+        strict_stitch: bool,
+
+        /// Write stitched mosaic segments as TSV
+        #[clap(long, value_parser)]
+        emit_mosaic: Option<String>,
+
+        /// Write inferred haplotype sequences as FASTA; requires --sequence-files or --sequence-list
+        #[clap(long, value_parser)]
+        emit_fasta: Option<String>,
+
+        /// Write inferred haplotype paths as GFA; requires --sequence-files or --sequence-list
+        #[clap(long, value_parser)]
+        emit_gfa: Option<String>,
+
+        #[clap(flatten)]
+        sequence: SequenceOpts,
+
         #[clap(flatten)]
         common: CommonOpts,
     },
@@ -3263,7 +3363,7 @@ enum Args {
         #[clap(short = 'q', long, value_parser)]
         query: String,
 
-        /// Output format: gaf (syncmer-node support), paf (projected genome coordinates), pack (TSV node coverage), or packbin (binary node coverage)
+        /// Output format: gaf (read syncmer walks), paf (projected coordinates), pack (compact support vector), pack-tsv (text support vector), or proj (projection bundle)
         #[clap(short = 'o', long, value_parser, default_value = "gaf")]
         output_format: String,
 
@@ -4976,6 +5076,7 @@ fn run() -> io::Result<()> {
             GenotypeCommand::Cos {
                 index,
                 pack,
+                proj,
                 target_range,
                 candidate_mode,
                 ploidy,
@@ -4991,9 +5092,32 @@ fn run() -> io::Result<()> {
             } => {
                 initialize_threads_and_log(&common);
                 let syng_prefix = detect_syng_prefix(&index).unwrap_or(index);
+                let projection = if let Some(path) = proj.as_deref() {
+                    Some(impg::projection::load(path)?)
+                } else {
+                    None
+                };
+                if let Some(projection) = &projection {
+                    if projection.syng_prefix != syng_prefix {
+                        warn!(
+                            "Projection was built against syng prefix '{}', current index is '{}'",
+                            projection.syng_prefix, syng_prefix
+                        );
+                    }
+                }
+                let pack_path = if let Some(pack) = pack.as_deref() {
+                    pack.to_string()
+                } else if let Some(projection) = &projection {
+                    projection.pack_path.to_string_lossy().to_string()
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "impg genotype cos requires --pack or --proj",
+                    ));
+                };
                 let config = genotype::SyngCosigtConfig {
                     syng_prefix: &syng_prefix,
-                    pack_path: &pack,
+                    pack_path: &pack_path,
                     target_range: &target_range,
                     candidate_mode,
                     ploidy,
@@ -5041,6 +5165,8 @@ fn run() -> io::Result<()> {
         Args::Infer {
             index,
             pack,
+            proj,
+            gaf,
             target_range,
             target_bed,
             partitions,
@@ -5065,6 +5191,15 @@ fn run() -> io::Result<()> {
             min_anchors,
             min_span_fraction,
             output,
+            stitch,
+            stitch_beam,
+            switch_penalty,
+            stitch_gap,
+            strict_stitch,
+            emit_mosaic,
+            emit_fasta,
+            emit_gfa,
+            sequence,
             common,
         } => {
             initialize_threads_and_log(&common);
@@ -5122,9 +5257,60 @@ fn run() -> io::Result<()> {
             };
 
             let syng_prefix = detect_syng_prefix(&index).unwrap_or(index);
+            let projection = if let Some(path) = proj.as_deref() {
+                Some(impg::projection::load(path)?)
+            } else {
+                None
+            };
+            if let Some(projection) = &projection {
+                if projection.syng_prefix != syng_prefix {
+                    warn!(
+                        "Projection was built against syng prefix '{}', current index is '{}'",
+                        projection.syng_prefix, syng_prefix
+                    );
+                }
+            }
+            let pack_path = if let Some(pack) = pack.as_deref() {
+                pack.to_string()
+            } else if let Some(projection) = &projection {
+                projection.pack_path.to_string_lossy().to_string()
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "impg infer requires --pack or --proj",
+                ));
+            };
+            let gaf_path = gaf.or_else(|| {
+                projection
+                    .as_ref()
+                    .and_then(|projection| projection.gaf_path.as_ref())
+                    .map(|path| path.to_string_lossy().to_string())
+            });
+            if stitch_beam == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--stitch-beam must be greater than 0",
+                ));
+            }
+            if switch_penalty < 0.0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--switch-penalty must be >= 0",
+                ));
+            }
+            let sequence_index = if emit_fasta.is_some() || emit_gfa.is_some() {
+                Some(sequence.build_sequence_index()?.ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--emit-fasta/--emit-gfa require --sequence-files or --sequence-list",
+                    )
+                })?)
+            } else {
+                None
+            };
             let config = infer::InferConfig {
                 syng_prefix: &syng_prefix,
-                pack_path: &pack,
+                pack_path: &pack_path,
                 targets,
                 discovery,
                 candidate_mode,
@@ -5136,6 +5322,16 @@ fn run() -> io::Result<()> {
                 syng_extension,
                 min_anchors,
                 min_span_fraction,
+                gaf_path: gaf_path.as_deref(),
+                stitch,
+                stitch_beam,
+                switch_penalty,
+                stitch_gap,
+                strict_stitch,
+                emit_mosaic: emit_mosaic.as_deref(),
+                emit_fasta: emit_fasta.as_deref(),
+                emit_gfa: emit_gfa.as_deref(),
+                sequence_index: sequence_index.as_ref(),
             };
 
             #[cfg(unix)]
@@ -5437,18 +5633,25 @@ fn run() -> io::Result<()> {
             initialize_threads_and_log(&common);
 
             let syng_prefix = detect_syng_prefix(&index).unwrap_or(index);
-            if !matches!(output_format.as_str(), "gaf" | "paf" | "pack")
+            if !matches!(output_format.as_str(), "gaf" | "paf" | "proj")
                 && !impg::pack::is_binary_format(&output_format)
+                && !impg::pack::is_tsv_format(&output_format)
             {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
-                        "unsupported map output format '{}'; expected 'gaf', 'paf', 'pack', or 'packbin'",
+                        "unsupported map output format '{}'; expected 'gaf', 'paf', 'pack', 'pack-tsv', or 'proj'",
                         output_format
                     ),
                 ));
             }
-            if impg::pack::is_binary_format(&output_format) {
+            if output_format == "proj" && output.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "impg map -o proj requires -O/--output with a projection directory path",
+                ));
+            }
+            if impg::pack::is_binary_format(&output_format) || output_format == "proj" {
                 if !(1..=22).contains(&pack_compression_level) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -5473,6 +5676,8 @@ fn run() -> io::Result<()> {
             if let Some(path) = output {
                 let mut out = if impg::pack::is_binary_format(&output_format) {
                     create_plain_map_output_writer(&path)?
+                } else if output_format == "proj" {
+                    Box::new(io::sink()) as Box<dyn Write + Send>
                 } else {
                     create_map_output_writer(&path)?
                 };
@@ -5485,7 +5690,7 @@ fn run() -> io::Result<()> {
                         )?;
                         emit_syng_map_gaf(&mut out, &syng_matcher, &query, min_anchors)?;
                     }
-                    "pack" => {
+                    format if impg::pack::is_tsv_format(format) => {
                         info!("Loading syng syncmer dictionary from prefix: {}", syng_prefix);
                         let syng_matcher = impg::syng::SyngMatcher::load(
                             &syng_prefix,
@@ -5501,6 +5706,22 @@ fn run() -> io::Result<()> {
                         )?;
                         emit_syng_map_pack_binary(
                             &mut out,
+                            &syng_matcher,
+                            &query,
+                            min_anchors,
+                            pack_compression_level,
+                            pack_block_size,
+                        )?;
+                    }
+                    "proj" => {
+                        info!("Loading syng syncmer dictionary from prefix: {}", syng_prefix);
+                        let syng_matcher = impg::syng::SyngMatcher::load(
+                            &syng_prefix,
+                            impg::syng::SyncmerParams::default(),
+                        )?;
+                        emit_syng_map_projection(
+                            &path,
+                            &syng_prefix,
                             &syng_matcher,
                             &query,
                             min_anchors,
@@ -5543,7 +5764,7 @@ fn run() -> io::Result<()> {
                         )?;
                         emit_syng_map_gaf(&mut out, &syng_matcher, &query, min_anchors)?;
                     }
-                    "pack" => {
+                    format if impg::pack::is_tsv_format(format) => {
                         info!("Loading syng syncmer dictionary from prefix: {}", syng_prefix);
                         let syng_matcher = impg::syng::SyngMatcher::load(
                             &syng_prefix,

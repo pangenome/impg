@@ -23,7 +23,11 @@ pub struct Coverage {
 }
 
 pub fn is_binary_format(output_format: &str) -> bool {
-    matches!(output_format, "packbin" | "pack-bin" | "bpack")
+    matches!(output_format, "pack" | "packbin" | "pack-bin" | "bpack")
+}
+
+pub fn is_tsv_format(output_format: &str) -> bool {
+    matches!(output_format, "pack-tsv" | "pack-text" | "packtsv")
 }
 
 fn write_u32_le<W: Write>(out: &mut W, value: u32) -> io::Result<()> {
