@@ -666,6 +666,69 @@ fn parse_gaf_path_nodes(path: &str, nodes: &mut Vec<i32>) -> io::Result<()> {
     Ok(())
 }
 
+fn parse_gaf_query_positions(fields: &[&str], anchors: usize) -> io::Result<Option<Vec<u64>>> {
+    for field in fields.iter().skip(12) {
+        if let Some(values) = field.strip_prefix("qp:B:I") {
+            let mut positions = Vec::with_capacity(anchors);
+            let values = values.strip_prefix(',').unwrap_or(values);
+            if !values.is_empty() {
+                for value in values.split(',') {
+                    positions.push(value.parse::<u64>().map_err(|e| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("invalid qp:B:I query position in GAF tag '{field}': {e}"),
+                        )
+                    })?);
+                }
+            }
+            if positions.len() != anchors {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "GAF qp:B:I tag has {} positions but path has {} syncmer nodes",
+                        positions.len(),
+                        anchors
+                    ),
+                ));
+            }
+            return Ok(Some(positions));
+        }
+    }
+    Ok(None)
+}
+
+fn build_read_walk_steps(
+    nodes: &[i32],
+    positions: &[u64],
+    out: &mut Vec<syng::SyngWalkStep>,
+) {
+    out.clear();
+    out.extend(
+        nodes
+            .iter()
+            .zip(positions.iter())
+            .map(|(&signed_node, &bp_pos)| syng::SyngWalkStep {
+                signed_node,
+                bp_pos,
+            }),
+    );
+    out.sort_unstable_by(|a, b| a.bp_pos.cmp(&b.bp_pos).then(a.signed_node.cmp(&b.signed_node)));
+}
+
+fn reverse_read_walk_steps(
+    steps: &[syng::SyngWalkStep],
+    query_len: u64,
+    syncmer_len: u64,
+    out: &mut Vec<syng::SyngWalkStep>,
+) {
+    out.clear();
+    out.extend(steps.iter().rev().map(|step| syng::SyngWalkStep {
+        signed_node: -step.signed_node,
+        bp_pos: query_len.saturating_sub(step.bp_pos.saturating_add(syncmer_len)),
+    }));
+    out.sort_unstable_by(|a, b| a.bp_pos.cmp(&b.bp_pos).then(a.signed_node.cmp(&b.signed_node)));
+}
+
 fn sorted_candidate_hits(
     counts: FxHashMap<CandidateKey, u32>,
     min_read_link_anchors: usize,
@@ -803,7 +866,118 @@ fn add_whole_walk_hits(
     add_whole_walk_orientation_hits(counts, walk_index, reverse_nodes);
 }
 
+fn candidate_mem_overlap_len(
+    read_steps: &[syng::SyngWalkStep],
+    mem_start: usize,
+    mem_end: usize,
+    read_start: usize,
+    candidate_walk: &[syng::SyngWalkStep],
+    candidate_start: usize,
+) -> u32 {
+    if read_start >= mem_end
+        || candidate_start >= candidate_walk.len()
+        || read_steps[read_start].signed_node != candidate_walk[candidate_start].signed_node
+    {
+        return 0;
+    }
+
+    let mut read_left = read_start;
+    let mut candidate_left = candidate_start;
+    while read_left > mem_start && candidate_left > 0 {
+        let prev_read = read_left - 1;
+        let prev_candidate = candidate_left - 1;
+        if read_steps[prev_read].signed_node != candidate_walk[prev_candidate].signed_node {
+            break;
+        }
+        let Some(read_offset) = read_steps[read_left]
+            .bp_pos
+            .checked_sub(read_steps[prev_read].bp_pos)
+        else {
+            break;
+        };
+        let Some(candidate_offset) = candidate_walk[candidate_left]
+            .bp_pos
+            .checked_sub(candidate_walk[prev_candidate].bp_pos)
+        else {
+            break;
+        };
+        if read_offset != candidate_offset {
+            break;
+        }
+        read_left = prev_read;
+        candidate_left = prev_candidate;
+    }
+
+    let mut read_right = read_start;
+    let mut candidate_right = candidate_start;
+    while read_right + 1 < mem_end && candidate_right + 1 < candidate_walk.len() {
+        let next_read = read_right + 1;
+        let next_candidate = candidate_right + 1;
+        if read_steps[next_read].signed_node != candidate_walk[next_candidate].signed_node {
+            break;
+        }
+        let Some(read_offset) = read_steps[next_read]
+            .bp_pos
+            .checked_sub(read_steps[read_right].bp_pos)
+        else {
+            break;
+        };
+        let Some(candidate_offset) = candidate_walk[next_candidate]
+            .bp_pos
+            .checked_sub(candidate_walk[candidate_right].bp_pos)
+        else {
+            break;
+        };
+        if read_offset != candidate_offset {
+            break;
+        }
+        read_right = next_read;
+        candidate_right = next_candidate;
+    }
+
+    (read_right - read_left + 1) as u32
+}
+
+fn add_mem_hits(
+    counts: &mut FxHashMap<CandidateKey, u32>,
+    call_sets: &[LocalCallSet],
+    walk_index: &FxHashMap<i32, Vec<WalkOccurrence>>,
+    read_steps: &[syng::SyngWalkStep],
+    mems: &[syng::SyngGbwtMem],
+) {
+    for mem in mems {
+        let mut best_by_candidate: FxHashMap<CandidateKey, u32> = FxHashMap::default();
+        for read_idx in mem.step_start..mem.step_end {
+            let Some(occurrences) = walk_index.get(&read_steps[read_idx].signed_node) else {
+                continue;
+            };
+            for &occurrence in occurrences {
+                let Some(output) = &call_sets[occurrence.key.call_idx].output else {
+                    continue;
+                };
+                let candidate = &output.candidates[occurrence.key.candidate_idx];
+                let overlap = candidate_mem_overlap_len(
+                    read_steps,
+                    mem.step_start,
+                    mem.step_end,
+                    read_idx,
+                    &candidate.oriented_walk,
+                    occurrence.position as usize,
+                );
+                let entry = best_by_candidate.entry(occurrence.key).or_insert(0);
+                *entry = (*entry).max(overlap);
+            }
+        }
+        for (key, anchors) in best_by_candidate {
+            if anchors > 0 {
+                *counts.entry(key).or_insert(0) += anchors;
+            }
+        }
+    }
+}
+
 fn build_read_walk_evidence(
+    syng_index: &syng::SyngIndex,
     call_sets: &[LocalCallSet],
     gaf_path: &str,
     min_read_link_anchors: usize,
@@ -820,7 +994,7 @@ fn build_read_walk_evidence(
             };
             for (position, &node) in candidate.oriented_walk.iter().enumerate() {
                 walk_index
-                    .entry(node)
+                    .entry(node.signed_node)
                     .or_default()
                     .push(WalkOccurrence {
                         key,
@@ -851,6 +1025,9 @@ fn build_read_walk_evidence(
     let mut evidence = ReadWalkEvidence::default();
     let mut nodes = Vec::new();
     let mut reverse_nodes = Vec::new();
+    let mut read_steps = Vec::new();
+    let mut reverse_steps = Vec::new();
+    let syncmer_len = syng_index.syncmer_length_bp() as u64;
 
     for (line_no, line) in reader.lines().enumerate() {
         let line = line?;
@@ -867,7 +1044,28 @@ fn build_read_walk_evidence(
         }
         parse_gaf_path_nodes(fields[5], &mut nodes)?;
         let mut walk_counts: FxHashMap<CandidateKey, u32> = FxHashMap::default();
-        add_whole_walk_hits(&mut walk_counts, &walk_index, &nodes, &mut reverse_nodes);
+        if let Some(positions) = parse_gaf_query_positions(&fields, nodes.len())? {
+            let query_len = fields[1].parse::<u64>().map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid GAF query length on line {}: {e}", line_no + 1),
+                )
+            })?;
+            build_read_walk_steps(&nodes, &positions, &mut read_steps);
+            let mems = syng_index.gbwt_mems_for_walk(&read_steps)?;
+            add_mem_hits(&mut walk_counts, call_sets, &walk_index, &read_steps, &mems);
+            reverse_read_walk_steps(&read_steps, query_len, syncmer_len, &mut reverse_steps);
+            let reverse_mems = syng_index.gbwt_mems_for_walk(&reverse_steps)?;
+            add_mem_hits(
+                &mut walk_counts,
+                call_sets,
+                &walk_index,
+                &reverse_steps,
+                &reverse_mems,
+            );
+        } else {
+            add_whole_walk_hits(&mut walk_counts, &walk_index, &nodes, &mut reverse_nodes);
+        }
         let walk_hits_by_call = sorted_candidate_hits(walk_counts, min_read_link_anchors);
         add_candidate_support(&mut evidence, &walk_hits_by_call);
         add_read_links(&mut evidence, &walk_hits_by_call);
@@ -1242,8 +1440,12 @@ pub fn run_syng_pack_infer<W: Write>(out: &mut W, config: &InferConfig<'_>) -> i
         || config.emit_gfa.is_some();
     if wants_stitch {
         let read_evidence = if let Some(gaf_path) = config.gaf_path {
-            let evidence =
-                build_read_walk_evidence(&call_sets, gaf_path, config.min_read_link_anchors)?;
+            let evidence = build_read_walk_evidence(
+                &syng_index,
+                &call_sets,
+                gaf_path,
+                config.min_read_link_anchors,
+            )?;
             info!(
                 "Loaded read-walk evidence from {}: {} GAF records, {} records with candidate hits, {} candidate hits, {} local candidate scores, {} linked candidate pairs, {} scored transitions",
                 gaf_path,

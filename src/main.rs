@@ -396,13 +396,18 @@ fn write_syng_map_gaf<W: Write>(
         path.push(orient);
         path.push_str(&sm.node_id.to_string());
     }
+    let mut query_positions = String::from("qp:B:I");
+    for sm in syncmers {
+        query_positions.push(',');
+        query_positions.push_str(&sm.query_pos.to_string());
+    }
     let path_len = (syncmers.len() as u64).saturating_mul(syncmer_len);
     let matches = path_len.min(qend.saturating_sub(qstart));
     let block_len = qend.saturating_sub(qstart);
     out.write_all(query_name)?;
     writeln!(
         out,
-        "\t{}\t{}\t{}\t+\t{}\t{}\t0\t{}\t{}\t{}\t0\tan:i:{}\tsk:i:{}",
+        "\t{}\t{}\t{}\t+\t{}\t{}\t0\t{}\t{}\t{}\t0\tan:i:{}\tsk:i:{}\t{}",
         query_len,
         qstart,
         qend,
@@ -412,7 +417,8 @@ fn write_syng_map_gaf<W: Write>(
         matches,
         block_len,
         syncmers.len(),
-        syncmer_len
+        syncmer_len,
+        query_positions
     )
 }
 

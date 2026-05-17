@@ -1474,6 +1474,24 @@ pub struct SyngQuerySyncmer {
     pub query_pos: u64,
 }
 
+/// A signed syncmer walk step with a bp-coordinate position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyngWalkStep {
+    pub signed_node: i32,
+    pub bp_pos: u64,
+}
+
+/// A maximal exact match of a signed syncmer walk in the syng GBWT.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyngGbwtMem {
+    pub step_start: usize,
+    pub step_end: usize,
+    pub query_start: u64,
+    pub query_end: u64,
+    pub anchors: usize,
+    pub occurrences: u32,
+}
+
 /// A rough syncmer-only mapping projected to a path in the syng index.
 #[derive(Debug, Clone)]
 pub struct SyngMapHit {
@@ -3255,6 +3273,261 @@ impl SyngIndex {
         Ok(high)
     }
 
+    fn valid_walk_node(&self, signed_node: i32) -> bool {
+        let node_id = signed_node.unsigned_abs() as usize;
+        signed_node != 0 && node_id <= self.num_syncmer_nodes()
+    }
+
+    fn walk_step_offset(prev: SyngWalkStep, next: SyngWalkStep) -> Option<u32> {
+        next.bp_pos
+            .checked_sub(prev.bp_pos)
+            .and_then(|offset| u32::try_from(offset).ok())
+    }
+
+    fn start_gbwt_match(
+        &self,
+        signed_node: i32,
+    ) -> io::Result<Option<(*mut syng_ffi::SyngBWTpath, u32, u32)>> {
+        if !self.valid_walk_node(signed_node) {
+            return Ok(None);
+        }
+        let mut high = 0u32;
+        let sbp = unsafe { syng_ffi::syngBWTmatchStart(self.gbwt, signed_node, &mut high) };
+        if sbp.is_null() {
+            return Err(io::Error::other("syngBWTmatchStart returned null"));
+        }
+        if high == 0 {
+            unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
+            return Ok(None);
+        }
+        Ok(Some((sbp, 0, high)))
+    }
+
+    fn advance_gbwt_match(
+        &self,
+        sbp: *mut syng_ffi::SyngBWTpath,
+        low: &mut u32,
+        high: &mut u32,
+        signed_node: i32,
+        offset: u32,
+    ) -> bool {
+        if !self.valid_walk_node(signed_node) {
+            return false;
+        }
+        let mut next_low = *low;
+        let mut next_high = *high;
+        let matched = unsafe {
+            syng_ffi::syngBWTmatchNext(
+                sbp,
+                signed_node,
+                offset,
+                &mut next_low,
+                &mut next_high,
+            )
+        };
+        if matched {
+            *low = next_low;
+            *high = next_high;
+        }
+        matched
+    }
+
+    fn push_gbwt_mem(
+        &self,
+        walk: &[SyngWalkStep],
+        start: usize,
+        end: usize,
+        occurrences: u32,
+        mems: &mut Vec<SyngGbwtMem>,
+    ) {
+        if start >= end || occurrences == 0 {
+            return;
+        }
+        let query_start = walk[start].bp_pos;
+        let query_end = walk[end - 1]
+            .bp_pos
+            .saturating_add(self.syncmer_length_bp() as u64);
+        mems.push(SyngGbwtMem {
+            step_start: start,
+            step_end: end,
+            query_start,
+            query_end,
+            anchors: end - start,
+            occurrences,
+        });
+    }
+
+    fn prune_contained_gbwt_mems(candidates: Vec<SyngGbwtMem>) -> Vec<SyngGbwtMem> {
+        let mut candidates = candidates;
+        candidates.sort_by(|a, b| {
+            a.step_start
+                .cmp(&b.step_start)
+                .then(b.step_end.cmp(&a.step_end))
+                .then(a.occurrences.cmp(&b.occurrences))
+        });
+        let mut mems: Vec<SyngGbwtMem> = Vec::new();
+        'candidate: for candidate in candidates {
+            for kept in &mems {
+                if kept.step_start <= candidate.step_start
+                    && kept.step_end >= candidate.step_end
+                    && kept.anchors >= candidate.anchors
+                {
+                    continue 'candidate;
+                }
+            }
+            mems.retain(|kept| {
+                !(candidate.step_start <= kept.step_start
+                    && candidate.step_end >= kept.step_end
+                    && candidate.anchors >= kept.anchors)
+            });
+            mems.push(candidate);
+        }
+        mems.sort_by(|a, b| {
+            a.step_start
+                .cmp(&b.step_start)
+                .then(a.step_end.cmp(&b.step_end))
+        });
+        mems
+    }
+
+    fn restart_gbwt_match_at_suffix(
+        &self,
+        walk: &[SyngWalkStep],
+        run_start: usize,
+        current: usize,
+    ) -> io::Result<Option<(*mut syng_ffi::SyngBWTpath, usize, u32, u32)>> {
+        let Some((reverse_sbp, mut reverse_low, mut reverse_high)) =
+            self.start_gbwt_match(-walk[current].signed_node)?
+        else {
+            return Ok(None);
+        };
+
+        let mut suffix_start = current;
+        while suffix_start > run_start {
+            let prev = suffix_start - 1;
+            let Some(offset) = Self::walk_step_offset(walk[prev], walk[suffix_start]) else {
+                break;
+            };
+            if !self.advance_gbwt_match(
+                reverse_sbp,
+                &mut reverse_low,
+                &mut reverse_high,
+                -walk[prev].signed_node,
+                offset,
+            ) {
+                break;
+            }
+            suffix_start = prev;
+        }
+        unsafe { syng_ffi::syngBWTpathDestroy(reverse_sbp) };
+
+        let Some((sbp, mut low, mut high)) = self.start_gbwt_match(walk[suffix_start].signed_node)?
+        else {
+            return Ok(None);
+        };
+        for next in suffix_start + 1..=current {
+            let Some(offset) = Self::walk_step_offset(walk[next - 1], walk[next]) else {
+                unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
+                return Ok(None);
+            };
+            if !self.advance_gbwt_match(sbp, &mut low, &mut high, walk[next].signed_node, offset) {
+                unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
+                return Ok(None);
+            }
+        }
+        Ok(Some((sbp, suffix_start, low, high)))
+    }
+
+    /// Find maximal exact matches of a signed syncmer walk in the syng GBWT.
+    ///
+    /// This mirrors syngmap's GBWT MEM procedure: extend the current match by
+    /// signed syncmer node and bp offset, then on failure reverse-search to the
+    /// longest suffix that can seed the next match. Returned MEMs use half-open
+    /// step coordinates `[step_start, step_end)`.
+    pub fn gbwt_mems_for_walk(&self, walk: &[SyngWalkStep]) -> io::Result<Vec<SyngGbwtMem>> {
+        if walk.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut candidates = Vec::new();
+        let mut sbp: *mut syng_ffi::SyngBWTpath = std::ptr::null_mut();
+        let mut active_start = 0usize;
+        let mut run_start = 0usize;
+        let mut low = 0u32;
+        let mut high = 0u32;
+
+        for idx in 0..walk.len() {
+            if !self.valid_walk_node(walk[idx].signed_node) {
+                if !sbp.is_null() {
+                    self.push_gbwt_mem(walk, active_start, idx, high - low, &mut candidates);
+                    unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
+                    sbp = std::ptr::null_mut();
+                }
+                run_start = idx + 1;
+                continue;
+            }
+
+            if sbp.is_null() {
+                let Some((started_sbp, started_low, started_high)) =
+                    self.start_gbwt_match(walk[idx].signed_node)?
+                else {
+                    run_start = idx + 1;
+                    continue;
+                };
+                sbp = started_sbp;
+                active_start = idx;
+                run_start = idx;
+                low = started_low;
+                high = started_high;
+                continue;
+            }
+
+            let Some(offset) = Self::walk_step_offset(walk[idx - 1], walk[idx]) else {
+                self.push_gbwt_mem(walk, active_start, idx, high - low, &mut candidates);
+                unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
+                sbp = std::ptr::null_mut();
+                let Some((started_sbp, started_low, started_high)) =
+                    self.start_gbwt_match(walk[idx].signed_node)?
+                else {
+                    run_start = idx + 1;
+                    continue;
+                };
+                sbp = started_sbp;
+                active_start = idx;
+                run_start = idx;
+                low = started_low;
+                high = started_high;
+                continue;
+            };
+
+            if self.advance_gbwt_match(sbp, &mut low, &mut high, walk[idx].signed_node, offset) {
+                continue;
+            }
+
+            self.push_gbwt_mem(walk, active_start, idx, high - low, &mut candidates);
+            unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
+            match self.restart_gbwt_match_at_suffix(walk, run_start, idx)? {
+                Some((restarted_sbp, restarted_start, restarted_low, restarted_high)) => {
+                    sbp = restarted_sbp;
+                    active_start = restarted_start;
+                    low = restarted_low;
+                    high = restarted_high;
+                }
+                None => {
+                    sbp = std::ptr::null_mut();
+                    run_start = idx + 1;
+                }
+            }
+        }
+
+        if !sbp.is_null() {
+            self.push_gbwt_mem(walk, active_start, walk.len(), high - low, &mut candidates);
+            unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
+        }
+
+        Ok(Self::prune_contained_gbwt_mems(candidates))
+    }
+
     fn locate_signed_node_occurrences(
         &self,
         signed_node: i32,
@@ -4224,6 +4497,58 @@ mod tests {
         forward_nodes.sort_unstable();
         rc_nodes.sort_unstable();
         assert_eq!(rc_nodes, forward_nodes);
+    }
+
+    #[test]
+    fn test_gbwt_mems_for_walk_uses_syncmer_offsets() {
+        let _guard = lock_syng();
+        let params = SyncmerParams::default();
+        let seq = make_test_sequence(5000, 43);
+        let index = SyngIndex::build(
+            params,
+            vec![("sample#0#chr1".to_string(), seq.clone())].into_iter(),
+        );
+
+        let mut matches = index.matched_syncmers_in_sequence(&seq);
+        matches.sort_unstable_by_key(|sm| sm.query_pos);
+        assert!(
+            matches.len() >= 4,
+            "test sequence should produce several indexed syncmer matches"
+        );
+        let walk: Vec<_> = matches
+            .iter()
+            .map(|sm| SyngWalkStep {
+                signed_node: sm.signed_node,
+                bp_pos: sm.query_pos,
+            })
+            .collect();
+
+        let mems = index.gbwt_mems_for_walk(&walk).unwrap();
+        assert!(
+            mems.iter().any(|mem| mem.step_start == 0
+                && mem.step_end == walk.len()
+                && mem.query_start == walk[0].bp_pos
+                && mem.query_end
+                    == walk.last().unwrap().bp_pos + index.syncmer_length_bp() as u64),
+            "the exact query walk should produce a full-length GBWT MEM: {:?}",
+            mems
+        );
+
+        let Some(shift_idx) =
+            (1..walk.len() - 1).find(|&idx| walk[idx].bp_pos + 1 < walk[idx + 1].bp_pos)
+        else {
+            return;
+        };
+        let mut shifted = walk.clone();
+        shifted[shift_idx].bp_pos += 1;
+        let shifted_mems = index.gbwt_mems_for_walk(&shifted).unwrap();
+        assert!(
+            shifted_mems
+                .iter()
+                .all(|mem| mem.step_start != 0 || mem.step_end != shifted.len()),
+            "changing a syncmer offset must break the full-length GBWT MEM: {:?}",
+            shifted_mems
+        );
     }
 
     #[test]

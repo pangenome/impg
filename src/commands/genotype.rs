@@ -25,13 +25,13 @@ pub struct HaplotypeCandidate {
     pub anchors: usize,
     pub query_span_fraction: f64,
     pub features: Vec<(u32, u64)>,
-    pub oriented_walk: Vec<i32>,
+    pub oriented_walk: Vec<syng::SyngWalkStep>,
     single_similarity: f64,
 }
 
 struct CandidateFeatures {
     unoriented: Vec<(u32, u64)>,
-    oriented_walk: Vec<i32>,
+    oriented_walk: Vec<syng::SyngWalkStep>,
 }
 
 #[derive(Debug)]
@@ -142,9 +142,12 @@ fn syng_candidate_features(
         })? as usize;
     let mut counts: FxHashMap<u32, u64> = FxHashMap::default();
     let mut oriented_walk = Vec::new();
-    for (signed_node, _) in syng_index.walk_path_range(path_idx, start, end)? {
+    for (signed_node, bp_pos) in syng_index.walk_path_range(path_idx, start, end)? {
         *counts.entry(signed_node.unsigned_abs()).or_insert(0) += 1;
-        oriented_walk.push(signed_node);
+        oriented_walk.push(syng::SyngWalkStep {
+            signed_node,
+            bp_pos,
+        });
     }
     let mut unoriented: Vec<(u32, u64)> = counts.into_iter().collect();
     unoriented.sort_unstable_by_key(|&(feature_id, _)| feature_id);

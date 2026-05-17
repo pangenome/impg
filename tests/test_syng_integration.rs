@@ -3126,6 +3126,20 @@ fn test_syng_infer_read_walk_emission_resolves_order_decoy() {
         "impg map -o proj for ordered repeat reads failed: {}",
         String::from_utf8_lossy(&map.stderr)
     );
+    let mut gaf_decoder = zstd::stream::read::Decoder::new(
+        std::fs::File::open(proj_path.join("reads.gaf.zst")).unwrap(),
+    )
+    .unwrap();
+    let mut projected_gaf = String::new();
+    {
+        use std::io::Read;
+        gaf_decoder.read_to_string(&mut projected_gaf).unwrap();
+    }
+    assert!(
+        projected_gaf.contains("\tqp:B:I,"),
+        "projection GAF should carry query syncmer positions for GBWT MEM scoring:\n{}",
+        projected_gaf
+    );
 
     let target_range = format!(
         "sampleRef#0#chr1:{}-{}",
