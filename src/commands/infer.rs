@@ -95,6 +95,12 @@ struct CandidateKey {
     candidate_idx: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct WalkOccurrence {
+    key: CandidateKey,
+    position: u32,
+}
+
 #[derive(Debug, Default, Clone)]
 struct LinkEvidence {
     read_weight: f64,
@@ -742,16 +748,59 @@ fn add_candidate_support(
     }
 }
 
-fn add_candidate_hits_from_map<K: Copy + Eq + std::hash::Hash>(
-    counts: &mut FxHashMap<CandidateKey, u32>,
-    feature_to_candidates: &FxHashMap<K, Vec<CandidateKey>>,
-    feature: K,
-) {
-    if let Some(candidate_keys) = feature_to_candidates.get(&feature) {
-        for &key in candidate_keys {
-            *counts.entry(key).or_insert(0) += 1;
+fn lis_len(values: &[u32]) -> u32 {
+    let mut tails: Vec<u32> = Vec::new();
+    for &value in values {
+        let idx = tails.partition_point(|&tail| tail < value);
+        if idx == tails.len() {
+            tails.push(value);
+        } else {
+            tails[idx] = value;
         }
     }
+    tails.len() as u32
+}
+
+fn add_whole_walk_orientation_hits(
+    counts: &mut FxHashMap<CandidateKey, u32>,
+    walk_index: &FxHashMap<i32, Vec<WalkOccurrence>>,
+    nodes: &[i32],
+) {
+    let mut positions_by_candidate: FxHashMap<CandidateKey, Vec<u32>> = FxHashMap::default();
+    for &node in nodes {
+        if let Some(occurrences) = walk_index.get(&node) {
+            for &occurrence in occurrences {
+                positions_by_candidate
+                    .entry(occurrence.key)
+                    .or_default()
+                    .push(occurrence.position);
+            }
+        }
+    }
+
+    for (key, positions) in positions_by_candidate {
+        let matched = lis_len(&positions);
+        if matched == 0 {
+            continue;
+        }
+        let entry = counts.entry(key).or_insert(0);
+        *entry = (*entry).max(matched);
+    }
+}
+
+fn add_whole_walk_hits(
+    counts: &mut FxHashMap<CandidateKey, u32>,
+    walk_index: &FxHashMap<i32, Vec<WalkOccurrence>>,
+    nodes: &[i32],
+    reverse_nodes: &mut Vec<i32>,
+) {
+    if nodes.is_empty() {
+        return;
+    }
+    add_whole_walk_orientation_hits(counts, walk_index, nodes);
+    reverse_nodes.clear();
+    reverse_nodes.extend(nodes.iter().rev().map(|node| -*node));
+    add_whole_walk_orientation_hits(counts, walk_index, reverse_nodes);
 }
 
 fn build_read_walk_evidence(
@@ -759,35 +808,38 @@ fn build_read_walk_evidence(
     gaf_path: &str,
     min_read_link_anchors: usize,
 ) -> io::Result<ReadWalkEvidence> {
-    let mut node_to_candidates: FxHashMap<u32, Vec<CandidateKey>> = FxHashMap::default();
-    let mut link_to_candidates: FxHashMap<(i32, i32), Vec<CandidateKey>> = FxHashMap::default();
+    let mut walk_index: FxHashMap<i32, Vec<WalkOccurrence>> = FxHashMap::default();
     for (call_idx, call_set) in call_sets.iter().enumerate() {
         let Some(output) = &call_set.output else {
             continue;
         };
         for (candidate_idx, candidate) in output.candidates.iter().enumerate() {
-            for &(node_id, _) in &candidate.features {
-                node_to_candidates
-                    .entry(node_id)
+            let key = CandidateKey {
+                call_idx,
+                candidate_idx,
+            };
+            for (position, &node) in candidate.oriented_walk.iter().enumerate() {
+                walk_index
+                    .entry(node)
                     .or_default()
-                    .push(CandidateKey {
-                        call_idx,
-                        candidate_idx,
-                    });
-            }
-            for &(link, _) in &candidate.oriented_links {
-                link_to_candidates
-                    .entry(link)
-                    .or_default()
-                    .push(CandidateKey {
-                        call_idx,
-                        candidate_idx,
+                    .push(WalkOccurrence {
+                        key,
+                        position: position as u32,
                     });
             }
         }
     }
+    for occurrences in walk_index.values_mut() {
+        occurrences.sort_unstable_by(|a, b| {
+            a.key
+                .call_idx
+                .cmp(&b.key.call_idx)
+                .then(a.key.candidate_idx.cmp(&b.key.candidate_idx))
+                .then(b.position.cmp(&a.position))
+        });
+    }
 
-    if node_to_candidates.is_empty() {
+    if walk_index.is_empty() {
         return Ok(ReadWalkEvidence::default());
     }
 
@@ -798,6 +850,7 @@ fn build_read_walk_evidence(
     let reader = BufReader::with_capacity(8 * 1024 * 1024, reader);
     let mut evidence = ReadWalkEvidence::default();
     let mut nodes = Vec::new();
+    let mut reverse_nodes = Vec::new();
 
     for (line_no, line) in reader.lines().enumerate() {
         let line = line?;
@@ -813,32 +866,11 @@ fn build_read_walk_evidence(
             ));
         }
         parse_gaf_path_nodes(fields[5], &mut nodes)?;
-        let mut node_counts: FxHashMap<CandidateKey, u32> = FxHashMap::default();
-        for &signed_node in &nodes {
-            add_candidate_hits_from_map(
-                &mut node_counts,
-                &node_to_candidates,
-                signed_node.unsigned_abs(),
-            );
-        }
-        let hits_by_call = sorted_candidate_hits(node_counts, min_read_link_anchors);
-
-        let mut link_counts: FxHashMap<CandidateKey, u32> = FxHashMap::default();
-        for pair in nodes.windows(2) {
-            let forward = (pair[0], pair[1]);
-            let reverse = (-pair[1], -pair[0]);
-            add_candidate_hits_from_map(&mut link_counts, &link_to_candidates, forward);
-            if reverse != forward {
-                add_candidate_hits_from_map(&mut link_counts, &link_to_candidates, reverse);
-            }
-        }
-        let link_hits_by_call = sorted_candidate_hits(link_counts, min_read_link_anchors);
-        if link_hits_by_call.is_empty() {
-            add_candidate_support(&mut evidence, &hits_by_call);
-        } else {
-            add_candidate_support(&mut evidence, &link_hits_by_call);
-        }
-        add_read_links(&mut evidence, &hits_by_call);
+        let mut walk_counts: FxHashMap<CandidateKey, u32> = FxHashMap::default();
+        add_whole_walk_hits(&mut walk_counts, &walk_index, &nodes, &mut reverse_nodes);
+        let walk_hits_by_call = sorted_candidate_hits(walk_counts, min_read_link_anchors);
+        add_candidate_support(&mut evidence, &walk_hits_by_call);
+        add_read_links(&mut evidence, &walk_hits_by_call);
     }
 
     Ok(evidence)

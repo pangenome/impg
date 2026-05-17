@@ -25,13 +25,13 @@ pub struct HaplotypeCandidate {
     pub anchors: usize,
     pub query_span_fraction: f64,
     pub features: Vec<(u32, u64)>,
-    pub oriented_links: Vec<((i32, i32), u64)>,
+    pub oriented_walk: Vec<i32>,
     single_similarity: f64,
 }
 
 struct CandidateFeatures {
     unoriented: Vec<(u32, u64)>,
-    oriented_links: Vec<((i32, i32), u64)>,
+    oriented_walk: Vec<i32>,
 }
 
 #[derive(Debug)]
@@ -141,24 +141,16 @@ fn syng_candidate_features(
             )
         })? as usize;
     let mut counts: FxHashMap<u32, u64> = FxHashMap::default();
-    let mut oriented_link_counts: FxHashMap<(i32, i32), u64> = FxHashMap::default();
-    let mut prev = None;
+    let mut oriented_walk = Vec::new();
     for (signed_node, _) in syng_index.walk_path_range(path_idx, start, end)? {
         *counts.entry(signed_node.unsigned_abs()).or_insert(0) += 1;
-        if let Some(prev_node) = prev {
-            *oriented_link_counts
-                .entry((prev_node, signed_node))
-                .or_insert(0) += 1;
-        }
-        prev = Some(signed_node);
+        oriented_walk.push(signed_node);
     }
     let mut unoriented: Vec<(u32, u64)> = counts.into_iter().collect();
     unoriented.sort_unstable_by_key(|&(feature_id, _)| feature_id);
-    let mut oriented_links: Vec<((i32, i32), u64)> = oriented_link_counts.into_iter().collect();
-    oriented_links.sort_unstable_by_key(|&(feature_id, _)| feature_id);
     Ok(CandidateFeatures {
         unoriented,
-        oriented_links,
+        oriented_walk,
     })
 }
 
@@ -205,7 +197,7 @@ fn collect_syng_candidates(
                     anchors: hit.anchors.len(),
                     query_span_fraction,
                     features: features.unoriented,
-                    oriented_links: features.oriented_links,
+                    oriented_walk: features.oriented_walk,
                     single_similarity: 0.0,
                 });
             }
@@ -258,7 +250,7 @@ fn collect_syng_candidates(
                     anchors: group.anchors.len(),
                     query_span_fraction,
                     features: features.unoriented,
-                    oriented_links: features.oriented_links,
+                    oriented_walk: features.oriented_walk,
                     single_similarity: 0.0,
                 });
             }

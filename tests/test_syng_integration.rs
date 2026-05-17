@@ -3031,27 +3031,36 @@ fn test_syng_infer_read_walk_emission_resolves_order_decoy() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let left = numeric_to_ascii(&make_sequence_numeric(420, 151));
-    let x = numeric_to_ascii(&make_sequence_numeric(540, 152));
-    let y = numeric_to_ascii(&make_sequence_numeric(540, 153));
-    let right = numeric_to_ascii(&make_sequence_numeric(420, 154));
+    let copy_a = numeric_to_ascii(&make_sequence_numeric(480, 152));
+    let copy_b = numeric_to_ascii(&make_sequence_numeric(480, 153));
+    let copy_c = numeric_to_ascii(&make_sequence_numeric(480, 154));
+    let right = numeric_to_ascii(&make_sequence_numeric(420, 155));
+
+    let mut true_repeat = Vec::new();
+    true_repeat.extend_from_slice(&copy_a);
+    true_repeat.extend_from_slice(&copy_b);
+    true_repeat.extend_from_slice(&copy_a);
+    true_repeat.extend_from_slice(&copy_c);
+    true_repeat.extend_from_slice(&copy_a);
+
+    let mut decoy_repeat = Vec::new();
+    decoy_repeat.extend_from_slice(&copy_a);
+    decoy_repeat.extend_from_slice(&copy_c);
+    decoy_repeat.extend_from_slice(&copy_a);
+    decoy_repeat.extend_from_slice(&copy_b);
+    decoy_repeat.extend_from_slice(&copy_a);
 
     let mut hap_ref = Vec::new();
     hap_ref.extend_from_slice(&left);
-    hap_ref.extend_from_slice(&x);
-    hap_ref.extend_from_slice(&y);
-    hap_ref.extend_from_slice(&x);
-    hap_ref.extend_from_slice(&y);
+    hap_ref.extend_from_slice(&true_repeat);
     hap_ref.extend_from_slice(&right);
 
-    // Same node-count projection as the target interval, but with the repeated
-    // copies in a different order. Read-walk adjacent-step evidence should
-    // break the pack/cos tie in favor of the true X-Y-X-Y order.
+    // Same node-count and adjacent-transition projection as the target interval:
+    // A-B-A-C-A and A-C-A-B-A both contain AB, BA, AC, and CA once. Only the
+    // whole read walk disambiguates the true order.
     let mut hap_decoy = Vec::new();
     hap_decoy.extend_from_slice(&left);
-    hap_decoy.extend_from_slice(&y);
-    hap_decoy.extend_from_slice(&x);
-    hap_decoy.extend_from_slice(&y);
-    hap_decoy.extend_from_slice(&x);
+    hap_decoy.extend_from_slice(&decoy_repeat);
     hap_decoy.extend_from_slice(&right);
 
     let fasta_path = dir.join("index.fa");
@@ -3088,7 +3097,7 @@ fn test_syng_infer_read_walk_emission_resolves_order_decoy() {
     let reads_path = dir.join("ordered_repeat_reads.fq");
     {
         let mut f = std::fs::File::create(&reads_path).unwrap();
-        write_tiled_fastq(&mut f, "ordered", &hap_ref, 900, 120).unwrap();
+        write_tiled_fastq(&mut f, "ordered", &true_repeat, true_repeat.len(), 120).unwrap();
     }
 
     let proj_path = dir.join("ordered.proj");
@@ -3121,7 +3130,7 @@ fn test_syng_infer_read_walk_emission_resolves_order_decoy() {
     let target_range = format!(
         "sampleRef#0#chr1:{}-{}",
         left.len(),
-        hap_ref.len() - right.len()
+        left.len() + true_repeat.len()
     );
     let mosaic_path = dir.join("ordered_repeat_mosaic.tsv");
     let infer = Command::new(&bin)
@@ -3174,12 +3183,12 @@ fn test_syng_infer_read_walk_emission_resolves_order_decoy() {
     assert_eq!(rows.len(), 1, "expected a single stitched interval:\n{}", mosaic);
     assert!(
         rows[0][5] == "sampleRef#0#chr1" && rows[0][19].parse::<f64>().unwrap() > 0.0,
-        "read-walk emission should choose the true X-Y-X-Y path and expose support:\n{}",
+        "whole-read-walk emission should choose the true A-B-A-C-A path and expose support:\n{}",
         mosaic
     );
     assert!(
         !rows.iter().any(|row| row[5] == "sampleADecoy#0#chr1"),
-        "node-count-equivalent order decoy should not win once read-walk pairs are scored:\n{}",
+        "node-count and adjacent-transition equivalent decoy should not win once whole walks are scored:\n{}",
         mosaic
     );
 
