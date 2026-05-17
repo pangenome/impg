@@ -48,3 +48,7 @@ See [`pangenome-genotyping-roadmap.md`](pangenome-genotyping-roadmap.md) for
 the longer-term plan: backend-neutral pangenome genotyping, local variation
 graph backends, alignment evidence, learned local scorers, and phased copying
 inference.
+
+For rendered graph products, the genotype layer must preserve source path
+identity through Pan-SN-aware translation tables. See
+[`render-gbz-translation-design.md`](render-gbz-translation-design.md).
