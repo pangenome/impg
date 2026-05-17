@@ -47,6 +47,20 @@ fn numeric_to_ascii(numeric: &[u8]) -> Vec<u8> {
         .collect()
 }
 
+fn mutate_ascii_every(seq: &[u8], offset: usize, stride: usize) -> Vec<u8> {
+    let mut out = seq.to_vec();
+    for i in (offset..out.len()).step_by(stride) {
+        out[i] = match out[i] {
+            b'A' => b'C',
+            b'C' => b'G',
+            b'G' => b'T',
+            b'T' => b'A',
+            other => other,
+        };
+    }
+    out
+}
+
 fn write_tiled_fastq<W: std::io::Write>(
     writer: &mut W,
     prefix: &str,
@@ -2070,24 +2084,10 @@ fn test_syng_infer_read_walk_links_phase_recombinant_mosaic() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    fn mutate_ascii(seq: &[u8], offset: usize, stride: usize) -> Vec<u8> {
-        let mut out = seq.to_vec();
-        for i in (offset..out.len()).step_by(stride) {
-            out[i] = match out[i] {
-                b'A' => b'C',
-                b'C' => b'G',
-                b'G' => b'T',
-                b'T' => b'A',
-                other => other,
-            };
-        }
-        out
-    }
-
     let left_1 = numeric_to_ascii(&make_sequence_numeric(950, 81));
-    let left_2 = mutate_ascii(&left_1, 37, 127);
+    let left_2 = mutate_ascii_every(&left_1, 37, 127);
     let right_1 = numeric_to_ascii(&make_sequence_numeric(950, 83));
-    let right_2 = mutate_ascii(&right_1, 53, 131);
+    let right_2 = mutate_ascii_every(&right_1, 53, 131);
 
     let mut hap_a = Vec::new();
     hap_a.extend_from_slice(&left_1);
@@ -2234,6 +2234,53 @@ fn test_syng_infer_read_walk_links_phase_recombinant_mosaic() {
         mosaic
     );
 
+    let zero_weight_mosaic_path = dir.join("mosaic.zero_read_weight.tsv");
+    let infer_zero_weight = Command::new(&bin)
+        .args([
+            "infer",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "--proj",
+            proj_path.to_str().unwrap(),
+            "--partitions",
+            partitions_path.to_str().unwrap(),
+            "--top-n",
+            "20",
+            "--candidate-top-k",
+            "20",
+            "--min-span-fraction",
+            "0.7",
+            "--stitch",
+            "beam",
+            "--stitch-beam",
+            "500",
+            "--read-link-weight",
+            "0",
+            "--emit-mosaic",
+            zero_weight_mosaic_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run impg infer with disabled read-link weight");
+    assert!(
+        infer_zero_weight.status.success(),
+        "impg infer with disabled read-link weight failed: {}",
+        String::from_utf8_lossy(&infer_zero_weight.stderr)
+    );
+    let zero_weight_mosaic = std::fs::read_to_string(&zero_weight_mosaic_path).unwrap();
+    let zero_weight_rows: Vec<Vec<&str>> = zero_weight_mosaic
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .map(|line| line.split('\t').collect())
+        .collect();
+    assert!(
+        zero_weight_rows
+            .iter()
+            .filter(|row| row[1] == "right")
+            .all(|row| row[16].parse::<f64>().unwrap() == 0.0),
+        "read-link rewards should be disabled when --read-link-weight 0:\n{}",
+        zero_weight_mosaic
+    );
+
     let mut phase_paths: std::collections::BTreeMap<&str, Vec<&str>> =
         std::collections::BTreeMap::new();
     for row in &rows {
@@ -2328,6 +2375,236 @@ fn test_syng_infer_read_walk_links_phase_recombinant_mosaic() {
         ],
         "phase-block stitching should infer copied recombinant segments inside one target:\n{}",
         block_mosaic
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn test_syng_infer_cnv_repeated_syncmer_path_calls_duplicated_haplotype() {
+    let _guard = lock_syng();
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping: impg binary not built");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join("impg_test_syng_infer_cnv_repeats");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let left = numeric_to_ascii(&make_sequence_numeric(500, 91));
+    let copy = numeric_to_ascii(&make_sequence_numeric(700, 92));
+    let copy_alt = mutate_ascii_every(&copy, 23, 101);
+    let right = numeric_to_ascii(&make_sequence_numeric(500, 93));
+
+    let mut hap_single = Vec::new();
+    hap_single.extend_from_slice(&left);
+    hap_single.extend_from_slice(&copy);
+    hap_single.extend_from_slice(&right);
+
+    let mut hap_double = Vec::new();
+    hap_double.extend_from_slice(&left);
+    hap_double.extend_from_slice(&copy);
+    hap_double.extend_from_slice(&copy);
+    hap_double.extend_from_slice(&right);
+
+    let mut hap_alt = Vec::new();
+    hap_alt.extend_from_slice(&left);
+    hap_alt.extend_from_slice(&copy_alt);
+    hap_alt.extend_from_slice(&right);
+
+    let fasta_path = dir.join("index.fa");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        writeln!(f, ">sampleSingle#0#chr1").unwrap();
+        f.write_all(&hap_single).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleDouble#0#chr1").unwrap();
+        f.write_all(&hap_double).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleAlt#0#chr1").unwrap();
+        f.write_all(&hap_alt).unwrap();
+        writeln!(f).unwrap();
+    }
+
+    let idx_prefix = dir.join("idx");
+    let build = Command::new(&bin)
+        .args([
+            "syng",
+            "-f",
+            fasta_path.to_str().unwrap(),
+            "-o",
+            idx_prefix.to_str().unwrap(),
+            "--position-sample-rate",
+            "1",
+        ])
+        .output()
+        .expect("failed to run impg syng");
+    assert!(
+        build.status.success(),
+        "impg syng failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let reads_path = dir.join("duplicated_reads.fq");
+    {
+        let mut f = std::fs::File::create(&reads_path).unwrap();
+        write_tiled_fastq(&mut f, "double", &hap_double, 1100, 175).unwrap();
+    }
+
+    let proj_path = dir.join("sample.proj");
+    let map = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            reads_path.to_str().unwrap(),
+            "-o",
+            "proj",
+            "-O",
+            proj_path.to_str().unwrap(),
+            "--pack-compression-level",
+            "3",
+            "--pack-block-size",
+            "64",
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o proj");
+    assert!(
+        map.status.success(),
+        "impg map -o proj failed: {}",
+        String::from_utf8_lossy(&map.stderr)
+    );
+
+    let mut gaf_decoder =
+        zstd::stream::read::Decoder::new(std::fs::File::open(proj_path.join("reads.gaf.zst")).unwrap()).unwrap();
+    let mut gaf = String::new();
+    {
+        use std::io::Read;
+        gaf_decoder.read_to_string(&mut gaf).unwrap();
+    }
+    assert!(
+        gaf.lines().any(|line| {
+            let Some(path) = line.split('\t').nth(5) else {
+                return false;
+            };
+            let mut seen = std::collections::BTreeSet::new();
+            let mut token = String::new();
+            for ch in path.chars() {
+                if ch == '>' || ch == '<' {
+                    if !token.is_empty() && !seen.insert(token.clone()) {
+                        return true;
+                    }
+                    token.clear();
+                } else {
+                    token.push(ch);
+                }
+            }
+            !token.is_empty() && !seen.insert(token)
+        }),
+        "duplicated-copy reads should produce GAF walks with repeated syncmer nodes:\n{}",
+        gaf
+    );
+
+    let target_range = format!("sampleSingle#0#chr1:0-{}", hap_single.len());
+    let infer = Command::new(&bin)
+        .args([
+            "infer",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "--proj",
+            proj_path.to_str().unwrap(),
+            "-r",
+            &target_range,
+            "--top-n",
+            "5",
+            "--candidate-top-k",
+            "20",
+            "--min-span-fraction",
+            "0.45",
+        ])
+        .output()
+        .expect("failed to run impg infer on duplicated haplotype");
+    assert!(
+        infer.status.success(),
+        "impg infer on duplicated haplotype failed: {}",
+        String::from_utf8_lossy(&infer.stderr)
+    );
+    let infer_stdout = String::from_utf8_lossy(&infer.stdout);
+    let first = infer_stdout
+        .lines()
+        .find(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .expect("expected at least one infer row");
+    let fields: Vec<&str> = first.split('\t').collect();
+    assert!(
+        fields[9].contains("sampleDouble#0#chr1"),
+        "duplicated-read evidence should call the duplicated haplotype first:\n{}",
+        infer_stdout
+    );
+    assert!(
+        !fields[9].contains("sampleAlt#0#chr1"),
+        "unrelated single-copy allele should not be part of the top CNV call:\n{}",
+        infer_stdout
+    );
+
+    let mosaic_path = dir.join("cnv_phase_blocks.tsv");
+    let infer_blocks = Command::new(&bin)
+        .args([
+            "infer",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "--proj",
+            proj_path.to_str().unwrap(),
+            "-r",
+            &target_range,
+            "--phase-block-size",
+            "600",
+            "--top-n",
+            "5",
+            "--candidate-top-k",
+            "20",
+            "--min-span-fraction",
+            "0.35",
+            "--stitch",
+            "beam",
+            "--stitch-beam",
+            "300",
+            "--read-link-weight",
+            "3",
+            "--emit-mosaic",
+            mosaic_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run impg infer phase blocks on duplicated haplotype");
+    assert!(
+        infer_blocks.status.success(),
+        "phase-block infer on duplicated haplotype failed: {}",
+        String::from_utf8_lossy(&infer_blocks.stderr)
+    );
+    let mosaic = std::fs::read_to_string(&mosaic_path).unwrap();
+    let rows: Vec<Vec<&str>> = mosaic
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .map(|line| line.split('\t').collect())
+        .collect();
+    assert!(
+        rows.len() >= 4,
+        "phase-block CNV mosaic should emit multiple phased blocks:\n{}",
+        mosaic
+    );
+    assert!(
+        rows.iter().any(|row| row[5] == "sampleDouble#0#chr1"),
+        "phase-block CNV mosaic should retain the duplicated haplotype candidate:\n{}",
+        mosaic
+    );
+    assert!(
+        rows.iter().skip(2).any(|row| row[16].parse::<f64>().unwrap() > 0.0),
+        "repeated-node read walks should still contribute nonzero transition reward:\n{}",
+        mosaic
     );
 
     std::fs::remove_dir_all(&dir).ok();
