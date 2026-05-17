@@ -61,6 +61,7 @@ pub struct InferConfig<'a> {
     pub min_span_fraction: f64,
     pub gaf_path: Option<&'a str>,
     pub stitch: StitchMode,
+    pub phase_block_size: usize,
     pub stitch_beam: usize,
     pub switch_penalty: f64,
     pub stitch_gap: u64,
@@ -352,6 +353,39 @@ fn resolve_targets(config: &InferConfig<'_>) -> io::Result<Vec<InferTarget>> {
     Ok(targets)
 }
 
+fn split_phase_blocks(targets: Vec<InferTarget>, block_size: usize) -> Vec<InferTarget> {
+    if block_size == 0 {
+        return targets;
+    }
+
+    let mut blocks = Vec::new();
+    for target in targets {
+        let len = target.end.saturating_sub(target.start) as usize;
+        if len <= block_size {
+            blocks.push(target);
+            continue;
+        }
+
+        let mut block_start = target.start;
+        let mut block_idx = 0usize;
+        while block_start < target.end {
+            let block_end = block_start
+                .saturating_add(block_size.min(i32::MAX as usize) as i32)
+                .min(target.end);
+            blocks.push(InferTarget {
+                partition: format!("{}#block{}", target.partition, block_idx),
+                chrom: target.chrom.clone(),
+                start: block_start,
+                end: block_end,
+                name: format!("{}#block{}", target.name, block_idx),
+            });
+            block_start = block_end;
+            block_idx += 1;
+        }
+    }
+    blocks
+}
+
 fn compute_local_call_sets(
     syng_index: &syng::SyngIndex,
     coverage: &pack::Coverage,
@@ -407,6 +441,9 @@ fn write_local_infer_output<W: Write>(
     writeln!(out, "#score\tcos")?;
     writeln!(out, "#feature_space\tsyng-syncmer-node")?;
     writeln!(out, "#targets\t{}", call_sets.len())?;
+    if config.phase_block_size > 0 {
+        writeln!(out, "#phase_block_size\t{}", config.phase_block_size)?;
+    }
     writeln!(out, "#candidate_mode\t{:?}", config.candidate_mode)?;
     writeln!(out, "#ploidy\t{}", config.ploidy)?;
     writeln!(
@@ -1028,7 +1065,7 @@ fn write_mosaic_gfa(
 }
 
 pub fn run_syng_pack_infer<W: Write>(out: &mut W, config: &InferConfig<'_>) -> io::Result<()> {
-    let targets = resolve_targets(config)?;
+    let targets = split_phase_blocks(resolve_targets(config)?, config.phase_block_size);
 
     info!("Loading syng index from prefix: {}", config.syng_prefix);
     let syng_index = syng::SyngIndex::load(config.syng_prefix, syng::SyncmerParams::default())?;

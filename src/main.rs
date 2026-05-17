@@ -3240,6 +3240,10 @@ enum Args {
         #[clap(long, value_enum, default_value_t = infer::StitchMode::None)]
         stitch: infer::StitchMode,
 
+        /// Split each target into fixed-size phase blocks before stitching (0 disables)
+        #[clap(long, value_parser, default_value_t = 0)]
+        phase_block_size: usize,
+
         /// Number of partial mosaics retained during beam stitching
         #[clap(long, value_parser, default_value_t = 200)]
         stitch_beam: usize,
@@ -5200,6 +5204,7 @@ fn run() -> io::Result<()> {
             min_span_fraction,
             output,
             stitch,
+            phase_block_size,
             stitch_beam,
             switch_penalty,
             stitch_gap,
@@ -5302,6 +5307,12 @@ fn run() -> io::Result<()> {
                     "--stitch-beam must be greater than 0",
                 ));
             }
+            if phase_block_size > i32::MAX as usize {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--phase-block-size must fit in signed 32-bit coordinates",
+                ));
+            }
             if switch_penalty < 0.0 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -5346,6 +5357,7 @@ fn run() -> io::Result<()> {
                 min_span_fraction,
                 gaf_path: gaf_path.as_deref(),
                 stitch,
+                phase_block_size,
                 stitch_beam,
                 switch_penalty,
                 stitch_gap,

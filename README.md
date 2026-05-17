@@ -390,7 +390,9 @@ calls into phased mosaic paths and materialize sequence. When `--proj` or
 `--gaf` read walks are available, stitched inference rewards phase transitions
 supported by the same reads (`--read-link-weight`,
 `--min-read-link-anchors`) while `--switch-penalty` keeps unnecessary panel
-crossovers expensive. See `docs/infer-design.md`.
+crossovers expensive. Add `--phase-block-size N` to split broad targets into
+internal phase blocks before stitching, which lets the same model infer copied
+segments inside a partition. See `docs/infer-design.md`.
 
 `-r` splits on the **last** `:`. Path names from `odgi paths -f`
 already contain coordinates (`grch38#chr6:31972046-32055647`), so a
