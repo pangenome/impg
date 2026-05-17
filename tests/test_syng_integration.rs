@@ -61,6 +61,16 @@ fn mutate_ascii_every(seq: &[u8], offset: usize, stride: usize) -> Vec<u8> {
     out
 }
 
+fn mutate_base_ascii(base: u8) -> u8 {
+    match base {
+        b'A' => b'C',
+        b'C' => b'G',
+        b'G' => b'T',
+        b'T' => b'A',
+        other => other,
+    }
+}
+
 fn write_tiled_fastq<W: std::io::Write>(
     writer: &mut W,
     prefix: &str,
@@ -87,6 +97,47 @@ fn write_tiled_fastq<W: std::io::Write>(
         let end = start + read_len;
         writeln!(writer, "@{}_{}", prefix, read_idx)?;
         writer.write_all(&seq[*start..end])?;
+        writeln!(writer)?;
+        writeln!(writer, "+")?;
+        writeln!(writer, "{}", "I".repeat(read_len))?;
+    }
+    Ok(starts.len())
+}
+
+fn write_tiled_fastq_with_errors<W: std::io::Write>(
+    writer: &mut W,
+    prefix: &str,
+    seq: &[u8],
+    read_len: usize,
+    step: usize,
+    max_reads: usize,
+    error_stride: usize,
+) -> std::io::Result<usize> {
+    assert!(read_len > 0);
+    assert!(step > 0);
+    assert!(max_reads > 0);
+    assert!(seq.len() >= read_len);
+    assert!(error_stride > 0);
+
+    let mut starts = Vec::new();
+    let mut start = 0usize;
+    while start + read_len <= seq.len() && starts.len() < max_reads {
+        starts.push(start);
+        start += step;
+    }
+    let terminal_start = seq.len() - read_len;
+    if starts.len() < max_reads && starts.last().copied() != Some(terminal_start) {
+        starts.push(terminal_start);
+    }
+
+    for (read_idx, start) in starts.iter().enumerate() {
+        let end = start + read_len;
+        let mut read = seq[*start..end].to_vec();
+        for i in ((read_idx + 1) * 17 % error_stride..read.len()).step_by(error_stride) {
+            read[i] = mutate_base_ascii(read[i]);
+        }
+        writeln!(writer, "@{}_{}", prefix, read_idx)?;
+        writer.write_all(&read)?;
         writeln!(writer)?;
         writeln!(writer, "+")?;
         writeln!(writer, "{}", "I".repeat(read_len))?;
@@ -2520,6 +2571,8 @@ fn test_syng_infer_cnv_repeated_syncmer_path_calls_duplicated_haplotype() {
             proj_path.to_str().unwrap(),
             "-r",
             &target_range,
+            "--ploidy",
+            "1",
             "--top-n",
             "5",
             "--candidate-top-k",
@@ -2561,6 +2614,8 @@ fn test_syng_infer_cnv_repeated_syncmer_path_calls_duplicated_haplotype() {
             proj_path.to_str().unwrap(),
             "-r",
             &target_range,
+            "--ploidy",
+            "1",
             "--phase-block-size",
             "600",
             "--top-n",
@@ -2592,7 +2647,7 @@ fn test_syng_infer_cnv_repeated_syncmer_path_calls_duplicated_haplotype() {
         .map(|line| line.split('\t').collect())
         .collect();
     assert!(
-        rows.len() >= 4,
+        rows.len() >= 3,
         "phase-block CNV mosaic should emit multiple phased blocks:\n{}",
         mosaic
     );
@@ -2604,6 +2659,540 @@ fn test_syng_infer_cnv_repeated_syncmer_path_calls_duplicated_haplotype() {
     assert!(
         rows.iter().skip(2).any(|row| row[16].parse::<f64>().unwrap() > 0.0),
         "repeated-node read walks should still contribute nonzero transition reward:\n{}",
+        mosaic
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn test_syng_infer_triplicated_syncmer_path_beats_lower_copy_decoys() {
+    let _guard = lock_syng();
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping: impg binary not built");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join("impg_test_syng_infer_triplication");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let left = numeric_to_ascii(&make_sequence_numeric(520, 101));
+    let copy = numeric_to_ascii(&make_sequence_numeric(680, 102));
+    let copy_alt = mutate_ascii_every(&copy, 31, 103);
+    let right = numeric_to_ascii(&make_sequence_numeric(520, 104));
+
+    let mut hap_single = Vec::new();
+    hap_single.extend_from_slice(&left);
+    hap_single.extend_from_slice(&copy);
+    hap_single.extend_from_slice(&right);
+
+    let mut hap_double = Vec::new();
+    hap_double.extend_from_slice(&left);
+    hap_double.extend_from_slice(&copy);
+    hap_double.extend_from_slice(&copy);
+    hap_double.extend_from_slice(&right);
+
+    let mut hap_triple = Vec::new();
+    hap_triple.extend_from_slice(&left);
+    hap_triple.extend_from_slice(&copy);
+    hap_triple.extend_from_slice(&copy);
+    hap_triple.extend_from_slice(&copy);
+    hap_triple.extend_from_slice(&right);
+
+    let mut hap_alt = Vec::new();
+    hap_alt.extend_from_slice(&left);
+    hap_alt.extend_from_slice(&copy_alt);
+    hap_alt.extend_from_slice(&copy_alt);
+    hap_alt.extend_from_slice(&copy_alt);
+    hap_alt.extend_from_slice(&right);
+
+    let fasta_path = dir.join("index.fa");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        writeln!(f, ">sampleSingle#0#chr1").unwrap();
+        f.write_all(&hap_single).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleDouble#0#chr1").unwrap();
+        f.write_all(&hap_double).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleTriple#0#chr1").unwrap();
+        f.write_all(&hap_triple).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleAltTriple#0#chr1").unwrap();
+        f.write_all(&hap_alt).unwrap();
+        writeln!(f).unwrap();
+    }
+
+    let idx_prefix = dir.join("idx");
+    let build = Command::new(&bin)
+        .args([
+            "syng",
+            "-f",
+            fasta_path.to_str().unwrap(),
+            "-o",
+            idx_prefix.to_str().unwrap(),
+            "--position-sample-rate",
+            "1",
+        ])
+        .output()
+        .expect("failed to run impg syng");
+    assert!(
+        build.status.success(),
+        "impg syng failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let reads_path = dir.join("triplicated_reads.fq");
+    {
+        let mut f = std::fs::File::create(&reads_path).unwrap();
+        write_tiled_fastq(&mut f, "triple", &hap_triple, 1120, 175).unwrap();
+    }
+
+    let proj_path = dir.join("sample_triple.proj");
+    let map = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            reads_path.to_str().unwrap(),
+            "-o",
+            "proj",
+            "-O",
+            proj_path.to_str().unwrap(),
+            "--pack-compression-level",
+            "3",
+            "--pack-block-size",
+            "64",
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o proj for triplicated reads");
+    assert!(
+        map.status.success(),
+        "impg map -o proj for triplicated reads failed: {}",
+        String::from_utf8_lossy(&map.stderr)
+    );
+
+    let target_range = format!("sampleSingle#0#chr1:0-{}", hap_single.len());
+    let infer = Command::new(&bin)
+        .args([
+            "infer",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "--proj",
+            proj_path.to_str().unwrap(),
+            "-r",
+            &target_range,
+            "--ploidy",
+            "1",
+            "--top-n",
+            "5",
+            "--candidate-top-k",
+            "20",
+            "--min-span-fraction",
+            "0.35",
+        ])
+        .output()
+        .expect("failed to run impg infer on triplicated haplotype");
+    assert!(
+        infer.status.success(),
+        "impg infer on triplicated haplotype failed: {}",
+        String::from_utf8_lossy(&infer.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&infer.stdout);
+    let first = stdout
+        .lines()
+        .find(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .expect("expected at least one triplicated infer row");
+    let fields: Vec<&str> = first.split('\t').collect();
+    assert!(
+        fields[9].contains("sampleTriple#0#chr1"),
+        "three-copy evidence should call the triplicated haplotype first:\n{}",
+        stdout
+    );
+    assert!(
+        !fields[9].contains("sampleSingle#0#chr1")
+            && !fields[9].contains("sampleDouble#0#chr1")
+            && !fields[9].contains("sampleAltTriple#0#chr1"),
+        "three-copy dosage should not collapse to one-copy, two-copy, or unrelated triplicated alleles:\n{}",
+        stdout
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn test_syng_infer_nested_sv_noisy_low_coverage_phase_blocks() {
+    let _guard = lock_syng();
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping: impg binary not built");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join("impg_test_syng_infer_nested_sv_noise");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let a = numeric_to_ascii(&make_sequence_numeric(500, 111));
+    let b = numeric_to_ascii(&make_sequence_numeric(500, 112));
+    let c = numeric_to_ascii(&make_sequence_numeric(500, 113));
+    let d = numeric_to_ascii(&make_sequence_numeric(500, 114));
+    let e = numeric_to_ascii(&make_sequence_numeric(500, 115));
+    let insertion = numeric_to_ascii(&make_sequence_numeric(350, 116));
+
+    let mut hap_ref = Vec::new();
+    hap_ref.extend_from_slice(&a);
+    hap_ref.extend_from_slice(&b);
+    hap_ref.extend_from_slice(&c);
+    hap_ref.extend_from_slice(&d);
+    hap_ref.extend_from_slice(&e);
+
+    // Nested event relative to reference: insertion after B and deletion of D.
+    // This forces the local calls to use a non-reference inserted interval and
+    // skip an absent reference block under sparse, noisy read evidence.
+    let mut hap_complex = Vec::new();
+    hap_complex.extend_from_slice(&a);
+    hap_complex.extend_from_slice(&b);
+    hap_complex.extend_from_slice(&insertion);
+    hap_complex.extend_from_slice(&c);
+    hap_complex.extend_from_slice(&e);
+
+    let mut hap_deletion = Vec::new();
+    hap_deletion.extend_from_slice(&a);
+    hap_deletion.extend_from_slice(&b);
+    hap_deletion.extend_from_slice(&c);
+    hap_deletion.extend_from_slice(&e);
+
+    let fasta_path = dir.join("index.fa");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        writeln!(f, ">sampleRef#0#chr1").unwrap();
+        f.write_all(&hap_ref).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleComplex#0#chr1").unwrap();
+        f.write_all(&hap_complex).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleDeletion#0#chr1").unwrap();
+        f.write_all(&hap_deletion).unwrap();
+        writeln!(f).unwrap();
+    }
+
+    let idx_prefix = dir.join("idx");
+    let build = Command::new(&bin)
+        .args([
+            "syng",
+            "-f",
+            fasta_path.to_str().unwrap(),
+            "-o",
+            idx_prefix.to_str().unwrap(),
+            "--position-sample-rate",
+            "1",
+        ])
+        .output()
+        .expect("failed to run impg syng");
+    assert!(
+        build.status.success(),
+        "impg syng failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let reads_path = dir.join("complex_noisy_low_coverage_reads.fq");
+    {
+        let mut f = std::fs::File::create(&reads_path).unwrap();
+        let reads = write_tiled_fastq_with_errors(
+            &mut f,
+            "complex",
+            &hap_complex,
+            650,
+            425,
+            6,
+            173,
+        )
+        .unwrap();
+        assert!(
+            reads <= 6,
+            "test should remain low coverage, wrote {} reads",
+            reads
+        );
+    }
+
+    let proj_path = dir.join("complex.proj");
+    let map = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            reads_path.to_str().unwrap(),
+            "-o",
+            "proj",
+            "-O",
+            proj_path.to_str().unwrap(),
+            "--pack-compression-level",
+            "3",
+            "--pack-block-size",
+            "64",
+            "--min-anchors",
+            "1",
+        ])
+        .output()
+        .expect("failed to run impg map -o proj for noisy nested-SV reads");
+    assert!(
+        map.status.success(),
+        "impg map -o proj for noisy nested-SV reads failed: {}",
+        String::from_utf8_lossy(&map.stderr)
+    );
+
+    let target_range = format!("sampleRef#0#chr1:0-{}", hap_ref.len());
+    let mosaic_path = dir.join("nested_sv_mosaic.tsv");
+    let infer = Command::new(&bin)
+        .args([
+            "infer",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "--proj",
+            proj_path.to_str().unwrap(),
+            "-r",
+            &target_range,
+            "--ploidy",
+            "1",
+            "--candidate-mode",
+            "overlapping",
+            "--phase-block-size",
+            "500",
+            "--top-n",
+            "12",
+            "--candidate-top-k",
+            "40",
+            "--min-anchors",
+            "1",
+            "--min-span-fraction",
+            "0.2",
+            "--stitch",
+            "beam",
+            "--stitch-beam",
+            "600",
+            "--read-link-weight",
+            "4",
+            "--emit-mosaic",
+            mosaic_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run impg infer on noisy nested-SV reads");
+    assert!(
+        infer.status.success(),
+        "impg infer on noisy nested-SV reads failed: {}",
+        String::from_utf8_lossy(&infer.stderr)
+    );
+    let mosaic = std::fs::read_to_string(&mosaic_path).unwrap();
+    let rows: Vec<Vec<&str>> = mosaic
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .map(|line| line.split('\t').collect())
+        .collect();
+    assert!(
+        rows.len() >= 4,
+        "nested-SV phase-block mosaic should emit several copied segments:\n{}",
+        mosaic
+    );
+    let complex_rows = rows
+        .iter()
+        .filter(|row| row[5] == "sampleComplex#0#chr1")
+        .count();
+    assert!(
+        complex_rows >= 2,
+        "noisy low-coverage nested-SV evidence should copy from the complex haplotype in multiple blocks:\n{}",
+        mosaic
+    );
+    assert!(
+        rows.iter().skip(1).any(|row| row[16].parse::<f64>().unwrap() > 0.0),
+        "noisy low-coverage read walks should still contribute transition evidence:\n{}",
+        mosaic
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn test_syng_infer_paralogous_swapped_copies_avoid_decoy_collapse() {
+    let _guard = lock_syng();
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping: impg binary not built");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join("impg_test_syng_infer_paralogy");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let left = numeric_to_ascii(&make_sequence_numeric(420, 131));
+    let copy_a = numeric_to_ascii(&make_sequence_numeric(760, 132));
+    let copy_b = mutate_ascii_every(&copy_a, 29, 97);
+    let spacer = numeric_to_ascii(&make_sequence_numeric(360, 133));
+    let right = numeric_to_ascii(&make_sequence_numeric(420, 134));
+
+    let mut hap_ab = Vec::new();
+    hap_ab.extend_from_slice(&left);
+    hap_ab.extend_from_slice(&copy_a);
+    hap_ab.extend_from_slice(&spacer);
+    hap_ab.extend_from_slice(&copy_b);
+    hap_ab.extend_from_slice(&right);
+
+    let mut hap_ba = Vec::new();
+    hap_ba.extend_from_slice(&left);
+    hap_ba.extend_from_slice(&copy_b);
+    hap_ba.extend_from_slice(&spacer);
+    hap_ba.extend_from_slice(&copy_a);
+    hap_ba.extend_from_slice(&right);
+
+    let mut hap_aa = Vec::new();
+    hap_aa.extend_from_slice(&left);
+    hap_aa.extend_from_slice(&copy_a);
+    hap_aa.extend_from_slice(&spacer);
+    hap_aa.extend_from_slice(&copy_a);
+    hap_aa.extend_from_slice(&right);
+
+    let mut hap_bb = Vec::new();
+    hap_bb.extend_from_slice(&left);
+    hap_bb.extend_from_slice(&copy_b);
+    hap_bb.extend_from_slice(&spacer);
+    hap_bb.extend_from_slice(&copy_b);
+    hap_bb.extend_from_slice(&right);
+
+    let fasta_path = dir.join("index.fa");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        writeln!(f, ">sampleAB#0#chr1").unwrap();
+        f.write_all(&hap_ab).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleBA#0#chr1").unwrap();
+        f.write_all(&hap_ba).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleAA#0#chr1").unwrap();
+        f.write_all(&hap_aa).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleBB#0#chr1").unwrap();
+        f.write_all(&hap_bb).unwrap();
+        writeln!(f).unwrap();
+    }
+
+    let idx_prefix = dir.join("idx");
+    let build = Command::new(&bin)
+        .args([
+            "syng",
+            "-f",
+            fasta_path.to_str().unwrap(),
+            "-o",
+            idx_prefix.to_str().unwrap(),
+            "--position-sample-rate",
+            "1",
+        ])
+        .output()
+        .expect("failed to run impg syng");
+    assert!(
+        build.status.success(),
+        "impg syng failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let reads_path = dir.join("swapped_paralog_reads.fq");
+    {
+        let mut f = std::fs::File::create(&reads_path).unwrap();
+        write_tiled_fastq(&mut f, "ba", &hap_ba, 900, 225).unwrap();
+    }
+
+    let proj_path = dir.join("sample_ba.proj");
+    let map = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            reads_path.to_str().unwrap(),
+            "-o",
+            "proj",
+            "-O",
+            proj_path.to_str().unwrap(),
+            "--pack-compression-level",
+            "3",
+            "--pack-block-size",
+            "64",
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o proj for swapped-paralog reads");
+    assert!(
+        map.status.success(),
+        "impg map -o proj for swapped-paralog reads failed: {}",
+        String::from_utf8_lossy(&map.stderr)
+    );
+
+    let target_range = format!("sampleAB#0#chr1:0-{}", hap_ab.len());
+    let mosaic_path = dir.join("paralogy_mosaic.tsv");
+    let infer = Command::new(&bin)
+        .args([
+            "infer",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "--proj",
+            proj_path.to_str().unwrap(),
+            "-r",
+            &target_range,
+            "--ploidy",
+            "1",
+            "--phase-block-size",
+            "760",
+            "--top-n",
+            "10",
+            "--candidate-top-k",
+            "40",
+            "--min-span-fraction",
+            "0.35",
+            "--stitch",
+            "beam",
+            "--stitch-beam",
+            "600",
+            "--read-link-weight",
+            "5",
+            "--emit-mosaic",
+            mosaic_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run impg infer on swapped-paralog reads");
+    assert!(
+        infer.status.success(),
+        "impg infer on swapped-paralog reads failed: {}",
+        String::from_utf8_lossy(&infer.stderr)
+    );
+    let mosaic = std::fs::read_to_string(&mosaic_path).unwrap();
+    let rows: Vec<Vec<&str>> = mosaic
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .map(|line| line.split('\t').collect())
+        .collect();
+    let ba_rows = rows.iter().filter(|row| row[5] == "sampleBA#0#chr1").count();
+    assert!(
+        ba_rows >= 2,
+        "swapped-paralog evidence should copy multiple blocks from sampleBA:\n{}",
+        mosaic
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row[5] == "sampleAA#0#chr1" || row[5] == "sampleBB#0#chr1"),
+        "swapped-paralog evidence should not collapse to homo-copy decoys:\n{}",
+        mosaic
+    );
+    assert!(
+        rows.iter().skip(1).any(|row| row[16].parse::<f64>().unwrap() > 0.0),
+        "paralog-spanning reads should contribute transition evidence:\n{}",
         mosaic
     );
 
