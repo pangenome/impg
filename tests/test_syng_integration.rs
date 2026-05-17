@@ -967,14 +967,14 @@ fn test_syng_map_cli_gaf_and_paf() {
 }
 
 #[test]
-fn test_syng_genotype_cos_packbin_heterozygote() {
+fn test_syng_genotype_cos_cli_permutations() {
     let _guard = lock_syng();
     let Some(bin) = impg_binary() else {
         eprintln!("Skipping: impg binary not built");
         return;
     };
 
-    let dir = std::env::temp_dir().join("impg_test_syng_genotype_cos");
+    let dir = std::env::temp_dir().join("impg_test_syng_genotype_cos_permutations");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -1065,83 +1065,180 @@ fn test_syng_genotype_cos_packbin_heterozygote() {
         String::from_utf8_lossy(&map.stderr)
     );
 
-    let gt = Command::new(&bin)
+    let pack_path = dir.join("sample.pack.tsv");
+    let map_pack = Command::new(&bin)
         .args([
-            "genotype",
-            "cos",
+            "map",
             "-a",
             idx_prefix.to_str().unwrap(),
-            "-p",
-            packbin_path.to_str().unwrap(),
-            "-r",
-            "sampleA#0#chr1:0-2100",
-            "--top-n",
-            "3",
-            "--candidate-top-k",
-            "10",
+            "-q",
+            reads_path.to_str().unwrap(),
+            "-o",
+            "pack",
+            "-O",
+            pack_path.to_str().unwrap(),
             "--min-anchors",
             "2",
-            "--min-span-fraction",
-            "0.7",
         ])
         .output()
-        .expect("failed to run impg genotype cos");
+        .expect("failed to run impg map -o pack");
     assert!(
-        gt.status.success(),
-        "impg genotype cos failed: {}",
-        String::from_utf8_lossy(&gt.stderr)
-    );
-    let gt_stdout = String::from_utf8_lossy(&gt.stdout);
-    let top = gt_stdout
-        .lines()
-        .find(|line| !line.starts_with('#') && !line.trim().is_empty())
-        .expect("expected at least one COSIGT result row");
-    let fields: Vec<&str> = top.split('\t').collect();
-    assert!(
-        fields.len() >= 12,
-        "COSIGT row should have at least 12 fields: {}",
-        top
-    );
-    assert_eq!(fields[0], "1");
-    assert_eq!(fields[1], "cos");
-    assert_eq!(fields[2], "2");
-    let similarity = fields[3].parse::<f64>().unwrap();
-    assert!(
-        similarity > 0.99,
-        "expected near-perfect heterozygous COSIGT score, got {}\n{}",
-        similarity,
-        gt_stdout
-    );
-    assert!(
-        fields[8].contains("sampleA#0#chr1") && fields[8].contains("sampleB#0#chr1"),
-        "top COSIGT haplotypes should contain both haplotypes, got:\n{}",
-        gt_stdout
+        map_pack.status.success(),
+        "impg map -o pack failed: {}",
+        String::from_utf8_lossy(&map_pack.stderr)
     );
 
-    let gt_alias = Command::new(&bin)
-        .args([
-            "gt",
-            "cosigt",
-            "-a",
-            idx_prefix.to_str().unwrap(),
-            "-p",
-            packbin_path.to_str().unwrap(),
-            "-r",
-            "sampleA#0#chr1:0-2100",
-            "--top-n",
-            "1",
-            "--candidate-top-k",
-            "10",
-            "--min-span-fraction",
-            "0.7",
-        ])
+    let genotype_help = Command::new(&bin)
+        .args(["genotype", "--help"])
         .output()
-        .expect("failed to run impg gt cosigt");
+        .expect("failed to run impg genotype --help");
+    assert!(genotype_help.status.success());
+    let genotype_help_stdout = String::from_utf8_lossy(&genotype_help.stdout);
     assert!(
-        gt_alias.status.success(),
-        "impg gt cosigt alias failed: {}",
-        String::from_utf8_lossy(&gt_alias.stderr)
+        genotype_help_stdout.contains("  cos  "),
+        "genotype help should list cos:\n{}",
+        genotype_help_stdout
     );
+    assert!(
+        !genotype_help_stdout.contains("cosigt"),
+        "genotype help should not list the cosigt alias:\n{}",
+        genotype_help_stdout
+    );
+
+    let gt_help = Command::new(&bin)
+        .args(["gt", "--help"])
+        .output()
+        .expect("failed to run impg gt --help");
+    assert!(gt_help.status.success());
+    let gt_help_stdout = String::from_utf8_lossy(&gt_help.stdout);
+    assert!(
+        gt_help_stdout.contains("  cos  "),
+        "gt help should list cos:\n{}",
+        gt_help_stdout
+    );
+    assert!(
+        !gt_help_stdout.contains("cosigt"),
+        "gt help should not list the cosigt alias:\n{}",
+        gt_help_stdout
+    );
+
+    let command_roots = ["genotype", "gt"];
+    let methods = ["cos", "cosigt"];
+    let candidate_modes = ["spanning", "overlapping"];
+    let packs = [
+        ("pack", pack_path.as_path()),
+        ("packbin", packbin_path.as_path()),
+    ];
+    let mut expected_by_pack_mode: std::collections::BTreeMap<(String, String), String> =
+        std::collections::BTreeMap::new();
+    let mut checked = 0usize;
+
+    for root in command_roots {
+        for method in methods {
+            for (pack_label, pack_path) in packs {
+                for candidate_mode in candidate_modes {
+                    checked += 1;
+                    let output = Command::new(&bin)
+                        .args([
+                            root,
+                            method,
+                            "-a",
+                            idx_prefix.to_str().unwrap(),
+                            "-p",
+                            pack_path.to_str().unwrap(),
+                            "-r",
+                            "sampleA#0#chr1:0-2100",
+                            "--candidate-mode",
+                            candidate_mode,
+                            "--top-n",
+                            "3",
+                            "--candidate-top-k",
+                            "10",
+                            "--min-anchors",
+                            "2",
+                            "--min-span-fraction",
+                            "0.7",
+                        ])
+                        .output()
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "failed to run impg {} {} with {} {}: {}",
+                                root, method, pack_label, candidate_mode, e
+                            )
+                        });
+                    assert!(
+                        output.status.success(),
+                        "impg {} {} failed with {} {}: {}",
+                        root,
+                        method,
+                        pack_label,
+                        candidate_mode,
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+
+                    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                    assert!(stdout.contains("#impg genotype cos"), "{}", stdout);
+                    assert!(stdout.contains("#method\tcos"), "{}", stdout);
+                    assert!(stdout.contains("#metric\tcosine"), "{}", stdout);
+                    assert!(stdout.contains("#alias\tcosigt"), "{}", stdout);
+                    assert!(
+                        stdout.contains(&format!(
+                            "#candidate_mode\t{}",
+                            if candidate_mode == "spanning" {
+                                "Spanning"
+                            } else {
+                                "Overlapping"
+                            }
+                        )),
+                        "{}",
+                        stdout
+                    );
+
+                    let top = stdout
+                        .lines()
+                        .find(|line| !line.starts_with('#') && !line.trim().is_empty())
+                        .expect("expected at least one cosine genotype result row");
+                    let fields: Vec<&str> = top.split('\t').collect();
+                    assert!(
+                        fields.len() >= 12,
+                        "cos genotype row should have at least 12 fields: {}",
+                        top
+                    );
+                    assert_eq!(fields[0], "1");
+                    assert_eq!(fields[1], "cos");
+                    assert_eq!(fields[2], "2");
+
+                    if candidate_mode == "spanning" {
+                        let similarity = fields[3].parse::<f64>().unwrap();
+                        assert!(
+                            similarity > 0.99,
+                            "expected near-perfect heterozygous cosine score, got {}\n{}",
+                            similarity,
+                            stdout
+                        );
+                        assert!(
+                            fields[8].contains("sampleA#0#chr1")
+                                && fields[8].contains("sampleB#0#chr1"),
+                            "top spanning genotype should contain both haplotypes, got:\n{}",
+                            stdout
+                        );
+                    }
+
+                    let key = (pack_label.to_string(), candidate_mode.to_string());
+                    if let Some(expected) = expected_by_pack_mode.get(&key) {
+                        assert_eq!(
+                            &stdout, expected,
+                            "{} {} should match the first {} {} output",
+                            root, method, pack_label, candidate_mode
+                        );
+                    } else {
+                        expected_by_pack_mode.insert(key, stdout);
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(checked, 16, "expected to exercise the full genotype CLI matrix");
 
     std::fs::remove_dir_all(&dir).ok();
 }
