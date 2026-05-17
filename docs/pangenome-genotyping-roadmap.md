@@ -19,6 +19,44 @@ panel sequences / pangenome graph
 
 Syng is the first scalable backend. It is not the only backend.
 
+## Sequence Namespace
+
+The coordinate authority is a single namespace of named source sequences:
+
+```text
+source_sequence_id : [0, source_length)
+```
+
+Those source sequences may be chromosome-length assemblies, contigs, scaffolds,
+fragments, reads, partial assemblies, pooled consensus sequences, or other
+collection members. Graphs, GBWTs, syng indexes, alignments, packs, local
+renders, and inferred mosaics are all views over this sequence coordinate
+space.
+
+This is the core synthesis: IMPG is a population-scale genotyping and
+translation engine over source sequence coordinates. Homology graphs describe
+relationships among those sequences; they do not replace the source namespace.
+
+## Path Identity And Pan-SN
+
+All backend and render work must preserve path identity. When source sequences
+use Pan-SN names, the structured path identity is:
+
+```text
+sample#haplotype#contig
+```
+
+Every candidate interval, rendered graph path, GBWT path, evidence projection,
+genotype result, and inferred mosaic segment must be able to recover the source
+sequence id, sample, haplotype, contig, full path name, and source interval when
+those fields exist. Non-Pan-SN names should be supported as explicit unparsed
+source sequence names, but they must not be silently interpreted as biological
+sample/haplotype metadata.
+
+This is a scaling requirement, not just output formatting. The copying model
+needs stable haplotype identity, cohort outputs need sample grouping, and local
+graph renders need a compact translation back to source panel paths.
+
 ## Core Abstractions
 
 The central invariant is that every backend must expose the same small set of
@@ -323,6 +361,12 @@ For C4/C4A/C4B-like loci and other structurally complex regions:
 
 This lets us keep the whole-genome index implicit while using explicit local
 graphs only where they add value.
+
+The render and translation layer is described in
+[`render-gbz-translation-design.md`](render-gbz-translation-design.md). That
+document is the implementation anchor for Pan-SN-aware GBZ-style bundles,
+succinct translation tables, syng-native renders, local pggb/seqwish renders,
+and tiled whole-genome rendering.
 
 ## Implementation Phases
 

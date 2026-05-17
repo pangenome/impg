@@ -252,3 +252,6 @@ as well as transition scoring.
 The broader roadmap for turning this into a backend-neutral pangenome genotyping
 and phased genome inference system is in
 [`pangenome-genotyping-roadmap.md`](pangenome-genotyping-roadmap.md).
+The GBZ-style render bundle, translation layer, and Pan-SN path identity
+requirements are described in
+[`render-gbz-translation-design.md`](render-gbz-translation-design.md).
