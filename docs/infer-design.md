@@ -235,7 +235,16 @@ Tests should cover:
 - CNV/repeated-syncmer paths where a duplicated-copy haplotype creates repeated
   nodes in read GAF walks and must not collapse into a single-copy or unrelated
   allele
+- triplicated copy-number paths where three-copy evidence beats one-copy,
+  two-copy, and unrelated triplicated decoys
+- nested insertion+deletion haplotypes under sparse noisy reads
+- swapped paralogous-copy haplotypes where read links must avoid collapsing to
+  homo-copy decoys
 
 The synthetic graphs are not substitutes for real population graph validation.
-They should progressively add SNPs, indels, nested SVs, repeats/paralogy,
-coverage variation, sequencing error, and recombination/mosaic samples.
+They should progressively add real HPRCv2 truth-backed validation, richer
+coverage gradients, sequencing error models, and orientation-confounded
+inversion/paralogy decoys. The latter is a known model pressure point because
+the current pack score is mostly unoriented syncmer-node support; fully
+resolving it likely requires using oriented read-walk evidence in local emission
+as well as transition scoring.
