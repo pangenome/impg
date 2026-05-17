@@ -25,7 +25,13 @@ pub struct HaplotypeCandidate {
     pub anchors: usize,
     pub query_span_fraction: f64,
     pub features: Vec<(u32, u64)>,
+    pub oriented_links: Vec<((i32, i32), u64)>,
     single_similarity: f64,
+}
+
+struct CandidateFeatures {
+    unoriented: Vec<(u32, u64)>,
+    oriented_links: Vec<((i32, i32), u64)>,
 }
 
 #[derive(Debug)]
@@ -119,7 +125,7 @@ fn syng_candidate_features(
     path_name: &str,
     start: u64,
     end: u64,
-) -> io::Result<Vec<(u32, u64)>> {
+) -> io::Result<CandidateFeatures> {
     let path_idx = syng_index
         .name_map
         .name_to_path
@@ -135,12 +141,25 @@ fn syng_candidate_features(
             )
         })? as usize;
     let mut counts: FxHashMap<u32, u64> = FxHashMap::default();
+    let mut oriented_link_counts: FxHashMap<(i32, i32), u64> = FxHashMap::default();
+    let mut prev = None;
     for (signed_node, _) in syng_index.walk_path_range(path_idx, start, end)? {
         *counts.entry(signed_node.unsigned_abs()).or_insert(0) += 1;
+        if let Some(prev_node) = prev {
+            *oriented_link_counts
+                .entry((prev_node, signed_node))
+                .or_insert(0) += 1;
+        }
+        prev = Some(signed_node);
     }
-    let mut features: Vec<(u32, u64)> = counts.into_iter().collect();
-    features.sort_unstable_by_key(|&(feature_id, _)| feature_id);
-    Ok(features)
+    let mut unoriented: Vec<(u32, u64)> = counts.into_iter().collect();
+    unoriented.sort_unstable_by_key(|&(feature_id, _)| feature_id);
+    let mut oriented_links: Vec<((i32, i32), u64)> = oriented_link_counts.into_iter().collect();
+    oriented_links.sort_unstable_by_key(|&(feature_id, _)| feature_id);
+    Ok(CandidateFeatures {
+        unoriented,
+        oriented_links,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -175,7 +194,7 @@ fn collect_syng_candidates(
                     anchor_span_fraction(&hit.anchors, region_start, region_end, syncmer_len);
                 let features =
                     syng_candidate_features(syng_index, &hit.genome, hit.start, hit.end)?;
-                if features.is_empty() {
+                if features.unoriented.is_empty() {
                     continue;
                 }
                 candidates.push(HaplotypeCandidate {
@@ -185,7 +204,8 @@ fn collect_syng_candidates(
                     strand: hit.strand,
                     anchors: hit.anchors.len(),
                     query_span_fraction,
-                    features,
+                    features: features.unoriented,
+                    oriented_links: features.oriented_links,
                     single_similarity: 0.0,
                 });
             }
@@ -227,7 +247,7 @@ fn collect_syng_candidates(
                 }
                 let features =
                     syng_candidate_features(syng_index, &path_name, group.start, group.end)?;
-                if features.is_empty() {
+                if features.unoriented.is_empty() {
                     continue;
                 }
                 candidates.push(HaplotypeCandidate {
@@ -237,7 +257,8 @@ fn collect_syng_candidates(
                     strand,
                     anchors: group.anchors.len(),
                     query_span_fraction,
-                    features,
+                    features: features.unoriented,
+                    oriented_links: features.oriented_links,
                     single_similarity: 0.0,
                 });
             }

@@ -86,6 +86,7 @@ struct OrderedState {
     result_idx: usize,
     candidates: Vec<usize>,
     emission: f64,
+    read_emissions: Vec<CandidateEmissionScore>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -102,11 +103,19 @@ struct LinkEvidence {
 
 #[derive(Debug, Default)]
 struct ReadWalkEvidence {
+    candidate_support: FxHashMap<CandidateKey, LinkEvidence>,
     links: FxHashMap<(CandidateKey, CandidateKey), LinkEvidence>,
     records: u64,
     records_with_candidate_hits: u64,
     candidate_hits: u64,
     linked_read_pairs: u64,
+}
+
+#[derive(Debug, Default, Clone)]
+struct CandidateEmissionScore {
+    read_weight: f64,
+    anchor_weight: f64,
+    reward: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -544,17 +553,57 @@ fn unique_ordered_permutations(values: &[usize]) -> Vec<Vec<usize>> {
     out
 }
 
-fn ordered_states(call_set: &LocalCallSet) -> Vec<OrderedState> {
+fn candidate_read_emission(
+    read_evidence: Option<&ReadWalkEvidence>,
+    key: CandidateKey,
+    read_link_weight: f64,
+) -> CandidateEmissionScore {
+    let support = read_evidence
+        .and_then(|evidence| evidence.candidate_support.get(&key))
+        .cloned()
+        .unwrap_or_default();
+    CandidateEmissionScore {
+        read_weight: support.read_weight,
+        anchor_weight: support.anchor_weight,
+        reward: read_link_reward(support.anchor_weight, read_link_weight),
+    }
+}
+
+fn ordered_states(
+    call_idx: usize,
+    call_set: &LocalCallSet,
+    config: &InferConfig<'_>,
+    read_evidence: Option<&ReadWalkEvidence>,
+) -> Vec<OrderedState> {
     let Some(output) = &call_set.output else {
         return Vec::new();
     };
     let mut states = Vec::new();
     for (result_idx, result) in output.results.iter().enumerate() {
         for candidates in unique_ordered_permutations(&result.combination) {
+            let mut read_emissions = Vec::with_capacity(candidates.len());
+            let mut read_emission_reward = 0.0;
+            let mut rewarded_candidates = Vec::new();
+            for &candidate_idx in &candidates {
+                let emission = candidate_read_emission(
+                    read_evidence,
+                    CandidateKey {
+                        call_idx,
+                        candidate_idx,
+                    },
+                    config.read_link_weight,
+                );
+                if !rewarded_candidates.contains(&candidate_idx) {
+                    read_emission_reward += emission.reward;
+                    rewarded_candidates.push(candidate_idx);
+                }
+                read_emissions.push(emission);
+            }
             states.push(OrderedState {
                 result_idx,
                 candidates,
-                emission: result.qv,
+                emission: result.qv + read_emission_reward,
+                read_emissions,
             });
         }
     }
@@ -571,12 +620,13 @@ fn start_transition() -> PhaseTransitionScore {
     }
 }
 
-fn parse_gaf_path_nodes(path: &str, nodes: &mut Vec<u32>) -> io::Result<()> {
+fn parse_gaf_path_nodes(path: &str, nodes: &mut Vec<i32>) -> io::Result<()> {
     nodes.clear();
     let bytes = path.as_bytes();
     let mut i = 0usize;
     while i < bytes.len() {
-        if bytes[i] != b'>' && bytes[i] != b'<' {
+        let orientation = bytes[i];
+        if orientation != b'>' && orientation != b'<' {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("GAF path contains non-orientation byte at offset {i}: {path}"),
@@ -593,13 +643,19 @@ fn parse_gaf_path_nodes(path: &str, nodes: &mut Vec<u32>) -> io::Result<()> {
                 format!("GAF path step is missing numeric syncmer node: {path}"),
             ));
         }
-        let node = path[start..i].parse::<u32>().map_err(|e| {
+        let node = path[start..i].parse::<i32>().map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("invalid syncmer node in GAF path '{path}': {e}"),
             )
         })?;
-        nodes.push(node);
+        if node <= 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("GAF path step must be a positive syncmer node: {path}"),
+            ));
+        }
+        nodes.push(if orientation == b'<' { -node } else { node });
     }
     Ok(())
 }
@@ -629,11 +685,6 @@ fn add_read_links(evidence: &mut ReadWalkEvidence, hits_by_call: &[(usize, Vec<(
     if hits_by_call.len() < 2 {
         return;
     }
-    evidence.records_with_candidate_hits += 1;
-    evidence.candidate_hits += hits_by_call
-        .iter()
-        .map(|(_, hits)| hits.len() as u64)
-        .sum::<u64>();
 
     for adjacent in hits_by_call.windows(2) {
         let (prev_call_idx, prev_hits) = &adjacent[0];
@@ -661,12 +712,55 @@ fn add_read_links(evidence: &mut ReadWalkEvidence, hits_by_call: &[(usize, Vec<(
     }
 }
 
+fn add_candidate_support(
+    evidence: &mut ReadWalkEvidence,
+    hits_by_call: &[(usize, Vec<(usize, u32)>)],
+) {
+    if hits_by_call.is_empty() {
+        return;
+    }
+    evidence.records_with_candidate_hits += 1;
+    evidence.candidate_hits += hits_by_call
+        .iter()
+        .map(|(_, hits)| hits.len() as u64)
+        .sum::<u64>();
+
+    for (call_idx, hits) in hits_by_call {
+        if hits.is_empty() {
+            continue;
+        }
+        let denominator = hits.len() as f64;
+        for &(candidate_idx, count) in hits {
+            let key = CandidateKey {
+                call_idx: *call_idx,
+                candidate_idx,
+            };
+            let entry = evidence.candidate_support.entry(key).or_default();
+            entry.read_weight += 1.0 / denominator;
+            entry.anchor_weight += f64::from(count) / denominator;
+        }
+    }
+}
+
+fn add_candidate_hits_from_map<K: Copy + Eq + std::hash::Hash>(
+    counts: &mut FxHashMap<CandidateKey, u32>,
+    feature_to_candidates: &FxHashMap<K, Vec<CandidateKey>>,
+    feature: K,
+) {
+    if let Some(candidate_keys) = feature_to_candidates.get(&feature) {
+        for &key in candidate_keys {
+            *counts.entry(key).or_insert(0) += 1;
+        }
+    }
+}
+
 fn build_read_walk_evidence(
     call_sets: &[LocalCallSet],
     gaf_path: &str,
     min_read_link_anchors: usize,
 ) -> io::Result<ReadWalkEvidence> {
     let mut node_to_candidates: FxHashMap<u32, Vec<CandidateKey>> = FxHashMap::default();
+    let mut link_to_candidates: FxHashMap<(i32, i32), Vec<CandidateKey>> = FxHashMap::default();
     for (call_idx, call_set) in call_sets.iter().enumerate() {
         let Some(output) = &call_set.output else {
             continue;
@@ -675,6 +769,15 @@ fn build_read_walk_evidence(
             for &(node_id, _) in &candidate.features {
                 node_to_candidates
                     .entry(node_id)
+                    .or_default()
+                    .push(CandidateKey {
+                        call_idx,
+                        candidate_idx,
+                    });
+            }
+            for &(link, _) in &candidate.oriented_links {
+                link_to_candidates
+                    .entry(link)
                     .or_default()
                     .push(CandidateKey {
                         call_idx,
@@ -710,15 +813,31 @@ fn build_read_walk_evidence(
             ));
         }
         parse_gaf_path_nodes(fields[5], &mut nodes)?;
-        let mut counts: FxHashMap<CandidateKey, u32> = FxHashMap::default();
-        for &node_id in &nodes {
-            if let Some(candidate_keys) = node_to_candidates.get(&node_id) {
-                for &key in candidate_keys {
-                    *counts.entry(key).or_insert(0) += 1;
-                }
+        let mut node_counts: FxHashMap<CandidateKey, u32> = FxHashMap::default();
+        for &signed_node in &nodes {
+            add_candidate_hits_from_map(
+                &mut node_counts,
+                &node_to_candidates,
+                signed_node.unsigned_abs(),
+            );
+        }
+        let hits_by_call = sorted_candidate_hits(node_counts, min_read_link_anchors);
+
+        let mut link_counts: FxHashMap<CandidateKey, u32> = FxHashMap::default();
+        for pair in nodes.windows(2) {
+            let forward = (pair[0], pair[1]);
+            let reverse = (-pair[1], -pair[0]);
+            add_candidate_hits_from_map(&mut link_counts, &link_to_candidates, forward);
+            if reverse != forward {
+                add_candidate_hits_from_map(&mut link_counts, &link_to_candidates, reverse);
             }
         }
-        let hits_by_call = sorted_candidate_hits(counts, min_read_link_anchors);
+        let link_hits_by_call = sorted_candidate_hits(link_counts, min_read_link_anchors);
+        if link_hits_by_call.is_empty() {
+            add_candidate_support(&mut evidence, &hits_by_call);
+        } else {
+            add_candidate_support(&mut evidence, &link_hits_by_call);
+        }
         add_read_links(&mut evidence, &hits_by_call);
     }
 
@@ -817,18 +936,13 @@ fn stitch_mosaic(
     config: &InferConfig<'_>,
     read_evidence: Option<&ReadWalkEvidence>,
 ) -> io::Result<Option<MosaicPath>> {
-    let indexed_states: Vec<(usize, Vec<OrderedState>)> = call_sets
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, call_set)| {
-            let states = ordered_states(call_set);
-            if states.is_empty() {
-                None
-            } else {
-                Some((idx, states))
-            }
-        })
-        .collect();
+    let mut indexed_states: Vec<(usize, Vec<OrderedState>)> = Vec::new();
+    for (idx, call_set) in call_sets.iter().enumerate() {
+        let states = ordered_states(idx, call_set, config, read_evidence);
+        if !states.is_empty() {
+            indexed_states.push((idx, states));
+        }
+    }
     if indexed_states.is_empty() {
         return Ok(None);
     }
@@ -895,13 +1009,21 @@ fn transition_for_phase(step: &MosaicStep, phase: usize) -> PhaseTransitionScore
         })
 }
 
+fn read_emission_for_phase(step: &MosaicStep, phase: usize) -> CandidateEmissionScore {
+    step.state
+        .read_emissions
+        .get(phase)
+        .cloned()
+        .unwrap_or_default()
+}
+
 fn write_mosaic_tsv(path: &str, mosaic: &MosaicPath, call_sets: &[LocalCallSet]) -> io::Result<()> {
     let mut out = BufWriter::new(File::create(path)?);
     writeln!(out, "#impg infer mosaic")?;
     writeln!(out, "#score\t{:.6}", mosaic.score)?;
     writeln!(
         out,
-        "#phase\tpartition\tchrom\tstart\tend\tpath\tpath_start\tpath_end\tstrand\tlocal_rank\tlocal_similarity\tlocal_qv\ttransition_kind\ttransition_cost\tread_link_reads\tread_link_anchors\tread_link_reward"
+        "#phase\tpartition\tchrom\tstart\tend\tpath\tpath_start\tpath_end\tstrand\tlocal_rank\tlocal_similarity\tlocal_qv\ttransition_kind\ttransition_cost\tread_link_reads\tread_link_anchors\tread_link_reward\tread_emission_reads\tread_emission_anchors\tread_emission_reward"
     )?;
     for step in &mosaic.steps {
         let call_set = &call_sets[step.call_idx];
@@ -910,9 +1032,10 @@ fn write_mosaic_tsv(path: &str, mosaic: &MosaicPath, call_sets: &[LocalCallSet])
         for (phase, &candidate_idx) in step.state.candidates.iter().enumerate() {
             let candidate = &output.candidates[candidate_idx];
             let transition = transition_for_phase(step, phase);
+            let read_emission = read_emission_for_phase(step, phase);
             writeln!(
                 out,
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.9}\t{:.3}\t{}\t{:.3}\t{:.3}\t{:.3}\t{:.3}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.9}\t{:.3}\t{}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}",
                 phase,
                 call_set.target.partition,
                 call_set.target.chrom,
@@ -930,6 +1053,9 @@ fn write_mosaic_tsv(path: &str, mosaic: &MosaicPath, call_sets: &[LocalCallSet])
                 transition.read_link_reads,
                 transition.read_link_anchors,
                 transition.read_link_reward,
+                read_emission.read_weight,
+                read_emission.anchor_weight,
+                read_emission.reward,
             )?;
         }
     }
@@ -1087,11 +1213,12 @@ pub fn run_syng_pack_infer<W: Write>(out: &mut W, config: &InferConfig<'_>) -> i
             let evidence =
                 build_read_walk_evidence(&call_sets, gaf_path, config.min_read_link_anchors)?;
             info!(
-                "Loaded read-walk evidence from {}: {} GAF records, {} records with candidate hits, {} candidate hits, {} linked candidate pairs, {} scored transitions",
+                "Loaded read-walk evidence from {}: {} GAF records, {} records with candidate hits, {} candidate hits, {} local candidate scores, {} linked candidate pairs, {} scored transitions",
                 gaf_path,
                 evidence.records,
                 evidence.records_with_candidate_hits,
                 evidence.candidate_hits,
+                evidence.candidate_support.len(),
                 evidence.linked_read_pairs,
                 evidence.links.len()
             );
