@@ -357,6 +357,22 @@ reference interval. Use `--candidate-mode overlapping` to score each gathered
 candidate interval independently. See `docs/genotype-architecture.md` for the
 graph-feature evidence model this is built around.
 
+`impg infer` lifts the same pack/cos scoring path over ranges or partitions and
+emits allele calls over genomic intervals:
+
+```bash
+impg infer -a hprc.syng -p sample.packbin \
+  --partitions partitions.bed --top-n 1 -O sample.infer.tsv.zst
+```
+
+Inputs choose the operation mode: `-r/--target-range` types one range,
+`--target-bed` types a BED-like range list, `--partitions` consumes ready
+`impg partition` BED output, and omitting all three runs internal syng partition
+discovery, which requires `-d/--merge-distance`. The first evidence backend is
+native `pack`/`packbin` from `impg map`; the design intentionally keeps BWA/local
+realignment evidence as future pack-producing backends. See
+`docs/infer-design.md`.
+
 `-r` splits on the **last** `:`. Path names from `odgi paths -f`
 already contain coordinates (`grch38#chr6:31972046-32055647`), so a
 whole-sequence query still needs an explicit trailing sub-range

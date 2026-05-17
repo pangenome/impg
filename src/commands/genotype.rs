@@ -60,6 +60,32 @@ pub struct SyngCosigtConfig<'a> {
     pub min_span_fraction: f64,
 }
 
+pub struct SyngCosigtQuery<'a> {
+    pub target_range: &'a str,
+    pub candidate_mode: CandidateMode,
+    pub ploidy: usize,
+    pub top_n: usize,
+    pub candidate_top_k: usize,
+    pub max_combinations: u64,
+    pub syng_padding: u64,
+    pub syng_extension: u64,
+    pub min_anchors: usize,
+    pub min_span_fraction: f64,
+}
+
+pub struct SyngCosigtOutput {
+    pub region_name: String,
+    pub candidate_mode: CandidateMode,
+    pub ploidy: usize,
+    pub candidates: Vec<HaplotypeCandidate>,
+    pub selected_features: Vec<u32>,
+    pub pack_nonzero_nodes: u64,
+    pub pack_universe_nodes: Option<u64>,
+    pub pack_retained_records: Option<u64>,
+    pub pack_syncmer_anchors: Option<u64>,
+    pub results: Vec<CosigtResult>,
+}
+
 fn anchor_span_fraction(
     anchors: &[syng::Anchor],
     region_start: u64,
@@ -424,19 +450,44 @@ fn format_candidate_region(candidate: &HaplotypeCandidate) -> String {
 }
 
 pub fn run_syng_cosigt<W: Write>(out: &mut W, config: &SyngCosigtConfig<'_>) -> io::Result<()> {
-    if config.ploidy == 0 {
+    info!("Loading syng index from prefix: {}", config.syng_prefix);
+    let syng_index = syng::SyngIndex::load(config.syng_prefix, syng::SyncmerParams::default())?;
+    info!("Loading sample pack coverage from {}", config.pack_path);
+    let coverage = pack::read(config.pack_path)?;
+    let query = SyngCosigtQuery {
+        target_range: config.target_range,
+        candidate_mode: config.candidate_mode,
+        ploidy: config.ploidy,
+        top_n: config.top_n,
+        candidate_top_k: config.candidate_top_k,
+        max_combinations: config.max_combinations,
+        syng_padding: config.syng_padding,
+        syng_extension: config.syng_extension,
+        min_anchors: config.min_anchors,
+        min_span_fraction: config.min_span_fraction,
+    };
+    let result = compute_syng_cosigt(&syng_index, &coverage, &query)?;
+    write_syng_cosigt_output(out, &result)
+}
+
+pub fn compute_syng_cosigt(
+    syng_index: &syng::SyngIndex,
+    coverage: &pack::Coverage,
+    query: &SyngCosigtQuery<'_>,
+) -> io::Result<SyngCosigtOutput> {
+    if query.ploidy == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "--ploidy must be greater than 0",
         ));
     }
-    if config.top_n == 0 {
+    if query.top_n == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "--top-n must be greater than 0",
         ));
     }
-    if !(0.0..=1.0).contains(&config.min_span_fraction) {
+    if !(0.0..=1.0).contains(&query.min_span_fraction) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "--min-span-fraction must be between 0 and 1",
@@ -444,34 +495,29 @@ pub fn run_syng_cosigt<W: Write>(out: &mut W, config: &SyngCosigtConfig<'_>) -> 
     }
 
     let (target_name, (range_start, range_end), region_name) =
-        partition::parse_target_range(config.target_range)?;
+        partition::parse_target_range(query.target_range)?;
     if range_start < 0 || range_end <= range_start {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
                 "target range must be non-empty with non-negative coordinates: {}",
-                config.target_range
+                query.target_range
             ),
         ));
     }
     let region_start = range_start as u64;
     let region_end = range_end as u64;
 
-    info!("Loading syng index from prefix: {}", config.syng_prefix);
-    let syng_index = syng::SyngIndex::load(config.syng_prefix, syng::SyncmerParams::default())?;
-    info!("Loading sample pack coverage from {}", config.pack_path);
-    let coverage = pack::read(config.pack_path)?;
-
     let mut candidates = collect_syng_candidates(
-        &syng_index,
+        syng_index,
         &target_name,
         region_start,
         region_end,
-        config.syng_padding,
-        config.syng_extension,
-        config.candidate_mode,
-        config.min_anchors,
-        config.min_span_fraction,
+        query.syng_padding,
+        query.syng_extension,
+        query.candidate_mode,
+        query.min_anchors,
+        query.min_span_fraction,
     )?;
     if candidates.is_empty() {
         return Err(io::Error::new(
@@ -483,67 +529,85 @@ pub fn run_syng_cosigt<W: Write>(out: &mut W, config: &SyngCosigtConfig<'_>) -> 
     let (results, selected_features) = rank_cosigt(
         &mut candidates,
         &coverage.counts,
-        config.ploidy,
-        config.top_n,
-        config.candidate_top_k,
-        config.max_combinations,
+        query.ploidy,
+        query.top_n,
+        query.candidate_top_k,
+        query.max_combinations,
     )?;
 
+    Ok(SyngCosigtOutput {
+        region_name,
+        candidate_mode: query.candidate_mode,
+        ploidy: query.ploidy,
+        candidates,
+        selected_features,
+        pack_nonzero_nodes: coverage.nonzero_nodes,
+        pack_universe_nodes: coverage.universe_nodes,
+        pack_retained_records: coverage.retained_records,
+        pack_syncmer_anchors: coverage.syncmer_anchors,
+        results,
+    })
+}
+
+pub fn write_syng_cosigt_output<W: Write>(
+    out: &mut W,
+    result: &SyngCosigtOutput,
+) -> io::Result<()> {
     writeln!(out, "#impg genotype cos")?;
-    writeln!(out, "#region\t{}", region_name)?;
+    writeln!(out, "#region\t{}", result.region_name)?;
     writeln!(out, "#method\tcos")?;
     writeln!(out, "#metric\tcosine")?;
     writeln!(out, "#alias\tcosigt")?;
     writeln!(out, "#feature_space\tsyng-syncmer-node")?;
-    writeln!(out, "#candidate_mode\t{:?}", config.candidate_mode)?;
-    writeln!(out, "#ploidy\t{}", config.ploidy)?;
-    writeln!(out, "#candidates\t{}", candidates.len())?;
-    writeln!(out, "#locus_features\t{}", selected_features.len())?;
-    writeln!(out, "#pack_nonzero_nodes\t{}", coverage.nonzero_nodes)?;
-    if let Some(universe_nodes) = coverage.universe_nodes {
+    writeln!(out, "#candidate_mode\t{:?}", result.candidate_mode)?;
+    writeln!(out, "#ploidy\t{}", result.ploidy)?;
+    writeln!(out, "#candidates\t{}", result.candidates.len())?;
+    writeln!(out, "#locus_features\t{}", result.selected_features.len())?;
+    writeln!(out, "#pack_nonzero_nodes\t{}", result.pack_nonzero_nodes)?;
+    if let Some(universe_nodes) = result.pack_universe_nodes {
         writeln!(out, "#pack_universe_nodes\t{}", universe_nodes)?;
     }
-    if let Some(retained_records) = coverage.retained_records {
+    if let Some(retained_records) = result.pack_retained_records {
         writeln!(out, "#pack_retained_records\t{}", retained_records)?;
     }
-    if let Some(syncmer_anchors) = coverage.syncmer_anchors {
+    if let Some(syncmer_anchors) = result.pack_syncmer_anchors {
         writeln!(out, "#pack_syncmer_anchors\t{}", syncmer_anchors)?;
     }
     writeln!(
         out,
         "#rank\tmethod\tploidy\tsimilarity\tqv\tdot\tsample_norm\tgenotype_norm\thaplotypes\tregions\tcandidate_anchors\tcandidate_span_fractions"
     )?;
-    for (rank, result) in results.iter().enumerate() {
-        let haplotypes: Vec<&str> = result
+    for (rank, genotype_result) in result.results.iter().enumerate() {
+        let haplotypes: Vec<&str> = genotype_result
             .combination
             .iter()
-            .map(|&idx| candidates[idx].path_name.as_str())
+            .map(|&idx| result.candidates[idx].path_name.as_str())
             .collect();
-        let regions: Vec<String> = result
+        let regions: Vec<String> = genotype_result
             .combination
             .iter()
-            .map(|&idx| format_candidate_region(&candidates[idx]))
+            .map(|&idx| format_candidate_region(&result.candidates[idx]))
             .collect();
-        let anchors: Vec<String> = result
+        let anchors: Vec<String> = genotype_result
             .combination
             .iter()
-            .map(|&idx| candidates[idx].anchors.to_string())
+            .map(|&idx| result.candidates[idx].anchors.to_string())
             .collect();
-        let spans: Vec<String> = result
+        let spans: Vec<String> = genotype_result
             .combination
             .iter()
-            .map(|&idx| format!("{:.6}", candidates[idx].query_span_fraction))
+            .map(|&idx| format!("{:.6}", result.candidates[idx].query_span_fraction))
             .collect();
         writeln!(
             out,
             "{}\tcos\t{}\t{:.9}\t{:.3}\t{:.3}\t{:.6}\t{:.6}\t{}\t{}\t{}\t{}",
             rank + 1,
-            config.ploidy,
-            result.similarity,
-            result.qv,
-            result.dot,
-            result.sample_norm,
-            result.genotype_norm,
+            result.ploidy,
+            genotype_result.similarity,
+            genotype_result.qv,
+            genotype_result.dot,
+            genotype_result.sample_norm,
+            genotype_result.genotype_norm,
             haplotypes.join(","),
             regions.join(","),
             anchors.join(","),

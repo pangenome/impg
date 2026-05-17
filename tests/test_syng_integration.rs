@@ -1651,6 +1651,323 @@ fn test_syng_genotype_cos_short_read_simulation_calls_heterozygote() {
 }
 
 #[test]
+fn test_syng_infer_pack_partitions_and_discovery() {
+    let _guard = lock_syng();
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping: impg binary not built");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join("impg_test_syng_infer_pack");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let left = numeric_to_ascii(&make_sequence_numeric(900, 41));
+    let allele_a = numeric_to_ascii(&make_sequence_numeric(900, 42));
+    let allele_b = numeric_to_ascii(&make_sequence_numeric(900, 43));
+    let allele_c = numeric_to_ascii(&make_sequence_numeric(900, 44));
+    let right = numeric_to_ascii(&make_sequence_numeric(900, 45));
+
+    let mut hap_a = Vec::new();
+    hap_a.extend_from_slice(&left);
+    hap_a.extend_from_slice(&allele_a);
+    hap_a.extend_from_slice(&right);
+    let mut hap_b = Vec::new();
+    hap_b.extend_from_slice(&left);
+    hap_b.extend_from_slice(&allele_b);
+    hap_b.extend_from_slice(&right);
+    let mut hap_c = Vec::new();
+    hap_c.extend_from_slice(&left);
+    hap_c.extend_from_slice(&allele_c);
+    hap_c.extend_from_slice(&right);
+
+    let fasta_path = dir.join("index.fa");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        writeln!(f, ">sampleA#0#chr1").unwrap();
+        f.write_all(&hap_a).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleB#0#chr1").unwrap();
+        f.write_all(&hap_b).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleC#0#chr1").unwrap();
+        f.write_all(&hap_c).unwrap();
+        writeln!(f).unwrap();
+    }
+
+    let idx_prefix = dir.join("idx");
+    let build = Command::new(&bin)
+        .args([
+            "syng",
+            "-f",
+            fasta_path.to_str().unwrap(),
+            "-o",
+            idx_prefix.to_str().unwrap(),
+            "--position-sample-rate",
+            "1",
+        ])
+        .output()
+        .expect("failed to run impg syng");
+    assert!(
+        build.status.success(),
+        "impg syng failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let reads_path = dir.join("simulated_reads.fq");
+    {
+        let mut f = std::fs::File::create(&reads_path).unwrap();
+        write_tiled_fastq(&mut f, "hapA", &hap_a, 250, 25).unwrap();
+        write_tiled_fastq(&mut f, "hapB", &hap_b, 250, 25).unwrap();
+    }
+
+    let packbin_path = dir.join("sample.packbin");
+    let map = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            reads_path.to_str().unwrap(),
+            "-o",
+            "packbin",
+            "-O",
+            packbin_path.to_str().unwrap(),
+            "--pack-compression-level",
+            "3",
+            "--pack-block-size",
+            "64",
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o packbin");
+    assert!(
+        map.status.success(),
+        "impg map -o packbin failed: {}",
+        String::from_utf8_lossy(&map.stderr)
+    );
+
+    let target_range = format!("sampleA#0#chr1:0-{}", hap_a.len());
+    let infer_range = Command::new(&bin)
+        .args([
+            "infer",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-p",
+            packbin_path.to_str().unwrap(),
+            "-r",
+            &target_range,
+            "--top-n",
+            "2",
+            "--candidate-top-k",
+            "10",
+            "--min-span-fraction",
+            "0.8",
+        ])
+        .output()
+        .expect("failed to run impg infer -r");
+    assert!(
+        infer_range.status.success(),
+        "impg infer -r failed: {}",
+        String::from_utf8_lossy(&infer_range.stderr)
+    );
+    let infer_stdout = String::from_utf8_lossy(&infer_range.stdout);
+    assert!(infer_stdout.contains("#impg infer"), "{}", infer_stdout);
+    assert!(infer_stdout.contains("#score\tcos"), "{}", infer_stdout);
+    let first = infer_stdout
+        .lines()
+        .find(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .expect("expected infer result row");
+    let fields: Vec<&str> = first.split('\t').collect();
+    assert!(
+        fields.len() >= 14,
+        "infer row should have at least 14 fields: {}",
+        first
+    );
+    assert_eq!(fields[0], "1");
+    assert_eq!(fields[5], "cos");
+    assert_eq!(fields[6], "2");
+    assert_eq!(fields[13], "PASS");
+    assert!(
+        fields[9].contains("sampleA#0#chr1") && fields[9].contains("sampleB#0#chr1"),
+        "infer should call the simulated A/B diploid, got:\n{}",
+        infer_stdout
+    );
+    assert!(
+        !fields[9].contains("sampleC#0#chr1"),
+        "infer top call should not include the unsampled decoy, got:\n{}",
+        infer_stdout
+    );
+
+    let target_bed = dir.join("targets.bed");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&target_bed).unwrap();
+        writeln!(f, "sampleA#0#chr1\t0\t{}\twhole", hap_a.len()).unwrap();
+        writeln!(f, "sampleA#0#chr1\t900\t1800\tallele").unwrap();
+    }
+    let infer_bed_zst = dir.join("infer.bed.tsv.zst");
+    let infer_bed = Command::new(&bin)
+        .args([
+            "infer",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-p",
+            packbin_path.to_str().unwrap(),
+            "--target-bed",
+            target_bed.to_str().unwrap(),
+            "--top-n",
+            "1",
+            "--candidate-top-k",
+            "10",
+            "--min-span-fraction",
+            "0.7",
+            "-O",
+            infer_bed_zst.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run impg infer --target-bed");
+    assert!(
+        infer_bed.status.success(),
+        "impg infer --target-bed failed: {}",
+        String::from_utf8_lossy(&infer_bed.stderr)
+    );
+    assert!(
+        infer_bed.stdout.is_empty(),
+        "infer -O should write result rows to the file"
+    );
+    let mut decoder =
+        zstd::stream::read::Decoder::new(std::fs::File::open(&infer_bed_zst).unwrap()).unwrap();
+    let mut decoded = String::new();
+    {
+        use std::io::Read;
+        decoder.read_to_string(&mut decoded).unwrap();
+    }
+    let bed_rows: Vec<&str> = decoded
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .collect();
+    assert_eq!(bed_rows.len(), 2, "target BED top-n 1 should emit two rows");
+    assert!(bed_rows.iter().all(|row| row.ends_with("\tPASS")), "{}", decoded);
+
+    let partitions_path = dir.join("partitions.bed");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&partitions_path).unwrap();
+        writeln!(f, "sampleA#0#chr1\t0\t{}\tp0", hap_a.len()).unwrap();
+        writeln!(f, "sampleB#0#chr1\t0\t{}\tp0", hap_b.len()).unwrap();
+        writeln!(f, "sampleA#0#chr1\t900\t1800\tp1").unwrap();
+        writeln!(f, "sampleB#0#chr1\t900\t1800\tp1").unwrap();
+    }
+    let infer_partitions = Command::new(&bin)
+        .args([
+            "infer",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-p",
+            packbin_path.to_str().unwrap(),
+            "--partitions",
+            partitions_path.to_str().unwrap(),
+            "--top-n",
+            "1",
+            "--candidate-top-k",
+            "10",
+            "--min-span-fraction",
+            "0.7",
+        ])
+        .output()
+        .expect("failed to run impg infer --partitions");
+    assert!(
+        infer_partitions.status.success(),
+        "impg infer --partitions failed: {}",
+        String::from_utf8_lossy(&infer_partitions.stderr)
+    );
+    let partition_stdout = String::from_utf8_lossy(&infer_partitions.stdout);
+    let partition_rows: Vec<&str> = partition_stdout
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .collect();
+    assert_eq!(
+        partition_rows.len(),
+        2,
+        "ready partition BED should emit one top row per partition"
+    );
+    assert!(
+        partition_rows.iter().any(|row| row.split('\t').nth(1) == Some("p0")),
+        "{}",
+        partition_stdout
+    );
+    assert!(
+        partition_rows.iter().any(|row| row.split('\t').nth(1) == Some("p1")),
+        "{}",
+        partition_stdout
+    );
+
+    let no_d = Command::new(&bin)
+        .args([
+            "infer",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-p",
+            packbin_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run impg infer without target inputs");
+    assert!(
+        !no_d.status.success(),
+        "infer discovery without -d should fail"
+    );
+    assert!(
+        String::from_utf8_lossy(&no_d.stderr).contains("requires -d/--merge-distance"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&no_d.stderr)
+    );
+
+    let infer_discovery = Command::new(&bin)
+        .args([
+            "infer",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-p",
+            packbin_path.to_str().unwrap(),
+            "-w",
+            "1500",
+            "-d",
+            "100",
+            "--min-missing-size",
+            "100",
+            "--min-boundary-distance",
+            "100",
+            "--top-n",
+            "1",
+            "--candidate-top-k",
+            "10",
+            "--min-span-fraction",
+            "0.7",
+        ])
+        .output()
+        .expect("failed to run impg infer discovery");
+    assert!(
+        infer_discovery.status.success(),
+        "impg infer discovery failed: {}",
+        String::from_utf8_lossy(&infer_discovery.stderr)
+    );
+    let discovery_stdout = String::from_utf8_lossy(&infer_discovery.stdout);
+    assert!(discovery_stdout.contains("#impg infer"), "{}", discovery_stdout);
+    assert!(
+        discovery_stdout
+            .lines()
+            .any(|line| !line.starts_with('#') && line.ends_with("\tPASS")),
+        "discovery infer should emit at least one PASS row:\n{}",
+        discovery_stdout
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn test_syng_map_cli_sampled_positions_paf() {
     let _guard = lock_syng();
     let Some(bin) = impg_binary() else {

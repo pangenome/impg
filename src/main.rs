@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use coitrees::{Interval, IntervalTree};
 use crossbeam_channel as channel;
 use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
-use impg::commands::{genotype, graph, lace, partition, refine, similarity};
+use impg::commands::{genotype, graph, infer, lace, partition, refine, similarity};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::impg_index::{ImpgIndex, ImpgWrapper};
 use impg::multi_impg::MultiImpg;
@@ -3065,6 +3065,116 @@ enum Args {
         command: GenotypeCommand,
     },
 
+    /// Infer allele calls across ranges or partitions from graph-derived evidence
+    Infer {
+        /// Syng index prefix or .1khash/.1gbwt/.spos/.pstep/.names/.meta path
+        #[clap(short = 'a', long, value_parser)]
+        index: String,
+
+        /// Sample evidence produced by `impg map -o pack` or `impg map -o packbin`
+        #[clap(short = 'p', long, value_parser)]
+        pack: String,
+
+        /// Type exactly one target range, in the format `seq_name:start-end`
+        #[clap(short = 'r', long, value_parser, conflicts_with_all = ["target_bed", "partitions"])]
+        target_range: Option<String>,
+
+        /// BED-like target ranges to type independently
+        #[clap(long, alias = "regions", value_parser, conflicts_with_all = ["target_range", "partitions"])]
+        target_bed: Option<String>,
+
+        /// BED-like partitions from `impg partition`; the first row per partition is used as the typed reference range
+        #[clap(long, value_parser, conflicts_with_all = ["target_range", "target_bed"])]
+        partitions: Option<String>,
+
+        /// Window size for internal partition discovery when no target input is provided
+        #[clap(short = 'w', long, value_parser, default_value_t = 1_000_000)]
+        window_size: usize,
+
+        /// Required for internal partition discovery. Merge query-gathered ranges separated by at most this many bp
+        #[clap(short = 'd', long, value_parser)]
+        merge_distance: Option<i32>,
+
+        /// Path to sequence names used to seed internal partition discovery
+        #[clap(long, value_parser)]
+        starting_sequences_file: Option<String>,
+
+        /// Selection mode for internal partition discovery
+        #[clap(long, value_parser, default_value = "longest")]
+        selection_mode: String,
+
+        /// Minimum region size for missing regions during internal partition discovery
+        #[clap(long, value_parser, default_value_t = 3000)]
+        min_missing_size: i32,
+
+        /// Minimum distance from sequence start/end during internal partition discovery
+        #[clap(long, value_parser, default_value_t = 3000)]
+        min_boundary_distance: i32,
+
+        /// Boundary padding in bp for syng queries during internal partition discovery
+        #[clap(long, value_parser, default_value_t = 120)]
+        partition_syng_padding: u64,
+
+        /// Minimum anchor count for syng chains during internal partition discovery
+        #[clap(long, value_parser, default_value_t = 0)]
+        partition_syng_min_chain_anchors: usize,
+
+        /// Minimum query-span fraction for syng chains during internal partition discovery
+        #[clap(long, value_parser, default_value_t = 0.0)]
+        partition_syng_min_chain_fraction: f64,
+
+        /// Disable post-partition singleton sliver rehoming during internal partition discovery
+        #[clap(long, action)]
+        no_rehome_singletons: bool,
+
+        /// Scoring method
+        #[clap(long, value_parser, default_value = "cos")]
+        score: String,
+
+        /// Candidate extraction mode
+        #[clap(long, value_enum, default_value_t = genotype::CandidateMode::Spanning)]
+        candidate_mode: genotype::CandidateMode,
+
+        /// Ploidy for genotype combinations
+        #[clap(long, value_parser, default_value_t = 2)]
+        ploidy: usize,
+
+        /// Number of genotype combinations to emit per target
+        #[clap(long, value_parser, default_value_t = 1)]
+        top_n: usize,
+
+        /// Keep only the best N single-haplotype candidates before combination search (0 = keep all)
+        #[clap(long, value_parser, default_value_t = 200)]
+        candidate_top_k: usize,
+
+        /// Maximum haplotype combinations to score per target
+        #[clap(long, value_parser, default_value_t = 1_000_000)]
+        max_combinations: u64,
+
+        /// Target-side padding in bp for syng candidate discovery during local typing
+        #[clap(long, value_parser, default_value_t = 0)]
+        syng_padding: u64,
+
+        /// Source-side extension in bp for syng candidate discovery during local typing
+        #[clap(long, value_parser, default_value_t = 0)]
+        syng_extension: u64,
+
+        /// Minimum shared syncmer anchors required for a candidate
+        #[clap(long, value_parser, default_value_t = 2)]
+        min_anchors: usize,
+
+        /// For spanning mode, minimum fraction of the requested reference range covered by shared anchors
+        #[clap(long, value_parser, default_value_t = 0.8)]
+        min_span_fraction: f64,
+
+        /// Output file path (default: stdout; .zst/.zstd enables zstd compression)
+        #[clap(short = 'O', long, value_parser)]
+        output: Option<String>,
+
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+
     /// Print alignment statistics
     Stats {
         // --- Input ---
@@ -4925,6 +5035,137 @@ fn run() -> io::Result<()> {
                         stdout.write_all(&out)?;
                         stdout.flush()?;
                     }
+                }
+            }
+        },
+        Args::Infer {
+            index,
+            pack,
+            target_range,
+            target_bed,
+            partitions,
+            window_size,
+            merge_distance,
+            starting_sequences_file,
+            selection_mode,
+            min_missing_size,
+            min_boundary_distance,
+            partition_syng_padding,
+            partition_syng_min_chain_anchors,
+            partition_syng_min_chain_fraction,
+            no_rehome_singletons,
+            score,
+            candidate_mode,
+            ploidy,
+            top_n,
+            candidate_top_k,
+            max_combinations,
+            syng_padding,
+            syng_extension,
+            min_anchors,
+            min_span_fraction,
+            output,
+            common,
+        } => {
+            initialize_threads_and_log(&common);
+            if score != "cos" {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unsupported infer --score '{}'; currently only 'cos' is supported", score),
+                ));
+            }
+            if window_size == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--window-size must be greater than 0",
+                ));
+            }
+
+            let targets = if let Some(range) = target_range {
+                vec![infer::parse_target_range(&range)?]
+            } else if let Some(path) = target_bed {
+                infer::parse_target_bed(&path)?
+            } else if let Some(path) = partitions {
+                infer::parse_partitions(&path)?
+            } else {
+                Vec::new()
+            };
+
+            let discovery = if targets.is_empty() {
+                let merge_distance = merge_distance.ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "impg infer discovery mode requires -d/--merge-distance; provide --target-range, --target-bed, or --partitions to type explicit ranges",
+                    )
+                })?;
+                if merge_distance < 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--merge-distance must be >= 0",
+                    ));
+                }
+                validate_selection_mode(&selection_mode)?;
+                Some(infer::PartitionDiscoveryConfig {
+                    window_size,
+                    merge_distance,
+                    starting_sequences_file: starting_sequences_file.as_deref(),
+                    selection_mode: &selection_mode,
+                    min_missing_size,
+                    min_boundary_distance,
+                    syng_padding: partition_syng_padding,
+                    syng_min_chain_anchors: partition_syng_min_chain_anchors,
+                    syng_min_chain_fraction: partition_syng_min_chain_fraction,
+                    rehome_singletons: !no_rehome_singletons,
+                })
+            } else {
+                None
+            };
+
+            let syng_prefix = detect_syng_prefix(&index).unwrap_or(index);
+            let config = infer::InferConfig {
+                syng_prefix: &syng_prefix,
+                pack_path: &pack,
+                targets,
+                discovery,
+                candidate_mode,
+                ploidy,
+                top_n,
+                candidate_top_k,
+                max_combinations,
+                syng_padding,
+                syng_extension,
+                min_anchors,
+                min_span_fraction,
+            };
+
+            #[cfg(unix)]
+            let saved_stdout = silence_stdout_for_process()?;
+            #[cfg(not(unix))]
+            silence_stdout_for_process()?;
+
+            if let Some(path) = output {
+                let mut out = create_map_output_writer(&path)?;
+                infer::run_syng_pack_infer(&mut out, &config)?;
+                out.flush()?;
+                #[cfg(unix)]
+                unsafe {
+                    libc::close(saved_stdout);
+                }
+            } else {
+                let mut out = Vec::new();
+                infer::run_syng_pack_infer(&mut out, &config)?;
+                #[cfg(unix)]
+                {
+                    write_all_to_fd(saved_stdout, &out)?;
+                    unsafe {
+                        libc::close(saved_stdout);
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let mut stdout = io::stdout();
+                    stdout.write_all(&out)?;
+                    stdout.flush()?;
                 }
             }
         },

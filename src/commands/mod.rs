@@ -1,6 +1,7 @@
 pub mod align;
 pub mod genotype;
 pub mod graph;
+pub mod infer;
 pub mod lace;
 pub mod partition;
 pub mod refine;
