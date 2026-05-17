@@ -181,9 +181,13 @@ shared sequence does not create artificial certainty. The mosaic TSV reports
 `read_link_reward` per phase.
 
 This is now a real read-link imputer across the current partition lattice. The
-next refinement is to split a partition into internal candidate blocks, using
-the same state/transition machinery to infer IBD copied segments within a large
-partition as well as between partitions.
+same state/transition machinery can also be run within a large target by adding
+`--phase-block-size N`, which splits each target/partition into fixed-width
+internal phase blocks before local genotyping and stitching. This lets `infer`
+discover copied IBD segments inside a broad partition and then carry phase
+between adjacent partitions with the same model. The fixed grid is an initial
+lattice; future work can choose block boundaries from read density, graph
+breakpoints, or local ambiguity instead of a constant width.
 
 ## Output
 

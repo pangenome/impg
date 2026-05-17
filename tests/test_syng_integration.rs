@@ -2251,6 +2251,85 @@ fn test_syng_infer_read_walk_links_phase_recombinant_mosaic() {
         mosaic
     );
 
+    let block_mosaic_path = dir.join("mosaic.phase_blocks.tsv");
+    let target_range = "sampleA#0#chr1:0-1900";
+    let infer_blocks = Command::new(&bin)
+        .args([
+            "infer",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "--proj",
+            proj_path.to_str().unwrap(),
+            "-r",
+            target_range,
+            "--phase-block-size",
+            "950",
+            "--top-n",
+            "20",
+            "--candidate-top-k",
+            "20",
+            "--min-span-fraction",
+            "0.7",
+            "--stitch",
+            "beam",
+            "--stitch-beam",
+            "500",
+            "--read-link-weight",
+            "5",
+            "--emit-mosaic",
+            block_mosaic_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run impg infer with phase-block stitching");
+    assert!(
+        infer_blocks.status.success(),
+        "impg infer with phase-block stitching failed: {}",
+        String::from_utf8_lossy(&infer_blocks.stderr)
+    );
+    let block_mosaic = std::fs::read_to_string(&block_mosaic_path).unwrap();
+    assert!(
+        block_mosaic.contains("#phase_block_size\t950")
+            || String::from_utf8_lossy(&infer_blocks.stdout).contains("#phase_block_size\t950"),
+        "phase-block inference should record the internal block size:\nstdout:\n{}\nmosaic:\n{}",
+        String::from_utf8_lossy(&infer_blocks.stdout),
+        block_mosaic
+    );
+    let block_rows: Vec<Vec<&str>> = block_mosaic
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .map(|line| line.split('\t').collect())
+        .collect();
+    assert_eq!(
+        block_rows.len(),
+        4,
+        "expected two phases across two internal phase blocks:\n{}",
+        block_mosaic
+    );
+    assert!(
+        block_rows
+            .iter()
+            .filter(|row| row[1].ends_with("#block1"))
+            .all(|row| row[16].parse::<f64>().unwrap() > 0.0),
+        "second internal phase block should be rewarded by spanning read walks:\n{}",
+        block_mosaic
+    );
+    let mut block_phase_paths: std::collections::BTreeMap<&str, Vec<&str>> =
+        std::collections::BTreeMap::new();
+    for row in &block_rows {
+        block_phase_paths.entry(row[0]).or_default().push(row[5]);
+    }
+    let mut block_stitched_paths: Vec<Vec<&str>> = block_phase_paths.into_values().collect();
+    block_stitched_paths.sort();
+    assert_eq!(
+        block_stitched_paths,
+        vec![
+            vec!["sampleC#0#chr1", "sampleC#0#chr1"],
+            vec!["sampleD#0#chr1", "sampleD#0#chr1"],
+        ],
+        "phase-block stitching should infer copied recombinant segments inside one target:\n{}",
+        block_mosaic
+    );
+
     std::fs::remove_dir_all(&dir).ok();
 }
 
