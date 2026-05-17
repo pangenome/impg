@@ -14,6 +14,7 @@ pub mod impg;
 pub mod impg_index;
 pub mod multi_impg;
 pub mod onealn;
+pub mod pack;
 pub mod paf;
 pub mod seqidx;
 pub mod sequence_index;

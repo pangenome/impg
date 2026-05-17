@@ -47,6 +47,39 @@ fn numeric_to_ascii(numeric: &[u8]) -> Vec<u8> {
         .collect()
 }
 
+fn write_tiled_fastq<W: std::io::Write>(
+    writer: &mut W,
+    prefix: &str,
+    seq: &[u8],
+    read_len: usize,
+    step: usize,
+) -> std::io::Result<usize> {
+    assert!(read_len > 0);
+    assert!(step > 0);
+    assert!(seq.len() >= read_len);
+
+    let mut starts = Vec::new();
+    let mut start = 0usize;
+    while start + read_len <= seq.len() {
+        starts.push(start);
+        start += step;
+    }
+    let terminal_start = seq.len() - read_len;
+    if starts.last().copied() != Some(terminal_start) {
+        starts.push(terminal_start);
+    }
+
+    for (read_idx, start) in starts.iter().enumerate() {
+        let end = start + read_len;
+        writeln!(writer, "@{}_{}", prefix, read_idx)?;
+        writer.write_all(&seq[*start..end])?;
+        writeln!(writer)?;
+        writeln!(writer, "+")?;
+        writeln!(writer, "{}", "I".repeat(read_len))?;
+    }
+    Ok(starts.len())
+}
+
 /// Build a small test AGC archive with multiple samples sharing a backbone.
 fn create_test_agc(path: &str) {
     let config = StreamingQueueConfig {
@@ -961,6 +994,974 @@ fn test_syng_map_cli_gaf_and_paf() {
         String::from_utf8_lossy(&gaf_threads_2.stdout).lines().count(),
         2050,
         "expected one GAF record per repeated query read"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn test_syng_genotype_cos_cli_permutations() {
+    let _guard = lock_syng();
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping: impg binary not built");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join("impg_test_syng_genotype_cos_permutations");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let left = numeric_to_ascii(&make_sequence_numeric(700, 11));
+    let allele_a = numeric_to_ascii(&make_sequence_numeric(700, 12));
+    let allele_b = numeric_to_ascii(&make_sequence_numeric(700, 13));
+    let right = numeric_to_ascii(&make_sequence_numeric(700, 14));
+    let mut hap_a = Vec::new();
+    hap_a.extend_from_slice(&left);
+    hap_a.extend_from_slice(&allele_a);
+    hap_a.extend_from_slice(&right);
+    let mut hap_b = Vec::new();
+    hap_b.extend_from_slice(&left);
+    hap_b.extend_from_slice(&allele_b);
+    hap_b.extend_from_slice(&right);
+
+    let fasta_path = dir.join("index.fa");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        writeln!(f, ">sampleA#0#chr1").unwrap();
+        f.write_all(&hap_a).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleB#0#chr1").unwrap();
+        f.write_all(&hap_b).unwrap();
+        writeln!(f).unwrap();
+    }
+
+    let idx_prefix = dir.join("idx");
+    let build = Command::new(&bin)
+        .args([
+            "syng",
+            "-f",
+            fasta_path.to_str().unwrap(),
+            "-o",
+            idx_prefix.to_str().unwrap(),
+            "--position-sample-rate",
+            "1",
+        ])
+        .output()
+        .expect("failed to run impg syng");
+    assert!(
+        build.status.success(),
+        "impg syng failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let reads_path = dir.join("reads.fq");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&reads_path).unwrap();
+        writeln!(f, "@read_a").unwrap();
+        f.write_all(&hap_a).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, "+").unwrap();
+        writeln!(f, "{}", "I".repeat(hap_a.len())).unwrap();
+        writeln!(f, "@read_b").unwrap();
+        f.write_all(&hap_b).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, "+").unwrap();
+        writeln!(f, "{}", "I".repeat(hap_b.len())).unwrap();
+    }
+
+    let packbin_path = dir.join("sample.packbin");
+    let map = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            reads_path.to_str().unwrap(),
+            "-o",
+            "packbin",
+            "-O",
+            packbin_path.to_str().unwrap(),
+            "--pack-compression-level",
+            "3",
+            "--pack-block-size",
+            "64",
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o packbin");
+    assert!(
+        map.status.success(),
+        "impg map -o packbin failed: {}",
+        String::from_utf8_lossy(&map.stderr)
+    );
+
+    let pack_path = dir.join("sample.pack.tsv");
+    let map_pack = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            reads_path.to_str().unwrap(),
+            "-o",
+            "pack",
+            "-O",
+            pack_path.to_str().unwrap(),
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o pack");
+    assert!(
+        map_pack.status.success(),
+        "impg map -o pack failed: {}",
+        String::from_utf8_lossy(&map_pack.stderr)
+    );
+
+    let pack_zst_path = dir.join("sample.pack.tsv.zst");
+    let map_pack_zst = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            reads_path.to_str().unwrap(),
+            "-o",
+            "pack",
+            "-O",
+            pack_zst_path.to_str().unwrap(),
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o pack -O sample.pack.tsv.zst");
+    assert!(
+        map_pack_zst.status.success(),
+        "impg map -o pack -O sample.pack.tsv.zst failed: {}",
+        String::from_utf8_lossy(&map_pack_zst.stderr)
+    );
+    let compressed_pack = std::fs::read(&pack_zst_path).unwrap();
+    assert!(
+        compressed_pack.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]),
+        "compressed pack should have zstd magic bytes"
+    );
+
+    let genotype_help = Command::new(&bin)
+        .args(["genotype", "--help"])
+        .output()
+        .expect("failed to run impg genotype --help");
+    assert!(genotype_help.status.success());
+    let genotype_help_stdout = String::from_utf8_lossy(&genotype_help.stdout);
+    assert!(
+        genotype_help_stdout.contains("  cos  "),
+        "genotype help should list cos:\n{}",
+        genotype_help_stdout
+    );
+    assert!(
+        !genotype_help_stdout.contains("cosigt"),
+        "genotype help should not list the cosigt alias:\n{}",
+        genotype_help_stdout
+    );
+
+    let gt_help = Command::new(&bin)
+        .args(["gt", "--help"])
+        .output()
+        .expect("failed to run impg gt --help");
+    assert!(gt_help.status.success());
+    let gt_help_stdout = String::from_utf8_lossy(&gt_help.stdout);
+    assert!(
+        gt_help_stdout.contains("  cos  "),
+        "gt help should list cos:\n{}",
+        gt_help_stdout
+    );
+    assert!(
+        !gt_help_stdout.contains("cosigt"),
+        "gt help should not list the cosigt alias:\n{}",
+        gt_help_stdout
+    );
+
+    let command_roots = ["genotype", "gt"];
+    let methods = ["cos", "cosigt"];
+    let candidate_modes = ["spanning", "overlapping"];
+    let packs = [
+        ("pack", "pack", pack_path.as_path()),
+        ("pack.zst", "pack", pack_zst_path.as_path()),
+        ("packbin", "packbin", packbin_path.as_path()),
+    ];
+    let mut expected_by_pack_mode: std::collections::BTreeMap<(String, String), String> =
+        std::collections::BTreeMap::new();
+    let mut checked = 0usize;
+
+    for root in command_roots {
+        for method in methods {
+            for (pack_label, compare_label, pack_path) in packs {
+                for candidate_mode in candidate_modes {
+                    checked += 1;
+                    let output = Command::new(&bin)
+                        .args([
+                            root,
+                            method,
+                            "-a",
+                            idx_prefix.to_str().unwrap(),
+                            "-p",
+                            pack_path.to_str().unwrap(),
+                            "-r",
+                            "sampleA#0#chr1:0-2100",
+                            "--candidate-mode",
+                            candidate_mode,
+                            "--top-n",
+                            "3",
+                            "--candidate-top-k",
+                            "10",
+                            "--min-anchors",
+                            "2",
+                            "--min-span-fraction",
+                            "0.7",
+                        ])
+                        .output()
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "failed to run impg {} {} with {} {}: {}",
+                                root, method, pack_label, candidate_mode, e
+                            )
+                        });
+                    assert!(
+                        output.status.success(),
+                        "impg {} {} failed with {} {}: {}",
+                        root,
+                        method,
+                        pack_label,
+                        candidate_mode,
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+
+                    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                    assert!(stdout.contains("#impg genotype cos"), "{}", stdout);
+                    assert!(stdout.contains("#method\tcos"), "{}", stdout);
+                    assert!(stdout.contains("#metric\tcosine"), "{}", stdout);
+                    assert!(stdout.contains("#alias\tcosigt"), "{}", stdout);
+                    assert!(
+                        stdout.contains(&format!(
+                            "#candidate_mode\t{}",
+                            if candidate_mode == "spanning" {
+                                "Spanning"
+                            } else {
+                                "Overlapping"
+                            }
+                        )),
+                        "{}",
+                        stdout
+                    );
+
+                    let top = stdout
+                        .lines()
+                        .find(|line| !line.starts_with('#') && !line.trim().is_empty())
+                        .expect("expected at least one cosine genotype result row");
+                    let fields: Vec<&str> = top.split('\t').collect();
+                    assert!(
+                        fields.len() >= 12,
+                        "cos genotype row should have at least 12 fields: {}",
+                        top
+                    );
+                    assert_eq!(fields[0], "1");
+                    assert_eq!(fields[1], "cos");
+                    assert_eq!(fields[2], "2");
+
+                    if candidate_mode == "spanning" {
+                        let similarity = fields[3].parse::<f64>().unwrap();
+                        assert!(
+                            similarity > 0.99,
+                            "expected near-perfect heterozygous cosine score, got {}\n{}",
+                            similarity,
+                            stdout
+                        );
+                        assert!(
+                            fields[8].contains("sampleA#0#chr1")
+                                && fields[8].contains("sampleB#0#chr1"),
+                            "top spanning genotype should contain both haplotypes, got:\n{}",
+                            stdout
+                        );
+                    }
+
+                    let key = (compare_label.to_string(), candidate_mode.to_string());
+                    if let Some(expected) = expected_by_pack_mode.get(&key) {
+                        assert_eq!(
+                            &stdout, expected,
+                            "{} {} should match the first {} {} output",
+                            root, method, pack_label, candidate_mode
+                        );
+                    } else {
+                        expected_by_pack_mode.insert(key, stdout);
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(checked, 24, "expected to exercise the full genotype CLI matrix");
+
+    let idx_prefix_str = idx_prefix.to_str().unwrap();
+    let packbin_str = packbin_path.to_str().unwrap();
+    let target_range = "sampleA#0#chr1:0-2100";
+    let run_gt = |extra: &[&str]| {
+        let mut args = vec![
+            "genotype",
+            "cos",
+            "-a",
+            idx_prefix_str,
+            "-p",
+            packbin_str,
+            "-r",
+            target_range,
+        ];
+        args.extend_from_slice(extra);
+        Command::new(&bin)
+            .args(args)
+            .output()
+            .expect("failed to run impg genotype cos")
+    };
+
+    let custom = run_gt(&[
+        "--ploidy",
+        "1",
+        "--top-n",
+        "1",
+        "--candidate-top-k",
+        "0",
+        "--syng-padding",
+        "12",
+        "--syng-extension",
+        "12",
+        "--min-anchors",
+        "1",
+        "--min-span-fraction",
+        "0.5",
+    ]);
+    assert!(
+        custom.status.success(),
+        "non-default genotype options failed: {}",
+        String::from_utf8_lossy(&custom.stderr)
+    );
+    let custom_stdout = String::from_utf8_lossy(&custom.stdout);
+    assert!(custom_stdout.contains("#ploidy\t1"), "{}", custom_stdout);
+    let custom_rows: Vec<&str> = custom_stdout
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .collect();
+    assert_eq!(custom_rows.len(), 1, "top-n 1 should emit one row");
+    assert_eq!(custom_rows[0].split('\t').nth(2), Some("1"));
+
+    let ploidy3 = run_gt(&[
+        "--ploidy",
+        "3",
+        "--top-n",
+        "2",
+        "--candidate-top-k",
+        "0",
+        "--min-span-fraction",
+        "0.7",
+    ]);
+    assert!(
+        ploidy3.status.success(),
+        "ploidy 3 genotype options failed: {}",
+        String::from_utf8_lossy(&ploidy3.stderr)
+    );
+    let ploidy3_stdout = String::from_utf8_lossy(&ploidy3.stdout);
+    assert!(ploidy3_stdout.contains("#ploidy\t3"), "{}", ploidy3_stdout);
+    let ploidy3_rows: Vec<&str> = ploidy3_stdout
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .collect();
+    assert_eq!(ploidy3_rows.len(), 2, "top-n 2 should emit two rows");
+    assert!(ploidy3_rows
+        .iter()
+        .all(|row| row.split('\t').nth(2) == Some("3")));
+
+    let stdout_for_output = run_gt(&["--top-n", "2", "--candidate-top-k", "10"]);
+    assert!(
+        stdout_for_output.status.success(),
+        "stdout genotype baseline failed: {}",
+        String::from_utf8_lossy(&stdout_for_output.stderr)
+    );
+    let output_zst_path = dir.join("genotype.tsv.zst");
+    let output_to_file = Command::new(&bin)
+        .args([
+            "genotype",
+            "cos",
+            "-a",
+            idx_prefix_str,
+            "-p",
+            packbin_str,
+            "-r",
+            target_range,
+            "--top-n",
+            "2",
+            "--candidate-top-k",
+            "10",
+            "-O",
+            output_zst_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run impg genotype cos -O genotype.tsv.zst");
+    assert!(
+        output_to_file.status.success(),
+        "compressed genotype output failed: {}",
+        String::from_utf8_lossy(&output_to_file.stderr)
+    );
+    assert!(
+        output_to_file.stdout.is_empty(),
+        "genotype -O should not write result rows to stdout"
+    );
+    let compressed_output = std::fs::read(&output_zst_path).unwrap();
+    assert!(
+        compressed_output.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]),
+        "genotype .zst output should have zstd magic bytes"
+    );
+    let mut decoder =
+        zstd::stream::read::Decoder::new(std::fs::File::open(&output_zst_path).unwrap()).unwrap();
+    let mut decoded_output = String::new();
+    {
+        use std::io::Read;
+        decoder.read_to_string(&mut decoded_output).unwrap();
+    }
+    assert_eq!(
+        decoded_output,
+        String::from_utf8_lossy(&stdout_for_output.stdout),
+        "compressed genotype output should match stdout output"
+    );
+
+    for (label, extra, expected) in [
+        (
+            "ploidy zero",
+            &["--ploidy", "0"][..],
+            "--ploidy must be greater than 0",
+        ),
+        (
+            "top-n zero",
+            &["--top-n", "0"][..],
+            "--top-n must be greater than 0",
+        ),
+        (
+            "bad min-span-fraction",
+            &["--min-span-fraction", "1.1"][..],
+            "--min-span-fraction must be between 0 and 1",
+        ),
+        (
+            "search budget",
+            &[
+                "--candidate-top-k",
+                "10",
+                "--max-combinations",
+                "1",
+                "--min-span-fraction",
+                "0.7",
+            ][..],
+            "genotype combination search exceeded --max-combinations",
+        ),
+    ] {
+        let failed = run_gt(extra);
+        assert!(
+            !failed.status.success(),
+            "{} should fail but succeeded with stdout:\n{}",
+            label,
+            String::from_utf8_lossy(&failed.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&failed.stderr);
+        assert!(
+            stderr.contains(expected),
+            "{} should report '{}', got:\n{}",
+            label,
+            expected,
+            stderr
+        );
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn test_syng_genotype_cos_short_read_simulation_calls_heterozygote() {
+    let _guard = lock_syng();
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping: impg binary not built");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join("impg_test_syng_genotype_short_read_sim");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let left = numeric_to_ascii(&make_sequence_numeric(900, 31));
+    let allele_a = numeric_to_ascii(&make_sequence_numeric(900, 32));
+    let allele_b = numeric_to_ascii(&make_sequence_numeric(900, 33));
+    let allele_c = numeric_to_ascii(&make_sequence_numeric(900, 34));
+    let right = numeric_to_ascii(&make_sequence_numeric(900, 35));
+
+    let mut hap_a = Vec::new();
+    hap_a.extend_from_slice(&left);
+    hap_a.extend_from_slice(&allele_a);
+    hap_a.extend_from_slice(&right);
+    let mut hap_b = Vec::new();
+    hap_b.extend_from_slice(&left);
+    hap_b.extend_from_slice(&allele_b);
+    hap_b.extend_from_slice(&right);
+    let mut hap_c = Vec::new();
+    hap_c.extend_from_slice(&left);
+    hap_c.extend_from_slice(&allele_c);
+    hap_c.extend_from_slice(&right);
+    assert_eq!(hap_a.len(), hap_b.len());
+    assert_eq!(hap_a.len(), hap_c.len());
+
+    let fasta_path = dir.join("index.fa");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        writeln!(f, ">sampleA#0#chr1").unwrap();
+        f.write_all(&hap_a).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleB#0#chr1").unwrap();
+        f.write_all(&hap_b).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleC#0#chr1").unwrap();
+        f.write_all(&hap_c).unwrap();
+        writeln!(f).unwrap();
+    }
+
+    let idx_prefix = dir.join("idx");
+    let build = Command::new(&bin)
+        .args([
+            "syng",
+            "-f",
+            fasta_path.to_str().unwrap(),
+            "-o",
+            idx_prefix.to_str().unwrap(),
+            "--position-sample-rate",
+            "1",
+        ])
+        .output()
+        .expect("failed to run impg syng");
+    assert!(
+        build.status.success(),
+        "impg syng failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let reads_path = dir.join("simulated_reads.fq");
+    let read_count = {
+        let mut f = std::fs::File::create(&reads_path).unwrap();
+        let a = write_tiled_fastq(&mut f, "hapA", &hap_a, 250, 25).unwrap();
+        let b = write_tiled_fastq(&mut f, "hapB", &hap_b, 250, 25).unwrap();
+        a + b
+    };
+    assert!(
+        read_count >= 190,
+        "expected dense tiled short-read simulation, got {} reads",
+        read_count
+    );
+
+    let packbin_path = dir.join("simulated.packbin");
+    let map = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            reads_path.to_str().unwrap(),
+            "-o",
+            "packbin",
+            "-O",
+            packbin_path.to_str().unwrap(),
+            "--pack-compression-level",
+            "3",
+            "--pack-block-size",
+            "64",
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o packbin");
+    assert!(
+        map.status.success(),
+        "impg map -o packbin failed: {}",
+        String::from_utf8_lossy(&map.stderr)
+    );
+
+    let target_range = format!("sampleA#0#chr1:0-{}", hap_a.len());
+    let gt = Command::new(&bin)
+        .args([
+            "genotype",
+            "cos",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-p",
+            packbin_path.to_str().unwrap(),
+            "-r",
+            &target_range,
+            "--top-n",
+            "5",
+            "--candidate-top-k",
+            "10",
+            "--min-anchors",
+            "2",
+            "--min-span-fraction",
+            "0.8",
+        ])
+        .output()
+        .expect("failed to run impg genotype cos");
+    assert!(
+        gt.status.success(),
+        "impg genotype cos failed: {}",
+        String::from_utf8_lossy(&gt.stderr)
+    );
+    let gt_stdout = String::from_utf8_lossy(&gt.stdout);
+    let top = gt_stdout
+        .lines()
+        .find(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .expect("expected at least one cosine genotype result row");
+    let fields: Vec<&str> = top.split('\t').collect();
+    assert!(
+        fields.len() >= 12,
+        "cos genotype row should have at least 12 fields: {}",
+        top
+    );
+    assert_eq!(fields[0], "1");
+    assert_eq!(fields[1], "cos");
+    assert_eq!(fields[2], "2");
+    let similarity = fields[3].parse::<f64>().unwrap();
+    assert!(
+        similarity > 0.90,
+        "expected strong short-read heterozygous cosine score, got {}\n{}",
+        similarity,
+        gt_stdout
+    );
+    assert!(
+        fields[8].contains("sampleA#0#chr1") && fields[8].contains("sampleB#0#chr1"),
+        "top genotype should call the simulated A/B diploid, got:\n{}",
+        gt_stdout
+    );
+    assert!(
+        !fields[8].contains("sampleC#0#chr1"),
+        "top genotype should not include the unsampled decoy haplotype, got:\n{}",
+        gt_stdout
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn test_syng_infer_pack_partitions_and_discovery() {
+    let _guard = lock_syng();
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping: impg binary not built");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join("impg_test_syng_infer_pack");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let left = numeric_to_ascii(&make_sequence_numeric(900, 41));
+    let allele_a = numeric_to_ascii(&make_sequence_numeric(900, 42));
+    let allele_b = numeric_to_ascii(&make_sequence_numeric(900, 43));
+    let allele_c = numeric_to_ascii(&make_sequence_numeric(900, 44));
+    let right = numeric_to_ascii(&make_sequence_numeric(900, 45));
+
+    let mut hap_a = Vec::new();
+    hap_a.extend_from_slice(&left);
+    hap_a.extend_from_slice(&allele_a);
+    hap_a.extend_from_slice(&right);
+    let mut hap_b = Vec::new();
+    hap_b.extend_from_slice(&left);
+    hap_b.extend_from_slice(&allele_b);
+    hap_b.extend_from_slice(&right);
+    let mut hap_c = Vec::new();
+    hap_c.extend_from_slice(&left);
+    hap_c.extend_from_slice(&allele_c);
+    hap_c.extend_from_slice(&right);
+
+    let fasta_path = dir.join("index.fa");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        writeln!(f, ">sampleA#0#chr1").unwrap();
+        f.write_all(&hap_a).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleB#0#chr1").unwrap();
+        f.write_all(&hap_b).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleC#0#chr1").unwrap();
+        f.write_all(&hap_c).unwrap();
+        writeln!(f).unwrap();
+    }
+
+    let idx_prefix = dir.join("idx");
+    let build = Command::new(&bin)
+        .args([
+            "syng",
+            "-f",
+            fasta_path.to_str().unwrap(),
+            "-o",
+            idx_prefix.to_str().unwrap(),
+            "--position-sample-rate",
+            "1",
+        ])
+        .output()
+        .expect("failed to run impg syng");
+    assert!(
+        build.status.success(),
+        "impg syng failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let reads_path = dir.join("simulated_reads.fq");
+    {
+        let mut f = std::fs::File::create(&reads_path).unwrap();
+        write_tiled_fastq(&mut f, "hapA", &hap_a, 250, 25).unwrap();
+        write_tiled_fastq(&mut f, "hapB", &hap_b, 250, 25).unwrap();
+    }
+
+    let packbin_path = dir.join("sample.packbin");
+    let map = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            reads_path.to_str().unwrap(),
+            "-o",
+            "packbin",
+            "-O",
+            packbin_path.to_str().unwrap(),
+            "--pack-compression-level",
+            "3",
+            "--pack-block-size",
+            "64",
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o packbin");
+    assert!(
+        map.status.success(),
+        "impg map -o packbin failed: {}",
+        String::from_utf8_lossy(&map.stderr)
+    );
+
+    let target_range = format!("sampleA#0#chr1:0-{}", hap_a.len());
+    let infer_range = Command::new(&bin)
+        .args([
+            "infer",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-p",
+            packbin_path.to_str().unwrap(),
+            "-r",
+            &target_range,
+            "--top-n",
+            "2",
+            "--candidate-top-k",
+            "10",
+            "--min-span-fraction",
+            "0.8",
+        ])
+        .output()
+        .expect("failed to run impg infer -r");
+    assert!(
+        infer_range.status.success(),
+        "impg infer -r failed: {}",
+        String::from_utf8_lossy(&infer_range.stderr)
+    );
+    let infer_stdout = String::from_utf8_lossy(&infer_range.stdout);
+    assert!(infer_stdout.contains("#impg infer"), "{}", infer_stdout);
+    assert!(infer_stdout.contains("#score\tcos"), "{}", infer_stdout);
+    let first = infer_stdout
+        .lines()
+        .find(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .expect("expected infer result row");
+    let fields: Vec<&str> = first.split('\t').collect();
+    assert!(
+        fields.len() >= 14,
+        "infer row should have at least 14 fields: {}",
+        first
+    );
+    assert_eq!(fields[0], "1");
+    assert_eq!(fields[5], "cos");
+    assert_eq!(fields[6], "2");
+    assert_eq!(fields[13], "PASS");
+    assert!(
+        fields[9].contains("sampleA#0#chr1") && fields[9].contains("sampleB#0#chr1"),
+        "infer should call the simulated A/B diploid, got:\n{}",
+        infer_stdout
+    );
+    assert!(
+        !fields[9].contains("sampleC#0#chr1"),
+        "infer top call should not include the unsampled decoy, got:\n{}",
+        infer_stdout
+    );
+
+    let target_bed = dir.join("targets.bed");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&target_bed).unwrap();
+        writeln!(f, "sampleA#0#chr1\t0\t{}\twhole", hap_a.len()).unwrap();
+        writeln!(f, "sampleA#0#chr1\t900\t1800\tallele").unwrap();
+    }
+    let infer_bed_zst = dir.join("infer.bed.tsv.zst");
+    let infer_bed = Command::new(&bin)
+        .args([
+            "infer",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-p",
+            packbin_path.to_str().unwrap(),
+            "--target-bed",
+            target_bed.to_str().unwrap(),
+            "--top-n",
+            "1",
+            "--candidate-top-k",
+            "10",
+            "--min-span-fraction",
+            "0.7",
+            "-O",
+            infer_bed_zst.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run impg infer --target-bed");
+    assert!(
+        infer_bed.status.success(),
+        "impg infer --target-bed failed: {}",
+        String::from_utf8_lossy(&infer_bed.stderr)
+    );
+    assert!(
+        infer_bed.stdout.is_empty(),
+        "infer -O should write result rows to the file"
+    );
+    let mut decoder =
+        zstd::stream::read::Decoder::new(std::fs::File::open(&infer_bed_zst).unwrap()).unwrap();
+    let mut decoded = String::new();
+    {
+        use std::io::Read;
+        decoder.read_to_string(&mut decoded).unwrap();
+    }
+    let bed_rows: Vec<&str> = decoded
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .collect();
+    assert_eq!(bed_rows.len(), 2, "target BED top-n 1 should emit two rows");
+    assert!(bed_rows.iter().all(|row| row.ends_with("\tPASS")), "{}", decoded);
+
+    let partitions_path = dir.join("partitions.bed");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&partitions_path).unwrap();
+        writeln!(f, "sampleA#0#chr1\t0\t{}\tp0", hap_a.len()).unwrap();
+        writeln!(f, "sampleB#0#chr1\t0\t{}\tp0", hap_b.len()).unwrap();
+        writeln!(f, "sampleA#0#chr1\t900\t1800\tp1").unwrap();
+        writeln!(f, "sampleB#0#chr1\t900\t1800\tp1").unwrap();
+    }
+    let infer_partitions = Command::new(&bin)
+        .args([
+            "infer",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-p",
+            packbin_path.to_str().unwrap(),
+            "--partitions",
+            partitions_path.to_str().unwrap(),
+            "--top-n",
+            "1",
+            "--candidate-top-k",
+            "10",
+            "--min-span-fraction",
+            "0.7",
+        ])
+        .output()
+        .expect("failed to run impg infer --partitions");
+    assert!(
+        infer_partitions.status.success(),
+        "impg infer --partitions failed: {}",
+        String::from_utf8_lossy(&infer_partitions.stderr)
+    );
+    let partition_stdout = String::from_utf8_lossy(&infer_partitions.stdout);
+    let partition_rows: Vec<&str> = partition_stdout
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .collect();
+    assert_eq!(
+        partition_rows.len(),
+        2,
+        "ready partition BED should emit one top row per partition"
+    );
+    assert!(
+        partition_rows.iter().any(|row| row.split('\t').nth(1) == Some("p0")),
+        "{}",
+        partition_stdout
+    );
+    assert!(
+        partition_rows.iter().any(|row| row.split('\t').nth(1) == Some("p1")),
+        "{}",
+        partition_stdout
+    );
+
+    let no_d = Command::new(&bin)
+        .args([
+            "infer",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-p",
+            packbin_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run impg infer without target inputs");
+    assert!(
+        !no_d.status.success(),
+        "infer discovery without -d should fail"
+    );
+    assert!(
+        String::from_utf8_lossy(&no_d.stderr).contains("requires -d/--merge-distance"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&no_d.stderr)
+    );
+
+    let infer_discovery = Command::new(&bin)
+        .args([
+            "infer",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-p",
+            packbin_path.to_str().unwrap(),
+            "-w",
+            "1500",
+            "-d",
+            "100",
+            "--min-missing-size",
+            "100",
+            "--min-boundary-distance",
+            "100",
+            "--top-n",
+            "1",
+            "--candidate-top-k",
+            "10",
+            "--min-span-fraction",
+            "0.7",
+        ])
+        .output()
+        .expect("failed to run impg infer discovery");
+    assert!(
+        infer_discovery.status.success(),
+        "impg infer discovery failed: {}",
+        String::from_utf8_lossy(&infer_discovery.stderr)
+    );
+    let discovery_stdout = String::from_utf8_lossy(&infer_discovery.stdout);
+    assert!(discovery_stdout.contains("#impg infer"), "{}", discovery_stdout);
+    assert!(
+        discovery_stdout
+            .lines()
+            .any(|line| !line.starts_with('#') && line.ends_with("\tPASS")),
+        "discovery infer should emit at least one PASS row:\n{}",
+        discovery_stdout
     );
 
     std::fs::remove_dir_all(&dir).ok();

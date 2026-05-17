@@ -2593,6 +2593,23 @@ impl SyngIndex {
         }))
     }
 
+    /// Walk a bp interval on an indexed forward path using sampled path-step
+    /// checkpoints, returning every syncmer step overlapping `[start, end)`.
+    pub fn walk_path_range(
+        &self,
+        path_idx: usize,
+        start: u64,
+        end: u64,
+    ) -> io::Result<Vec<(i32, u64)>> {
+        if path_idx >= self.name_map.path_to_name.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("path index {} is outside the syng name map", path_idx),
+            ));
+        }
+        self.walk_path_range_from_sampled_steps(path_idx, start, end)
+    }
+
     /// Rebuild both sampled positional sidecars by walking existing GBWT paths.
     ///
     /// This repairs indexes that already have `.1gbwt`, `.1khash`, `.names`, and

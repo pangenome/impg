@@ -337,6 +337,42 @@ counts above 255. `--pack-compression-level` defaults to 12; level 19 is a
 compact cohort/archive setting that is slower to write but just as fast to
 read in practice.
 
+`impg genotype` (`impg gt`) is the namespace for graph-based genotyping
+methods. The first listed method is `cos`: cosine genotyping over graph-feature
+coverage, following the COSIGT/LikeGT scoring model:
+
+```bash
+impg genotype cos -a c4.syng -p sample.packbin \
+  -r 'grch38#chr6:31972046-32055647:0-10000' \
+  --ploidy 2 --top-n 20
+```
+
+`cosigt` is accepted as an alias for `cos` to make the paper/tool lineage
+clear. `cos` extracts haplotype candidates from the requested reference path
+range, builds traversal-count vectors over the candidate syncmer nodes, and ranks
+ploidy-sized haplotype combinations against the sample `pack`/`packbin`
+coverage vector by cosine similarity. The default candidate mode is
+`spanning`: candidates must have shared anchors spanning the requested
+reference interval. Use `--candidate-mode overlapping` to score each gathered
+candidate interval independently. See `docs/genotype-architecture.md` for the
+graph-feature evidence model this is built around.
+
+`impg infer` lifts the same pack/cos scoring path over ranges or partitions and
+emits allele calls over genomic intervals:
+
+```bash
+impg infer -a hprc.syng -p sample.packbin \
+  --partitions partitions.bed --top-n 1 -O sample.infer.tsv.zst
+```
+
+Inputs choose the operation mode: `-r/--target-range` types one range,
+`--target-bed` types a BED-like range list, `--partitions` consumes ready
+`impg partition` BED output, and omitting all three runs internal syng partition
+discovery, which requires `-d/--merge-distance`. The first evidence backend is
+native `pack`/`packbin` from `impg map`; the design intentionally keeps BWA/local
+realignment evidence as future pack-producing backends. See
+`docs/infer-design.md`.
+
 `-r` splits on the **last** `:`. Path names from `odgi paths -f`
 already contain coordinates (`grch38#chr6:31972046-32055647`), so a
 whole-sequence query still needs an explicit trailing sub-range

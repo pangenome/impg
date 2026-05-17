@@ -1,10 +1,10 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use coitrees::{Interval, IntervalTree};
 use crossbeam_channel as channel;
 use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
-use impg::commands::{graph, lace, partition, refine, similarity};
+use impg::commands::{genotype, graph, infer, lace, partition, refine, similarity};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::impg_index::{ImpgIndex, ImpgWrapper};
 use impg::multi_impg::MultiImpg;
@@ -1047,27 +1047,6 @@ struct SyngPackMapStats {
     anchors: usize,
 }
 
-const SYNG_PACK_BINARY_MAGIC: &[u8; 8] = b"IMPGPKB1";
-const SYNG_PACK_BINARY_VERSION: u32 = 1;
-const SYNG_PACK_BINARY_HEADER_LEN: u32 = 96;
-const DEFAULT_PACK_BINARY_BLOCK_SIZE: usize = 1 << 20;
-
-fn is_pack_binary_format(output_format: &str) -> bool {
-    matches!(output_format, "packbin" | "pack-bin" | "bpack")
-}
-
-fn write_u32_le<W: Write>(out: &mut W, value: u32) -> io::Result<()> {
-    out.write_all(&value.to_le_bytes())
-}
-
-fn write_i32_le<W: Write>(out: &mut W, value: i32) -> io::Result<()> {
-    out.write_all(&value.to_le_bytes())
-}
-
-fn write_u64_le<W: Write>(out: &mut W, value: u64) -> io::Result<()> {
-    out.write_all(&value.to_le_bytes())
-}
-
 fn build_syng_map_pack_chunk(
     syng_matcher: &mut impg::syng::SyngMatcherWorker<'_>,
     chunk: &SyngGafQueryChunk,
@@ -1113,13 +1092,7 @@ fn merge_syng_pack_counts(dst: &mut FxHashMap<u32, u64>, src: FxHashMap<u32, u64
 }
 
 fn write_syng_map_pack<W: Write>(out: &mut W, counts: FxHashMap<u32, u64>) -> io::Result<usize> {
-    writeln!(out, "#node_id\tcount")?;
-    let mut rows: Vec<(u32, u64)> = counts.into_iter().collect();
-    rows.sort_unstable_by_key(|&(node_id, _)| node_id);
-    for (node_id, count) in &rows {
-        writeln!(out, "{node_id}\t{count}")?;
-    }
-    Ok(rows.len())
+    impg::pack::write_tsv(out, counts)
 }
 
 fn write_syng_map_pack_binary<W: Write>(
@@ -1130,103 +1103,17 @@ fn write_syng_map_pack_binary<W: Write>(
     compression_level: i32,
     block_size: usize,
 ) -> io::Result<usize> {
-    if !(1..=22).contains(&compression_level) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("--pack-compression-level must be in 1..=22, got {compression_level}"),
-        ));
-    }
-    if block_size == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "--pack-block-size must be greater than 0",
-        ));
-    }
-    if block_size > u32::MAX as usize {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "--pack-block-size must fit in u32",
-        ));
-    }
-    if universe_nodes > u32::MAX as usize {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "packbin currently supports at most 2^32 syncmer nodes",
-        ));
-    }
-
-    let mut dense = vec![0u8; universe_nodes];
-    let mut overflow = Vec::new();
-    for (&node_id, &count) in &counts {
-        if node_id == 0 || node_id as usize > universe_nodes {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("pack count node {node_id} is outside 1..={universe_nodes}"),
-            ));
-        }
-        dense[(node_id - 1) as usize] = count.min(255) as u8;
-        if count > 255 {
-            overflow.push((node_id, count));
-        }
-    }
-    overflow.sort_unstable_by_key(|&(node_id, _)| node_id);
-
-    let block_count = dense.len().div_ceil(block_size);
-    let mut block_offsets = Vec::with_capacity(block_count + 1);
-    let mut compressed_blocks = Vec::with_capacity(block_count);
-    let mut compressed_offset = 0u64;
-    block_offsets.push(compressed_offset);
-    for block in dense.chunks(block_size) {
-        let compressed = zstd::bulk::compress(block, compression_level)?;
-        compressed_offset = compressed_offset
-            .checked_add(compressed.len() as u64)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "packbin offset overflow"))?;
-        block_offsets.push(compressed_offset);
-        compressed_blocks.push(compressed);
-    }
-
-    let header_len = u64::from(SYNG_PACK_BINARY_HEADER_LEN);
-    let block_index_offset = header_len;
-    let block_index_bytes = (block_offsets.len() as u64)
-        .checked_mul(8)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "packbin index overflow"))?;
-    let overflow_offset = block_index_offset
-        .checked_add(block_index_bytes)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "packbin offset overflow"))?;
-    let overflow_bytes = (overflow.len() as u64)
-        .checked_mul(12)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "packbin overflow overflow"))?;
-    let data_offset = overflow_offset
-        .checked_add(overflow_bytes)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "packbin data offset overflow"))?;
-
-    out.write_all(SYNG_PACK_BINARY_MAGIC)?;
-    write_u32_le(out, SYNG_PACK_BINARY_VERSION)?;
-    write_u32_le(out, SYNG_PACK_BINARY_HEADER_LEN)?;
-    write_u64_le(out, universe_nodes as u64)?;
-    write_u64_le(out, counts.len() as u64)?;
-    write_u64_le(out, stats.records as u64)?;
-    write_u64_le(out, stats.anchors as u64)?;
-    write_u32_le(out, block_size as u32)?;
-    write_i32_le(out, compression_level)?;
-    write_u64_le(out, block_count as u64)?;
-    write_u64_le(out, overflow.len() as u64)?;
-    write_u64_le(out, block_index_offset)?;
-    write_u64_le(out, overflow_offset)?;
-    write_u64_le(out, data_offset)?;
-
-    for offset in block_offsets {
-        write_u64_le(out, offset)?;
-    }
-    for (node_id, count) in overflow {
-        write_u32_le(out, node_id)?;
-        write_u64_le(out, count)?;
-    }
-    for block in compressed_blocks {
-        out.write_all(&block)?;
-    }
-
-    Ok(counts.len())
+    impg::pack::write_binary(
+        out,
+        &counts,
+        impg::pack::WriteStats {
+            retained_records: stats.records as u64,
+            syncmer_anchors: stats.anchors as u64,
+        },
+        universe_nodes,
+        compression_level,
+        block_size,
+    )
 }
 
 fn collect_syng_map_pack_counts_sequential(
@@ -2629,6 +2516,69 @@ impl RefineOpts {
     }
 }
 
+#[derive(Subcommand, Debug)]
+enum GenotypeCommand {
+    /// Genotype a locus by cosine similarity over graph-feature coverage
+    #[command(alias = "cosigt")]
+    Cos {
+        /// Syng index prefix or .1khash/.1gbwt/.spos/.pstep/.names/.meta path
+        #[clap(short = 'a', long, value_parser)]
+        index: String,
+
+        /// Sample coverage produced by `impg map -o pack` or `impg map -o packbin`
+        #[clap(short = 'p', long, value_parser)]
+        pack: String,
+
+        /// Reference path range to genotype, in the format `seq_name:start-end`
+        #[clap(short = 'r', long, value_parser)]
+        target_range: String,
+
+        /// Candidate extraction mode
+        #[clap(long, value_enum, default_value_t = genotype::CandidateMode::Spanning)]
+        candidate_mode: genotype::CandidateMode,
+
+        /// Ploidy for genotype combinations
+        #[clap(long, value_parser, default_value_t = 2)]
+        ploidy: usize,
+
+        /// Number of genotype combinations to emit
+        #[clap(long, value_parser, default_value_t = 20)]
+        top_n: usize,
+
+        /// Keep only the best N single-haplotype candidates before combination search (0 = keep all)
+        #[clap(long, value_parser, default_value_t = 200)]
+        candidate_top_k: usize,
+
+        /// Maximum haplotype combinations to score
+        #[clap(long, value_parser, default_value_t = 1_000_000)]
+        max_combinations: u64,
+
+        /// Target-side padding in bp for syng candidate discovery
+        #[clap(long, value_parser, default_value_t = 0)]
+        syng_padding: u64,
+
+        /// Source-side extension in bp for syng candidate discovery
+        #[clap(long, value_parser, default_value_t = 0)]
+        syng_extension: u64,
+
+        /// Minimum shared syncmer anchors required for a candidate
+        #[clap(long, value_parser, default_value_t = 2)]
+        min_anchors: usize,
+
+        /// For spanning mode, minimum fraction of the requested reference range covered by shared anchors
+        #[clap(long, value_parser, default_value_t = 0.8)]
+        min_span_fraction: f64,
+
+        /// Output file path (default: stdout; .zst/.zstd enables zstd compression)
+        #[clap(short = 'O', long, value_parser)]
+        output: Option<String>,
+
+        // --- General ---
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+}
+
 /// Parse sequence name to extract subsequence coordinates and original sequence name
 /// Format: `seq_name:start-end` -> (original_seq_name, start_offset)
 /// Detect whether a path points to a syng index. Returns the syng
@@ -3108,6 +3058,123 @@ enum Args {
         common: CommonOpts,
     },
 
+    /// Genotype a locus from graph-derived sample evidence
+    #[command(alias = "gt")]
+    Genotype {
+        #[command(subcommand)]
+        command: GenotypeCommand,
+    },
+
+    /// Infer allele calls across ranges or partitions from graph-derived evidence
+    Infer {
+        /// Syng index prefix or .1khash/.1gbwt/.spos/.pstep/.names/.meta path
+        #[clap(short = 'a', long, value_parser)]
+        index: String,
+
+        /// Sample evidence produced by `impg map -o pack` or `impg map -o packbin`
+        #[clap(short = 'p', long, value_parser)]
+        pack: String,
+
+        /// Type exactly one target range, in the format `seq_name:start-end`
+        #[clap(short = 'r', long, value_parser, conflicts_with_all = ["target_bed", "partitions"])]
+        target_range: Option<String>,
+
+        /// BED-like target ranges to type independently
+        #[clap(long, alias = "regions", value_parser, conflicts_with_all = ["target_range", "partitions"])]
+        target_bed: Option<String>,
+
+        /// BED-like partitions from `impg partition`; the first row per partition is used as the typed reference range
+        #[clap(long, value_parser, conflicts_with_all = ["target_range", "target_bed"])]
+        partitions: Option<String>,
+
+        /// Window size for internal partition discovery when no target input is provided
+        #[clap(short = 'w', long, value_parser, default_value_t = 1_000_000)]
+        window_size: usize,
+
+        /// Required for internal partition discovery. Merge query-gathered ranges separated by at most this many bp
+        #[clap(short = 'd', long, value_parser)]
+        merge_distance: Option<i32>,
+
+        /// Path to sequence names used to seed internal partition discovery
+        #[clap(long, value_parser)]
+        starting_sequences_file: Option<String>,
+
+        /// Selection mode for internal partition discovery
+        #[clap(long, value_parser, default_value = "longest")]
+        selection_mode: String,
+
+        /// Minimum region size for missing regions during internal partition discovery
+        #[clap(long, value_parser, default_value_t = 3000)]
+        min_missing_size: i32,
+
+        /// Minimum distance from sequence start/end during internal partition discovery
+        #[clap(long, value_parser, default_value_t = 3000)]
+        min_boundary_distance: i32,
+
+        /// Boundary padding in bp for syng queries during internal partition discovery
+        #[clap(long, value_parser, default_value_t = 120)]
+        partition_syng_padding: u64,
+
+        /// Minimum anchor count for syng chains during internal partition discovery
+        #[clap(long, value_parser, default_value_t = 0)]
+        partition_syng_min_chain_anchors: usize,
+
+        /// Minimum query-span fraction for syng chains during internal partition discovery
+        #[clap(long, value_parser, default_value_t = 0.0)]
+        partition_syng_min_chain_fraction: f64,
+
+        /// Disable post-partition singleton sliver rehoming during internal partition discovery
+        #[clap(long, action)]
+        no_rehome_singletons: bool,
+
+        /// Scoring method
+        #[clap(long, value_parser, default_value = "cos")]
+        score: String,
+
+        /// Candidate extraction mode
+        #[clap(long, value_enum, default_value_t = genotype::CandidateMode::Spanning)]
+        candidate_mode: genotype::CandidateMode,
+
+        /// Ploidy for genotype combinations
+        #[clap(long, value_parser, default_value_t = 2)]
+        ploidy: usize,
+
+        /// Number of genotype combinations to emit per target
+        #[clap(long, value_parser, default_value_t = 1)]
+        top_n: usize,
+
+        /// Keep only the best N single-haplotype candidates before combination search (0 = keep all)
+        #[clap(long, value_parser, default_value_t = 200)]
+        candidate_top_k: usize,
+
+        /// Maximum haplotype combinations to score per target
+        #[clap(long, value_parser, default_value_t = 1_000_000)]
+        max_combinations: u64,
+
+        /// Target-side padding in bp for syng candidate discovery during local typing
+        #[clap(long, value_parser, default_value_t = 0)]
+        syng_padding: u64,
+
+        /// Source-side extension in bp for syng candidate discovery during local typing
+        #[clap(long, value_parser, default_value_t = 0)]
+        syng_extension: u64,
+
+        /// Minimum shared syncmer anchors required for a candidate
+        #[clap(long, value_parser, default_value_t = 2)]
+        min_anchors: usize,
+
+        /// For spanning mode, minimum fraction of the requested reference range covered by shared anchors
+        #[clap(long, value_parser, default_value_t = 0.8)]
+        min_span_fraction: f64,
+
+        /// Output file path (default: stdout; .zst/.zstd enables zstd compression)
+        #[clap(short = 'O', long, value_parser)]
+        output: Option<String>,
+
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+
     /// Print alignment statistics
     Stats {
         // --- Input ---
@@ -3221,7 +3288,7 @@ enum Args {
         pack_compression_level: i32,
 
         /// Dense node-count block size for binary pack random access
-        #[clap(long, value_parser, default_value_t = DEFAULT_PACK_BINARY_BLOCK_SIZE)]
+        #[clap(long, value_parser, default_value_t = impg::pack::DEFAULT_BINARY_BLOCK_SIZE)]
         pack_block_size: usize,
 
         // --- General ---
@@ -4905,6 +4972,203 @@ fn run() -> io::Result<()> {
                 polarize_guide_samples.as_deref(),
             )?;
         }
+        Args::Genotype { command } => match command {
+            GenotypeCommand::Cos {
+                index,
+                pack,
+                target_range,
+                candidate_mode,
+                ploidy,
+                top_n,
+                candidate_top_k,
+                max_combinations,
+                syng_padding,
+                syng_extension,
+                min_anchors,
+                min_span_fraction,
+                output,
+                common,
+            } => {
+                initialize_threads_and_log(&common);
+                let syng_prefix = detect_syng_prefix(&index).unwrap_or(index);
+                let config = genotype::SyngCosigtConfig {
+                    syng_prefix: &syng_prefix,
+                    pack_path: &pack,
+                    target_range: &target_range,
+                    candidate_mode,
+                    ploidy,
+                    top_n,
+                    candidate_top_k,
+                    max_combinations,
+                    syng_padding,
+                    syng_extension,
+                    min_anchors,
+                    min_span_fraction,
+                };
+
+                #[cfg(unix)]
+                let saved_stdout = silence_stdout_for_process()?;
+                #[cfg(not(unix))]
+                silence_stdout_for_process()?;
+
+                if let Some(path) = output {
+                    let mut out = create_map_output_writer(&path)?;
+                    genotype::run_syng_cosigt(&mut out, &config)?;
+                    out.flush()?;
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::close(saved_stdout);
+                    }
+                } else {
+                    let mut out = Vec::new();
+                    genotype::run_syng_cosigt(&mut out, &config)?;
+                    #[cfg(unix)]
+                    {
+                        write_all_to_fd(saved_stdout, &out)?;
+                        unsafe {
+                            libc::close(saved_stdout);
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let mut stdout = io::stdout();
+                        stdout.write_all(&out)?;
+                        stdout.flush()?;
+                    }
+                }
+            }
+        },
+        Args::Infer {
+            index,
+            pack,
+            target_range,
+            target_bed,
+            partitions,
+            window_size,
+            merge_distance,
+            starting_sequences_file,
+            selection_mode,
+            min_missing_size,
+            min_boundary_distance,
+            partition_syng_padding,
+            partition_syng_min_chain_anchors,
+            partition_syng_min_chain_fraction,
+            no_rehome_singletons,
+            score,
+            candidate_mode,
+            ploidy,
+            top_n,
+            candidate_top_k,
+            max_combinations,
+            syng_padding,
+            syng_extension,
+            min_anchors,
+            min_span_fraction,
+            output,
+            common,
+        } => {
+            initialize_threads_and_log(&common);
+            if score != "cos" {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unsupported infer --score '{}'; currently only 'cos' is supported", score),
+                ));
+            }
+            if window_size == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--window-size must be greater than 0",
+                ));
+            }
+
+            let targets = if let Some(range) = target_range {
+                vec![infer::parse_target_range(&range)?]
+            } else if let Some(path) = target_bed {
+                infer::parse_target_bed(&path)?
+            } else if let Some(path) = partitions {
+                infer::parse_partitions(&path)?
+            } else {
+                Vec::new()
+            };
+
+            let discovery = if targets.is_empty() {
+                let merge_distance = merge_distance.ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "impg infer discovery mode requires -d/--merge-distance; provide --target-range, --target-bed, or --partitions to type explicit ranges",
+                    )
+                })?;
+                if merge_distance < 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--merge-distance must be >= 0",
+                    ));
+                }
+                validate_selection_mode(&selection_mode)?;
+                Some(infer::PartitionDiscoveryConfig {
+                    window_size,
+                    merge_distance,
+                    starting_sequences_file: starting_sequences_file.as_deref(),
+                    selection_mode: &selection_mode,
+                    min_missing_size,
+                    min_boundary_distance,
+                    syng_padding: partition_syng_padding,
+                    syng_min_chain_anchors: partition_syng_min_chain_anchors,
+                    syng_min_chain_fraction: partition_syng_min_chain_fraction,
+                    rehome_singletons: !no_rehome_singletons,
+                })
+            } else {
+                None
+            };
+
+            let syng_prefix = detect_syng_prefix(&index).unwrap_or(index);
+            let config = infer::InferConfig {
+                syng_prefix: &syng_prefix,
+                pack_path: &pack,
+                targets,
+                discovery,
+                candidate_mode,
+                ploidy,
+                top_n,
+                candidate_top_k,
+                max_combinations,
+                syng_padding,
+                syng_extension,
+                min_anchors,
+                min_span_fraction,
+            };
+
+            #[cfg(unix)]
+            let saved_stdout = silence_stdout_for_process()?;
+            #[cfg(not(unix))]
+            silence_stdout_for_process()?;
+
+            if let Some(path) = output {
+                let mut out = create_map_output_writer(&path)?;
+                infer::run_syng_pack_infer(&mut out, &config)?;
+                out.flush()?;
+                #[cfg(unix)]
+                unsafe {
+                    libc::close(saved_stdout);
+                }
+            } else {
+                let mut out = Vec::new();
+                infer::run_syng_pack_infer(&mut out, &config)?;
+                #[cfg(unix)]
+                {
+                    write_all_to_fd(saved_stdout, &out)?;
+                    unsafe {
+                        libc::close(saved_stdout);
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let mut stdout = io::stdout();
+                    stdout.write_all(&out)?;
+                    stdout.flush()?;
+                }
+            }
+        },
         Args::Stats {
             common,
             alignment,
@@ -5174,7 +5438,7 @@ fn run() -> io::Result<()> {
 
             let syng_prefix = detect_syng_prefix(&index).unwrap_or(index);
             if !matches!(output_format.as_str(), "gaf" | "paf" | "pack")
-                && !is_pack_binary_format(&output_format)
+                && !impg::pack::is_binary_format(&output_format)
             {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -5184,7 +5448,7 @@ fn run() -> io::Result<()> {
                     ),
                 ));
             }
-            if is_pack_binary_format(&output_format) {
+            if impg::pack::is_binary_format(&output_format) {
                 if !(1..=22).contains(&pack_compression_level) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -5207,7 +5471,7 @@ fn run() -> io::Result<()> {
             silence_stdout_for_process()?;
 
             if let Some(path) = output {
-                let mut out = if is_pack_binary_format(&output_format) {
+                let mut out = if impg::pack::is_binary_format(&output_format) {
                     create_plain_map_output_writer(&path)?
                 } else {
                     create_map_output_writer(&path)?
@@ -5229,7 +5493,7 @@ fn run() -> io::Result<()> {
                         )?;
                         emit_syng_map_pack(&mut out, &syng_matcher, &query, min_anchors)?;
                     }
-                    format if is_pack_binary_format(format) => {
+                    format if impg::pack::is_binary_format(format) => {
                         info!("Loading syng syncmer dictionary from prefix: {}", syng_prefix);
                         let syng_matcher = impg::syng::SyngMatcher::load(
                             &syng_prefix,
@@ -5287,7 +5551,7 @@ fn run() -> io::Result<()> {
                         )?;
                         emit_syng_map_pack(&mut out, &syng_matcher, &query, min_anchors)?;
                     }
-                    format if is_pack_binary_format(format) => {
+                    format if impg::pack::is_binary_format(format) => {
                         info!("Loading syng syncmer dictionary from prefix: {}", syng_prefix);
                         let syng_matcher = impg::syng::SyngMatcher::load(
                             &syng_prefix,
