@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use crate::commands::partition;
-use crate::genotyping::{FeatureSpace, ScoringMethod};
+use crate::genotyping::{self, FeatureSpace, ScoringMethod};
 use crate::pack;
 use crate::syng;
 
@@ -42,15 +42,7 @@ struct SyngCandidateGroup {
     anchors: Vec<syng::Anchor>,
 }
 
-#[derive(Debug)]
-pub struct CosigtResult {
-    pub combination: Vec<usize>,
-    pub similarity: f64,
-    pub qv: f64,
-    pub dot: f64,
-    pub sample_norm: f64,
-    pub genotype_norm: f64,
-}
+pub type CosigtResult = genotyping::CombinationScore;
 
 pub struct SyngCosigtConfig<'a> {
     pub syng_prefix: &'a str,
@@ -271,147 +263,6 @@ fn collect_syng_candidates(
     Ok(candidates)
 }
 
-fn locus_features(candidates: &[HaplotypeCandidate]) -> Vec<u32> {
-    let mut seen: FxHashMap<u32, ()> = FxHashMap::default();
-    for candidate in candidates {
-        for &(feature_id, _) in &candidate.features {
-            seen.insert(feature_id, ());
-        }
-    }
-    let mut features: Vec<u32> = seen.into_keys().collect();
-    features.sort_unstable();
-    features
-}
-
-fn sample_norm_sq_for_features(sample_counts: &FxHashMap<u32, u64>, features: &[u32]) -> f64 {
-    features
-        .iter()
-        .map(|feature_id| sample_counts.get(feature_id).copied().unwrap_or(0) as f64)
-        .map(|v| v * v)
-        .sum()
-}
-
-fn cosine_for_candidate_features(
-    candidate_features: &[(u32, u64)],
-    sample_counts: &FxHashMap<u32, u64>,
-    sample_norm_sq: f64,
-) -> f64 {
-    if sample_norm_sq == 0.0 {
-        return 0.0;
-    }
-    let mut dot = 0.0;
-    let mut genotype_norm_sq = 0.0;
-    for &(feature_id, count) in candidate_features {
-        let g = count as f64;
-        genotype_norm_sq += g * g;
-        dot += g * sample_counts.get(&feature_id).copied().unwrap_or(0) as f64;
-    }
-    if genotype_norm_sq == 0.0 {
-        0.0
-    } else {
-        dot / (sample_norm_sq.sqrt() * genotype_norm_sq.sqrt())
-    }
-}
-
-fn score_combination(
-    combination: &[usize],
-    candidates: &[HaplotypeCandidate],
-    sample_counts: &FxHashMap<u32, u64>,
-    sample_norm_sq: f64,
-) -> CosigtResult {
-    let mut genotype_counts: FxHashMap<u32, u64> = FxHashMap::default();
-    for &idx in combination {
-        for &(feature_id, count) in &candidates[idx].features {
-            *genotype_counts.entry(feature_id).or_insert(0) += count;
-        }
-    }
-
-    let mut dot = 0.0;
-    let mut genotype_norm_sq = 0.0;
-    for (feature_id, count) in genotype_counts {
-        let g = count as f64;
-        genotype_norm_sq += g * g;
-        dot += g * sample_counts.get(&feature_id).copied().unwrap_or(0) as f64;
-    }
-
-    let sample_norm = sample_norm_sq.sqrt();
-    let genotype_norm = genotype_norm_sq.sqrt();
-    let similarity = if sample_norm == 0.0 || genotype_norm == 0.0 {
-        0.0
-    } else {
-        dot / (sample_norm * genotype_norm)
-    };
-    let qv = if similarity >= 1.0 {
-        999.0
-    } else if similarity <= 0.0 {
-        0.0
-    } else {
-        -10.0 * (1.0 - similarity).log10()
-    };
-
-    CosigtResult {
-        combination: combination.to_vec(),
-        similarity,
-        qv,
-        dot,
-        sample_norm,
-        genotype_norm,
-    }
-}
-
-struct CosigtSearch<'a> {
-    candidates: &'a [HaplotypeCandidate],
-    sample_counts: &'a FxHashMap<u32, u64>,
-    sample_norm_sq: f64,
-    ploidy: usize,
-    max_combinations: u64,
-    visited: u64,
-    results: Vec<CosigtResult>,
-}
-
-impl CosigtSearch<'_> {
-    fn run(mut self) -> io::Result<Vec<CosigtResult>> {
-        let mut current = Vec::with_capacity(self.ploidy);
-        self.visit(0, &mut current)?;
-        self.results.sort_by(|a, b| {
-            b.similarity
-                .total_cmp(&a.similarity)
-                .then_with(|| b.dot.total_cmp(&a.dot))
-                .then_with(|| a.combination.cmp(&b.combination))
-        });
-        Ok(self.results)
-    }
-
-    fn visit(&mut self, start: usize, current: &mut Vec<usize>) -> io::Result<()> {
-        if current.len() == self.ploidy {
-            self.visited += 1;
-            if self.visited > self.max_combinations {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "genotype combination search exceeded --max-combinations ({})",
-                        self.max_combinations
-                    ),
-                ));
-            }
-            self.results.push(score_combination(
-                current,
-                self.candidates,
-                self.sample_counts,
-                self.sample_norm_sq,
-            ));
-            return Ok(());
-        }
-
-        for idx in start..self.candidates.len() {
-            current.push(idx);
-            self.visit(idx, current)?;
-            current.pop();
-        }
-        Ok(())
-    }
-}
-
 fn rank_cosigt(
     candidates: &mut Vec<HaplotypeCandidate>,
     sample_counts: &FxHashMap<u32, u64>,
@@ -420,11 +271,19 @@ fn rank_cosigt(
     candidate_top_k: usize,
     max_combinations: u64,
 ) -> io::Result<(Vec<CosigtResult>, Vec<u32>)> {
-    let all_locus_features = locus_features(candidates);
-    let all_sample_norm_sq = sample_norm_sq_for_features(sample_counts, &all_locus_features);
+    let all_locus_features = genotyping::feature_universe(
+        candidates
+            .iter()
+            .map(|candidate| candidate.features.as_slice()),
+    );
+    let all_sample_norm_sq =
+        genotyping::sample_norm_sq_for_features(sample_counts, &all_locus_features);
     for candidate in candidates.iter_mut() {
-        candidate.single_similarity =
-            cosine_for_candidate_features(&candidate.features, sample_counts, all_sample_norm_sq);
+        candidate.single_similarity = genotyping::cosine_for_feature_counts(
+            &candidate.features,
+            sample_counts,
+            all_sample_norm_sq,
+        );
     }
     candidates.sort_by(|a, b| {
         b.single_similarity
@@ -437,8 +296,12 @@ fn rank_cosigt(
         candidates.truncate(candidate_top_k);
     }
 
-    let selected_features = locus_features(candidates);
-    let sample_norm_sq = sample_norm_sq_for_features(sample_counts, &selected_features);
+    let selected_features = genotyping::feature_universe(
+        candidates
+            .iter()
+            .map(|candidate| candidate.features.as_slice()),
+    );
+    let sample_norm_sq = genotyping::sample_norm_sq_for_features(sample_counts, &selected_features);
     if sample_norm_sq == 0.0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -446,16 +309,17 @@ fn rank_cosigt(
         ));
     }
 
-    let search = CosigtSearch {
-        candidates,
+    let candidate_features: Vec<&[(u32, u64)]> = candidates
+        .iter()
+        .map(|candidate| candidate.features.as_slice())
+        .collect();
+    let mut results = genotyping::run_cosine_combination_search(
+        &candidate_features,
         sample_counts,
         sample_norm_sq,
         ploidy,
         max_combinations,
-        visited: 0,
-        results: Vec::new(),
-    };
-    let mut results = search.run()?;
+    )?;
     results.truncate(top_n);
     Ok((results, selected_features))
 }
