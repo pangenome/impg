@@ -122,9 +122,9 @@ sample.proj/
 ```
 
 `sample.pack` is the aggregate support vector. `reads.gaf.zst` is the per-read
-syncmer walk layer that can later supply linkage/phase evidence. Commands should
-prefer `--proj` when both layers are available, while still accepting `--pack`
-for large cohort-scale aggregate workflows.
+syncmer walk layer used by stitched inference to supply linkage/phase evidence.
+Commands should prefer `--proj` when both layers are available, while still
+accepting `--pack` for large cohort-scale aggregate workflows.
 
 ## Scoring
 
@@ -160,12 +160,30 @@ best genome = argmax sum_j emission_j + transition_j
 This can start as beam search over the top local genotype states, then move to
 more principled HMM/Viterbi inference.
 
-Current stitching is the conservative first layer: retained local calls are
-expanded into ordered ploidy states, same-path continuation is cheap, and
-haplotype switches pay a configurable `--switch-penalty`. This is a panel
-copying prior over local calls, not yet a full read-link imputer. Projection GAF
-walks are carried through the interface so read-link transition evidence can be
-added without changing the user workflow.
+Current stitching is a beam-search haplotype-copying model over retained local
+calls. Each local genotype is expanded into ordered ploidy states. Same-path
+continuation is cheap, haplotype switches pay `--switch-penalty`, and read walks
+from a projection bundle add transition reward when the same read supports the
+specific previous-candidate -> current-candidate phase link.
+
+The read-link reward is intentionally simple and auditable:
+
+```text
+candidate feature = syng syncmer node
+read hits candidate = shared read-walk nodes >= --min-read-link-anchors
+transition support = adjacent candidate hits from the same read walk
+transition reward = --read-link-weight * 10 * log10(1 + normalized_anchor_support)
+```
+
+Ambiguous reads divide their support across all candidate links they match, so
+shared sequence does not create artificial certainty. The mosaic TSV reports
+`transition_cost`, `read_link_reads`, `read_link_anchors`, and
+`read_link_reward` per phase.
+
+This is now a real read-link imputer across the current partition lattice. The
+next refinement is to split a partition into internal candidate blocks, using
+the same state/transition machinery to infer IBD copied segments within a large
+partition as well as between partitions.
 
 ## Output
 

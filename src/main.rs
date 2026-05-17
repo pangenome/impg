@@ -3252,6 +3252,14 @@ enum Args {
         #[clap(long, value_parser, default_value_t = 1000)]
         stitch_gap: u64,
 
+        /// Weight for read-walk evidence when scoring stitched phase transitions
+        #[clap(long, value_parser, default_value_t = 1.0)]
+        read_link_weight: f64,
+
+        /// Minimum read syncmer anchors a candidate must share before it contributes read-link evidence
+        #[clap(long, value_parser, default_value_t = 2)]
+        min_read_link_anchors: usize,
+
         /// Reject uncertain FASTA/GFA sequence joins instead of labeling or padding them
         #[clap(long, action)]
         strict_stitch: bool,
@@ -5195,6 +5203,8 @@ fn run() -> io::Result<()> {
             stitch_beam,
             switch_penalty,
             stitch_gap,
+            read_link_weight,
+            min_read_link_anchors,
             strict_stitch,
             emit_mosaic,
             emit_fasta,
@@ -5298,6 +5308,18 @@ fn run() -> io::Result<()> {
                     "--switch-penalty must be >= 0",
                 ));
             }
+            if read_link_weight < 0.0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--read-link-weight must be >= 0",
+                ));
+            }
+            if min_read_link_anchors == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--min-read-link-anchors must be greater than 0",
+                ));
+            }
             let sequence_index = if emit_fasta.is_some() || emit_gfa.is_some() {
                 Some(sequence.build_sequence_index()?.ok_or_else(|| {
                     io::Error::new(
@@ -5327,6 +5349,8 @@ fn run() -> io::Result<()> {
                 stitch_beam,
                 switch_penalty,
                 stitch_gap,
+                read_link_weight,
+                min_read_link_anchors,
                 strict_stitch,
                 emit_mosaic: emit_mosaic.as_deref(),
                 emit_fasta: emit_fasta.as_deref(),
