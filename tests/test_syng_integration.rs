@@ -47,6 +47,39 @@ fn numeric_to_ascii(numeric: &[u8]) -> Vec<u8> {
         .collect()
 }
 
+fn write_tiled_fastq<W: std::io::Write>(
+    writer: &mut W,
+    prefix: &str,
+    seq: &[u8],
+    read_len: usize,
+    step: usize,
+) -> std::io::Result<usize> {
+    assert!(read_len > 0);
+    assert!(step > 0);
+    assert!(seq.len() >= read_len);
+
+    let mut starts = Vec::new();
+    let mut start = 0usize;
+    while start + read_len <= seq.len() {
+        starts.push(start);
+        start += step;
+    }
+    let terminal_start = seq.len() - read_len;
+    if starts.last().copied() != Some(terminal_start) {
+        starts.push(terminal_start);
+    }
+
+    for (read_idx, start) in starts.iter().enumerate() {
+        let end = start + read_len;
+        writeln!(writer, "@{}_{}", prefix, read_idx)?;
+        writer.write_all(&seq[*start..end])?;
+        writeln!(writer)?;
+        writeln!(writer, "+")?;
+        writeln!(writer, "{}", "I".repeat(read_len))?;
+    }
+    Ok(starts.len())
+}
+
 /// Build a small test AGC archive with multiple samples sharing a backbone.
 fn create_test_agc(path: &str) {
     let config = StreamingQueueConfig {
@@ -1239,6 +1272,175 @@ fn test_syng_genotype_cos_cli_permutations() {
         }
     }
     assert_eq!(checked, 16, "expected to exercise the full genotype CLI matrix");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn test_syng_genotype_cos_short_read_simulation_calls_heterozygote() {
+    let _guard = lock_syng();
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping: impg binary not built");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join("impg_test_syng_genotype_short_read_sim");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let left = numeric_to_ascii(&make_sequence_numeric(900, 31));
+    let allele_a = numeric_to_ascii(&make_sequence_numeric(900, 32));
+    let allele_b = numeric_to_ascii(&make_sequence_numeric(900, 33));
+    let allele_c = numeric_to_ascii(&make_sequence_numeric(900, 34));
+    let right = numeric_to_ascii(&make_sequence_numeric(900, 35));
+
+    let mut hap_a = Vec::new();
+    hap_a.extend_from_slice(&left);
+    hap_a.extend_from_slice(&allele_a);
+    hap_a.extend_from_slice(&right);
+    let mut hap_b = Vec::new();
+    hap_b.extend_from_slice(&left);
+    hap_b.extend_from_slice(&allele_b);
+    hap_b.extend_from_slice(&right);
+    let mut hap_c = Vec::new();
+    hap_c.extend_from_slice(&left);
+    hap_c.extend_from_slice(&allele_c);
+    hap_c.extend_from_slice(&right);
+    assert_eq!(hap_a.len(), hap_b.len());
+    assert_eq!(hap_a.len(), hap_c.len());
+
+    let fasta_path = dir.join("index.fa");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        writeln!(f, ">sampleA#0#chr1").unwrap();
+        f.write_all(&hap_a).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleB#0#chr1").unwrap();
+        f.write_all(&hap_b).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleC#0#chr1").unwrap();
+        f.write_all(&hap_c).unwrap();
+        writeln!(f).unwrap();
+    }
+
+    let idx_prefix = dir.join("idx");
+    let build = Command::new(&bin)
+        .args([
+            "syng",
+            "-f",
+            fasta_path.to_str().unwrap(),
+            "-o",
+            idx_prefix.to_str().unwrap(),
+            "--position-sample-rate",
+            "1",
+        ])
+        .output()
+        .expect("failed to run impg syng");
+    assert!(
+        build.status.success(),
+        "impg syng failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let reads_path = dir.join("simulated_reads.fq");
+    let read_count = {
+        let mut f = std::fs::File::create(&reads_path).unwrap();
+        let a = write_tiled_fastq(&mut f, "hapA", &hap_a, 250, 25).unwrap();
+        let b = write_tiled_fastq(&mut f, "hapB", &hap_b, 250, 25).unwrap();
+        a + b
+    };
+    assert!(
+        read_count >= 190,
+        "expected dense tiled short-read simulation, got {} reads",
+        read_count
+    );
+
+    let packbin_path = dir.join("simulated.packbin");
+    let map = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            reads_path.to_str().unwrap(),
+            "-o",
+            "packbin",
+            "-O",
+            packbin_path.to_str().unwrap(),
+            "--pack-compression-level",
+            "3",
+            "--pack-block-size",
+            "64",
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o packbin");
+    assert!(
+        map.status.success(),
+        "impg map -o packbin failed: {}",
+        String::from_utf8_lossy(&map.stderr)
+    );
+
+    let target_range = format!("sampleA#0#chr1:0-{}", hap_a.len());
+    let gt = Command::new(&bin)
+        .args([
+            "genotype",
+            "cos",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-p",
+            packbin_path.to_str().unwrap(),
+            "-r",
+            &target_range,
+            "--top-n",
+            "5",
+            "--candidate-top-k",
+            "10",
+            "--min-anchors",
+            "2",
+            "--min-span-fraction",
+            "0.8",
+        ])
+        .output()
+        .expect("failed to run impg genotype cos");
+    assert!(
+        gt.status.success(),
+        "impg genotype cos failed: {}",
+        String::from_utf8_lossy(&gt.stderr)
+    );
+    let gt_stdout = String::from_utf8_lossy(&gt.stdout);
+    let top = gt_stdout
+        .lines()
+        .find(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .expect("expected at least one cosine genotype result row");
+    let fields: Vec<&str> = top.split('\t').collect();
+    assert!(
+        fields.len() >= 12,
+        "cos genotype row should have at least 12 fields: {}",
+        top
+    );
+    assert_eq!(fields[0], "1");
+    assert_eq!(fields[1], "cos");
+    assert_eq!(fields[2], "2");
+    let similarity = fields[3].parse::<f64>().unwrap();
+    assert!(
+        similarity > 0.90,
+        "expected strong short-read heterozygous cosine score, got {}\n{}",
+        similarity,
+        gt_stdout
+    );
+    assert!(
+        fields[8].contains("sampleA#0#chr1") && fields[8].contains("sampleB#0#chr1"),
+        "top genotype should call the simulated A/B diploid, got:\n{}",
+        gt_stdout
+    );
+    assert!(
+        !fields[8].contains("sampleC#0#chr1"),
+        "top genotype should not include the unsampled decoy haplotype, got:\n{}",
+        gt_stdout
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }
