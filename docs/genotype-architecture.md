@@ -43,3 +43,8 @@ path. `pack-tsv` is the human-readable export of the same abstraction, and
 `packbin` remains a compatibility alias for compact pack output. Projection
 bundles add metadata and read-walk evidence around the pack so packs cannot be
 accidentally combined with the wrong graph or feature namespace.
+
+See [`pangenome-genotyping-roadmap.md`](pangenome-genotyping-roadmap.md) for
+the longer-term plan: backend-neutral pangenome genotyping, local variation
+graph backends, alignment evidence, learned local scorers, and phased copying
+inference.

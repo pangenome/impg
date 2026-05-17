@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use crate::commands::partition;
+use crate::genotyping::{FeatureSpace, ScoringMethod};
 use crate::pack;
 use crate::syng;
 
@@ -572,10 +573,14 @@ pub fn write_syng_cosigt_output<W: Write>(
 ) -> io::Result<()> {
     writeln!(out, "#impg genotype cos")?;
     writeln!(out, "#region\t{}", result.region_name)?;
-    writeln!(out, "#method\tcos")?;
-    writeln!(out, "#metric\tcosine")?;
+    writeln!(out, "#method\t{}", ScoringMethod::Cos.as_str())?;
+    writeln!(out, "#metric\t{}", ScoringMethod::Cos.metric_str())?;
     writeln!(out, "#alias\tcosigt")?;
-    writeln!(out, "#feature_space\tsyng-syncmer-node")?;
+    writeln!(
+        out,
+        "#feature_space\t{}",
+        FeatureSpace::SyngSyncmerNode.as_str()
+    )?;
     writeln!(out, "#candidate_mode\t{:?}", result.candidate_mode)?;
     writeln!(out, "#ploidy\t{}", result.ploidy)?;
     writeln!(out, "#candidates\t{}", result.candidates.len())?;
@@ -617,8 +622,9 @@ pub fn write_syng_cosigt_output<W: Write>(
             .collect();
         writeln!(
             out,
-            "{}\tcos\t{}\t{:.9}\t{:.3}\t{:.3}\t{:.6}\t{:.6}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{:.9}\t{:.3}\t{:.3}\t{:.6}\t{:.6}\t{}\t{}\t{}\t{}",
             rank + 1,
+            ScoringMethod::Cos.as_str(),
             result.ploidy,
             genotype_result.similarity,
             genotype_result.qv,

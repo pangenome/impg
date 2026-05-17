@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::commands::{genotype, graph, partition};
+use crate::genotyping::{EvidenceBackend, FeatureSpace, ScoringMethod};
 use crate::graph::reverse_complement;
 use crate::pack;
 use crate::sequence_index::{SequenceIndex, UnifiedSequenceIndex};
@@ -444,7 +445,7 @@ fn write_local_infer_output<W: Write>(
     config: &InferConfig<'_>,
 ) -> io::Result<()> {
     writeln!(out, "#impg infer")?;
-    writeln!(out, "#evidence_backend\tpack")?;
+    writeln!(out, "#evidence_backend\t{}", EvidenceBackend::Pack.as_str())?;
     if config.gaf_path.is_some() {
         writeln!(out, "#read_walks\tgaf")?;
         writeln!(
@@ -453,8 +454,12 @@ fn write_local_infer_output<W: Write>(
             config.min_read_link_anchors, config.read_link_weight
         )?;
     }
-    writeln!(out, "#score\tcos")?;
-    writeln!(out, "#feature_space\tsyng-syncmer-node")?;
+    writeln!(out, "#score\t{}", ScoringMethod::Cos.as_str())?;
+    writeln!(
+        out,
+        "#feature_space\t{}",
+        FeatureSpace::SyngSyncmerNode.as_str()
+    )?;
     writeln!(out, "#targets\t{}", call_sets.len())?;
     if config.phase_block_size > 0 {
         writeln!(out, "#phase_block_size\t{}", config.phase_block_size)?;
@@ -493,12 +498,13 @@ fn write_local_infer_output<W: Write>(
                         .collect();
                     writeln!(
                         out,
-                        "{}\t{}\t{}\t{}\t{}\tcos\t{}\t{:.9}\t{:.3}\t{}\t{}\t{}\t{}\tPASS",
+                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.9}\t{:.3}\t{}\t{}\t{}\t{}\tPASS",
                         rank + 1,
                         target.partition,
                         target.chrom,
                         target.start,
                         target.end,
+                        ScoringMethod::Cos.as_str(),
                         result.ploidy,
                         genotype_result.similarity,
                         genotype_result.qv,
@@ -512,11 +518,12 @@ fn write_local_infer_output<W: Write>(
             None => {
                 writeln!(
                     out,
-                    "1\t{}\t{}\t{}\t{}\tcos\t{}\t0.000000000\t0.000\t.\t.\t.\t.\tNO_CALL:{}",
+                    "1\t{}\t{}\t{}\t{}\t{}\t{}\t0.000000000\t0.000\t.\t.\t.\t.\tNO_CALL:{}",
                     target.partition,
                     target.chrom,
                     target.start,
                     target.end,
+                    ScoringMethod::Cos.as_str(),
                     config.ploidy,
                     call_set.error.as_deref().unwrap_or("unknown error")
                 )?;
