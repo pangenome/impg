@@ -10,6 +10,7 @@ pub mod commands;
 pub mod faidx;
 pub mod forest_map;
 pub mod graph;
+pub mod genotyping;
 pub mod impg;
 pub mod impg_index;
 pub mod multi_impg;
