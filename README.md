@@ -386,8 +386,11 @@ discovery, which requires `-d/--merge-distance`. `infer` can consume `--pack`
 for aggregate graph support or `--proj` for a bundle that also carries read
 walks. Add `--stitch beam --emit-mosaic out.tsv --emit-fasta haps.fa
 --emit-gfa diplotype.gfa --sequence-files panel.fa-or.agc` to stitch local
-calls into phased mosaic paths and materialize sequence. See
-`docs/infer-design.md`.
+calls into phased mosaic paths and materialize sequence. When `--proj` or
+`--gaf` read walks are available, stitched inference rewards phase transitions
+supported by the same reads (`--read-link-weight`,
+`--min-read-link-anchors`) while `--switch-penalty` keeps unnecessary panel
+crossovers expensive. See `docs/infer-design.md`.
 
 `-r` splits on the **last** `:`. Path names from `odgi paths -f`
 already contain coordinates (`grch38#chr6:31972046-32055647`), so a

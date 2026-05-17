@@ -1,5 +1,6 @@
 use clap::ValueEnum;
 use log::info;
+use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
@@ -63,6 +64,8 @@ pub struct InferConfig<'a> {
     pub stitch_beam: usize,
     pub switch_penalty: f64,
     pub stitch_gap: u64,
+    pub read_link_weight: f64,
+    pub min_read_link_anchors: usize,
     pub strict_stitch: bool,
     pub emit_mosaic: Option<&'a str>,
     pub emit_fasta: Option<&'a str>,
@@ -82,6 +85,36 @@ struct OrderedState {
     result_idx: usize,
     candidates: Vec<usize>,
     emission: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct CandidateKey {
+    call_idx: usize,
+    candidate_idx: usize,
+}
+
+#[derive(Debug, Default, Clone)]
+struct LinkEvidence {
+    read_weight: f64,
+    anchor_weight: f64,
+}
+
+#[derive(Debug, Default)]
+struct ReadWalkEvidence {
+    links: FxHashMap<(CandidateKey, CandidateKey), LinkEvidence>,
+    records: u64,
+    records_with_candidate_hits: u64,
+    candidate_hits: u64,
+    linked_read_pairs: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PhaseTransitionScore {
+    kind: TransitionKind,
+    cost: f64,
+    read_link_reads: f64,
+    read_link_anchors: f64,
+    read_link_reward: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,8 +140,7 @@ impl TransitionKind {
 struct MosaicStep {
     call_idx: usize,
     state: OrderedState,
-    transition_kinds: Vec<TransitionKind>,
-    transition_cost: f64,
+    transitions: Vec<PhaseTransitionScore>,
 }
 
 #[derive(Debug, Clone)]
@@ -366,6 +398,11 @@ fn write_local_infer_output<W: Write>(
     writeln!(out, "#evidence_backend\tpack")?;
     if config.gaf_path.is_some() {
         writeln!(out, "#read_walks\tgaf")?;
+        writeln!(
+            out,
+            "#read_link_model\tadjacent-candidate-walk-links;min_anchors={};weight={:.6}",
+            config.min_read_link_anchors, config.read_link_weight
+        )?;
     }
     writeln!(out, "#score\tcos")?;
     writeln!(out, "#feature_space\tsyng-syncmer-node")?;
@@ -487,6 +524,178 @@ fn ordered_states(call_set: &LocalCallSet) -> Vec<OrderedState> {
     states
 }
 
+fn start_transition() -> PhaseTransitionScore {
+    PhaseTransitionScore {
+        kind: TransitionKind::Start,
+        cost: 0.0,
+        read_link_reads: 0.0,
+        read_link_anchors: 0.0,
+        read_link_reward: 0.0,
+    }
+}
+
+fn parse_gaf_path_nodes(path: &str, nodes: &mut Vec<u32>) -> io::Result<()> {
+    nodes.clear();
+    let bytes = path.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != b'>' && bytes[i] != b'<' {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("GAF path contains non-orientation byte at offset {i}: {path}"),
+            ));
+        }
+        i += 1;
+        let start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == start {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("GAF path step is missing numeric syncmer node: {path}"),
+            ));
+        }
+        let node = path[start..i].parse::<u32>().map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid syncmer node in GAF path '{path}': {e}"),
+            )
+        })?;
+        nodes.push(node);
+    }
+    Ok(())
+}
+
+fn sorted_candidate_hits(
+    counts: FxHashMap<CandidateKey, u32>,
+    min_read_link_anchors: usize,
+) -> Vec<(usize, Vec<(usize, u32)>)> {
+    let mut by_call: BTreeMap<usize, Vec<(usize, u32)>> = BTreeMap::new();
+    let min_read_link_anchors = min_read_link_anchors.max(1) as u32;
+    for (key, count) in counts {
+        if count >= min_read_link_anchors {
+            by_call
+                .entry(key.call_idx)
+                .or_default()
+                .push((key.candidate_idx, count));
+        }
+    }
+    let mut hits: Vec<(usize, Vec<(usize, u32)>)> = by_call.into_iter().collect();
+    for (_, candidates) in &mut hits {
+        candidates.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    }
+    hits
+}
+
+fn add_read_links(evidence: &mut ReadWalkEvidence, hits_by_call: &[(usize, Vec<(usize, u32)>)]) {
+    if hits_by_call.len() < 2 {
+        return;
+    }
+    evidence.records_with_candidate_hits += 1;
+    evidence.candidate_hits += hits_by_call
+        .iter()
+        .map(|(_, hits)| hits.len() as u64)
+        .sum::<u64>();
+
+    for adjacent in hits_by_call.windows(2) {
+        let (prev_call_idx, prev_hits) = &adjacent[0];
+        let (curr_call_idx, curr_hits) = &adjacent[1];
+        if prev_hits.is_empty() || curr_hits.is_empty() {
+            continue;
+        }
+        let denominator = (prev_hits.len() * curr_hits.len()) as f64;
+        for &(prev_candidate_idx, prev_count) in prev_hits {
+            for &(curr_candidate_idx, curr_count) in curr_hits {
+                let prev_key = CandidateKey {
+                    call_idx: *prev_call_idx,
+                    candidate_idx: prev_candidate_idx,
+                };
+                let curr_key = CandidateKey {
+                    call_idx: *curr_call_idx,
+                    candidate_idx: curr_candidate_idx,
+                };
+                let entry = evidence.links.entry((prev_key, curr_key)).or_default();
+                entry.read_weight += 1.0 / denominator;
+                entry.anchor_weight += f64::from(prev_count.min(curr_count)) / denominator;
+                evidence.linked_read_pairs += 1;
+            }
+        }
+    }
+}
+
+fn build_read_walk_evidence(
+    call_sets: &[LocalCallSet],
+    gaf_path: &str,
+    min_read_link_anchors: usize,
+) -> io::Result<ReadWalkEvidence> {
+    let mut node_to_candidates: FxHashMap<u32, Vec<CandidateKey>> = FxHashMap::default();
+    for (call_idx, call_set) in call_sets.iter().enumerate() {
+        let Some(output) = &call_set.output else {
+            continue;
+        };
+        for (candidate_idx, candidate) in output.candidates.iter().enumerate() {
+            for &(node_id, _) in &candidate.features {
+                node_to_candidates
+                    .entry(node_id)
+                    .or_default()
+                    .push(CandidateKey {
+                        call_idx,
+                        candidate_idx,
+                    });
+            }
+        }
+    }
+
+    if node_to_candidates.is_empty() {
+        return Ok(ReadWalkEvidence::default());
+    }
+
+    let file = File::open(gaf_path)?;
+    let (reader, _) = niffler::get_reader(Box::new(file)).map_err(|e| {
+        io::Error::other(format!("failed to open read-walk GAF '{}': {e}", gaf_path))
+    })?;
+    let reader = BufReader::with_capacity(8 * 1024 * 1024, reader);
+    let mut evidence = ReadWalkEvidence::default();
+    let mut nodes = Vec::new();
+
+    for (line_no, line) in reader.lines().enumerate() {
+        let line = line?;
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        evidence.records += 1;
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() < 6 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("GAF line {} has fewer than 6 fields", line_no + 1),
+            ));
+        }
+        parse_gaf_path_nodes(fields[5], &mut nodes)?;
+        let mut counts: FxHashMap<CandidateKey, u32> = FxHashMap::default();
+        for &node_id in &nodes {
+            if let Some(candidate_keys) = node_to_candidates.get(&node_id) {
+                for &key in candidate_keys {
+                    *counts.entry(key).or_insert(0) += 1;
+                }
+            }
+        }
+        let hits_by_call = sorted_candidate_hits(counts, min_read_link_anchors);
+        add_read_links(&mut evidence, &hits_by_call);
+    }
+
+    Ok(evidence)
+}
+
+fn read_link_reward(anchor_weight: f64, read_link_weight: f64) -> f64 {
+    if anchor_weight <= 0.0 || read_link_weight <= 0.0 {
+        0.0
+    } else {
+        read_link_weight * 10.0 * (1.0 + anchor_weight).log10()
+    }
+}
+
 fn phase_transition(
     prev: &genotype::HaplotypeCandidate,
     curr: &genotype::HaplotypeCandidate,
@@ -509,19 +718,23 @@ fn phase_transition(
 
 fn transition_between(
     prev_call: &LocalCallSet,
+    prev_call_idx: usize,
     prev_state: &OrderedState,
     curr_call: &LocalCallSet,
+    curr_call_idx: usize,
     curr_state: &OrderedState,
     config: &InferConfig<'_>,
-) -> (Vec<TransitionKind>, f64) {
+    read_evidence: Option<&ReadWalkEvidence>,
+) -> (Vec<PhaseTransitionScore>, f64, f64) {
     let Some(prev_output) = &prev_call.output else {
-        return (Vec::new(), 0.0);
+        return (Vec::new(), 0.0, 0.0);
     };
     let Some(curr_output) = &curr_call.output else {
-        return (Vec::new(), 0.0);
+        return (Vec::new(), 0.0, 0.0);
     };
-    let mut kinds = Vec::with_capacity(prev_state.candidates.len());
-    let mut cost = 0.0;
+    let mut transitions = Vec::with_capacity(prev_state.candidates.len());
+    let mut total_cost = 0.0;
+    let mut total_reward = 0.0;
     for (&prev_idx, &curr_idx) in prev_state
         .candidates
         .iter()
@@ -533,15 +746,39 @@ fn transition_between(
             config.switch_penalty,
             config.stitch_gap,
         );
-        kinds.push(kind);
-        cost += phase_cost;
+        let link = read_evidence
+            .and_then(|evidence| {
+                evidence.links.get(&(
+                    CandidateKey {
+                        call_idx: prev_call_idx,
+                        candidate_idx: prev_idx,
+                    },
+                    CandidateKey {
+                        call_idx: curr_call_idx,
+                        candidate_idx: curr_idx,
+                    },
+                ))
+            })
+            .cloned()
+            .unwrap_or_default();
+        let reward = read_link_reward(link.anchor_weight, config.read_link_weight);
+        total_cost += phase_cost;
+        total_reward += reward;
+        transitions.push(PhaseTransitionScore {
+            kind,
+            cost: phase_cost,
+            read_link_reads: link.read_weight,
+            read_link_anchors: link.anchor_weight,
+            read_link_reward: reward,
+        });
     }
-    (kinds, cost)
+    (transitions, total_cost, total_reward)
 }
 
 fn stitch_mosaic(
     call_sets: &[LocalCallSet],
     config: &InferConfig<'_>,
+    read_evidence: Option<&ReadWalkEvidence>,
 ) -> io::Result<Option<MosaicPath>> {
     let indexed_states: Vec<(usize, Vec<OrderedState>)> = call_sets
         .iter()
@@ -567,8 +804,7 @@ fn stitch_mosaic(
             steps: vec![MosaicStep {
                 call_idx: *first_idx,
                 state: state.clone(),
-                transition_kinds: vec![TransitionKind::Start; state.candidates.len()],
-                transition_cost: 0.0,
+                transitions: vec![start_transition(); state.candidates.len()],
             }],
         })
         .collect();
@@ -581,20 +817,22 @@ fn stitch_mosaic(
             let prev_step = path.steps.last().expect("beam path has at least one step");
             let prev_call = &call_sets[prev_step.call_idx];
             for state in states {
-                let (kinds, transition_cost) = transition_between(
+                let (transitions, transition_cost, read_link_reward) = transition_between(
                     prev_call,
+                    prev_step.call_idx,
                     &prev_step.state,
                     &call_sets[*call_idx],
+                    *call_idx,
                     state,
                     config,
+                    read_evidence,
                 );
                 let mut candidate = path.clone();
-                candidate.score += state.emission - transition_cost;
+                candidate.score += state.emission - transition_cost + read_link_reward;
                 candidate.steps.push(MosaicStep {
                     call_idx: *call_idx,
                     state: state.clone(),
-                    transition_kinds: kinds,
-                    transition_cost,
+                    transitions,
                 });
                 next.push(candidate);
             }
@@ -607,13 +845,26 @@ fn stitch_mosaic(
     Ok(beam.into_iter().max_by(|a, b| a.score.total_cmp(&b.score)))
 }
 
+fn transition_for_phase(step: &MosaicStep, phase: usize) -> PhaseTransitionScore {
+    step.transitions
+        .get(phase)
+        .cloned()
+        .unwrap_or_else(|| PhaseTransitionScore {
+            kind: TransitionKind::Uncertain,
+            cost: 0.0,
+            read_link_reads: 0.0,
+            read_link_anchors: 0.0,
+            read_link_reward: 0.0,
+        })
+}
+
 fn write_mosaic_tsv(path: &str, mosaic: &MosaicPath, call_sets: &[LocalCallSet]) -> io::Result<()> {
     let mut out = BufWriter::new(File::create(path)?);
     writeln!(out, "#impg infer mosaic")?;
     writeln!(out, "#score\t{:.6}", mosaic.score)?;
     writeln!(
         out,
-        "#phase\tpartition\tchrom\tstart\tend\tpath\tpath_start\tpath_end\tstrand\tlocal_rank\tlocal_similarity\tlocal_qv\ttransition_kind\ttransition_cost"
+        "#phase\tpartition\tchrom\tstart\tend\tpath\tpath_start\tpath_end\tstrand\tlocal_rank\tlocal_similarity\tlocal_qv\ttransition_kind\ttransition_cost\tread_link_reads\tread_link_anchors\tread_link_reward"
     )?;
     for step in &mosaic.steps {
         let call_set = &call_sets[step.call_idx];
@@ -621,9 +872,10 @@ fn write_mosaic_tsv(path: &str, mosaic: &MosaicPath, call_sets: &[LocalCallSet])
         let result = &output.results[step.state.result_idx];
         for (phase, &candidate_idx) in step.state.candidates.iter().enumerate() {
             let candidate = &output.candidates[candidate_idx];
+            let transition = transition_for_phase(step, phase);
             writeln!(
                 out,
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.9}\t{:.3}\t{}\t{:.3}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.9}\t{:.3}\t{}\t{:.3}\t{:.3}\t{:.3}\t{:.3}",
                 phase,
                 call_set.target.partition,
                 call_set.target.chrom,
@@ -636,12 +888,11 @@ fn write_mosaic_tsv(path: &str, mosaic: &MosaicPath, call_sets: &[LocalCallSet])
                 step.state.result_idx + 1,
                 result.similarity,
                 result.qv,
-                step.transition_kinds
-                    .get(phase)
-                    .copied()
-                    .unwrap_or(TransitionKind::Uncertain)
-                    .as_str(),
-                step.transition_cost,
+                transition.kind.as_str(),
+                transition.cost,
+                transition.read_link_reads,
+                transition.read_link_anchors,
+                transition.read_link_reward,
             )?;
         }
     }
@@ -689,11 +940,7 @@ fn write_mosaic_fasta(
         let call_set = &call_sets[step.call_idx];
         let output = call_set.output.as_ref().expect("mosaic step has output");
         for (phase, &candidate_idx) in step.state.candidates.iter().enumerate() {
-            let kind = step
-                .transition_kinds
-                .get(phase)
-                .copied()
-                .unwrap_or(TransitionKind::Uncertain);
+            let kind = transition_for_phase(step, phase).kind;
             if matches!(kind, TransitionKind::Recombine | TransitionKind::Uncertain)
                 && !phase_sequences[phase].is_empty()
             {
@@ -739,11 +986,7 @@ fn write_mosaic_gfa(
         let call_set = &call_sets[step.call_idx];
         let output = call_set.output.as_ref().expect("mosaic step has output");
         for (phase, &candidate_idx) in step.state.candidates.iter().enumerate() {
-            let kind = step
-                .transition_kinds
-                .get(phase)
-                .copied()
-                .unwrap_or(TransitionKind::Uncertain);
+            let kind = transition_for_phase(step, phase).kind;
             if strict
                 && matches!(kind, TransitionKind::Recombine | TransitionKind::Uncertain)
                 && !phase_segments[phase].is_empty()
@@ -803,12 +1046,29 @@ pub fn run_syng_pack_infer<W: Write>(out: &mut W, config: &InferConfig<'_>) -> i
         || config.emit_fasta.is_some()
         || config.emit_gfa.is_some();
     if wants_stitch {
-        let mosaic = stitch_mosaic(&call_sets, config)?.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "no PASS local calls available to stitch into a mosaic",
-            )
-        })?;
+        let read_evidence = if let Some(gaf_path) = config.gaf_path {
+            let evidence =
+                build_read_walk_evidence(&call_sets, gaf_path, config.min_read_link_anchors)?;
+            info!(
+                "Loaded read-walk evidence from {}: {} GAF records, {} records with candidate hits, {} candidate hits, {} linked candidate pairs, {} scored transitions",
+                gaf_path,
+                evidence.records,
+                evidence.records_with_candidate_hits,
+                evidence.candidate_hits,
+                evidence.linked_read_pairs,
+                evidence.links.len()
+            );
+            Some(evidence)
+        } else {
+            None
+        };
+        let mosaic =
+            stitch_mosaic(&call_sets, config, read_evidence.as_ref())?.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "no PASS local calls available to stitch into a mosaic",
+                )
+            })?;
         if let Some(path) = config.emit_mosaic {
             write_mosaic_tsv(path, &mosaic, &call_sets)?;
         }

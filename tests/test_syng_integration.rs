@@ -2059,6 +2059,202 @@ fn test_syng_infer_pack_partitions_and_discovery() {
 }
 
 #[test]
+fn test_syng_infer_read_walk_links_phase_recombinant_mosaic() {
+    let _guard = lock_syng();
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping: impg binary not built");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join("impg_test_syng_infer_read_links");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    fn mutate_ascii(seq: &[u8], offset: usize, stride: usize) -> Vec<u8> {
+        let mut out = seq.to_vec();
+        for i in (offset..out.len()).step_by(stride) {
+            out[i] = match out[i] {
+                b'A' => b'C',
+                b'C' => b'G',
+                b'G' => b'T',
+                b'T' => b'A',
+                other => other,
+            };
+        }
+        out
+    }
+
+    let left_1 = numeric_to_ascii(&make_sequence_numeric(950, 81));
+    let left_2 = mutate_ascii(&left_1, 37, 127);
+    let right_1 = numeric_to_ascii(&make_sequence_numeric(950, 83));
+    let right_2 = mutate_ascii(&right_1, 53, 131);
+
+    let mut hap_a = Vec::new();
+    hap_a.extend_from_slice(&left_1);
+    hap_a.extend_from_slice(&right_1);
+    let mut hap_b = Vec::new();
+    hap_b.extend_from_slice(&left_2);
+    hap_b.extend_from_slice(&right_2);
+    let mut hap_c = Vec::new();
+    hap_c.extend_from_slice(&left_1);
+    hap_c.extend_from_slice(&right_2);
+    let mut hap_d = Vec::new();
+    hap_d.extend_from_slice(&left_2);
+    hap_d.extend_from_slice(&right_1);
+
+    let fasta_path = dir.join("index.fa");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        writeln!(f, ">sampleA#0#chr1").unwrap();
+        f.write_all(&hap_a).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleB#0#chr1").unwrap();
+        f.write_all(&hap_b).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleC#0#chr1").unwrap();
+        f.write_all(&hap_c).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleD#0#chr1").unwrap();
+        f.write_all(&hap_d).unwrap();
+        writeln!(f).unwrap();
+    }
+
+    let idx_prefix = dir.join("idx");
+    let build = Command::new(&bin)
+        .args([
+            "syng",
+            "-f",
+            fasta_path.to_str().unwrap(),
+            "-o",
+            idx_prefix.to_str().unwrap(),
+            "--position-sample-rate",
+            "1",
+        ])
+        .output()
+        .expect("failed to run impg syng");
+    assert!(
+        build.status.success(),
+        "impg syng failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let reads_path = dir.join("simulated_recombinant_reads.fq");
+    {
+        let mut f = std::fs::File::create(&reads_path).unwrap();
+        write_tiled_fastq(&mut f, "hapC", &hap_c, 1200, 175).unwrap();
+        write_tiled_fastq(&mut f, "hapD", &hap_d, 1200, 175).unwrap();
+    }
+
+    let proj_path = dir.join("sample.proj");
+    let map = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "-q",
+            reads_path.to_str().unwrap(),
+            "-o",
+            "proj",
+            "-O",
+            proj_path.to_str().unwrap(),
+            "--pack-compression-level",
+            "3",
+            "--pack-block-size",
+            "64",
+            "--min-anchors",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg map -o proj");
+    assert!(
+        map.status.success(),
+        "impg map -o proj failed: {}",
+        String::from_utf8_lossy(&map.stderr)
+    );
+
+    let partitions_path = dir.join("partitions.bed");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&partitions_path).unwrap();
+        writeln!(f, "sampleA#0#chr1\t0\t950\tleft").unwrap();
+        writeln!(f, "sampleA#0#chr1\t950\t1900\tright").unwrap();
+    }
+
+    let mosaic_path = dir.join("mosaic.tsv");
+    let infer = Command::new(&bin)
+        .args([
+            "infer",
+            "-a",
+            idx_prefix.to_str().unwrap(),
+            "--proj",
+            proj_path.to_str().unwrap(),
+            "--partitions",
+            partitions_path.to_str().unwrap(),
+            "--top-n",
+            "20",
+            "--candidate-top-k",
+            "20",
+            "--min-span-fraction",
+            "0.7",
+            "--stitch",
+            "beam",
+            "--stitch-beam",
+            "500",
+            "--read-link-weight",
+            "5",
+            "--emit-mosaic",
+            mosaic_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run impg infer with read-link stitching");
+    assert!(
+        infer.status.success(),
+        "impg infer with read-link stitching failed: {}",
+        String::from_utf8_lossy(&infer.stderr)
+    );
+
+    let mosaic = std::fs::read_to_string(&mosaic_path).unwrap();
+    assert!(
+        mosaic.contains("read_link_reward"),
+        "mosaic output should expose read-link scoring columns:\n{}",
+        mosaic
+    );
+    let rows: Vec<Vec<&str>> = mosaic
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .map(|line| line.split('\t').collect())
+        .collect();
+    assert_eq!(rows.len(), 4, "expected two phases across two partitions:\n{}", mosaic);
+    assert!(
+        rows.iter()
+            .filter(|row| row[1] == "right")
+            .all(|row| row[16].parse::<f64>().unwrap() > 0.0),
+        "right-partition transitions should be rewarded by spanning read walks:\n{}",
+        mosaic
+    );
+
+    let mut phase_paths: std::collections::BTreeMap<&str, Vec<&str>> =
+        std::collections::BTreeMap::new();
+    for row in &rows {
+        phase_paths.entry(row[0]).or_default().push(row[5]);
+    }
+    let mut stitched_paths: Vec<Vec<&str>> = phase_paths.into_values().collect();
+    stitched_paths.sort();
+    assert_eq!(
+        stitched_paths,
+        vec![
+            vec!["sampleC#0#chr1", "sampleC#0#chr1"],
+            vec!["sampleD#0#chr1", "sampleD#0#chr1"],
+        ],
+        "read links plus crossover penalty should choose the sampled recombinant haplotypes:\n{}",
+        mosaic
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn test_syng_map_cli_sampled_positions_paf() {
     let _guard = lock_syng();
     let Some(bin) = impg_binary() else {
