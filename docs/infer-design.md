@@ -229,6 +229,12 @@ Tests should cover:
 - short-read simulation against a panel with a decoy haplotype
 - invalid CLI combinations
 - output compression and deterministic row shape
+- stitched recombinant phasing where read links disambiguate copied haplotype
+  segments across both explicit partitions and fixed internal phase blocks
+- read-link control settings, including disabled read-link rewards
+- CNV/repeated-syncmer paths where a duplicated-copy haplotype creates repeated
+  nodes in read GAF walks and must not collapse into a single-copy or unrelated
+  allele
 
 The synthetic graphs are not substitutes for real population graph validation.
 They should progressively add SNPs, indels, nested SVs, repeats/paralogy,
