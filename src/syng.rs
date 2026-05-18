@@ -103,6 +103,7 @@ pub struct SampledPositionBuildStats {
 }
 
 pub const DEFAULT_POSITION_SAMPLE_RATE: u32 = 256;
+const DEFAULT_MEM_SEED_MIN_ANCHORS: usize = 2;
 
 fn syng_sidecar_path(prefix: &str, suffix: &str) -> String {
     if prefix.ends_with(".syng") {
@@ -1510,6 +1511,13 @@ impl NodeOccurrenceCounts {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct QueryWalkStep {
+    signed_node: i32,
+    bp_pos: u64,
+    query_pos: u64,
+}
+
 /// A query syncmer found in the index.
 #[derive(Debug, Clone, Copy)]
 pub struct SyngQuerySyncmer {
@@ -1534,6 +1542,9 @@ pub struct SyngGbwtMem {
     pub query_end: u64,
     pub anchors: usize,
     pub occurrences: u32,
+    pub match_signed_node: i32,
+    pub match_low: u32,
+    pub match_high: u32,
 }
 
 /// A rough syncmer-only mapping projected to a path in the syng index.
@@ -3400,9 +3411,11 @@ impl SyngIndex {
         walk: &[SyngWalkStep],
         start: usize,
         end: usize,
-        occurrences: u32,
+        low: u32,
+        high: u32,
         mems: &mut Vec<SyngGbwtMem>,
     ) {
+        let occurrences = high.saturating_sub(low);
         if start >= end || occurrences == 0 {
             return;
         }
@@ -3417,6 +3430,9 @@ impl SyngIndex {
             query_end,
             anchors: end - start,
             occurrences,
+            match_signed_node: walk[end - 1].signed_node,
+            match_low: low,
+            match_high: high,
         });
     }
 
@@ -3522,7 +3538,7 @@ impl SyngIndex {
         for idx in 0..walk.len() {
             if !self.valid_walk_node(walk[idx].signed_node) {
                 if !sbp.is_null() {
-                    self.push_gbwt_mem(walk, active_start, idx, high - low, &mut candidates);
+                    self.push_gbwt_mem(walk, active_start, idx, low, high, &mut candidates);
                     unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
                     sbp = std::ptr::null_mut();
                 }
@@ -3546,7 +3562,7 @@ impl SyngIndex {
             }
 
             let Some(offset) = Self::walk_step_offset(walk[idx - 1], walk[idx]) else {
-                self.push_gbwt_mem(walk, active_start, idx, high - low, &mut candidates);
+                self.push_gbwt_mem(walk, active_start, idx, low, high, &mut candidates);
                 unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
                 sbp = std::ptr::null_mut();
                 let Some((started_sbp, started_low, started_high)) =
@@ -3567,7 +3583,7 @@ impl SyngIndex {
                 continue;
             }
 
-            self.push_gbwt_mem(walk, active_start, idx, high - low, &mut candidates);
+            self.push_gbwt_mem(walk, active_start, idx, low, high, &mut candidates);
             unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
             match self.restart_gbwt_match_at_suffix(walk, run_start, idx)? {
                 Some((restarted_sbp, restarted_start, restarted_low, restarted_high)) => {
@@ -3584,7 +3600,7 @@ impl SyngIndex {
         }
 
         if !sbp.is_null() {
-            self.push_gbwt_mem(walk, active_start, walk.len(), high - low, &mut candidates);
+            self.push_gbwt_mem(walk, active_start, walk.len(), low, high, &mut candidates);
             unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
         }
 
@@ -3607,18 +3623,27 @@ impl SyngIndex {
         signed_node: i32,
         occurrence_count: u32,
     ) -> io::Result<Vec<LocatedSyncmerHit>> {
+        self.locate_signed_node_occurrence_range(signed_node, 0, occurrence_count)
+    }
+
+    fn locate_signed_node_occurrence_range(
+        &self,
+        signed_node: i32,
+        start_rank: u32,
+        end_rank: u32,
+    ) -> io::Result<Vec<LocatedSyncmerHit>> {
         if signed_node == 0 {
             return Ok(Vec::new());
         }
         let checkpoint_index = self.locate_checkpoint_index()?;
-        if occurrence_count == 0 {
+        if start_rank >= end_rank {
             return Ok(Vec::new());
         }
 
         let target_orient = if signed_node >= 0 { 0 } else { 1 };
         let max_walk_steps = checkpoint_index.sample_rate as usize;
         let mut hits = Vec::new();
-        for start_rank in 0..occurrence_count {
+        for start_rank in start_rank..end_rank {
             let mut current_node = signed_node;
             let mut current_rank = start_rank;
             let mut walked_bp = 0u64;
@@ -4065,16 +4090,34 @@ impl SyngIndex {
             expanded_start,
             expanded_end,
         )?;
-        let mut query_node_positions: FxHashMap<u32, Vec<(u64, u8)>> = FxHashMap::default();
+        let mut query_walk = Vec::new();
         for &(signed_node, pos) in &query_nodes {
             if pos >= expanded_start && pos < expanded_end {
-                let abs = signed_node.unsigned_abs();
-                let q_orient: u8 = if signed_node >= 0 { 0 } else { 1 };
-                query_node_positions
-                    .entry(abs)
-                    .or_default()
-                    .push((pos, q_orient));
+                query_walk.push(QueryWalkStep {
+                    signed_node,
+                    bp_pos: pos,
+                    query_pos: pos,
+                });
             }
+        }
+
+        if seed_filter.enabled() {
+            return self.query_region_from_ordered_walk_seed_filtered(
+                query_walk,
+                padding,
+                visited_nodes,
+                seed_filter,
+            );
+        }
+
+        let mut query_node_positions: FxHashMap<u32, Vec<(u64, u8)>> = FxHashMap::default();
+        for step in query_walk {
+            let abs = step.signed_node.unsigned_abs();
+            let q_orient: u8 = if step.signed_node >= 0 { 0 } else { 1 };
+            query_node_positions
+                .entry(abs)
+                .or_default()
+                .push((step.query_pos, q_orient));
         }
 
         self.query_region_from_node_positions_seed_filtered(
@@ -4188,6 +4231,271 @@ impl SyngIndex {
             visited_nodes.as_deref_mut(),
             SyngSeedFilter::default(),
         )
+    }
+
+    fn query_region_from_ordered_walk_seed_filtered(
+        &self,
+        query_walk: Vec<QueryWalkStep>,
+        padding: u64,
+        mut visited_nodes: Option<&mut FxHashSet<u32>>,
+        seed_filter: SyngSeedFilter,
+    ) -> Result<Vec<HomologousIntervalWithAnchors>, io::Error> {
+        if query_walk.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let emit_prof = std::env::var("SYNG_EMIT_PROFILE").is_ok();
+        let lookup_start = std::time::Instant::now();
+        let mut skipped_visited = 0usize;
+        let mut unvisited = Vec::with_capacity(query_walk.len());
+        let mut unvisited_nodes = FxHashSet::default();
+        for step in query_walk {
+            let node = step.signed_node.unsigned_abs();
+            if visited_nodes
+                .as_deref()
+                .map(|v| v.contains(&node))
+                .unwrap_or(false)
+            {
+                skipped_visited += 1;
+                continue;
+            }
+            unvisited_nodes.insert(node);
+            unvisited.push(step);
+        }
+        let input_seed_nodes = unvisited_nodes.len();
+
+        let count_start = std::time::Instant::now();
+        let mut skipped_frequency = 0usize;
+        let mut top_drop_count = 0usize;
+        let mut max_seed_occurrences = 0u32;
+        let mut dropped_nodes = FxHashSet::default();
+        if seed_filter.enabled() && !unvisited_nodes.is_empty() {
+            let mut occurrence_counts = Vec::with_capacity(unvisited_nodes.len());
+            for &node in &unvisited_nodes {
+                let occurrences = self.syncmer_node_occurrence_count(node)?;
+                max_seed_occurrences = max_seed_occurrences.max(occurrences);
+                occurrence_counts.push((node, occurrences));
+            }
+            let top_drop_nodes =
+                Self::top_frequency_seed_nodes(&occurrence_counts, seed_filter.drop_top_fraction);
+            top_drop_count = top_drop_nodes.len();
+            let occurrence_by_node: FxHashMap<u32, u32> = occurrence_counts.into_iter().collect();
+            let max_occurrences = seed_filter.max_occurrences;
+            for &node in &unvisited_nodes {
+                let occurrences = occurrence_by_node.get(&node).copied().unwrap_or(0);
+                let drop_by_top = top_drop_nodes.contains(&node);
+                let drop_by_cap = max_occurrences
+                    .map(|cap| occurrences > cap)
+                    .unwrap_or(false);
+                if drop_by_top || drop_by_cap {
+                    dropped_nodes.insert(node);
+                }
+            }
+            skipped_frequency = dropped_nodes.len();
+        }
+        if let Some(v) = visited_nodes.as_deref_mut() {
+            v.extend(unvisited_nodes.iter().copied());
+        }
+        let count_elapsed = count_start.elapsed();
+
+        let mut runs: Vec<Vec<QueryWalkStep>> = Vec::new();
+        let mut current = Vec::new();
+        for step in unvisited {
+            if dropped_nodes.contains(&step.signed_node.unsigned_abs()) {
+                if !current.is_empty() {
+                    runs.push(std::mem::take(&mut current));
+                }
+            } else {
+                current.push(step);
+            }
+        }
+        if !current.is_empty() {
+            runs.push(current);
+        }
+
+        let kept_seed_nodes = input_seed_nodes.saturating_sub(skipped_frequency);
+        let kept_steps: usize = runs.iter().map(Vec::len).sum();
+        if kept_steps < DEFAULT_MEM_SEED_MIN_ANCHORS {
+            let mut query_node_positions: FxHashMap<u32, Vec<(u64, u8)>> = FxHashMap::default();
+            for run in runs {
+                for step in run {
+                    let q_orient: u8 = if step.signed_node >= 0 { 0 } else { 1 };
+                    query_node_positions
+                        .entry(step.signed_node.unsigned_abs())
+                        .or_default()
+                        .push((step.query_pos, q_orient));
+                }
+            }
+            return self.query_region_from_node_positions_seed_filtered(
+                query_node_positions,
+                padding,
+                None,
+                SyngSeedFilter::default(),
+            );
+        }
+
+        let locate_start = std::time::Instant::now();
+        let mut per_path: FxHashMap<(usize, char), Vec<HomologousIntervalWithAnchors>> =
+            FxHashMap::default();
+        let mut mems_seen = 0u64;
+        let mut mems_kept = 0u64;
+        let mut located_hits = 0u64;
+        let mut emitted_anchors = 0u64;
+        for run in &runs {
+            self.collect_mem_seed_hits_from_run(
+                run,
+                '+',
+                padding,
+                &mut per_path,
+                &mut mems_seen,
+                &mut mems_kept,
+                &mut located_hits,
+                &mut emitted_anchors,
+            )?;
+            let reverse_run = self.reverse_query_run(run);
+            self.collect_mem_seed_hits_from_run(
+                &reverse_run,
+                '-',
+                padding,
+                &mut per_path,
+                &mut mems_seen,
+                &mut mems_kept,
+                &mut located_hits,
+                &mut emitted_anchors,
+            )?;
+        }
+        let locate_elapsed = locate_start.elapsed();
+
+        let t_merge = std::time::Instant::now();
+        let mut merged: Vec<HomologousIntervalWithAnchors> = Vec::new();
+        for (_key, mut group) in per_path {
+            Self::merge_intervals_with_anchors(&mut group);
+            merged.extend(group);
+        }
+        merged.sort_by(|a, b| {
+            a.genome
+                .cmp(&b.genome)
+                .then(a.strand.cmp(&b.strand))
+                .then(a.start.cmp(&b.start))
+        });
+        if emit_prof {
+            eprintln!(
+                "EMITPROF mode=mem seed_nodes={} kept_seed_nodes={} skipped_visited={} skipped_frequency={} top_drop={} max_seed_occurrences={} runs={} mems={} kept_mems={} located_hits={} emit_anchors={} count={:.2}s locate={:.2}s lookup={:.2}s merge_sort={:.2}s",
+                input_seed_nodes,
+                kept_seed_nodes,
+                skipped_visited,
+                skipped_frequency,
+                top_drop_count,
+                max_seed_occurrences,
+                runs.len(),
+                mems_seen,
+                mems_kept,
+                located_hits,
+                emitted_anchors,
+                count_elapsed.as_secs_f64(),
+                locate_elapsed.as_secs_f64(),
+                lookup_start.elapsed().as_secs_f64(),
+                t_merge.elapsed().as_secs_f64(),
+            );
+        }
+        Ok(merged)
+    }
+
+    fn reverse_query_run(&self, run: &[QueryWalkStep]) -> Vec<QueryWalkStep> {
+        let syncmer_len = self.syncmer_length_bp() as u64;
+        let Some(reverse_end) = run
+            .iter()
+            .map(|step| step.query_pos.saturating_add(syncmer_len))
+            .max()
+        else {
+            return Vec::new();
+        };
+        run.iter()
+            .rev()
+            .map(|step| QueryWalkStep {
+                signed_node: -step.signed_node,
+                bp_pos: reverse_end.saturating_sub(step.query_pos.saturating_add(syncmer_len)),
+                query_pos: step.query_pos,
+            })
+            .collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn collect_mem_seed_hits_from_run(
+        &self,
+        run: &[QueryWalkStep],
+        strand: char,
+        padding: u64,
+        per_path: &mut FxHashMap<(usize, char), Vec<HomologousIntervalWithAnchors>>,
+        mems_seen: &mut u64,
+        mems_kept: &mut u64,
+        located_hits: &mut u64,
+        emitted_anchors: &mut u64,
+    ) -> io::Result<()> {
+        if run.len() < DEFAULT_MEM_SEED_MIN_ANCHORS {
+            return Ok(());
+        }
+        let syncmer_len = self.syncmer_length_bp() as u64;
+        let walk: Vec<SyngWalkStep> = run
+            .iter()
+            .map(|step| SyngWalkStep {
+                signed_node: step.signed_node,
+                bp_pos: step.bp_pos,
+            })
+            .collect();
+        let mems = self.gbwt_mems_for_walk(&walk)?;
+        *mems_seen += mems.len() as u64;
+        for mem in mems {
+            if mem.anchors < DEFAULT_MEM_SEED_MIN_ANCHORS {
+                continue;
+            }
+            *mems_kept += 1;
+            let hits = self.locate_signed_node_occurrence_range(
+                mem.match_signed_node,
+                mem.match_low,
+                mem.match_high,
+            )?;
+            let first_step = &run[mem.step_start];
+            let last_step = &run[mem.step_end - 1];
+            let mem_span = last_step.bp_pos.saturating_sub(first_step.bp_pos);
+            for hit in hits {
+                *located_hits += 1;
+                if hit.path_idx >= self.name_map.path_to_name.len() {
+                    continue;
+                }
+                let Some(target_start) = hit.target_pos.checked_sub(mem_span) else {
+                    continue;
+                };
+                let genome_len = self.name_map.path_to_length[hit.path_idx];
+                let target_end = hit.target_pos.saturating_add(syncmer_len).min(genome_len);
+                let padded_start = target_start.saturating_sub(padding);
+                let padded_end = target_end.saturating_add(padding).min(genome_len);
+                if padded_start >= padded_end {
+                    continue;
+                }
+                let mut anchors = Vec::with_capacity(mem.anchors);
+                for step in &run[mem.step_start..mem.step_end] {
+                    let rel = step.bp_pos.saturating_sub(first_step.bp_pos);
+                    anchors.push(Anchor {
+                        query_pos: step.query_pos,
+                        target_pos: target_start.saturating_add(rel),
+                        node_id: step.signed_node.unsigned_abs(),
+                    });
+                }
+                *emitted_anchors += anchors.len() as u64;
+                per_path
+                    .entry((hit.path_idx, strand))
+                    .or_default()
+                    .push(HomologousIntervalWithAnchors {
+                        genome: self.name_map.path_to_name[hit.path_idx].clone(),
+                        start: padded_start,
+                        end: padded_end,
+                        strand,
+                        anchors,
+                    });
+            }
+        }
+        Ok(())
     }
 
     fn query_region_from_node_positions_seed_filtered(

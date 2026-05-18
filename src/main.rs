@@ -3000,14 +3000,13 @@ enum Args {
         syng_min_chain_fraction: f64,
 
         /// Drop this fraction of the query syncmer seed nodes with the
-        /// highest GBWT occurrence counts before locating hits. This is
-        /// query-local, not an index-global minimizer frequency cutoff:
-        /// default 0.05 drops the top 5% most repetitive seeds in the
-        /// requested region, so high-copy repeats do not seed
-        /// chromosome-scale ranges.
+        /// highest GBWT occurrence counts before locating hits. Default
+        /// 0.0005 drops the top 0.05% most repetitive query-local
+        /// seeds, minimizer-style, without making frequency filtering
+        /// carry the query algorithm.
         /// Set to 0 to disable.
         #[arg(help_heading = "Syng input")]
-        #[clap(long, value_parser, default_value_t = 0.05)]
+        #[clap(long, value_parser, default_value_t = 0.0005)]
         syng_seed_drop_top_fraction: f64,
 
         /// Drop syncmer seed nodes occurring more than this many times
