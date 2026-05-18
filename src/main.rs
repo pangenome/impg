@@ -170,11 +170,16 @@ struct SyngAgcRecord {
     length: usize,
 }
 
+fn primary_fasta_name(header: &str) -> &str {
+    header.split_whitespace().next().unwrap_or("")
+}
+
 fn syng_sequence_name(sample: &str, contig: &str) -> String {
-    if contig.contains('#') {
-        contig.to_string()
+    let primary = primary_fasta_name(contig);
+    if primary.contains('#') {
+        primary.to_string()
     } else {
-        format!("{}@{}", contig, sample)
+        format!("{}@{}", primary, sample)
     }
 }
 
@@ -6737,18 +6742,11 @@ fn run() -> io::Result<()> {
                             })
                             .collect();
 
-                        // If the contig name already follows PanSN convention
-                        // (sample#haplotype#contig), use it as-is — it already
-                        // embeds the sample, so appending @sample would create
-                        // a redundant suffix that makes query -r lookups fail.
-                        // Otherwise (raw contig name like `chr1`), prepend the
-                        // sample via `contig@sample` so names stay unique across
-                        // samples that share a contig name.
-                        let name = if contig.contains('#') {
-                            contig.clone()
-                        } else {
-                            format!("{}@{}", contig, sample)
-                        };
+                        // Use the primary FASTA/AGC contig token as the syng
+                        // path name. AGC may retain the full FASTA defline
+                        // (`name description`), but queries should address the
+                        // stable primary name only.
+                        let name = syng_sequence_name(sample, contig);
                         let seq_len = seq.len();
                         info!("  Processing {} ({} bp)", name, seq_len);
                         let stats = index.add_sequence(name.clone(), seq);
@@ -9880,6 +9878,21 @@ mod tests {
         assert_eq!(
             read_syncmer_index_path("sample.r2s", "post"),
             "sample.r2s.post"
+        );
+    }
+
+    #[test]
+    fn test_syng_sequence_name_uses_primary_defline_token() {
+        assert_eq!(
+            syng_sequence_name(
+                "GRCh38",
+                "GRCh38#0#chr6  AC:CM000668.2  LN:170805979"
+            ),
+            "GRCh38#0#chr6"
+        );
+        assert_eq!(
+            syng_sequence_name("sampleA", "chr6  AC:CM000668.2"),
+            "chr6@sampleA"
         );
     }
 
