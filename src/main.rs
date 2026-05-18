@@ -2945,6 +2945,26 @@ enum Args {
         common: CommonOpts,
     },
     /// Query overlaps in the alignment
+    #[command(after_help = "\
+Output formats:
+  auto       bed for -r/--target-range; bedpe for -b/--target-bed
+  bed        merged homologous intervals as BED rows
+  bedpe      paired query/result intervals; useful for batch queries and CIGAR-aware output
+  paf        PAF-like projected interval matches
+  gfa        local sequence graph built from query-selected intervals using --gfa-engine
+  maf        multiple-alignment output for query-selected intervals
+  fasta      FASTA sequences for query-selected intervals
+  fasta+paf  FASTA sequences plus PAF-like interval mappings
+  fasta-aln  FASTA alignment output from the local POA/MAF path
+  gbwt       region-specific syng GBWT/khash output; requires -O and sequence files
+
+Syng notes:
+  With -a/--alignment pointing to a syng index, supported query outputs are
+  bed, bedpe, gfa, fasta, and gbwt. Use -o gfa for a local sequence GFA from
+  query-selected intervals. Use `impg syng2gfa` to dump the whole syng
+  syncmer graph instead. `--gfa-engine` selects how -o gfa is built; it is not
+  the output-format flag.
+")]
     Query {
         // --- Input ---
         #[clap(flatten)]
@@ -3041,9 +3061,14 @@ enum Args {
         query: QueryOpts,
 
         // --- Output ---
-        /// Output format: 'auto' ('bed' for -r, 'bedpe' for -b), 'bed', 'bedpe', 'paf', 'gfa', 'maf', 'fasta', 'fasta+paf', or 'gbwt' (region-specific GBWT, requires --sequence-files)
         #[arg(help_heading = "Output options")]
-        #[clap(short = 'o', long, value_parser, default_value = "auto")]
+        #[clap(
+            short = 'o',
+            long,
+            value_parser,
+            default_value = "auto",
+            help = "Output format; see Output formats below"
+        )]
         output_format: String,
 
         /// Prefix for output file (automatically appends the extension based on format; required for 'gbwt' output)
@@ -9302,6 +9327,36 @@ mod tests {
                 assert_eq!(query.merge_distance, Some(50_000));
             }
             _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_query_help_explains_output_formats() {
+        let mut cmd = <Args as clap::CommandFactory>::command();
+        let query_cmd = cmd.find_subcommand_mut("query").unwrap();
+        let mut help = Vec::new();
+        query_cmd.write_help(&mut help).unwrap();
+        let help = String::from_utf8(help).unwrap();
+
+        for expected in [
+            "Output formats:",
+            "auto       bed for -r/--target-range; bedpe for -b/--target-bed",
+            "bed        merged homologous intervals as BED rows",
+            "bedpe      paired query/result intervals",
+            "paf        PAF-like projected interval matches",
+            "gfa        local sequence graph built from query-selected intervals",
+            "maf        multiple-alignment output for query-selected intervals",
+            "fasta      FASTA sequences for query-selected intervals",
+            "fasta+paf  FASTA sequences plus PAF-like interval mappings",
+            "fasta-aln  FASTA alignment output",
+            "gbwt       region-specific syng GBWT/khash output",
+            "Use `impg syng2gfa` to dump the whole syng",
+            "`--gfa-engine` selects how -o gfa is built",
+        ] {
+            assert!(
+                help.contains(expected),
+                "query help missing expected text: {expected}"
+            );
         }
     }
 

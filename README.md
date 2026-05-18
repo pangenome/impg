@@ -418,7 +418,8 @@ ranges; once a range survives, downstream scoring can still recover all
 syncmers by walking that path range. `query -o gbwt` emits a
 region-specific sub-GBWT. The syng prefix passed to `-a` is resolved
 relative to cwd, so either `cd` to the index directory or pass an absolute
-path.
+path. For a focused syng-backed local GFA recipe, see
+[`docs/syng-gfa-query.md`](docs/syng-gfa-query.md).
 
 ## GFA engines
 
