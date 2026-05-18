@@ -4198,6 +4198,7 @@ fn run() -> io::Result<()> {
                                     syng_min_chain_anchors,
                                     syng_min_chain_fraction,
                                     syng_seed_filter,
+                                    query.effective_merge_distance(),
                                     sequence_index.as_ref().unwrap(),
                                 )?
                             } else {
@@ -4276,6 +4277,7 @@ fn run() -> io::Result<()> {
                                             syng_min_chain_anchors,
                                             syng_min_chain_fraction,
                                             syng_seed_filter,
+                                            query.effective_merge_distance(),
                                             sequence_index.as_ref().unwrap(),
                                         )?
                                     } else {
@@ -4330,6 +4332,7 @@ fn run() -> io::Result<()> {
                                         syng_min_chain_anchors,
                                         syng_min_chain_fraction,
                                         syng_seed_filter,
+                                        query.effective_merge_distance(),
                                         sequence_index.as_ref().unwrap(),
                                     )?
                                 } else {
@@ -4375,6 +4378,7 @@ fn run() -> io::Result<()> {
                                     syng_min_chain_anchors,
                                     syng_min_chain_fraction,
                                     syng_seed_filter,
+                                    query.effective_merge_distance(),
                                     seq_idx,
                                 )?
                             } else {
@@ -4403,6 +4407,7 @@ fn run() -> io::Result<()> {
                                     syng_min_chain_anchors,
                                     syng_min_chain_fraction,
                                     syng_seed_filter,
+                                    query.effective_merge_distance(),
                                     seq_idx,
                                 )?
                             } else {
