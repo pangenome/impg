@@ -236,6 +236,38 @@ pub fn chain_anchors_with_limits(
     out
 }
 
+fn query_scaled_chain_limits(
+    query_range_len: u64,
+    extend_budget: u64,
+    syncmer_len: u64,
+    merge_distance: i32,
+) -> (u64, u64, u64) {
+    let merge_gap = merge_distance.max(0) as u64;
+    let chain_slop = extend_budget.max(merge_gap);
+    let chain_gap = query_range_len
+        .saturating_add(chain_slop)
+        .max(extend_budget.saturating_mul(3))
+        .max(syncmer_len);
+    let drift_budget = query_range_len
+        .saturating_add(chain_slop)
+        .max(chain_slop)
+        .max(syncmer_len);
+    // Boundary realignment budget is not an SV-size budget. Keep the target
+    // span cap query-scaled so large insertions, deletions, and local copy
+    // changes can survive chaining. The user merge distance is also part of
+    // the same semantic gap model, so it participates here before refinement
+    // and before the next transitive hop.
+    let sv_span_slop = query_range_len
+        .saturating_mul(3)
+        .max(50_000)
+        .max(extend_budget.saturating_mul(10))
+        .max(merge_gap);
+    let target_span_cap = query_range_len
+        .saturating_add(sv_span_slop)
+        .max(syncmer_len);
+    (chain_gap, drift_budget, target_span_cap)
+}
+
 /// Linear projection from an anchor to a query position — coordinate
 /// arithmetic only. Used as a fallback when pairwise alignment is
 /// unavailable.
@@ -817,6 +849,7 @@ pub fn one_hop_ext_visited(
         min_chain_fraction,
         visited_nodes,
         SyngSeedFilter::default(),
+        -1,
         sequence_index,
     )
 }
@@ -835,6 +868,7 @@ pub fn one_hop_ext_visited_with_seed_filter(
     min_chain_fraction: f64,
     visited_nodes: Option<&mut FxHashSet<u32>>,
     seed_filter: SyngSeedFilter,
+    merge_distance: i32,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
     use std::time::Instant;
@@ -860,17 +894,8 @@ pub fn one_hop_ext_visited_with_seed_filter(
     let query_range_len = query_end.saturating_sub(query_start);
     let t1 = Instant::now();
     let total_anchors: usize = hits.iter().map(|h| h.anchors.len()).sum();
-    let chain_gap = query_range_len
-        .saturating_add(extend_budget)
-        .max(extend_budget.saturating_mul(3))
-        .max(syncmer_len);
-    let drift_budget = query_range_len
-        .saturating_add(extend_budget)
-        .max(extend_budget);
-    let target_span_cap = query_range_len
-        .saturating_add(extend_budget.saturating_mul(2))
-        .max(extend_budget.saturating_mul(10))
-        .max(syncmer_len);
+    let (chain_gap, drift_budget, target_span_cap) =
+        query_scaled_chain_limits(query_range_len, extend_budget, syncmer_len, merge_distance);
     let hits = chain_anchors_with_limits(
         hits,
         syncmer_len,
@@ -1189,6 +1214,7 @@ pub fn query_transitive_ext(
         min_chain_anchors,
         min_chain_fraction,
         SyngSeedFilter::default(),
+        -1,
         sequence_index,
     )
 }
@@ -1208,6 +1234,7 @@ pub fn query_transitive_ext_with_seed_filter(
     min_chain_anchors: usize,
     min_chain_fraction: f64,
     seed_filter: SyngSeedFilter,
+    merge_distance: i32,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
     let mut visited: FxHashSet<(String, u64, u64, char)> = FxHashSet::default();
@@ -1243,6 +1270,7 @@ pub fn query_transitive_ext_with_seed_filter(
                 min_chain_fraction,
                 Some(&mut visited_nodes),
                 seed_filter,
+                merge_distance,
                 sequence_index,
             ) {
                 Ok(h) => h,
@@ -1254,6 +1282,7 @@ pub fn query_transitive_ext_with_seed_filter(
                     continue;
                 }
             };
+            let hits = merge_nearby_on_same_path(hits, merge_distance);
             for hit in hits {
                 let key = (hit.genome.clone(), hit.start, hit.end, hit.strand);
                 if visited.insert(key) {
@@ -1265,18 +1294,27 @@ pub fn query_transitive_ext_with_seed_filter(
         frontier = next_frontier;
     }
 
-    Ok(merge_overlapping_on_same_path(all_hits))
+    Ok(merge_nearby_on_same_path(all_hits, merge_distance))
 }
 
-/// Collapse strictly overlapping intervals that share the same
+/// Collapse nearby intervals that share the same
 /// `(genome, strand)`. Different transitive paths can reach the same
 /// homolog and produce intervals that differ by a few bp at the boundaries
 /// (BiWFA refinement is not idempotent across hop depths), leaving tens of
-/// near-duplicate rows per haplotype for a single query. Strictly touching
-/// or gapped intervals are *not* merged — those represent genuinely adjacent
-/// homologs (e.g. tandem arrays) that should stay separate.
-fn merge_overlapping_on_same_path(hits: Vec<HomologousInterval>) -> Vec<HomologousInterval> {
+/// near-duplicate rows per haplotype for a single query.
+///
+/// `merge_distance` is the user's `-d` query gap model. With `-d >= 0`, merge
+/// same-path intervals separated by at most that many bp before the next
+/// transitive hop. With `--no-merge` (`merge_distance < 0`), preserve the
+/// historical strict-overlap collapse used only to remove duplicate hits.
+fn merge_nearby_on_same_path(
+    hits: Vec<HomologousInterval>,
+    merge_distance: i32,
+) -> Vec<HomologousInterval> {
     use std::collections::HashMap;
+    let prof = std::env::var("SYNG_PROFILE").is_ok();
+    let input_count = hits.len();
+    let gap = merge_distance.max(0) as u64;
     // Merging loses CIGAR alignment context since merged coordinates
     // don't map back to either source CIGAR. Group by (genome, strand)
     // with (start, end, cigar); if exactly one entry ends up unmerged
@@ -1289,15 +1327,32 @@ fn merge_overlapping_on_same_path(hits: Vec<HomologousInterval>) -> Vec<Homologo
             .push((h.start, h.end, h.cigar));
     }
     let mut out: Vec<HomologousInterval> = Vec::new();
+    let mut merged_groups = 0usize;
+    let mut merge_examples: Vec<String> = Vec::new();
     for ((genome, strand), mut ivs) in groups {
+        let group_input_count = ivs.len();
         ivs.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
         let mut iter = ivs.into_iter();
         let Some(mut cur) = iter.next() else {
             continue;
         };
+        let mut group_output_count = 0usize;
         let mut cur_merged = false;
+        let mut group_example_parts: Vec<String> = if prof && group_input_count > 1 {
+            vec![format!("{}({}):", genome, strand)]
+        } else {
+            Vec::new()
+        };
         for next in iter {
-            if next.0 < cur.1 {
+            let should_merge = if merge_distance >= 0 {
+                next.0 <= cur.1.saturating_add(gap)
+            } else {
+                next.0 < cur.1
+            };
+            if should_merge {
+                if prof && merge_examples.len() < 20 {
+                    group_example_parts.push(format!("{}-{}~{}-{}", cur.0, cur.1, next.0, next.1));
+                }
                 if next.1 > cur.1 {
                     cur.1 = next.1;
                 }
@@ -1310,6 +1365,7 @@ fn merge_overlapping_on_same_path(hits: Vec<HomologousInterval>) -> Vec<Homologo
                     strand,
                     cigar: if cur_merged { None } else { cur.2.take() },
                 });
+                group_output_count += 1;
                 cur = next;
                 cur_merged = false;
             }
@@ -1321,6 +1377,13 @@ fn merge_overlapping_on_same_path(hits: Vec<HomologousInterval>) -> Vec<Homologo
             strand,
             cigar: if cur_merged { None } else { cur.2 },
         });
+        group_output_count += 1;
+        if group_output_count < group_input_count {
+            merged_groups += 1;
+            if prof && merge_examples.len() < 20 {
+                merge_examples.push(group_example_parts.join(" "));
+            }
+        }
     }
     out.sort_by(|a, b| {
         a.genome
@@ -1329,6 +1392,16 @@ fn merge_overlapping_on_same_path(hits: Vec<HomologousInterval>) -> Vec<Homologo
             .then(a.end.cmp(&b.end))
             .then(a.strand.cmp(&b.strand))
     });
+    if prof {
+        eprintln!(
+            "PROF merge_same_path input={} output={} merged_groups={} gap={} examples={}",
+            input_count,
+            out.len(),
+            merged_groups,
+            merge_distance,
+            merge_examples.join(" | ")
+        );
+    }
     out
 }
 
@@ -1471,6 +1544,109 @@ mod tests {
         assert_eq!(out[0].anchors.len(), 2);
         assert_eq!(out[0].start, 0);
         assert_eq!(out[0].end, 80_000 + TEST_SYNCMER_LEN);
+    }
+
+    #[test]
+    fn query_scaled_chain_limits_do_not_treat_alignment_budget_as_sv_budget() {
+        let query_len = 83_361;
+        let extend_budget = 1_000;
+        let (_gap, _drift, span_cap) =
+            query_scaled_chain_limits(query_len, extend_budget, TEST_SYNCMER_LEN, 10_000);
+        assert!(
+            span_cap > query_len + 100_000,
+            "C4-scale queries need enough target span to retain local CNV/SV alleles"
+        );
+        assert!(
+            span_cap > query_len + extend_budget * 2,
+            "the boundary realignment budget must not cap target SV span"
+        );
+    }
+
+    #[test]
+    fn query_scaled_chain_limits_use_merge_distance_before_refinement() {
+        let query_len = 1_000;
+        let extend_budget = 100;
+        let merge_distance = 10_000;
+        let (gap, drift, span_cap) = query_scaled_chain_limits(
+            query_len,
+            extend_budget,
+            TEST_SYNCMER_LEN,
+            merge_distance,
+        );
+        assert!(
+            gap >= query_len + merge_distance as u64,
+            "-d should widen the pre-refinement chain gap"
+        );
+        assert!(
+            drift >= query_len + merge_distance as u64,
+            "-d should widen the pre-refinement drift budget"
+        );
+        assert!(
+            span_cap >= query_len + merge_distance as u64,
+            "-d should contribute to the pre-refinement target span cap"
+        );
+    }
+
+    #[test]
+    fn merge_nearby_on_same_path_uses_user_gap_distance() {
+        let hits = vec![
+            HomologousInterval {
+                genome: "g".into(),
+                start: 0,
+                end: 100,
+                strand: '+',
+                cigar: None,
+            },
+            HomologousInterval {
+                genome: "g".into(),
+                start: 150,
+                end: 220,
+                strand: '+',
+                cigar: None,
+            },
+            HomologousInterval {
+                genome: "g".into(),
+                start: 400,
+                end: 500,
+                strand: '+',
+                cigar: None,
+            },
+        ];
+        let out = merge_nearby_on_same_path(hits, 50);
+        assert_eq!(out.len(), 2);
+        assert_eq!((out[0].start, out[0].end), (0, 220));
+        assert_eq!((out[1].start, out[1].end), (400, 500));
+    }
+
+    #[test]
+    fn merge_nearby_on_same_path_no_merge_keeps_gapped_intervals() {
+        let hits = vec![
+            HomologousInterval {
+                genome: "g".into(),
+                start: 0,
+                end: 100,
+                strand: '+',
+                cigar: None,
+            },
+            HomologousInterval {
+                genome: "g".into(),
+                start: 100,
+                end: 200,
+                strand: '+',
+                cigar: None,
+            },
+            HomologousInterval {
+                genome: "g".into(),
+                start: 190,
+                end: 250,
+                strand: '+',
+                cigar: None,
+            },
+        ];
+        let out = merge_nearby_on_same_path(hits, -1);
+        assert_eq!(out.len(), 2);
+        assert_eq!((out[0].start, out[0].end), (0, 100));
+        assert_eq!((out[1].start, out[1].end), (100, 250));
     }
 
     #[test]
