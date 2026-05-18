@@ -57,6 +57,10 @@ pub enum GfaEngine {
 /// Resolved engine configuration passed to subcommand functions.
 pub struct EngineOpts {
     pub engine: GfaEngine,
+    /// Syng GFA mode when `engine == GfaEngine::SyngNative`.
+    pub syng_gfa_mode: Option<commands::syng2gfa::SyngGfaMode>,
+    /// Optional assertion about the syncmer scheme of a syng input index.
+    pub syng_params: Option<syng::SyncmerParams>,
     pub pipeline: commands::graph::GraphBuildConfig,
     // Smoothxg-style smoothing parameters (pggb engine)
     /// Target POA length(s) per pass — one value per smoothing pass (default: [700, 1100]).
@@ -520,6 +524,12 @@ fn dispatch_gfa_engine_inner(
             }
         }
         GfaEngine::SyngNative => {
+            if engine_opts.syng_gfa_mode.is_some() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--gfa-engine syng[:raw|:blunt] requires syng-index input; use `impg query -a <prefix>.syng -o gfa --gfa-engine syng` or `impg render --engine syng`",
+                ));
+            }
             // v2.3: if we have access to the underlying syng index,
             // re-query from the first interval as seed and use
             // anchor-seeded gap-only BiWFA for pairs that share anchors.

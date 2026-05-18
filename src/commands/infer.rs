@@ -292,6 +292,8 @@ fn discover_partitions(
     };
     let engine_config = EngineOpts {
         engine: GfaEngine::Poa,
+        syng_gfa_mode: None,
+        syng_params: None,
         pipeline: graph::GraphBuildConfig::default(),
         target_poa_lengths: vec![700, 1100],
         max_node_length: 100,

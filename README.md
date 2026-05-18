@@ -431,6 +431,13 @@ one set of engine implementations, selected via `--gfa-engine`:
 | `pggb` (default) | sweepga + seqwish + smoothxg-style smoothing + gfaffix | smoothed variation graphs |
 | `seqwish` | sweepga + seqwish + gfaffix | raw (unsmoothed) graphs |
 | `poa` | single-pass SPOA | small regions, quick MSA-based output |
+| `syng` / `syng:blunt` | regional syng syncmer graph + bluntg | syng-native zero-overlap graph output from syng indexes |
+| `syng:raw` | regional syng syncmer overlap graph | debugging native syncmer graph overlaps |
+
+For syng-index queries, `--gfa-engine syng` defaults to `syng:blunt`.
+The compact form `-o gfa:syng:blunt,k=63,s=8,seed=7` is accepted as
+shorthand for `-o gfa --gfa-engine syng:blunt,k=63,s=8,seed=7`; the
+`k/s/seed` tail is checked against the loaded syng index.
 
 ### Partitioned mode
 

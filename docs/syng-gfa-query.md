@@ -105,6 +105,21 @@ impg query -a panel.syng -r 'GRCh38#0#chr6:31982056-32035418' \
 impg query -a panel.syng -r 'GRCh38#0#chr6:31982056-32035418' \
   -d 50k -x -o gfa --gfa-engine pggb:10000 \
   --sequence-files panel.agc --force-large-region -O c4.partitioned
+
+# Syng-native blunt graph (default when selecting syng)
+impg query -a panel.syng -r 'GRCh38#0#chr6:31982056-32035418' \
+  -d 50k -x -o gfa --gfa-engine syng \
+  --sequence-files panel.agc --force-large-region -O c4.syng-blunt
+
+# Same thing with explicit mode and syncmer-parameter assertion
+impg query -a panel.syng -r 'GRCh38#0#chr6:31982056-32035418' \
+  -d 50k -x -o gfa:syng:blunt,k=63,s=8,seed=7 \
+  --sequence-files panel.agc --force-large-region -O c4.syng-blunt
+
+# Native syng overlap graph, for debugging
+impg query -a panel.syng -r 'GRCh38#0#chr6:31982056-32035418' \
+  -d 50k -x -o gfa --gfa-engine syng:raw \
+  --sequence-files panel.agc --force-large-region -O c4.syng-raw
 ```
 
 Available engines:
@@ -114,6 +129,9 @@ pggb          default; sweepga + seqwish + smoothing + gfaffix
 seqwish       unsmoothed graph
 poa           small-region MSA graph
 pggb:10000    partitioned mode with 10 kb windows
+syng          syng syncmer graph, defaults to syng:blunt
+syng:blunt    syng graph processed through pangenome/bluntg; links are 0M
+syng:raw      native syng overlap graph
 ```
 
 ## Raw Syng Graph Dump
@@ -125,6 +143,7 @@ impg syng2gfa -a panel.syng --sequence-files panel.agc -o panel.syncmers.gfa
 ```
 
 This dumps the whole syng syncmer graph: one GFA segment per syncmer plus gap
-segments between syncmers. Use this when you want to inspect the syng graph
-itself. Use `impg query -o gfa` when you want a local variation graph for a
-genomic region.
+segments between syncmers. By default this writes blunt graph output via
+pangenome/bluntg. Use `--gfa-mode raw` when you want to inspect native syng
+overlaps. Use `impg query -o gfa` when you want a local graph for a genomic
+region.

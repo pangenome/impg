@@ -300,7 +300,7 @@ fn test_syng_render_bundle_preserves_source_namespace() {
         serde_json::from_str(&std::fs::read_to_string(bundle.join("manifest.json")).unwrap())
             .unwrap();
     assert_eq!(manifest["format"], "impg-render-bundle");
-    assert_eq!(manifest["engine"], "syng-native");
+    assert_eq!(manifest["engine"], "syng:blunt");
     assert_eq!(manifest["feature_space"], "syng-syncmer-node");
     assert!(manifest["rendered_paths"].as_u64().unwrap() >= 2);
     assert!(manifest["step_samples"].as_u64().unwrap() > 0);

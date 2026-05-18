@@ -7622,6 +7622,43 @@ mod tests {
             stdout
         );
 
+        // Syng engine defaults to blunt graph output, so every emitted link
+        // should have zero overlap after pangenome/bluntg processing.
+        let output = std::process::Command::new(&bin)
+            .args([
+                "query",
+                "-d",
+                "0",
+                "-a",
+                output_prefix.to_str().unwrap(),
+                "--sequence-files",
+                fasta_path.to_str().unwrap(),
+                "-r",
+                "genome_a:0-400",
+                "-o",
+                "gfa",
+                "--gfa-engine",
+                "syng",
+            ])
+            .output()
+            .expect("Failed to run impg query -a syng prefix -o gfa --gfa-engine syng");
+        assert!(
+            output.status.success(),
+            "impg query -a syng prefix -o gfa --gfa-engine syng failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let nonzero_links: Vec<&str> = stdout
+            .lines()
+            .filter(|l| l.starts_with("L\t") && !l.ends_with("\t0M"))
+            .collect();
+        assert!(
+            nonzero_links.is_empty(),
+            "syng engine should default to blunt 0M links. Nonzero links: {:?}\n{}",
+            nonzero_links,
+            stdout
+        );
+
         std::fs::remove_dir_all(&dir).ok();
     }
 

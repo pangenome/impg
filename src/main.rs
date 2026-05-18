@@ -106,6 +106,62 @@ fn resolve_syng_syncmer_params(
     })
 }
 
+fn parse_render_engine_spec(raw: &str) -> io::Result<(String, SyngGfaMode)> {
+    let mut parts = raw.split(',').map(str::trim).filter(|p| !p.is_empty());
+    let head = parts.next().unwrap_or("syng");
+    if parts.next().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "render --engine currently accepts syng:raw or syng:blunt; syncmer parameter assertions are supported on --gfa-engine",
+        ));
+    }
+
+    let (name, suffix) = head
+        .split_once(':')
+        .map_or((head, None), |(name, suffix)| (name, Some(suffix)));
+    let name = name.trim().replace('_', "-").to_ascii_lowercase();
+    match name.as_str() {
+        "syng" | "syng-native" => {
+            let mode = if let Some(suffix) = suffix {
+                SyngGfaMode::parse(&format!("syng:{suffix}"))?
+            } else {
+                SyngGfaMode::Blunt
+            };
+            Ok(("syng-native".to_string(), mode))
+        }
+        "poa" | "seqwish" | "pggb" => {
+            if suffix.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("render --engine '{}' does not accept a ':' mode", raw),
+                ));
+            }
+            Ok((name, SyngGfaMode::Blunt))
+        }
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unsupported render engine '{other}'; expected syng, poa, seqwish, or pggb"),
+        )),
+    }
+}
+
+fn apply_gfa_output_engine_shorthand(
+    output_format: String,
+    engine_cli: &mut EngineCliOpts,
+) -> io::Result<String> {
+    let Some(engine_spec) = output_format.strip_prefix("gfa:") else {
+        return Ok(output_format);
+    };
+    if engine_spec.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "-o gfa:<engine> requires an engine spec, e.g. -o gfa:syng:blunt",
+        ));
+    }
+    engine_cli.engine_raw = engine_spec.to_string();
+    Ok("gfa".to_string())
+}
+
 #[derive(Debug, Clone)]
 struct SyngAgcRecord {
     sample: String,
@@ -1339,6 +1395,85 @@ fn emit_syng_map_projection(
     Ok(())
 }
 
+fn format_syng_params(params: impg::syng::SyncmerParams) -> String {
+    format!(
+        "k={},s={},seed={}",
+        params.k + params.w,
+        params.k,
+        params.seed
+    )
+}
+
+fn validate_syng_param_assertion(
+    actual: impg::syng::SyncmerParams,
+    expected: Option<impg::syng::SyncmerParams>,
+) -> io::Result<()> {
+    if let Some(expected) = expected {
+        if actual != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "syng parameter assertion does not match index: requested {}, index has {}",
+                    format_syng_params(expected),
+                    format_syng_params(actual)
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn write_fasta_records(path: &Path, records: &[(String, Vec<u8>)]) -> io::Result<()> {
+    let mut out = BufWriter::new(File::create(path)?);
+    for (name, seq) in records {
+        writeln!(out, ">{name}")?;
+        out.write_all(seq)?;
+        writeln!(out)?;
+    }
+    out.flush()
+}
+
+fn emit_syng_region_gfa<W: Write>(
+    source_index: &impg::syng::SyngIndex,
+    fetched: &[(String, Vec<u8>)],
+    out: &mut W,
+    mode: SyngGfaMode,
+) -> io::Result<()> {
+    if fetched.is_empty() {
+        writeln!(out, "H\tVN:Z:1.0")?;
+        return Ok(());
+    }
+
+    let tempdir = tempfile::Builder::new()
+        .prefix("impg-syng-gfa-")
+        .tempdir()?;
+    let region_prefix_path = tempdir.path().join("region");
+    let region_prefix = region_prefix_path
+        .to_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "region prefix is not UTF-8"))?;
+    let seq_refs: Vec<(String, &[u8])> = fetched
+        .iter()
+        .map(|(name, seq)| (name.clone(), seq.as_slice()))
+        .collect();
+    source_index.build_region_gbwt(&seq_refs, region_prefix)?;
+
+    let fasta_path = tempdir.path().join("region.fa");
+    write_fasta_records(&fasta_path, fetched)?;
+    let sequence_files = vec![fasta_path.to_string_lossy().to_string()];
+    let sequence_index = UnifiedSequenceIndex::from_files(&sequence_files)?;
+    let region_index =
+        impg::syng::SyngIndex::load(region_prefix, source_index.params)?;
+
+    impg::commands::syng2gfa::write_gfa_with_mode(
+        &region_index,
+        out,
+        impg::commands::syng2gfa::GfaVersion::V1_0,
+        Some(&sequence_index),
+        mode,
+    )?;
+    Ok(())
+}
+
 const READ_SYNCMER_INDEX_VERSION: u32 = 1;
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -1871,6 +2006,7 @@ fn setup_temp_dir(temp_dir: &str) -> io::Result<()> {
     Ok(())
 }
 
+use impg::commands::syng2gfa::SyngGfaMode;
 use impg::{EngineOpts, GfaEngine};
 use sweepga::knn_graph::SparsificationStrategy;
 
@@ -1986,14 +2122,15 @@ impl SmoothOpts {
 /// Engine + graph-building options shared by query, partition, similarity, and graph.
 #[derive(Parser, Debug)]
 struct EngineCliOpts {
-    /// GFA engine: 'pggb' (default), 'seqwish', or 'poa'.
-    /// Append ':WINDOW' to enable partitioned mode, e.g. 'pggb:10000'
-    /// splits into 10kb windows, builds per-window, laces, and normalizes.
+    /// GFA engine: 'pggb' (default), 'seqwish', 'poa', or 'syng'.
+    /// Append ':WINDOW' to pggb/seqwish/poa for partitioned mode, e.g. 'pggb:10000'.
+    /// Syng modes are 'syng'/'syng:blunt' (default bluntg output) or 'syng:raw';
+    /// optional syng assertions use comma parameters, e.g. 'syng:blunt,k=63,s=8,seed=7'.
     #[arg(help_heading = "Output options")]
     #[clap(
         long = "gfa-engine",
         default_value = "pggb",
-        value_name = "ENGINE[:WINDOW]"
+        value_name = "ENGINE[:MODE|WINDOW][,key=value...]"
     )]
     engine_raw: String,
 
@@ -2016,32 +2153,43 @@ struct EngineCliOpts {
     debug_dir: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ParsedGfaEngine {
+    engine: GfaEngine,
+    partition_size: Option<usize>,
+    syng_gfa_mode: Option<SyngGfaMode>,
+    syng_params: Option<impg::syng::SyncmerParams>,
+}
+
 impl EngineCliOpts {
-    /// Parse `--gfa-engine` value into (GfaEngine, Option<partition_size>).
+    /// Parse `--gfa-engine`.
     ///
-    /// Accepted forms: `pggb`, `seqwish`, `poa`, `pggb:10000`, `seqwish:5000`, etc.
-    /// A bare colon (`pggb:`) is an error.
-    fn parse_engine(&self) -> io::Result<(GfaEngine, Option<usize>)> {
+    /// Accepted forms include:
+    /// - `pggb`, `seqwish`, `poa`
+    /// - `pggb:10000` or `pggb,window=10k`
+    /// - `syng`, `syng:blunt`, `syng:raw`
+    /// - `syng:blunt,k=63,s=8,seed=7` as an assertion about the input syng index.
+    fn parse_engine(&self) -> io::Result<ParsedGfaEngine> {
         let raw = self.engine_raw.trim();
-        let (name, partition_size) = if let Some(idx) = raw.find(':') {
-            let engine_str = &raw[..idx];
-            let ps_str = &raw[idx + 1..];
-            if ps_str.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "Invalid --gfa-engine '{}': expected a window size after ':', e.g. '{}:10000'",
-                        raw, engine_str
-                    ),
-                ));
-            }
-            let ps: usize = ps_str.parse().map_err(|_| {
+        let mut parts = raw.split(',').map(str::trim).filter(|p| !p.is_empty());
+        let head = parts.next().unwrap_or("pggb");
+        let param_parts: Vec<&str> = parts.collect();
+        let (engine_name_raw, suffix) = head
+            .split_once(':')
+            .map_or((head, None), |(name, suffix)| (name, Some(suffix)));
+        let engine_name = engine_name_raw.trim().replace('_', "-").to_ascii_lowercase();
+
+        let parse_window = |value: &str| -> io::Result<usize> {
+            let parsed = parse_size(value).map_err(|e| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!(
-                        "Invalid --gfa-engine '{}': '{}' is not a valid window size (expected integer)",
-                        raw, ps_str
-                    ),
+                    format!("Invalid --gfa-engine '{}': {e}", raw),
+                )
+            })?;
+            let ps = usize::try_from(parsed).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Invalid --gfa-engine '{}': window size is too large", raw),
                 )
             })?;
             if ps < 1_000 {
@@ -2053,28 +2201,155 @@ impl EngineCliOpts {
                     ),
                 ));
             }
-            (engine_str, Some(ps))
-        } else {
-            (raw, None)
+            Ok(ps)
         };
 
-        let engine = match name {
+        let is_syng = matches!(engine_name.as_str(), "syng" | "syng-native");
+        let mut partition_size = None;
+        let mut syng_gfa_mode = None;
+
+        if let Some(suffix) = suffix {
+            let suffix = suffix.trim();
+            if suffix.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Invalid --gfa-engine '{}': empty value after ':'", raw),
+                ));
+            }
+            if is_syng {
+                syng_gfa_mode = Some(SyngGfaMode::parse(&format!("syng:{suffix}"))?);
+            } else {
+                partition_size = Some(parse_window(suffix)?);
+            }
+        }
+
+        let engine = match engine_name.as_str() {
             "pggb" => GfaEngine::Pggb,
             "seqwish" => GfaEngine::Seqwish,
             "poa" => GfaEngine::Poa,
-            "syng-native" | "syng_native" | "syng" => GfaEngine::SyngNative,
+            "syng" | "syng-native" => {
+                syng_gfa_mode.get_or_insert(SyngGfaMode::Blunt);
+                GfaEngine::SyngNative
+            }
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
-                        "Unknown GFA engine '{}'. Valid engines: pggb, seqwish, poa, syng-native",
-                        name
+                        "Unknown GFA engine '{}'. Valid engines: pggb, seqwish, poa, syng",
+                        engine_name_raw
                     ),
                 ));
             }
         };
 
-        Ok((engine, partition_size))
+        let mut syncmer_length: Option<u32> = None;
+        let mut smer_length: Option<u32> = None;
+        let mut syncmer_seed: Option<u32> = None;
+        let mut saw_syng_param = false;
+
+        for part in param_parts {
+            let (key, value) = part.split_once('=').ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Invalid --gfa-engine '{}': parameter '{}' must be key=value",
+                        raw, part
+                    ),
+                )
+            })?;
+            let key = key.trim().replace('_', "-").to_ascii_lowercase();
+            let value = value.trim();
+            match key.as_str() {
+                "window" | "window-size" => {
+                    if is_syng {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Invalid --gfa-engine '{}': syng GFA modes do not use window", raw),
+                        ));
+                    }
+                    partition_size = Some(parse_window(value)?);
+                }
+                "mode" => {
+                    if !is_syng {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Invalid --gfa-engine '{}': mode= is only valid for syng", raw),
+                        ));
+                    }
+                    syng_gfa_mode = Some(SyngGfaMode::parse(value)?);
+                }
+                "k" | "syncmer" | "syncmer-length" => {
+                    if !is_syng {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Invalid --gfa-engine '{}': k= is only valid for syng", raw),
+                        ));
+                    }
+                    saw_syng_param = true;
+                    syncmer_length = Some(value.parse::<u32>().map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Invalid --gfa-engine '{}': k='{}' is not a u32", raw, value),
+                        )
+                    })?);
+                }
+                "s" | "smer" | "smer-length" => {
+                    if !is_syng {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Invalid --gfa-engine '{}': s= is only valid for syng", raw),
+                        ));
+                    }
+                    saw_syng_param = true;
+                    smer_length = Some(value.parse::<u32>().map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Invalid --gfa-engine '{}': s='{}' is not a u32", raw, value),
+                        )
+                    })?);
+                }
+                "seed" => {
+                    if !is_syng {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Invalid --gfa-engine '{}': seed= is only valid for syng", raw),
+                        ));
+                    }
+                    saw_syng_param = true;
+                    syncmer_seed = Some(value.parse::<u32>().map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Invalid --gfa-engine '{}': seed='{}' is not a u32", raw, value),
+                        )
+                    })?);
+                }
+                other => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("Invalid --gfa-engine '{}': unknown parameter '{}'", raw, other),
+                    ));
+                }
+            }
+        }
+
+        let syng_params = if saw_syng_param {
+            Some(resolve_syng_syncmer_params(
+                None,
+                smer_length,
+                None,
+                syncmer_length,
+                syncmer_seed.unwrap_or(7),
+            )?)
+        } else {
+            None
+        };
+
+        Ok(ParsedGfaEngine {
+            engine,
+            partition_size,
+            syng_gfa_mode,
+            syng_params,
+        })
     }
 
     /// Parse POA scoring parameters.
@@ -2132,7 +2407,8 @@ impl EngineCliOpts {
 
     /// Resolve and build an `EngineOpts`.
     fn build(&self, num_threads: usize) -> io::Result<EngineOpts> {
-        let (engine, partition_size) = self.parse_engine()?;
+        let parsed = self.parse_engine()?;
+        let engine = parsed.engine;
         self.validate_engine_params(engine)?;
 
         let sparsify = self.aln.sw.sparsify.clone();
@@ -2152,7 +2428,9 @@ impl EngineCliOpts {
             &self.smooth,
             self.debug_dir.clone(),
             Some(temp_dir),
-            partition_size,
+            parsed.partition_size,
+            parsed.syng_gfa_mode,
+            parsed.syng_params,
         )
     }
 }
@@ -2961,9 +3239,10 @@ Output formats:
 Syng notes:
   With -a/--alignment pointing to a syng index, supported query outputs are
   bed, bedpe, gfa, fasta, and gbwt. Use -o gfa for a local sequence GFA from
-  query-selected intervals. Use `impg syng2gfa` to dump the whole syng
-  syncmer graph instead. `--gfa-engine` selects how -o gfa is built; it is not
-  the output-format flag.
+  query-selected intervals. `--gfa-engine syng` emits a syng syncmer GFA and
+  defaults to syng:blunt; use syng:raw to preserve native overlaps. The compact
+  form `-o gfa:syng:blunt,k=63,s=8,seed=7` is accepted as shorthand. Use
+  `impg syng2gfa` to dump the whole syng syncmer graph instead.
 ")]
     Query {
         // --- Input ---
@@ -3411,8 +3690,8 @@ Syng notes:
         #[clap(short = 'O', long, value_parser)]
         output: String,
 
-        /// Render engine
-        #[clap(long, value_parser, default_value = "syng-native")]
+        /// Render engine. `syng` defaults to `syng:blunt`; use `syng:raw` to keep native overlaps
+        #[clap(long, value_parser, default_value = "syng")]
         engine: String,
 
         /// Boundary padding in bp for syng candidate discovery
@@ -3609,7 +3888,9 @@ Syng notes:
     /// segment per syncmer plus one segment per inter-syncmer gap. Gaps
     /// are filled with real DNA when `--sequence-files` is provided
     /// (sequence names must match the syng path names); otherwise they
-    /// are filled with `N`s and a warning is emitted.
+    /// are filled with `N`s and a warning is emitted. Default mode is
+    /// `blunt`, which runs pangenome/bluntg; use `--gfa-mode raw` to keep
+    /// native syng link overlaps.
     Syng2gfa {
         /// Syng index prefix (the same prefix passed to `impg syng -o`).
         #[clap(short = 'a', long = "syng-prefix", value_parser)]
@@ -3622,6 +3903,10 @@ Syng notes:
         /// GFA spec version: `1.0` (P lines, default) or `1.1` (W lines, PanSN-parsed).
         #[clap(long, value_parser, default_value = "1.0")]
         gfa_version: String,
+
+        /// Syng GFA mode: `blunt` (default; zero-overlap blunt graph via bluntg) or `raw`
+        #[clap(long, value_parser, default_value = "blunt")]
+        gfa_mode: String,
 
         /// Sequence input for gap filling. Without these, gaps are filled with `N`s.
         #[clap(flatten)]
@@ -3813,6 +4098,8 @@ fn run() -> io::Result<()> {
             approximate,
         } => {
             initialize_threads_and_log(&common);
+            let mut engine_cli = engine_cli;
+            let output_format = apply_gfa_output_engine_shorthand(output_format, &mut engine_cli)?;
 
             let merge_distance = require_merge_distance("partition", merge_distance, no_merge)?;
 
@@ -3835,7 +4122,9 @@ fn run() -> io::Result<()> {
             }
 
             // Parse engine spec early (engine + optional partition size)
-            let (parsed_engine, parsed_partition_size) = engine_cli.parse_engine()?;
+            let parsed_gfa_engine = engine_cli.parse_engine()?;
+            let parsed_engine = parsed_gfa_engine.engine;
+            let parsed_partition_size = parsed_gfa_engine.partition_size;
 
             // Validate partitioned mode + --separate-files are mutually exclusive
             if parsed_partition_size.is_some() && separate_files {
@@ -4020,6 +4309,8 @@ fn run() -> io::Result<()> {
             engine_cli,
         } => {
             initialize_threads_and_log(&common);
+            let mut engine_cli = engine_cli;
+            let output_format = apply_gfa_output_engine_shorthand(output_format, &mut engine_cli)?;
             query.validate_merge_distance("query")?;
             if !syng_seed_drop_top_fraction.is_finite()
                 || !(0.0..1.0).contains(&syng_seed_drop_top_fraction)
@@ -4276,7 +4567,69 @@ fn run() -> io::Result<()> {
                         "gfa" => {
                             let engine_opts = engine_cli.build(common.threads.get())?;
 
-                            if let Some(partition_size) = engine_opts.partition_size {
+                            if engine_opts.engine == GfaEngine::SyngNative {
+                                validate_syng_param_assertion(
+                                    wrapper.syng_index().params,
+                                    engine_opts.syng_params,
+                                )?;
+                                if engine_opts.partition_size.is_some() {
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::InvalidInput,
+                                        "--gfa-engine syng does not support partition windows; use syng:raw or syng:blunt",
+                                    ));
+                                }
+                                let mode = engine_opts
+                                    .syng_gfa_mode
+                                    .unwrap_or(SyngGfaMode::Blunt);
+                                let seq_idx = sequence_index.as_ref().unwrap();
+                                let intervals = if use_boundary_realign {
+                                    impg::syng_transitive::query_transitive_ext_with_seed_filter(
+                                        wrapper.syng_index(),
+                                        target_name,
+                                        *range_start as u64,
+                                        *range_end as u64,
+                                        syng_padding,
+                                        syng_max_depth,
+                                        syng_extension,
+                                        syng_extend_budget,
+                                        syng_min_chain_anchors,
+                                        syng_min_chain_fraction,
+                                        syng_seed_filter,
+                                        query.effective_merge_distance(),
+                                        seq_idx,
+                                    )?
+                                } else {
+                                    query_raw_syng(
+                                        target_name,
+                                        *range_start,
+                                        *range_end,
+                                        syng_padding,
+                                        syng_extension,
+                                    )?
+                                };
+                                let fetched: Vec<(String, Vec<u8>)> = intervals
+                                    .iter()
+                                    .map(|iv| {
+                                        let sequence = seq_idx.fetch_sequence(
+                                            &iv.genome,
+                                            iv.start as i32,
+                                            iv.end as i32,
+                                        )?;
+                                        let seq_name = format!(
+                                            "{}:{}-{}({})",
+                                            iv.genome, iv.start, iv.end, iv.strand
+                                        );
+                                        Ok((seq_name, sequence))
+                                    })
+                                    .collect::<io::Result<Vec<_>>>()?;
+                                let mut out = find_output_stream(&output_prefix, "gfa")?;
+                                emit_syng_region_gfa(
+                                    wrapper.syng_index(),
+                                    &fetched,
+                                    &mut out,
+                                    mode,
+                                )?;
+                            } else if let Some(partition_size) = engine_opts.partition_size {
                                 // ─── Sub-windowed path: syng-at-the-outer-level ───
                                 //
                                 // Split the query range into `partition_size`-bp
@@ -4512,7 +4865,9 @@ fn run() -> io::Result<()> {
             )?;
 
             // Parse engine spec early (engine + optional partition size)
-            let (parsed_engine, parsed_partition_size) = engine_cli.parse_engine()?;
+            let parsed_gfa_engine = engine_cli.parse_engine()?;
+            let parsed_engine = parsed_gfa_engine.engine;
+            let parsed_partition_size = parsed_gfa_engine.partition_size;
 
             // For size validation, flat POA on "gfa" needs the same limit as the old "gfa-poa"
             let size_check_format = if output_format == "gfa" && parsed_engine == GfaEngine::Poa {
@@ -5057,7 +5412,9 @@ fn run() -> io::Result<()> {
             }
 
             // Parse engine spec early
-            let (parsed_engine, parsed_partition_size) = engine_cli.parse_engine()?;
+            let parsed_gfa_engine = engine_cli.parse_engine()?;
+            let parsed_engine = parsed_gfa_engine.engine;
+            let parsed_partition_size = parsed_gfa_engine.partition_size;
 
             if parsed_partition_size.is_some() {
                 return Err(io::Error::new(
@@ -5641,7 +5998,9 @@ fn run() -> io::Result<()> {
             common,
         } => {
             initialize_threads_and_log(&common);
-            let (parsed_engine, parsed_partition_size) = engine_cli.parse_engine()?;
+            let parsed_gfa_engine = engine_cli.parse_engine()?;
+            let parsed_engine = parsed_gfa_engine.engine;
+            let parsed_partition_size = parsed_gfa_engine.partition_size;
             engine_cli.validate_engine_params(parsed_engine)?;
             let temp_dir = resolve_temp_dir(engine_cli.aln.sw.tempdir.clone())?;
             setup_temp_dir(&temp_dir)?;
@@ -5791,12 +6150,14 @@ fn run() -> io::Result<()> {
             initialize_threads_and_log(&common);
             let syng_prefix = detect_syng_prefix(&index).unwrap_or(index);
             let sequence_files = sequence.resolve_sequence_files()?;
+            let (render_engine, syng_gfa_mode) = parse_render_engine_spec(&engine)?;
             let config = render::RenderConfig {
                 syng_prefix: &syng_prefix,
                 target_range: &target_range,
                 output: &output,
                 sequence_files: &sequence_files,
-                engine: &engine,
+                engine: &render_engine,
+                syng_gfa_mode,
                 syng_padding,
                 syng_extension,
                 emit_gfa: !no_gfa,
@@ -6654,13 +7015,15 @@ fn run() -> io::Result<()> {
             syng_prefix,
             output,
             gfa_version,
+            gfa_mode,
             sequence,
             common,
         } => {
             initialize_threads_and_log(&common);
             let version = impg::commands::syng2gfa::GfaVersion::parse(&gfa_version)?;
+            let mode = SyngGfaMode::parse(&gfa_mode)?;
             let sequence_files = sequence.resolve_sequence_files()?;
-            impg::commands::syng2gfa::run(&syng_prefix, &output, version, &sequence_files)?;
+            impg::commands::syng2gfa::run(&syng_prefix, &output, version, &sequence_files, mode)?;
         }
         Args::SyngRepair {
             index,
@@ -6849,6 +7212,8 @@ fn build_engine_opts(
     debug_dir: Option<String>,
     temp_dir: Option<String>,
     partition_size: Option<usize>,
+    syng_gfa_mode: Option<SyngGfaMode>,
+    syng_params: Option<impg::syng::SyncmerParams>,
 ) -> io::Result<EngineOpts> {
     let pipeline = graph::GraphBuildConfig {
         num_threads,
@@ -6883,6 +7248,8 @@ fn build_engine_opts(
 
     Ok(EngineOpts {
         engine,
+        syng_gfa_mode,
+        syng_params,
         pipeline,
         partition_size,
         target_poa_lengths: smooth.parse_target_poa_lengths()?,
@@ -9350,13 +9717,97 @@ mod tests {
             "fasta+paf  FASTA sequences plus PAF-like interval mappings",
             "fasta-aln  FASTA alignment output",
             "gbwt       region-specific syng GBWT/khash output",
-            "Use `impg syng2gfa` to dump the whole syng",
-            "`--gfa-engine` selects how -o gfa is built",
+            "`--gfa-engine syng` emits a syng syncmer GFA",
+            "defaults to syng:blunt; use syng:raw",
+            "-o gfa:syng:blunt,k=63,s=8,seed=7",
+            "`impg syng2gfa` to dump the whole syng syncmer graph",
         ] {
             assert!(
                 help.contains(expected),
                 "query help missing expected text: {expected}"
             );
+        }
+    }
+
+    #[test]
+    fn test_gfa_engine_syng_defaults_to_blunt() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa",
+            "--gfa-engine",
+            "syng",
+        ])
+        .unwrap();
+        match args {
+            Args::Query { engine_cli, .. } => {
+                let parsed = engine_cli.parse_engine().unwrap();
+                assert_eq!(parsed.engine, GfaEngine::SyngNative);
+                assert_eq!(parsed.syng_gfa_mode, Some(SyngGfaMode::Blunt));
+                assert_eq!(parsed.syng_params, None);
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_engine_syng_mode_and_param_assertions() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa",
+            "--gfa-engine",
+            "syng:raw,k=63,s=8,seed=7",
+        ])
+        .unwrap();
+        match args {
+            Args::Query { engine_cli, .. } => {
+                let parsed = engine_cli.parse_engine().unwrap();
+                assert_eq!(parsed.engine, GfaEngine::SyngNative);
+                assert_eq!(parsed.syng_gfa_mode, Some(SyngGfaMode::Raw));
+                assert_eq!(
+                    parsed.syng_params,
+                    Some(impg::syng::SyncmerParams { k: 8, w: 55, seed: 7 })
+                );
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_can_carry_engine_spec() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:blunt,k=63,s=8,seed=7",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                assert_eq!(parsed.syng_gfa_mode, Some(SyngGfaMode::Blunt));
+                assert_eq!(
+                    parsed.syng_params,
+                    Some(impg::syng::SyncmerParams { k: 8, w: 55, seed: 7 })
+                );
+            }
+            _ => panic!("expected query command"),
         }
     }
 

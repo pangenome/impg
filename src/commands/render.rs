@@ -20,6 +20,7 @@ pub struct RenderConfig<'a> {
     pub output: &'a str,
     pub sequence_files: &'a [String],
     pub engine: &'a str,
+    pub syng_gfa_mode: syng2gfa::SyngGfaMode,
     pub syng_padding: u64,
     pub syng_extension: u64,
     pub emit_gfa: bool,
@@ -103,10 +104,11 @@ fn render_syng_native(config: &RenderConfig<'_>) -> io::Result<()> {
             })?,
             syng2gfa::GfaVersion::V1_0,
             &[],
+            config.syng_gfa_mode,
         )?;
     }
 
-    let manifest = RenderManifest::new_syng_native(
+    let mut manifest = RenderManifest::new_syng_native(
         config.syng_prefix.to_string(),
         config.target_range.to_string(),
         &paths,
@@ -115,6 +117,7 @@ fn render_syng_native(config: &RenderConfig<'_>) -> io::Result<()> {
         tables.rendered_paths.len(),
         tables.step_samples.len(),
     );
+    manifest.engine = format!("syng:{}", config.syng_gfa_mode.label());
     render_bundle::write_manifest(&paths.manifest, &manifest)?;
 
     info!(
