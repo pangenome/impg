@@ -324,6 +324,90 @@ fn test_syng_render_bundle_preserves_source_namespace() {
     assert!(gfa.contains("\nS\t"), "{}", gfa);
     assert!(gfa.contains("\nP\t"), "{}", gfa);
 
+    let local_pack = dir.join("render.pack");
+    let map_local_pack = Command::new(&bin)
+        .args([
+            "map",
+            "-a",
+            bundle.join("paths").to_str().unwrap(),
+            "-q",
+            bundle.join("rendered.fa").to_str().unwrap(),
+            "-o",
+            "pack",
+            "-O",
+            local_pack.to_str().unwrap(),
+            "--min-anchors",
+            "1",
+        ])
+        .output()
+        .expect("failed to run impg map on rendered syng bundle");
+    assert!(
+        map_local_pack.status.success(),
+        "impg map on rendered syng bundle failed: {}",
+        String::from_utf8_lossy(&map_local_pack.stderr)
+    );
+    let genotype_bundle = Command::new(&bin)
+        .args([
+            "genotype",
+            "cos",
+            "--render-bundle",
+            bundle.to_str().unwrap(),
+            "--pack",
+            local_pack.to_str().unwrap(),
+            "--ploidy",
+            "1",
+            "--top-n",
+            "1",
+            "--min-anchors",
+            "1",
+            "--min-span-fraction",
+            "0",
+        ])
+        .output()
+        .expect("failed to run impg genotype cos --render-bundle");
+    assert!(
+        genotype_bundle.status.success(),
+        "impg genotype cos --render-bundle failed: {}",
+        String::from_utf8_lossy(&genotype_bundle.stderr)
+    );
+    let genotype_stdout = String::from_utf8_lossy(&genotype_bundle.stdout);
+    assert!(genotype_stdout.contains("#impg genotype cos"), "{}", genotype_stdout);
+    assert!(
+        genotype_stdout.contains("sampleA#0#chr1"),
+        "bundle genotype should report rendered paths with source names:\n{}",
+        genotype_stdout
+    );
+    let infer_bundle = Command::new(&bin)
+        .args([
+            "infer",
+            "--render-bundle",
+            bundle.to_str().unwrap(),
+            "--pack",
+            local_pack.to_str().unwrap(),
+            "--ploidy",
+            "1",
+            "--top-n",
+            "1",
+            "--min-anchors",
+            "1",
+            "--min-span-fraction",
+            "0",
+        ])
+        .output()
+        .expect("failed to run impg infer --render-bundle");
+    assert!(
+        infer_bundle.status.success(),
+        "impg infer --render-bundle failed: {}",
+        String::from_utf8_lossy(&infer_bundle.stderr)
+    );
+    let infer_stdout = String::from_utf8_lossy(&infer_bundle.stdout);
+    assert!(infer_stdout.contains("#impg infer"), "{}", infer_stdout);
+    assert!(
+        infer_stdout.contains("sampleA#0#chr1"),
+        "bundle infer should report rendered paths with source names:\n{}",
+        infer_stdout
+    );
+
     let poa_bundle = dir.join("render.poa.impg-gbz");
     let render_poa = Command::new(&bin)
         .args([

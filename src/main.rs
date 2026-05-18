@@ -2581,8 +2581,12 @@ enum GenotypeCommand {
     #[command(alias = "cosigt")]
     Cos {
         /// Syng index prefix or .1khash/.1gbwt/.spos/.pstep/.names/.meta path
-        #[clap(short = 'a', long, value_parser)]
-        index: String,
+        #[clap(short = 'a', long, value_parser, required_unless_present = "render_bundle")]
+        index: Option<String>,
+
+        /// Render bundle directory produced by `impg render --engine syng-native`
+        #[clap(long = "render-bundle", value_parser, conflicts_with = "index")]
+        render_bundle: Option<String>,
 
         /// Sample support vector produced by `impg map -o pack`
         #[clap(short = 'p', long, value_parser)]
@@ -2593,8 +2597,8 @@ enum GenotypeCommand {
         proj: Option<String>,
 
         /// Reference path range to genotype, in the format `seq_name:start-end`
-        #[clap(short = 'r', long, value_parser)]
-        target_range: String,
+        #[clap(short = 'r', long, value_parser, required_unless_present = "render_bundle")]
+        target_range: Option<String>,
 
         /// Candidate extraction mode
         #[clap(long, value_enum, default_value_t = genotype::CandidateMode::Spanning)]
@@ -3131,8 +3135,12 @@ enum Args {
     /// Infer allele calls across ranges or partitions from graph-derived evidence
     Infer {
         /// Syng index prefix or .1khash/.1gbwt/.spos/.pstep/.names/.meta path
-        #[clap(short = 'a', long, value_parser)]
-        index: String,
+        #[clap(short = 'a', long, value_parser, required_unless_present = "render_bundle")]
+        index: Option<String>,
+
+        /// Render bundle directory produced by `impg render --engine syng-native`
+        #[clap(long = "render-bundle", value_parser, conflicts_with = "index")]
+        render_bundle: Option<String>,
 
         /// Sample support vector produced by `impg map -o pack`
         #[clap(short = 'p', long, value_parser)]
@@ -5135,6 +5143,7 @@ fn run() -> io::Result<()> {
         Args::Genotype { command } => match command {
             GenotypeCommand::Cos {
                 index,
+                render_bundle,
                 pack,
                 proj,
                 target_range,
@@ -5151,7 +5160,39 @@ fn run() -> io::Result<()> {
                 common,
             } => {
                 initialize_threads_and_log(&common);
-                let syng_prefix = detect_syng_prefix(&index).unwrap_or(index);
+                let loaded_render_bundle = render_bundle
+                    .as_deref()
+                    .map(impg::render_bundle::load_bundle)
+                    .transpose()?;
+                let (syng_prefix, target_range) = if let Some(bundle) = &loaded_render_bundle {
+                    if bundle.manifest.feature_space != "syng-syncmer-node" {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!(
+                                "impg genotype cos can consume syng-native render bundles; bundle feature_space is '{}'",
+                                bundle.manifest.feature_space
+                            ),
+                        ));
+                    }
+                    (
+                        bundle.syng_prefix_path()?.to_string_lossy().to_string(),
+                        bundle.rendered_target_range(target_range.as_deref())?,
+                    )
+                } else {
+                    let index = index.ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "impg genotype cos requires --index or --render-bundle",
+                        )
+                    })?;
+                    let target_range = target_range.ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "impg genotype cos requires --target-range or --render-bundle",
+                        )
+                    })?;
+                    (detect_syng_prefix(&index).unwrap_or(index), target_range)
+                };
                 let projection = if let Some(path) = proj.as_deref() {
                     Some(impg::projection::load(path)?)
                 } else {
@@ -5224,6 +5265,7 @@ fn run() -> io::Result<()> {
         },
         Args::Infer {
             index,
+            render_bundle,
             pack,
             proj,
             gaf,
@@ -5266,6 +5308,10 @@ fn run() -> io::Result<()> {
             common,
         } => {
             initialize_threads_and_log(&common);
+            let loaded_render_bundle = render_bundle
+                .as_deref()
+                .map(impg::render_bundle::load_bundle)
+                .transpose()?;
             if score != "cos" {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -5279,7 +5325,31 @@ fn run() -> io::Result<()> {
                 ));
             }
 
-            let targets = if let Some(range) = target_range {
+            let targets = if let Some(bundle) = &loaded_render_bundle {
+                if bundle.manifest.feature_space != "syng-syncmer-node" {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "impg infer can consume syng-native render bundles; bundle feature_space is '{}'",
+                            bundle.manifest.feature_space
+                        ),
+                    ));
+                }
+                if target_bed.is_some() || partitions.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "impg infer --render-bundle currently supports one source target range; omit -r to use the bundle target or provide -r",
+                    ));
+                }
+                if emit_fasta.is_some() || emit_gfa.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "impg infer --render-bundle does not yet support --emit-fasta/--emit-gfa",
+                    ));
+                }
+                let local_range = bundle.rendered_target_range(target_range.as_deref())?;
+                vec![infer::parse_target_range(&local_range)?]
+            } else if let Some(range) = target_range {
                 vec![infer::parse_target_range(&range)?]
             } else if let Some(path) = target_bed {
                 infer::parse_target_bed(&path)?
@@ -5319,7 +5389,17 @@ fn run() -> io::Result<()> {
                 None
             };
 
-            let syng_prefix = detect_syng_prefix(&index).unwrap_or(index);
+            let syng_prefix = if let Some(bundle) = &loaded_render_bundle {
+                bundle.syng_prefix_path()?.to_string_lossy().to_string()
+            } else {
+                let index = index.ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "impg infer requires --index or --render-bundle",
+                    )
+                })?;
+                detect_syng_prefix(&index).unwrap_or(index)
+            };
             let projection = if let Some(path) = proj.as_deref() {
                 Some(impg::projection::load(path)?)
             } else {

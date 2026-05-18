@@ -147,6 +147,110 @@ impl RenderBundlePaths {
     }
 }
 
+impl LoadedRenderBundle {
+    pub fn syng_prefix_path(&self) -> io::Result<PathBuf> {
+        let syng_prefix = self.manifest.syng_prefix.as_deref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "render bundle does not contain a syng prefix",
+            )
+        })?;
+        Ok(resolve_bundle_path(&self.root, syng_prefix))
+    }
+
+    pub fn rendered_target_range(&self, source_range: Option<&str>) -> io::Result<String> {
+        let source_range = source_range.unwrap_or(&self.manifest.target_range);
+        let (source_name, source_start, source_end) = parse_source_range(source_range)?;
+        let source = self
+            .tables
+            .namespace
+            .get_by_name(&source_name)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("source range references unknown sequence '{source_name}'"),
+                )
+            })?;
+
+        let mut best = None;
+        for path in &self.tables.rendered_paths {
+            let interval = &path.source_interval;
+            if interval.source_sequence_id != source.id {
+                continue;
+            }
+            if interval.start > source_start || interval.end < source_end {
+                continue;
+            }
+            let span = interval.end.saturating_sub(interval.start);
+            if best
+                .as_ref()
+                .map(|(_, best_span)| span < *best_span)
+                .unwrap_or(true)
+            {
+                best = Some((path, span));
+            }
+        }
+
+        let (path, _) = best.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("render bundle has no path containing source range '{source_range}'"),
+            )
+        })?;
+        let (local_start, local_end) = match path.source_interval.strand {
+            '+' => (
+                source_start - path.source_interval.start,
+                source_end - path.source_interval.start,
+            ),
+            '-' => (
+                path.source_interval.end - source_end,
+                path.source_interval.end - source_start,
+            ),
+            strand => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("rendered path has invalid strand '{strand}'"),
+                ));
+            }
+        };
+        Ok(format!("{}:{}-{}", path.rendered_name, local_start, local_end))
+    }
+}
+
+fn parse_source_range(range: &str) -> io::Result<(String, u64, u64)> {
+    let (name, coords) = range.rsplit_once(':').ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid source range '{range}'; expected NAME:START-END"),
+        )
+    })?;
+    let (start, end) = coords.split_once('-').ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid source range '{range}'; expected NAME:START-END"),
+        )
+    })?;
+    let start = start.parse::<u64>().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid start coordinate in source range '{range}'"),
+        )
+    })?;
+    let end = end.parse::<u64>().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid end coordinate in source range '{range}'"),
+        )
+    })?;
+    if end <= start {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid source range '{range}': end must be greater than start"),
+        ));
+    }
+    Ok((name.to_string(), start, end))
+}
+
 pub fn write_manifest(path: &Path, manifest: &RenderManifest) -> io::Result<()> {
     let file = File::create(path)?;
     serde_json::to_writer_pretty(file, manifest).map_err(io::Error::other)
@@ -402,5 +506,55 @@ mod tests {
         assert_eq!(loaded.tables.rendered_paths[0].rendered_name, "HG002#1#chr6:10-100");
         assert_eq!(loaded.tables.step_samples[0].source_bp, 10);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rendered_target_range_projects_source_coordinates() {
+        let mut namespace = SequenceNamespace::new();
+        let source_id = namespace.add_sequence("HG002#1#chr6", 1000);
+        let root = PathBuf::from("/tmp/render-test");
+        let paths = RenderBundlePaths::new(&root);
+        let tables = RenderTranslationTables {
+            namespace,
+            rendered_paths: vec![
+                RenderedPathRecord {
+                    rendered_path_id: 0,
+                    rendered_name: "HG002#1#chr6:100-500(+)".to_string(),
+                    source_interval: SourceInterval::new(source_id, 100, 500, '+').unwrap(),
+                    gbwt_path_id: Some(0),
+                },
+                RenderedPathRecord {
+                    rendered_path_id: 1,
+                    rendered_name: "HG002#1#chr6:100-500(-)".to_string(),
+                    source_interval: SourceInterval::new(source_id, 100, 500, '-').unwrap(),
+                    gbwt_path_id: Some(1),
+                },
+            ],
+            step_samples: Vec::new(),
+        };
+        let bundle = LoadedRenderBundle {
+            root,
+            manifest: RenderManifest::new_syng_native(
+                "panel.syng".to_string(),
+                "HG002#1#chr6:150-250".to_string(),
+                &paths,
+                true,
+                tables.namespace.sequences.len(),
+                tables.rendered_paths.len(),
+                tables.step_samples.len(),
+            ),
+            tables,
+        };
+
+        assert_eq!(
+            bundle.rendered_target_range(None).unwrap(),
+            "HG002#1#chr6:100-500(+):50-150"
+        );
+        assert_eq!(
+            bundle
+                .rendered_target_range(Some("HG002#1#chr6:200-300"))
+                .unwrap(),
+            "HG002#1#chr6:100-500(+):100-200"
+        );
     }
 }
