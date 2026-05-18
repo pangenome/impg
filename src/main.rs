@@ -5639,6 +5639,7 @@ fn run() -> io::Result<()> {
                 syng_extension,
                 emit_gfa: !no_gfa,
                 keep_existing,
+                threads: common.threads.get(),
             };
             render::run(&config)?;
         }

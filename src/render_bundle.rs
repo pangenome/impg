@@ -1,7 +1,7 @@
 use crate::sequence_namespace::{SequenceNamespace, SourceInterval};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 pub const RENDER_FORMAT: &str = "impg-render-bundle";
@@ -20,6 +20,7 @@ pub struct RenderManifest {
     pub namespace: String,
     pub translation: String,
     pub translation_tsv: Option<String>,
+    pub rendered_fasta: Option<String>,
     pub graph_gfa: Option<String>,
     pub syng_prefix: Option<String>,
     pub source_sequences: usize,
@@ -58,8 +59,16 @@ pub struct RenderBundlePaths {
     pub namespace: PathBuf,
     pub translation: PathBuf,
     pub translation_tsv: PathBuf,
+    pub rendered_fasta: PathBuf,
     pub graph_gfa: PathBuf,
     pub syng_prefix: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct LoadedRenderBundle {
+    pub root: PathBuf,
+    pub manifest: RenderManifest,
+    pub tables: RenderTranslationTables,
 }
 
 impl RenderManifest {
@@ -83,8 +92,38 @@ impl RenderManifest {
             namespace: relative_file(&paths.root, &paths.namespace),
             translation: relative_file(&paths.root, &paths.translation),
             translation_tsv: Some(relative_file(&paths.root, &paths.translation_tsv)),
+            rendered_fasta: Some(relative_file(&paths.root, &paths.rendered_fasta)),
             graph_gfa: include_gfa.then(|| relative_file(&paths.root, &paths.graph_gfa)),
             syng_prefix: Some(relative_file(&paths.root, &paths.syng_prefix)),
+            source_sequences,
+            rendered_paths,
+            step_samples,
+        }
+    }
+
+    pub fn new_local_graph(
+        engine: String,
+        source_index: String,
+        target_range: String,
+        paths: &RenderBundlePaths,
+        source_sequences: usize,
+        rendered_paths: usize,
+        step_samples: usize,
+    ) -> Self {
+        Self {
+            format: RENDER_FORMAT.to_string(),
+            version: RENDER_VERSION,
+            engine,
+            graph_kind: "local-sequence-graph".to_string(),
+            source_index,
+            target_range,
+            feature_space: "gfa-segment".to_string(),
+            namespace: relative_file(&paths.root, &paths.namespace),
+            translation: relative_file(&paths.root, &paths.translation),
+            translation_tsv: Some(relative_file(&paths.root, &paths.translation_tsv)),
+            rendered_fasta: Some(relative_file(&paths.root, &paths.rendered_fasta)),
+            graph_gfa: Some(relative_file(&paths.root, &paths.graph_gfa)),
+            syng_prefix: None,
             source_sequences,
             rendered_paths,
             step_samples,
@@ -100,6 +139,7 @@ impl RenderBundlePaths {
             namespace: root.join("namespace.json"),
             translation: root.join("translation.bin"),
             translation_tsv: root.join("translation.tsv"),
+            rendered_fasta: root.join("rendered.fa"),
             graph_gfa: root.join("graph.gfa"),
             syng_prefix: root.join("paths"),
             root,
@@ -110,6 +150,62 @@ impl RenderBundlePaths {
 pub fn write_manifest(path: &Path, manifest: &RenderManifest) -> io::Result<()> {
     let file = File::create(path)?;
     serde_json::to_writer_pretty(file, manifest).map_err(io::Error::other)
+}
+
+pub fn read_manifest(path: &Path) -> io::Result<RenderManifest> {
+    let file = File::open(path)?;
+    let manifest: RenderManifest = serde_json::from_reader(file).map_err(io::Error::other)?;
+    validate_manifest(&manifest)?;
+    Ok(manifest)
+}
+
+pub fn load_bundle(root: impl AsRef<Path>) -> io::Result<LoadedRenderBundle> {
+    let root = root.as_ref().to_path_buf();
+    let manifest = read_manifest(&root.join("manifest.json"))?;
+    let translation = resolve_bundle_path(&root, &manifest.translation);
+    let tables = read_translation_binary(&translation)?;
+    Ok(LoadedRenderBundle {
+        root,
+        manifest,
+        tables,
+    })
+}
+
+pub fn resolve_bundle_path(root: &Path, relative_or_absolute: &str) -> PathBuf {
+    let path = Path::new(relative_or_absolute);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    }
+}
+
+fn validate_manifest(manifest: &RenderManifest) -> io::Result<()> {
+    if manifest.format != RENDER_FORMAT {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "render manifest has format '{}', expected '{}'",
+                manifest.format, RENDER_FORMAT
+            ),
+        ));
+    }
+    if manifest.version != RENDER_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "render manifest has version {}, expected {}",
+                manifest.version, RENDER_VERSION
+            ),
+        ));
+    }
+    if manifest.namespace.is_empty() || manifest.translation.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "render manifest is missing namespace or translation path",
+        ));
+    }
+    Ok(())
 }
 
 pub fn write_namespace(path: &Path, namespace: &SequenceNamespace) -> io::Result<()> {
@@ -128,7 +224,7 @@ pub fn write_translation_binary(path: &Path, tables: &RenderTranslationTables) -
 pub fn read_translation_binary(path: &Path) -> io::Result<RenderTranslationTables> {
     let mut reader = std::io::BufReader::new(File::open(path)?);
     let mut magic = [0u8; 8];
-    std::io::Read::read_exact(&mut reader, &mut magic)?;
+    reader.read_exact(&mut magic)?;
     if &magic != TRANSLATION_MAGIC {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -260,6 +356,51 @@ mod tests {
             "HG002#1#chr6:10-100"
         );
         assert_eq!(decoded.step_samples[0].feature_id, 42);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn bundle_loader_validates_manifest_and_translation() {
+        let dir = std::env::temp_dir().join("impg_test_render_bundle_loader");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = RenderBundlePaths::new(&dir);
+
+        let mut namespace = SequenceNamespace::new();
+        let source_id = namespace.add_sequence("HG002#1#chr6", 1000);
+        let tables = RenderTranslationTables {
+            namespace,
+            rendered_paths: vec![RenderedPathRecord {
+                rendered_path_id: 0,
+                rendered_name: "HG002#1#chr6:10-100".to_string(),
+                source_interval: SourceInterval::new(source_id, 10, 100, '+').unwrap(),
+                gbwt_path_id: Some(0),
+            }],
+            step_samples: vec![StepTranslationRecord {
+                rendered_path_id: 0,
+                rendered_step: 0,
+                source_bp: 10,
+                feature_id: 42,
+                orientation: '+',
+            }],
+        };
+        let manifest = RenderManifest::new_local_graph(
+            "poa".to_string(),
+            "panel.syng".to_string(),
+            "HG002#1#chr6:10-100".to_string(),
+            &paths,
+            tables.namespace.sequences.len(),
+            tables.rendered_paths.len(),
+            tables.step_samples.len(),
+        );
+
+        write_manifest(&paths.manifest, &manifest).unwrap();
+        write_translation_binary(&paths.translation, &tables).unwrap();
+        let loaded = load_bundle(&dir).unwrap();
+
+        assert_eq!(loaded.manifest.engine, "poa");
+        assert_eq!(loaded.tables.rendered_paths[0].rendered_name, "HG002#1#chr6:10-100");
+        assert_eq!(loaded.tables.step_samples[0].source_bp, 10);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

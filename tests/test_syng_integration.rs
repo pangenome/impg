@@ -284,6 +284,7 @@ fn test_syng_render_bundle_preserves_source_namespace() {
         "namespace.json",
         "translation.bin",
         "translation.tsv",
+        "rendered.fa",
         "graph.gfa",
         "paths.1gbwt",
         "paths.1khash",
@@ -322,6 +323,45 @@ fn test_syng_render_bundle_preserves_source_namespace() {
     assert!(gfa.starts_with("H\tVN:Z:1.0\n"), "{}", gfa);
     assert!(gfa.contains("\nS\t"), "{}", gfa);
     assert!(gfa.contains("\nP\t"), "{}", gfa);
+
+    let poa_bundle = dir.join("render.poa.impg-gbz");
+    let render_poa = Command::new(&bin)
+        .args([
+            "render",
+            "-a",
+            prefix.to_str().unwrap(),
+            "-r",
+            "sampleA#0#chr1:100-1000",
+            "--sequence-files",
+            fasta.to_str().unwrap(),
+            "-O",
+            poa_bundle.to_str().unwrap(),
+            "--engine",
+            "poa",
+            "-t",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg render --engine poa");
+    assert!(
+        render_poa.status.success(),
+        "impg render --engine poa failed: {}",
+        String::from_utf8_lossy(&render_poa.stderr)
+    );
+    let poa_manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(poa_bundle.join("manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(poa_manifest["engine"], "poa");
+    assert_eq!(poa_manifest["graph_kind"], "local-sequence-graph");
+    assert_eq!(poa_manifest["feature_space"], "gfa-segment");
+    assert!(poa_manifest["syng_prefix"].is_null());
+    assert!(poa_manifest["step_samples"].as_u64().unwrap() > 0);
+    assert!(poa_bundle.join("rendered.fa").exists());
+    let poa_translation = std::fs::read_to_string(poa_bundle.join("translation.tsv")).unwrap();
+    assert!(poa_translation.contains("\nstep\t"), "{}", poa_translation);
+    let poa_gfa = std::fs::read_to_string(poa_bundle.join("graph.gfa")).unwrap();
+    assert!(poa_gfa.contains("\nS\t"), "{}", poa_gfa);
+    assert!(poa_gfa.contains("\nP\t"), "{}", poa_gfa);
 }
 
 #[test]
