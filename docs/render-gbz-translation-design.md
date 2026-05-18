@@ -203,11 +203,28 @@ syng query target
   -> fetch interval DNA from AGC/FASTA
   -> pggb/seqwish/internal graph build
   -> thread input haplotypes as graph paths
-  -> build local GBWT
-  -> write translation tables
+  -> write graph-step translation tables
 ```
 
 This is the first target for C4/C4A/C4B-like loci.
+
+Implemented local render engines:
+
+```bash
+impg render -a panel.syng -r sample#0#chr6:31972057-32055418 \
+  --sequence-files panel.fa -O c4.poa.impg-gbz --engine poa
+impg render -a panel.syng -r sample#0#chr6:31972057-32055418 \
+  --sequence-files panel.fa -O c4.seqwish.impg-gbz --engine seqwish
+impg render -a panel.syng -r sample#0#chr6:31972057-32055418 \
+  --sequence-files panel.fa -O c4.pggb.impg-gbz --engine pggb
+```
+
+The current local graph bundle writes `rendered.fa`, `graph.gfa`,
+`namespace.json`, `translation.bin`, and `translation.tsv`. Its feature space is
+`gfa-segment`. A true local GBWT over the explicit graph paths is still a
+separate pending step; the rendered FASTA path names and translation tables are
+already organized so that GBWT path IDs can be attached without changing the
+source namespace model.
 
 ### Whole-Genome Render
 
@@ -303,11 +320,12 @@ only when a locus needs that representation.
    sequences, not as a requirement for membership in the namespace.
 3. Define render bundle manifest and succinct translation table schemas.
 4. Implement regional syng-native render with translation tables.
-5. Implement regional local sequence graph render using seqwish or pggb first,
-   with threaded input haplotype paths and local GBWT.
+5. Implement regional local sequence graph render using POA, seqwish, and pggb,
+   with threaded input haplotype paths and graph-step translation tables.
 6. Teach `genotype`/`infer` to consume render bundles as a backend.
 7. Add tiled render and merge.
 8. Add true GBZ-compatible packaging if needed for interoperability.
+9. Add local GBWT construction for explicit graph paths.
 
 ## Tests
 
