@@ -226,6 +226,24 @@ separate pending step; the rendered FASTA path names and translation tables are
 already organized so that GBWT path IDs can be attached without changing the
 source namespace model.
 
+Syng-native bundles can be used as local genotyping views by mapping reads to
+the bundle's `paths` syng index and passing the bundle to `genotype cos`:
+
+```bash
+impg map -a c4.syng-native.impg-gbz/paths -q reads.fq.gz -o pack \
+  -O c4.local.pack
+impg genotype cos --render-bundle c4.syng-native.impg-gbz --pack c4.local.pack
+impg infer --render-bundle c4.syng-native.impg-gbz --pack c4.local.pack
+```
+
+When `-r/--target-range` is omitted, `genotype cos` and `infer` use the source
+target from the render manifest and project it onto the containing rendered path.
+A different source-coordinate subrange can be supplied with `-r`; it is
+projected through the same translation table before scoring. `infer
+--render-bundle` currently supports this single-target mode; BED and partition
+inputs should be projected through the bundle as a deliberate batch operation in
+a later slice.
+
 ### Whole-Genome Render
 
 Whole-genome rendering should be tiled:
