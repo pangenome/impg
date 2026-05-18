@@ -77,15 +77,35 @@ where
 ///
 /// Replaces the older O(N²) mutual-best-buddy + union-find pipeline.
 /// Algorithmic budget per bucket: O(N × active_chains). On realistic
-/// inputs, active_chains stays bounded (tens to low hundreds even in
-/// repeat-dense regions), so the effective cost is O(N × small).
-///
-/// Caps are derived from `extend_budget` only — tile size does not
-/// leak into chain shape or projection endpoints.
 pub fn chain_anchors(
     hits: Vec<HomologousIntervalWithAnchors>,
     extend_budget: u64,
     syncmer_len: u64,
+) -> Vec<HomologousIntervalWithAnchors> {
+    let max_query_hop = extend_budget.saturating_mul(3).max(extend_budget);
+    let drift_per_hop = extend_budget;
+    let max_chain_span = extend_budget.saturating_mul(10).max(extend_budget);
+    chain_anchors_with_limits(
+        hits,
+        syncmer_len,
+        max_query_hop,
+        drift_per_hop,
+        max_chain_span,
+    )
+}
+
+/// Collinear-chain shared syncmer anchors per `(target path, strand)`.
+///
+/// `max_query_hop` and `drift_per_hop` are deliberately explicit. Endpoint
+/// refinement budget and chain gap are different concepts: a query over a
+/// large bubble can need far-apart flanking anchors in the same chain while
+/// still using a much smaller base-alignment window at each boundary.
+pub fn chain_anchors_with_limits(
+    hits: Vec<HomologousIntervalWithAnchors>,
+    syncmer_len: u64,
+    max_query_hop: u64,
+    drift_per_hop: u64,
+    max_chain_span: u64,
 ) -> Vec<HomologousIntervalWithAnchors> {
     if hits.is_empty() {
         return hits;
@@ -100,17 +120,9 @@ pub fn chain_anchors(
             .extend(h.anchors.into_iter());
     }
 
-    // Per-hop signature drift tolerance: scaled to the extension
-    // budget. Absorbs real indels (incl. TE/MEI) up to this size in
-    // one hop. Cross-paralog jumps with period > budget stay distinct.
-    let drift_per_hop: i64 = extend_budget.min(i64::MAX as u64) as i64;
-    // Max query-axis hop between consecutive anchors in a chain:
-    // 3 × budget admits normal repeat density plus some slop. Beyond
-    // this, the chain is stale and gets finalized.
-    let max_hop = extend_budget.saturating_mul(3).max(extend_budget);
-    // Chain-total target span cap — same as before, ensures stacked
-    // small drifts don't assemble unbounded target extent.
-    let max_chain_span = extend_budget.saturating_mul(10).max(extend_budget);
+    let drift_per_hop: i64 = drift_per_hop.min(i64::MAX as u64) as i64;
+    let max_hop = max_query_hop.max(syncmer_len);
+    let max_chain_span = max_chain_span.max(syncmer_len);
 
     fn anchor_sig(a: &Anchor, strand: char) -> i64 {
         match strand {
@@ -848,7 +860,24 @@ pub fn one_hop_ext_visited_with_seed_filter(
     let query_range_len = query_end.saturating_sub(query_start);
     let t1 = Instant::now();
     let total_anchors: usize = hits.iter().map(|h| h.anchors.len()).sum();
-    let hits = chain_anchors(hits, extend_budget, syncmer_len);
+    let chain_gap = query_range_len
+        .saturating_add(extend_budget)
+        .max(extend_budget.saturating_mul(3))
+        .max(syncmer_len);
+    let drift_budget = query_range_len
+        .saturating_add(extend_budget)
+        .max(extend_budget);
+    let target_span_cap = query_range_len
+        .saturating_add(extend_budget.saturating_mul(2))
+        .max(extend_budget.saturating_mul(10))
+        .max(syncmer_len);
+    let hits = chain_anchors_with_limits(
+        hits,
+        syncmer_len,
+        chain_gap,
+        drift_budget,
+        target_span_cap,
+    );
     let pre_filter = hits.len();
     // Filter chains by anchor count. Default min=2 drops singletons
     // (one-anchor chains with no mutual-best colinear partner — mostly
@@ -888,7 +917,7 @@ pub fn one_hop_ext_visited_with_seed_filter(
         .collect();
     if prof {
         eprintln!(
-            "PROF chain_anchors={:?} total_anchors={} chains={} after_filter={} (min_anchors={} eff={} min_frac={} min_bp={})",
+            "PROF chain_anchors={:?} total_anchors={} chains={} after_filter={} (min_anchors={} eff={} min_frac={} min_bp={} chain_gap={} drift={} span_cap={})",
             t1.elapsed(),
             total_anchors,
             pre_filter,
@@ -897,6 +926,9 @@ pub fn one_hop_ext_visited_with_seed_filter(
             effective_min,
             min_chain_fraction,
             min_chain_extent_bp,
+            chain_gap,
+            drift_budget,
+            target_span_cap,
         );
     }
     let t2 = Instant::now();
@@ -1417,6 +1449,28 @@ mod tests {
         }];
         let out = chain_anchors(hits, 1_000, TEST_SYNCMER_LEN);
         assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn chain_anchors_with_limits_can_span_large_bubble_flanks() {
+        let hits = vec![HomologousIntervalWithAnchors {
+            genome: "g".into(),
+            start: 0,
+            end: 90_000,
+            strand: '+',
+            anchors: vec![mk_anchor(0, 0), mk_anchor(80_000, 80_000)],
+        }];
+        let out = chain_anchors_with_limits(
+            hits,
+            TEST_SYNCMER_LEN,
+            90_000,
+            90_000,
+            90_000,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].anchors.len(), 2);
+        assert_eq!(out[0].start, 0);
+        assert_eq!(out[0].end, 80_000 + TEST_SYNCMER_LEN);
     }
 
     #[test]

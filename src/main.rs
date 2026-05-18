@@ -2990,13 +2990,11 @@ enum Args {
         /// Minimum chain query-extent as a fraction of the queried
         /// range (0.0 to 1.0). Chains whose anchor span on the query
         /// axis covers less than `fraction × query_range_len` are
-        /// dropped. Default 0.0 keeps every chain (maximum paralog
-        /// discovery). Set 0.5 to keep only chains covering at least
-        /// half the query (good for partitioning — filters out
-        /// fragment chains in repeat regions and speeds up hard tiles
-        /// dramatically).
+        /// dropped. Default 0.5 keeps locus-scale chains and prevents
+        /// isolated local homologies from being projected to the full
+        /// query. Set 0.0 for exploratory local-chain discovery.
         #[arg(help_heading = "Syng input")]
-        #[clap(long, value_parser, default_value_t = 0.0)]
+        #[clap(long, value_parser, default_value_t = 0.5)]
         syng_min_chain_fraction: f64,
 
         /// Drop this fraction of the query syncmer seed nodes with the
@@ -3016,6 +3014,14 @@ enum Args {
         #[arg(help_heading = "Syng input")]
         #[clap(long, value_parser, default_value_t = 0)]
         syng_seed_max_occurrences: u32,
+
+        /// Consecutive syncmers per bounded exact GBWT walk seed. Default
+        /// 5 prevents isolated high-copy syncmers from seeding ranges
+        /// while preserving sensitivity across divergent homologs. Set 3
+        /// for more sensitive, higher-volume seeds.
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, value_parser, default_value_t = impg::syng::DEFAULT_WALK_SEED_ANCHORS)]
+        syng_seed_walk_anchors: usize,
 
         /// Debug-only: skip boundary realignment and emit raw syncmer-resolution
         /// intervals from syng's query_region. The default syng path runs
@@ -3975,6 +3981,7 @@ fn run() -> io::Result<()> {
             syng_min_chain_fraction,
             syng_seed_drop_top_fraction,
             syng_seed_max_occurrences,
+            syng_seed_walk_anchors,
             syng_raw,
             query,
             output_format,
@@ -4061,6 +4068,7 @@ fn run() -> io::Result<()> {
                     max_occurrences: (syng_seed_max_occurrences > 0)
                         .then_some(syng_seed_max_occurrences),
                     drop_top_fraction: syng_seed_drop_top_fraction,
+                    walk_anchors: syng_seed_walk_anchors.max(1),
                 };
 
                 // Parse target ranges

@@ -103,7 +103,7 @@ pub struct SampledPositionBuildStats {
 }
 
 pub const DEFAULT_POSITION_SAMPLE_RATE: u32 = 256;
-const DEFAULT_MEM_SEED_MIN_ANCHORS: usize = 2;
+pub const DEFAULT_WALK_SEED_ANCHORS: usize = 5;
 
 fn syng_sidecar_path(prefix: &str, suffix: &str) -> String {
     if prefix.ends_with(".syng") {
@@ -1482,6 +1482,11 @@ pub struct SyngSeedFilter {
     /// occurrence counts. Uses `floor(n * fraction)`, so small queries
     /// are not affected by tiny defaults such as 0.0005.
     pub drop_top_fraction: f64,
+    /// Number of consecutive query syncmers in each bounded exact GBWT
+    /// walk seed. Values >1 prevent single high-copy syncmers from
+    /// seeding candidate ranges while still allowing divergent homologs
+    /// to chain through short exact walks.
+    pub walk_anchors: usize,
 }
 
 impl Default for SyngSeedFilter {
@@ -1489,13 +1494,14 @@ impl Default for SyngSeedFilter {
         Self {
             max_occurrences: None,
             drop_top_fraction: 0.0,
+            walk_anchors: 1,
         }
     }
 }
 
 impl SyngSeedFilter {
     pub fn enabled(self) -> bool {
-        self.max_occurrences.is_some() || self.drop_top_fraction > 0.0
+        self.max_occurrences.is_some() || self.drop_top_fraction > 0.0 || self.walk_anchors > 1
     }
 }
 
@@ -4272,7 +4278,7 @@ impl SyngIndex {
         if seed_filter.enabled() && !unvisited_nodes.is_empty() {
             let mut occurrence_counts = Vec::with_capacity(unvisited_nodes.len());
             for &node in &unvisited_nodes {
-                let occurrences = self.syncmer_node_occurrence_count(node)?;
+                let occurrences = self.syncmer_node_orientation_counts(node)?.total();
                 max_seed_occurrences = max_seed_occurrences.max(occurrences);
                 occurrence_counts.push((node, occurrences));
             }
@@ -4315,7 +4321,8 @@ impl SyngIndex {
 
         let kept_seed_nodes = input_seed_nodes.saturating_sub(skipped_frequency);
         let kept_steps: usize = runs.iter().map(Vec::len).sum();
-        if kept_steps < DEFAULT_MEM_SEED_MIN_ANCHORS {
+        let walk_anchors = seed_filter.walk_anchors.max(1);
+        if kept_steps < walk_anchors {
             let mut query_node_positions: FxHashMap<u32, Vec<(u64, u8)>> = FxHashMap::default();
             for run in runs {
                 for step in run {
@@ -4337,29 +4344,31 @@ impl SyngIndex {
         let locate_start = std::time::Instant::now();
         let mut per_path: FxHashMap<(usize, char), Vec<HomologousIntervalWithAnchors>> =
             FxHashMap::default();
-        let mut mems_seen = 0u64;
-        let mut mems_kept = 0u64;
+        let mut seeds_seen = 0u64;
+        let mut seeds_kept = 0u64;
         let mut located_hits = 0u64;
         let mut emitted_anchors = 0u64;
         for run in &runs {
-            self.collect_mem_seed_hits_from_run(
+            self.collect_walk_seed_hits_from_run(
                 run,
                 '+',
                 padding,
+                walk_anchors,
                 &mut per_path,
-                &mut mems_seen,
-                &mut mems_kept,
+                &mut seeds_seen,
+                &mut seeds_kept,
                 &mut located_hits,
                 &mut emitted_anchors,
             )?;
             let reverse_run = self.reverse_query_run(run);
-            self.collect_mem_seed_hits_from_run(
+            self.collect_walk_seed_hits_from_run(
                 &reverse_run,
                 '-',
                 padding,
+                walk_anchors,
                 &mut per_path,
-                &mut mems_seen,
-                &mut mems_kept,
+                &mut seeds_seen,
+                &mut seeds_kept,
                 &mut located_hits,
                 &mut emitted_anchors,
             )?;
@@ -4380,16 +4389,17 @@ impl SyngIndex {
         });
         if emit_prof {
             eprintln!(
-                "EMITPROF mode=mem seed_nodes={} kept_seed_nodes={} skipped_visited={} skipped_frequency={} top_drop={} max_seed_occurrences={} runs={} mems={} kept_mems={} located_hits={} emit_anchors={} count={:.2}s locate={:.2}s lookup={:.2}s merge_sort={:.2}s",
+                "EMITPROF mode=bounded-mem seed_nodes={} kept_seed_nodes={} skipped_visited={} skipped_frequency={} top_drop={} max_seed_occurrences={} walk_anchors={} runs={} seeds={} kept_seeds={} located_hits={} emit_anchors={} count={:.2}s locate={:.2}s lookup={:.2}s merge_sort={:.2}s",
                 input_seed_nodes,
                 kept_seed_nodes,
                 skipped_visited,
                 skipped_frequency,
                 top_drop_count,
                 max_seed_occurrences,
+                walk_anchors,
                 runs.len(),
-                mems_seen,
-                mems_kept,
+                seeds_seen,
+                seeds_kept,
                 located_hits,
                 emitted_anchors,
                 count_elapsed.as_secs_f64(),
@@ -4420,50 +4430,76 @@ impl SyngIndex {
             .collect()
     }
 
+    fn match_walk_seed(&self, walk: &[SyngWalkStep]) -> io::Result<Option<(i32, u32, u32)>> {
+        let Some(first) = walk.first().copied() else {
+            return Ok(None);
+        };
+        let Some((sbp, mut low, mut high)) = self.start_gbwt_match(first.signed_node)? else {
+            return Ok(None);
+        };
+        for idx in 1..walk.len() {
+            let Some(offset) = Self::walk_step_offset(walk[idx - 1], walk[idx]) else {
+                unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
+                return Ok(None);
+            };
+            if !self.advance_gbwt_match(sbp, &mut low, &mut high, walk[idx].signed_node, offset) {
+                unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
+                return Ok(None);
+            }
+        }
+        unsafe { syng_ffi::syngBWTpathDestroy(sbp) };
+        Ok(Some((walk.last().unwrap().signed_node, low, high)))
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn collect_mem_seed_hits_from_run(
+    fn collect_walk_seed_hits_from_run(
         &self,
         run: &[QueryWalkStep],
         strand: char,
         padding: u64,
+        walk_anchors: usize,
         per_path: &mut FxHashMap<(usize, char), Vec<HomologousIntervalWithAnchors>>,
-        mems_seen: &mut u64,
-        mems_kept: &mut u64,
+        seeds_seen: &mut u64,
+        seeds_kept: &mut u64,
         located_hits: &mut u64,
         emitted_anchors: &mut u64,
     ) -> io::Result<()> {
-        if run.len() < DEFAULT_MEM_SEED_MIN_ANCHORS {
+        if run.len() < walk_anchors {
             return Ok(());
         }
         let syncmer_len = self.syncmer_length_bp() as u64;
-        let walk: Vec<SyngWalkStep> = run
-            .iter()
-            .map(|step| SyngWalkStep {
-                signed_node: step.signed_node,
-                bp_pos: step.bp_pos,
-            })
-            .collect();
-        let mems = self.gbwt_mems_for_walk(&walk)?;
-        *mems_seen += mems.len() as u64;
-        for mem in mems {
-            if mem.anchors < DEFAULT_MEM_SEED_MIN_ANCHORS {
+        for seed_start in (0..=run.len() - walk_anchors).step_by(walk_anchors) {
+            let seed_end = seed_start + walk_anchors;
+            *seeds_seen += 1;
+            let walk: Vec<SyngWalkStep> = run[seed_start..seed_end]
+                .iter()
+                .map(|step| SyngWalkStep {
+                    signed_node: step.signed_node,
+                    bp_pos: step.bp_pos,
+                })
+                .collect();
+            let Some((match_signed_node, match_low, match_high)) = self.match_walk_seed(&walk)?
+            else {
+                continue;
+            };
+            if match_low >= match_high {
                 continue;
             }
-            *mems_kept += 1;
+            *seeds_kept += 1;
             let hits = self.locate_signed_node_occurrence_range(
-                mem.match_signed_node,
-                mem.match_low,
-                mem.match_high,
+                match_signed_node,
+                match_low,
+                match_high,
             )?;
-            let first_step = &run[mem.step_start];
-            let last_step = &run[mem.step_end - 1];
-            let mem_span = last_step.bp_pos.saturating_sub(first_step.bp_pos);
+            let first_step = &run[seed_start];
+            let last_step = &run[seed_end - 1];
+            let seed_span = last_step.bp_pos.saturating_sub(first_step.bp_pos);
             for hit in hits {
                 *located_hits += 1;
                 if hit.path_idx >= self.name_map.path_to_name.len() {
                     continue;
                 }
-                let Some(target_start) = hit.target_pos.checked_sub(mem_span) else {
+                let Some(target_start) = hit.target_pos.checked_sub(seed_span) else {
                     continue;
                 };
                 let genome_len = self.name_map.path_to_length[hit.path_idx];
@@ -4473,8 +4509,8 @@ impl SyngIndex {
                 if padded_start >= padded_end {
                     continue;
                 }
-                let mut anchors = Vec::with_capacity(mem.anchors);
-                for step in &run[mem.step_start..mem.step_end] {
+                let mut anchors = Vec::with_capacity(walk_anchors);
+                for step in &run[seed_start..seed_end] {
                     let rel = step.bp_pos.saturating_sub(first_step.bp_pos);
                     anchors.push(Anchor {
                         query_pos: step.query_pos,
@@ -5114,6 +5150,67 @@ mod tests {
                 .all(|mem| mem.step_start != 0 || mem.step_end != shifted.len()),
             "changing a syncmer offset must break the full-length GBWT MEM: {:?}",
             shifted_mems
+        );
+    }
+
+    #[test]
+    fn test_bounded_walk_seeds_recover_divergent_homolog_under_long_self_mem() {
+        let _guard = lock_syng();
+        let params = SyncmerParams::default();
+        let seq_a = make_test_sequence(6000, 91);
+        let mut seq_b = seq_a.clone();
+        for pos in (300..5700).step_by(600) {
+            seq_b[pos] = match seq_b[pos] {
+                b'A' => b'C',
+                b'C' => b'G',
+                b'G' => b'T',
+                b'T' => b'A',
+                other => other,
+            };
+        }
+        let index = SyngIndex::build(
+            params,
+            vec![
+                ("genome_a".to_string(), seq_a.clone()),
+                ("genome_b".to_string(), seq_b),
+            ]
+            .into_iter(),
+        );
+
+        let mut matches = index.matched_syncmers_in_sequence(&seq_a);
+        matches.sort_unstable_by_key(|sm| sm.query_pos);
+        let walk: Vec<_> = matches
+            .iter()
+            .map(|sm| SyngWalkStep {
+                signed_node: sm.signed_node,
+                bp_pos: sm.query_pos,
+            })
+            .collect();
+        let mems = index.gbwt_mems_for_walk(&walk).unwrap();
+        assert!(
+            mems.iter().any(|mem| mem.step_start == 0 && mem.step_end == walk.len()),
+            "self path should produce a long maximal MEM that would hide shorter homolog seeds: {:?}",
+            mems
+        );
+
+        let hits = index
+            .query_region_with_anchors_ext_seed_filtered(
+                "genome_a",
+                0,
+                seq_a.len() as u64,
+                0,
+                0,
+                SyngSeedFilter {
+                    max_occurrences: None,
+                    drop_top_fraction: 0.0005,
+                    walk_anchors: 3,
+                },
+            )
+            .unwrap();
+        assert!(
+            hits.iter().any(|hit| hit.genome == "genome_b"),
+            "bounded 3-syncmer walk seeds should recover the divergent homolog; hits: {:?}",
+            hits
         );
     }
 
@@ -7241,6 +7338,11 @@ mod tests {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let lines: Vec<&str> = stdout.lines().collect();
         assert!(!lines.is_empty(), "BED output should not be empty");
+        assert!(
+            lines.iter().all(|line| line.split('\t').count() >= 6),
+            "BED stdout should contain only BED records, not native diagnostics. Got:\n{}",
+            stdout
+        );
 
         // Should find genome_b in the output
         let has_genome_b = lines.iter().any(|l| l.starts_with("genome_b\t"));
