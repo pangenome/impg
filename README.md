@@ -407,11 +407,15 @@ pass-through. Tune via `--syng-padding`, `--syng-min-chain-anchors`
 (lower -> more paralog hits; default `2` is conservative on duplicated
 loci like C4), `--syng-min-chain-fraction`, and the seed-frequency
 filters `--syng-seed-max-occurrences` / `--syng-seed-drop-top-fraction`.
-High-frequency syncmers are ignored only while seeding candidate ranges;
-once a range survives, downstream scoring can still recover all syncmers by
-walking that path range. `query -o gbwt` emits a region-specific sub-GBWT.
-The syng prefix passed to `-a` is resolved relative to cwd, so either `cd`
-to the index directory or pass an absolute path.
+By default syng query drops the top 5% most frequent query-local seed
+syncmers and does not use a fixed absolute occurrence cap; set
+`--syng-seed-max-occurrences` only when a hard panel-specific ceiling is
+desired. High-frequency syncmers are ignored only while seeding candidate
+ranges; once a range survives, downstream scoring can still recover all
+syncmers by walking that path range. `query -o gbwt` emits a
+region-specific sub-GBWT. The syng prefix passed to `-a` is resolved
+relative to cwd, so either `cd` to the index directory or pass an absolute
+path.
 
 ## GFA engines
 
