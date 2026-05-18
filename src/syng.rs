@@ -63,7 +63,8 @@ struct LocateCheckpointValue {
 #[derive(Debug)]
 struct LocateCheckpointIndex {
     sample_rate: u32,
-    checkpoints: FxHashMap<LocateCheckpointKey, LocateCheckpointValue>,
+    shard_mask: usize,
+    shards: Vec<FxHashMap<LocateCheckpointKey, LocateCheckpointValue>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1522,6 +1523,20 @@ struct QueryWalkStep {
     signed_node: i32,
     bp_pos: u64,
     query_pos: u64,
+}
+
+#[derive(Debug, Clone)]
+struct WalkSeedTask {
+    strand: char,
+    steps: Vec<QueryWalkStep>,
+}
+
+#[derive(Debug, Default)]
+struct WalkSeedTaskHits {
+    seeds_kept: u64,
+    located_hits: u64,
+    emitted_anchors: u64,
+    intervals: Vec<(usize, HomologousIntervalWithAnchors)>,
 }
 
 /// A query syncmer found in the index.
@@ -3264,6 +3279,7 @@ impl SyngIndex {
     }
 
     fn build_locate_checkpoint_index(&self) -> io::Result<LocateCheckpointIndex> {
+        let build_start = std::time::Instant::now();
         let sampled_path_steps = self.sampled_path_steps.as_ref().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -3271,35 +3287,77 @@ impl SyngIndex {
             )
         })?;
 
-        let mut checkpoints: FxHashMap<LocateCheckpointKey, LocateCheckpointValue> =
-            FxHashMap::default();
-        for path_idx in 0..self.name_map.path_to_name.len() {
-            for checkpoint in sampled_path_steps.decode_path(path_idx)? {
-                let abs_rank = self.absolute_incoming_rank(&checkpoint)?;
-                let key = LocateCheckpointKey {
-                    signed_node: checkpoint.signed_node,
-                    abs_rank,
-                };
-                let value = LocateCheckpointValue {
-                    path_idx,
-                    bp_pos: checkpoint.bp_pos,
-                };
-                if checkpoints.insert(key, value).is_some() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "duplicate syng locate checkpoint for node {} rank {}",
-                            key.signed_node, key.abs_rank
-                        ),
-                    ));
+        let shard_count = (rayon::current_num_threads().max(1) * 4).next_power_of_two();
+        let shard_mask = shard_count - 1;
+        let new_shards = || -> Vec<FxHashMap<LocateCheckpointKey, LocateCheckpointValue>> {
+            (0..shard_count).map(|_| FxHashMap::default()).collect()
+        };
+        let mut shards = (0..self.name_map.path_to_name.len())
+            .into_par_iter()
+            .try_fold(new_shards, |mut shards, path_idx| {
+                for checkpoint in sampled_path_steps.decode_path(path_idx)? {
+                    let abs_rank = self.absolute_incoming_rank(&checkpoint)?;
+                    let key = LocateCheckpointKey {
+                        signed_node: checkpoint.signed_node,
+                        abs_rank,
+                    };
+                    let value = LocateCheckpointValue {
+                        path_idx,
+                        bp_pos: checkpoint.bp_pos,
+                    };
+                    let shard_idx = Self::locate_checkpoint_shard(&key, shard_mask);
+                    if shards[shard_idx].insert(key, value).is_some() {
+                        return Err(Self::duplicate_locate_checkpoint_error(key));
+                    }
                 }
-            }
+                Ok(shards)
+            })
+            .try_reduce(new_shards, |mut left, right| {
+                for (left_shard, right_shard) in left.iter_mut().zip(right) {
+                    for (key, value) in right_shard {
+                        if left_shard.insert(key, value).is_some() {
+                            return Err(Self::duplicate_locate_checkpoint_error(key));
+                        }
+                    }
+                }
+                Ok(left)
+            })?;
+        shards.shrink_to_fit();
+        let checkpoint_count: usize = shards.iter().map(FxHashMap::len).sum();
+
+        if std::env::var("SYNG_EMIT_PROFILE").is_ok() {
+            eprintln!(
+                "EMITPROF locate_checkpoint_index paths={} samples={} checkpoints={} shards={} build={:.2}s",
+                self.name_map.path_to_name.len(),
+                sampled_path_steps.sample_count(),
+                checkpoint_count,
+                shard_count,
+                build_start.elapsed().as_secs_f64(),
+            );
         }
 
         Ok(LocateCheckpointIndex {
             sample_rate: sampled_path_steps.sample_rate,
-            checkpoints,
+            shard_mask,
+            shards,
         })
+    }
+
+    fn locate_checkpoint_shard(key: &LocateCheckpointKey, shard_mask: usize) -> usize {
+        let h = (key.signed_node as u32 as u64)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ key.abs_rank as u64;
+        (h as usize) & shard_mask
+    }
+
+    fn duplicate_locate_checkpoint_error(key: LocateCheckpointKey) -> io::Error {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "duplicate syng locate checkpoint for node {} rank {}",
+                key.signed_node, key.abs_rank
+            ),
+        )
     }
 
     fn absolute_incoming_rank(&self, checkpoint: &SampledPathStepHit) -> io::Result<u32> {
@@ -3659,7 +3717,9 @@ impl SyngIndex {
                     signed_node: current_node,
                     abs_rank: current_rank,
                 };
-                if let Some(checkpoint) = checkpoint_index.checkpoints.get(&key) {
+                let shard_idx =
+                    Self::locate_checkpoint_shard(&key, checkpoint_index.shard_mask);
+                if let Some(checkpoint) = checkpoint_index.shards[shard_idx].get(&key) {
                     let Some(target_pos) = checkpoint.bp_pos.checked_sub(walked_bp) else {
                         break;
                     };
@@ -4342,36 +4402,39 @@ impl SyngIndex {
         }
 
         let locate_start = std::time::Instant::now();
+        // Build the shared locate table before entering rayon. If the first
+        // task initialized this through OnceLock, the pool could starve while
+        // other workers waited on the same initialization.
+        self.locate_checkpoint_index()?;
+        let mut seed_tasks = Vec::new();
+        for run in &runs {
+            Self::push_walk_seed_tasks_from_run(run, '+', walk_anchors, &mut seed_tasks);
+            let reverse_run = self.reverse_query_run(run);
+            Self::push_walk_seed_tasks_from_run(&reverse_run, '-', walk_anchors, &mut seed_tasks);
+        }
+        let seeds_seen = seed_tasks.len() as u64;
+
+        let task_hits: Vec<io::Result<WalkSeedTaskHits>> = seed_tasks
+            .par_iter()
+            .map(|task| self.collect_walk_seed_hits_from_task(task, padding))
+            .collect();
+
         let mut per_path: FxHashMap<(usize, char), Vec<HomologousIntervalWithAnchors>> =
             FxHashMap::default();
-        let mut seeds_seen = 0u64;
         let mut seeds_kept = 0u64;
         let mut located_hits = 0u64;
         let mut emitted_anchors = 0u64;
-        for run in &runs {
-            self.collect_walk_seed_hits_from_run(
-                run,
-                '+',
-                padding,
-                walk_anchors,
-                &mut per_path,
-                &mut seeds_seen,
-                &mut seeds_kept,
-                &mut located_hits,
-                &mut emitted_anchors,
-            )?;
-            let reverse_run = self.reverse_query_run(run);
-            self.collect_walk_seed_hits_from_run(
-                &reverse_run,
-                '-',
-                padding,
-                walk_anchors,
-                &mut per_path,
-                &mut seeds_seen,
-                &mut seeds_kept,
-                &mut located_hits,
-                &mut emitted_anchors,
-            )?;
+        for hits in task_hits {
+            let hits = hits?;
+            seeds_kept += hits.seeds_kept;
+            located_hits += hits.located_hits;
+            emitted_anchors += hits.emitted_anchors;
+            for (path_idx, interval) in hits.intervals {
+                per_path
+                    .entry((path_idx, interval.strand))
+                    .or_default()
+                    .push(interval);
+            }
         }
         let locate_elapsed = locate_start.elapsed();
 
@@ -4409,6 +4472,24 @@ impl SyngIndex {
             );
         }
         Ok(merged)
+    }
+
+    fn push_walk_seed_tasks_from_run(
+        run: &[QueryWalkStep],
+        strand: char,
+        walk_anchors: usize,
+        tasks: &mut Vec<WalkSeedTask>,
+    ) {
+        if run.len() < walk_anchors {
+            return;
+        }
+        for seed_start in (0..=run.len() - walk_anchors).step_by(walk_anchors) {
+            let seed_end = seed_start + walk_anchors;
+            tasks.push(WalkSeedTask {
+                strand,
+                steps: run[seed_start..seed_end].to_vec(),
+            });
+        }
     }
 
     fn reverse_query_run(&self, run: &[QueryWalkStep]) -> Vec<QueryWalkStep> {
@@ -4451,87 +4532,78 @@ impl SyngIndex {
         Ok(Some((walk.last().unwrap().signed_node, low, high)))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn collect_walk_seed_hits_from_run(
+    fn collect_walk_seed_hits_from_task(
         &self,
-        run: &[QueryWalkStep],
-        strand: char,
+        task: &WalkSeedTask,
         padding: u64,
-        walk_anchors: usize,
-        per_path: &mut FxHashMap<(usize, char), Vec<HomologousIntervalWithAnchors>>,
-        seeds_seen: &mut u64,
-        seeds_kept: &mut u64,
-        located_hits: &mut u64,
-        emitted_anchors: &mut u64,
-    ) -> io::Result<()> {
-        if run.len() < walk_anchors {
-            return Ok(());
-        }
+    ) -> io::Result<WalkSeedTaskHits> {
         let syncmer_len = self.syncmer_length_bp() as u64;
-        for seed_start in (0..=run.len() - walk_anchors).step_by(walk_anchors) {
-            let seed_end = seed_start + walk_anchors;
-            *seeds_seen += 1;
-            let walk: Vec<SyngWalkStep> = run[seed_start..seed_end]
-                .iter()
-                .map(|step| SyngWalkStep {
-                    signed_node: step.signed_node,
-                    bp_pos: step.bp_pos,
-                })
-                .collect();
-            let Some((match_signed_node, match_low, match_high)) = self.match_walk_seed(&walk)?
-            else {
+        let walk: Vec<SyngWalkStep> = task
+            .steps
+            .iter()
+            .map(|step| SyngWalkStep {
+                signed_node: step.signed_node,
+                bp_pos: step.bp_pos,
+            })
+            .collect();
+        let Some((match_signed_node, match_low, match_high)) = self.match_walk_seed(&walk)? else {
+            return Ok(WalkSeedTaskHits::default());
+        };
+        if match_low >= match_high {
+            return Ok(WalkSeedTaskHits::default());
+        }
+        let hits =
+            self.locate_signed_node_occurrence_range(match_signed_node, match_low, match_high)?;
+        let Some(first_step) = task.steps.first() else {
+            return Ok(WalkSeedTaskHits::default());
+        };
+        let Some(last_step) = task.steps.last() else {
+            return Ok(WalkSeedTaskHits::default());
+        };
+        let seed_span = last_step.bp_pos.saturating_sub(first_step.bp_pos);
+
+        let mut out = WalkSeedTaskHits {
+            seeds_kept: 1,
+            located_hits: hits.len() as u64,
+            emitted_anchors: 0,
+            intervals: Vec::new(),
+        };
+        for hit in hits {
+            if hit.path_idx >= self.name_map.path_to_name.len() {
+                continue;
+            }
+            let Some(target_start) = hit.target_pos.checked_sub(seed_span) else {
                 continue;
             };
-            if match_low >= match_high {
+            let genome_len = self.name_map.path_to_length[hit.path_idx];
+            let target_end = hit.target_pos.saturating_add(syncmer_len).min(genome_len);
+            let padded_start = target_start.saturating_sub(padding);
+            let padded_end = target_end.saturating_add(padding).min(genome_len);
+            if padded_start >= padded_end {
                 continue;
             }
-            *seeds_kept += 1;
-            let hits = self.locate_signed_node_occurrence_range(
-                match_signed_node,
-                match_low,
-                match_high,
-            )?;
-            let first_step = &run[seed_start];
-            let last_step = &run[seed_end - 1];
-            let seed_span = last_step.bp_pos.saturating_sub(first_step.bp_pos);
-            for hit in hits {
-                *located_hits += 1;
-                if hit.path_idx >= self.name_map.path_to_name.len() {
-                    continue;
-                }
-                let Some(target_start) = hit.target_pos.checked_sub(seed_span) else {
-                    continue;
-                };
-                let genome_len = self.name_map.path_to_length[hit.path_idx];
-                let target_end = hit.target_pos.saturating_add(syncmer_len).min(genome_len);
-                let padded_start = target_start.saturating_sub(padding);
-                let padded_end = target_end.saturating_add(padding).min(genome_len);
-                if padded_start >= padded_end {
-                    continue;
-                }
-                let mut anchors = Vec::with_capacity(walk_anchors);
-                for step in &run[seed_start..seed_end] {
-                    let rel = step.bp_pos.saturating_sub(first_step.bp_pos);
-                    anchors.push(Anchor {
-                        query_pos: step.query_pos,
-                        target_pos: target_start.saturating_add(rel),
-                        node_id: step.signed_node.unsigned_abs(),
-                    });
-                }
-                *emitted_anchors += anchors.len() as u64;
-                per_path
-                    .entry((hit.path_idx, strand))
-                    .or_default()
-                    .push(HomologousIntervalWithAnchors {
-                        genome: self.name_map.path_to_name[hit.path_idx].clone(),
-                        start: padded_start,
-                        end: padded_end,
-                        strand,
-                        anchors,
-                    });
+            let mut anchors = Vec::with_capacity(task.steps.len());
+            for step in &task.steps {
+                let rel = step.bp_pos.saturating_sub(first_step.bp_pos);
+                anchors.push(Anchor {
+                    query_pos: step.query_pos,
+                    target_pos: target_start.saturating_add(rel),
+                    node_id: step.signed_node.unsigned_abs(),
+                });
             }
+            out.emitted_anchors += anchors.len() as u64;
+            out.intervals.push((
+                hit.path_idx,
+                HomologousIntervalWithAnchors {
+                    genome: self.name_map.path_to_name[hit.path_idx].clone(),
+                    start: padded_start,
+                    end: padded_end,
+                    strand: task.strand,
+                    anchors,
+                },
+            ));
         }
-        Ok(())
+        Ok(out)
     }
 
     fn query_region_from_node_positions_seed_filtered(
@@ -4984,6 +5056,30 @@ mod tests {
         seq
     }
 
+    fn normalize_anchored_hits(
+        hits: Vec<HomologousIntervalWithAnchors>,
+    ) -> Vec<(String, u64, u64, char, Vec<(u64, u64, u32)>)> {
+        let mut out: Vec<_> = hits
+            .into_iter()
+            .map(|mut hit| {
+                hit.anchors.sort_by(|a, b| {
+                    a.query_pos
+                        .cmp(&b.query_pos)
+                        .then(a.target_pos.cmp(&b.target_pos))
+                        .then(a.node_id.cmp(&b.node_id))
+                });
+                let anchors = hit
+                    .anchors
+                    .into_iter()
+                    .map(|a| (a.query_pos, a.target_pos, a.node_id))
+                    .collect();
+                (hit.genome, hit.start, hit.end, hit.strand, anchors)
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
     #[test]
     fn test_preloaded_dictionary_replay_supports_query() {
         let _guard = lock_syng();
@@ -5211,6 +5307,85 @@ mod tests {
             hits.iter().any(|hit| hit.genome == "genome_b"),
             "bounded 3-syncmer walk seeds should recover the divergent homolog; hits: {:?}",
             hits
+        );
+    }
+
+    #[test]
+    fn test_bounded_walk_parallel_query_matches_single_thread() {
+        let _guard = lock_syng();
+        let params = SyncmerParams::default();
+        let seq_a = make_test_sequence(7000, 121);
+        let mut seq_b = seq_a.clone();
+        let mut seq_c = seq_a.clone();
+        for pos in (500..6500).step_by(700) {
+            seq_b[pos] = match seq_b[pos] {
+                b'A' => b'C',
+                b'C' => b'G',
+                b'G' => b'T',
+                b'T' => b'A',
+                other => other,
+            };
+        }
+        for pos in (800..6200).step_by(900) {
+            seq_c[pos] = match seq_c[pos] {
+                b'A' => b'T',
+                b'C' => b'A',
+                b'G' => b'C',
+                b'T' => b'G',
+                other => other,
+            };
+        }
+        let index = SyngIndex::build(
+            params,
+            vec![
+                ("genome_a".to_string(), seq_a.clone()),
+                ("genome_b".to_string(), seq_b),
+                ("genome_c".to_string(), seq_c),
+            ]
+            .into_iter(),
+        );
+        let seed_filter = SyngSeedFilter {
+            max_occurrences: None,
+            drop_top_fraction: 0.0005,
+            walk_anchors: 3,
+        };
+
+        let one_thread = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap()
+            .install(|| {
+                index
+                    .query_region_with_anchors_ext_seed_filtered(
+                        "genome_a",
+                        0,
+                        seq_a.len() as u64,
+                        0,
+                        0,
+                        seed_filter,
+                    )
+                    .unwrap()
+            });
+        let four_threads = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap()
+            .install(|| {
+                index
+                    .query_region_with_anchors_ext_seed_filtered(
+                        "genome_a",
+                        0,
+                        seq_a.len() as u64,
+                        0,
+                        0,
+                        seed_filter,
+                    )
+                    .unwrap()
+            });
+
+        assert_eq!(
+            normalize_anchored_hits(one_thread),
+            normalize_anchored_hits(four_threads)
         );
     }
 
