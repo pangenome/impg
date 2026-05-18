@@ -31,25 +31,26 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-/// Parse a size value with optional k/m/g suffix (case-insensitive)
-/// Examples: "100" -> 100, "10k" -> 10000, "5M" -> 5000000, "1g" -> 1000000000
+/// Parse a size value with optional k/m/g suffix (case-insensitive).
+///
+/// Delegates to sweepga's metric parser so impg and sweepga interpret
+/// user-facing distance/size suffixes the same way.
 fn parse_size(s: &str) -> Result<u64, String> {
-    let s = s.trim();
-    if s.is_empty() {
-        return Err("empty value".to_string());
-    }
+    sweepga::parse_metric_number(s.trim())
+}
 
-    let (num_str, multiplier) = match s.chars().last() {
-        Some('k') | Some('K') => (&s[..s.len() - 1], 1_000u64),
-        Some('m') | Some('M') => (&s[..s.len() - 1], 1_000_000u64),
-        Some('g') | Some('G') => (&s[..s.len() - 1], 1_000_000_000u64),
-        _ => (s, 1u64),
-    };
-
-    num_str
-        .parse::<u64>()
-        .map(|n| n * multiplier)
-        .map_err(|e| format!("invalid number '{}': {}", num_str, e))
+/// Parse a non-negative bp distance with optional metric suffix.
+///
+/// Internal merge distance code still uses `i32`, so reject values that do
+/// not fit instead of silently wrapping or truncating.
+fn parse_merge_distance(s: &str) -> Result<i32, String> {
+    let value = sweepga::parse_metric_number(s.trim())?;
+    i32::try_from(value).map_err(|_| {
+        format!(
+            "merge distance {value} exceeds maximum supported value {}",
+            i32::MAX
+        )
+    })
 }
 
 fn resolve_syng_syncmer_params(
@@ -2384,7 +2385,8 @@ const MERGE_DISTANCE_REQUIRED_TEXT: &str = "\
 output or partitioning: ranges separated by at most D bp are treated as one \
 range. D is also the largest internal gap/SV that a one-hop query can absorb \
 inside one reported interval; larger gaps remain split. Pick D for your locus \
-(use 0 for only overlapping/touching ranges).";
+(use 0 for only overlapping/touching ranges). D accepts metric suffixes such \
+as 50k or 1m.";
 
 fn missing_merge_distance_error(command: &str, allow_no_merge: bool) -> io::Error {
     let mut msg =
@@ -2421,11 +2423,12 @@ struct QueryOpts {
     target_bed: Option<String>,
 
     /// Required. Merge query-gathered ranges separated by at most this many bp.
+    /// Accepts k/m/g suffixes, e.g. 50k or 1m.
     /// This also sets the largest internal gap/SV one query hop can absorb into
     /// one reported interval; larger gaps stay split. Use 0 for only
     /// overlapping/touching ranges, or --no-merge to disable merging.
     #[arg(help_heading = "Filtering and merging")]
-    #[clap(short = 'd', long, value_parser, conflicts_with = "no_merge")]
+    #[clap(short = 'd', long, value_parser = parse_merge_distance, conflicts_with = "no_merge")]
     merge_distance: Option<i32>,
 
     /// Explicitly disable merging for all output formats
@@ -2892,12 +2895,13 @@ enum Args {
 
         // --- Filtering and merging ---
         /// Required. Merge query-gathered ranges separated by at most this many bp
+        /// (accepts k/m/g suffixes, e.g. 50k or 1m)
         /// before partition assignment. This sets the largest internal gap/SV a
         /// one-hop query can absorb into one partition interval; larger gaps stay
         /// split. Use 0 for only overlapping/touching ranges, or --no-merge to
         /// disable merging.
         #[arg(help_heading = "Filtering and merging")]
-        #[clap(short = 'd', long, value_parser, conflicts_with = "no_merge")]
+        #[clap(short = 'd', long, value_parser = parse_merge_distance, conflicts_with = "no_merge")]
         merge_distance: Option<i32>,
 
         /// Explicitly disable merging before partition assignment
@@ -3195,7 +3199,8 @@ enum Args {
         window_size: usize,
 
         /// Required for internal partition discovery. Merge query-gathered ranges separated by at most this many bp
-        #[clap(short = 'd', long, value_parser)]
+        /// (accepts k/m/g suffixes, e.g. 50k or 1m)
+        #[clap(short = 'd', long, value_parser = parse_merge_distance)]
         merge_distance: Option<i32>,
 
         /// Path to sequence names used to seed internal partition discovery
@@ -9272,6 +9277,60 @@ mod tests {
         let opts = minimal_query_opts(None, true);
         opts.validate_merge_distance("query").unwrap();
         assert_eq!(opts.effective_merge_distance(), -1);
+    }
+
+    #[test]
+    fn test_parse_merge_distance_accepts_metric_suffixes() {
+        assert_eq!(parse_merge_distance("50000").unwrap(), 50_000);
+        assert_eq!(parse_merge_distance("50k").unwrap(), 50_000);
+        assert_eq!(parse_merge_distance("1m").unwrap(), 1_000_000);
+        assert_eq!(parse_merge_distance("1M").unwrap(), 1_000_000);
+        assert_eq!(parse_merge_distance("1.5k").unwrap(), 1_500);
+    }
+
+    #[test]
+    fn test_parse_merge_distance_rejects_invalid_or_too_large_values() {
+        assert!(parse_merge_distance("10kb").is_err());
+        assert!(parse_merge_distance("3g").is_err());
+    }
+
+    #[test]
+    fn test_query_cli_merge_distance_accepts_metric_suffix() {
+        let args = Args::try_parse_from(["impg", "query", "-d", "50k"]).unwrap();
+        match args {
+            Args::Query { query, .. } => {
+                assert_eq!(query.merge_distance, Some(50_000));
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_partition_cli_merge_distance_accepts_metric_suffix() {
+        let args =
+            Args::try_parse_from(["impg", "partition", "-w", "1000000", "-d", "50k"]).unwrap();
+        match args {
+            Args::Partition {
+                window_size,
+                merge_distance,
+                ..
+            } => {
+                assert_eq!(window_size, 1_000_000);
+                assert_eq!(merge_distance, Some(50_000));
+            }
+            _ => panic!("expected partition command"),
+        }
+    }
+
+    #[test]
+    fn test_infer_cli_merge_distance_accepts_metric_suffix() {
+        let args = Args::try_parse_from(["impg", "infer", "-a", "idx", "-d", "1m"]).unwrap();
+        match args {
+            Args::Infer { merge_distance, .. } => {
+                assert_eq!(merge_distance, Some(1_000_000));
+            }
+            _ => panic!("expected infer command"),
+        }
     }
 
     fn decode_test_varints(bytes: &[u8]) -> Vec<u64> {
