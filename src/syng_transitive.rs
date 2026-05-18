@@ -34,7 +34,9 @@ use rayon::prelude::*;
 
 use crate::graph::reverse_complement;
 use crate::sequence_index::{SequenceIndex as _, UnifiedSequenceIndex};
-use crate::syng::{Anchor, HomologousInterval, HomologousIntervalWithAnchors, SyngIndex};
+use crate::syng::{
+    Anchor, HomologousInterval, HomologousIntervalWithAnchors, SyngIndex, SyngSeedFilter,
+};
 
 /// Minimum fraction of query bases that must align at 'M'/'=' ops for
 /// the refined homolog to be accepted. Below this, the "homolog" is
@@ -791,16 +793,49 @@ pub fn one_hop_ext_visited(
     visited_nodes: Option<&mut FxHashSet<u32>>,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
+    one_hop_ext_visited_with_seed_filter(
+        syng_index,
+        query_name,
+        query_start,
+        query_end,
+        padding,
+        query_extension,
+        extend_budget,
+        min_chain_anchors,
+        min_chain_fraction,
+        visited_nodes,
+        SyngSeedFilter::default(),
+        sequence_index,
+    )
+}
+
+/// [`one_hop_ext_visited`] with a high-frequency syncmer seed filter.
+#[allow(clippy::too_many_arguments)]
+pub fn one_hop_ext_visited_with_seed_filter(
+    syng_index: &SyngIndex,
+    query_name: &str,
+    query_start: u64,
+    query_end: u64,
+    padding: u64,
+    query_extension: u64,
+    extend_budget: u64,
+    min_chain_anchors: usize,
+    min_chain_fraction: f64,
+    visited_nodes: Option<&mut FxHashSet<u32>>,
+    seed_filter: SyngSeedFilter,
+    sequence_index: &UnifiedSequenceIndex,
+) -> io::Result<Vec<HomologousInterval>> {
     use std::time::Instant;
     let prof = std::env::var("SYNG_PROFILE").is_ok();
     let t0 = Instant::now();
-    let hits = syng_index.query_region_with_anchors_ext_visited(
+    let hits = syng_index.query_region_with_anchors_ext_visited_seed_filtered(
         query_name,
         query_start,
         query_end,
         padding,
         query_extension,
         visited_nodes,
+        seed_filter,
     )?;
     if prof {
         eprintln!(
@@ -1110,6 +1145,39 @@ pub fn query_transitive_ext(
     min_chain_fraction: f64,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
+    query_transitive_ext_with_seed_filter(
+        syng_index,
+        query_name,
+        query_start,
+        query_end,
+        padding,
+        max_depth,
+        query_extension,
+        extend_budget,
+        min_chain_anchors,
+        min_chain_fraction,
+        SyngSeedFilter::default(),
+        sequence_index,
+    )
+}
+
+/// [`query_transitive_ext`] with a high-frequency syncmer seed filter
+/// applied independently at each BFS hop.
+#[allow(clippy::too_many_arguments)]
+pub fn query_transitive_ext_with_seed_filter(
+    syng_index: &SyngIndex,
+    query_name: &str,
+    query_start: u64,
+    query_end: u64,
+    padding: u64,
+    max_depth: u16,
+    query_extension: u64,
+    extend_budget: u64,
+    min_chain_anchors: usize,
+    min_chain_fraction: f64,
+    seed_filter: SyngSeedFilter,
+    sequence_index: &UnifiedSequenceIndex,
+) -> io::Result<Vec<HomologousInterval>> {
     let mut visited: FxHashSet<(String, u64, u64, char)> = FxHashSet::default();
     visited.insert((query_name.to_string(), query_start, query_end, '+'));
     // Shared across all hops: any syncmer node consumed at an earlier hop
@@ -1131,7 +1199,7 @@ pub fn query_transitive_ext(
         let hop_extension = if depth == 0 { query_extension } else { 0 };
         let mut next_frontier: Vec<(String, u64, u64)> = Vec::new();
         for (q_name, q_start, q_end) in &frontier {
-            let hits = match one_hop_ext_visited(
+            let hits = match one_hop_ext_visited_with_seed_filter(
                 syng_index,
                 q_name,
                 *q_start,
@@ -1142,6 +1210,7 @@ pub fn query_transitive_ext(
                 min_chain_anchors,
                 min_chain_fraction,
                 Some(&mut visited_nodes),
+                seed_filter,
                 sequence_index,
             ) {
                 Ok(h) => h,

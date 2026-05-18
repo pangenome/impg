@@ -1466,6 +1466,50 @@ pub struct HomologousIntervalWithAnchors {
     pub anchors: Vec<Anchor>,
 }
 
+/// Frequency filter for syncmer seed nodes during syng queries.
+///
+/// The filter applies before locating syncmer occurrences. Dropped
+/// syncmers do not seed candidate ranges, but downstream code can still
+/// recover every syncmer by walking ranges that survived seeding.
+#[derive(Debug, Clone, Copy)]
+pub struct SyngSeedFilter {
+    /// Drop query syncmer nodes whose total GBWT occurrence count
+    /// across both orientations is greater than this cap. `None`
+    /// disables the absolute cap.
+    pub max_occurrences: Option<u32>,
+    /// Drop this fraction of query syncmer nodes with the highest
+    /// occurrence counts. Uses `floor(n * fraction)`, so small queries
+    /// are not affected by tiny defaults such as 0.0005.
+    pub drop_top_fraction: f64,
+}
+
+impl Default for SyngSeedFilter {
+    fn default() -> Self {
+        Self {
+            max_occurrences: None,
+            drop_top_fraction: 0.0,
+        }
+    }
+}
+
+impl SyngSeedFilter {
+    pub fn enabled(self) -> bool {
+        self.max_occurrences.is_some() || self.drop_top_fraction > 0.0
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NodeOccurrenceCounts {
+    forward: u32,
+    reverse: u32,
+}
+
+impl NodeOccurrenceCounts {
+    fn total(self) -> u32 {
+        self.forward.saturating_add(self.reverse)
+    }
+}
+
 /// A query syncmer found in the index.
 #[derive(Debug, Clone, Copy)]
 pub struct SyngQuerySyncmer {
@@ -3273,6 +3317,25 @@ impl SyngIndex {
         Ok(high)
     }
 
+    /// Total occurrence count for an unsigned syncmer node across both
+    /// orientations in the GBWT.
+    pub fn syncmer_node_occurrence_count(&self, node_id: u32) -> io::Result<u32> {
+        Ok(self.syncmer_node_orientation_counts(node_id)?.total())
+    }
+
+    fn syncmer_node_orientation_counts(&self, node_id: u32) -> io::Result<NodeOccurrenceCounts> {
+        if node_id == 0 || node_id > i32::MAX as u32 {
+            return Ok(NodeOccurrenceCounts {
+                forward: 0,
+                reverse: 0,
+            });
+        }
+        let signed_node = node_id as i32;
+        let forward = self.signed_node_occurrence_count(signed_node)?;
+        let reverse = self.signed_node_occurrence_count(-signed_node)?;
+        Ok(NodeOccurrenceCounts { forward, reverse })
+    }
+
     fn valid_walk_node(&self, signed_node: i32) -> bool {
         let node_id = signed_node.unsigned_abs() as usize;
         signed_node != 0 && node_id <= self.num_syncmer_nodes()
@@ -3535,8 +3598,19 @@ impl SyngIndex {
         if signed_node == 0 {
             return Ok(Vec::new());
         }
-        let checkpoint_index = self.locate_checkpoint_index()?;
         let occurrence_count = self.signed_node_occurrence_count(signed_node)?;
+        self.locate_signed_node_occurrences_with_count(signed_node, occurrence_count)
+    }
+
+    fn locate_signed_node_occurrences_with_count(
+        &self,
+        signed_node: i32,
+        occurrence_count: u32,
+    ) -> io::Result<Vec<LocatedSyncmerHit>> {
+        if signed_node == 0 {
+            return Ok(Vec::new());
+        }
+        let checkpoint_index = self.locate_checkpoint_index()?;
         if occurrence_count == 0 {
             return Ok(Vec::new());
         }
@@ -3592,14 +3666,51 @@ impl SyngIndex {
         Ok(hits)
     }
 
-    fn locate_node_occurrences(&self, node_id: u32) -> io::Result<Vec<LocatedSyncmerHit>> {
+    fn locate_node_occurrences_with_counts(
+        &self,
+        node_id: u32,
+        counts: Option<NodeOccurrenceCounts>,
+    ) -> io::Result<Vec<LocatedSyncmerHit>> {
         if node_id == 0 || node_id > i32::MAX as u32 {
             return Ok(Vec::new());
         }
         let signed_node = node_id as i32;
-        let mut hits = self.locate_signed_node_occurrences(signed_node)?;
-        hits.extend(self.locate_signed_node_occurrences(-signed_node)?);
+        let mut hits = if let Some(counts) = counts {
+            self.locate_signed_node_occurrences_with_count(signed_node, counts.forward)?
+        } else {
+            self.locate_signed_node_occurrences(signed_node)?
+        };
+        if let Some(counts) = counts {
+            hits.extend(self.locate_signed_node_occurrences_with_count(
+                -signed_node,
+                counts.reverse,
+            )?);
+        } else {
+            hits.extend(self.locate_signed_node_occurrences(-signed_node)?);
+        }
         Ok(hits)
+    }
+
+    fn top_frequency_seed_nodes(
+        occurrence_counts: &[(u32, u32)],
+        drop_top_fraction: f64,
+    ) -> FxHashSet<u32> {
+        if drop_top_fraction <= 0.0 || occurrence_counts.is_empty() {
+            return FxHashSet::default();
+        }
+        let drop_count = ((occurrence_counts.len() as f64) * drop_top_fraction).floor() as usize;
+        if drop_count == 0 {
+            return FxHashSet::default();
+        }
+        let mut ranked = occurrence_counts.to_vec();
+        ranked.sort_by(|(node_a, count_a), (node_b, count_b)| {
+            count_b.cmp(count_a).then(node_a.cmp(node_b))
+        });
+        ranked
+            .into_iter()
+            .take(drop_count.min(occurrence_counts.len()))
+            .map(|(node, _)| node)
+            .collect()
     }
 
     /// Walk a genome's forward GBWT path, returning `(node_id, absolute_bp_pos)`
@@ -3671,8 +3782,35 @@ impl SyngIndex {
         padding: u64,
         query_extension: u64,
     ) -> Result<Vec<HomologousInterval>, io::Error> {
+        self.query_region_ext_with_seed_filter(
+            genome,
+            start,
+            end,
+            padding,
+            query_extension,
+            SyngSeedFilter::default(),
+        )
+    }
+
+    /// [`query_region_ext`] with a high-frequency syncmer seed filter.
+    pub fn query_region_ext_with_seed_filter(
+        &self,
+        genome: &str,
+        start: u64,
+        end: u64,
+        padding: u64,
+        query_extension: u64,
+        seed_filter: SyngSeedFilter,
+    ) -> Result<Vec<HomologousInterval>, io::Error> {
         let with_anchors =
-            self.query_region_with_anchors_ext(genome, start, end, padding, query_extension)?;
+            self.query_region_with_anchors_ext_seed_filtered(
+                genome,
+                start,
+                end,
+                padding,
+                query_extension,
+                seed_filter,
+            )?;
         Ok(with_anchors
             .into_iter()
             .map(|h| HomologousInterval {
@@ -3830,13 +3968,35 @@ impl SyngIndex {
         padding: u64,
         query_extension: u64,
     ) -> Result<Vec<HomologousIntervalWithAnchors>, io::Error> {
-        self.query_region_with_anchors_ext_visited(
+        self.query_region_with_anchors_ext_seed_filtered(
+            genome,
+            start,
+            end,
+            padding,
+            query_extension,
+            SyngSeedFilter::default(),
+        )
+    }
+
+    /// [`query_region_with_anchors_ext`] with a high-frequency syncmer
+    /// seed filter.
+    pub fn query_region_with_anchors_ext_seed_filtered(
+        &self,
+        genome: &str,
+        start: u64,
+        end: u64,
+        padding: u64,
+        query_extension: u64,
+        seed_filter: SyngSeedFilter,
+    ) -> Result<Vec<HomologousIntervalWithAnchors>, io::Error> {
+        self.query_region_with_anchors_ext_visited_seed_filtered(
             genome,
             start,
             end,
             padding,
             query_extension,
             None,
+            seed_filter,
         )
     }
 
@@ -3852,6 +4012,30 @@ impl SyngIndex {
         padding: u64,
         query_extension: u64,
         visited_nodes: Option<&mut FxHashSet<u32>>,
+    ) -> Result<Vec<HomologousIntervalWithAnchors>, io::Error> {
+        self.query_region_with_anchors_ext_visited_seed_filtered(
+            genome,
+            start,
+            end,
+            padding,
+            query_extension,
+            visited_nodes,
+            SyngSeedFilter::default(),
+        )
+    }
+
+    /// [`query_region_with_anchors_ext_visited`] with a high-frequency
+    /// syncmer seed filter.
+    #[allow(clippy::too_many_arguments)]
+    pub fn query_region_with_anchors_ext_visited_seed_filtered(
+        &self,
+        genome: &str,
+        start: u64,
+        end: u64,
+        padding: u64,
+        query_extension: u64,
+        visited_nodes: Option<&mut FxHashSet<u32>>,
+        seed_filter: SyngSeedFilter,
     ) -> Result<Vec<HomologousIntervalWithAnchors>, io::Error> {
         // Suppress C debug output from syngBWTnext
         unsafe { syng_ffi::impg_syng_suppress_debug() };
@@ -3893,7 +4077,12 @@ impl SyngIndex {
             }
         }
 
-        self.query_region_from_node_positions(query_node_positions, padding, visited_nodes)
+        self.query_region_from_node_positions_seed_filtered(
+            query_node_positions,
+            padding,
+            visited_nodes,
+            seed_filter,
+        )
     }
 
     /// Query variant that takes the source sequence bytes directly.
@@ -3993,6 +4182,21 @@ impl SyngIndex {
         padding: u64,
         mut visited_nodes: Option<&mut FxHashSet<u32>>,
     ) -> Result<Vec<HomologousIntervalWithAnchors>, io::Error> {
+        self.query_region_from_node_positions_seed_filtered(
+            query_node_positions,
+            padding,
+            visited_nodes.as_deref_mut(),
+            SyngSeedFilter::default(),
+        )
+    }
+
+    fn query_region_from_node_positions_seed_filtered(
+        &self,
+        query_node_positions: FxHashMap<u32, Vec<(u64, u8)>>,
+        padding: u64,
+        mut visited_nodes: Option<&mut FxHashSet<u32>>,
+        seed_filter: SyngSeedFilter,
+    ) -> Result<Vec<HomologousIntervalWithAnchors>, io::Error> {
         if query_node_positions.is_empty() {
             return Ok(Vec::new());
         }
@@ -4006,28 +4210,74 @@ impl SyngIndex {
 
         let emit_prof = std::env::var("SYNG_EMIT_PROFILE").is_ok();
         let lookup_start = std::time::Instant::now();
-        let unvisited: Vec<(u32, &Vec<(u64, u8)>)> = query_node_positions
-            .iter()
-            .filter(|(node, _)| match visited_nodes.as_deref() {
-                Some(v) => !v.contains(node),
-                None => true,
-            })
-            .map(|(n, qp)| (*n, qp))
-            .collect();
+        let mut unvisited: Vec<(u32, Vec<(u64, u8)>)> = Vec::with_capacity(query_node_positions.len());
+        let mut skipped_visited = 0usize;
+        for (node, query_positions) in query_node_positions {
+            if visited_nodes
+                .as_deref()
+                .map(|v| v.contains(&node))
+                .unwrap_or(false)
+            {
+                skipped_visited += 1;
+                continue;
+            }
+            unvisited.push((node, query_positions));
+        }
+        let input_seed_nodes = unvisited.len();
+        let unvisited_nodes_for_visited: Vec<u32> = unvisited.iter().map(|(n, _)| *n).collect();
+
+        let mut skipped_frequency = 0usize;
+        let mut top_drop_count = 0usize;
+        let mut max_seed_occurrences = 0u32;
+        let count_start = std::time::Instant::now();
+        let mut occurrence_counts_by_node: FxHashMap<u32, NodeOccurrenceCounts> =
+            FxHashMap::default();
+        if seed_filter.enabled() && !unvisited.is_empty() {
+            let mut occurrence_counts = Vec::with_capacity(unvisited.len());
+            for (node, _) in &unvisited {
+                let counts = self.syncmer_node_orientation_counts(*node)?;
+                let occurrences = counts.total();
+                max_seed_occurrences = max_seed_occurrences.max(occurrences);
+                occurrence_counts.push((*node, occurrences));
+                occurrence_counts_by_node.insert(*node, counts);
+            }
+            let top_drop_nodes = Self::top_frequency_seed_nodes(
+                &occurrence_counts,
+                seed_filter.drop_top_fraction,
+            );
+            top_drop_count = top_drop_nodes.len();
+            let max_occurrences = seed_filter.max_occurrences;
+            let occurrence_by_node: FxHashMap<u32, u32> = occurrence_counts.into_iter().collect();
+            unvisited.retain(|(node, _)| {
+                let occurrences = occurrence_by_node.get(node).copied().unwrap_or(0);
+                let drop_by_top = top_drop_nodes.contains(node);
+                let drop_by_cap = max_occurrences
+                    .map(|cap| occurrences > cap)
+                    .unwrap_or(false);
+                let keep = !(drop_by_top || drop_by_cap);
+                if !keep {
+                    skipped_frequency += 1;
+                }
+                keep
+            });
+        }
         if let Some(v) = visited_nodes.as_deref_mut() {
-            for (n, _) in &unvisited {
-                v.insert(*n);
+            for node in unvisited_nodes_for_visited {
+                v.insert(node);
             }
         }
+        let count_elapsed = count_start.elapsed();
 
         let mut located_hits = 0u64;
         let mut emitted_anchors = 0u64;
+        let locate_start = std::time::Instant::now();
         let mut per_node_sampled: FxHashMap<
             (usize, u32, char),
             (u64, u64, FxHashMap<i64, Anchor>),
         > = FxHashMap::default();
         for (query_node, query_positions) in unvisited {
-            for hit in self.locate_node_occurrences(query_node)? {
+            let cached_counts = occurrence_counts_by_node.get(&query_node).copied();
+            for hit in self.locate_node_occurrences_with_counts(query_node, cached_counts)? {
                 located_hits += 1;
                 if hit.path_idx >= self.name_map.path_to_name.len() {
                     continue;
@@ -4036,7 +4286,7 @@ impl SyngIndex {
                 let hit_end = hit.target_pos + syncmer_len;
                 let padded_start = hit.target_pos.saturating_sub(padding);
                 let padded_end = (hit_end + padding).min(genome_len);
-                for &(qp, q_orient) in query_positions {
+                for &(qp, q_orient) in &query_positions {
                     let strand = if q_orient == hit.target_orient {
                         '+'
                     } else {
@@ -4061,6 +4311,7 @@ impl SyngIndex {
                 }
             }
         }
+        let locate_elapsed = locate_start.elapsed();
         for ((genome_idx, _node, strand), (start, end, sig_map)) in per_node_sampled {
             if sig_map.is_empty() {
                 continue;
@@ -4094,10 +4345,17 @@ impl SyngIndex {
         });
         if emit_prof {
             eprintln!(
-                "EMITPROF nodes={} located_hits={} emit_anchors={} lookup={:.2}s merge_sort={:.2}s",
-                query_node_positions.len(),
+                "EMITPROF seed_nodes={} kept_seed_nodes={} skipped_visited={} skipped_frequency={} top_drop={} max_seed_occurrences={} located_hits={} emit_anchors={} count={:.2}s locate={:.2}s lookup={:.2}s merge_sort={:.2}s",
+                input_seed_nodes,
+                input_seed_nodes.saturating_sub(skipped_frequency),
+                skipped_visited,
+                skipped_frequency,
+                top_drop_count,
+                max_seed_occurrences,
                 located_hits,
                 emitted_anchors,
+                count_elapsed.as_secs_f64(),
+                locate_elapsed.as_secs_f64(),
                 lookup_start.elapsed().as_secs_f64(),
                 t_merge.elapsed().as_secs_f64(),
             );
@@ -7624,6 +7882,25 @@ mod tests {
             stderr.contains("prefix") || stderr.contains("-O") || stderr.contains("required"),
             "Error message should mention output prefix requirement. Got: {}",
             stderr
+        );
+    }
+
+    #[test]
+    fn test_top_frequency_seed_filter_drops_only_top_fraction() {
+        let counts = vec![(10, 5), (11, 100), (12, 40), (13, 80), (14, 80)];
+        let dropped = SyngIndex::top_frequency_seed_nodes(&counts, 0.4);
+        assert_eq!(dropped.len(), 2);
+        assert!(dropped.contains(&11));
+        assert!(dropped.contains(&13));
+        assert!(
+            !dropped.contains(&14),
+            "ties are broken by node id for deterministic exact-count drops"
+        );
+
+        let tiny = SyngIndex::top_frequency_seed_nodes(&counts, 0.0005);
+        assert!(
+            tiny.is_empty(),
+            "tiny top-fraction filters should not affect small queries"
         );
     }
 

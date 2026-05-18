@@ -2999,6 +2999,24 @@ enum Args {
         #[clap(long, value_parser, default_value_t = 0.0)]
         syng_min_chain_fraction: f64,
 
+        /// Drop this fraction of the query syncmer seed nodes with the
+        /// highest GBWT occurrence counts before locating hits. Default
+        /// 0.0005 drops the top 0.05% of query seeds, minimizer-style,
+        /// so high-copy repeats do not seed chromosome-scale ranges.
+        /// Set to 0 to disable.
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, value_parser, default_value_t = 0.0005)]
+        syng_seed_drop_top_fraction: f64,
+
+        /// Drop syncmer seed nodes occurring more than this many times
+        /// across both GBWT orientations before locating hits. The
+        /// default 1000 removes very high-copy seeds in large pangenomes
+        /// while leaving the filter inactive on small test panels. Set
+        /// to 0 to disable the absolute cap.
+        #[arg(help_heading = "Syng input")]
+        #[clap(long, value_parser, default_value_t = 1000)]
+        syng_seed_max_occurrences: u32,
+
         /// Debug-only: skip boundary realignment and emit raw syncmer-resolution
         /// intervals from syng's query_region. The default syng path runs
         /// BiWFA boundary realignment for base-pair-precise edges (and iterates
@@ -3955,6 +3973,8 @@ fn run() -> io::Result<()> {
             syng_extend_budget,
             syng_min_chain_anchors,
             syng_min_chain_fraction,
+            syng_seed_drop_top_fraction,
+            syng_seed_max_occurrences,
             syng_raw,
             query,
             output_format,
@@ -3964,6 +3984,14 @@ fn run() -> io::Result<()> {
         } => {
             initialize_threads_and_log(&common);
             query.validate_merge_distance("query")?;
+            if !syng_seed_drop_top_fraction.is_finite()
+                || !(0.0..1.0).contains(&syng_seed_drop_top_fraction)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--syng-seed-drop-top-fraction must be finite and in [0, 1)",
+                ));
+            }
 
             // Migration errors for removed format strings
             if output_format == "gfa-poa" {
@@ -4029,6 +4057,11 @@ fn run() -> io::Result<()> {
                 let seq_index_built = syng_index.build_seq_index();
                 // Wrap once; wrapper owns syng_index and seq_index for the rest of the path.
                 let wrapper = impg::SyngImpgWrapper::new(syng_index, seq_index_built, syng_padding);
+                let syng_seed_filter = impg::syng::SyngSeedFilter {
+                    max_occurrences: (syng_seed_max_occurrences > 0)
+                        .then_some(syng_seed_max_occurrences),
+                    drop_top_fraction: syng_seed_drop_top_fraction,
+                };
 
                 // Parse target ranges
                 let target_ranges: Vec<(String, (i32, i32), String)> = if let Some(ref target_range_str) = query.target_range {
@@ -4124,12 +4157,13 @@ fn run() -> io::Result<()> {
                 | -> io::Result<Vec<impg::syng::HomologousInterval>> {
                     let start = range_start.max(0) as u64;
                     let end = range_end.max(range_start).max(0) as u64;
-                    wrapper.syng_index().query_region_ext(
+                    wrapper.syng_index().query_region_ext_with_seed_filter(
                         target_name,
                         start,
                         end,
                         padding,
                         extension,
+                        syng_seed_filter,
                     )
                 };
 
@@ -4144,7 +4178,7 @@ fn run() -> io::Result<()> {
                     match resolved_format {
                         "bed" | "bedpe" => {
                             let intervals = if use_boundary_realign {
-                                impg::syng_transitive::query_transitive_ext(
+                                impg::syng_transitive::query_transitive_ext_with_seed_filter(
                                     wrapper.syng_index(),
                                     target_name,
                                     *range_start as u64,
@@ -4155,6 +4189,7 @@ fn run() -> io::Result<()> {
                                     syng_extend_budget,
                                     syng_min_chain_anchors,
                                     syng_min_chain_fraction,
+                                    syng_seed_filter,
                                     sequence_index.as_ref().unwrap(),
                                 )?
                             } else {
@@ -4221,7 +4256,7 @@ fn run() -> io::Result<()> {
                                 while window_start < *range_end {
                                     let window_end = (window_start + ps).min(*range_end);
                                     let intervals = if use_boundary_realign {
-                                        impg::syng_transitive::query_transitive_ext(
+                                        impg::syng_transitive::query_transitive_ext_with_seed_filter(
                                             wrapper.syng_index(),
                                             target_name,
                                             window_start as u64,
@@ -4232,6 +4267,7 @@ fn run() -> io::Result<()> {
                                             syng_extend_budget,
                                             syng_min_chain_anchors,
                                             syng_min_chain_fraction,
+                                            syng_seed_filter,
                                             sequence_index.as_ref().unwrap(),
                                         )?
                                     } else {
@@ -4274,7 +4310,7 @@ fn run() -> io::Result<()> {
                             } else {
                                 // ─── Flat path: one query_region, one engine run ───
                                 let intervals = if use_boundary_realign {
-                                    impg::syng_transitive::query_transitive_ext(
+                                    impg::syng_transitive::query_transitive_ext_with_seed_filter(
                                         wrapper.syng_index(),
                                         target_name,
                                         *range_start as u64,
@@ -4285,6 +4321,7 @@ fn run() -> io::Result<()> {
                                         syng_extend_budget,
                                         syng_min_chain_anchors,
                                         syng_min_chain_fraction,
+                                        syng_seed_filter,
                                         sequence_index.as_ref().unwrap(),
                                     )?
                                 } else {
@@ -4318,7 +4355,7 @@ fn run() -> io::Result<()> {
                         "fasta" => {
                             let seq_idx = sequence_index.as_ref().unwrap();
                             let intervals = if use_boundary_realign {
-                                impg::syng_transitive::query_transitive_ext(
+                                impg::syng_transitive::query_transitive_ext_with_seed_filter(
                                     wrapper.syng_index(),
                                     target_name,
                                     *range_start as u64,
@@ -4329,6 +4366,7 @@ fn run() -> io::Result<()> {
                                     syng_extend_budget,
                                     syng_min_chain_anchors,
                                     syng_min_chain_fraction,
+                                    syng_seed_filter,
                                     seq_idx,
                                 )?
                             } else {
@@ -4345,7 +4383,7 @@ fn run() -> io::Result<()> {
                         "gbwt" => {
                             let seq_idx = sequence_index.as_ref().unwrap();
                             let intervals = if use_boundary_realign {
-                                impg::syng_transitive::query_transitive_ext(
+                                impg::syng_transitive::query_transitive_ext_with_seed_filter(
                                     wrapper.syng_index(),
                                     target_name,
                                     *range_start as u64,
@@ -4356,6 +4394,7 @@ fn run() -> io::Result<()> {
                                     syng_extend_budget,
                                     syng_min_chain_anchors,
                                     syng_min_chain_fraction,
+                                    syng_seed_filter,
                                     seq_idx,
                                 )?
                             } else {
