@@ -405,11 +405,13 @@ Default query mode runs BiWFA boundary refinement and so requires
 `--sequence-files`. Pass `--syng-raw` for the raw syncmer-resolution
 pass-through. Tune via `--syng-padding`, `--syng-min-chain-anchors`
 (lower -> more paralog hits; default `2` is conservative on duplicated
-loci like C4), `--syng-min-chain-fraction`, and the seed-frequency
-filters `--syng-seed-max-occurrences` / `--syng-seed-drop-top-fraction`.
+loci like C4), `--syng-min-chain-fraction` (default `0.5`; set `0` for
+exploratory local-chain discovery), and the seed-frequency filters
+`--syng-seed-max-occurrences` / `--syng-seed-drop-top-fraction`.
 By default syng query drops the top 0.05% most frequent query-local seed
-syncmers, seeds ranges from ordered GBWT MEMs when available, and does not
-use a fixed absolute occurrence cap; set
+syncmers, seeds ranges from bounded exact GBWT walk seeds of five
+syncmers (`--syng-seed-walk-anchors`; set `3` for more sensitive seeds),
+and does not use a fixed absolute occurrence cap; set
 `--syng-seed-max-occurrences` only when a hard panel-specific ceiling is
 desired. High-frequency syncmers are ignored only while seeding candidate
 ranges; once a range survives, downstream scoring can still recover all
