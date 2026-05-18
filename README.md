@@ -404,11 +404,14 @@ fails.
 Default query mode runs BiWFA boundary refinement and so requires
 `--sequence-files`. Pass `--syng-raw` for the raw syncmer-resolution
 pass-through. Tune via `--syng-padding`, `--syng-min-chain-anchors`
-(lower → more paralog hits; default `2` is conservative on duplicated
-loci like C4), `--syng-min-chain-fraction`. `query -o gbwt` emits a
-region-specific sub-GBWT. The syng prefix passed to `-a` is resolved
-relative to cwd, so either `cd` to the index directory or pass an
-absolute path.
+(lower -> more paralog hits; default `2` is conservative on duplicated
+loci like C4), `--syng-min-chain-fraction`, and the seed-frequency
+filters `--syng-seed-max-occurrences` / `--syng-seed-drop-top-fraction`.
+High-frequency syncmers are ignored only while seeding candidate ranges;
+once a range survives, downstream scoring can still recover all syncmers by
+walking that path range. `query -o gbwt` emits a region-specific sub-GBWT.
+The syng prefix passed to `-a` is resolved relative to cwd, so either `cd`
+to the index directory or pass an absolute path.
 
 ## GFA engines
 
