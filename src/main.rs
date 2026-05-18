@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use coitrees::{Interval, IntervalTree};
 use crossbeam_channel as channel;
 use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
-use impg::commands::{genotype, graph, infer, lace, partition, refine, similarity};
+use impg::commands::{genotype, graph, infer, lace, partition, refine, render, similarity};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::impg_index::{ImpgIndex, ImpgWrapper};
 use impg::multi_impg::MultiImpg;
@@ -3335,6 +3335,48 @@ enum Args {
         common: CommonOpts,
     },
 
+    /// Render a syng-backed source-coordinate region into a GBZ-style bundle
+    Render {
+        /// Syng index prefix or .1khash/.1gbwt/.spos/.pstep/.names/.meta path
+        #[clap(short = 'a', long, value_parser)]
+        index: String,
+
+        /// Source coordinate range to render, in the format `seq_name:start-end`
+        #[clap(short = 'r', long, value_parser)]
+        target_range: String,
+
+        /// Output render bundle directory
+        #[clap(short = 'O', long, value_parser)]
+        output: String,
+
+        /// Render engine
+        #[clap(long, value_parser, default_value = "syng-native")]
+        engine: String,
+
+        /// Boundary padding in bp for syng candidate discovery
+        #[clap(long, value_parser, default_value_t = 120)]
+        syng_padding: u64,
+
+        /// Source-side extension in bp for syng candidate discovery
+        #[clap(long, value_parser, default_value_t = 0)]
+        syng_extension: u64,
+
+        /// Do not emit an explicit GFA view of the rendered syng region
+        #[clap(long, action)]
+        no_gfa: bool,
+
+        /// Write into an existing output directory
+        #[clap(long, action)]
+        keep_existing: bool,
+
+        #[clap(flatten)]
+        sequence: SequenceOpts,
+
+        // --- General ---
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+
     /// Generate alignment pairs with sparsification strategies
     Align {
         // --- Input ---
@@ -5571,6 +5613,34 @@ fn run() -> io::Result<()> {
                     }
                 }
             }
+        }
+        Args::Render {
+            index,
+            target_range,
+            output,
+            engine,
+            syng_padding,
+            syng_extension,
+            no_gfa,
+            keep_existing,
+            sequence,
+            common,
+        } => {
+            initialize_threads_and_log(&common);
+            let syng_prefix = detect_syng_prefix(&index).unwrap_or(index);
+            let sequence_files = sequence.resolve_sequence_files()?;
+            let config = render::RenderConfig {
+                syng_prefix: &syng_prefix,
+                target_range: &target_range,
+                output: &output,
+                sequence_files: &sequence_files,
+                engine: &engine,
+                syng_padding,
+                syng_extension,
+                emit_gfa: !no_gfa,
+                keep_existing,
+            };
+            render::run(&config)?;
         }
         Args::Align {
             fasta_input,

@@ -205,6 +205,126 @@ fn impg_binary() -> Option<PathBuf> {
 }
 
 #[test]
+fn test_syng_render_bundle_preserves_source_namespace() {
+    let _guard = lock_syng();
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping CLI test: impg binary not found");
+        return;
+    };
+
+    use std::io::Write;
+
+    let dir = std::env::temp_dir().join("impg_test_syng_render_bundle");
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).unwrap();
+    let fasta = dir.join("panel.fa");
+    let prefix = dir.join("panel.syng");
+    let bundle = dir.join("render.impg-gbz");
+
+    let base = numeric_to_ascii(&make_sequence_numeric(1400, 23));
+    let mut hap_b = base.clone();
+    for i in (180..1200).step_by(97) {
+        hap_b[i] = mutate_base_ascii(hap_b[i]);
+    }
+    let fragment = &base[300..950];
+
+    {
+        let mut f = std::fs::File::create(&fasta).unwrap();
+        writeln!(f, ">sampleA#0#chr1").unwrap();
+        f.write_all(&base).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleB#1#chr1").unwrap();
+        f.write_all(&hap_b).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">fragment_001").unwrap();
+        f.write_all(fragment).unwrap();
+        writeln!(f).unwrap();
+    }
+
+    let build = Command::new(&bin)
+        .args([
+            "syng",
+            "--fasta",
+            fasta.to_str().unwrap(),
+            "-o",
+            prefix.to_str().unwrap(),
+            "--position-sample-rate",
+            "8",
+        ])
+        .output()
+        .expect("failed to run impg syng");
+    assert!(
+        build.status.success(),
+        "impg syng failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let render = Command::new(&bin)
+        .args([
+            "render",
+            "-a",
+            prefix.to_str().unwrap(),
+            "-r",
+            "sampleA#0#chr1:100-1000",
+            "--sequence-files",
+            fasta.to_str().unwrap(),
+            "-O",
+            bundle.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run impg render");
+    assert!(
+        render.status.success(),
+        "impg render failed: {}",
+        String::from_utf8_lossy(&render.stderr)
+    );
+
+    for file in [
+        "manifest.json",
+        "namespace.json",
+        "translation.bin",
+        "translation.tsv",
+        "graph.gfa",
+        "paths.1gbwt",
+        "paths.1khash",
+    ] {
+        assert!(
+            bundle.join(file).exists(),
+            "render bundle should contain {}",
+            file
+        );
+    }
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(bundle.join("manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["format"], "impg-render-bundle");
+    assert_eq!(manifest["engine"], "syng-native");
+    assert_eq!(manifest["feature_space"], "syng-syncmer-node");
+    assert!(manifest["rendered_paths"].as_u64().unwrap() >= 2);
+    assert!(manifest["step_samples"].as_u64().unwrap() > 0);
+
+    let namespace = std::fs::read_to_string(bundle.join("namespace.json")).unwrap();
+    assert!(namespace.contains("sampleA#0#chr1"), "{}", namespace);
+    assert!(namespace.contains("\"sample\": \"sampleA\""), "{}", namespace);
+    assert!(namespace.contains("\"haplotype\": \"0\""), "{}", namespace);
+    assert!(namespace.contains("fragment_001"), "{}", namespace);
+    assert!(namespace.contains("\"pansn\": null"), "{}", namespace);
+
+    let translation = std::fs::read(bundle.join("translation.bin")).unwrap();
+    assert_eq!(&translation[..8], b"IMPGTRN1");
+    let translation_tsv = std::fs::read_to_string(bundle.join("translation.tsv")).unwrap();
+    assert!(translation_tsv.contains("\npath\t"), "{}", translation_tsv);
+    assert!(translation_tsv.contains("\nstep\t"), "{}", translation_tsv);
+    assert!(translation_tsv.contains("sampleA#0#chr1"), "{}", translation_tsv);
+
+    let gfa = std::fs::read_to_string(bundle.join("graph.gfa")).unwrap();
+    assert!(gfa.starts_with("H\tVN:Z:1.0\n"), "{}", gfa);
+    assert!(gfa.contains("\nS\t"), "{}", gfa);
+    assert!(gfa.contains("\nP\t"), "{}", gfa);
+}
+
+#[test]
 fn test_syng_agc_build_produces_non_empty_index() {
     let _guard = lock_syng();
     let Some(bin) = impg_binary() else {
