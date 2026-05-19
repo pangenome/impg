@@ -17,7 +17,7 @@ them and are separated by commas:
 syng,k=63,s=8,seed=7:blunt
 seqwish,min-match-len=70
 pggb,window=20k
-syng,k=63,s=8:crush,max-span=10k,max-traversals=1024
+syng,k=63,s=8:crush,max-span=10k,max-traversals=10k
 ```
 
 This is a graph-pipeline DSL, not a general shell pipeline. Each stage is a
@@ -108,7 +108,7 @@ Examples:
 syng,k=63,s=8,seed=7
 seqwish,min-match-len=70,sparse-factor=0.001
 pggb,window=20k
-crush,max-span=10k,max-traversal-len=10k,max-traversals=1024,method=poa
+crush,max-span=10k,max-traversal-len=10k,max-traversals=10k,method=poa
 ```
 
 Unknown parameters should be errors, not warnings. Silent ignoring would make
@@ -121,7 +121,9 @@ current blunt GFA to `povu-rs` and calls `NativeGfa::decompose_flubbles`, then
 uses POVU's site IDs, parent/child relationships, entry/exit steps, and
 bottom-up leaf ordering to schedule exact path-preserving replacement.
 
-The crush loop is:
+The crush loop is iterative because each exact replacement changes the local
+graph topology and therefore can create, remove, or expose nested POVU sites.
+One iteration means one candidate attempt, not one SPOA alignment step:
 
 1. Decompose the current graph into flubbles/bubbles/tangles.
 2. Build a parent/child hierarchy.
@@ -137,6 +139,8 @@ transform is exposed directly:
 impg crush -g local.blunt.gfa -o local.crushed.gfa
 ```
 
-The defaults are sized for human panels (`512` iterations and `1024` path
-traversals per candidate). Smaller values are useful only for quick synthetic
-tests or deliberately capped exploratory runs.
+The defaults are sized for human panels (`512` candidate attempts and `10k`
+path traversals per candidate). Traversal count is deliberately a high safety
+rail. The main alignment budgets are `max-span`, `max-traversal-len`, and
+`max-total-seq`, because a common allele represented by many haplotypes should
+not fail only because many paths traverse it.
