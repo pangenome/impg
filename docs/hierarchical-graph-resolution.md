@@ -207,8 +207,12 @@ Important invariants:
   traversal.
 - Source path identity is never discarded. It may be summarized, but the full
   path membership must remain recoverable for audit and training data.
-- Every lossy operation must produce a translation from old handles/path steps
-  to new handles/path steps or to a symbolic representative.
+- Exact graph rendering does not need a full old-handle-to-new-handle
+  translation table as long as all output paths are embedded correctly in the
+  new graph. Path coordinates can be recovered from those emitted paths.
+- Approximate, representative, or otherwise lossy graph rewrites must produce
+  enough coordinate/provenance metadata to explain how old path intervals map
+  to new graph paths, representative paths, or symbolic blocks.
 
 ## Decomposition Algorithm
 
@@ -218,8 +222,11 @@ The first implementation should be deterministic and conservative.
 
    Build a handle graph view with segment lengths, edges, path walks, and path
    step positions. Optionally compact linear chains, remove exact duplicate
-   segments, and annotate tips or low-support graph pieces, but keep a
-   provenance map from old handles to new handles.
+   segments, and annotate tips or low-support graph pieces. If the rewritten
+   graph still embeds exact source paths, the path embeddings are the primary
+   coordinate system. A separate old-to-new handle provenance map is only
+   required once the operation changes path sequence, collapses alternatives,
+   or emits synthetic representatives.
 
 2. Choose anchor paths and coordinate frames.
 
@@ -306,7 +313,7 @@ input graph
   -> classify each site by span, traversal count, divergence, cycles, alignability
   -> choose operation
   -> run local POA / BiWFA compression / representative collapse / passthrough
-  -> write resolved graph plus translation tables
+  -> write resolved graph plus site metadata and optional coordinate provenance
 ```
 
 Suggested operation classes:
@@ -498,12 +505,20 @@ resolved.gfa
 resolution.json
   site hierarchy, operations, thresholds, and provenance maps
 
-translation.tsv / translation.bin
-  old handle/path-step -> new handle/path-step or representative assignment
+coordinate_map.tsv / coordinate_map.bin
+  optional old path interval -> new path interval, representative assignment,
+  or symbolic block assignment for approximate/lossy operations
 
 site_traversals.fa
   traversal sequences used for local POA/BiWFA/representative selection
 ```
+
+For exact path-preserving rendering, `resolved.gfa` and `resolution.json` are
+sufficient. The emitted paths are the coordinate system. A coordinate map is
+only needed when the output graph stops being an exact embedding of the source
+paths, for example after representative collapse, centroid consensus,
+symbolic-block emission, or any approximation that changes sequence or path
+membership.
 
 Resolution levels:
 
@@ -595,8 +610,9 @@ At representative resolution, simplification can:
 - replace each selected site with representative traversal paths
 - collapse member traversals onto their representative when allowed
 - preserve child site annotations as nested metadata
-- write a translation table from original handles/path steps to simplified
-  handles/path steps
+- write a coordinate map from original path intervals to simplified path
+  intervals, representative paths, or symbolic site records when exact path
+  embeddings are no longer present
 
 This is closely related to assembly graph simplification, but the objective is
 different. Assembly cleaning often tries to recover one assembly graph or remove
@@ -615,7 +631,8 @@ lossy resolution reduction
 ```
 
 Lossy operations must require explicit resolution settings and must produce a
-provenance sidecar.
+provenance sidecar. Exact smoothing can avoid a separate coordinate map if it
+emits correct full paths through the resolved graph.
 
 ## Genotyping And Deconvolution
 
@@ -750,7 +767,8 @@ Validation metrics:
 ```text
 site boundary precision/recall against hand-labeled fixtures
 resolved graph node/edge count versus input
-sequence/path preservation through translation tables
+sequence/path preservation through emitted graph paths
+coordinate-map correctness when lossy rewrites are requested
 allele reconstruction identity for emitted sequence alleles
 path coverage by representatives
 maximum and mean traversal-to-representative distance
@@ -839,21 +857,24 @@ Learned or simulation-trained scoring:
 3. Add the deterministic alignability classifier and operation assignment:
    passthrough, local POA, BiWFA pair-compression, representative, or symbolic
    block.
-4. Add graph output passthrough with translation tables, proving that the
-   hierarchy can round-trip a graph without changing it.
+4. Add graph output passthrough and exact path-preserving rendering, proving
+   that the hierarchy can round-trip a graph without changing path sequences or
+   path coordinates.
 5. Add bubble-guided local POA smoothing for small clean bubbles and lace the
    smoothed subgraph back through entry/exit handles.
 6. Add BiWFA pair-compression for moderate bubbles where pairwise alignment is
    credible but full POA is too expensive.
 7. Add exact and medoid representative selection with feature vectors for
    larger or repetitive sites.
-8. Route `query -o vcf` through the hierarchy for `atomic` and `site` modes,
+8. Add coordinate/provenance sidecars for representative, symbolic, centroid,
+   or other lossy modes.
+9. Route `query -o vcf` through the hierarchy for `atomic` and `site` modes,
    keeping POVU as the sequence-allele backend where possible.
-9. Add representative/block VCF modes with symbolic alleles and sidecar
+10. Add representative/block VCF modes with symbolic alleles and sidecar
    traversal metadata.
-10. Connect representatives to `genotype`/`infer` as candidate haplotypes in a
+11. Connect representatives to `genotype`/`infer` as candidate haplotypes in a
    declared feature space.
-11. Add simulation-trained or learned scoring only after deterministic fixtures
+12. Add simulation-trained or learned scoring only after deterministic fixtures
     and real-region validation are stable.
 
 The key design constraint is that resolution is not a VCF formatting option.
