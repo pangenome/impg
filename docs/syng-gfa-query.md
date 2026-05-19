@@ -163,9 +163,15 @@ gfa:<stage>[,<key=value>...][:<stage>[,<key=value>...]...]
 
 For example, `gfa:syng,k=63,s=8,seed=7:blunt` and the legacy
 `gfa:syng:blunt,k=63,s=8,seed=7` are both accepted. Graph transforms use the
-same staged syntax. `gfa:syng:crush,max-span=10k,max-traversals=128` emits
+same staged syntax. `gfa:syng:crush,max-span=10k,max-traversals=1024` emits
 blunt syng GFA and then runs exact path-preserving bubble resolution; see
 `docs/graph-pipeline-dsl.md`.
+
+The transform can also be run on an existing blunt GFA:
+
+```bash
+impg crush -g local.blunt.gfa -o local.crushed.gfa
+```
 
 VCF output uses the same engine dispatch and passes the local GFA to POVU:
 `-o vcf:syng`, `-o vcf:pggb`, `-o vcf:seqwish`, and `-o vcf:poa` are
