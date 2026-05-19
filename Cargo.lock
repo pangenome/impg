@@ -204,7 +204,7 @@ dependencies = [
  "bitflags 2.11.1",
  "cexpr",
  "clang-sys",
- "itertools 0.10.5",
+ "itertools 0.12.1",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -2060,7 +2060,7 @@ dependencies = [
 [[package]]
 name = "povu-rs"
 version = "0.1.0"
-source = "git+https://github.com/pangenome/povu?branch=rust-native-gfa-vcf#a05c00071a31d14a0122c606a8da3a81f536998a"
+source = "git+https://github.com/pangenome/povu?branch=rust#857ae6ecb5d97272b51d676b25b4307ecb6c16e8"
 dependencies = [
  "bindgen 0.70.1",
  "cmake",

@@ -75,7 +75,7 @@ seqwish = { git = "https://github.com/pangenome/seqwish", branch = "rust-2" }
 # Dependencies for graph sorting
 gfasort = { git = "https://github.com/pangenome/gfasort", rev = "f15d8ebfdc632af2333f277cb9da0748d8fba7aa" }
 bluntg = { git = "https://github.com/pangenome/bluntg" }
-povu = { package = "povu-rs", git = "https://github.com/pangenome/povu", branch = "rust-native-gfa-vcf", default-features = false }
+povu = { package = "povu-rs", git = "https://github.com/pangenome/povu", branch = "rust", default-features = false }
 
 [build-dependencies]
 cc = "1"
