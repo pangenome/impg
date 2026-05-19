@@ -2214,7 +2214,7 @@ fn parse_crush_stage(
     let mut config = impg::resolution::ResolutionConfig::default();
     for param in &stage.params {
         match param.key.as_str() {
-            "max-iterations" | "iterations" => {
+            "max-iterations" | "iterations" | "max-rounds" | "rounds" => {
                 config.max_iterations =
                     parse_usize_size_engine_param(raw, &param.key, &param.value)?;
             }
@@ -2261,7 +2261,7 @@ fn parse_crush_stage(
     if config.max_iterations == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("Invalid --gfa-engine '{}': crush iterations must be > 0", raw),
+            format!("Invalid --gfa-engine '{}': crush rounds must be > 0", raw),
         ));
     }
     if config.max_traversals == 0 {
@@ -3896,8 +3896,14 @@ GFA engine shorthand:
         #[clap(short = 'o', long, value_parser, default_value = "-")]
         output: String,
 
-        /// Maximum replacement iterations
-        #[clap(long, alias = "iterations", value_parser = parse_usize_size, default_value = "512")]
+        /// Maximum frontier replacement rounds
+        #[clap(
+            long,
+            alias = "iterations",
+            alias = "max-rounds",
+            value_parser = parse_usize_size,
+            default_value = "512"
+        )]
         max_iterations: usize,
 
         /// Maximum reference span in bp for a candidate bubble
@@ -6447,7 +6453,7 @@ fn run() -> io::Result<()> {
             if max_iterations == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "--max-iterations must be > 0",
+                    "--max-iterations/--max-rounds must be > 0",
                 ));
             }
             if max_traversals == 0 {
@@ -6474,7 +6480,7 @@ fn run() -> io::Result<()> {
             };
             let resolved = impg::resolution::resolve_gfa_bubbles(&gfa_text, &config)?;
             info!(
-                "crush: {} resolved, {} bailed, {} candidates seen across {} iterations",
+                "crush: {} resolved, {} bailed, {} candidates seen across {} rounds",
                 resolved.stats.resolved,
                 resolved.stats.bailed,
                 resolved.stats.candidates_seen,
@@ -10291,7 +10297,7 @@ mod tests {
             "-d",
             "0",
             "-o",
-            "gfa:syng:crush,max-span=10k,max-traversals=64",
+            "gfa:syng:crush,max-span=10k,max-traversals=64,max-rounds=7",
         ])
         .unwrap();
         match args {
@@ -10305,7 +10311,7 @@ mod tests {
                 assert_eq!(output_format, "gfa");
                 assert_eq!(
                     engine_cli.engine_raw,
-                    "syng:crush,max-span=10k,max-traversals=64"
+                    "syng:crush,max-span=10k,max-traversals=64,max-rounds=7"
                 );
                 let parsed = engine_cli.parse_engine().unwrap();
                 assert_eq!(parsed.engine, GfaEngine::SyngNative);
@@ -10313,6 +10319,7 @@ mod tests {
                 let crush = parsed.crush_config.unwrap();
                 assert_eq!(crush.max_bubble_span, 10_000);
                 assert_eq!(crush.max_traversals, 64);
+                assert_eq!(crush.max_iterations, 7);
             }
             _ => panic!("expected query command"),
         }

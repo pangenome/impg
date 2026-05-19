@@ -72,9 +72,10 @@ gfa:sweepga:fastga:pggb,window=20k
 ```text
 input blunt graph
   -> POVU native flubble decomposition
-  -> bottom-up leaf-site ordering
-  -> exact path-preserving local replacement
-  -> recompute site discovery after each replacement
+  -> maximal eligible non-overlapping site frontier
+  -> parallel exact path-preserving local replacement
+  -> single graph rewrite for the frontier
+  -> recompute site discovery after each round
   -> stop when no bounded sites remain
 ```
 
@@ -119,18 +120,21 @@ graph parameterization hard to reproduce.
 `src/resolution.rs` does not implement its own flubble finder. It passes the
 current blunt GFA to `povu-rs` and calls `NativeGfa::decompose_flubbles`, then
 uses POVU's site IDs, parent/child relationships, entry/exit steps, and
-bottom-up leaf ordering to schedule exact path-preserving replacement.
+reference spans to schedule exact path-preserving replacement.
 
 The crush loop is iterative because each exact replacement changes the local
 graph topology and therefore can create, remove, or expose nested POVU sites.
-One iteration means one candidate attempt, not one SPOA alignment step:
+One round resolves a frontier of independent sites in parallel; it is not one
+SPOA alignment step:
 
 1. Decompose the current graph into flubbles/bubbles/tangles.
 2. Build a parent/child hierarchy.
-3. Select deepest non-overlapping sites.
-4. Extract observed path traversals through each site.
-5. Replace bounded sites exactly.
-6. Recompute decomposition on the changed graph.
+3. Build candidates for all observed path-supported sites.
+4. Select a maximal non-overlapping frontier: choose the largest eligible site
+   under the budgets, and descend only when a containing site is too large.
+5. Resolve the selected sites in parallel.
+6. Rewrite the graph once and validate exact path-sequence preservation.
+7. Recompute decomposition on the changed graph.
 
 For debugging or batch processing of an already rendered blunt GFA, the same
 transform is exposed directly:
@@ -139,8 +143,8 @@ transform is exposed directly:
 impg crush -g local.blunt.gfa -o local.crushed.gfa
 ```
 
-The defaults are sized for human panels (`512` candidate attempts and `10k`
-path traversals per candidate). Traversal count is deliberately a high safety
-rail. The main alignment budgets are `max-span`, `max-traversal-len`, and
-`max-total-seq`, because a common allele represented by many haplotypes should
-not fail only because many paths traverse it.
+The defaults are sized for human panels (`512` rounds and `10k` path traversals
+per candidate). Traversal count is deliberately a high safety rail. The main
+alignment budgets are `max-span`, `max-traversal-len`, and `max-total-seq`,
+because a common allele represented by many haplotypes should not fail only
+because many paths traverse it.
