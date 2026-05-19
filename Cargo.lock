@@ -204,7 +204,7 @@ dependencies = [
  "bitflags 2.11.1",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.10.5",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -1459,15 +1459,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "itertools"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
-dependencies = [
- "either",
-]
-
-[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2069,7 +2060,7 @@ dependencies = [
 [[package]]
 name = "povu-rs"
 version = "0.1.0"
-source = "git+https://github.com/pangenome/povu?branch=rust-native-gfa-vcf#02c18e56f7a029f0a07e08fd34864c5d75aaba27"
+source = "git+https://github.com/pangenome/povu?branch=rust-native-gfa-vcf#a05c00071a31d14a0122c606a8da3a81f536998a"
 dependencies = [
  "bindgen 0.70.1",
  "cmake",
