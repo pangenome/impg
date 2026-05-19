@@ -1,33 +1,48 @@
-# Hierarchical VCF And Graph Resolution
+# Hierarchical Graph Resolution
 
 IMPG can already build local sequence graphs from pangenome intervals, including
-syng-derived graphs, and route `query -o vcf` through POVU-style GFA-to-VCF
-conversion. The missing control surface is resolution: the same local graph may
-contain single-base substitutions, nested indels, multi-kilobase SVs, CNV
-structure, and repetitive tangles. A flat GFA-to-VCF pass tends to either emit
-too many small records or lose the structure needed to type larger sites.
+graphs induced from sparse de Bruijn or syncmer structures such as syng. Once
+those graphs are blunt variation graphs, the next missing control surface is
+not primarily VCF formatting. It is graph resolution: finding the regions of a
+graph that should be locally realigned, smoothed, compressed, simplified, or
+only summarized at a coarser topology-preserving scale.
 
-This note proposes a hierarchical bubble decomposition layer between local GFA
-construction and VCF/genotyping. The layer should identify fine bubbles,
-organize them into larger flubbles/sites, select representative traversals at
-configurable resolution, and preserve enough provenance to simplify graphs,
-emit VCF, and match sample evidence back to representative haplotypes.
+This note proposes a hierarchical bubble decomposition layer after local graph
+construction. The layer should identify clean bubbles and more general flubbles,
+organize them into larger sites, and choose an operation for each region:
+lossless pass-through, local partial order realignment, bidirectional-WFA pair
+compression, representative traversal collapse, symbolic coarse representation,
+VCF emission, or genotype/deconvolution against selected haplotypes.
+
+The important shift is that VCF is only one view over the resolved graph. The
+same hierarchy should also drive bubble-guided smoothing for pggb/seqwish/syng
+graphs, compression of poor local alignments, graph cleanup, and local
+haplotype inference.
 
 ## Problem
 
-Current GFA-to-VCF conversion needs controllable clustering of variant graph
-structure, especially in large SV, CNV, and repetitive regions.
+Current graph construction can leave us with the wrong local resolution. De
+Bruijn-style graph induction, syncmer graphs, poor pairwise alignments, or
+under-smoothed seqwish output may all produce tangles that are topologically
+correct at a large scale but too noisy or too fragmented inside local bubbles.
+Conversely, trying to fully align very large, high-divergence bubbles can be
+expensive, lossy, or misleading.
 
 The core issues are:
 
 - Local pangenome graphs are often nested: small variants sit inside insertion
   alleles, repeat copies, or alternative structural haplotypes.
-- A "one record per smallest bubble" VCF is too fragmented for SV/CNV sites and
-  loses haplotype context across nearby dependent choices.
-- A "one record per graph component" VCF can become untypeable if it enumerates
-  every observed path in a repetitive or copy-variable locus.
-- Graph simplification and VCF emission need the same notion of resolution, or
-  the simplified graph and the VCF records will disagree.
+- Existing smoothxg-style smoothing chooses blocks from a 1D graph sort and
+  heuristic block decomposition. That works, but it is not biologically or
+  topologically targeted: the blocks are not necessarily bubbles.
+- Bubble decomposition gives exact local work units. A bubble has common
+  anchors at both ends, so local alignment has a clear reason to align these
+  sequences together.
+- Small bubbles can be locally realigned into a clean partial order graph.
+  Larger bubbles may need compression or representative traversal selection
+  rather than full base-level smoothing.
+- VCF emission, simplified GFA, and genotyping need the same notion of
+  resolution, or the outputs will disagree.
 - Genotyping needs representative haplotypes that can explain read coverage and
   linkage, not just syntactically valid VCF alleles.
 
@@ -36,22 +51,32 @@ The desired behavior is a tunable path:
 ```text
 local GFA
   -> normalize/clean graph
-  -> detect atomic bubbles
+  -> detect bubbles/flubbles and cyclic tangles
   -> cluster into hierarchical flubbles/sites
-  -> select representative traversals at requested resolution
-  -> emit VCF and optional simplified GFA
+  -> choose per-site operation by size/divergence/topology
+  -> smooth, compress, simplify, or preserve each site
+  -> emit resolved GFA plus optional VCF/sidecars
   -> genotype/deconvolve sample evidence against representatives
 ```
 
 ## Goals
 
 - Support multiple resolution levels from atomic bubbles to large SV/CNV sites.
+- Use bubble/flubble decomposition as the primary unit of graph smoothing and
+  compression.
+- Use POVU-style bubble, flubble, and cycle structure to find tight tangles
+  that should be resolved or summarized as one local unit.
+- Produce locally consistent partial order graphs for bubbles below a practical
+  sequence/complexity threshold.
+- Preserve coarse sparse-de-Bruijn/syng topology above that threshold instead
+  of forcing a fragile full alignment.
 - Keep source path identity and path intervals through every transformation.
 - Select representative traversals that cover common haplotype space while
   bounding allele count.
-- Emit VCF records at the requested resolution with clear provenance back to
-  graph sites and lower-level bubbles.
-- Simplify or clean GFA graphs with the same site hierarchy used for VCF.
+- Emit VCF records at the requested resolution as a downstream view, with clear
+  provenance back to graph sites and lower-level bubbles.
+- Simplify or clean GFA graphs with the same site hierarchy used for local
+  smoothing and compression.
 - Expose representative haplotypes as feature vectors for genotyping,
   deconvolution, and local haplotype inference.
 
@@ -62,6 +87,9 @@ Non-goals for the first implementation:
   abstractions.
 - Replacing POVU immediately. The first target can wrap or preprocess GFA for
   POVU and then progressively move more logic into IMPG.
+- Reimplementing smoothxg wholesale. We should learn from its local POA
+  smoothing, but the work units should be graph-topological bubbles, not
+  heuristic chunks from a 1D sorted graph.
 
 ## Hierarchical Model
 
@@ -75,20 +103,21 @@ level 1: atomic bubbles
   single-entry/single-exit alternative traversals, usually small variants
 
 level 2: compound flubbles / variant sites
-  adjacent, nested, or weakly interacting bubbles that should often be emitted
-  together, such as an insertion with internal SNPs or a deletion plus nearby
-  breakpoint polymorphism
+  adjacent, nested, or weakly interacting bubbles that should often be operated
+  on together, such as an insertion with internal SNPs or a deletion plus
+  nearby breakpoint polymorphism
 
 level 3: complex loci / blocks
   large SV, CNV, duplicated, or repetitive regions where representative
-  traversal selection is required
+  traversal selection, compression, or topology preservation is required
 ```
 
 "Bubble" should be reserved for clean source/sink subgraphs when possible.
 "Flubble" is useful for an almost-bubble: a local component with recognizable
 entry/exit anchors and path traversals, but with internal nesting, weak cycles,
-copy-number variation, or multiple plausible boundaries. VCF emission may use
-either, but the model should record boundary confidence and decomposition type.
+copy-number variation, or multiple plausible boundaries. Resolution operations
+may use either, but the model should record boundary confidence and
+decomposition type.
 
 The hierarchy is usually a tree along a chosen reference path, but the data
 model should allow a DAG. Repetitive loci can cause one lower-level bubble to
@@ -172,12 +201,14 @@ Representative
 Important invariants:
 
 - A representative must map back to one or more graph traversals.
-- VCF alleles, simplified GFA paths, and genotype candidates must all reference
-  the same site and representative IDs.
+- Smoothed subgraphs, compressed paths, VCF alleles, simplified GFA paths, and
+  genotype candidates must all reference the same site and representative IDs.
 - The reference allele is explicit, even when it is not the most common
   traversal.
 - Source path identity is never discarded. It may be summarized, but the full
   path membership must remain recoverable for audit and training data.
+- Every lossy operation must produce a translation from old handles/path steps
+  to new handles/path steps or to a symbolic representative.
 
 ## Decomposition Algorithm
 
@@ -197,13 +228,15 @@ The first implementation should be deterministic and conservative.
    reported in reference coordinates when available and graph-local coordinates
    otherwise.
 
-3. Detect atomic bubbles.
+3. Detect atomic bubbles and cyclic tangles.
 
    Start with superbubble-like detection on the directed bidirected graph after
    orienting around the reference path. Boundaries should be graph handles with
    multiple path-consistent traversals between them. Reject or downgrade sites
    with ambiguous entry/exit, too many internal cycles, or insufficient path
-   support.
+   support. Also record dense local cycles and knots as tangle candidates even
+   when they are not clean bubbles; these are candidates for compression or
+   coarse preservation.
 
 4. Enumerate path-supported traversals.
 
@@ -228,25 +261,170 @@ The first implementation should be deterministic and conservative.
    entropy of child allele combinations, traversal count, and copy-number
    dispersion.
 
-6. Assign resolution levels.
+6. Assign resolution levels and operations.
 
-   Each site can be emitted at multiple levels:
+   Each site can be operated on at multiple levels:
 
    ```text
-   atomic       emit child bubbles independently
-   site         emit a compound flubble as one VCF record
-   representative emit only selected traversal representatives
-   block        emit a larger complex locus with symbolic alleles or sidecar
+   atomic       resolve child bubbles independently
+   site         operate on a compound flubble as one local graph block
+   representative collapse to selected traversal representatives
+   block        preserve larger sparse topology with symbolic/sidecar summary
    ```
 
    The default should be conservative: atomic for simple sites, site-level for
-   obvious nested SV/indel structures, and representative mode only when allele
-   explosion would otherwise occur.
+   obvious nested SV/indel structures, local smoothing for tractable bubbles,
+   and representative/block mode only when full local smoothing would be too
+   expensive or would collapse important large-scale topology.
 
 7. Select representatives.
 
    Collapse duplicate traversals first, then select exact or approximate
    representatives according to the requested resolution and bounds.
+
+8. Materialize the resolved view.
+
+   Replace each operated-on site with either a smoothed subgraph, a compressed
+   representative subgraph, or the original topology plus annotations. Then
+   lace the transformed sites back into the surrounding graph using the site
+   entry/exit handles.
+
+## Bubble-Guided Smoothing And Compression
+
+This hierarchy should become the block selector for smoothing. The current
+smoothxg-style path in IMPG inherits the pggb idea: sort the graph into one
+dimension, cut blocks with heuristics, run POA per block, and lace the result
+back. That is useful, but it is not the cleanest model once we have a bubble
+decomposition. A clean bubble already says: these traversals share a start and
+end and should be compared as alternatives in this local context.
+
+The proposed smoothing engine should be bubble-guided:
+
+```text
+input graph
+  -> POVU / internal bubble+flubble/cycle decomposition
+  -> classify each site by span, traversal count, divergence, cycles, alignability
+  -> choose operation
+  -> run local POA / BiWFA compression / representative collapse / passthrough
+  -> write resolved graph plus translation tables
+```
+
+Suggested operation classes:
+
+```text
+passthrough
+  keep the original subgraph; annotate why it was not touched
+
+local-poa
+  extract all path-supported traversal sequences through a small bubble and
+  build a local partial order graph
+
+pair-compress
+  align traversal pairs with bidirectional WFA inside the bubble anchors and
+  induce a compact local graph, seqwish-style but using the known bubble
+  context rather than global mapping
+
+representative
+  select medoids/k-medoids/polytypes and collapse low-value redundant
+  traversals onto them, preserving provenance
+
+symbolic-block
+  keep large-scale topology and emit a symbolic summary/sidecar for downstream
+  VCF or genotyping
+```
+
+Initial thresholds can be simple and explicit:
+
+```text
+local-poa if:
+  reference_span <= 1000 bp
+  max_traversal_length <= 3000 bp
+  traversal_count <= 128
+  graph is acyclic or weakly cyclic after path support filtering
+
+pair-compress if:
+  max_traversal_length <= 10000 bp
+  traversal_count is too high for all-vs-all POA but pair selection is bounded
+  entry/exit anchors are clean
+
+representative/block if:
+  traversal_count, copy-number entropy, cycle count, or span exceeds budget
+```
+
+The exact numbers should be configurable and tuned empirically. The guiding
+principle is that we want base-level local consistency up to a practical kernel
+size, perhaps 1-3 kb by default, and then we deliberately retain coarser
+topology above that scale rather than pretending a forced alignment is more
+truthful.
+
+### Resolution Policy
+
+The policy should be explicit about what scale is being represented:
+
+```text
+below the local alignment kernel
+  make a clean local partial order graph when the traversal set is bounded and
+  alignable
+
+near the kernel boundary
+  compress with bounded pairwise alignments or choose representatives, keeping
+  exact path membership
+
+above the kernel boundary
+  preserve sparse de Bruijn / syng / large-SV topology and expose it as a
+  block-level object
+```
+
+This avoids the main failure mode of global smoothing: forcing base-level
+homology into regions where the input graph is really expressing larger-scale
+topology. A syng or sparse de Bruijn graph can be exactly the right object at
+large scale while still being too coarse or fragmented inside a small bubble.
+Hierarchical resolution should improve the small local pieces without
+destroying the larger topology that made the sparse graph useful.
+
+The alignability model can start as a deterministic classifier over:
+
+- maximum and median traversal length
+- traversal count and duplicate sequence count
+- length dispersion across traversals
+- cycle/tangle count inside the site
+- anchor uniqueness and boundary confidence
+- repeat/self-similarity sketch score
+- pairwise sketch distance between traversals
+- path support and Pan-SN source diversity
+
+The output is an operation choice plus a reason string. That reason should be
+emitted in `resolution.json`, because users will need to know whether a site was
+smoothed, pair-compressed, represented by medoids, or deliberately left as
+coarse topology.
+
+### BiWFA Inside Bubbles
+
+Bidirectional WFA is attractive here because the bubble boundaries are known.
+We do not need to discover whether two sequences belong together; the graph
+topology has already asserted that they are alternative traversals between the
+same anchors. That lets us run pairwise compression in a strongly constrained
+local coordinate frame:
+
+- extract traversal sequences from entry to exit
+- select pairs by path support, distance, or k-nearest traversal sketches
+- run BiWFA for each selected pair
+- left-normalize / compress indel-equivalent alignments locally
+- feed the alignments to seqwish/cseqwish-like induction or a smaller internal
+  alignment-to-graph builder
+- stitch the induced subgraph back between entry and exit
+
+The main risk is local over-compression of indel/repeat structure. We should
+therefore preserve path-step provenance and keep the operation bounded to
+regions where the alignment is credible. For STRs, satellites, or high-copy
+CNVs, representative or symbolic block modes may be more honest than forcing
+base-level compression.
+
+The important distinction from whole-graph alignment is that the bubble gives
+the coordinate frame. We are not asking whether two sequences should align
+somewhere in the graph; we are asking how to express alternatives between the
+same entry and exit handles. That makes pair compression a local graph
+resolution operation rather than a discovery operation.
 
 ## Representative Traversals, Centroids, And Polytypes
 
@@ -299,15 +477,59 @@ representative_path=sample42#1#chr6:...
 assigned_paths=...
 ```
 
-For VCF, exact and medoid representatives can usually become sequence alleles
-or symbolic alleles. Centroids and polytypes may require symbolic alleles plus
-sidecar annotations because standard VCF cannot fully encode arbitrary graph
-traversal structure.
+Exact and medoid representatives can become paths in a simplified graph. They
+can also become VCF sequence alleles or symbolic alleles when the selected site
+is being exported as variants. Centroids and polytypes may be useful for graph
+cleaning or compression, but should be marked as synthetic if emitted as
+sequence paths because they may not correspond to a real source haplotype.
+
+## Resolved Graph Output
+
+The primary output of hierarchical resolution should be a graph, not a VCF.
+VCF, genotype candidates, and traversal FASTA are views over the same resolved
+site model.
+
+Possible graph outputs:
+
+```text
+resolved.gfa
+  graph after bubble-guided smoothing/compression
+
+resolution.json
+  site hierarchy, operations, thresholds, and provenance maps
+
+translation.tsv / translation.bin
+  old handle/path-step -> new handle/path-step or representative assignment
+
+site_traversals.fa
+  traversal sequences used for local POA/BiWFA/representative selection
+```
+
+Resolution levels:
+
+```text
+fine
+  aggressively smooth small bubbles into local POA graphs
+
+balanced
+  smooth tractable bubbles, compress moderate sites, preserve large topology
+
+coarse
+  collapse redundant traversals into representatives/polytypes
+
+topology
+  preserve the input sparse graph topology with only annotations and cleanup
+```
+
+This is the graph-compression analogue of variant calling. The caller chooses
+where the graph should represent base-level homology and where it should
+represent only coarser equivalence classes of haplotype paths.
 
 ## VCF Emission At Chosen Resolution
 
-The VCF writer should consume the hierarchy instead of rediscovering variants
-from raw graph topology.
+The VCF writer should consume the resolved hierarchy instead of rediscovering
+variants from raw graph topology. It is a downstream exporter from graph
+resolution, not the reason the hierarchy exists.
 
 Proposed modes:
 
@@ -444,21 +666,28 @@ site, while deconvolution reports that the evidence prefers child alleles
 The first user-facing knobs should be few and stable:
 
 ```text
-impg query -o vcf:syng \
-  --vcf-resolution site \
-  --site-merge-distance 1000 \
-  --max-site-alleles 16 \
-  --representative-method k-medoids \
-  --representative-k 8 \
+impg query -o gfa:syng \
+  --graph-resolution balanced \
+  --bubble-smoothing local-poa \
+  --max-poa-span 1000 \
+  --max-poa-traversal-len 3000 \
+  --bubble-compression biwfa \
   --emit-resolution-index out.resolution.json
 ```
 
 Potential options:
 
 ```text
---vcf-resolution atomic|site|representative|block
+--graph-resolution fine|balanced|coarse|topology
+--site-operation auto|passthrough|local-poa|pair-compress|representative|symbolic
+--bubble-smoothing none|local-poa|biwfa|auto
 --bubble-min-anchor-bp N
 --bubble-max-span N
+--max-poa-span N
+--max-poa-traversal-len N
+--max-poa-traversals N
+--max-biwfa-span N
+--max-biwfa-pairs N
 --site-merge-distance N
 --site-max-span N
 --max-site-traversals N
@@ -472,12 +701,16 @@ Potential options:
 --emit-simplified-gfa PATH
 --emit-resolution-index PATH
 --emit-traversal-fasta PATH
+--vcf-resolution atomic|site|representative|block
 ```
 
 Defaults should favor auditability:
 
 - include the reference traversal
-- use observed traversals rather than synthetic centroids for VCF alleles
+- use observed traversals rather than synthetic centroids for graph paths or
+  VCF alleles
+- preserve large sparse graph topology when local alignment budgets are
+  exceeded
 - avoid lossy representative collapse unless allele/traversal limits are hit or
   the user requests representative/block resolution
 - write clear warnings for ambiguous sites
@@ -491,6 +724,12 @@ Tests should cover:
 - simple SNP/indel bubbles emitted identically at atomic and site resolution
 - adjacent independent SNPs that remain split unless merge distance or linkage
   requires a parent site
+- small bubbles that are smoothed into a locally consistent POA graph
+- small bubbles with poor original alignment that improve after local POA
+- moderate bubbles compressed by BiWFA pair induction without losing path
+  membership
+- large bubbles that deliberately pass through as coarse topology rather than
+  forced POA
 - insertion with internal SNPs, emitted as child bubbles at atomic resolution
   and one insertion-site record at site resolution
 - nested deletion and inversion-like path where boundaries are ambiguous
@@ -510,6 +749,8 @@ Validation metrics:
 
 ```text
 site boundary precision/recall against hand-labeled fixtures
+resolved graph node/edge count versus input
+sequence/path preservation through translation tables
 allele reconstruction identity for emitted sequence alleles
 path coverage by representatives
 maximum and mean traversal-to-representative distance
@@ -525,6 +766,17 @@ sites, but the adversarial synthetic set is more important for preventing
 regressions in decomposition logic.
 
 ## Relation To Other Work Areas
+
+PGGB / smoothxg:
+
+- smoothxg provides the precedent for local POA smoothing and graph lacing
+- the proposed difference is block choice: use bubble/flubble topology instead
+  of sorted-graph chunk heuristics
+- the target is a locally consistent partial order graph up to a configurable
+  kernel size, while preserving larger sparse topology above that size
+- the useful lesson is not the exact chunking heuristic, but the smoothing
+  machinery: extract local sequences, align them into a partial order graph,
+  and lace the result back with path provenance intact
 
 Assembly graph simplification:
 
@@ -578,20 +830,32 @@ Learned or simulation-trained scoring:
 
 ## Suggested Implementation Phases
 
-1. Add an internal resolution index for local GFAs with atomic bubble detection,
-   path-supported traversal extraction, and JSON debug output.
-2. Add site clustering over adjacent/nested bubbles and deterministic site IDs.
-3. Add exact and medoid representative selection with feature vectors.
-4. Route `query -o vcf` through the hierarchy for `atomic` and `site` modes,
+1. Add an internal resolution index for local GFAs with bubble/flubble
+   detection, cycle/tangle marking, path-supported traversal extraction, and
+   JSON debug output. Start with POVU output where possible and keep the data
+   model independent enough to replace pieces later.
+2. Add deterministic site clustering over adjacent/nested bubbles, tight
+   tangles, and cyclic local components with stable site IDs.
+3. Add the deterministic alignability classifier and operation assignment:
+   passthrough, local POA, BiWFA pair-compression, representative, or symbolic
+   block.
+4. Add graph output passthrough with translation tables, proving that the
+   hierarchy can round-trip a graph without changing it.
+5. Add bubble-guided local POA smoothing for small clean bubbles and lace the
+   smoothed subgraph back through entry/exit handles.
+6. Add BiWFA pair-compression for moderate bubbles where pairwise alignment is
+   credible but full POA is too expensive.
+7. Add exact and medoid representative selection with feature vectors for
+   larger or repetitive sites.
+8. Route `query -o vcf` through the hierarchy for `atomic` and `site` modes,
    keeping POVU as the sequence-allele backend where possible.
-5. Add representative/block VCF modes with symbolic alleles and sidecar
+9. Add representative/block VCF modes with symbolic alleles and sidecar
    traversal metadata.
-6. Add simplified GFA emission using the same hierarchy and provenance maps.
-7. Connect representatives to `genotype`/`infer` as candidate haplotypes in a
+10. Connect representatives to `genotype`/`infer` as candidate haplotypes in a
    declared feature space.
-8. Add simulation-trained or learned scoring only after deterministic fixtures
-   and real-region validation are stable.
+11. Add simulation-trained or learned scoring only after deterministic fixtures
+    and real-region validation are stable.
 
-The key design constraint is that resolution is not just a VCF formatting
-option. It is a shared graph model used by VCF emission, graph simplification,
-and sample evidence interpretation.
+The key design constraint is that resolution is not a VCF formatting option.
+It is a shared graph model used by bubble-guided smoothing, graph compression,
+graph simplification, VCF emission, and sample evidence interpretation.
