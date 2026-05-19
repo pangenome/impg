@@ -162,8 +162,9 @@ gfa:<stage>[,<key=value>...][:<stage>[,<key=value>...]...]
 ```
 
 For example, `gfa:syng,k=63,s=8,seed=7:blunt` and the legacy
-`gfa:syng:blunt,k=63,s=8,seed=7` are both accepted. Future graph transforms
-such as `:crush` use the same staged syntax; see
+`gfa:syng:blunt,k=63,s=8,seed=7` are both accepted. Graph transforms use the
+same staged syntax. `gfa:syng:crush,max-span=10k,max-traversals=128` emits
+blunt syng GFA and then runs exact path-preserving bubble resolution; see
 `docs/graph-pipeline-dsl.md`.
 
 VCF output uses the same engine dispatch and passes the local GFA to POVU:

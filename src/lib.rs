@@ -72,6 +72,8 @@ pub struct EngineOpts {
     /// When set, activates the partitioned GFA pipeline: build per-partition GFA,
     /// lace together, then run gfaffix once at the end.
     pub partition_size: Option<usize>,
+    /// Optional exact path-preserving blunt-graph resolution pass.
+    pub crush_config: Option<resolution::ResolutionConfig>,
 }
 
 /// Minimal ImpgIndex wrapper around a SequenceIndex for syng query path.
@@ -527,13 +529,32 @@ pub fn dispatch_gfa_engine(
             std::io::Error::other(format!("Failed to create debug dir '{}': {}", dir, e))
         })?;
     }
-    dispatch_gfa_engine_inner(
+    let gfa = dispatch_gfa_engine_inner(
         impg,
         query_intervals,
         sequence_index,
         scoring_params,
         engine_opts,
-    )
+    )?;
+    apply_graph_transforms(gfa, engine_opts)
+}
+
+fn apply_graph_transforms(
+    gfa: String,
+    engine_opts: &EngineOpts,
+) -> std::io::Result<String> {
+    let Some(config) = &engine_opts.crush_config else {
+        return Ok(gfa);
+    };
+    let resolved = resolution::resolve_gfa_bubbles(&gfa, config)?;
+    log::info!(
+        "crush: {} resolved, {} bailed, {} candidates seen across {} iterations",
+        resolved.stats.resolved,
+        resolved.stats.bailed,
+        resolved.stats.candidates_seen,
+        resolved.stats.iterations
+    );
+    Ok(resolved.gfa)
 }
 
 /// Convert an in-memory GFA string to VCF using the native Rust POVU path.
@@ -890,7 +911,8 @@ pub fn partitioned_gfa_pipeline(
 
     // 3. Single final gfaffix normalization + sort
     info!("[partitioned] Running final gfaffix normalization");
-    graph::normalize_and_sort(laced, engine_opts.pipeline.num_threads)
+    let final_gfa = graph::normalize_and_sort(laced, engine_opts.pipeline.num_threads)?;
+    apply_graph_transforms(final_gfa, engine_opts)
 }
 
 #[cfg(test)]
@@ -1059,5 +1081,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_crush_transform_is_applied_path_preserving() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tAAA
+S\t2\tC
+S\t3\tG
+S\t4\tTTT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+P\tref\t1+,2+,4+\t*
+P\talt\t1+,3+,4+\t*
+";
+        let before = resolution::path_sequences(gfa).unwrap();
+        let opts = EngineOpts {
+            engine: GfaEngine::Poa,
+            syng_gfa_mode: None,
+            syng_params: None,
+            pipeline: commands::graph::GraphBuildConfig::default(),
+            target_poa_lengths: vec![700, 1100],
+            max_node_length: 100,
+            poa_padding_fraction: 0.001,
+            partition_size: None,
+            crush_config: Some(resolution::ResolutionConfig::default()),
+        };
+        let out = super::apply_graph_transforms(gfa.to_string(), &opts).unwrap();
+        let after = resolution::path_sequences(&out).unwrap();
+        assert_eq!(before, after);
+        assert_ne!(gfa, out);
     }
 }

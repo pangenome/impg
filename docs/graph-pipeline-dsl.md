@@ -26,8 +26,8 @@ parameters.
 
 ## Current Runtime Support
 
-The parser accepts the staged grammar, but runtime execution is intentionally
-still conservative.
+The parser accepts the staged grammar and runtime execution supports a small
+set of typed producers plus the exact path-preserving `crush` transform.
 
 Supported executable producers today:
 
@@ -67,30 +67,24 @@ gfa:seqwish:20k
 gfa:sweepga:fastga:pggb,window=20k
 ```
 
-`crush` is parsed as a future graph transform but is not wired into runtime
-dispatch yet. Attempting to run `gfa:syng:crush` currently fails with an
-explicit "not wired yet" error rather than silently changing graph semantics.
-
-## Planned Stages
-
-`crush` should become a generic blunt-graph transform:
+`crush` is a generic blunt-graph transform:
 
 ```text
 input blunt graph
-  -> POVU/flubble decomposition
-  -> bottom-up non-overlapping site batches
+  -> POVU-style collinear path-site discovery
+  -> bottom-up leaf-site ordering
   -> exact path-preserving local replacement
-  -> recompute decomposition after each phase
+  -> recompute site discovery after each replacement
   -> stop when no bounded sites remain
 ```
 
-For syng, `crush` should imply blunt input:
+For syng, `crush` implies blunt input:
 
 ```text
 syng:crush == syng:blunt -> crush
 ```
 
-For seqwish and pggb, `crush` should operate on the already-blunt local graph:
+For seqwish and pggb, `crush` operates on the already-blunt local graph:
 
 ```text
 seqwish:crush
@@ -100,6 +94,8 @@ pggb:crush
 The important design point is that `crush` is not syng-specific. Syng, seqwish,
 pggb, high-k seqwish, and future GBZ/handlegraph-backed renderers should all
 feed a common path-embedded blunt graph into the same transform.
+
+`syng:raw:crush` is rejected because the resolver requires blunt `0M` links.
 
 ## Stage Parameters
 
@@ -118,11 +114,15 @@ crush,max-span=10k,max-traversal-len=10k,max-traversals=128,method=poa
 Unknown parameters should be errors, not warnings. Silent ignoring would make
 graph parameterization hard to reproduce.
 
-## POVU Requirement For Crush
+## POVU Requirement For Fuller Crush
 
-The current `src/resolution.rs` primitive has an exact path-preserving local
-replacement backend, but its detector is deliberately conservative. The real
-`crush` scheduler must be POVU/flubble-driven:
+The current `src/resolution.rs` implementation uses the same reference-path
+collinear-match site model as POVU's native Rust VCF extractor, then processes
+leaf sites first and validates exact path-sequence preservation after every
+replacement. This is enough to make `:crush` executable and testable.
+
+The fuller scheduler should be POVU/flubble-driven when `povu-rs` exposes the
+needed hierarchy API:
 
 1. Decompose the current graph into flubbles/bubbles/tangles.
 2. Build a parent/child hierarchy.
@@ -132,7 +132,8 @@ replacement backend, but its detector is deliberately conservative. The real
 6. Recompute decomposition on the changed graph.
 
 At the current pinned `povu-rs` revision, IMPG has native GFA-to-VCF support,
-but not a public flubble hierarchy API. We need a POVU-side API that exposes
-site IDs, parent/child relationships, entry/exit handles, path-supported
-traversal boundaries, and enough node/edge identity to schedule non-overlapping
-bottom-up batches.
+but not a public flubble hierarchy API. The current `:crush` implementation
+therefore does not consume a public POVU hierarchy yet. We still need a
+POVU-side API that exposes site IDs, parent/child relationships, entry/exit
+handles, path-supported traversal boundaries, and enough node/edge identity to
+schedule non-overlapping bottom-up batches.

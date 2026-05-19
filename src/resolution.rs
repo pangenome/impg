@@ -8,7 +8,7 @@
 
 use crate::graph::{build_spoa_engine, feed_sequences_to_graph, reverse_complement, unchop_gfa};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
 /// Configuration for exact path-preserving bubble resolution.
@@ -93,6 +93,12 @@ struct BubbleCandidate {
     ranges: Vec<PathRange>,
     signature: String,
     within_budget: bool,
+}
+
+#[derive(Clone, Debug)]
+struct SiteDraft {
+    ref_start: usize,
+    ref_end: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -316,62 +322,137 @@ fn find_next_candidate(
     let ref_path = &graph.paths[ref_path_idx];
     let ref_positions = path_positions(graph, ref_path_idx);
 
-    for begin in 0..ref_path.steps.len().saturating_sub(1) {
+    for site in leaf_site_order(&candidate_sites(graph, ref_path_idx)) {
+        let begin = site.ref_start;
+        let exit_step = site.ref_end;
         let entry = ref_path.steps[begin];
-        for exit_step in begin + 1..ref_path.steps.len() {
-            let exit = ref_path.steps[exit_step];
-            let ref_span = ref_positions[exit_step + 1] - ref_positions[begin];
-            if ref_span > config.max_bubble_span {
-                break;
+        let exit = ref_path.steps[exit_step];
+        let ref_span = ref_positions[exit_step + 1] - ref_positions[begin];
+
+        let mut ranges = Vec::new();
+        for path_idx in 0..graph.paths.len() {
+            if let Some((range_begin, range_end)) =
+                unique_anchor_range(&graph.paths[path_idx], entry, exit)
+            {
+                let mut range = PathRange {
+                    path_idx,
+                    begin_step: range_begin,
+                    end_step: range_end,
+                    sequence: Vec::new(),
+                };
+                range.sequence = range_sequence(graph, &range);
+                ranges.push(range);
             }
-
-            let mut ranges = Vec::new();
-            for path_idx in 0..graph.paths.len() {
-                if let Some((range_begin, range_end)) =
-                    unique_anchor_range(&graph.paths[path_idx], entry, exit)
-                {
-                    let mut range = PathRange {
-                        path_idx,
-                        begin_step: range_begin,
-                        end_step: range_end,
-                        sequence: Vec::new(),
-                    };
-                    range.sequence = range_sequence(graph, &range);
-                    ranges.push(range);
-                }
-            }
-
-            if ranges.len() < 2 {
-                continue;
-            }
-
-            let distinct_sequences: BTreeSet<Vec<u8>> =
-                ranges.iter().map(|r| r.sequence.clone()).collect();
-            if distinct_sequences.len() < 2 {
-                continue;
-            }
-
-            let signature = candidate_signature(graph, ref_path_idx, begin, exit_step, &ranges);
-            if seen.contains(&signature) {
-                continue;
-            }
-
-            let max_traversal_len = ranges.iter().map(|r| r.sequence.len()).max().unwrap_or(0);
-            let total_sequence = ranges.iter().map(|r| r.sequence.len()).sum::<usize>();
-            let within_budget = ref_span <= config.max_bubble_span
-                && ranges.len() <= config.max_traversals
-                && max_traversal_len <= config.max_traversal_len
-                && total_sequence <= config.max_total_sequence;
-
-            return Some(BubbleCandidate {
-                ranges,
-                signature,
-                within_budget,
-            });
         }
+
+        if ranges.len() < 2 {
+            continue;
+        }
+
+        let distinct_sequences: BTreeSet<Vec<u8>> =
+            ranges.iter().map(|r| r.sequence.clone()).collect();
+        if distinct_sequences.len() < 2 {
+            continue;
+        }
+
+        let signature = candidate_signature(graph, ref_path_idx, begin, exit_step, &ranges);
+        if seen.contains(&signature) {
+            continue;
+        }
+
+        let max_traversal_len = ranges.iter().map(|r| r.sequence.len()).max().unwrap_or(0);
+        let total_sequence = ranges.iter().map(|r| r.sequence.len()).sum::<usize>();
+        let within_budget = ref_span <= config.max_bubble_span
+            && ranges.len() <= config.max_traversals
+            && max_traversal_len <= config.max_traversal_len
+            && total_sequence <= config.max_total_sequence;
+
+        return Some(BubbleCandidate {
+            ranges,
+            signature,
+            within_budget,
+        });
     }
 
     None
+}
+
+/// Discover candidate sites using the same reference-path collinear-match
+/// model as POVU's native VCF extractor: every adjacent pair of shared,
+/// collinear steps between the reference path and another path defines a
+/// candidate if the internal traversals differ.
+fn candidate_sites(graph: &Graph, ref_path_idx: usize) -> BTreeMap<(usize, usize), SiteDraft> {
+    let reference = &graph.paths[ref_path_idx];
+    let mut candidates = BTreeMap::<(usize, usize), SiteDraft>::new();
+
+    for (path_idx, path) in graph.paths.iter().enumerate() {
+        if path_idx == ref_path_idx {
+            continue;
+        }
+        let matches = collinear_matches(&reference.steps, &path.steps);
+        for window in matches.windows(2) {
+            let (ref_start, path_start) = window[0];
+            let (ref_end, path_end) = window[1];
+            if ref_end <= ref_start || path_end <= path_start {
+                continue;
+            }
+            let ref_internal = &reference.steps[ref_start + 1..ref_end];
+            let alt_internal = &path.steps[path_start + 1..path_end];
+            if ref_internal == alt_internal {
+                continue;
+            }
+            candidates
+                .entry((ref_start, ref_end))
+                .or_insert(SiteDraft { ref_start, ref_end });
+        }
+    }
+
+    candidates
+}
+
+fn collinear_matches(reference: &[Step], path: &[Step]) -> Vec<(usize, usize)> {
+    let rows = reference.len();
+    let cols = path.len();
+    let mut dp = vec![vec![0usize; cols + 1]; rows + 1];
+    for i in (0..rows).rev() {
+        for j in (0..cols).rev() {
+            dp[i][j] = if reference[i] == path[j] {
+                1 + dp[i + 1][j + 1]
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+
+    let mut matches = Vec::new();
+    let mut i = 0usize;
+    let mut j = 0usize;
+    while i < rows && j < cols {
+        if reference[i] == path[j] {
+            matches.push((i, j));
+            i += 1;
+            j += 1;
+        } else if dp[i + 1][j] >= dp[i][j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    matches
+}
+
+fn leaf_site_order(candidates: &BTreeMap<(usize, usize), SiteDraft>) -> Vec<SiteDraft> {
+    let mut leaves = candidates
+        .values()
+        .filter(|site| {
+            !candidates.values().any(|other| {
+                site.ref_start < other.ref_start && other.ref_end < site.ref_end
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    leaves.sort_by_key(|site| (site.ref_end - site.ref_start, site.ref_start, site.ref_end));
+    leaves
 }
 
 fn unique_anchor_range(path: &Path, entry: Step, exit: Step) -> Option<(usize, usize)> {
@@ -727,6 +808,53 @@ P\tins\t1+,2+,3+\t*
         assert_eq!(before["ref"], "ACTA");
         assert_eq!(before["ins"], "ACGGGTA");
         assert_eq!(resolved.stats.resolved, 1);
+    }
+
+    #[test]
+    fn resolves_nested_leaf_sites_bottom_up() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tT
+S\t5\tAA
+S\t6\tA
+S\t7\tCCC
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+L\t2\t+\t5\t+\t0M
+L\t5\t+\t4\t+\t0M
+L\t4\t+\t6\t+\t0M
+L\t1\t+\t7\t+\t0M
+L\t7\t+\t6\t+\t0M
+P\tref\t1+,2+,3+,4+,6+\t*
+P\tinner_alt\t1+,2+,5+,4+,6+\t*
+P\touter_alt\t1+,7+,6+\t*
+";
+        let before = seq_map(gfa);
+        let graph = parse_gfa(gfa).unwrap();
+        let sites = candidate_sites(&graph, 0);
+        let leaves = leaf_site_order(&sites);
+        assert_eq!(
+            leaves
+                .iter()
+                .map(|site| (site.ref_start, site.ref_end))
+                .collect::<Vec<_>>(),
+            vec![(1, 3)]
+        );
+        let resolved = resolve_gfa_bubbles(
+            gfa,
+            &ResolutionConfig {
+                max_iterations: 4,
+                ..ResolutionConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert!(resolved.stats.resolved >= 2);
+        assert_eq!(resolved.stats.bailed, 0);
     }
 
     #[test]

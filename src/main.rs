@@ -2141,12 +2141,13 @@ struct EngineCliOpts {
     debug_dir: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ParsedGfaEngine {
     engine: GfaEngine,
     partition_size: Option<usize>,
     syng_gfa_mode: Option<SyngGfaMode>,
     syng_params: Option<impg::syng::SyncmerParams>,
+    crush_config: Option<impg::resolution::ResolutionConfig>,
 }
 
 fn set_syng_gfa_mode(
@@ -2181,6 +2182,93 @@ fn parse_u32_engine_param(raw: &str, key: &str, value: &str) -> io::Result<u32> 
             ),
         )
     })
+}
+
+fn parse_usize_size_engine_param(raw: &str, key: &str, value: &str) -> io::Result<usize> {
+    let parsed = parse_size(value).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Invalid --gfa-engine '{}': {}='{}': {}", raw, key, value, e),
+        )
+    })?;
+    usize::try_from(parsed).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': {}='{}' is too large",
+                raw, key, value
+            ),
+        )
+    })
+}
+
+fn parse_crush_stage(
+    raw: &str,
+    stage: &GraphPipelineStage,
+) -> io::Result<impg::resolution::ResolutionConfig> {
+    let mut config = impg::resolution::ResolutionConfig::default();
+    for param in &stage.params {
+        match param.key.as_str() {
+            "max-iterations" | "iterations" => {
+                config.max_iterations =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "max-span" | "max-bubble-span" | "span" => {
+                config.max_bubble_span =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "max-traversal-len" | "max-traversal-length" | "max-traversal" => {
+                config.max_traversal_len =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "max-total-sequence" | "max-total-seq" | "max-sequence" => {
+                config.max_total_sequence =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "max-traversals" => {
+                config.max_traversals =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "method" => {
+                let method = param.value.replace('_', "-").to_ascii_lowercase();
+                if !matches!(method.as_str(), "poa" | "spoa") {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected poa)",
+                            raw, param.value
+                        ),
+                    ));
+                }
+            }
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Invalid --gfa-engine '{}': unknown crush parameter '{}'",
+                        raw, other
+                    ),
+                ));
+            }
+        }
+    }
+
+    if config.max_iterations == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Invalid --gfa-engine '{}': crush iterations must be > 0", raw),
+        ));
+    }
+    if config.max_traversals == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': crush max-traversals must be > 0",
+                raw
+            ),
+        ));
+    }
+    Ok(config)
 }
 
 fn parse_syng_assertion_params(
@@ -2369,6 +2457,7 @@ impl EngineCliOpts {
         let mut smer_length: Option<u32> = None;
         let mut syncmer_seed: Option<u32> = None;
         let mut saw_syng_param = false;
+        let mut crush_config = None;
 
         parse_engine_stage_params(
             raw,
@@ -2397,13 +2486,13 @@ impl EngineCliOpts {
                     )?;
                 }
                 "crush" => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "Invalid --gfa-engine '{}': graph pipeline stage 'crush' is parsed but not wired yet",
-                            raw
-                        ),
-                    ));
+                    if crush_config.is_some() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Invalid --gfa-engine '{}': duplicate crush stage", raw),
+                        ));
+                    }
+                    crush_config = Some(parse_crush_stage(raw, stage)?);
                 }
                 stage_name if !is_syng && stage.params.is_empty() => {
                     partition_size = Some(parse_window(stage_name)?);
@@ -2418,6 +2507,18 @@ impl EngineCliOpts {
         }
         if is_syng && syng_gfa_mode.is_none() {
             syng_gfa_mode = Some(SyngGfaMode::Blunt);
+        }
+        if is_syng
+            && crush_config.is_some()
+            && matches!(syng_gfa_mode, Some(SyngGfaMode::Raw))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Invalid --gfa-engine '{}': crush requires blunt syng GFA; use syng:crush or syng:blunt:crush",
+                    raw
+                ),
+            ));
         }
 
         let syng_params = if saw_syng_param {
@@ -2437,6 +2538,7 @@ impl EngineCliOpts {
             partition_size,
             syng_gfa_mode,
             syng_params,
+            crush_config,
         })
     }
 
@@ -2495,9 +2597,12 @@ impl EngineCliOpts {
 
     /// Resolve and build an `EngineOpts`.
     fn build(&self, num_threads: usize) -> io::Result<EngineOpts> {
-        let parsed = self.parse_engine()?;
+        let mut parsed = self.parse_engine()?;
         let engine = parsed.engine;
         self.validate_engine_params(engine)?;
+        if let Some(config) = parsed.crush_config.as_mut() {
+            config.scoring_params = self.parse_poa_scoring()?;
+        }
 
         let sparsify = self.aln.sw.sparsify.clone();
         let mash_params = sweepga::knn_graph::MashParams {
@@ -2519,6 +2624,7 @@ impl EngineCliOpts {
             parsed.partition_size,
             parsed.syng_gfa_mode,
             parsed.syng_params,
+            parsed.crush_config,
         )
     }
 }
@@ -3330,7 +3436,8 @@ Syng notes:
   bed, bedpe, gfa, vcf, fasta, and gbwt. Use -o gfa for a local sequence GFA from
   query-selected intervals. `--gfa-engine syng` emits a syng syncmer GFA and
   defaults to syng:blunt; use syng:raw to preserve native overlaps. The compact
-  forms `-o gfa:syng:blunt,k=63,s=8,seed=7` and `-o vcf:syng` are accepted
+  forms `-o gfa:syng:blunt,k=63,s=8,seed=7`, `-o gfa:syng:crush`,
+  and `-o vcf:syng` are accepted
   as shorthand. Use
   `impg syng2gfa` to dump the whole syng syncmer graph instead.
 
@@ -3339,7 +3446,8 @@ GFA engine shorthand:
   matching `-o vcf:<engine>` forms are equivalent to
   `-o <format> --gfa-engine <engine>`. Alignment-backed graph builds can also
   name the aligner prefix, e.g. `-o gfa:wfmash:seqwish`,
-  `-o gfa:fastga:pggb`, or `-o gfa:sweepga:seqwish`.
+  `-o gfa:fastga:pggb`, or `-o gfa:sweepga:seqwish`. Add `:crush` to run
+  exact path-preserving blunt-graph resolution, e.g. `-o gfa:syng:crush`.
 ")]
     Query {
         // --- Input ---
@@ -7339,6 +7447,7 @@ fn build_engine_opts(
     partition_size: Option<usize>,
     syng_gfa_mode: Option<SyngGfaMode>,
     syng_params: Option<impg::syng::SyncmerParams>,
+    crush_config: Option<impg::resolution::ResolutionConfig>,
 ) -> io::Result<EngineOpts> {
     let pipeline = graph::GraphBuildConfig {
         num_threads,
@@ -7377,6 +7486,7 @@ fn build_engine_opts(
         syng_params,
         pipeline,
         partition_size,
+        crush_config,
         target_poa_lengths: smooth.parse_target_poa_lengths()?,
         max_node_length: smooth.max_node_length,
         poa_padding_fraction: smooth.poa_padding_fraction,
@@ -9949,6 +10059,7 @@ mod tests {
             "`--gfa-engine syng` emits a syng syncmer GFA",
             "defaults to syng:blunt; use syng:raw",
             "-o gfa:syng:blunt,k=63,s=8,seed=7",
+            "-o gfa:syng:crush",
             "-o vcf:syng",
             "-o gfa:wfmash:seqwish",
             "`impg syng2gfa` to dump the whole syng syncmer graph",
@@ -10075,14 +10186,14 @@ mod tests {
     }
 
     #[test]
-    fn test_gfa_output_format_parses_but_rejects_unwired_crush_stage() {
+    fn test_gfa_output_format_accepts_crush_stage() {
         let args = Args::try_parse_from([
             "impg",
             "query",
             "-d",
             "0",
             "-o",
-            "gfa:syng:crush,max-span=10k",
+            "gfa:syng:crush,max-span=10k,max-traversals=64",
         ])
         .unwrap();
         match args {
@@ -10094,10 +10205,41 @@ mod tests {
                 let output_format =
                     apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
                 assert_eq!(output_format, "gfa");
-                assert_eq!(engine_cli.engine_raw, "syng:crush,max-span=10k");
+                assert_eq!(
+                    engine_cli.engine_raw,
+                    "syng:crush,max-span=10k,max-traversals=64"
+                );
+                let parsed = engine_cli.parse_engine().unwrap();
+                assert_eq!(parsed.engine, GfaEngine::SyngNative);
+                assert_eq!(parsed.syng_gfa_mode, Some(SyngGfaMode::Blunt));
+                let crush = parsed.crush_config.unwrap();
+                assert_eq!(crush.max_bubble_span, 10_000);
+                assert_eq!(crush.max_traversals, 64);
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_rejects_raw_syng_crush() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:raw:crush",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
                 let err = engine_cli.parse_engine().unwrap_err();
-                assert!(err.to_string().contains("crush"));
-                assert!(err.to_string().contains("not wired yet"));
+                assert!(err.to_string().contains("crush requires blunt syng GFA"));
             }
             _ => panic!("expected query command"),
         }
