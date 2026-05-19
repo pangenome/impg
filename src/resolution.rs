@@ -8,6 +8,7 @@
 
 use crate::graph::{build_spoa_engine, feed_sequences_to_graph, reverse_complement, unchop_gfa};
 use povu::native_gfa::{Step as PovuStep, Strand as PovuStrand};
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeSet;
 use std::io;
@@ -15,7 +16,7 @@ use std::io;
 /// Configuration for exact path-preserving bubble resolution.
 #[derive(Clone, Debug)]
 pub struct ResolutionConfig {
-    /// Maximum number of replacement iterations.
+    /// Maximum number of frontier replacement rounds.
     pub max_iterations: usize,
     /// Maximum reference path span, in bp, for a candidate bubble.
     pub max_bubble_span: usize,
@@ -51,6 +52,7 @@ impl Default for ResolutionConfig {
 /// Summary of a resolution run.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ResolutionStats {
+    /// Number of frontier replacement rounds attempted.
     pub iterations: usize,
     pub candidates_seen: usize,
     pub resolved: usize,
@@ -101,12 +103,34 @@ struct BubbleCandidate {
     ranges: Vec<PathRange>,
     signature: String,
     within_budget: bool,
+    reference_start_step: usize,
+    reference_end_step: usize,
+    ref_span: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct CandidateFrontier {
+    selected: Vec<BubbleCandidate>,
+    bailed_signatures: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ReplacementPlan {
+    candidate: BubbleCandidate,
+    replacement: Graph,
+}
+
+#[derive(Clone, Debug)]
+struct PathReplacement {
+    begin_step: usize,
+    end_step: usize,
+    steps: Vec<OutStep>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 enum OutNode {
     Original(usize),
-    Replacement(usize),
+    Replacement(usize, usize),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -128,37 +152,63 @@ pub fn resolve_gfa_bubbles(gfa: &str, config: &ResolutionConfig) -> io::Result<R
     let mut seen: FxHashSet<String> = FxHashSet::default();
     let mut changed = false;
 
-    for iteration in 0..config.max_iterations {
-        let Some(candidate) = find_next_candidate(&graph, config, &seen)? else {
+    for round in 0..config.max_iterations {
+        let frontier = find_candidate_frontier(&graph, config, &seen)?;
+        if frontier.selected.is_empty() && frontier.bailed_signatures.is_empty() {
             break;
-        };
-        stats.iterations = iteration + 1;
-        seen.insert(candidate.signature.clone());
-        stats.candidates_seen += 1;
+        }
+        stats.iterations = round + 1;
 
-        if !candidate.within_budget {
+        for signature in frontier.bailed_signatures {
+            seen.insert(signature);
+            stats.candidates_seen += 1;
             stats.bailed += 1;
+        }
+
+        if frontier.selected.is_empty() {
             continue;
         }
 
-        match replace_candidate(&graph, &candidate, config) {
-            Ok(Some(next_graph)) => {
-                graph = next_graph;
-                changed = true;
-                stats.resolved += 1;
-            }
-            Ok(None) => {
-                stats.bailed += 1;
-            }
-            Err(err) => {
-                log::debug!(
-                    "resolution: candidate replacement failed at iteration {}: {}",
-                    iteration + 1,
-                    err
-                );
-                stats.bailed += 1;
+        for candidate in &frontier.selected {
+            seen.insert(candidate.signature.clone());
+            stats.candidates_seen += 1;
+        }
+
+        let build_results = frontier
+            .selected
+            .into_par_iter()
+            .map(|candidate| {
+                build_poa_replacement(&candidate, config).map(|replacement| ReplacementPlan {
+                    candidate,
+                    replacement,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let mut plans = Vec::new();
+        for result in build_results {
+            match result {
+                Ok(plan) if !plan.replacement.segments.is_empty() => plans.push(plan),
+                Ok(_) => stats.bailed += 1,
+                Err(err) => {
+                    log::debug!(
+                        "resolution: candidate replacement failed in round {}: {}",
+                        round + 1,
+                        err
+                    );
+                    stats.bailed += 1;
+                }
             }
         }
+
+        if plans.is_empty() {
+            continue;
+        }
+
+        let resolved_count = plans.len();
+        graph = apply_replacement_frontier(&graph, &plans)?;
+        changed = true;
+        stats.resolved += resolved_count;
     }
 
     Ok(ResolvedGfa {
@@ -313,13 +363,13 @@ fn path_positions(graph: &Graph, path_idx: usize) -> Vec<usize> {
     positions
 }
 
-fn find_next_candidate(
+fn find_candidate_frontier(
     graph: &Graph,
     config: &ResolutionConfig,
     seen: &FxHashSet<String>,
-) -> io::Result<Option<BubbleCandidate>> {
+) -> io::Result<CandidateFrontier> {
     if graph.paths.is_empty() || graph.paths[0].steps.len() < 2 {
-        return Ok(None);
+        return Ok(CandidateFrontier::default());
     }
     let ref_path_idx = 0;
     let ref_path = &graph.paths[ref_path_idx];
@@ -337,7 +387,8 @@ fn find_next_candidate(
         .map(|(idx, segment)| (segment.id.as_str(), idx))
         .collect::<FxHashMap<_, _>>();
 
-    for site in decomposition.leaf_sites_bottom_up() {
+    let mut candidates = Vec::new();
+    for site in &decomposition.sites {
         let begin = site.reference_start_step;
         let exit_step = site.reference_end_step;
         if exit_step + 1 >= ref_positions.len() {
@@ -389,14 +440,70 @@ fn find_next_candidate(
             && max_traversal_len <= config.max_traversal_len
             && total_sequence <= config.max_total_sequence;
 
-        return Ok(Some(BubbleCandidate {
+        candidates.push(BubbleCandidate {
             ranges,
             signature,
             within_budget,
-        }));
+            reference_start_step: begin,
+            reference_end_step: exit_step,
+            ref_span,
+        });
     }
 
-    Ok(None)
+    candidates.sort_by(|a, b| {
+        b.reference_step_span()
+            .cmp(&a.reference_step_span())
+            .then_with(|| b.ref_span.cmp(&a.ref_span))
+            .then_with(|| a.reference_start_step.cmp(&b.reference_start_step))
+            .then_with(|| a.reference_end_step.cmp(&b.reference_end_step))
+    });
+
+    let mut frontier = CandidateFrontier::default();
+    for candidate in candidates {
+        if !candidate.within_budget {
+            frontier.bailed_signatures.push(candidate.signature);
+            continue;
+        }
+        if frontier
+            .selected
+            .iter()
+            .any(|selected| candidates_conflict(selected, &candidate))
+        {
+            continue;
+        }
+        frontier.selected.push(candidate);
+    }
+
+    Ok(frontier)
+}
+
+impl BubbleCandidate {
+    fn reference_step_span(&self) -> usize {
+        self.reference_end_step
+            .saturating_sub(self.reference_start_step)
+    }
+}
+
+fn candidates_conflict(a: &BubbleCandidate, b: &BubbleCandidate) -> bool {
+    for a_range in &a.ranges {
+        for b_range in &b.ranges {
+            if a_range.path_idx == b_range.path_idx
+                && ranges_overlap(
+                    a_range.begin_step,
+                    a_range.end_step,
+                    b_range.begin_step,
+                    b_range.end_step,
+                )
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn ranges_overlap(a_begin: usize, a_end: usize, b_begin: usize, b_end: usize) -> bool {
+    a_begin < b_end && b_begin < a_end
 }
 
 fn step_from_povu(id_to_idx: &FxHashMap<&str, usize>, step: &PovuStep) -> Option<Step> {
@@ -455,60 +562,73 @@ fn candidate_signature(
     )
 }
 
-fn replace_candidate(
-    graph: &Graph,
-    candidate: &BubbleCandidate,
-    config: &ResolutionConfig,
-) -> io::Result<Option<Graph>> {
-    let replacement = build_poa_replacement(candidate, config)?;
-    if replacement.segments.is_empty() {
-        return Ok(None);
+fn apply_replacement_frontier(graph: &Graph, plans: &[ReplacementPlan]) -> io::Result<Graph> {
+    let mut replacements_by_path: FxHashMap<usize, Vec<PathReplacement>> = FxHashMap::default();
+
+    for (plan_idx, plan) in plans.iter().enumerate() {
+        for (range_idx, range) in plan.candidate.ranges.iter().enumerate() {
+            let path = plan.replacement.paths.get(range_idx).ok_or_else(|| {
+                io::Error::other("replacement path missing for candidate range")
+            })?;
+            let steps = path
+                .steps
+                .iter()
+                .map(|step| OutStep {
+                    node: OutNode::Replacement(plan_idx, step.node),
+                    rev: step.rev,
+                })
+                .collect::<Vec<_>>();
+            replacements_by_path
+                .entry(range.path_idx)
+                .or_default()
+                .push(PathReplacement {
+                    begin_step: range.begin_step,
+                    end_step: range.end_step,
+                    steps,
+                });
+        }
     }
 
-    let mut replacement_by_path: FxHashMap<usize, Vec<OutStep>> = FxHashMap::default();
-    for (range_idx, range) in candidate.ranges.iter().enumerate() {
-        let Some(path) = replacement.paths.get(range_idx) else {
-            return Ok(None);
-        };
-        let steps = path
-            .steps
-            .iter()
-            .map(|step| OutStep {
-                node: OutNode::Replacement(step.node),
-                rev: step.rev,
-            })
-            .collect::<Vec<_>>();
-        replacement_by_path.insert(range.path_idx, steps);
+    for replacements in replacements_by_path.values_mut() {
+        replacements.sort_by_key(|replacement| (replacement.begin_step, replacement.end_step));
+        for pair in replacements.windows(2) {
+            if pair[0].end_step > pair[1].begin_step {
+                return Err(io::Error::other(
+                    "replacement frontier contains overlapping path ranges",
+                ));
+            }
+        }
     }
-
-    let range_by_path: FxHashMap<usize, (usize, usize)> = candidate
-        .ranges
-        .iter()
-        .map(|r| (r.path_idx, (r.begin_step, r.end_step)))
-        .collect();
 
     let mut out_paths = Vec::with_capacity(graph.paths.len());
     let mut used_original: FxHashSet<usize> = FxHashSet::default();
-    let mut used_replacement: FxHashSet<usize> = FxHashSet::default();
+    let mut used_replacement: FxHashSet<(usize, usize)> = FxHashSet::default();
 
     for (path_idx, path) in graph.paths.iter().enumerate() {
+        let path_replacements = replacements_by_path
+            .get(&path_idx)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let mut replacement_idx = 0usize;
         let mut steps = Vec::new();
         let mut i = 0usize;
         while i < path.steps.len() {
-            if let Some(&(begin, end)) = range_by_path.get(&path_idx) {
-                if i == begin {
-                    let replacement_steps =
-                        replacement_by_path.get(&path_idx).ok_or_else(|| {
-                            io::Error::other("replacement path missing for candidate range")
-                        })?;
-                    for step in replacement_steps {
-                        if let OutNode::Replacement(idx) = step.node {
-                            used_replacement.insert(idx);
+            if let Some(replacement) = path_replacements.get(replacement_idx) {
+                if i == replacement.begin_step {
+                    for step in &replacement.steps {
+                        if let OutNode::Replacement(plan_idx, node_idx) = step.node {
+                            used_replacement.insert((plan_idx, node_idx));
                         }
                         steps.push(*step);
                     }
-                    i = end;
+                    i = replacement.end_step;
+                    replacement_idx += 1;
                     continue;
+                }
+                if replacement.begin_step < i && i < replacement.end_step {
+                    return Err(io::Error::other(
+                        "replacement frontier rewrite entered an already replaced range",
+                    ));
                 }
             }
 
@@ -523,9 +643,13 @@ fn replace_candidate(
         out_paths.push((path.name.clone(), steps));
     }
 
+    let replacement_graphs = plans
+        .iter()
+        .map(|plan| plan.replacement.clone())
+        .collect::<Vec<_>>();
     let rendered = render_rewritten_graph(
         graph,
-        &replacement,
+        &replacement_graphs,
         &used_original,
         &used_replacement,
         &out_paths,
@@ -536,7 +660,7 @@ fn replace_candidate(
             "resolved graph failed exact path-sequence validation",
         ));
     }
-    Ok(Some(next))
+    Ok(next)
 }
 
 fn build_poa_replacement(
@@ -604,9 +728,9 @@ fn path_sequence_map(graph: &Graph) -> io::Result<FxHashMap<String, Vec<u8>>> {
 
 fn render_rewritten_graph(
     original: &Graph,
-    replacement: &Graph,
+    replacements: &[Graph],
     used_original: &FxHashSet<usize>,
-    used_replacement: &FxHashSet<usize>,
+    used_replacement: &FxHashSet<(usize, usize)>,
     out_paths: &[(String, Vec<OutStep>)],
 ) -> String {
     let mut out = String::new();
@@ -631,11 +755,14 @@ fn render_rewritten_graph(
         ));
     }
 
-    let mut replacement_nodes: Vec<usize> = used_replacement.iter().copied().collect();
+    let mut replacement_nodes: Vec<(usize, usize)> = used_replacement.iter().copied().collect();
     replacement_nodes.sort_unstable();
-    for node in replacement_nodes {
+    for (replacement_idx, node) in replacement_nodes {
+        let replacement = replacements
+            .get(replacement_idx)
+            .expect("used replacement index must refer to an emitted replacement graph");
         let id = next_unused_segment_id(&mut used_ids, &mut next_id);
-        id_by_node.insert(OutNode::Replacement(node), id.clone());
+        id_by_node.insert(OutNode::Replacement(replacement_idx, node), id.clone());
         out.push_str(&format!(
             "S\t{}\t{}\n",
             id,
@@ -717,10 +844,7 @@ fn render_graph(graph: &Graph) -> String {
         .collect::<FxHashSet<_>>();
     render_rewritten_graph(
         graph,
-        &Graph {
-            segments: Vec::new(),
-            paths: Vec::new(),
-        },
+        &[],
         &used_original,
         &FxHashSet::default(),
         &out_paths,
@@ -782,7 +906,7 @@ P\tins\t1+,2+,3+\t*
     }
 
     #[test]
-    fn resolves_nested_leaf_sites_bottom_up() {
+    fn resolves_maximal_eligible_nested_site_first() {
         let gfa = "\
 H\tVN:Z:1.0
 S\t1\tA
@@ -824,7 +948,48 @@ P\touter_alt\t1+,7+,6+\t*
         )
         .unwrap();
         assert_eq!(before, seq_map(&resolved.gfa));
-        assert!(resolved.stats.resolved >= 2);
+        assert_eq!(resolved.stats.resolved, 1);
+        assert_eq!(resolved.stats.iterations, 1);
+        assert_eq!(resolved.stats.bailed, 0);
+    }
+
+    #[test]
+    fn resolves_independent_sites_in_one_round() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tT
+S\t5\tA
+S\t6\tC
+S\t7\tGG
+S\t8\tTT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t3\t+\t0M
+L\t1\t+\t7\t+\t0M
+L\t7\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+L\t4\t+\t5\t+\t0M
+L\t5\t+\t6\t+\t0M
+L\t4\t+\t8\t+\t0M
+L\t8\t+\t6\t+\t0M
+P\tref\t1+,2+,3+,4+,5+,6+\t*
+P\tleft_alt\t1+,7+,3+,4+,5+,6+\t*
+P\tright_alt\t1+,2+,3+,4+,8+,6+\t*
+";
+        let before = seq_map(gfa);
+        let resolved = resolve_gfa_bubbles(
+            gfa,
+            &ResolutionConfig {
+                max_iterations: 1,
+                ..ResolutionConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert_eq!(resolved.stats.iterations, 1);
+        assert_eq!(resolved.stats.resolved, 2);
         assert_eq!(resolved.stats.bailed, 0);
     }
 

@@ -548,7 +548,7 @@ fn apply_graph_transforms(
     };
     let resolved = resolution::resolve_gfa_bubbles(&gfa, config)?;
     log::info!(
-        "crush: {} resolved, {} bailed, {} candidates seen across {} iterations",
+        "crush: {} resolved, {} bailed, {} candidates seen across {} rounds",
         resolved.stats.resolved,
         resolved.stats.bailed,
         resolved.stats.candidates_seen,
