@@ -7,8 +7,9 @@
 //! collapse and coordinate sidecars; emitted paths are the coordinate system.
 
 use crate::graph::{build_spoa_engine, feed_sequences_to_graph, reverse_complement, unchop_gfa};
+use povu::native_gfa::{Step as PovuStep, Strand as PovuStrand};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::io;
 
 /// Configuration for exact path-preserving bubble resolution.
@@ -65,6 +66,7 @@ struct Step {
 
 #[derive(Clone, Debug)]
 struct Segment {
+    id: String,
     seq: Vec<u8>,
 }
 
@@ -95,12 +97,6 @@ struct BubbleCandidate {
     within_budget: bool,
 }
 
-#[derive(Clone, Debug)]
-struct SiteDraft {
-    ref_start: usize,
-    ref_end: usize,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 enum OutNode {
     Original(usize),
@@ -127,7 +123,7 @@ pub fn resolve_gfa_bubbles(gfa: &str, config: &ResolutionConfig) -> io::Result<R
     let mut changed = false;
 
     for iteration in 0..config.max_iterations {
-        let Some(candidate) = find_next_candidate(&graph, config, &seen) else {
+        let Some(candidate) = find_next_candidate(&graph, config, &seen)? else {
             break;
         };
         stats.iterations = iteration + 1;
@@ -211,6 +207,7 @@ fn parse_gfa(gfa: &str) -> io::Result<Graph> {
                 let idx = segments.len();
                 id_to_idx.insert(id.clone(), idx);
                 segments.push(Segment {
+                    id,
                     seq: fields[2].as_bytes().to_vec(),
                 });
             }
@@ -314,19 +311,38 @@ fn find_next_candidate(
     graph: &Graph,
     config: &ResolutionConfig,
     seen: &FxHashSet<String>,
-) -> Option<BubbleCandidate> {
+) -> io::Result<Option<BubbleCandidate>> {
     if graph.paths.is_empty() || graph.paths[0].steps.len() < 2 {
-        return None;
+        return Ok(None);
     }
     let ref_path_idx = 0;
     let ref_path = &graph.paths[ref_path_idx];
     let ref_positions = path_positions(graph, ref_path_idx);
+    let rendered = render_graph(graph);
+    let native_graph = povu::NativeGfa::parse(&rendered).map_err(povu_to_io_error)?;
+    let reference_names = vec![ref_path.name.clone()];
+    let decomposition = native_graph
+        .decompose_flubbles(&reference_names)
+        .map_err(povu_to_io_error)?;
+    let id_to_idx = graph
+        .segments
+        .iter()
+        .enumerate()
+        .map(|(idx, segment)| (segment.id.as_str(), idx))
+        .collect::<FxHashMap<_, _>>();
 
-    for site in leaf_site_order(&candidate_sites(graph, ref_path_idx)) {
-        let begin = site.ref_start;
-        let exit_step = site.ref_end;
-        let entry = ref_path.steps[begin];
-        let exit = ref_path.steps[exit_step];
+    for site in decomposition.leaf_sites_bottom_up() {
+        let begin = site.reference_start_step;
+        let exit_step = site.reference_end_step;
+        if exit_step + 1 >= ref_positions.len() {
+            continue;
+        }
+        let Some(entry) = step_from_povu(&id_to_idx, &site.start) else {
+            continue;
+        };
+        let Some(exit) = step_from_povu(&id_to_idx, &site.end) else {
+            continue;
+        };
         let ref_span = ref_positions[exit_step + 1] - ref_positions[begin];
 
         let mut ranges = Vec::new();
@@ -367,92 +383,29 @@ fn find_next_candidate(
             && max_traversal_len <= config.max_traversal_len
             && total_sequence <= config.max_total_sequence;
 
-        return Some(BubbleCandidate {
+        return Ok(Some(BubbleCandidate {
             ranges,
             signature,
             within_budget,
-        });
+        }));
     }
 
-    None
+    Ok(None)
 }
 
-/// Discover candidate sites using the same reference-path collinear-match
-/// model as POVU's native VCF extractor: every adjacent pair of shared,
-/// collinear steps between the reference path and another path defines a
-/// candidate if the internal traversals differ.
-fn candidate_sites(graph: &Graph, ref_path_idx: usize) -> BTreeMap<(usize, usize), SiteDraft> {
-    let reference = &graph.paths[ref_path_idx];
-    let mut candidates = BTreeMap::<(usize, usize), SiteDraft>::new();
-
-    for (path_idx, path) in graph.paths.iter().enumerate() {
-        if path_idx == ref_path_idx {
-            continue;
-        }
-        let matches = collinear_matches(&reference.steps, &path.steps);
-        for window in matches.windows(2) {
-            let (ref_start, path_start) = window[0];
-            let (ref_end, path_end) = window[1];
-            if ref_end <= ref_start || path_end <= path_start {
-                continue;
-            }
-            let ref_internal = &reference.steps[ref_start + 1..ref_end];
-            let alt_internal = &path.steps[path_start + 1..path_end];
-            if ref_internal == alt_internal {
-                continue;
-            }
-            candidates
-                .entry((ref_start, ref_end))
-                .or_insert(SiteDraft { ref_start, ref_end });
-        }
-    }
-
-    candidates
+fn step_from_povu(id_to_idx: &FxHashMap<&str, usize>, step: &PovuStep) -> Option<Step> {
+    let node = *id_to_idx.get(step.segment.as_str())?;
+    Some(Step {
+        node,
+        rev: matches!(step.strand, PovuStrand::Reverse),
+    })
 }
 
-fn collinear_matches(reference: &[Step], path: &[Step]) -> Vec<(usize, usize)> {
-    let rows = reference.len();
-    let cols = path.len();
-    let mut dp = vec![vec![0usize; cols + 1]; rows + 1];
-    for i in (0..rows).rev() {
-        for j in (0..cols).rev() {
-            dp[i][j] = if reference[i] == path[j] {
-                1 + dp[i + 1][j + 1]
-            } else {
-                dp[i + 1][j].max(dp[i][j + 1])
-            };
-        }
-    }
-
-    let mut matches = Vec::new();
-    let mut i = 0usize;
-    let mut j = 0usize;
-    while i < rows && j < cols {
-        if reference[i] == path[j] {
-            matches.push((i, j));
-            i += 1;
-            j += 1;
-        } else if dp[i + 1][j] >= dp[i][j + 1] {
-            i += 1;
-        } else {
-            j += 1;
-        }
-    }
-    matches
-}
-
-fn leaf_site_order(candidates: &BTreeMap<(usize, usize), SiteDraft>) -> Vec<SiteDraft> {
-    let mut leaves = candidates
-        .values()
-        .filter(|site| {
-            !candidates.values().any(|other| {
-                site.ref_start < other.ref_start && other.ref_end < site.ref_end
-            })
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    leaves.sort_by_key(|site| (site.ref_end - site.ref_start, site.ref_start, site.ref_end));
-    leaves
+fn povu_to_io_error(err: povu::Error) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("POVU flubble decomposition failed: {err}"),
+    )
 }
 
 fn unique_anchor_range(path: &Path, entry: Step, exit: Step) -> Option<(usize, usize)> {
@@ -654,13 +607,16 @@ fn render_rewritten_graph(
     out.push_str("H\tVN:Z:1.0\n");
 
     let mut id_by_node: FxHashMap<OutNode, String> = FxHashMap::default();
+    let mut used_ids = FxHashSet::<String>::default();
+    for node in used_original {
+        used_ids.insert(original.segments[*node].id.clone());
+    }
     let mut next_id = 1usize;
 
     let mut original_nodes: Vec<usize> = used_original.iter().copied().collect();
     original_nodes.sort_unstable();
     for node in original_nodes {
-        let id = next_id.to_string();
-        next_id += 1;
+        let id = original.segments[node].id.clone();
         id_by_node.insert(OutNode::Original(node), id.clone());
         out.push_str(&format!(
             "S\t{}\t{}\n",
@@ -672,8 +628,7 @@ fn render_rewritten_graph(
     let mut replacement_nodes: Vec<usize> = used_replacement.iter().copied().collect();
     replacement_nodes.sort_unstable();
     for node in replacement_nodes {
-        let id = next_id.to_string();
-        next_id += 1;
+        let id = next_unused_segment_id(&mut used_ids, &mut next_id);
         id_by_node.insert(OutNode::Replacement(node), id.clone());
         out.push_str(&format!(
             "S\t{}\t{}\n",
@@ -720,6 +675,16 @@ fn render_rewritten_graph(
     }
 
     out
+}
+
+fn next_unused_segment_id(used_ids: &mut FxHashSet<String>, next_id: &mut usize) -> String {
+    loop {
+        let id = next_id.to_string();
+        *next_id += 1;
+        if used_ids.insert(id.clone()) {
+            return id;
+        }
+    }
 }
 
 fn render_graph(graph: &Graph) -> String {
@@ -834,13 +799,13 @@ P\tinner_alt\t1+,2+,5+,4+,6+\t*
 P\touter_alt\t1+,7+,6+\t*
 ";
         let before = seq_map(gfa);
-        let graph = parse_gfa(gfa).unwrap();
-        let sites = candidate_sites(&graph, 0);
-        let leaves = leaf_site_order(&sites);
+        let graph = povu::NativeGfa::parse(gfa).unwrap();
+        let decomposition = graph.decompose_flubbles(&["ref".to_string()]).unwrap();
+        let leaves = decomposition.leaf_sites_bottom_up();
         assert_eq!(
             leaves
                 .iter()
-                .map(|site| (site.ref_start, site.ref_end))
+                .map(|site| (site.reference_start_step, site.reference_end_step))
                 .collect::<Vec<_>>(),
             vec![(1, 3)]
         );

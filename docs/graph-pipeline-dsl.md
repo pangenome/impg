@@ -71,7 +71,7 @@ gfa:sweepga:fastga:pggb,window=20k
 
 ```text
 input blunt graph
-  -> POVU-style collinear path-site discovery
+  -> POVU native flubble decomposition
   -> bottom-up leaf-site ordering
   -> exact path-preserving local replacement
   -> recompute site discovery after each replacement
@@ -114,15 +114,14 @@ crush,max-span=10k,max-traversal-len=10k,max-traversals=128,method=poa
 Unknown parameters should be errors, not warnings. Silent ignoring would make
 graph parameterization hard to reproduce.
 
-## POVU Requirement For Fuller Crush
+## POVU Decomposition Boundary
 
-The current `src/resolution.rs` implementation uses the same reference-path
-collinear-match site model as POVU's native Rust VCF extractor, then processes
-leaf sites first and validates exact path-sequence preservation after every
-replacement. This is enough to make `:crush` executable and testable.
+`src/resolution.rs` does not implement its own flubble finder. It passes the
+current blunt GFA to `povu-rs` and calls `NativeGfa::decompose_flubbles`, then
+uses POVU's site IDs, parent/child relationships, entry/exit steps, and
+bottom-up leaf ordering to schedule exact path-preserving replacement.
 
-The fuller scheduler should be POVU/flubble-driven when `povu-rs` exposes the
-needed hierarchy API:
+The crush loop is:
 
 1. Decompose the current graph into flubbles/bubbles/tangles.
 2. Build a parent/child hierarchy.
@@ -130,10 +129,3 @@ needed hierarchy API:
 4. Extract observed path traversals through each site.
 5. Replace bounded sites exactly.
 6. Recompute decomposition on the changed graph.
-
-At the current pinned `povu-rs` revision, IMPG has native GFA-to-VCF support,
-but not a public flubble hierarchy API. The current `:crush` implementation
-therefore does not consume a public POVU hierarchy yet. We still need a
-POVU-side API that exposes site IDs, parent/child relationships, entry/exit
-handles, path-supported traversal boundaries, and enough node/edge identity to
-schedule non-overlapping bottom-up batches.
