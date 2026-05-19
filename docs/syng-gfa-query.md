@@ -111,6 +111,11 @@ impg query -a panel.syng -r 'GRCh38#0#chr6:31982056-32035418' \
   -d 50k -x -o gfa --gfa-engine syng \
   --sequence-files panel.agc --force-large-region -O c4.syng-blunt
 
+# VCF calls from the same local syng graph, using POVU
+impg query -a panel.syng -r 'GRCh38#0#chr6:31982056-32035418' \
+  -d 50k -x -o vcf:syng \
+  --sequence-files panel.agc --force-large-region -O c4.syng-blunt
+
 # Same thing with explicit mode and syncmer-parameter assertion
 impg query -a panel.syng -r 'GRCh38#0#chr6:31982056-32035418' \
   -d 50k -x -o gfa:syng:blunt,k=63,s=8,seed=7 \
@@ -120,6 +125,10 @@ impg query -a panel.syng -r 'GRCh38#0#chr6:31982056-32035418' \
 impg query -a panel.syng -r 'GRCh38#0#chr6:31982056-32035418' \
   -d 50k -x -o gfa --gfa-engine syng:raw \
   --sequence-files panel.agc --force-large-region -O c4.syng-raw
+
+# Syng-native blunt graph for every discovered partition
+impg partition -a panel.syng -w 1m -d 50k -o gfa --gfa-engine syng \
+  --sequence-files panel.agc --separate-files --output-folder parts.syng-gfa
 ```
 
 Available engines:
@@ -133,6 +142,22 @@ syng          syng syncmer graph, defaults to syng:blunt
 syng:blunt    syng graph processed through pangenome/bluntg; links are 0M
 syng:raw      native syng overlap graph
 ```
+
+`query` and `partition` differ only in how they gather local intervals. Once
+the intervals are selected, both commands call the same GFA engine dispatcher.
+For `--gfa-engine syng`, the dispatcher extracts the selected source-forward
+strings, builds a regional syng index with the loaded syncmer parameters, then
+emits either `syng:blunt` or `syng:raw` GFA.
+
+The `-o gfa:<spec>` shorthand is generic. `-o gfa:pggb`, `-o gfa:seqwish`,
+`-o gfa:poa`, and `-o gfa:syng` are equivalent to `-o gfa --gfa-engine
+<engine>`. For alignment-backed engines, the spec can also name the alignment
+backend: `-o gfa:wfmash:seqwish`, `-o gfa:fastga:pggb`, or
+`-o gfa:sweepga:seqwish`.
+
+VCF output uses the same engine dispatch and passes the local GFA to POVU:
+`-o vcf:syng`, `-o vcf:pggb`, `-o vcf:seqwish`, and `-o vcf:poa` are
+equivalent to `-o vcf --gfa-engine <engine>`.
 
 ## Raw Syng Graph Dump
 

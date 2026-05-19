@@ -3944,6 +3944,119 @@ fn test_partition_syng_end_to_end_bed() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+#[test]
+fn test_partition_syng_gfa_blunt_engine() {
+    let _guard = lock_syng();
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping: impg binary not built");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join("impg_test_partition_syng_gfa_blunt");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let fasta_path = dir.join("test.fa");
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        let backbone = numeric_to_ascii(&make_sequence_numeric(2500, 42));
+        let tail1 = numeric_to_ascii(&make_sequence_numeric(700, 1));
+        let tail2 = numeric_to_ascii(&make_sequence_numeric(700, 2));
+
+        writeln!(f, ">sampleA#1#chr1").unwrap();
+        f.write_all(&backbone).unwrap();
+        f.write_all(&tail1).unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, ">sampleB#1#chr1").unwrap();
+        f.write_all(&backbone).unwrap();
+        f.write_all(&tail2).unwrap();
+        writeln!(f).unwrap();
+    }
+
+    let syng_prefix = dir.join("idx");
+    let build = Command::new(&bin)
+        .args([
+            "syng",
+            "-f",
+            fasta_path.to_str().unwrap(),
+            "-o",
+            syng_prefix.to_str().unwrap(),
+            "--position-sample-rate",
+            "1",
+        ])
+        .output()
+        .expect("Failed to run impg syng");
+    assert!(
+        build.status.success(),
+        "impg syng failed. stderr: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let out_folder = dir.join("gfas");
+    std::fs::create_dir_all(&out_folder).unwrap();
+    let part = Command::new(&bin)
+        .args([
+            "partition",
+            "-d",
+            "100000",
+            "-a",
+            syng_prefix.to_str().unwrap(),
+            "-w",
+            "1500",
+            "-o",
+            "gfa",
+            "--gfa-engine",
+            "syng",
+            "--sequence-files",
+            fasta_path.to_str().unwrap(),
+            "--separate-files",
+            "--output-folder",
+            out_folder.to_str().unwrap(),
+            "--min-missing-size",
+            "100",
+            "--min-boundary-distance",
+            "0",
+            "-t",
+            "1",
+        ])
+        .output()
+        .expect("Failed to run impg partition -a syng prefix -o gfa");
+    assert!(
+        part.status.success(),
+        "impg partition syng gfa failed. stdout: {} stderr: {}",
+        String::from_utf8_lossy(&part.stdout),
+        String::from_utf8_lossy(&part.stderr)
+    );
+
+    let gfa_files: Vec<_> = std::fs::read_dir(&out_folder)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("gfa"))
+        .collect();
+    assert!(!gfa_files.is_empty(), "No GFA files produced in {:?}", out_folder);
+
+    let mut saw_segment = false;
+    let mut nonzero_links = Vec::new();
+    for entry in &gfa_files {
+        let text = std::fs::read_to_string(entry.path()).unwrap();
+        saw_segment |= text.lines().any(|line| line.starts_with("S\t"));
+        nonzero_links.extend(
+            text.lines()
+                .filter(|line| line.starts_with("L\t") && !line.ends_with("\t0M"))
+                .map(|line| line.to_string()),
+        );
+    }
+    assert!(saw_segment, "partition syng GFA should contain segment lines");
+    assert!(
+        nonzero_links.is_empty(),
+        "syng partition GFA should be bluntified to 0M links. Nonzero links: {:?}",
+        nonzero_links
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Regression test: `impg query -a <syng-prefix> -o gfa --gfa-engine seqwish:X` must
 /// treat `X` as a sub-window size and split the query range into per-window
 /// partitions, not silently collapse into a flat single-engine run.

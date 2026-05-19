@@ -1380,6 +1380,7 @@ dependencies = [
  "noodles",
  "num_cpus",
  "onecode 0.1.0 (git+https://github.com/pangenome/onecode-rs?rev=38182c7acf7cccc53509176b1d11001ae6ff2642)",
+ "povu-rs",
  "ragc-core",
  "rayon",
  "regex",
@@ -2063,6 +2064,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0103b1cef7ec0cf76490e969665504990193874ea05c85ff9bab8b911d0a0564"
 dependencies = [
  "zerovec",
+]
+
+[[package]]
+name = "povu-rs"
+version = "0.1.0"
+source = "git+https://github.com/pangenome/povu?branch=rust-native-gfa-vcf#02c18e56f7a029f0a07e08fd34864c5d75aaba27"
+dependencies = [
+ "bindgen 0.70.1",
+ "cmake",
+ "libc",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

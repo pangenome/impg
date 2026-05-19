@@ -115,9 +115,10 @@ impg query -a aln.paf -r chr1:1000-2000 -d 100 -x -m 3
 # Many regions from a BED, mixed PAF + 1ALN
 impg query -a f1.paf f2.1aln -b regions.bed -d 100
 
-# Output formats: auto | bed | bedpe | paf | gfa | maf | fasta | fasta+paf | fasta-aln
+# Output formats: auto | bed | bedpe | paf | gfa | vcf | maf | fasta | fasta+paf | fasta-aln
 impg query -a aln.paf -r chr1:1000-2000 -d 100 -o bed
 impg query -a aln.paf -r chr1:1000-2000 -d 100 -o gfa --sequence-files genomes.fa
+impg query -a aln.paf -r chr1:1000-2000 -d 100 -o vcf --sequence-files genomes.fa
 impg query -a aln.1aln -r chr1:1000-2000 -d 100 -o fasta --sequence-files *.fa \
            --reverse-complement
 
@@ -438,6 +439,17 @@ For syng-index queries, `--gfa-engine syng` defaults to `syng:blunt`.
 The compact form `-o gfa:syng:blunt,k=63,s=8,seed=7` is accepted as
 shorthand for `-o gfa --gfa-engine syng:blunt,k=63,s=8,seed=7`; the
 `k/s/seed` tail is checked against the loaded syng index.
+
+The same shorthand works for the other engines: `-o gfa:pggb`,
+`-o gfa:seqwish`, `-o gfa:poa`, and `-o gfa:syng`. Alignment-backed graph
+builds may also include the aligner prefix, for example
+`-o gfa:wfmash:seqwish`, `-o gfa:fastga:pggb`, or
+`-o gfa:sweepga:seqwish`; this is equivalent to setting `--aligner` and
+`--gfa-engine` separately.
+
+VCF output uses the same graph engines and then converts the resulting local
+GFA through POVU. Use `-o vcf --gfa-engine <engine>` or the shorthand
+`-o vcf:<engine>`, for example `-o vcf:syng`.
 
 ### Partitioned mode
 

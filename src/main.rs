@@ -149,17 +149,67 @@ fn apply_gfa_output_engine_shorthand(
     output_format: String,
     engine_cli: &mut EngineCliOpts,
 ) -> io::Result<String> {
-    let Some(engine_spec) = output_format.strip_prefix("gfa:") else {
-        return Ok(output_format);
+    let (graph_format, raw_engine_spec) =
+        if let Some(raw_engine_spec) = output_format.strip_prefix("gfa:") {
+            ("gfa", raw_engine_spec)
+        } else if let Some(raw_engine_spec) = output_format.strip_prefix("vcf:") {
+            ("vcf", raw_engine_spec)
+        } else {
+            return Ok(output_format);
+        };
+    let output_example = if graph_format == "vcf" {
+        "-o vcf:syng:blunt"
+    } else {
+        "-o gfa:syng:blunt"
     };
+    let engine_spec = raw_engine_spec.trim();
     if engine_spec.trim().is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "-o gfa:<engine> requires an engine spec, e.g. -o gfa:syng:blunt",
+            format!("-o {graph_format}:<engine> requires an engine spec, e.g. {output_example}"),
         ));
     }
-    engine_cli.engine_raw = engine_spec.to_string();
-    Ok("gfa".to_string())
+
+    let (head, params) = engine_spec
+        .split_once(',')
+        .map_or((engine_spec, ""), |(head, params)| (head.trim(), params));
+    let head_parts: Vec<&str> = head.split(':').map(str::trim).collect();
+    let mut engine_start = 0usize;
+
+    if head_parts
+        .get(engine_start)
+        .is_some_and(|part| part.eq_ignore_ascii_case("sweepga"))
+    {
+        engine_start += 1;
+    }
+    if let Some(part) = head_parts.get(engine_start) {
+        let aligner = part.replace('_', "-").to_ascii_lowercase();
+        if matches!(aligner.as_str(), "wfmash" | "fastga") {
+            engine_cli.aln.sw.aligner = aligner;
+            engine_start += 1;
+        }
+    }
+
+    let normalized_head = if engine_start == 0 {
+        head.to_string()
+    } else {
+        if engine_start >= head_parts.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "-o {graph_format}:{} is missing a graph engine after the alignment prefix",
+                    engine_spec
+                ),
+            ));
+        }
+        head_parts[engine_start..].join(":")
+    };
+    engine_cli.engine_raw = if params.is_empty() {
+        normalized_head
+    } else {
+        format!("{normalized_head},{params}")
+    };
+    Ok(graph_format.to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -1400,85 +1450,6 @@ fn emit_syng_map_projection(
     Ok(())
 }
 
-fn format_syng_params(params: impg::syng::SyncmerParams) -> String {
-    format!(
-        "k={},s={},seed={}",
-        params.k + params.w,
-        params.k,
-        params.seed
-    )
-}
-
-fn validate_syng_param_assertion(
-    actual: impg::syng::SyncmerParams,
-    expected: Option<impg::syng::SyncmerParams>,
-) -> io::Result<()> {
-    if let Some(expected) = expected {
-        if actual != expected {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "syng parameter assertion does not match index: requested {}, index has {}",
-                    format_syng_params(expected),
-                    format_syng_params(actual)
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn write_fasta_records(path: &Path, records: &[(String, Vec<u8>)]) -> io::Result<()> {
-    let mut out = BufWriter::new(File::create(path)?);
-    for (name, seq) in records {
-        writeln!(out, ">{name}")?;
-        out.write_all(seq)?;
-        writeln!(out)?;
-    }
-    out.flush()
-}
-
-fn emit_syng_region_gfa<W: Write>(
-    source_index: &impg::syng::SyngIndex,
-    fetched: &[(String, Vec<u8>)],
-    out: &mut W,
-    mode: SyngGfaMode,
-) -> io::Result<()> {
-    if fetched.is_empty() {
-        writeln!(out, "H\tVN:Z:1.0")?;
-        return Ok(());
-    }
-
-    let tempdir = tempfile::Builder::new()
-        .prefix("impg-syng-gfa-")
-        .tempdir()?;
-    let region_prefix_path = tempdir.path().join("region");
-    let region_prefix = region_prefix_path
-        .to_str()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "region prefix is not UTF-8"))?;
-    let seq_refs: Vec<(String, &[u8])> = fetched
-        .iter()
-        .map(|(name, seq)| (name.clone(), seq.as_slice()))
-        .collect();
-    source_index.build_region_gbwt(&seq_refs, region_prefix)?;
-
-    let fasta_path = tempdir.path().join("region.fa");
-    write_fasta_records(&fasta_path, fetched)?;
-    let sequence_files = vec![fasta_path.to_string_lossy().to_string()];
-    let sequence_index = UnifiedSequenceIndex::from_files(&sequence_files)?;
-    let region_index =
-        impg::syng::SyngIndex::load(region_prefix, source_index.params)?;
-
-    impg::commands::syng2gfa::write_gfa_with_mode(
-        &region_index,
-        out,
-        impg::commands::syng2gfa::GfaVersion::V1_0,
-        Some(&sequence_index),
-        mode,
-    )?;
-    Ok(())
-}
-
 const READ_SYNCMER_INDEX_VERSION: u32 = 1;
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -2598,11 +2569,11 @@ impl GfaMafFastaOpts {
 
         let needs_sequence_mandatory = matches!(
             output_format,
-            "gfa" | "maf" | "fasta" | "fasta-aln" | "fasta+paf" | "gbwt"
+            "gfa" | "vcf" | "maf" | "fasta" | "fasta-aln" | "fasta+paf" | "gbwt"
         ) || tracepoint_needs_sequences;
         let needs_sequence_optional = output_format == "paf" && original_sequence_coordinates;
         // POA scoring is needed for gfa (all engines may use it), maf, and fasta-aln
-        let needs_poa = matches!(output_format, "gfa" | "maf" | "fasta-aln");
+        let needs_poa = matches!(output_format, "gfa" | "vcf" | "maf" | "fasta-aln");
 
         let scoring_params = if needs_poa {
             Some(parse_poa_scoring_string(poa_scoring)?)
@@ -2774,7 +2745,7 @@ impl QueryOpts {
         // Default behavior per output format
         let default = match output_format {
             "fasta" | "fasta-aln" => false,
-            "maf" | "gfa" | "bed" => true,
+            "maf" | "gfa" | "vcf" | "bed" => true,
             _ => true,
         };
 
@@ -3207,7 +3178,7 @@ enum Args {
         approximate: bool,
 
         // --- Output ---
-        /// Output format: 'bed', 'gfa' (v1.0), 'maf', or 'fasta' ('gfa', 'maf', and 'fasta' require --sequence-files or --sequence-list)
+        /// Output format: 'bed', 'gfa' (v1.0), 'vcf', 'maf', or 'fasta' ('gfa', 'vcf', 'maf', and 'fasta' require --sequence-files or --sequence-list)
         #[arg(help_heading = "Output options")]
         #[clap(short = 'o', long, value_parser, default_value = "bed")]
         output_format: String,
@@ -3235,6 +3206,7 @@ Output formats:
   bedpe      paired query/result intervals; useful for batch queries and CIGAR-aware output
   paf        PAF-like projected interval matches
   gfa        local sequence graph built from query-selected intervals using --gfa-engine
+  vcf        POVU VCF calls from the local sequence graph selected by --gfa-engine
   maf        multiple-alignment output for query-selected intervals
   fasta      FASTA sequences for query-selected intervals
   fasta+paf  FASTA sequences plus PAF-like interval mappings
@@ -3243,11 +3215,19 @@ Output formats:
 
 Syng notes:
   With -a/--alignment pointing to a syng index, supported query outputs are
-  bed, bedpe, gfa, fasta, and gbwt. Use -o gfa for a local sequence GFA from
+  bed, bedpe, gfa, vcf, fasta, and gbwt. Use -o gfa for a local sequence GFA from
   query-selected intervals. `--gfa-engine syng` emits a syng syncmer GFA and
   defaults to syng:blunt; use syng:raw to preserve native overlaps. The compact
-  form `-o gfa:syng:blunt,k=63,s=8,seed=7` is accepted as shorthand. Use
+  forms `-o gfa:syng:blunt,k=63,s=8,seed=7` and `-o vcf:syng` are accepted
+  as shorthand. Use
   `impg syng2gfa` to dump the whole syng syncmer graph instead.
+
+GFA engine shorthand:
+  `-o gfa:pggb`, `-o gfa:seqwish`, `-o gfa:poa`, `-o gfa:syng`, and the
+  matching `-o vcf:<engine>` forms are equivalent to
+  `-o <format> --gfa-engine <engine>`. Alignment-backed graph builds can also
+  name the aligner prefix, e.g. `-o gfa:wfmash:seqwish`,
+  `-o gfa:fastga:pggb`, or `-o gfa:sweepga:seqwish`.
 ")]
     Query {
         // --- Input ---
@@ -4109,7 +4089,7 @@ fn run() -> io::Result<()> {
             let merge_distance = require_merge_distance("partition", merge_distance, no_merge)?;
 
             validate_selection_mode(&selection_mode)?;
-            validate_output_format(&output_format, &["bed", "gfa", "maf", "fasta"])?;
+            validate_output_format(&output_format, &["bed", "gfa", "vcf", "maf", "fasta"])?;
 
             // Validate --approximate mode compatibility
             if approximate {
@@ -4140,7 +4120,9 @@ fn run() -> io::Result<()> {
             }
 
             // For size validation, flat POA on "gfa" needs the same limit as "gfa-poa"
-            let size_check_format = if output_format == "gfa" && parsed_engine == GfaEngine::Poa {
+            let size_check_format = if matches!(output_format.as_str(), "gfa" | "vcf")
+                && parsed_engine == GfaEngine::Poa
+            {
                 "gfa-poa"
             } else {
                 &output_format
@@ -4185,7 +4167,8 @@ fn run() -> io::Result<()> {
                 let seq_index = syng_index.build_seq_index();
 
                 let reverse_complement = gfa_maf_fasta.reverse_complement;
-                let needs_sequences = matches!(output_format.as_str(), "gfa" | "maf" | "fasta");
+                let needs_sequences =
+                    matches!(output_format.as_str(), "gfa" | "vcf" | "maf" | "fasta");
                 let sequence_index = if needs_sequences {
                     let si = gfa_maf_fasta.sequence.build_sequence_index()?;
                     if si.is_none() {
@@ -4199,7 +4182,7 @@ fn run() -> io::Result<()> {
                     None
                 };
 
-                let scoring_params = if matches!(output_format.as_str(), "gfa" | "maf") {
+                let scoring_params = if matches!(output_format.as_str(), "gfa" | "vcf" | "maf") {
                     Some(parse_poa_scoring_string(&engine_cli.poa_scoring)?)
                 } else {
                     None
@@ -4348,6 +4331,7 @@ fn run() -> io::Result<()> {
                     "bedpe",
                     "paf",
                     "gfa",
+                    "vcf",
                     "maf",
                     "fasta",
                     "fasta+paf",
@@ -4373,13 +4357,13 @@ fn run() -> io::Result<()> {
                 // Validate that alignment files are NOT also provided
                 // (conflicts_with_all handles this at clap level, but be explicit)
 
-                // Only bed, bedpe, gfa, fasta, and gbwt output are supported for syng queries
+                // Only bed, bedpe, gfa, vcf, fasta, and gbwt output are supported for syng queries
                 let resolved_format = if output_format == "auto" { "bed" } else { output_format.as_str() };
-                if !matches!(resolved_format, "bed" | "bedpe" | "gfa" | "fasta" | "gbwt") {
+                if !matches!(resolved_format, "bed" | "bedpe" | "gfa" | "vcf" | "fasta" | "gbwt") {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "syng index queries currently support 'bed', 'bedpe', 'gfa', 'fasta', and 'gbwt' output formats, not '{}'",
+                            "syng index queries currently support 'bed', 'bedpe', 'gfa', 'vcf', 'fasta', and 'gbwt' output formats, not '{}'",
                             resolved_format
                         ),
                     ));
@@ -4442,12 +4426,12 @@ fn run() -> io::Result<()> {
                 // (local indels), paralog copies and long insertions
                 // sit at structurally different signatures (kb-scale
                 // on yeast). A typical `-d` up to a few kb cleanly
-                // Setup output resources for GFA/FASTA/GBWT (need sequence files).
+                // Setup output resources for graph/FASTA/GBWT output (need sequence files).
                 // Boundary realignment also needs them for edge-window fetches.
                 let sequence_files_supplied =
                     !gfa_maf_fasta.sequence.resolve_sequence_files()?.is_empty();
                 let needs_sequences =
-                    matches!(resolved_format, "gfa" | "fasta" | "gbwt")
+                    matches!(resolved_format, "gfa" | "vcf" | "fasta" | "gbwt")
                         || use_boundary_realign
                         || sequence_files_supplied;
                 let sequence_index = if needs_sequences {
@@ -4476,7 +4460,7 @@ fn run() -> io::Result<()> {
                     ));
                 }
 
-                let scoring_params = if resolved_format == "gfa" {
+                let scoring_params = if matches!(resolved_format, "gfa" | "vcf") {
                     Some(parse_poa_scoring_string(&engine_cli.poa_scoring)?)
                 } else {
                     None
@@ -4569,23 +4553,18 @@ fn run() -> io::Result<()> {
                                 )?;
                             }
                         }
-                        "gfa" => {
+                        "gfa" | "vcf" => {
                             let engine_opts = engine_cli.build(common.threads.get())?;
+                            let output_ext = graph_output_extension(resolved_format);
+                            let reference_names = vcf_reference_names(name, target_name);
 
                             if engine_opts.engine == GfaEngine::SyngNative {
-                                validate_syng_param_assertion(
-                                    wrapper.syng_index().params,
-                                    engine_opts.syng_params,
-                                )?;
                                 if engine_opts.partition_size.is_some() {
                                     return Err(io::Error::new(
                                         io::ErrorKind::InvalidInput,
                                         "--gfa-engine syng does not support partition windows; use syng:raw or syng:blunt",
                                     ));
                                 }
-                                let mode = engine_opts
-                                    .syng_gfa_mode
-                                    .unwrap_or(SyngGfaMode::Blunt);
                                 let seq_idx = sequence_index.as_ref().unwrap();
                                 let intervals = if use_boundary_realign {
                                     impg::syng_transitive::query_transitive_ext_with_seed_filter(
@@ -4612,27 +4591,35 @@ fn run() -> io::Result<()> {
                                         syng_extension,
                                     )?
                                 };
-                                let fetched: Vec<(String, Vec<u8>)> = intervals
+                                let query_intervals: Vec<coitrees::Interval<u32>> = intervals
                                     .iter()
-                                    .map(|iv| {
-                                        let sequence = seq_idx.fetch_sequence(
-                                            &iv.genome,
-                                            iv.start as i32,
-                                            iv.end as i32,
-                                        )?;
-                                        let seq_name = format!(
-                                            "{}:{}-{}({})",
-                                            iv.genome, iv.start, iv.end, iv.strand
-                                        );
-                                        Ok((seq_name, sequence))
-                                    })
-                                    .collect::<io::Result<Vec<_>>>()?;
-                                let mut out = find_output_stream(&output_prefix, "gfa")?;
-                                emit_syng_region_gfa(
-                                    wrapper.syng_index(),
-                                    &fetched,
+                                    .filter_map(|iv| syng_interval_to_coitree(iv, wrapper.seq_index()))
+                                    .collect();
+
+                                if query_intervals.is_empty() {
+                                    let mut out = find_output_stream(&output_prefix, output_ext)?;
+                                    write_graph_output(
+                                        String::from("H\tVN:Z:1.0\n"),
+                                        resolved_format,
+                                        &mut out,
+                                        &reference_names,
+                                    )?;
+                                    continue;
+                                }
+
+                                let gfa_output = impg::dispatch_gfa_engine(
+                                    &wrapper,
+                                    &query_intervals,
+                                    seq_idx,
+                                    scoring_params,
+                                    &engine_opts,
+                                )?;
+                                let mut out = find_output_stream(&output_prefix, output_ext)?;
+                                write_graph_output(
+                                    gfa_output,
+                                    resolved_format,
                                     &mut out,
-                                    mode,
+                                    &reference_names,
                                 )?;
                             } else if let Some(partition_size) = engine_opts.partition_size {
                                 // ─── Sub-windowed path: syng-at-the-outer-level ───
@@ -4673,10 +4660,7 @@ fn run() -> io::Result<()> {
                                     };
                                     let window_intervals: Vec<Interval<u32>> = intervals
                                         .iter()
-                                        .filter_map(|iv| {
-                                            let id = wrapper.seq_index().get_id(&iv.genome)?;
-                                            Some(Interval::new(iv.start as i32, iv.end as i32, id))
-                                        })
+                                        .filter_map(|iv| syng_interval_to_coitree(iv, wrapper.seq_index()))
                                         .collect();
                                     info!(
                                         "  [syng sub-window {}] {}:{}-{} → {} intervals",
@@ -4691,8 +4675,13 @@ fn run() -> io::Result<()> {
                                 }
 
                                 if partitions.is_empty() {
-                                    let mut out = find_output_stream(&output_prefix, "gfa")?;
-                                    writeln!(out, "H\tVN:Z:1.0")?;
+                                    let mut out = find_output_stream(&output_prefix, output_ext)?;
+                                    write_graph_output(
+                                        String::from("H\tVN:Z:1.0\n"),
+                                        resolved_format,
+                                        &mut out,
+                                        &reference_names,
+                                    )?;
                                     continue;
                                 }
 
@@ -4703,8 +4692,13 @@ fn run() -> io::Result<()> {
                                     scoring_params,
                                     &engine_opts,
                                 )?;
-                                let mut out = find_output_stream(&output_prefix, "gfa")?;
-                                writeln!(out, "{gfa_output}")?;
+                                let mut out = find_output_stream(&output_prefix, output_ext)?;
+                                write_graph_output(
+                                    gfa_output,
+                                    resolved_format,
+                                    &mut out,
+                                    &reference_names,
+                                )?;
                             } else {
                                 // ─── Flat path: one query_region, one engine run ───
                                 let intervals = if use_boundary_realign {
@@ -4728,15 +4722,17 @@ fn run() -> io::Result<()> {
                                 };
                                 let query_intervals: Vec<coitrees::Interval<u32>> = intervals
                                     .iter()
-                                    .filter_map(|iv| {
-                                        let id = wrapper.seq_index().get_id(&iv.genome)?;
-                                        Some(Interval::new(iv.start as i32, iv.end as i32, id))
-                                    })
+                                    .filter_map(|iv| syng_interval_to_coitree(iv, wrapper.seq_index()))
                                     .collect();
 
                                 if query_intervals.is_empty() {
-                                    let mut out = find_output_stream(&output_prefix, "gfa")?;
-                                    writeln!(out, "H\tVN:Z:1.0")?;
+                                    let mut out = find_output_stream(&output_prefix, output_ext)?;
+                                    write_graph_output(
+                                        String::from("H\tVN:Z:1.0\n"),
+                                        resolved_format,
+                                        &mut out,
+                                        &reference_names,
+                                    )?;
                                     continue;
                                 }
 
@@ -4747,8 +4743,13 @@ fn run() -> io::Result<()> {
                                     scoring_params,
                                     &engine_opts,
                                 )?;
-                                let mut out = find_output_stream(&output_prefix, "gfa")?;
-                                writeln!(out, "{gfa_output}")?;
+                                let mut out = find_output_stream(&output_prefix, output_ext)?;
+                                write_graph_output(
+                                    gfa_output,
+                                    resolved_format,
+                                    &mut out,
+                                    &reference_names,
+                                )?;
                             }
                         }
                         "fasta" => {
@@ -4875,7 +4876,9 @@ fn run() -> io::Result<()> {
             let parsed_partition_size = parsed_gfa_engine.partition_size;
 
             // For size validation, flat POA on "gfa" needs the same limit as the old "gfa-poa"
-            let size_check_format = if output_format == "gfa" && parsed_engine == GfaEngine::Poa {
+            let size_check_format = if matches!(output_format.as_str(), "gfa" | "vcf")
+                && parsed_engine == GfaEngine::Poa
+            {
                 "gfa-poa"
             } else {
                 &output_format
@@ -5083,6 +5086,37 @@ fn run() -> io::Result<()> {
                                 &name,
                                 query.effective_merge_distance(),
                                 query.merge_strands_for_output("gfa"),
+                                scoring_params,
+                                &engine_opts,
+                            )?;
+                        }
+                    }
+                    "vcf" => {
+                        let engine_opts = engine_cli.build(common.threads.get())?;
+                        let reference_names = vcf_reference_names(&name, &target_name);
+                        if let Some(ps) = engine_opts.partition_size {
+                            output_results_vcf_partitioned(
+                                &impg,
+                                &mut find_output_stream(&output_prefix, "vcf")?,
+                                sequence_index.as_ref().unwrap(),
+                                scoring_params,
+                                &engine_opts,
+                                &target_name,
+                                target_range,
+                                ps,
+                                &query,
+                                subset_filter.as_ref(),
+                                &reference_names,
+                            )?;
+                        } else {
+                            output_results_vcf(
+                                &impg,
+                                &mut results,
+                                &mut find_output_stream(&output_prefix, "vcf")?,
+                                sequence_index.as_ref().unwrap(),
+                                &reference_names,
+                                query.effective_merge_distance(),
+                                query.merge_strands_for_output("vcf"),
                                 scoring_params,
                                 &engine_opts,
                             )?;
@@ -7537,6 +7571,33 @@ fn find_output_stream(basename: &Option<String>, extension: &str) -> io::Result<
     }
 }
 
+fn graph_output_extension(output_format: &str) -> &'static str {
+    match output_format {
+        "vcf" => "vcf",
+        _ => "gfa",
+    }
+}
+
+fn vcf_reference_names(range_name: &str, target_name: &str) -> Vec<String> {
+    let mut names = vec![range_name.to_string()];
+    if target_name != range_name {
+        names.push(target_name.to_string());
+    }
+    names
+}
+
+fn write_graph_output(
+    mut gfa_output: String,
+    output_format: &str,
+    out: &mut dyn Write,
+    reference_names: &[String],
+) -> io::Result<()> {
+    if output_format == "vcf" {
+        gfa_output = impg::gfa_to_vcf_string(&gfa_output, reference_names)?;
+    }
+    out.write_all(gfa_output.as_bytes())
+}
+
 /// Load/generate index based on common and alignment options
 fn initialize_index(
     common: &CommonOpts,
@@ -8249,6 +8310,14 @@ fn syng_intervals_to_adjusted(
         .collect()
 }
 
+fn syng_interval_to_coitree(
+    iv: &impg::syng::HomologousInterval,
+    seq_index: &SequenceIndex,
+) -> Option<Interval<u32>> {
+    let id = seq_index.get_id(&iv.genome)?;
+    Some(Interval::new(iv.start as i32, iv.end as i32, id))
+}
+
 fn output_results_bed(
     impg: &impl ImpgIndex,
     results: &mut Vec<AdjustedInterval>,
@@ -8535,6 +8604,37 @@ fn output_results_gfa(
     Ok(())
 }
 
+fn output_results_vcf(
+    impg: &impl ImpgIndex,
+    results: &mut Vec<AdjustedInterval>,
+    out: &mut dyn Write,
+    sequence_index: &UnifiedSequenceIndex,
+    reference_names: &[String],
+    merge_distance: i32,
+    merge_strands: bool,
+    scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
+    engine_opts: &EngineOpts,
+) -> io::Result<()> {
+    merge_query_adjusted_intervals(results, merge_distance, merge_strands);
+
+    let query_intervals: Vec<Interval<u32>> = results
+        .drain(..)
+        .map(|(query_interval, _, _)| query_interval)
+        .collect();
+
+    let gfa_output = impg::dispatch_gfa_engine(
+        impg,
+        &query_intervals,
+        sequence_index,
+        scoring_params,
+        engine_opts,
+    )?;
+    let vcf_output = impg::gfa_to_vcf_string(&gfa_output, reference_names)?;
+    out.write_all(vcf_output.as_bytes())?;
+
+    Ok(())
+}
+
 /// Partitioned GFA output for the query command: splits the query region into
 /// sub-windows of `partition_size` bp, queries each, then runs the partitioned
 /// GFA pipeline (per-partition engine → lace → gfaffix).
@@ -8603,6 +8703,43 @@ fn output_results_gfa_partitioned(
     )?;
     out.write_all(gfa_output.as_bytes())?;
 
+    Ok(())
+}
+
+fn output_results_vcf_partitioned(
+    impg: &impl ImpgIndex,
+    out: &mut dyn Write,
+    sequence_index: &UnifiedSequenceIndex,
+    scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
+    engine_opts: &EngineOpts,
+    target_name: &str,
+    target_range: (i32, i32),
+    partition_size: usize,
+    query: &QueryOpts,
+    subset_filter: Option<&SubsetFilter>,
+    reference_names: &[String],
+) -> io::Result<()> {
+    let mut gfa = Vec::new();
+    output_results_gfa_partitioned(
+        impg,
+        &mut gfa,
+        sequence_index,
+        scoring_params,
+        engine_opts,
+        target_name,
+        target_range,
+        partition_size,
+        query,
+        subset_filter,
+    )?;
+    let gfa_output = String::from_utf8(gfa).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("partitioned GFA output is not UTF-8: {e}"),
+        )
+    })?;
+    let vcf_output = impg::gfa_to_vcf_string(&gfa_output, reference_names)?;
+    out.write_all(vcf_output.as_bytes())?;
     Ok(())
 }
 
@@ -9691,6 +9828,7 @@ mod tests {
             "bedpe      paired query/result intervals",
             "paf        PAF-like projected interval matches",
             "gfa        local sequence graph built from query-selected intervals",
+            "vcf        POVU VCF calls from the local sequence graph",
             "maf        multiple-alignment output for query-selected intervals",
             "fasta      FASTA sequences for query-selected intervals",
             "fasta+paf  FASTA sequences plus PAF-like interval mappings",
@@ -9699,6 +9837,8 @@ mod tests {
             "`--gfa-engine syng` emits a syng syncmer GFA",
             "defaults to syng:blunt; use syng:raw",
             "-o gfa:syng:blunt,k=63,s=8,seed=7",
+            "-o vcf:syng",
+            "-o gfa:wfmash:seqwish",
             "`impg syng2gfa` to dump the whole syng syncmer graph",
         ] {
             assert!(
@@ -9788,6 +9928,103 @@ mod tests {
             }
             _ => panic!("expected query command"),
         }
+    }
+
+    #[test]
+    fn test_gfa_output_format_can_carry_alignment_pipeline_spec() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:wfmash:seqwish:10k",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                assert_eq!(engine_cli.aln.sw.aligner, "wfmash");
+                let parsed = engine_cli.parse_engine().unwrap();
+                assert_eq!(parsed.engine, GfaEngine::Seqwish);
+                assert_eq!(parsed.partition_size, Some(10_000));
+            }
+            _ => panic!("expected query command"),
+        }
+
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:sweepga:fastga:pggb,window=20k",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                assert_eq!(engine_cli.aln.sw.aligner, "fastga");
+                let parsed = engine_cli.parse_engine().unwrap();
+                assert_eq!(parsed.engine, GfaEngine::Pggb);
+                assert_eq!(parsed.partition_size, Some(20_000));
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_vcf_output_format_can_carry_engine_spec() {
+        let args = Args::try_parse_from(["impg", "query", "-d", "0", "-o", "vcf:syng"])
+            .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "vcf");
+                let parsed = engine_cli.parse_engine().unwrap();
+                assert_eq!(parsed.engine, GfaEngine::SyngNative);
+                assert_eq!(parsed.syng_gfa_mode, Some(SyngGfaMode::Blunt));
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_povu_gfa_to_vcf_string_simple_substitution() {
+        let gfa = concat!(
+            "H\tVN:Z:1.0\n",
+            "S\t0\tA\n",
+            "S\t1\tC\n",
+            "S\t2\tG\n",
+            "S\t3\tT\n",
+            "L\t0\t+\t1\t+\t0M\n",
+            "L\t1\t+\t3\t+\t0M\n",
+            "L\t0\t+\t2\t+\t0M\n",
+            "L\t2\t+\t3\t+\t0M\n",
+            "P\tref\t0+,1+,3+\t*\n",
+            "P\talt\t0+,2+,3+\t*\n",
+        );
+        let refs = vec!["ref".to_string()];
+        let vcf = impg::gfa_to_vcf_string(gfa, &refs).unwrap();
+        assert!(vcf.contains("#CHROM\tPOS\tID\tREF\tALT"));
+        assert!(vcf.contains("ref\t2\t>0>3\tC\tG"));
     }
 
     #[test]
