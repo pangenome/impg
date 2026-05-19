@@ -155,6 +155,17 @@ The `-o gfa:<spec>` shorthand is generic. `-o gfa:pggb`, `-o gfa:seqwish`,
 backend: `-o gfa:wfmash:seqwish`, `-o gfa:fastga:pggb`, or
 `-o gfa:sweepga:seqwish`.
 
+The shorthand is parsed as a staged graph pipeline:
+
+```text
+gfa:<stage>[,<key=value>...][:<stage>[,<key=value>...]...]
+```
+
+For example, `gfa:syng,k=63,s=8,seed=7:blunt` and the legacy
+`gfa:syng:blunt,k=63,s=8,seed=7` are both accepted. Future graph transforms
+such as `:crush` use the same staged syntax; see
+`docs/graph-pipeline-dsl.md`.
+
 VCF output uses the same engine dispatch and passes the local GFA to POVU:
 `-o vcf:syng`, `-o vcf:pggb`, `-o vcf:seqwish`, and `-o vcf:poa` are
 equivalent to `-o vcf --gfa-engine <engine>`.

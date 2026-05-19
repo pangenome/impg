@@ -1,0 +1,138 @@
+# Graph Pipeline DSL
+
+IMPG graph output is moving toward a typed graph-construction pipeline instead
+of one-off CLI flags for every engine and transformation.
+
+The intended grammar is:
+
+```text
+gfa:<stage>[,<key=value>...][:<stage>[,<key=value>...]...]
+vcf:<stage>[,<key=value>...][:<stage>[,<key=value>...]...]
+```
+
+Stages are separated by `:`. Parameters belong to the stage immediately before
+them and are separated by commas:
+
+```text
+syng,k=63,s=8,seed=7:blunt
+seqwish,min-match-len=70
+pggb,window=20k
+syng,k=63,s=8:crush,max-span=10k,max-traversals=128
+```
+
+This is a graph-pipeline DSL, not a general shell pipeline. Each stage is a
+typed graph producer or graph transform with declared inputs, outputs, and
+parameters.
+
+## Current Runtime Support
+
+The parser accepts the staged grammar, but runtime execution is intentionally
+still conservative.
+
+Supported executable producers today:
+
+```text
+pggb
+seqwish
+poa
+syng
+```
+
+Supported syng graph modes:
+
+```text
+syng
+syng:blunt
+syng:raw
+syng,mode=blunt
+syng,mode=raw
+syng,k=63,s=8,seed=7:blunt
+syng:blunt,k=63,s=8,seed=7
+```
+
+Supported legacy alignment prefixes remain:
+
+```text
+gfa:wfmash:seqwish
+gfa:fastga:pggb
+gfa:sweepga:seqwish
+```
+
+Supported partition/window forms remain:
+
+```text
+gfa:pggb:10k
+gfa:pggb,window=10k
+gfa:seqwish:20k
+gfa:sweepga:fastga:pggb,window=20k
+```
+
+`crush` is parsed as a future graph transform but is not wired into runtime
+dispatch yet. Attempting to run `gfa:syng:crush` currently fails with an
+explicit "not wired yet" error rather than silently changing graph semantics.
+
+## Planned Stages
+
+`crush` should become a generic blunt-graph transform:
+
+```text
+input blunt graph
+  -> POVU/flubble decomposition
+  -> bottom-up non-overlapping site batches
+  -> exact path-preserving local replacement
+  -> recompute decomposition after each phase
+  -> stop when no bounded sites remain
+```
+
+For syng, `crush` should imply blunt input:
+
+```text
+syng:crush == syng:blunt -> crush
+```
+
+For seqwish and pggb, `crush` should operate on the already-blunt local graph:
+
+```text
+seqwish:crush
+pggb:crush
+```
+
+The important design point is that `crush` is not syng-specific. Syng, seqwish,
+pggb, high-k seqwish, and future GBZ/handlegraph-backed renderers should all
+feed a common path-embedded blunt graph into the same transform.
+
+## Stage Parameters
+
+Each stage owns its own parameter namespace. The top-level CLI should parse the
+pipeline into stages and then let each stage validate its own parameters.
+
+Examples:
+
+```text
+syng,k=63,s=8,seed=7
+seqwish,min-match-len=70,sparse-factor=0.001
+pggb,window=20k
+crush,max-span=10k,max-traversal-len=10k,max-traversals=128,method=poa
+```
+
+Unknown parameters should be errors, not warnings. Silent ignoring would make
+graph parameterization hard to reproduce.
+
+## POVU Requirement For Crush
+
+The current `src/resolution.rs` primitive has an exact path-preserving local
+replacement backend, but its detector is deliberately conservative. The real
+`crush` scheduler must be POVU/flubble-driven:
+
+1. Decompose the current graph into flubbles/bubbles/tangles.
+2. Build a parent/child hierarchy.
+3. Select deepest non-overlapping sites.
+4. Extract observed path traversals through each site.
+5. Replace bounded sites exactly.
+6. Recompute decomposition on the changed graph.
+
+At the current pinned `povu-rs` revision, IMPG has native GFA-to-VCF support,
+but not a public flubble hierarchy API. We need a POVU-side API that exposes
+site IDs, parent/child relationships, entry/exit handles, path-supported
+traversal boundaries, and enough node/edge identity to schedule non-overlapping
+bottom-up batches.
