@@ -170,45 +170,56 @@ fn apply_gfa_output_engine_shorthand(
         ));
     }
 
-    let (head, params) = engine_spec
-        .split_once(',')
-        .map_or((engine_spec, ""), |(head, params)| (head.trim(), params));
-    let head_parts: Vec<&str> = head.split(':').map(str::trim).collect();
+    let pipeline = GraphPipelineSpec::parse(engine_spec).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Invalid -o {graph_format}:{}: {}", engine_spec, e),
+        )
+    })?;
     let mut engine_start = 0usize;
 
-    if head_parts
+    if pipeline
+        .stages
         .get(engine_start)
-        .is_some_and(|part| part.eq_ignore_ascii_case("sweepga"))
+        .is_some_and(|stage| stage.name == "sweepga")
     {
-        engine_start += 1;
-    }
-    if let Some(part) = head_parts.get(engine_start) {
-        let aligner = part.replace('_', "-").to_ascii_lowercase();
-        if matches!(aligner.as_str(), "wfmash" | "fastga") {
-            engine_cli.aln.sw.aligner = aligner;
-            engine_start += 1;
-        }
-    }
-
-    let normalized_head = if engine_start == 0 {
-        head.to_string()
-    } else {
-        if engine_start >= head_parts.len() {
+        if !pipeline.stages[engine_start].params.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "-o {graph_format}:{} is missing a graph engine after the alignment prefix",
+                    "-o {graph_format}:{} sweepga stage does not accept comma parameters yet",
                     engine_spec
                 ),
             ));
         }
-        head_parts[engine_start..].join(":")
-    };
-    engine_cli.engine_raw = if params.is_empty() {
-        normalized_head
-    } else {
-        format!("{normalized_head},{params}")
-    };
+        engine_start += 1;
+    }
+    if let Some(stage) = pipeline.stages.get(engine_start) {
+        if matches!(stage.name.as_str(), "wfmash" | "fastga") {
+            if !stage.params.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "-o {graph_format}:{} aligner stage '{}' does not accept comma parameters yet",
+                        engine_spec, stage.name
+                    ),
+                ));
+            }
+            engine_cli.aln.sw.aligner = stage.name.clone();
+            engine_start += 1;
+        }
+    }
+
+    if engine_start >= pipeline.stages.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "-o {graph_format}:{} is missing a graph engine after the alignment prefix",
+                engine_spec
+            ),
+        ));
+    }
+    engine_cli.engine_raw = pipeline.stages_from(engine_start).to_spec();
     Ok(graph_format.to_string())
 }
 
@@ -1983,6 +1994,7 @@ fn setup_temp_dir(temp_dir: &str) -> io::Result<()> {
 }
 
 use impg::commands::syng2gfa::SyngGfaMode;
+use impg::graph_pipeline::{GraphPipelineSpec, GraphPipelineStage};
 use impg::{EngineOpts, GfaEngine};
 use sweepga::knn_graph::SparsificationStrategy;
 
@@ -2137,6 +2149,153 @@ struct ParsedGfaEngine {
     syng_params: Option<impg::syng::SyncmerParams>,
 }
 
+fn set_syng_gfa_mode(
+    raw: &str,
+    current: &mut Option<SyngGfaMode>,
+    next: SyngGfaMode,
+) -> io::Result<()> {
+    if let Some(existing) = *current {
+        if existing != next {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Invalid --gfa-engine '{}': conflicting syng modes '{}' and '{}'",
+                    raw,
+                    existing.label(),
+                    next.label()
+                ),
+            ));
+        }
+    }
+    *current = Some(next);
+    Ok(())
+}
+
+fn parse_u32_engine_param(raw: &str, key: &str, value: &str) -> io::Result<u32> {
+    value.parse::<u32>().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': {}='{}' is not a u32",
+                raw, key, value
+            ),
+        )
+    })
+}
+
+fn parse_syng_assertion_params(
+    raw: &str,
+    stage: &GraphPipelineStage,
+    syncmer_length: &mut Option<u32>,
+    smer_length: &mut Option<u32>,
+    syncmer_seed: &mut Option<u32>,
+    saw_syng_param: &mut bool,
+) -> io::Result<()> {
+    for param in &stage.params {
+        match param.key.as_str() {
+            "k" | "syncmer" | "syncmer-length" => {
+                *saw_syng_param = true;
+                *syncmer_length = Some(parse_u32_engine_param(raw, &param.key, &param.value)?);
+            }
+            "s" | "smer" | "smer-length" => {
+                *saw_syng_param = true;
+                *smer_length = Some(parse_u32_engine_param(raw, &param.key, &param.value)?);
+            }
+            "seed" => {
+                *saw_syng_param = true;
+                *syncmer_seed = Some(parse_u32_engine_param(raw, &param.key, &param.value)?);
+            }
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Invalid --gfa-engine '{}': unknown syng parameter '{}' on stage '{}'",
+                        raw, other, stage.name
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_engine_stage_params<F>(
+    raw: &str,
+    stage: &GraphPipelineStage,
+    is_syng: bool,
+    parse_window: &F,
+    partition_size: &mut Option<usize>,
+    syng_gfa_mode: &mut Option<SyngGfaMode>,
+    syncmer_length: &mut Option<u32>,
+    smer_length: &mut Option<u32>,
+    syncmer_seed: &mut Option<u32>,
+    saw_syng_param: &mut bool,
+) -> io::Result<()>
+where
+    F: Fn(&str) -> io::Result<usize>,
+{
+    if is_syng {
+        let mut assertion_stage = GraphPipelineStage {
+            name: stage.name.clone(),
+            params: Vec::new(),
+        };
+        for param in &stage.params {
+            match param.key.as_str() {
+                "mode" => {
+                    set_syng_gfa_mode(raw, syng_gfa_mode, SyngGfaMode::parse(&param.value)?)?;
+                }
+                "k" | "syncmer" | "syncmer-length" | "s" | "smer" | "smer-length"
+                | "seed" => assertion_stage.params.push(param.clone()),
+                "window" | "window-size" => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': syng GFA modes do not use window",
+                            raw
+                        ),
+                    ));
+                }
+                other => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': unknown syng parameter '{}'",
+                            raw, other
+                        ),
+                    ));
+                }
+            }
+        }
+        parse_syng_assertion_params(
+            raw,
+            &assertion_stage,
+            syncmer_length,
+            smer_length,
+            syncmer_seed,
+            saw_syng_param,
+        )
+    } else {
+        for param in &stage.params {
+            match param.key.as_str() {
+                "window" | "window-size" => {
+                    *partition_size = Some(parse_window(&param.value)?);
+                }
+                other => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': unknown parameter '{}' for engine '{}'",
+                            raw, other, stage.name
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 impl EngineCliOpts {
     /// Parse `--gfa-engine`.
     ///
@@ -2147,13 +2306,19 @@ impl EngineCliOpts {
     /// - `syng:blunt,k=63,s=8,seed=7` as an assertion about the input syng index.
     fn parse_engine(&self) -> io::Result<ParsedGfaEngine> {
         let raw = self.engine_raw.trim();
-        let mut parts = raw.split(',').map(str::trim).filter(|p| !p.is_empty());
-        let head = parts.next().unwrap_or("pggb");
-        let param_parts: Vec<&str> = parts.collect();
-        let (engine_name_raw, suffix) = head
-            .split_once(':')
-            .map_or((head, None), |(name, suffix)| (name, Some(suffix)));
-        let engine_name = engine_name_raw.trim().replace('_', "-").to_ascii_lowercase();
+        let pipeline = GraphPipelineSpec::parse(raw).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Invalid --gfa-engine '{}': {}", raw, e),
+            )
+        })?;
+        let engine_stage = pipeline.stages.first().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Invalid --gfa-engine '{}': missing graph engine", raw),
+            )
+        })?;
+        let engine_name = engine_stage.name.as_str();
 
         let parse_window = |value: &str| -> io::Result<usize> {
             let parsed = parse_size(value).map_err(|e| {
@@ -2180,39 +2345,21 @@ impl EngineCliOpts {
             Ok(ps)
         };
 
-        let is_syng = matches!(engine_name.as_str(), "syng" | "syng-native");
+        let is_syng = matches!(engine_name, "syng" | "syng-native");
         let mut partition_size = None;
         let mut syng_gfa_mode = None;
 
-        if let Some(suffix) = suffix {
-            let suffix = suffix.trim();
-            if suffix.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("Invalid --gfa-engine '{}': empty value after ':'", raw),
-                ));
-            }
-            if is_syng {
-                syng_gfa_mode = Some(SyngGfaMode::parse(&format!("syng:{suffix}"))?);
-            } else {
-                partition_size = Some(parse_window(suffix)?);
-            }
-        }
-
-        let engine = match engine_name.as_str() {
+        let engine = match engine_name {
             "pggb" => GfaEngine::Pggb,
             "seqwish" => GfaEngine::Seqwish,
             "poa" => GfaEngine::Poa,
-            "syng" | "syng-native" => {
-                syng_gfa_mode.get_or_insert(SyngGfaMode::Blunt);
-                GfaEngine::SyngNative
-            }
+            "syng" | "syng-native" => GfaEngine::SyngNative,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
                         "Unknown GFA engine '{}'. Valid engines: pggb, seqwish, poa, syng",
-                        engine_name_raw
+                        engine_stage.name
                     ),
                 ));
             }
@@ -2223,89 +2370,54 @@ impl EngineCliOpts {
         let mut syncmer_seed: Option<u32> = None;
         let mut saw_syng_param = false;
 
-        for part in param_parts {
-            let (key, value) = part.split_once('=').ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "Invalid --gfa-engine '{}': parameter '{}' must be key=value",
-                        raw, part
-                    ),
-                )
-            })?;
-            let key = key.trim().replace('_', "-").to_ascii_lowercase();
-            let value = value.trim();
-            match key.as_str() {
-                "window" | "window-size" => {
-                    if is_syng {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("Invalid --gfa-engine '{}': syng GFA modes do not use window", raw),
-                        ));
-                    }
-                    partition_size = Some(parse_window(value)?);
+        parse_engine_stage_params(
+            raw,
+            engine_stage,
+            is_syng,
+            &parse_window,
+            &mut partition_size,
+            &mut syng_gfa_mode,
+            &mut syncmer_length,
+            &mut smer_length,
+            &mut syncmer_seed,
+            &mut saw_syng_param,
+        )?;
+
+        for stage in pipeline.stages.iter().skip(1) {
+            match stage.name.as_str() {
+                "raw" | "blunt" | "bluntg" if is_syng => {
+                    set_syng_gfa_mode(raw, &mut syng_gfa_mode, SyngGfaMode::parse(&stage.name)?)?;
+                    parse_syng_assertion_params(
+                        raw,
+                        stage,
+                        &mut syncmer_length,
+                        &mut smer_length,
+                        &mut syncmer_seed,
+                        &mut saw_syng_param,
+                    )?;
                 }
-                "mode" => {
-                    if !is_syng {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("Invalid --gfa-engine '{}': mode= is only valid for syng", raw),
-                        ));
-                    }
-                    syng_gfa_mode = Some(SyngGfaMode::parse(value)?);
+                "crush" => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': graph pipeline stage 'crush' is parsed but not wired yet",
+                            raw
+                        ),
+                    ));
                 }
-                "k" | "syncmer" | "syncmer-length" => {
-                    if !is_syng {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("Invalid --gfa-engine '{}': k= is only valid for syng", raw),
-                        ));
-                    }
-                    saw_syng_param = true;
-                    syncmer_length = Some(value.parse::<u32>().map_err(|_| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("Invalid --gfa-engine '{}': k='{}' is not a u32", raw, value),
-                        )
-                    })?);
-                }
-                "s" | "smer" | "smer-length" => {
-                    if !is_syng {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("Invalid --gfa-engine '{}': s= is only valid for syng", raw),
-                        ));
-                    }
-                    saw_syng_param = true;
-                    smer_length = Some(value.parse::<u32>().map_err(|_| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("Invalid --gfa-engine '{}': s='{}' is not a u32", raw, value),
-                        )
-                    })?);
-                }
-                "seed" => {
-                    if !is_syng {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("Invalid --gfa-engine '{}': seed= is only valid for syng", raw),
-                        ));
-                    }
-                    saw_syng_param = true;
-                    syncmer_seed = Some(value.parse::<u32>().map_err(|_| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("Invalid --gfa-engine '{}': seed='{}' is not a u32", raw, value),
-                        )
-                    })?);
+                stage_name if !is_syng && stage.params.is_empty() => {
+                    partition_size = Some(parse_window(stage_name)?);
                 }
                 other => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        format!("Invalid --gfa-engine '{}': unknown parameter '{}'", raw, other),
+                        format!("Invalid --gfa-engine '{}': unsupported pipeline stage '{}'", raw, other),
                     ));
                 }
             }
+        }
+        if is_syng && syng_gfa_mode.is_none() {
+            syng_gfa_mode = Some(SyngGfaMode::Blunt);
         }
 
         let syng_params = if saw_syng_param {
@@ -9931,6 +10043,67 @@ mod tests {
     }
 
     #[test]
+    fn test_gfa_output_format_accepts_stage_local_params() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng,k=63,s=8,seed=7:blunt",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                assert_eq!(engine_cli.engine_raw, "syng,k=63,s=8,seed=7:blunt");
+                let parsed = engine_cli.parse_engine().unwrap();
+                assert_eq!(parsed.syng_gfa_mode, Some(SyngGfaMode::Blunt));
+                assert_eq!(
+                    parsed.syng_params,
+                    Some(impg::syng::SyncmerParams { k: 8, w: 55, seed: 7 })
+                );
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_parses_but_rejects_unwired_crush_stage() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush,max-span=10k",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                assert_eq!(engine_cli.engine_raw, "syng:crush,max-span=10k");
+                let err = engine_cli.parse_engine().unwrap_err();
+                assert!(err.to_string().contains("crush"));
+                assert!(err.to_string().contains("not wired yet"));
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
     fn test_gfa_output_format_can_carry_alignment_pipeline_spec() {
         let args = Args::try_parse_from([
             "impg",
@@ -9980,6 +10153,32 @@ mod tests {
                 let parsed = engine_cli.parse_engine().unwrap();
                 assert_eq!(parsed.engine, GfaEngine::Pggb);
                 assert_eq!(parsed.partition_size, Some(20_000));
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_rejects_unsupported_alignment_stage_params() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:sweepga,foo=bar:seqwish",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let err =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap_err();
+                assert!(err.to_string().contains("sweepga"));
+                assert!(err.to_string().contains("does not accept comma parameters"));
             }
             _ => panic!("expected query command"),
         }
