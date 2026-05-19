@@ -299,6 +299,7 @@ fn discover_partitions(
         max_node_length: 100,
         poa_padding_fraction: 0.001,
         partition_size: None,
+        crush_config: None,
     };
 
     info!(
