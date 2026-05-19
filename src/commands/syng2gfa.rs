@@ -7,16 +7,17 @@
 //! syncmer length, a gap segment of `offset - syncmer_length` bp is
 //! inserted between them. Gap bases come from `--sequence-files` if
 //! provided, otherwise the gap is filled with `N`s and a warning is
-//! emitted. Each gap occurrence gets a fresh segment id (no
-//! cross-path dedup) so that orientation/dedup never silently mixes
-//! distinct DNA. The CLI default is blunt mode (`pangenome/bluntg`),
+//! emitted. Gap segments are interned by exact sequence plus local
+//! signed-syncmer context, so identical terminal/inter-syncmer DNA shared
+//! by the same local graph context is one node, without collapsing unrelated
+//! repeated sequence elsewhere. The CLI default is blunt mode (`pangenome/bluntg`),
 //! which converts native variable overlaps to 0M links; raw mode keeps
 //! syng's native overlap graph.
 
 use std::io::{self, BufWriter, Write};
 
 use log::{debug, info, warn};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::sequence_index::{SequenceIndex, UnifiedSequenceIndex};
 use crate::syng::{GbwtPathStart, SyngIndex};
@@ -36,8 +37,9 @@ impl SyngGfaMode {
         match s.trim().replace('_', "-").to_ascii_lowercase().as_str() {
             "raw" | "syng:raw" | "syng-raw" | "syng-native:raw" => Ok(Self::Raw),
             "blunt" | "bluntg" | "syng" | "syng:blunt" | "syng:bluntg" | "syng-blunt"
-            | "syng-bluntg" | "syng-native" | "syng-native:blunt"
-            | "syng-native:bluntg" => Ok(Self::Blunt),
+            | "syng-bluntg" | "syng-native" | "syng-native:blunt" | "syng-native:bluntg" => {
+                Ok(Self::Blunt)
+            }
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("unknown syng GFA mode '{other}' (expected raw or blunt)"),
@@ -130,6 +132,68 @@ struct GapSegment {
     seq: Vec<u8>,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum GapContext {
+    Prefix { right: i32 },
+    Between { left: i32, right: i32 },
+    Suffix { left: i32 },
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct GapKey {
+    context: GapContext,
+    seq: Vec<u8>,
+}
+
+struct GapInterner {
+    n_nodes: usize,
+    next_gap_id: u64,
+    keys: FxHashMap<GapKey, String>,
+    segments: Vec<GapSegment>,
+    total_segment_bp: u64,
+}
+
+impl GapInterner {
+    fn new(n_nodes: usize) -> Self {
+        Self {
+            n_nodes,
+            next_gap_id: 0,
+            keys: FxHashMap::default(),
+            segments: Vec::new(),
+            total_segment_bp: 0,
+        }
+    }
+
+    fn intern(&mut self, context: GapContext, seq: Vec<u8>) -> String {
+        let key = GapKey { context, seq };
+        if let Some(id) = self.keys.get(&key) {
+            return id.clone();
+        }
+
+        let id = format!("{}", self.n_nodes as u64 + 1 + self.next_gap_id);
+        self.next_gap_id += 1;
+        self.total_segment_bp += key.seq.len() as u64;
+        self.segments.push(GapSegment {
+            id: id.clone(),
+            seq: key.seq.clone(),
+        });
+        self.keys.insert(key, id.clone());
+        id
+    }
+
+    fn len(&self) -> usize {
+        self.segments.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.segments.is_empty()
+    }
+
+    fn total_segment_bp(&self) -> u64 {
+        self.total_segment_bp
+    }
+}
+
 /// Walked path plus any inserted gap segments.
 struct WalkedPath {
     name: String,
@@ -141,7 +205,7 @@ struct WalkedPath {
 ///
 /// `gap_fill` selects how mid-path gaps are filled (FASTA vs. NNN).
 /// Returns `(n_segments, n_links, n_paths_emitted, n_paths_skipped,
-/// n_gap_segments, total_gap_bp)`.
+/// n_gap_segments, unique_gap_segment_bp)`.
 pub fn write_gfa<W: Write>(
     index: &SyngIndex,
     writer: &mut W,
@@ -155,7 +219,11 @@ pub fn write_gfa<W: Write>(
         n_nodes,
         syncmer_len,
         version.header_tag(),
-        if gap_fill.is_some() { "FASTA/AGC" } else { "Ns" }
+        if gap_fill.is_some() {
+            "FASTA/AGC"
+        } else {
+            "Ns"
+        }
     );
 
     // Silence syng's C-side debug printfs (syngBWTpathStartOld et al.)
@@ -167,17 +235,16 @@ pub fn write_gfa<W: Write>(
     //   - per-path step list (syncmers + gap segments) for P/W emission
     //   - unique L edges with overlaps
     //   - in-order list of gap segments to emit later as S lines
-    let mut walked_paths: Vec<WalkedPath> =
-        Vec::with_capacity(index.name_map.path_to_name.len());
+    let mut walked_paths: Vec<WalkedPath> = Vec::with_capacity(index.name_map.path_to_name.len());
     // Edge tuple: (from_id, from_sign, to_id, to_sign, overlap_bp).
     // `String` because endpoints are integer IDs (syncmers 1..N, gaps
     // N+1, N+2, …) and we serialize them as text.
     let mut edges: FxHashSet<(String, char, String, char, u32)> = FxHashSet::default();
-    let mut gap_segments: Vec<GapSegment> = Vec::new();
+    let mut gap_interner = GapInterner::new(n_nodes);
     let mut n_skipped = 0usize;
-    let mut next_gap_id: u64 = 0;
     let mut gaps_filled_with_ns: usize = 0;
-    let mut total_gap_bp: u64 = 0;
+    let mut gap_occurrences: usize = 0;
+    let mut gap_occurrence_bp: u64 = 0;
 
     let syncmer_len_u64 = syncmer_len as u64;
 
@@ -213,22 +280,12 @@ pub fn write_gfa<W: Write>(
                     gaps_filled_with_ns += 1;
                     vec![b'N'; first_pos as usize]
                 };
-                total_gap_bp += gap_seq.len() as u64;
-                let gap_id = format!("{}", n_nodes as u64 + 1 + next_gap_id);
-                next_gap_id += 1;
+                gap_occurrences += 1;
+                gap_occurrence_bp += gap_seq.len() as u64;
+                let gap_id = gap_interner.intern(GapContext::Prefix { right: first }, gap_seq);
                 let (first_id, first_sign) = signed_to_gfa(first);
-                edges.insert((
-                    gap_id.clone(),
-                    '+',
-                    first_id.to_string(),
-                    first_sign,
-                    0,
-                ));
+                edges.insert((gap_id.clone(), '+', first_id.to_string(), first_sign, 0));
                 steps.push(PathStep::Gap(gap_id.clone()));
-                gap_segments.push(GapSegment {
-                    id: gap_id,
-                    seq: gap_seq,
-                });
             }
             steps.push(PathStep::Syncmer(first));
         }
@@ -242,13 +299,7 @@ pub fn write_gfa<W: Write>(
             if off_u64 <= syncmer_len_u64 {
                 // Direct adjacency: overlap = syncmer_len - offset.
                 let overlap = (syncmer_len_u64 - off_u64) as u32;
-                edges.insert((
-                    a_id.to_string(),
-                    a_sign,
-                    b_id.to_string(),
-                    b_sign,
-                    overlap,
-                ));
+                edges.insert((a_id.to_string(), a_sign, b_id.to_string(), b_sign, overlap));
                 steps.push(PathStep::Syncmer(b));
             } else {
                 // Inter-syncmer gap of (offset - syncmer_len) bp.
@@ -261,29 +312,14 @@ pub fn write_gfa<W: Write>(
                     gaps_filled_with_ns += 1;
                     vec![b'N'; gap_len as usize]
                 };
-                total_gap_bp += gap_seq.len() as u64;
-                let gap_id = format!("{}", n_nodes as u64 + 1 + next_gap_id);
-                next_gap_id += 1;
-                edges.insert((
-                    a_id.to_string(),
-                    a_sign,
-                    gap_id.clone(),
-                    '+',
-                    0,
-                ));
-                edges.insert((
-                    gap_id.clone(),
-                    '+',
-                    b_id.to_string(),
-                    b_sign,
-                    0,
-                ));
+                gap_occurrences += 1;
+                gap_occurrence_bp += gap_seq.len() as u64;
+                let gap_id =
+                    gap_interner.intern(GapContext::Between { left: a, right: b }, gap_seq);
+                edges.insert((a_id.to_string(), a_sign, gap_id.clone(), '+', 0));
+                edges.insert((gap_id.clone(), '+', b_id.to_string(), b_sign, 0));
                 steps.push(PathStep::Gap(gap_id.clone()));
                 steps.push(PathStep::Syncmer(b));
-                gap_segments.push(GapSegment {
-                    id: gap_id,
-                    seq: gap_seq,
-                });
             }
         }
         // Suffix: bases [last_pos + syncmer_len, path_len) after the last syncmer.
@@ -297,22 +333,12 @@ pub fn write_gfa<W: Write>(
                     gaps_filled_with_ns += 1;
                     vec![b'N'; (suffix_end - suffix_start) as usize]
                 };
-                total_gap_bp += gap_seq.len() as u64;
-                let gap_id = format!("{}", n_nodes as u64 + 1 + next_gap_id);
-                next_gap_id += 1;
+                gap_occurrences += 1;
+                gap_occurrence_bp += gap_seq.len() as u64;
+                let gap_id = gap_interner.intern(GapContext::Suffix { left: last }, gap_seq);
                 let (last_id, last_sign) = signed_to_gfa(last);
-                edges.insert((
-                    last_id.to_string(),
-                    last_sign,
-                    gap_id.clone(),
-                    '+',
-                    0,
-                ));
+                edges.insert((last_id.to_string(), last_sign, gap_id.clone(), '+', 0));
                 steps.push(PathStep::Gap(gap_id.clone()));
-                gap_segments.push(GapSegment {
-                    id: gap_id,
-                    seq: gap_seq,
-                });
             }
         }
 
@@ -324,16 +350,20 @@ pub fn write_gfa<W: Write>(
 
     if gaps_filled_with_ns > 0 {
         warn!(
-            "[syng2gfa] filled {} inter-syncmer gap(s) with 'N' ({} bp total). \
-             Concatenating these paths will NOT reconstruct the original genome. \
-             Pass --sequence-files <FASTA> to splice in real DNA.",
-            gaps_filled_with_ns, total_gap_bp
+            "[syng2gfa] filled {} gap occurrence(s) with 'N' ({} bp over paths; {} unique segment bp). \
+                 Concatenating these paths will NOT reconstruct the original genome. \
+                 Pass --sequence-files <FASTA> to splice in real DNA.",
+            gaps_filled_with_ns,
+            gap_occurrence_bp,
+            gap_interner.total_segment_bp()
         );
-    } else if !gap_segments.is_empty() {
+    } else if !gap_interner.is_empty() {
         info!(
-            "[syng2gfa] spliced {} real-DNA gap segment(s), {} bp total",
-            gap_segments.len(),
-            total_gap_bp
+            "[syng2gfa] spliced {} unique real-DNA gap segment(s) from {} gap occurrence(s), {} unique bp ({} bp over paths)",
+            gap_interner.len(),
+            gap_occurrences,
+            gap_interner.total_segment_bp(),
+            gap_occurrence_bp
         );
     }
 
@@ -345,11 +375,11 @@ pub fn write_gfa<W: Write>(
         seq.make_ascii_uppercase();
         write_segment(writer, &node_id.to_string(), &seq)?;
     }
-    for gap in &gap_segments {
+    for gap in &gap_interner.segments {
         write_segment(writer, &gap.id, &gap.seq)?;
     }
-    let n_segments = n_nodes + gap_segments.len();
-    let n_gap_segments = gap_segments.len();
+    let n_segments = n_nodes + gap_interner.len();
+    let n_gap_segments = gap_interner.len();
 
     debug!("[syng2gfa] collected {} unique edges", edges.len());
 
@@ -357,10 +387,7 @@ pub fn write_gfa<W: Write>(
     let mut edge_vec: Vec<(String, char, String, char, u32)> = edges.into_iter().collect();
     edge_vec.sort_unstable();
     for (a_id, a_sign, b_id, b_sign, overlap) in &edge_vec {
-        writeln!(
-            writer,
-            "L\t{a_id}\t{a_sign}\t{b_id}\t{b_sign}\t{overlap}M"
-        )?;
+        writeln!(writer, "L\t{a_id}\t{a_sign}\t{b_id}\t{b_sign}\t{overlap}M")?;
     }
     let n_links = edge_vec.len();
 
@@ -389,7 +416,7 @@ pub fn write_gfa<W: Write>(
         n_paths_emitted,
         n_skipped,
         n_gap_segments,
-        total_gap_bp,
+        gap_interner.total_segment_bp(),
     ))
 }
 
@@ -545,9 +572,14 @@ pub fn run(
         Some(UnifiedSequenceIndex::from_files(sequence_files)?)
     };
 
-    let report =
-        |s: usize, l: usize, p: usize, skipped: usize, gaps: usize, gap_bp: u64, where_: &str| {
-            info!(
+    let report = |s: usize,
+                  l: usize,
+                  p: usize,
+                  skipped: usize,
+                  gaps: usize,
+                  gap_bp: u64,
+                  where_: &str| {
+        info!(
                 "[syng2gfa] wrote {} S ({} syncmer + {} gap, {} gap bp), {} L, {} P/W lines ({} paths skipped) to {}",
                 s,
                 s - gaps,
@@ -558,7 +590,7 @@ pub fn run(
                 skipped,
                 where_,
             );
-        };
+    };
 
     if out_path == "-" {
         let stdout = io::stdout();
@@ -607,10 +639,7 @@ mod tests {
         );
         assert_eq!(SyngGfaMode::parse("bluntg").unwrap(), SyngGfaMode::Blunt);
         assert_eq!(SyngGfaMode::parse("raw").unwrap(), SyngGfaMode::Raw);
-        assert_eq!(
-            SyngGfaMode::parse("syng:raw").unwrap(),
-            SyngGfaMode::Raw
-        );
+        assert_eq!(SyngGfaMode::parse("syng:raw").unwrap(), SyngGfaMode::Raw);
     }
 
     #[test]
@@ -630,5 +659,24 @@ P\tp\t1+,2+,3+\t3M,1M\n";
         assert!(out.contains("P\tp\t1+,2+,3+\t0M,0M"), "{out}");
         assert!(!out.contains("\t3M"), "{out}");
         assert!(!out.contains("\t1M"), "{out}");
+    }
+
+    #[test]
+    fn test_gap_interner_reuses_only_same_sequence_and_context() {
+        let mut gaps = GapInterner::new(10);
+
+        let first = gaps.intern(GapContext::Prefix { right: 7 }, b"ACGT".to_vec());
+        let same = gaps.intern(GapContext::Prefix { right: 7 }, b"ACGT".to_vec());
+        assert_eq!(first, same);
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps.total_segment_bp(), 4);
+
+        let different_context = gaps.intern(GapContext::Prefix { right: 8 }, b"ACGT".to_vec());
+        assert_ne!(first, different_context);
+        assert_eq!(gaps.len(), 2);
+
+        let different_sequence = gaps.intern(GapContext::Prefix { right: 7 }, b"ACGA".to_vec());
+        assert_ne!(first, different_sequence);
+        assert_eq!(gaps.len(), 3);
     }
 }
