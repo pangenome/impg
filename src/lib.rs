@@ -18,6 +18,7 @@ pub mod onealn;
 pub mod pack;
 pub mod paf;
 pub mod projection;
+pub mod resolution;
 pub mod render_bundle;
 pub mod seqidx;
 pub mod sequence_namespace;
