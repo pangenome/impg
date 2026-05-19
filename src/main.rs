@@ -6978,10 +6978,8 @@ fn run() -> io::Result<()> {
             let position_start = Instant::now();
             if let Some(stats) = index.finalize_online_sampled_positions()? {
                 info!(
-                    "Regular sampled position sidecars compacted in {}: {} node-position samples across {} nodes; {} path-step checkpoints across {} paths from {} walked paths (sample_rate={} syncmer steps) at +{}",
+                    "Regular sampled path-step grid compacted in {}: {} checkpoints across {} paths from {} walked paths (sample_rate={} syncmer steps) at +{}",
                     format_duration(position_start.elapsed()),
-                    stats.sampled_occurrences,
-                    stats.sampled_nodes,
                     stats.sampled_path_steps,
                     stats.sampled_step_paths,
                     stats.walked_paths,
@@ -7082,7 +7080,19 @@ fn run() -> io::Result<()> {
                 return Ok(());
             }
 
-            if !force && have_requested_spos {
+            if !force && have_requested_pstep {
+                info!(
+                    "Building occurrence-major syncmer-position sidecar from existing .pstep: {}",
+                    spos_path
+                );
+                let save_start = Instant::now();
+                syng_index.save_checkpoint_sidecar(&prefix)?;
+                info!(
+                    "Saved syncmer-position sidecar in {}: {}",
+                    format_duration(save_start.elapsed()),
+                    spos_path
+                );
+            } else {
                 info!(
                     "Rebuilding regular sampled path-step sidecar: every {} syncmer steps per path",
                     position_sample_rate,
@@ -7105,39 +7115,10 @@ fn run() -> io::Result<()> {
                 let save_start = Instant::now();
                 syng_index.save_path_step_sidecar(&prefix)?;
                 info!(
-                    "Saved path-step sidecar in {}: {}",
+                    "Saved position sidecars in {}: {}, {}",
                     format_duration(save_start.elapsed()),
-                    impg::syng::syng_pstep_path(&prefix)
-                );
-            } else {
-                info!(
-                    "Rebuilding regular sampled position sidecars: every {} syncmer steps per path",
-                    position_sample_rate,
-                );
-                let stats = if serial_position_sampling {
-                    syng_index.rebuild_sampled_position_indexes_from_gbwt(position_sample_rate)?
-                } else {
-                    syng_index.rebuild_sampled_position_indexes_from_gbwt_parallel(
-                        position_sample_rate,
-                        position_progress_interval,
-                    )?
-                };
-                info!(
-                    "Rebuilt sampled position sidecars in {}: {} node-position samples across {} nodes; {} path-step checkpoints across {} paths from {} walked paths",
-                    format_duration(rebuild_start.elapsed()),
-                    stats.sampled_occurrences,
-                    stats.sampled_nodes,
-                    stats.sampled_path_steps,
-                    stats.sampled_step_paths,
-                    stats.walked_paths
-                );
-                let save_start = Instant::now();
-                syng_index.save_position_sidecars(&prefix)?;
-                info!(
-                    "Saved positional sidecars in {}: {}, {}",
-                    format_duration(save_start.elapsed()),
-                    impg::syng::syng_spos_path(&prefix),
-                    impg::syng::syng_pstep_path(&prefix)
+                    impg::syng::syng_pstep_path(&prefix),
+                    impg::syng::syng_spos_path(&prefix)
                 );
             }
             info!(

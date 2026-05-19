@@ -23,6 +23,37 @@ fn read_u64<R: std::io::Read>(r: &mut R) -> io::Result<u64> {
     Ok(u64::from_le_bytes(buf))
 }
 
+fn read_u64_from_slice(buf: &[u8], offset: &mut usize) -> io::Result<u64> {
+    let end = offset
+        .checked_add(8)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "u64 slice offset overflow"))?;
+    let bytes = buf
+        .get(*offset..end)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "truncated u64 in sidecar"))?;
+    *offset = end;
+    Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
+}
+
+fn read_u32_from_slice_at(buf: &[u8], offset: usize) -> io::Result<u32> {
+    let end = offset
+        .checked_add(4)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "u32 slice offset overflow"))?;
+    let bytes = buf
+        .get(offset..end)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "truncated u32 in sidecar"))?;
+    Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+}
+
+fn read_u64_from_slice_at(buf: &[u8], offset: usize) -> io::Result<u64> {
+    let end = offset
+        .checked_add(8)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "u64 slice offset overflow"))?;
+    let bytes = buf
+        .get(offset..end)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "truncated u64 in sidecar"))?;
+    Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct SampledPositionHit {
     pub path_idx: usize,
@@ -65,6 +96,34 @@ struct LocateCheckpointIndex {
     sample_rate: u32,
     shard_mask: usize,
     shards: Vec<FxHashMap<LocateCheckpointKey, LocateCheckpointValue>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CheckpointRecord {
+    signed_node: i32,
+    abs_rank: u32,
+    path_idx: u32,
+    bp_pos: u64,
+}
+
+impl CheckpointRecord {
+    const BYTE_LEN: usize = 16;
+}
+
+/// Persistent occurrence-major syncmer positions.
+///
+/// `.spos` is the query-time inverse of `.pstep`: for each oriented syncmer
+/// node, it stores sampled GBWT occurrence ranks and the path coordinate of
+/// that checkpoint. The payload is fixed-width so it can be memory-mapped and
+/// binary-searched without materializing a global hash table.
+#[derive(Debug)]
+pub struct SampledCheckpointIndex {
+    pub sample_rate: u32,
+    checkpoint_count: u64,
+    signed_nodes: Vec<i32>,
+    record_offsets: Vec<u64>,
+    payload_offset: usize,
+    mmap: memmap2::Mmap,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,6 +268,7 @@ pub struct SampledPositions {
     data: Vec<u8>,
 }
 
+#[allow(dead_code)]
 impl SampledPositions {
     const MAGIC: u64 = 0x494D50_53504F53; // "IMPSPOS"
     const VERSION: u64 = 4;
@@ -265,7 +325,10 @@ impl SampledPositions {
         starts.push(acc);
         for &len in path_lengths {
             acc = acc.checked_add(len).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "total path length overflowed u64")
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "total path length overflowed u64",
+                )
             })?;
             starts.push(acc);
         }
@@ -285,12 +348,19 @@ impl SampledPositions {
             return Ok(Vec::new());
         };
         let start = *self.byte_offsets.get(group_idx).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "sampled-position offset missing")
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "sampled-position offset missing",
+            )
         })? as usize;
         let end = *self.byte_offsets.get(group_idx + 1).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "sampled-position terminal offset missing")
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "sampled-position terminal offset missing",
+            )
         })? as usize;
-        if start > end || end > self.data.len() {
+        let data = self.data.as_slice();
+        if start > end || end > data.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "sampled-position byte offsets are out of range",
@@ -303,7 +373,10 @@ impl SampledPositions {
         while pos < end {
             let delta = read_varint_from_slice(&self.data, &mut pos, end)?;
             packed = packed.checked_add(delta).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "sampled position overflowed u64")
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "sampled position overflowed u64",
+                )
             })?;
             let target_orient = (packed & 1) as u8;
             let global_pos = packed >> 1;
@@ -322,7 +395,9 @@ impl SampledPositions {
         if self.path_starts.len() < 2 || global_pos >= *self.path_starts.last()? {
             return None;
         }
-        let upper = self.path_starts.partition_point(|&start| start <= global_pos);
+        let upper = self
+            .path_starts
+            .partition_point(|&start| start <= global_pos);
         let path_idx = upper.checked_sub(1)?;
         Some((path_idx, global_pos - self.path_starts[path_idx]))
     }
@@ -350,7 +425,7 @@ impl SampledPositions {
         }
 
         write_u64(&mut w, self.data.len() as u64)?;
-        w.write_all(&self.data)?;
+        w.write_all(self.data.as_slice())?;
         w.flush()
     }
 
@@ -363,6 +438,7 @@ impl SampledPositions {
         })
     }
 
+    #[allow(dead_code)]
     fn load(path: &str) -> io::Result<Self> {
         let mut r = BufReader::new(std::fs::File::open(path)?);
         let magic = read_u64(&mut r)?;
@@ -452,6 +528,27 @@ impl SampledPositions {
             data,
         })
     }
+
+    fn load_sample_rate(path: &str) -> io::Result<u32> {
+        let mut r = BufReader::new(std::fs::File::open(path)?);
+        let magic = read_u64(&mut r)?;
+        if magic != Self::MAGIC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("SampledPositions: bad magic 0x{:x}", magic),
+            ));
+        }
+        let version = read_u64(&mut r)?;
+        if version != Self::VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("SampledPositions: unsupported version {}", version),
+            ));
+        }
+        let sample_rate = read_u64(&mut r)? as u32;
+        validate_position_sample_rate(sample_rate)?;
+        Ok(sample_rate)
+    }
 }
 
 /// Sampled checkpoints keyed by path coordinate.
@@ -460,11 +557,37 @@ impl SampledPositions {
 /// step plus enough GBWT state to resume walking from the sampled step. Query
 /// locate also inverts these checkpoints in memory and finds exact syncmer
 /// positions by walking arbitrary GBWT occurrences forward to the next sample.
+#[derive(Debug)]
+enum SampledPathStepData {
+    Owned(Vec<u8>),
+    Mapped {
+        mmap: memmap2::Mmap,
+        offset: usize,
+        len: usize,
+    },
+}
+
+impl SampledPathStepData {
+    fn len(&self) -> usize {
+        match self {
+            Self::Owned(data) => data.len(),
+            Self::Mapped { len, .. } => *len,
+        }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Owned(data) => data.as_slice(),
+            Self::Mapped { mmap, offset, len } => &mmap[*offset..*offset + *len],
+        }
+    }
+}
+
 pub struct SampledPathSteps {
     pub sample_rate: u32,
     sample_count: u64,
     path_byte_offsets: Vec<u64>,
-    data: Vec<u8>,
+    data: SampledPathStepData,
 }
 
 impl SampledPathSteps {
@@ -568,7 +691,7 @@ impl SampledPathSteps {
             sample_rate,
             sample_count,
             path_byte_offsets,
-            data,
+            data: SampledPathStepData::Owned(data),
         })
     }
 
@@ -598,7 +721,8 @@ impl SampledPathSteps {
                 "path index terminal offset out of range",
             )
         })? as usize;
-        if start > end || end > self.data.len() {
+        let data = self.data.as_slice();
+        if start > end || end > data.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "sampled path-step byte offsets are out of range",
@@ -610,8 +734,8 @@ impl SampledPathSteps {
         let mut bp_pos = 0u64;
         let mut step_idx = 0u32;
         while pos < end {
-            let bp_delta = read_varint_from_slice(&self.data, &mut pos, end)?;
-            let step_delta = read_varint_from_slice(&self.data, &mut pos, end)?;
+            let bp_delta = read_varint_from_slice(data, &mut pos, end)?;
+            let step_delta = read_varint_from_slice(data, &mut pos, end)?;
             bp_pos = bp_pos.checked_add(bp_delta).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "path-step bp position overflow")
             })?;
@@ -624,10 +748,10 @@ impl SampledPathSteps {
             step_idx = step_idx.checked_add(step_delta as u32).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "path-step index overflow")
             })?;
-            let signed_node = decode_i32(read_varint_from_slice(&self.data, &mut pos, end)?)?;
-            let prev_node = decode_i32(read_varint_from_slice(&self.data, &mut pos, end)?)?;
-            let prev_offset = read_varint_from_slice(&self.data, &mut pos, end)?;
-            let traversal_rank = read_varint_from_slice(&self.data, &mut pos, end)?;
+            let signed_node = decode_i32(read_varint_from_slice(data, &mut pos, end)?)?;
+            let prev_node = decode_i32(read_varint_from_slice(data, &mut pos, end)?)?;
+            let prev_offset = read_varint_from_slice(data, &mut pos, end)?;
+            let traversal_rank = read_varint_from_slice(data, &mut pos, end)?;
             if prev_offset > u32::MAX as u64 || traversal_rank > u32::MAX as u64 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -670,7 +794,7 @@ impl SampledPathSteps {
         }
 
         write_u64(&mut w, self.data.len() as u64)?;
-        w.write_all(&self.data)?;
+        w.write_all(self.data.as_slice())?;
         w.flush()
     }
 
@@ -684,34 +808,34 @@ impl SampledPathSteps {
     }
 
     fn load(path: &str) -> io::Result<Self> {
-        let mut r = BufReader::new(std::fs::File::open(path)?);
-        let magic = read_u64(&mut r)?;
+        let file = std::fs::File::open(path)?;
+        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        let mut offset = 0usize;
+        let magic = read_u64_from_slice(&mmap, &mut offset)?;
         if magic != Self::MAGIC {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("SampledPathSteps: bad magic 0x{:x}", magic),
             ));
         }
-        let version = read_u64(&mut r)?;
+        let version = read_u64_from_slice(&mmap, &mut offset)?;
         if version != Self::VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("SampledPathSteps: unsupported version {}", version),
             ));
         }
-        let sample_rate = read_u64(&mut r)? as u32;
+        let sample_rate = read_u64_from_slice(&mmap, &mut offset)? as u32;
         validate_position_sample_rate(sample_rate)?;
-        let sample_count = read_u64(&mut r)?;
+        let sample_count = read_u64_from_slice(&mmap, &mut offset)?;
 
-        let n_offsets = read_u64(&mut r)? as usize;
+        let n_offsets = read_u64_from_slice(&mmap, &mut offset)? as usize;
         let mut path_byte_offsets = Vec::with_capacity(n_offsets);
         for _ in 0..n_offsets {
-            path_byte_offsets.push(read_u64(&mut r)?);
+            path_byte_offsets.push(read_u64_from_slice(&mmap, &mut offset)?);
         }
 
-        let n_data = read_u64(&mut r)? as usize;
-        let mut data = vec![0u8; n_data];
-        r.read_exact(&mut data)?;
+        let n_data = read_u64_from_slice(&mmap, &mut offset)? as usize;
 
         if path_byte_offsets.is_empty() {
             return Err(io::Error::new(
@@ -719,7 +843,7 @@ impl SampledPathSteps {
                 "SampledPathSteps: path offsets cannot be empty",
             ));
         }
-        if path_byte_offsets.last().copied().unwrap_or(0) as usize != data.len() {
+        if path_byte_offsets.last().copied().unwrap_or(0) as usize != n_data {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "SampledPathSteps: final byte offset does not match data length",
@@ -731,13 +855,279 @@ impl SampledPathSteps {
                 "SampledPathSteps: byte offsets are not sorted",
             ));
         }
+        let expected_len = offset.checked_add(n_data).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "path-step file size overflow")
+        })?;
+        if mmap.len() != expected_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "SampledPathSteps: file has {} bytes, expected {}",
+                    mmap.len(),
+                    expected_len
+                ),
+            ));
+        }
 
         Ok(Self {
             sample_rate,
             sample_count,
             path_byte_offsets,
-            data,
+            data: SampledPathStepData::Mapped {
+                mmap,
+                offset,
+                len: n_data,
+            },
         })
+    }
+}
+
+impl SampledCheckpointIndex {
+    const MAGIC: u64 = 0x494D50_53504F31; // "IMPSPO1"
+    const VERSION: u64 = 1;
+
+    fn save_records_atomic(
+        path: &str,
+        sample_rate: u32,
+        records: &mut Vec<CheckpointRecord>,
+    ) -> io::Result<()> {
+        let tmp_path = format!("{}.tmp.{}", path, std::process::id());
+        let result = Self::save_records(&tmp_path, sample_rate, records);
+        match result {
+            Ok(()) => std::fs::rename(&tmp_path, path).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp_path);
+                e
+            }),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp_path);
+                Err(e)
+            }
+        }
+    }
+
+    fn save_records(
+        path: &str,
+        sample_rate: u32,
+        records: &mut Vec<CheckpointRecord>,
+    ) -> io::Result<()> {
+        validate_position_sample_rate(sample_rate)?;
+        records.par_sort_unstable_by(|a, b| {
+            a.signed_node
+                .cmp(&b.signed_node)
+                .then(a.abs_rank.cmp(&b.abs_rank))
+                .then(a.path_idx.cmp(&b.path_idx))
+                .then(a.bp_pos.cmp(&b.bp_pos))
+        });
+
+        let mut signed_nodes = Vec::new();
+        let mut record_offsets = Vec::new();
+        record_offsets.push(0u64);
+        let mut i = 0usize;
+        while i < records.len() {
+            let signed_node = records[i].signed_node;
+            signed_nodes.push(signed_node);
+            let mut prev_rank = None;
+            while i < records.len() && records[i].signed_node == signed_node {
+                if prev_rank == Some(records[i].abs_rank) {
+                    return Err(Self::duplicate_checkpoint_error(
+                        records[i].signed_node,
+                        records[i].abs_rank,
+                    ));
+                }
+                prev_rank = Some(records[i].abs_rank);
+                i += 1;
+            }
+            record_offsets.push(i as u64);
+        }
+
+        let mut w = BufWriter::new(std::fs::File::create(path)?);
+        write_u64(&mut w, Self::MAGIC)?;
+        write_u64(&mut w, Self::VERSION)?;
+        write_u64(&mut w, sample_rate as u64)?;
+        write_u64(&mut w, records.len() as u64)?;
+
+        write_u64(&mut w, signed_nodes.len() as u64)?;
+        for &signed_node in &signed_nodes {
+            write_u64(&mut w, encode_i32(signed_node))?;
+        }
+        for &offset in &record_offsets {
+            write_u64(&mut w, offset)?;
+        }
+
+        for record in records {
+            w.write_all(&record.abs_rank.to_le_bytes())?;
+            w.write_all(&record.path_idx.to_le_bytes())?;
+            w.write_all(&record.bp_pos.to_le_bytes())?;
+        }
+        w.flush()
+    }
+
+    fn load(path: &str) -> io::Result<Self> {
+        let file = std::fs::File::open(path)?;
+        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        let mut offset = 0usize;
+        let magic = read_u64_from_slice(&mmap, &mut offset)?;
+        if magic != Self::MAGIC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("SampledCheckpointIndex: bad magic 0x{:x}", magic),
+            ));
+        }
+        let version = read_u64_from_slice(&mmap, &mut offset)?;
+        if version != Self::VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("SampledCheckpointIndex: unsupported version {}", version),
+            ));
+        }
+        let sample_rate = read_u64_from_slice(&mmap, &mut offset)? as u32;
+        validate_position_sample_rate(sample_rate)?;
+        let checkpoint_count = read_u64_from_slice(&mmap, &mut offset)?;
+
+        let n_nodes = read_u64_from_slice(&mmap, &mut offset)? as usize;
+        let mut signed_nodes = Vec::with_capacity(n_nodes);
+        for _ in 0..n_nodes {
+            signed_nodes.push(decode_i32(read_u64_from_slice(&mmap, &mut offset)?)?);
+        }
+        let mut record_offsets = Vec::with_capacity(n_nodes + 1);
+        for _ in 0..=n_nodes {
+            record_offsets.push(read_u64_from_slice(&mmap, &mut offset)?);
+        }
+
+        if signed_nodes.windows(2).any(|w| w[0] >= w[1]) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "SampledCheckpointIndex: signed node ids are not strictly sorted",
+            ));
+        }
+        if record_offsets.windows(2).any(|w| w[0] > w[1]) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "SampledCheckpointIndex: record offsets are not sorted",
+            ));
+        }
+        if record_offsets.last().copied().unwrap_or(0) != checkpoint_count {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "SampledCheckpointIndex: final record offset does not match checkpoint count",
+            ));
+        }
+
+        let payload_bytes = (checkpoint_count as usize)
+            .checked_mul(CheckpointRecord::BYTE_LEN)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "checkpoint payload size overflow",
+                )
+            })?;
+        let expected_len = offset.checked_add(payload_bytes).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "checkpoint file size overflow")
+        })?;
+        if mmap.len() != expected_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "SampledCheckpointIndex: file has {} bytes, expected {}",
+                    mmap.len(),
+                    expected_len
+                ),
+            ));
+        }
+
+        Ok(Self {
+            sample_rate,
+            checkpoint_count,
+            signed_nodes,
+            record_offsets,
+            payload_offset: offset,
+            mmap,
+        })
+    }
+
+    pub fn checkpoint_count(&self) -> u64 {
+        self.checkpoint_count
+    }
+
+    pub fn signed_node_count(&self) -> usize {
+        self.signed_nodes.len()
+    }
+
+    fn checkpoint(
+        &self,
+        signed_node: i32,
+        abs_rank: u32,
+    ) -> io::Result<Option<LocateCheckpointValue>> {
+        let Ok(group_idx) = self.signed_nodes.binary_search(&signed_node) else {
+            return Ok(None);
+        };
+        let start = self.record_offsets[group_idx];
+        let end = self.record_offsets[group_idx + 1];
+        let mut lo = start;
+        let mut hi = end;
+        while lo < hi {
+            let mid = lo + ((hi - lo) / 2);
+            let rank = self.record_abs_rank(mid)?;
+            if rank < abs_rank {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if lo >= end || self.record_abs_rank(lo)? != abs_rank {
+            return Ok(None);
+        }
+        Ok(Some(LocateCheckpointValue {
+            path_idx: self.record_path_idx(lo)? as usize,
+            bp_pos: self.record_bp_pos(lo)?,
+        }))
+    }
+
+    fn record_byte_offset(&self, record_idx: u64) -> io::Result<usize> {
+        let record_idx = usize::try_from(record_idx).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "checkpoint record index exceeds usize",
+            )
+        })?;
+        let payload_delta = record_idx
+            .checked_mul(CheckpointRecord::BYTE_LEN)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "checkpoint record offset overflow",
+                )
+            })?;
+        self.payload_offset
+            .checked_add(payload_delta)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "checkpoint record offset overflow",
+                )
+            })
+    }
+
+    fn record_abs_rank(&self, record_idx: u64) -> io::Result<u32> {
+        read_u32_from_slice_at(&self.mmap, self.record_byte_offset(record_idx)?)
+    }
+
+    fn record_path_idx(&self, record_idx: u64) -> io::Result<u32> {
+        read_u32_from_slice_at(&self.mmap, self.record_byte_offset(record_idx)? + 4)
+    }
+
+    fn record_bp_pos(&self, record_idx: u64) -> io::Result<u64> {
+        read_u64_from_slice_at(&self.mmap, self.record_byte_offset(record_idx)? + 8)
+    }
+
+    fn duplicate_checkpoint_error(signed_node: i32, abs_rank: u32) -> io::Error {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "duplicate syng locate checkpoint for node {} rank {}",
+                signed_node, abs_rank
+            ),
+        )
     }
 }
 
@@ -755,11 +1145,8 @@ struct SampledPositionBuilder {
 }
 
 impl SampledPositionBuilder {
-    fn new(
-        sample_rate: u32,
-        next_path_start: u64,
-        paths_seen: usize,
-    ) -> io::Result<Self> {
+    #[allow(dead_code)]
+    fn new(sample_rate: u32, next_path_start: u64, paths_seen: usize) -> io::Result<Self> {
         Self::new_with_mode(sample_rate, next_path_start, paths_seen, true)
     }
 
@@ -848,7 +1235,8 @@ impl SampledPositionBuilder {
         if self.path_step_data.len() > path_step_start {
             self.sampled_step_paths += 1;
         }
-        self.path_step_offsets.push(self.path_step_data.len() as u64);
+        self.path_step_offsets
+            .push(self.path_step_data.len() as u64);
         self.next_path_start = self
             .next_path_start
             .checked_add(seq_len)
@@ -856,6 +1244,7 @@ impl SampledPositionBuilder {
         self.paths_seen += 1;
     }
 
+    #[allow(dead_code)]
     fn finish(
         self,
         path_lengths: &[u64],
@@ -873,11 +1262,8 @@ impl SampledPositionBuilder {
             walked_paths,
             ..
         } = self;
-        let sampled_positions = SampledPositions::from_samples(
-            sample_rate,
-            path_lengths,
-            position_samples,
-        )?;
+        let sampled_positions =
+            SampledPositions::from_samples(sample_rate, path_lengths, position_samples)?;
         let sampled_path_steps = SampledPathSteps::from_encoded(
             sample_rate,
             path_step_sample_count,
@@ -1047,12 +1433,15 @@ fn encode_regular_position_sample_if_selected(
             "sampled path-step bp positions are not sorted within path",
         )
     })?;
-    let step_delta = step.step_idx.checked_sub(*prev_sample_step).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "sampled path-step indices are not sorted within path",
-        )
-    })?;
+    let step_delta = step
+        .step_idx
+        .checked_sub(*prev_sample_step)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "sampled path-step indices are not sorted within path",
+            )
+        })?;
     push_varint(path_step_data, bp_delta);
     push_varint(path_step_data, step_delta as u64);
     push_varint(path_step_data, encode_i32(step.signed_node));
@@ -1717,11 +2106,7 @@ fn matched_syncmers_best_query_orientation_impl(
     );
 
     if rc_syncmers.len() > out.len() {
-        orient_reverse_query_syncmers(
-            rc_syncmers,
-            query_seq.len(),
-            (params.w + params.k) as usize,
-        );
+        orient_reverse_query_syncmers(rc_syncmers, query_seq.len(), (params.w + params.k) as usize);
         std::mem::swap(out, rc_syncmers);
     }
 }
@@ -1867,10 +2252,10 @@ pub struct SyngIndex {
     seqhash: *mut syng_ffi::Seqhash,
     pub name_map: SyngNameMap,
     pub params: SyncmerParams,
-    /// Succinct sampled path-position sidecar for projected query/map coordinates.
-    sampled_positions: Option<SampledPositions>,
     /// Sampled path checkpoints for path-position to syncmer-step lookup.
     sampled_path_steps: Option<SampledPathSteps>,
+    /// Memory-mapped occurrence-major checkpoints for fast target locate.
+    sampled_checkpoints: Option<SampledCheckpointIndex>,
     /// In-memory locate table keyed by oriented GBWT node occurrence rank.
     locate_checkpoint_index: OnceLock<Result<LocateCheckpointIndex, String>>,
     /// Online collector that records sampled positions while sequences are added.
@@ -1915,11 +2300,11 @@ impl SyngIndex {
             seqhash,
             name_map: SyngNameMap::new(),
             params,
-            sampled_positions: None,
             sampled_path_steps: None,
+            sampled_checkpoints: None,
             locate_checkpoint_index: OnceLock::new(),
             sampled_position_builder: Some(
-                SampledPositionBuilder::new(DEFAULT_POSITION_SAMPLE_RATE, 0, 0)
+                SampledPositionBuilder::new_path_steps_only(DEFAULT_POSITION_SAMPLE_RATE, 0, 0)
                     .expect("default sampled-position parameters are valid"),
             ),
         }
@@ -1987,7 +2372,7 @@ impl SyngIndex {
 
     /// True if a sampled path-position sidecar has been built or loaded.
     pub fn has_sampled_positions(&self) -> bool {
-        self.sampled_positions.is_some()
+        self.sampled_checkpoints.is_some()
     }
 
     /// True if an inverted sampled path-step sidecar has been built or loaded.
@@ -1995,14 +2380,28 @@ impl SyngIndex {
         self.sampled_path_steps.is_some()
     }
 
-    /// Sampling interval for the node-to-position sidecar, if present.
+    /// True if an occurrence-major checkpoint sidecar has been loaded.
+    pub fn has_sampled_checkpoints(&self) -> bool {
+        self.sampled_checkpoints.is_some()
+    }
+
+    /// Sampling interval for the syncmer-position sidecar, if present.
     pub fn sampled_positions_rate(&self) -> Option<u32> {
-        self.sampled_positions.as_ref().map(|positions| positions.sample_rate)
+        self.sampled_checkpoints_rate()
     }
 
     /// Sampling interval for the path-step checkpoint sidecar, if present.
     pub fn sampled_path_steps_rate(&self) -> Option<u32> {
-        self.sampled_path_steps.as_ref().map(|steps| steps.sample_rate)
+        self.sampled_path_steps
+            .as_ref()
+            .map(|steps| steps.sample_rate)
+    }
+
+    /// Sampling interval for the occurrence-major checkpoint sidecar, if present.
+    pub fn sampled_checkpoints_rate(&self) -> Option<u32> {
+        self.sampled_checkpoints
+            .as_ref()
+            .map(|checkpoints| checkpoints.sample_rate)
     }
 
     fn reset_locate_checkpoint_index(&mut self) {
@@ -2025,18 +2424,18 @@ impl SyngIndex {
                     "total path length overflowed u64",
                 )
             })?;
-        self.sampled_position_builder = Some(SampledPositionBuilder::new(
+        self.sampled_position_builder = Some(SampledPositionBuilder::new_path_steps_only(
             sample_rate,
             next_path_start,
             self.name_map.path_to_name.len(),
         )?);
-        self.sampled_positions = None;
         self.sampled_path_steps = None;
+        self.sampled_checkpoints = None;
         self.reset_locate_checkpoint_index();
         Ok(())
     }
 
-    /// Materialize the `.syng.spos` and `.syng.pstep` representations.
+    /// Materialize the `.syng.pstep` and `.syng.spos` representations.
     ///
     /// GBWT occurrence ranks are not stable until all paths have been inserted,
     /// so final `.pstep` checkpoints are rebuilt from the completed GBWT rather
@@ -2047,10 +2446,8 @@ impl SyngIndex {
         let Some(builder) = self.sampled_position_builder.take() else {
             return Ok(None);
         };
-        let stats = self.rebuild_sampled_position_indexes_from_gbwt_parallel(
-            builder.sample_rate,
-            0,
-        )?;
+        let stats =
+            self.rebuild_sampled_position_indexes_from_gbwt_parallel(builder.sample_rate, 0)?;
         Ok(Some(stats))
     }
 
@@ -2114,8 +2511,8 @@ impl SyngIndex {
         seq: Vec<u8>,
         lookup_mode: SyncmerLookupMode,
     ) -> io::Result<SyngAddSequenceStats> {
-        self.sampled_positions = None;
         self.sampled_path_steps = None;
+        self.sampled_checkpoints = None;
         self.reset_locate_checkpoint_index();
 
         let syncmer_len = (self.params.w + self.params.k) as usize;
@@ -2279,7 +2676,7 @@ impl SyngIndex {
     /// - `{prefix}.1khash` — syncmer hash (syng-compatible)
     /// - `{prefix}.1gbwt` — GBWT graph (syng-compatible)
     /// - `{prefix}.syng.names` or `{prefix}.names` — sequence name mapping
-    /// - `{prefix}.syng.spos` or `{prefix}.spos` — sampled path-position index
+    /// - `{prefix}.syng.spos` or `{prefix}.spos` — sampled syncmer occurrence positions
     /// - `{prefix}.syng.pstep` or `{prefix}.pstep` — inverted sampled path-step checkpoints
     /// - `{prefix}.syng.meta` or `{prefix}.meta` — syncmer extraction parameters
     ///
@@ -2367,20 +2764,14 @@ impl SyngIndex {
 
     /// Save only the position sidecars for an existing syng index prefix.
     pub fn save_position_sidecars(&self, prefix: &str) -> io::Result<()> {
-        let sampled_positions = self.sampled_positions.as_ref().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "cannot save syng index without sampled positions",
-            )
-        })?;
-        sampled_positions.save_atomic(&syng_spos_path(prefix))?;
         let sampled_path_steps = self.sampled_path_steps.as_ref().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 "cannot save syng index without sampled path-step checkpoints",
             )
         })?;
-        sampled_path_steps.save_atomic(&syng_pstep_path(prefix))
+        sampled_path_steps.save_atomic(&syng_pstep_path(prefix))?;
+        self.save_checkpoint_sidecar(prefix)
     }
 
     /// Save only the inverted path-step sidecar for an existing syng index prefix.
@@ -2391,7 +2782,74 @@ impl SyngIndex {
                 "cannot save syng index without sampled path-step checkpoints",
             )
         })?;
-        sampled_path_steps.save_atomic(&syng_pstep_path(prefix))
+        sampled_path_steps.save_atomic(&syng_pstep_path(prefix))?;
+        self.save_checkpoint_sidecar(prefix)
+    }
+
+    /// Save only the occurrence-major syncmer-position sidecar for an existing syng index prefix.
+    pub fn save_checkpoint_sidecar(&self, prefix: &str) -> io::Result<()> {
+        let sampled_path_steps = self.sampled_path_steps.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "cannot save syng syncmer-position sidecar without sampled path-step checkpoints",
+            )
+        })?;
+        let build_start = std::time::Instant::now();
+        let mut records = self.build_checkpoint_records_from_path_steps(sampled_path_steps)?;
+        let record_count = records.len();
+        SampledCheckpointIndex::save_records_atomic(
+            &syng_spos_path(prefix),
+            sampled_path_steps.sample_rate,
+            &mut records,
+        )?;
+        if std::env::var("SYNG_EMIT_PROFILE").is_ok() {
+            eprintln!(
+                "EMITPROF save_syncmer_position_sidecar checkpoints={} build_save={:.2}s",
+                record_count,
+                build_start.elapsed().as_secs_f64(),
+            );
+        }
+        Ok(())
+    }
+
+    fn build_checkpoint_records_from_path_steps(
+        &self,
+        sampled_path_steps: &SampledPathSteps,
+    ) -> io::Result<Vec<CheckpointRecord>> {
+        let path_count = self.name_map.path_to_name.len();
+        if sampled_path_steps.path_count() != path_count {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "path-step index has {} paths, expected {}",
+                    sampled_path_steps.path_count(),
+                    path_count
+                ),
+            ));
+        }
+        (0..path_count)
+            .into_par_iter()
+            .try_fold(Vec::new, |mut records, path_idx| {
+                let path_idx_u32 = u32::try_from(path_idx).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "path index exceeds u32 in checkpoint sidecar",
+                    )
+                })?;
+                for checkpoint in sampled_path_steps.decode_path(path_idx)? {
+                    records.push(CheckpointRecord {
+                        signed_node: checkpoint.signed_node,
+                        abs_rank: self.absolute_incoming_rank(&checkpoint)?,
+                        path_idx: path_idx_u32,
+                        bp_pos: checkpoint.bp_pos,
+                    });
+                }
+                Ok(records)
+            })
+            .try_reduce(Vec::new, |mut left, right| {
+                left.extend(right);
+                Ok(left)
+            })
     }
 
     /// Load an index from disk.
@@ -2400,8 +2858,8 @@ impl SyngIndex {
     /// - `{prefix}.1khash`
     /// - `{prefix}.1gbwt`
     /// - `{prefix}.syng.names` or `{prefix}.names`
-    /// - `{prefix}.syng.spos` or `{prefix}.spos`
     /// - `{prefix}.syng.pstep` or `{prefix}.pstep`
+    /// - `{prefix}.syng.spos` or `{prefix}.spos`
     /// - `{prefix}.syng.meta` or `{prefix}.meta`
     pub fn load(prefix: &str, _params: SyncmerParams) -> io::Result<Self> {
         Self::load_with_options(prefix, true)
@@ -2479,46 +2937,6 @@ impl SyngIndex {
             syng_ffi::impg_seqhashCreateSafe(params.k as i32, params.w as i32, params.seed as i32)
         };
 
-        // Read sampled-position sidecar.
-        let sampled_positions_path = existing_syng_sidecar_path(prefix, "spos");
-        let sampled_positions = if Path::new(&sampled_positions_path).exists() {
-            match SampledPositions::load(&sampled_positions_path) {
-                Ok(sp) => Some(sp),
-                Err(e) => {
-                    if !require_sampled_positions {
-                        log::warn!(
-                            "ignoring sampled-position sidecar during repair: {} ({})",
-                            sampled_positions_path,
-                            e
-                        );
-                        None
-                    } else {
-                        unsafe {
-                            syng_ffi::syngBWTdestroy(gbwt);
-                            syng_ffi::kmerHashDestroy(kmer_hash);
-                            syng_ffi::impg_seqhashDestroy(seqhash);
-                        }
-                        return Err(e);
-                    }
-                }
-            }
-        } else if require_sampled_positions {
-            unsafe {
-                syng_ffi::syngBWTdestroy(gbwt);
-                syng_ffi::kmerHashDestroy(kmer_hash);
-                syng_ffi::impg_seqhashDestroy(seqhash);
-            }
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!(
-                    "sampled-position sidecar not found: {} (rebuild the syng index with this impg)",
-                    sampled_positions_path
-                ),
-            ));
-        } else {
-            None
-        };
-
         // Read sampled path-step sidecar.
         let sampled_path_steps_path = existing_syng_sidecar_path(prefix, "pstep");
         let sampled_path_steps = if Path::new(&sampled_path_steps_path).exists() {
@@ -2559,14 +2977,65 @@ impl SyngIndex {
             None
         };
 
+        // Read occurrence-major syncmer-position sidecar. Normal loads require
+        // this mmap-backed lookup; repair loads can tolerate a missing/stale
+        // `.spos` so they can rebuild it from `.pstep`.
+        let sampled_checkpoints_path = existing_syng_sidecar_path(prefix, "spos");
+        let mut sampled_checkpoints = if Path::new(&sampled_checkpoints_path).exists() {
+            match SampledCheckpointIndex::load(&sampled_checkpoints_path) {
+                Ok(spos) => Some(spos),
+                Err(e) => {
+                    log::warn!(
+                        "ignoring sampled syncmer-position sidecar: {} ({})",
+                        sampled_checkpoints_path,
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if let (Some(path_steps), Some(checkpoints)) =
+            (sampled_path_steps.as_ref(), sampled_checkpoints.as_ref())
+        {
+            if checkpoints.sample_rate != path_steps.sample_rate
+                || checkpoints.checkpoint_count() != path_steps.sample_count()
+            {
+                log::warn!(
+                    "ignoring stale sampled syncmer-position sidecar {}: rate/count {} / {} does not match .pstep {} / {}",
+                    sampled_checkpoints_path,
+                    checkpoints.sample_rate,
+                    checkpoints.checkpoint_count(),
+                    path_steps.sample_rate,
+                    path_steps.sample_count()
+                );
+                sampled_checkpoints = None;
+            }
+        }
+        if require_sampled_positions && sampled_checkpoints.is_none() {
+            unsafe {
+                syng_ffi::syngBWTdestroy(gbwt);
+                syng_ffi::kmerHashDestroy(kmer_hash);
+                syng_ffi::impg_seqhashDestroy(seqhash);
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "sampled syncmer-position sidecar is missing, stale, or unreadable: {} (run `impg syng-repair` for this index)",
+                    sampled_checkpoints_path
+                ),
+            ));
+        }
+
         Ok(Self {
             gbwt,
             kmer_hash,
             seqhash,
             name_map,
             params,
-            sampled_positions,
             sampled_path_steps,
+            sampled_checkpoints,
             locate_checkpoint_index: OnceLock::new(),
             sampled_position_builder: None,
         })
@@ -2704,7 +3173,7 @@ impl SyngIndex {
         self.walk_path_range_from_sampled_steps(path_idx, start, end)
     }
 
-    /// Rebuild both sampled positional sidecars by walking existing GBWT paths.
+    /// Rebuild sampled path-step checkpoints by walking existing GBWT paths.
     ///
     /// This repairs indexes that already have `.1gbwt`, `.1khash`, `.names`, and
     /// `.meta`, without re-decompressing sequences or reconstructing the graph.
@@ -2712,37 +3181,7 @@ impl SyngIndex {
         &mut self,
         sample_rate: u32,
     ) -> io::Result<SampledPositionBuildStats> {
-        unsafe { syng_ffi::impg_syng_suppress_debug() };
-        let mut builder = SampledPositionBuilder::new(sample_rate, 0, 0)?;
-        let syncmer_len = (self.params.k + self.params.w) as u64;
-        for path_idx in 0..self.name_map.path_to_name.len() {
-            let seq_len = self.name_map.path_to_length[path_idx];
-            let steps = match self
-                .name_map
-                .path_starts
-                .get(path_idx)
-                .and_then(|s| s.as_ref())
-            {
-                Some(start) => self.walk_path_steps(start)?,
-                None if seq_len < syncmer_len => Vec::new(),
-                None => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "cannot rebuild positional sidecars: missing GBWT path start for {}",
-                            self.name_map.path_to_name[path_idx]
-                        ),
-                    ));
-                }
-            };
-            builder.record_path(path_idx, seq_len, &steps);
-        }
-        let (sampled_positions, sampled_path_steps, stats) =
-            builder.finish(&self.name_map.path_to_length)?;
-        self.sampled_positions = Some(sampled_positions);
-        self.sampled_path_steps = Some(sampled_path_steps);
-        self.reset_locate_checkpoint_index();
-        Ok(stats)
+        self.rebuild_sampled_path_steps_from_gbwt(sample_rate)
     }
 
     /// Rebuild only the inverted path-step sidecar by walking existing GBWT paths.
@@ -2755,7 +3194,12 @@ impl SyngIndex {
         let syncmer_len = (self.params.k + self.params.w) as u64;
         for path_idx in 0..self.name_map.path_to_name.len() {
             let seq_len = self.name_map.path_to_length[path_idx];
-            let steps = match self.name_map.path_starts.get(path_idx).and_then(|s| s.as_ref()) {
+            let steps = match self
+                .name_map
+                .path_starts
+                .get(path_idx)
+                .and_then(|s| s.as_ref())
+            {
                 Some(start) => self.walk_path_steps(start)?,
                 None if seq_len < syncmer_len => Vec::new(),
                 None => {
@@ -2773,33 +3217,19 @@ impl SyngIndex {
         let (sampled_path_steps, stats) =
             builder.finish_path_steps(self.name_map.path_to_name.len())?;
         self.sampled_path_steps = Some(sampled_path_steps);
+        self.sampled_checkpoints = None;
         self.reset_locate_checkpoint_index();
         Ok(stats)
     }
 
-    /// Rebuild both sampled positional sidecars by walking existing GBWT paths
+    /// Rebuild sampled path-step checkpoints by walking existing GBWT paths
     /// in parallel. Sampling is a regular per-path syncmer-step grid.
     pub fn rebuild_sampled_position_indexes_from_gbwt_parallel(
         &mut self,
         sample_rate: u32,
         progress_interval: usize,
     ) -> io::Result<SampledPositionBuildStats> {
-        let (sampled_positions, sampled_path_steps, stats) =
-            self.rebuild_sampled_position_chunks_from_gbwt_parallel(
-                sample_rate,
-                true,
-                progress_interval,
-            )?;
-        let sampled_positions = sampled_positions.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "parallel positional repair did not build sampled positions",
-            )
-        })?;
-        self.sampled_positions = Some(sampled_positions);
-        self.sampled_path_steps = Some(sampled_path_steps);
-        self.reset_locate_checkpoint_index();
-        Ok(stats)
+        self.rebuild_sampled_path_steps_from_gbwt_parallel(sample_rate, progress_interval)
     }
 
     /// Rebuild only the inverted path-step sidecar by walking existing GBWT
@@ -2816,6 +3246,7 @@ impl SyngIndex {
                 progress_interval,
             )?;
         self.sampled_path_steps = Some(sampled_path_steps);
+        self.sampled_checkpoints = None;
         self.reset_locate_checkpoint_index();
         Ok(stats)
     }
@@ -2930,14 +3361,13 @@ impl SyngIndex {
                             100.0
                         };
                         log::info!(
-                            "Sampled-position repair progress: {}/{} paths complete ({:.1}%), {}/{} syncmer steps ({:.1}%), {} node-position samples, {} path-step checkpoints; completed path {}/{} {}",
+                            "Sampled-position repair progress: {}/{} paths complete ({:.1}%), {}/{} syncmer steps ({:.1}%), {} path-step checkpoints; completed path {}/{} {}",
                             done,
                             path_count,
                             path_pct,
                             progress.completed_steps,
                             total_steps,
                             step_pct,
-                            progress.completed_position_samples,
                             progress.completed_path_step_samples,
                             path_idx + 1,
                             path_count,
@@ -3278,6 +3708,14 @@ impl SyngIndex {
         })
     }
 
+    fn prepare_locate_checkpoint_lookup(&self) -> io::Result<()> {
+        if self.sampled_checkpoints.is_some() {
+            Ok(())
+        } else {
+            self.locate_checkpoint_index().map(|_| ())
+        }
+    }
+
     fn build_locate_checkpoint_index(&self) -> io::Result<LocateCheckpointIndex> {
         let build_start = std::time::Instant::now();
         let sampled_path_steps = self.sampled_path_steps.as_ref().ok_or_else(|| {
@@ -3344,8 +3782,7 @@ impl SyngIndex {
     }
 
     fn locate_checkpoint_shard(key: &LocateCheckpointKey, shard_mask: usize) -> usize {
-        let h = (key.signed_node as u32 as u64)
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        let h = (key.signed_node as u32 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
             ^ key.abs_rank as u64;
         (h as usize) & shard_mask
     }
@@ -3455,13 +3892,7 @@ impl SyngIndex {
         let mut next_low = *low;
         let mut next_high = *high;
         let matched = unsafe {
-            syng_ffi::syngBWTmatchNext(
-                sbp,
-                signed_node,
-                offset,
-                &mut next_low,
-                &mut next_high,
-            )
+            syng_ffi::syngBWTmatchNext(sbp, signed_node, offset, &mut next_low, &mut next_high)
         };
         if matched {
             *low = next_low;
@@ -3564,7 +3995,8 @@ impl SyngIndex {
         }
         unsafe { syng_ffi::syngBWTpathDestroy(reverse_sbp) };
 
-        let Some((sbp, mut low, mut high)) = self.start_gbwt_match(walk[suffix_start].signed_node)?
+        let Some((sbp, mut low, mut high)) =
+            self.start_gbwt_match(walk[suffix_start].signed_node)?
         else {
             return Ok(None);
         };
@@ -3699,13 +4131,26 @@ impl SyngIndex {
         if signed_node == 0 {
             return Ok(Vec::new());
         }
-        let checkpoint_index = self.locate_checkpoint_index()?;
         if start_rank >= end_rank {
             return Ok(Vec::new());
         }
 
+        let persistent_checkpoint_index = self.sampled_checkpoints.as_ref();
+        let fallback_checkpoint_index = if persistent_checkpoint_index.is_none() {
+            Some(self.locate_checkpoint_index()?)
+        } else {
+            None
+        };
+        let max_walk_steps = persistent_checkpoint_index
+            .map(|index| index.sample_rate)
+            .or_else(|| {
+                fallback_checkpoint_index
+                    .as_ref()
+                    .map(|index| index.sample_rate)
+            })
+            .unwrap_or(DEFAULT_POSITION_SAMPLE_RATE) as usize;
+
         let target_orient = if signed_node >= 0 { 0 } else { 1 };
-        let max_walk_steps = checkpoint_index.sample_rate as usize;
         let mut hits = Vec::new();
         for start_rank in start_rank..end_rank {
             let mut current_node = signed_node;
@@ -3717,9 +4162,15 @@ impl SyngIndex {
                     signed_node: current_node,
                     abs_rank: current_rank,
                 };
-                let shard_idx =
-                    Self::locate_checkpoint_shard(&key, checkpoint_index.shard_mask);
-                if let Some(checkpoint) = checkpoint_index.shards[shard_idx].get(&key) {
+                let checkpoint = if let Some(index) = persistent_checkpoint_index {
+                    index.checkpoint(key.signed_node, key.abs_rank)?
+                } else if let Some(index) = fallback_checkpoint_index {
+                    let shard_idx = Self::locate_checkpoint_shard(&key, index.shard_mask);
+                    index.shards[shard_idx].get(&key).copied()
+                } else {
+                    None
+                };
+                if let Some(checkpoint) = checkpoint {
                     let Some(target_pos) = checkpoint.bp_pos.checked_sub(walked_bp) else {
                         break;
                     };
@@ -3772,10 +4223,9 @@ impl SyngIndex {
             self.locate_signed_node_occurrences(signed_node)?
         };
         if let Some(counts) = counts {
-            hits.extend(self.locate_signed_node_occurrences_with_count(
-                -signed_node,
-                counts.reverse,
-            )?);
+            hits.extend(
+                self.locate_signed_node_occurrences_with_count(-signed_node, counts.reverse)?,
+            );
         } else {
             hits.extend(self.locate_signed_node_occurrences(-signed_node)?);
         }
@@ -3893,15 +4343,14 @@ impl SyngIndex {
         query_extension: u64,
         seed_filter: SyngSeedFilter,
     ) -> Result<Vec<HomologousInterval>, io::Error> {
-        let with_anchors =
-            self.query_region_with_anchors_ext_seed_filtered(
-                genome,
-                start,
-                end,
-                padding,
-                query_extension,
-                seed_filter,
-            )?;
+        let with_anchors = self.query_region_with_anchors_ext_seed_filtered(
+            genome,
+            start,
+            end,
+            padding,
+            query_extension,
+            seed_filter,
+        )?;
         Ok(with_anchors
             .into_iter()
             .map(|h| HomologousInterval {
@@ -4402,10 +4851,10 @@ impl SyngIndex {
         }
 
         let locate_start = std::time::Instant::now();
-        // Build the shared locate table before entering rayon. If the first
-        // task initialized this through OnceLock, the pool could starve while
-        // other workers waited on the same initialization.
-        self.locate_checkpoint_index()?;
+        // Prepare the shared locate table before entering rayon. With `.spos`
+        // this is a no-op; unsaved in-memory indexes can still materialize the
+        // same lookup from `.pstep`-equivalent samples outside the worker pool.
+        self.prepare_locate_checkpoint_lookup()?;
         let mut seed_tasks = Vec::new();
         for run in &runs {
             Self::push_walk_seed_tasks_from_run(run, '+', walk_anchors, &mut seed_tasks);
@@ -4626,7 +5075,8 @@ impl SyngIndex {
 
         let emit_prof = std::env::var("SYNG_EMIT_PROFILE").is_ok();
         let lookup_start = std::time::Instant::now();
-        let mut unvisited: Vec<(u32, Vec<(u64, u8)>)> = Vec::with_capacity(query_node_positions.len());
+        let mut unvisited: Vec<(u32, Vec<(u64, u8)>)> =
+            Vec::with_capacity(query_node_positions.len());
         let mut skipped_visited = 0usize;
         for (node, query_positions) in query_node_positions {
             if visited_nodes
@@ -4657,10 +5107,8 @@ impl SyngIndex {
                 occurrence_counts.push((*node, occurrences));
                 occurrence_counts_by_node.insert(*node, counts);
             }
-            let top_drop_nodes = Self::top_frequency_seed_nodes(
-                &occurrence_counts,
-                seed_filter.drop_top_fraction,
-            );
+            let top_drop_nodes =
+                Self::top_frequency_seed_nodes(&occurrence_counts, seed_filter.drop_top_fraction);
             top_drop_count = top_drop_nodes.len();
             let max_occurrences = seed_filter.max_occurrences;
             let occurrence_by_node: FxHashMap<u32, u32> = occurrence_counts.into_iter().collect();
@@ -4687,6 +5135,7 @@ impl SyngIndex {
         let mut located_hits = 0u64;
         let mut emitted_anchors = 0u64;
         let locate_start = std::time::Instant::now();
+        self.prepare_locate_checkpoint_lookup()?;
         let mut per_node_sampled: FxHashMap<
             (usize, u32, char),
             (u64, u64, FxHashMap<i64, Anchor>),
@@ -5100,9 +5549,7 @@ mod tests {
         assert!(!dictionary.is_empty());
 
         let mut index = SyngIndex::new_with_packed_syncmer_dictionary(params, &dictionary).unwrap();
-        index
-            .enable_online_sampled_positions(1)
-            .unwrap();
+        index.enable_online_sampled_positions(1).unwrap();
         for (name, seq) in sequences {
             let stats = index
                 .add_sequence_with_existing_syncmers(name, seq)
@@ -5143,13 +5590,14 @@ mod tests {
             .find_map(|sm| {
                 let start = sm.query_pos as usize;
                 let end = (start + syncmer_len).min(seq.len());
-                (start..end).find(|&pos| seq[pos] == b'A').map(|pos| (*sm, pos))
+                (start..end)
+                    .find(|&pos| seq[pos] == b'A')
+                    .map(|pos| (*sm, pos))
             })
             .expect("at least one matched syncmer should contain an A base");
         assert!(
             chosen.query_pos <= invalid_pos as u64
-                && (invalid_pos as u64)
-                    < chosen.query_pos.saturating_add(syncmer_len as u64)
+                && (invalid_pos as u64) < chosen.query_pos.saturating_add(syncmer_len as u64)
         );
 
         let mut query = seq.clone();
@@ -5158,8 +5606,7 @@ mod tests {
         assert!(
             matches.iter().all(|sm| {
                 !(sm.query_pos <= invalid_pos as u64
-                    && (invalid_pos as u64)
-                        < sm.query_pos.saturating_add(syncmer_len as u64))
+                    && (invalid_pos as u64) < sm.query_pos.saturating_add(syncmer_len as u64))
             }),
             "matched syncmers must not span ambiguous query bases: {:?}",
             matches
@@ -5226,8 +5673,7 @@ mod tests {
             mems.iter().any(|mem| mem.step_start == 0
                 && mem.step_end == walk.len()
                 && mem.query_start == walk[0].bp_pos
-                && mem.query_end
-                    == walk.last().unwrap().bp_pos + index.syncmer_length_bp() as u64),
+                && mem.query_end == walk.last().unwrap().bp_pos + index.syncmer_length_bp() as u64),
             "the exact query walk should produce a full-length GBWT MEM: {:?}",
             mems
         );
@@ -6013,11 +6459,10 @@ mod tests {
         index.add_sequence("sampleA#0#chr1".to_string(), seq_a);
         index.add_sequence("sampleB#0#chr1".to_string(), seq_b);
         let stats = index.finalize_online_sampled_positions().unwrap().unwrap();
-        assert!(stats.sampled_occurrences > 0);
-        assert!(stats.sampled_nodes > 0);
+        assert_eq!(stats.sampled_occurrences, 0);
+        assert_eq!(stats.sampled_nodes, 0);
         assert!(stats.sampled_path_steps > 0);
         assert!(stats.sampled_step_paths > 0);
-        assert!(index.has_sampled_positions());
         assert!(index.has_sampled_path_steps());
 
         let query = &shared[100..800];
@@ -6049,10 +6494,10 @@ mod tests {
             std::path::Path::new(&format!("{}.syng.pstep", prefix_str)).exists(),
             ".syng.pstep file should exist after save"
         );
-
         let loaded = SyngIndex::load(prefix_str, params).unwrap();
         assert!(loaded.has_sampled_positions());
         assert!(loaded.has_sampled_path_steps());
+        assert!(loaded.has_sampled_checkpoints());
         let loaded_hits = loaded
             .map_sequence("read1", query, 2, 10_000)
             .expect("loaded sampled-position PAF mapping should succeed");
@@ -6164,7 +6609,8 @@ mod tests {
             .find(|step| {
                 !sampled_step_idxs.contains(&step.step_idx)
                     && step.bp_pos > syncmer_len
-                    && step.bp_pos.saturating_add(syncmer_len) < index.name_map.path_to_length[path_idx]
+                    && step.bp_pos.saturating_add(syncmer_len)
+                        < index.name_map.path_to_length[path_idx]
             })
             .expect("expected at least one interior unsampled syncmer");
 
@@ -6183,9 +6629,9 @@ mod tests {
             .unwrap();
 
         assert!(
-            expected
-                .iter()
-                .any(|&(node, pos)| node == boundary_step.signed_node && pos == boundary_step.bp_pos),
+            expected.iter().any(
+                |&(node, pos)| node == boundary_step.signed_node && pos == boundary_step.bp_pos
+            ),
             "test setup should include the unsampled boundary syncmer"
         );
         assert_eq!(observed, expected);
@@ -6298,10 +6744,7 @@ mod tests {
         let params = SyncmerParams::default();
         let mut index = SyngIndex::new(params);
         index.enable_online_sampled_positions(8).unwrap();
-        index.add_sequence(
-            "sampleA#0#chr1".to_string(),
-            make_test_sequence(12_000, 91),
-        );
+        index.add_sequence("sampleA#0#chr1".to_string(), make_test_sequence(12_000, 91));
         index.finalize_online_sampled_positions().unwrap().unwrap();
 
         let path_idx = *index.name_map.name_to_path.get("sampleA#0#chr1").unwrap() as usize;
@@ -6328,9 +6771,9 @@ mod tests {
             );
         }
         assert_eq!(
-            index.sampled_positions.as_ref().unwrap().sample_count(),
             index.sampled_path_steps.as_ref().unwrap().sample_count(),
-            "forward and inverted sidecars should sample the same path steps"
+            sampled_steps.len() as u64,
+            "path-step sidecar should report the decoded checkpoint count"
         );
     }
 
@@ -6340,10 +6783,7 @@ mod tests {
         let params = SyncmerParams::default();
         let mut index = SyngIndex::new(params);
         index.enable_online_sampled_positions(256).unwrap();
-        index.add_sequence(
-            "sampleA#0#chr1".to_string(),
-            make_test_sequence(2_000, 92),
-        );
+        index.add_sequence("sampleA#0#chr1".to_string(), make_test_sequence(2_000, 92));
         index.finalize_online_sampled_positions().unwrap().unwrap();
 
         let path_idx = *index.name_map.name_to_path.get("sampleA#0#chr1").unwrap() as usize;
@@ -6390,11 +6830,12 @@ mod tests {
         let mut repair = SyngIndex::load_for_repair(prefix_str, params).unwrap();
         assert!(!repair.has_sampled_positions());
         assert!(!repair.has_sampled_path_steps());
+        assert!(!repair.has_sampled_checkpoints());
         let stats = repair
             .rebuild_sampled_position_indexes_from_gbwt(1)
             .unwrap();
-        assert!(stats.sampled_occurrences > 0);
-        assert_eq!(stats.sampled_occurrences, stats.sampled_path_steps);
+        assert_eq!(stats.sampled_occurrences, 0);
+        assert!(stats.sampled_path_steps > 0);
         repair.save_position_sidecars(prefix_str).unwrap();
 
         assert!(std::path::Path::new(&format!("{}.syng.spos", prefix_str)).exists());
@@ -6403,6 +6844,7 @@ mod tests {
         let loaded = SyngIndex::load(prefix_str, params).unwrap();
         assert!(loaded.has_sampled_positions());
         assert!(loaded.has_sampled_path_steps());
+        assert!(loaded.has_sampled_checkpoints());
         let path_idx = *loaded.name_map.name_to_path.get("sampleA#0#chr1").unwrap() as usize;
         let checkpoint = loaded
             .sampled_path_step_at_or_before(path_idx, 2_000)
@@ -6410,6 +6852,40 @@ mod tests {
             .unwrap();
         let next = loaded.next_path_step_from_checkpoint(&checkpoint).unwrap();
         assert!(next.is_some());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_loaded_syng_requires_spos_but_repair_can_rebuild() {
+        let _guard = lock_syng();
+        let params = SyncmerParams::default();
+        let seqs = vec![
+            ("sampleA#0#chr1".to_string(), make_test_sequence(4000, 31)),
+            ("sampleB#0#chr1".to_string(), make_test_sequence(4000, 37)),
+        ];
+        let mut index = SyngIndex::build(params, seqs.into_iter());
+
+        let dir = std::env::temp_dir().join("impg_test_syng_requires_spos");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("idx");
+        let prefix_str = prefix.to_str().unwrap();
+        index.save(prefix_str).unwrap();
+        std::fs::remove_file(format!("{}.syng.spos", prefix_str)).unwrap();
+
+        let err = match SyngIndex::load(prefix_str, params) {
+            Ok(_) => panic!("normal syng load should reject indexes without .spos"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("sampled syncmer-position sidecar"),
+            "unexpected missing-spos error: {err}"
+        );
+
+        let repair = SyngIndex::load_for_repair(prefix_str, params).unwrap();
+        assert!(repair.has_sampled_path_steps());
+        assert!(!repair.has_sampled_checkpoints());
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -6442,11 +6918,10 @@ mod tests {
             .rebuild_sampled_position_indexes_from_gbwt_parallel(8, 0)
             .unwrap();
 
-        assert_eq!(
-            serial_stats.sampled_occurrences,
-            parallel_stats.sampled_occurrences
-        );
-        assert_eq!(serial_stats.sampled_nodes, parallel_stats.sampled_nodes);
+        assert_eq!(serial_stats.sampled_occurrences, 0);
+        assert_eq!(parallel_stats.sampled_occurrences, 0);
+        assert_eq!(serial_stats.sampled_nodes, 0);
+        assert_eq!(parallel_stats.sampled_nodes, 0);
         assert_eq!(
             serial_stats.sampled_path_steps,
             parallel_stats.sampled_path_steps
@@ -6456,14 +6931,6 @@ mod tests {
             parallel_stats.sampled_step_paths
         );
         assert_eq!(serial_stats.walked_paths, parallel_stats.walked_paths);
-
-        let serial_positions = serial.sampled_positions.as_ref().unwrap();
-        let parallel_positions = parallel.sampled_positions.as_ref().unwrap();
-        assert_eq!(serial_positions.sample_count, parallel_positions.sample_count);
-        assert_eq!(serial_positions.path_starts, parallel_positions.path_starts);
-        assert_eq!(serial_positions.node_ids, parallel_positions.node_ids);
-        assert_eq!(serial_positions.byte_offsets, parallel_positions.byte_offsets);
-        assert_eq!(serial_positions.data, parallel_positions.data);
 
         let serial_steps = serial.sampled_path_steps.as_ref().unwrap();
         let parallel_steps = parallel.sampled_path_steps.as_ref().unwrap();
@@ -6588,6 +7055,7 @@ mod tests {
         let loaded = SyngIndex::load(output_prefix_str, SyncmerParams::default()).unwrap();
         assert!(loaded.has_sampled_positions());
         assert!(loaded.has_sampled_path_steps());
+        assert!(loaded.has_sampled_checkpoints());
         assert_eq!(loaded.name_map.path_to_name.len(), 3);
         assert_eq!(loaded.name_map.path_to_name[0], "HG002#1#chr1");
         assert_eq!(loaded.name_map.path_to_name[1], "HG002#2#chr1");
@@ -6641,11 +7109,14 @@ mod tests {
             !std::path::Path::new(&format!("{}.syng.locate", prefix_str)).exists(),
             ".syng.locate should not be written"
         );
-
         let loaded = SyngIndex::load(prefix_str, params).unwrap();
         assert!(
             loaded.has_sampled_positions(),
             "loaded index should have sampled positions"
+        );
+        assert!(
+            loaded.has_sampled_checkpoints(),
+            "loaded index should have sampled checkpoints"
         );
         let reloaded = loaded.query_region("ga", 0, 1000, 120).unwrap();
 
@@ -6682,7 +7153,7 @@ mod tests {
         ];
 
         let index = SyngIndex::build(params, seqs.into_iter());
-        assert!(index.has_sampled_positions());
+        assert!(index.has_sampled_path_steps());
         let intervals = index.query_region("ga", 0, 1000, 120).unwrap();
         let genomes: std::collections::BTreeSet<&str> =
             intervals.iter().map(|iv| iv.genome.as_str()).collect();
@@ -6727,10 +7198,10 @@ mod tests {
 
         let to_set =
             |v: &[HomologousInterval]| -> std::collections::BTreeSet<(String, u64, u64, char)> {
-            v.iter()
-                .map(|iv| (iv.genome.clone(), iv.start, iv.end, iv.strand))
-                .collect()
-        };
+                v.iter()
+                    .map(|iv| (iv.genome.clone(), iv.start, iv.end, iv.strand))
+                    .collect()
+            };
         assert_eq!(to_set(&path_intervals), to_set(&sequence_intervals));
         assert!(!sequence_intervals.is_empty());
     }

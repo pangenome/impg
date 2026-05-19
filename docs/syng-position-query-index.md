@@ -13,9 +13,9 @@ Those sidecars fix query correctness for unsampled syncmer positions by
 walking the GBWT to the nearest sampled checkpoint. They do not yet make
 the first query as fast as it should be on a human-scale graph.
 
-There are two remaining latency costs:
+There were two remaining latency costs:
 
-1. `SyngIndex::load` reads the multi-GB `.spos` and `.pstep` byte payloads
+1. `SyngIndex::load` read the multi-GB `.pstep` payload
    into memory.
 2. The first arbitrary target-position locate lazily builds an in-memory
    checkpoint hash from every sampled `.pstep` checkpoint:
@@ -49,16 +49,16 @@ does this current (signed_node, occurrence_rank) equal a sampled checkpoint?
 
 Today that question is answered by building the whole in-memory hash.
 
-## Required Fix
+## Implemented Fix
 
-Add a persistent checkpoint lookup sidecar, built by `impg syng-repair`
-and by normal `impg syng` construction:
+`impg syng-repair` and normal `impg syng` construction now write
+`.syng.spos` as a persistent checkpoint lookup sidecar:
 
 ```text
-{prefix}.syng.ckpt   # tentative name
+{prefix}.syng.spos
 ```
 
-The sidecar should be occurrence-major:
+The sidecar is occurrence-major:
 
 ```text
 signed_syncmer_node -> sorted occurrence_rank checkpoints
@@ -67,7 +67,7 @@ signed_syncmer_node -> sorted occurrence_rank checkpoints
 
 At query time, lookup becomes:
 
-1. Memory-map `.syng.ckpt`.
+1. Memory-map `.syng.spos`.
 2. Find the signed-node group by binary search or a small resident
    sampled dictionary.
 3. Binary-search the group's occurrence ranks.
@@ -78,9 +78,9 @@ At query time, lookup becomes:
 This preserves the current correctness model but removes the global
 first-query hash build.
 
-## File Layout Direction
+## File Layout
 
-A simple v1 `.syng.ckpt` can be:
+The v1 `.syng.spos` layout is:
 
 ```text
 header:
@@ -92,35 +92,32 @@ node table:
 
 payload:
   per signed_node:
-    delta-coded occurrence_rank
-    delta-coded path_id or raw path_id
-    delta-coded bp_pos within path
+    fixed-width occurrence_rank, path_id, bp_pos records
 ```
 
-This is already enough to be queryable without decoding unrelated nodes.
-The payload can later become block-compressed, Elias-Fano encoded, or
-partitioned by signed node. The important first step is the access shape:
-node-local lookup without whole-index materialization.
+The fixed-width payload is intentionally simple: it can be memory-mapped
+and binary-searched directly by `(signed_node, occurrence_rank)` without
+decoding unrelated nodes or building a global hash. The payload can later
+be block-compressed or Elias-Fano encoded if disk footprint becomes the
+dominant concern.
 
 ## Load Behavior
 
-`SyngIndex::load` should stop eagerly reading all positional payloads:
+`SyngIndex::load` no longer eagerly reads all positional payloads:
 
 - load `.1gbwt`, `.1khash`, `.names`, and `.meta` as today;
-- load only small sidecar metadata immediately;
-- memory-map `.pstep`, `.spos`, and `.ckpt` payloads;
-- do not load `.spos` unless a command actually needs sampled
-  node-to-position records;
-- do not build the checkpoint hash at all when `.ckpt` is present.
+- memory-map `.pstep` and `.spos`;
+- do not build the checkpoint hash at all when `.spos` is present.
 
-For exact syng query, `.pstep` and `.ckpt` are the critical pair.
-`.spos` is useful as a sampled node-to-position sidecar, but it is not the
-final answer for exact query positions.
+For exact syng query, `.pstep` and `.spos` are the critical pair:
+`.pstep` enters a path by coordinate, and `.spos` resolves sampled syncmer
+occurrences to path coordinates.
 
 ## Repair And Distribution
 
 The existing HPRCv2 repair does not need to be rerun for correctness, but
-it will need one more repair/build step after `.syng.ckpt` exists:
+it needs one more repair/build step to rewrite `.syng.spos` into the new
+occurrence-major format:
 
 ```bash
 impg syng-repair -a HPRC_r2_assemblies_0.6.1.syng \
@@ -129,19 +126,18 @@ impg syng-repair -a HPRC_r2_assemblies_0.6.1.syng \
   -t 32
 ```
 
-That repair should write `.spos`, `.pstep`, and `.ckpt` together. The
-three positional sidecars should then be uploaded together to S3 so other
-users do not pay the repair cost:
+That repair writes `.pstep` and `.spos` together. The positional sidecars
+should then be uploaded together to S3 so other users do not pay the
+repair cost:
 
 ```text
 HPRC_r2_assemblies_0.6.1.syng.spos
 HPRC_r2_assemblies_0.6.1.syng.pstep
-HPRC_r2_assemblies_0.6.1.syng.ckpt
 ```
 
-Older `impg` binaries will not understand the new sidecar. The failure
-mode should be explicit: either ignore `.ckpt` and fall back to the old
-hash build, or error with a message asking the user to update `impg`.
+Older `impg` binaries will not understand the new `.spos` sidecar. The
+failure mode should be explicit: ask the user to update `impg` or rebuild
+sidecars with the current binary.
 
 ## Testing
 
@@ -152,7 +148,8 @@ Correctness tests:
 - reverse-complement occurrences resolve to the same coordinates and
   correct strand semantics;
 - short paths still sample first and terminal syncmers;
-- missing `.ckpt` falls back or errors according to the chosen policy.
+- normal query/partition/map loads require the new `.spos`; repair loads can
+  tolerate a missing or stale `.spos` and rebuild it from `.pstep`.
 
 Performance tests:
 

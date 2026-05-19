@@ -1373,6 +1373,7 @@ dependencies = [
  "lib_wfa2",
  "libc",
  "log",
+ "memmap2",
  "nalgebra",
  "natord",
  "niffler",
