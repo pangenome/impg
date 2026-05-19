@@ -17,7 +17,7 @@ them and are separated by commas:
 syng,k=63,s=8,seed=7:blunt
 seqwish,min-match-len=70
 pggb,window=20k
-syng,k=63,s=8:crush,max-span=10k,max-traversals=128
+syng,k=63,s=8:crush,max-span=10k,max-traversals=1024
 ```
 
 This is a graph-pipeline DSL, not a general shell pipeline. Each stage is a
@@ -108,7 +108,7 @@ Examples:
 syng,k=63,s=8,seed=7
 seqwish,min-match-len=70,sparse-factor=0.001
 pggb,window=20k
-crush,max-span=10k,max-traversal-len=10k,max-traversals=128,method=poa
+crush,max-span=10k,max-traversal-len=10k,max-traversals=1024,method=poa
 ```
 
 Unknown parameters should be errors, not warnings. Silent ignoring would make
@@ -129,3 +129,14 @@ The crush loop is:
 4. Extract observed path traversals through each site.
 5. Replace bounded sites exactly.
 6. Recompute decomposition on the changed graph.
+
+For debugging or batch processing of an already rendered blunt GFA, the same
+transform is exposed directly:
+
+```bash
+impg crush -g local.blunt.gfa -o local.crushed.gfa
+```
+
+The defaults are sized for human panels (`512` iterations and `1024` path
+traversals per candidate). Smaller values are useful only for quick synthetic
+tests or deliberately capped exploratory runs.

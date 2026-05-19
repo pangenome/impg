@@ -29,14 +29,20 @@ pub struct ResolutionConfig {
     pub scoring_params: (u8, u8, u8, u8, u8, u8),
 }
 
+pub const DEFAULT_MAX_ITERATIONS: usize = 512;
+pub const DEFAULT_MAX_BUBBLE_SPAN: usize = 10_000;
+pub const DEFAULT_MAX_TRAVERSAL_LEN: usize = 10_000;
+pub const DEFAULT_MAX_TOTAL_SEQUENCE: usize = 1_000_000;
+pub const DEFAULT_MAX_TRAVERSALS: usize = 1_024;
+
 impl Default for ResolutionConfig {
     fn default() -> Self {
         Self {
-            max_iterations: 8,
-            max_bubble_span: 10_000,
-            max_traversal_len: 10_000,
-            max_total_sequence: 1_000_000,
-            max_traversals: 128,
+            max_iterations: DEFAULT_MAX_ITERATIONS,
+            max_bubble_span: DEFAULT_MAX_BUBBLE_SPAN,
+            max_traversal_len: DEFAULT_MAX_TRAVERSAL_LEN,
+            max_total_sequence: DEFAULT_MAX_TOTAL_SEQUENCE,
+            max_traversals: DEFAULT_MAX_TRAVERSALS,
             scoring_params: (1, 4, 6, 2, 26, 1),
         }
     }

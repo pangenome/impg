@@ -20,7 +20,7 @@ use rustc_hash::FxHashMap;
 use std::collections::{hash_map::DefaultHasher, BTreeMap};
 use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::num::NonZeroUsize;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
@@ -51,6 +51,11 @@ fn parse_merge_distance(s: &str) -> Result<i32, String> {
             i32::MAX
         )
     })
+}
+
+fn parse_usize_size(s: &str) -> Result<usize, String> {
+    let value = parse_size(s)?;
+    usize::try_from(value).map_err(|_| format!("size {value} exceeds usize::MAX"))
 }
 
 fn resolve_syng_syncmer_params(
@@ -3881,6 +3886,40 @@ GFA engine shorthand:
         common: CommonOpts,
     },
 
+    /// Resolve bounded bubbles in an existing blunt GFA
+    Crush {
+        /// Input blunt GFA path, or '-' for stdin
+        #[clap(short = 'g', long, value_parser)]
+        gfa: String,
+
+        /// Output GFA path, or '-' for stdout
+        #[clap(short = 'o', long, value_parser, default_value = "-")]
+        output: String,
+
+        /// Maximum replacement iterations
+        #[clap(long, alias = "iterations", value_parser = parse_usize_size, default_value = "512")]
+        max_iterations: usize,
+
+        /// Maximum reference span in bp for a candidate bubble
+        #[clap(long, alias = "max-bubble-span", value_parser = parse_usize_size, default_value = "10k")]
+        max_span: usize,
+
+        /// Maximum sequence length of any traversal through one candidate
+        #[clap(long, alias = "max-traversal-length", value_parser = parse_usize_size, default_value = "10k")]
+        max_traversal_len: usize,
+
+        /// Maximum total sequence across all traversals through one candidate
+        #[clap(long, alias = "max-total-seq", value_parser = parse_usize_size, default_value = "1m")]
+        max_total_sequence: usize,
+
+        /// Maximum number of path-supported traversals through one candidate
+        #[clap(long, value_parser = parse_usize_size, default_value = "1024")]
+        max_traversals: usize,
+
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+
     /// Render a syng-backed source-coordinate region into a GBZ-style bundle
     Render {
         /// Syng index prefix or .1khash/.1gbwt/.spos/.pstep/.names/.meta path
@@ -6392,6 +6431,65 @@ fn run() -> io::Result<()> {
                         }
                     }
                 }
+            }
+        }
+        Args::Crush {
+            gfa,
+            output,
+            max_iterations,
+            max_span,
+            max_traversal_len,
+            max_total_sequence,
+            max_traversals,
+            common,
+        } => {
+            initialize_threads_and_log(&common);
+            if max_iterations == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--max-iterations must be > 0",
+                ));
+            }
+            if max_traversals == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--max-traversals must be > 0",
+                ));
+            }
+
+            let mut gfa_text = String::new();
+            if gfa == "-" {
+                io::stdin().read_to_string(&mut gfa_text)?;
+            } else {
+                File::open(&gfa)?.read_to_string(&mut gfa_text)?;
+            }
+
+            let config = impg::resolution::ResolutionConfig {
+                max_iterations,
+                max_bubble_span: max_span,
+                max_traversal_len,
+                max_total_sequence,
+                max_traversals,
+                ..Default::default()
+            };
+            let resolved = impg::resolution::resolve_gfa_bubbles(&gfa_text, &config)?;
+            info!(
+                "crush: {} resolved, {} bailed, {} candidates seen across {} iterations",
+                resolved.stats.resolved,
+                resolved.stats.bailed,
+                resolved.stats.candidates_seen,
+                resolved.stats.iterations
+            );
+
+            if output == "-" {
+                let stdout = io::stdout();
+                let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
+                out.write_all(resolved.gfa.as_bytes())?;
+                out.flush()?;
+            } else {
+                let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
+                out.write_all(resolved.gfa.as_bytes())?;
+                out.flush()?;
             }
         }
         Args::Render {

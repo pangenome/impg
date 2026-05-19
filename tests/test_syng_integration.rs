@@ -205,6 +205,66 @@ fn impg_binary() -> Option<PathBuf> {
 }
 
 #[test]
+fn test_crush_cli_resolves_blunt_gfa() {
+    let Some(bin) = impg_binary() else {
+        eprintln!("Skipping CLI test: impg binary not found");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join("impg_test_crush_cli");
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).unwrap();
+    let input = dir.join("input.gfa");
+    let output = dir.join("out.gfa");
+    std::fs::write(
+        &input,
+        "\
+H\tVN:Z:1.0
+S\t1\tAC
+S\t2\tGGG
+S\t3\tTA
+L\t1\t+\t3\t+\t0M
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t3\t+\t0M
+P\tref\t1+,3+\t*
+P\tins\t1+,2+,3+\t*
+",
+    )
+    .unwrap();
+
+    let run = Command::new(&bin)
+        .args([
+            "crush",
+            "-g",
+            input.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "-v",
+            "2",
+        ])
+        .env("RUST_LOG", "info")
+        .output()
+        .expect("failed to run impg crush");
+    assert!(
+        run.status.success(),
+        "impg crush failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("crush: 1 resolved"),
+        "crush should resolve one insertion bubble, stderr:\n{}",
+        stderr
+    );
+    let text = std::fs::read_to_string(&output).unwrap();
+    assert!(text.starts_with("H\tVN:Z:1.0\n"), "{}", text);
+    assert!(text.contains("\nS\t"), "{}", text);
+    assert!(text.contains("\nP\tref\t"), "{}", text);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn test_syng_render_bundle_preserves_source_namespace() {
     let _guard = lock_syng();
     let Some(bin) = impg_binary() else {
