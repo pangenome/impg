@@ -184,7 +184,7 @@ dependencies = [
  "bitflags 2.11.1",
  "cexpr",
  "clang-sys",
- "itertools 0.12.1",
+ "itertools",
  "lazy_static",
  "lazycell",
  "proc-macro2",
@@ -204,7 +204,7 @@ dependencies = [
  "bitflags 2.11.1",
  "cexpr",
  "clang-sys",
- "itertools 0.12.1",
+ "itertools",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -603,7 +603,7 @@ dependencies = [
  "clap",
  "criterion-plot",
  "is-terminal",
- "itertools 0.10.5",
+ "itertools",
  "num-traits",
  "once_cell",
  "oorandom",
@@ -624,7 +624,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b50826342786a51a89e2da3a28f1c32b06e387201bc2d19791f622c673706b1"
 dependencies = [
  "cast",
- "itertools 0.10.5",
+ "itertools",
 ]
 
 [[package]]
@@ -1450,15 +1450,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "itertools"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
-dependencies = [
- "either",
-]
-
-[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2060,7 +2051,7 @@ dependencies = [
 [[package]]
 name = "povu-rs"
 version = "0.1.0"
-source = "git+https://github.com/pangenome/povu?branch=rust#857ae6ecb5d97272b51d676b25b4307ecb6c16e8"
+source = "git+https://github.com/pangenome/povu?rev=168167fd2a05b8f9fa4901a2aa0feb02bfc13ea5#168167fd2a05b8f9fa4901a2aa0feb02bfc13ea5"
 dependencies = [
  "bindgen 0.70.1",
  "cmake",
