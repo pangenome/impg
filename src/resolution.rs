@@ -33,7 +33,7 @@ pub const DEFAULT_MAX_ITERATIONS: usize = 512;
 pub const DEFAULT_MAX_BUBBLE_SPAN: usize = 10_000;
 pub const DEFAULT_MAX_TRAVERSAL_LEN: usize = 10_000;
 pub const DEFAULT_MAX_TOTAL_SEQUENCE: usize = 1_000_000;
-pub const DEFAULT_MAX_TRAVERSALS: usize = 1_024;
+pub const DEFAULT_MAX_TRAVERSALS: usize = 10_000;
 
 impl Default for ResolutionConfig {
     fn default() -> Self {

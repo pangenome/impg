@@ -3913,7 +3913,7 @@ GFA engine shorthand:
         max_total_sequence: usize,
 
         /// Maximum number of path-supported traversals through one candidate
-        #[clap(long, value_parser = parse_usize_size, default_value = "1024")]
+        #[clap(long, value_parser = parse_usize_size, default_value = "10k")]
         max_traversals: usize,
 
         #[clap(flatten)]
