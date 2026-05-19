@@ -9,7 +9,9 @@
 //! provided, otherwise the gap is filled with `N`s and a warning is
 //! emitted. Each gap occurrence gets a fresh segment id (no
 //! cross-path dedup) so that orientation/dedup never silently mixes
-//! distinct DNA.
+//! distinct DNA. The CLI default is blunt mode (`pangenome/bluntg`),
+//! which converts native variable overlaps to 0M links; raw mode keeps
+//! syng's native overlap graph.
 
 use std::io::{self, BufWriter, Write};
 
@@ -19,6 +21,37 @@ use rustc_hash::FxHashSet;
 use crate::sequence_index::{SequenceIndex, UnifiedSequenceIndex};
 use crate::syng::{GbwtPathStart, SyngIndex};
 use crate::syng_ffi;
+
+/// Syng GFA graph shape.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SyngGfaMode {
+    /// Native syng overlap graph, preserving nonzero link overlaps.
+    Raw,
+    /// Blunt graph produced by pangenome/bluntg; all link/path overlaps become 0M.
+    Blunt,
+}
+
+impl SyngGfaMode {
+    pub fn parse(s: &str) -> io::Result<Self> {
+        match s.trim().replace('_', "-").to_ascii_lowercase().as_str() {
+            "raw" | "syng:raw" | "syng-raw" | "syng-native:raw" => Ok(Self::Raw),
+            "blunt" | "bluntg" | "syng" | "syng:blunt" | "syng:bluntg" | "syng-blunt"
+            | "syng-bluntg" | "syng-native" | "syng-native:blunt"
+            | "syng-native:bluntg" => Ok(Self::Blunt),
+            other => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unknown syng GFA mode '{other}' (expected raw or blunt)"),
+            )),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Raw => "raw",
+            Self::Blunt => "blunt",
+        }
+    }
+}
 
 /// Which GFA spec version to emit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -360,6 +393,46 @@ pub fn write_gfa<W: Write>(
     ))
 }
 
+/// Write syng GFA in either native overlap form or bluntg-processed form.
+pub fn write_gfa_with_mode<W: Write>(
+    index: &SyngIndex,
+    writer: &mut W,
+    version: GfaVersion,
+    gap_fill: Option<&UnifiedSequenceIndex>,
+    mode: SyngGfaMode,
+) -> io::Result<(usize, usize, usize, usize, usize, u64)> {
+    match mode {
+        SyngGfaMode::Raw => write_gfa(index, writer, version, gap_fill),
+        SyngGfaMode::Blunt => {
+            let mut raw = Vec::new();
+            let stats = write_gfa(index, &mut raw, version, gap_fill)?;
+            let blunted = bluntify_gfa_bytes(&raw, version)?;
+            info!(
+                "[syng2gfa] bluntg processed {} raw GFA bytes into {} blunt GFA bytes",
+                raw.len(),
+                blunted.len()
+            );
+            writer.write_all(&blunted)?;
+            Ok(stats)
+        }
+    }
+}
+
+fn bluntify_gfa_bytes(raw: &[u8], version: GfaVersion) -> io::Result<Vec<u8>> {
+    if version != GfaVersion::V1_0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--gfa-mode blunt currently requires --gfa-version 1.0 because bluntg preserves P lines, not W lines",
+        ));
+    }
+
+    let gfa = bluntg::parse_gfa(raw);
+    let blunted = bluntg::bluntify_auto(gfa);
+    let mut out = Vec::new();
+    bluntg::write_gfa(&mut out, &blunted)?;
+    Ok(out)
+}
+
 /// Pull the DNA between two syncmers from a sequence index.
 fn fetch_gap_dna(
     seq_idx: &UnifiedSequenceIndex,
@@ -455,6 +528,7 @@ pub fn run(
     out_path: &str,
     version: GfaVersion,
     sequence_files: &[String],
+    mode: SyngGfaMode,
 ) -> io::Result<()> {
     info!("[syng2gfa] loading syng index from prefix '{}'", prefix);
     // SyncmerParams in load() is overridden by the .syng.meta sidecar, so any
@@ -490,16 +564,71 @@ pub fn run(
         let stdout = io::stdout();
         let mut w = BufWriter::new(stdout.lock());
         let (s, l, p, skipped, gaps, gap_bp) =
-            write_gfa(&index, &mut w, version, seq_idx.as_ref())?;
+            write_gfa_with_mode(&index, &mut w, version, seq_idx.as_ref(), mode)?;
         w.flush()?;
-        report(s, l, p, skipped, gaps, gap_bp, "stdout");
+        report(
+            s,
+            l,
+            p,
+            skipped,
+            gaps,
+            gap_bp,
+            &format!("stdout ({})", mode.label()),
+        );
     } else {
         let file = std::fs::File::create(out_path)?;
         let mut w = BufWriter::new(file);
         let (s, l, p, skipped, gaps, gap_bp) =
-            write_gfa(&index, &mut w, version, seq_idx.as_ref())?;
+            write_gfa_with_mode(&index, &mut w, version, seq_idx.as_ref(), mode)?;
         w.flush()?;
-        report(s, l, p, skipped, gaps, gap_bp, &format!("'{}'", out_path));
+        report(
+            s,
+            l,
+            p,
+            skipped,
+            gaps,
+            gap_bp,
+            &format!("'{}' ({})", out_path, mode.label()),
+        );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_syng_gfa_mode_parse_defaults_syng_to_blunt() {
+        assert_eq!(SyngGfaMode::parse("syng").unwrap(), SyngGfaMode::Blunt);
+        assert_eq!(
+            SyngGfaMode::parse("syng:blunt").unwrap(),
+            SyngGfaMode::Blunt
+        );
+        assert_eq!(SyngGfaMode::parse("bluntg").unwrap(), SyngGfaMode::Blunt);
+        assert_eq!(SyngGfaMode::parse("raw").unwrap(), SyngGfaMode::Raw);
+        assert_eq!(
+            SyngGfaMode::parse("syng:raw").unwrap(),
+            SyngGfaMode::Raw
+        );
+    }
+
+    #[test]
+    fn test_bluntify_gfa_bytes_handles_variable_overlaps() {
+        let raw = b"\
+H\tVN:Z:1.0\n\
+S\t1\tACGTAC\n\
+S\t2\tTACGGA\n\
+S\t3\tGGAACC\n\
+L\t1\t+\t2\t+\t3M\n\
+L\t2\t+\t3\t+\t1M\n\
+P\tp\t1+,2+,3+\t3M,1M\n";
+        let out = bluntify_gfa_bytes(raw, GfaVersion::V1_0).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("L\t1\t+\t2\t+\t0M"), "{out}");
+        assert!(out.contains("L\t2\t+\t3\t+\t0M"), "{out}");
+        assert!(out.contains("P\tp\t1+,2+,3+\t0M,0M"), "{out}");
+        assert!(!out.contains("\t3M"), "{out}");
+        assert!(!out.contains("\t1M"), "{out}");
+    }
 }

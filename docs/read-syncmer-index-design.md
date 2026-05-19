@@ -23,6 +23,46 @@ syncmer node -> sorted read ordinals
 This is the standard inverted-index problem: a dictionary of terms
 syncmer nodes, each with a monotone posting list of document/read IDs.
 
+## Implementation Status
+
+As of May 2026, `impg read-index` has a builder for the first prototype:
+
+```text
+impg read-index -a panel.syng -q reads.fq.gz -o sample
+```
+
+This writes:
+
+```text
+sample.r2s.meta
+sample.r2s.sample
+sample.r2s.post
+```
+
+That prototype is a build artifact, not yet the production query format.
+It proves that node-major read postings can be built, but it has not
+fixed the fast-load / immediate-query problem yet:
+
+- there is no public `.r2s` query command yet;
+- there is no memory-mapped or zero-copy reader yet;
+- the builder still collects all `(syncmer_node, read_ordinal)` pairs and
+  sorts them before writing;
+- read IDs are still FASTQ-order ordinals, so posting-list deltas are
+  much less compressible than they should be;
+- the sparse `.r2s.sample` file can seek near a node block, but it is
+  not the final observed-node dictionary / offset table we want.
+
+So the correction we still need is `.r2s2`: an indexable, node-major
+posting-list format with a real loader/query path. The goal is that a
+subgraph query loads only metadata and small dictionaries up front, then
+decodes only the posting lists for requested syncmer nodes.
+
+This is separate from the syng positional sidecars (`.syng.spos` and
+`.syng.pstep`). Those sidecars already use the regular sampled
+path-step scheme and are used by syng query/partition/map. They solve
+path-coordinate lookup inside the panel index; they do not solve
+read-to-syncmer support lookup.
+
 ## Current Prototype
 
 The current `.r2s` prototype writes each node block as:

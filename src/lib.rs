@@ -57,6 +57,10 @@ pub enum GfaEngine {
 /// Resolved engine configuration passed to subcommand functions.
 pub struct EngineOpts {
     pub engine: GfaEngine,
+    /// Syng GFA mode when `engine == GfaEngine::SyngNative`.
+    pub syng_gfa_mode: Option<commands::syng2gfa::SyngGfaMode>,
+    /// Optional assertion about the syncmer scheme of a syng input index.
+    pub syng_params: Option<syng::SyncmerParams>,
     pub pipeline: commands::graph::GraphBuildConfig,
     // Smoothxg-style smoothing parameters (pggb engine)
     /// Target POA length(s) per pass — one value per smoothing pass (default: [700, 1100]).
@@ -400,6 +404,110 @@ pub fn dispatch_gfa_engine_with_seq_index(
     dispatch_gfa_engine(&wrapper, query_intervals, sequence_index, scoring_params, engine_opts)
 }
 
+fn format_syng_params(params: syng::SyncmerParams) -> String {
+    format!(
+        "k={},s={},seed={}",
+        params.k + params.w,
+        params.k,
+        params.seed
+    )
+}
+
+fn validate_syng_param_assertion(
+    actual: syng::SyncmerParams,
+    expected: Option<syng::SyncmerParams>,
+) -> std::io::Result<()> {
+    if let Some(expected) = expected {
+        if actual != expected {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "syng parameter assertion does not match index: requested {}, index has {}",
+                    format_syng_params(expected),
+                    format_syng_params(actual)
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn write_fasta_records(
+    path: &std::path::Path,
+    records: &[(String, Vec<u8>)],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+    for (name, seq) in records {
+        writeln!(out, ">{name}")?;
+        out.write_all(seq)?;
+        writeln!(out)?;
+    }
+    out.flush()
+}
+
+pub fn write_syng_region_gfa_from_sequences<W: std::io::Write>(
+    source_index: &syng::SyngIndex,
+    sequences: &[(String, Vec<u8>)],
+    out: &mut W,
+    mode: commands::syng2gfa::SyngGfaMode,
+) -> std::io::Result<()> {
+    if sequences.is_empty() {
+        writeln!(out, "H\tVN:Z:1.0")?;
+        return Ok(());
+    }
+
+    let tempdir = tempfile::Builder::new()
+        .prefix("impg-syng-gfa-")
+        .tempdir()?;
+    let region_prefix_path = tempdir.path().join("region");
+    let region_prefix = region_prefix_path.to_str().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "region prefix is not UTF-8")
+    })?;
+    let seq_refs: Vec<(String, &[u8])> = sequences
+        .iter()
+        .map(|(name, seq)| (name.clone(), seq.as_slice()))
+        .collect();
+    source_index.build_region_gbwt(&seq_refs, region_prefix)?;
+
+    let fasta_path = tempdir.path().join("region.fa");
+    write_fasta_records(&fasta_path, sequences)?;
+    let sequence_files = vec![fasta_path.to_string_lossy().to_string()];
+    let sequence_index = sequence_index::UnifiedSequenceIndex::from_files(&sequence_files)?;
+    let region_index = syng::SyngIndex::load(region_prefix, source_index.params)?;
+
+    commands::syng2gfa::write_gfa_with_mode(
+        &region_index,
+        out,
+        commands::syng2gfa::GfaVersion::V1_0,
+        Some(&sequence_index),
+        mode,
+    )?;
+    Ok(())
+}
+
+fn build_syng_region_gfa_from_intervals(
+    syng_idx: &syng::SyngIndex,
+    impg: &impl impg_index::ImpgIndex,
+    query_intervals: &[coitrees::Interval<u32>],
+    sequence_index: &sequence_index::UnifiedSequenceIndex,
+    mode: commands::syng2gfa::SyngGfaMode,
+) -> std::io::Result<String> {
+    let sequences = graph::prepare_sequences(impg, query_intervals, sequence_index)?;
+    let fetched: Vec<(String, Vec<u8>)> = sequences
+        .into_iter()
+        .map(|(seq, meta)| (meta.path_name(), seq.into_bytes()))
+        .collect();
+    let mut out = Vec::new();
+    write_syng_region_gfa_from_sequences(syng_idx, &fetched, &mut out, mode)?;
+    String::from_utf8(out).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("regional syng GFA is not UTF-8: {e}"),
+        )
+    })
+}
+
 /// Dispatch GFA generation to the selected engine.
 ///
 /// Shared by `query -o gfa` and `partition -o gfa` so the engine match
@@ -424,6 +532,35 @@ pub fn dispatch_gfa_engine(
         scoring_params,
         engine_opts,
     )
+}
+
+/// Convert an in-memory GFA string to VCF using the native Rust POVU path.
+///
+/// `reference_names` are matched against full path names, sample names, or path
+/// prefixes by POVU; callers should pass the queried range name and the bare
+/// target sequence name when both are known.
+pub fn gfa_to_vcf_string(
+    gfa: &str,
+    reference_names: &[String],
+) -> std::io::Result<String> {
+    if !gfa.lines().any(|line| {
+        line.starts_with("P\t") || line.starts_with("W\t")
+    }) {
+        return povu::VcfDocument::new(Vec::<String>::new(), Vec::new())
+            .with_source("povu-rs-native")
+            .to_vcf_string()
+            .map_err(povu_to_io_error);
+    }
+
+    let graph = povu::NativeGfa::parse(gfa).map_err(povu_to_io_error)?;
+    let document = graph
+        .to_vcf_document(reference_names)
+        .map_err(povu_to_io_error)?;
+    document.to_vcf_string().map_err(povu_to_io_error)
+}
+
+fn povu_to_io_error(err: povu::Error) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string())
 }
 
 /// Dispatch that assumes `debug_dir` (if any) has already been created.
@@ -520,6 +657,22 @@ fn dispatch_gfa_engine_inner(
             }
         }
         GfaEngine::SyngNative => {
+            if let Some(mode) = engine_opts.syng_gfa_mode {
+                let syng_idx = impg.syng_index_ref().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "--gfa-engine syng[:raw|:blunt] requires syng-index input; use `impg query -a <prefix>.syng -o gfa --gfa-engine syng` or `impg render --engine syng`",
+                    )
+                })?;
+                validate_syng_param_assertion(syng_idx.params, engine_opts.syng_params)?;
+                return build_syng_region_gfa_from_intervals(
+                    syng_idx,
+                    impg,
+                    query_intervals,
+                    sequence_index,
+                    mode,
+                );
+            }
             // v2.3: if we have access to the underlying syng index,
             // re-query from the first interval as seed and use
             // anchor-seeded gap-only BiWFA for pairs that share anchors.

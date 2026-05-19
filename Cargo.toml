@@ -33,6 +33,7 @@ env_logger = "0.11"
 natord = "1.0"
 rustc-hash = "2.1"
 libc = "0.2"
+memmap2 = "0.9"
 indexmap = { version = "2", features = ["rayon"] }
 nalgebra = "0.33"
 indicatif = "0.18"
@@ -73,6 +74,8 @@ seqwish = { git = "https://github.com/pangenome/seqwish", branch = "rust-2" }
 
 # Dependencies for graph sorting
 gfasort = { git = "https://github.com/pangenome/gfasort", rev = "f15d8ebfdc632af2333f277cb9da0748d8fba7aa" }
+bluntg = { git = "https://github.com/pangenome/bluntg" }
+povu = { package = "povu-rs", git = "https://github.com/pangenome/povu", rev = "168167fd2a05b8f9fa4901a2aa0feb02bfc13ea5", default-features = false }
 
 [build-dependencies]
 cc = "1"

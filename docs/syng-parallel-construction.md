@@ -63,7 +63,7 @@ The clean end-state is a two-pass parallel dictionary plus per-node reduce:
 5. For each shard, emit per-node occurrence records and regular-grid
    positional samples using global node ids and global path coordinates.
 6. Reduce per-node occurrence records into the final GBWT node structures.
-7. Sort/group sampled-position records and write `.syng.spos` plus `.syng.pstep`.
+7. Sort/group sampled-position records and write `.syng.spos` and `.syng.pstep`.
 
 Step 6 is the only part not exposed by the current syng C API. The existing
 API has one mutable `syngBWTpathAdd` stream, but no `syngBWTmerge` or builder
@@ -97,8 +97,13 @@ AGC inputs.
 - Positional sampling uses a regular per-path syncmer-step grid plus each
   path's terminal syncmer. For `sample_rate = r`, sampled steps are
   `0, r, 2*r, ...` plus the final syncmer step on each path.
-  `.syng.spos` stores sampled node-to-position records and `.syng.pstep`
-  stores the inverse path-position checkpoints for the same sampled steps.
+  `.syng.pstep` stores path-position checkpoints and `.syng.spos` stores
+  the occurrence-major syncmer-position lookup used by query.
+- FASTA/AGC sequence names use the primary defline token. Any description
+  after the first whitespace is not part of the syng path key. For example,
+  `GRCh38#0#chr6  AC:CM000668.2 ...` is stored as `GRCh38#0#chr6`.
+  AGC readers still keep the full AGC contig name internally for sequence
+  retrieval.
 
 ## Next Step: True GBWT Reduce
 
@@ -116,3 +121,6 @@ simple-node / rskip representation currently produced incrementally by
 That reduce API should live below `SyngIndex`, ideally in C next to
 `syngbwt3.c`, because it needs to construct `NodeSide` / `Rskip` structures
 directly.
+
+For the remaining positional-query startup cost on human-scale graphs, see
+[`syng-position-query-index.md`](syng-position-query-index.md).

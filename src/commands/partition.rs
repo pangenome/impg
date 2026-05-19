@@ -481,7 +481,7 @@ pub fn partition_alignments(
                                 None,
                             )?;
                         }
-                        "gfa" | "maf" => {
+                        "gfa" | "vcf" | "maf" => {
                             // Write temporary BED file with .tmp suffix
                             write_partition_bed(
                                 partition_num,
@@ -517,14 +517,14 @@ pub fn partition_alignments(
                             // Collect BED partitions
                             collected_partitions.push((partition_num, query_intervals.clone()));
                         }
-                        "gfa" if engine_config.partition_size.is_some() => {
+                        "gfa" | "vcf" if engine_config.partition_size.is_some() => {
                             // Partitioned GFA mode: collect intervals for later pipeline
                             collected_partitions.push((partition_num, query_intervals.clone()));
                         }
-                        "gfa" | "maf" | "fasta" => {
+                        "gfa" | "vcf" | "maf" | "fasta" => {
                             return Err(io::Error::new(
                                 io::ErrorKind::InvalidInput,
-                                "Single-file output is only supported for BED format. Use --separate-files for GFA, MAF, or FASTA formats.".to_string(),
+                                "Single-file output is only supported for BED format. Use --separate-files for GFA, VCF, MAF, or FASTA formats.".to_string(),
                             ));
                         }
                         _ => {
@@ -576,7 +576,7 @@ pub fn partition_alignments(
         //info!("  select_and_window_sequences={:?}", window_time);
     }
 
-    // Convert temporary BED files to GFA/MAF if needed
+    // Convert temporary BED files to graph/MAF if needed
     if !temp_bed_files.is_empty() {
         info!(
             "Converting {} temporary BED files to {} format",
@@ -637,8 +637,8 @@ pub fn partition_alignments(
 
     // Write collected partitions as single file if not using separate files
     if !separate_files && !collected_partitions.is_empty() {
-        if output_format == "gfa" && engine_config.partition_size.is_some() {
-            // Partitioned GFA mode: run the partitioned pipeline
+        if matches!(output_format, "gfa" | "vcf") && engine_config.partition_size.is_some() {
+            // Partitioned graph mode: run the partitioned pipeline
             info!(
                 "Running partitioned GFA pipeline with {} partitions",
                 collected_partitions.len()
@@ -646,7 +646,7 @@ pub fn partition_alignments(
             let seq_idx = sequence_index.ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "Sequence files required for partitioned GFA output",
+                    "Sequence files required for partitioned graph output",
                 )
             })?;
             // Strip the partition_num tags before handing to the pipeline.
@@ -664,11 +664,17 @@ pub fn partition_alignments(
                 engine_config,
             )?;
 
-            // Write to output file
-            let output_path = create_output_path(output_folder, "partitions.gfa")?;
+            let (output_path, output_text) = if output_format == "vcf" {
+                (
+                    create_output_path(output_folder, "partitions.vcf")?,
+                    crate::gfa_to_vcf_string(&final_gfa, &[])?,
+                )
+            } else {
+                (create_output_path(output_folder, "partitions.gfa")?, final_gfa)
+            };
             let mut out = std::io::BufWriter::new(File::create(&output_path)?);
-            out.write_all(final_gfa.as_bytes())?;
-            info!("Wrote partitioned GFA to {}", output_path);
+            out.write_all(output_text.as_bytes())?;
+            info!("Wrote partitioned {} to {}", output_format.to_uppercase(), output_path);
         } else {
             info!(
                 "Writing {} partitions to single {} file",
@@ -1428,6 +1434,23 @@ fn write_partition(
                 engine_config,
             )
         }
+        "vcf" => {
+            let sequence_index = sequence_index.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "FASTA index required for VCF output",
+                )
+            })?;
+            write_partition_vcf(
+                partition_num,
+                query_intervals,
+                impg,
+                output_folder,
+                sequence_index,
+                scoring_params,
+                engine_config,
+            )
+        }
         "maf" => {
             let sequence_index = sequence_index.ok_or_else(|| {
                 io::Error::new(
@@ -1533,6 +1556,34 @@ fn write_partition_gfa(
 
     // Write the GFA output to the file
     writeln!(writer, "{gfa_output}")?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_partition_vcf(
+    partition_num: usize,
+    query_intervals: &[Interval<u32>],
+    impg: &impl ImpgIndex,
+    output_folder: Option<&str>,
+    sequence_index: &UnifiedSequenceIndex,
+    scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
+    engine_config: &EngineOpts,
+) -> io::Result<()> {
+    let gfa_output = crate::dispatch_gfa_engine(
+        impg,
+        query_intervals,
+        sequence_index,
+        scoring_params,
+        engine_config,
+    )?;
+    let vcf_output = crate::gfa_to_vcf_string(&gfa_output, &[])?;
+
+    let filename = format!("partition{partition_num}.vcf");
+    let full_path = create_output_path(output_folder, &filename)?;
+    let file = File::create(full_path)?;
+    let mut writer = BufWriter::new(file);
+
+    writer.write_all(vcf_output.as_bytes())?;
     writer.flush()?;
     Ok(())
 }

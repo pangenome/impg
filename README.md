@@ -115,9 +115,10 @@ impg query -a aln.paf -r chr1:1000-2000 -d 100 -x -m 3
 # Many regions from a BED, mixed PAF + 1ALN
 impg query -a f1.paf f2.1aln -b regions.bed -d 100
 
-# Output formats: auto | bed | bedpe | paf | gfa | maf | fasta | fasta+paf | fasta-aln
+# Output formats: auto | bed | bedpe | paf | gfa | vcf | maf | fasta | fasta+paf | fasta-aln
 impg query -a aln.paf -r chr1:1000-2000 -d 100 -o bed
 impg query -a aln.paf -r chr1:1000-2000 -d 100 -o gfa --sequence-files genomes.fa
+impg query -a aln.paf -r chr1:1000-2000 -d 100 -o vcf --sequence-files genomes.fa
 impg query -a aln.1aln -r chr1:1000-2000 -d 100 -o fasta --sequence-files *.fa \
            --reverse-complement
 
@@ -282,13 +283,13 @@ impg stats -a f1.paf f2.1aln
 
 ### `syng` and `map` — alignment-free syncmer backend
 
-`impg syng` builds a [syng](https://github.com/richarddurbin/syng) index from FASTA or AGC. Six sidecars are written under one prefix (`<prefix>.1khash` dictionary, `.1gbwt` GBWT, `.syng.names`, `.syng.spos` sampled node positions, `.syng.pstep` sampled path-step checkpoints, `.syng.meta` parameters — auto-loaded on read). Any later `impg query` / `partition` / `map` can then point `-a` at the prefix (or any sidecar) and skip pairwise alignment. Exact target coordinates are located by walking GBWT occurrences forward to the next `.syng.pstep` checkpoint; `.syng.spos` is only a sampled sidecar, not the final query answer.
+`impg syng` builds a [syng](https://github.com/richarddurbin/syng) index from FASTA or AGC. Six sidecars are written under one prefix (`<prefix>.1khash` dictionary, `.1gbwt` GBWT, `.syng.names`, `.syng.pstep` sampled path-step checkpoints, `.syng.spos` sampled syncmer occurrence positions, `.syng.meta` parameters — auto-loaded on read). Any later `impg query` / `partition` / `map` can then point `-a` at the prefix (or any sidecar) and skip pairwise alignment. Exact target coordinates are located by walking GBWT occurrences forward to the next sampled checkpoint and resolving it through `.syng.spos`.
 
 Parameters follow the syng paper: `--smer-length` (`s`, default 8) and `--syncmer-length` (`k`, must be odd, default 63). Position sidecars use a regular per-path syncmer-step grid plus the terminal syncmer: `--position-sample-rate 256` samples steps `0, 256, 512, ...` and the final step on each path. `--parallel-dictionary` adds a deterministic prepass for large inputs.
 
 `impg map` projects FASTA/FASTQ queries onto a syng index via shared syncmers. The default output is GAF (per-read syncmer-node walks); pass `-o paf` for projected genome coordinates, `-o pack` for a compact binary node support vector, `-o pack-tsv` for a human-readable TSV support vector, or `-o proj` for a sample projection bundle containing both `sample.pack` and `reads.gaf.zst`. Text map output written with `-O` is compressed automatically when the filename ends in `.zst` or `.zstd`; `pack` uses internal block zstd compression for random access by node ID. `packbin` remains accepted as a compatibility alias for compact pack output.
 
-Use `impg syng-repair -a <prefix> --position-sample-rate <N> --force` to rebuild or resample `.syng.spos` and `.syng.pstep` from an existing `.1gbwt` / `.1khash` syng index without re-reading the original sequences.
+Use `impg syng-repair -a <prefix> --position-sample-rate <N> --force` to rebuild or resample `.syng.pstep` and `.syng.spos` from an existing `.1gbwt` / `.1khash` syng index without re-reading the original sequences.
 
 End-to-end walkthrough using ODGI's C4 test GFA (90 HPRC haplotypes, ~6.9 Mb total):
 
@@ -418,7 +419,8 @@ ranges; once a range survives, downstream scoring can still recover all
 syncmers by walking that path range. `query -o gbwt` emits a
 region-specific sub-GBWT. The syng prefix passed to `-a` is resolved
 relative to cwd, so either `cd` to the index directory or pass an absolute
-path.
+path. For a focused syng-backed local GFA recipe, see
+[`docs/syng-gfa-query.md`](docs/syng-gfa-query.md).
 
 ## GFA engines
 
@@ -430,6 +432,24 @@ one set of engine implementations, selected via `--gfa-engine`:
 | `pggb` (default) | sweepga + seqwish + smoothxg-style smoothing + gfaffix | smoothed variation graphs |
 | `seqwish` | sweepga + seqwish + gfaffix | raw (unsmoothed) graphs |
 | `poa` | single-pass SPOA | small regions, quick MSA-based output |
+| `syng` / `syng:blunt` | regional syng syncmer graph + bluntg | syng-native zero-overlap graph output from syng indexes |
+| `syng:raw` | regional syng syncmer overlap graph | debugging native syncmer graph overlaps |
+
+For syng-index queries, `--gfa-engine syng` defaults to `syng:blunt`.
+The compact form `-o gfa:syng:blunt,k=63,s=8,seed=7` is accepted as
+shorthand for `-o gfa --gfa-engine syng:blunt,k=63,s=8,seed=7`; the
+`k/s/seed` tail is checked against the loaded syng index.
+
+The same shorthand works for the other engines: `-o gfa:pggb`,
+`-o gfa:seqwish`, `-o gfa:poa`, and `-o gfa:syng`. Alignment-backed graph
+builds may also include the aligner prefix, for example
+`-o gfa:wfmash:seqwish`, `-o gfa:fastga:pggb`, or
+`-o gfa:sweepga:seqwish`; this is equivalent to setting `--aligner` and
+`--gfa-engine` separately.
+
+VCF output uses the same graph engines and then converts the resulting local
+GFA through POVU. Use `-o vcf --gfa-engine <engine>` or the shorthand
+`-o vcf:<engine>`, for example `-o vcf:syng`.
 
 ### Partitioned mode
 
