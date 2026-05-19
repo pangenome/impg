@@ -313,8 +313,18 @@ input graph
   -> classify each site by span, traversal count, divergence, cycles, alignability
   -> choose operation
   -> run local POA / BiWFA compression / representative collapse / passthrough
+  -> lace the replacement graph back between the same boundary handles
+  -> repeat on the changed graph until no eligible bubbles remain or budget is hit
   -> write resolved graph plus site metadata and optional coordinate provenance
 ```
+
+For syng, this is a direct extension of the existing model. The syncmer graph
+already gives a sparse topology over path-supported homology. Resolving a small
+bubble to a tighter local graph and lacing it back compresses that sparse graph
+without needing to materialize or globally realign everything. After one bubble
+is replaced, the surrounding graph changes; that replacement may become a
+fragment inside a larger bubble, which can then be considered by the next
+iteration. The algorithm is therefore naturally bottom-up and hierarchical.
 
 Suggested operation classes:
 
@@ -363,6 +373,57 @@ principle is that we want base-level local consistency up to a practical kernel
 size, perhaps 1-3 kb by default, and then we deliberately retain coarser
 topology above that scale rather than pretending a forced alignment is more
 truthful.
+
+### Bottom-Up Bubble Compression
+
+The core loop can be simple:
+
+```text
+while true:
+  find current bubbles/flubbles/tangles
+  rank smallest and cleanest candidates first
+  for each candidate within budget:
+    extract observed path traversals
+    build a replacement graph with the selected operation
+    verify exact path embedding for exact modes
+    lace replacement between candidate entry/exit handles
+  stop when no candidate changes the graph or global budget is reached
+```
+
+This makes the hierarchy emerge from the graph instead of being fixed at the
+start. A local replacement can simplify a nested structure and expose the next
+larger bubble. The next pass can then operate on that larger unit, using the
+already-compressed internal graph as one of its traversed fragments.
+
+Budgeting is part of correctness, not just performance. The engine should have
+hard stop conditions:
+
+- maximum bubble reference span, for example 10 kb by default
+- maximum traversal length, total extracted sequence, and traversal count
+- maximum cycle/tangle score
+- maximum pairwise-alignment count
+- maximum wall time or memory per site
+- maximum graph growth ratio after replacement
+
+When a site exceeds budget, the correct first approximation is to leave its
+current topology in place, optionally after compressing eligible internal
+components. A 10 kb bubble with no shared syncmers in the middle is likely a
+real structural difference or a region where base-level homology is not worth
+forcing. Preserving the sparse syng/de-Bruijn topology is often more honest
+than spending unbounded time trying to align it.
+
+The compression schedule should avoid all-vs-all alignment by default. Useful
+bounded schedules include:
+
+- guide-tree or spanning-tree alignments over traversal sketches
+- reference-plus-nearest-neighbor alignments
+- random chords between traversal clusters
+- extra alignments for high-support or long-distance outliers
+- iterative refinement only while replacement quality improves
+
+This is enough to get most of the benefit without quadratic blowups. Exact
+small sites can use denser alignment, while large or repetitive sites should
+fall back to representative or passthrough modes.
 
 ### Resolution Policy
 
@@ -659,6 +720,12 @@ This fits the existing architecture:
 - read-walk evidence can disambiguate representatives with similar aggregate
   coverage but different ordering or phase
 
+The bottom-up compression hierarchy also gives a natural feature hierarchy for
+genotyping. Fine bubbles can contribute exact node or sequence support. Larger
+compressed bubbles can contribute support for their replacement paths. Large
+passthrough blocks can contribute coarse topology, copy-number, and read-walk
+features without pretending that they have a trustworthy base-level alignment.
+
 Deconvolution is the inverse view: after choosing a representative genotype,
 estimate which child bubbles or member traversals explain the evidence.
 
@@ -862,19 +929,22 @@ Learned or simulation-trained scoring:
    path coordinates.
 5. Add bubble-guided local POA smoothing for small clean bubbles and lace the
    smoothed subgraph back through entry/exit handles.
-6. Add BiWFA pair-compression for moderate bubbles where pairwise alignment is
-   credible but full POA is too expensive.
-7. Add exact and medoid representative selection with feature vectors for
+6. Add the bottom-up iterative compression loop, rerunning decomposition after
+   replacements and stopping when no eligible bounded sites remain.
+7. Add BiWFA pair-compression for moderate bubbles using bounded alignment
+   schedules such as guide trees, spanning trees, nearest neighbors, and random
+   chords instead of default all-vs-all alignment.
+8. Add exact and medoid representative selection with feature vectors for
    larger or repetitive sites.
-8. Add coordinate/provenance sidecars for representative, symbolic, centroid,
+9. Add coordinate/provenance sidecars for representative, symbolic, centroid,
    or other lossy modes.
-9. Route `query -o vcf` through the hierarchy for `atomic` and `site` modes,
+10. Route `query -o vcf` through the hierarchy for `atomic` and `site` modes,
    keeping POVU as the sequence-allele backend where possible.
-10. Add representative/block VCF modes with symbolic alleles and sidecar
+11. Add representative/block VCF modes with symbolic alleles and sidecar
    traversal metadata.
-11. Connect representatives to `genotype`/`infer` as candidate haplotypes in a
+12. Connect representatives to `genotype`/`infer` as candidate haplotypes in a
    declared feature space.
-12. Add simulation-trained or learned scoring only after deterministic fixtures
+13. Add simulation-trained or learned scoring only after deterministic fixtures
     and real-region validation are stable.
 
 The key design constraint is that resolution is not a VCF formatting option.
