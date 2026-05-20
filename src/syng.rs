@@ -5237,12 +5237,34 @@ impl SyngIndex {
     /// Uses the same syncmer parameters as this index (or default if
     /// called on a freshly constructed index).
     pub fn build_region_gbwt(&self, sequences: &[(String, &[u8])], prefix: &str) -> io::Result<()> {
+        let total_start = std::time::Instant::now();
+        let total_bp: usize = sequences.iter().map(|(_, seq)| seq.len()).sum();
+        log::info!(
+            "[syng region gbwt] serial build from {} sequence(s), {} bp",
+            sequences.len(),
+            total_bp
+        );
         let mut region_index = SyngIndex::new(self.params);
         region_index.enable_online_sampled_positions(1)?;
+        let replay_start = std::time::Instant::now();
+        let mut total_syncmers = 0usize;
         for (name, seq) in sequences {
-            region_index.add_sequence(name.clone(), seq.to_vec());
+            let stats = region_index.add_sequence(name.clone(), seq.to_vec());
+            total_syncmers += stats.syncmers;
         }
-        region_index.save(prefix)
+        log::info!(
+            "[syng region gbwt] extracted and inserted {} syncmer step(s) into GBWT in {:.3}s",
+            total_syncmers,
+            replay_start.elapsed().as_secs_f64()
+        );
+        let save_start = std::time::Instant::now();
+        region_index.save(prefix)?;
+        log::info!(
+            "[syng region gbwt] saved regional syng files in {:.3}s; total {:.3}s",
+            save_start.elapsed().as_secs_f64(),
+            total_start.elapsed().as_secs_f64()
+        );
+        Ok(())
     }
 
     /// Merge overlapping or adjacent intervals that share the same genome and strand.

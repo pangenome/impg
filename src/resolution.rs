@@ -194,7 +194,18 @@ struct OutStep {
 /// adjacency and emits `0M` edges. Use `syng:blunt` output, not raw syng overlap
 /// GFA, as input.
 pub fn resolve_gfa_bubbles(gfa: &str, config: &ResolutionConfig) -> io::Result<ResolvedGfa> {
+    let parse_start = Instant::now();
+    log::info!(
+        "crush: parsing input GFA ({} bytes) before bubble decomposition",
+        gfa.len()
+    );
     let mut graph = parse_gfa(gfa)?;
+    log::info!(
+        "crush: parsed input GFA into {} segment(s), {} path(s) in {:.2?}",
+        graph.segments.len(),
+        graph.paths.len(),
+        parse_start.elapsed()
+    );
     let mut stats = ResolutionStats::default();
     let mut seen: FxHashSet<String> = FxHashSet::default();
     let mut changed = false;
@@ -601,13 +612,26 @@ fn find_candidate_frontier(
     let root_path = &graph.paths[root_path_idx];
     let root_positions = path_positions(graph, root_path_idx);
     let render_start = Instant::now();
+    log::info!(
+        "crush discovery: rendering working graph with {} segment(s), {} path(s)",
+        graph.segments.len(),
+        graph.paths.len()
+    );
     let rendered = render_graph(graph);
     let render_elapsed = render_start.elapsed();
     let parse_start = Instant::now();
+    log::info!(
+        "crush discovery: parsing rendered graph with POVU ({} bytes)",
+        rendered.len()
+    );
     let native_graph = povu::NativeGfa::parse(&rendered).map_err(povu_to_io_error)?;
     let parse_elapsed = parse_start.elapsed();
     let reference_names = vec![root_path.name.clone()];
     let decompose_start = Instant::now();
+    log::info!(
+        "crush discovery: decomposing rendered graph with POVU using root '{}'",
+        root_path.name
+    );
     let decomposition = native_graph
         .decompose_flubbles(&reference_names)
         .map_err(povu_to_io_error)?;
@@ -1022,30 +1046,16 @@ fn build_poasta_replacement(
         let scoring = GapAffine2Piece::new(mismatch, gap_extend, gap_open, gap_extend2, gap_open2);
         let mut aligner =
             PoastaAligner::new(Affine2PieceMinGapCost(scoring), AlignmentType::Global);
-        add_poasta_sequences(
-            &mut graph,
-            &mut aligner,
-            &headers,
-            &sequences,
-            &weights,
-        )?;
+        add_poasta_sequences(&mut graph, &mut aligner, &headers, &sequences, &weights)?;
     } else {
         let scoring = GapAffine::new(mismatch, gap_extend, gap_open);
         let mut aligner = PoastaAligner::new(AffineMinGapCost(scoring), AlignmentType::Global);
-        add_poasta_sequences(
-            &mut graph,
-            &mut aligner,
-            &headers,
-            &sequences,
-            &weights,
-        )?;
+        add_poasta_sequences(&mut graph, &mut aligner, &headers, &sequences, &weights)?;
     }
 
     let mut gfa = Vec::new();
     graph_to_gfa(&mut gfa, &graph).map_err(|err| {
-        io::Error::other(format!(
-            "POASTA replacement GFA generation failed: {err}"
-        ))
+        io::Error::other(format!("POASTA replacement GFA generation failed: {err}"))
     })?;
     let gfa = String::from_utf8(gfa).map_err(|err| {
         io::Error::new(

@@ -115,6 +115,10 @@ impg query -a aln.paf -r chr1:1000-2000 -d 100 -x -m 3
 # Many regions from a BED, mixed PAF + 1ALN
 impg query -a f1.paf f2.1aln -b regions.bed -d 100
 
+# One local graph per BED4 row, named from column 4
+impg query -a pan.syng -b regions.bed -d 100k -o gfa:syng:crush \
+           --sequence-files genomes.agc -O graphs/
+
 # Output formats: auto | bed | bedpe | paf | gfa | vcf | maf | fasta | fasta+paf | fasta-aln
 impg query -a aln.paf -r chr1:1000-2000 -d 100 -o bed
 impg query -a aln.paf -r chr1:1000-2000 -d 100 -o gfa --sequence-files genomes.fa
@@ -137,7 +141,10 @@ impg query -a pan.syng -r chr1:1000-2000 -d 100 --sequence-files genomes.fa
 
 GFA / MAF / FASTA outputs need `--sequence-files` (FASTA or AGC
 archive) or `--sequence-list`. See [GFA engines](#gfa-engines) for
-engine selection and partitioned builds.
+engine selection and partitioned builds. With `-b` and graph-like outputs
+(`gfa`, `vcf`, or `gbwt`), `-O` is treated as an output directory and
+each BED row is written separately using the BED column 4 name as the
+file stem.
 
 ### `graph` — build a pangenome graph from FASTA
 

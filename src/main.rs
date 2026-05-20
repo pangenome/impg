@@ -18,7 +18,7 @@ use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use rustc_hash::FxHashMap;
 use std::collections::{hash_map::DefaultHasher, BTreeMap};
-use std::fs::File;
+use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::num::NonZeroUsize;
@@ -3446,6 +3446,9 @@ Output formats:
   fasta-aln  FASTA alignment output from the local POA/MAF path
   gbwt       region-specific syng GBWT/khash output; requires -O and sequence files
 
+For BED graph output (`-b regions.bed -o gfa|vcf|gbwt`), `-O` is an output
+directory and each BED row is written to its own file named from BED column 4.
+
 Syng notes:
   With -a/--alignment pointing to a syng index, supported query outputs are
   bed, bedpe, gfa, vcf, fasta, and gbwt. Use -o gfa for a local sequence GFA from
@@ -4742,6 +4745,15 @@ fn run() -> io::Result<()> {
                         "Output prefix (-O) is required for 'gbwt' output format",
                     ));
                 }
+                let bed_graph_dir =
+                    bed_graph_output_dir(&output_prefix, resolved_format, &query.target_bed)?;
+                if let Some(dir) = &bed_graph_dir {
+                    info!(
+                        "BED graph output: writing one {} per BED row under {} using BED column 4 names",
+                        resolved_format,
+                        dir.display()
+                    );
+                }
 
                 let scoring_params = if matches!(resolved_format, "gfa" | "vcf") {
                     Some(parse_poa_scoring_string(&engine_cli.poa_scoring)?)
@@ -4774,6 +4786,9 @@ fn run() -> io::Result<()> {
                 // an outer par_iter over tiles oversubscribes and
                 // actually slowed things down in measurement.
                 for (target_name, (range_start, range_end), name) in &target_ranges {
+                    let target_query_start = Instant::now();
+                    let target_output_prefix =
+                        output_prefix_for_target(&output_prefix, bed_graph_dir.as_deref(), name);
                     info!("Syng query: {} ({}:{}-{})", name, target_name, range_start, range_end);
 
                     match resolved_format {
@@ -4814,7 +4829,7 @@ fn run() -> io::Result<()> {
                                 wrapper.seq_index(),
                             );
                             let ext = if resolved_format == "bedpe" { "bedpe" } else { "bed" };
-                            let mut out = find_output_stream(&output_prefix, ext)?;
+                            let mut out = find_output_stream(&target_output_prefix, ext)?;
                             if resolved_format == "bedpe" {
                                 output_results_bedpe(
                                     &wrapper,
@@ -4885,13 +4900,21 @@ fn run() -> io::Result<()> {
                                 );
 
                                 if query_intervals.is_empty() {
-                                    let mut out = find_output_stream(&output_prefix, output_ext)?;
+                                    let mut out = find_output_stream(&target_output_prefix, output_ext)?;
                                     write_graph_output(
                                         String::from("H\tVN:Z:1.0\n"),
                                         resolved_format,
                                         &mut out,
                                         &reference_names,
                                     )?;
+                                    info!(
+                                        "Syng query complete: {} ({}:{}-{}) in {}",
+                                        name,
+                                        target_name,
+                                        range_start,
+                                        range_end,
+                                        format_duration(target_query_start.elapsed())
+                                    );
                                     continue;
                                 }
 
@@ -4902,7 +4925,7 @@ fn run() -> io::Result<()> {
                                     scoring_params,
                                     &engine_opts,
                                 )?;
-                                let mut out = find_output_stream(&output_prefix, output_ext)?;
+                                let mut out = find_output_stream(&target_output_prefix, output_ext)?;
                                 write_graph_output(
                                     gfa_output,
                                     resolved_format,
@@ -4968,13 +4991,21 @@ fn run() -> io::Result<()> {
                                 }
 
                                 if partitions.is_empty() {
-                                    let mut out = find_output_stream(&output_prefix, output_ext)?;
+                                    let mut out = find_output_stream(&target_output_prefix, output_ext)?;
                                     write_graph_output(
                                         String::from("H\tVN:Z:1.0\n"),
                                         resolved_format,
                                         &mut out,
                                         &reference_names,
                                     )?;
+                                    info!(
+                                        "Syng query complete: {} ({}:{}-{}) in {}",
+                                        name,
+                                        target_name,
+                                        range_start,
+                                        range_end,
+                                        format_duration(target_query_start.elapsed())
+                                    );
                                     continue;
                                 }
 
@@ -4985,7 +5016,7 @@ fn run() -> io::Result<()> {
                                     scoring_params,
                                     &engine_opts,
                                 )?;
-                                let mut out = find_output_stream(&output_prefix, output_ext)?;
+                                let mut out = find_output_stream(&target_output_prefix, output_ext)?;
                                 write_graph_output(
                                     gfa_output,
                                     resolved_format,
@@ -5024,13 +5055,21 @@ fn run() -> io::Result<()> {
                                 );
 
                                 if query_intervals.is_empty() {
-                                    let mut out = find_output_stream(&output_prefix, output_ext)?;
+                                    let mut out = find_output_stream(&target_output_prefix, output_ext)?;
                                     write_graph_output(
                                         String::from("H\tVN:Z:1.0\n"),
                                         resolved_format,
                                         &mut out,
                                         &reference_names,
                                     )?;
+                                    info!(
+                                        "Syng query complete: {} ({}:{}-{}) in {}",
+                                        name,
+                                        target_name,
+                                        range_start,
+                                        range_end,
+                                        format_duration(target_query_start.elapsed())
+                                    );
                                     continue;
                                 }
 
@@ -5041,7 +5080,7 @@ fn run() -> io::Result<()> {
                                     scoring_params,
                                     &engine_opts,
                                 )?;
-                                let mut out = find_output_stream(&output_prefix, output_ext)?;
+                                let mut out = find_output_stream(&target_output_prefix, output_ext)?;
                                 write_graph_output(
                                     gfa_output,
                                     resolved_format,
@@ -5071,7 +5110,7 @@ fn run() -> io::Result<()> {
                             } else {
                                 query_raw_syng(target_name, *range_start, *range_end, syng_padding, syng_extension)?
                             };
-                            let mut out = find_output_stream(&output_prefix, "fa")?;
+                            let mut out = find_output_stream(&target_output_prefix, "fa")?;
                             for iv in &intervals {
                                 let sequence = seq_idx.fetch_sequence(&iv.genome, iv.start as i32, iv.end as i32)?;
                                 writeln!(out, ">{}:{}-{}({})", iv.genome, iv.start, iv.end, iv.strand)?;
@@ -5100,7 +5139,7 @@ fn run() -> io::Result<()> {
                             } else {
                                 query_raw_syng(target_name, *range_start, *range_end, syng_padding, syng_extension)?
                             };
-                            let gbwt_prefix = output_prefix.as_ref().unwrap();
+                            let gbwt_prefix = target_output_prefix.as_ref().unwrap();
 
                             // Fetch sequences for all intervals
                             let fetched: Vec<(String, Vec<u8>)> = intervals
@@ -5122,6 +5161,14 @@ fn run() -> io::Result<()> {
                         }
                         _ => unreachable!(),
                     }
+                    info!(
+                        "Syng query complete: {} ({}:{}-{}) in {}",
+                        name,
+                        target_name,
+                        range_start,
+                        range_end,
+                        format_duration(target_query_start.elapsed())
+                    );
                 }
                 // Skip the rest of the normal query path
             } else {
@@ -5289,6 +5336,15 @@ fn run() -> io::Result<()> {
                     "Output prefix (-O) is required for 'gbwt' output format",
                 ));
             }
+            let bed_graph_dir =
+                bed_graph_output_dir(&output_prefix, resolved_output_format, &query.target_bed)?;
+            if let Some(dir) = &bed_graph_dir {
+                info!(
+                    "BED graph output: writing one {} per BED row under {} using BED column 4 names",
+                    resolved_output_format,
+                    dir.display()
+                );
+            }
 
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
@@ -5305,6 +5361,13 @@ fn run() -> io::Result<()> {
             // Process all target ranges in a unified loop
             info!("Querying target ranges");
             for (target_name, target_range, name) in target_ranges {
+                let target_query_start = Instant::now();
+                let target_output_prefix =
+                    output_prefix_for_target(&output_prefix, bed_graph_dir.as_deref(), &name);
+                info!(
+                    "Query: {} ({}:{}-{})",
+                    name, target_name, target_range.0, target_range.1
+                );
                 let mut results = perform_query(
                     &impg,
                     &target_name,
@@ -5327,7 +5390,7 @@ fn run() -> io::Result<()> {
                         output_results_bed(
                             &impg,
                             &mut results,
-                            &mut find_output_stream(&output_prefix, "bed")?,
+                            &mut find_output_stream(&target_output_prefix, "bed")?,
                             &name,
                             query.effective_merge_distance(),
                             query.merge_strands_for_output("bed"),
@@ -5340,7 +5403,7 @@ fn run() -> io::Result<()> {
                         output_results_bedpe(
                             &impg,
                             &mut results,
-                            &mut find_output_stream(&output_prefix, "bed")?,
+                            &mut find_output_stream(&target_output_prefix, "bed")?,
                             &name,
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
@@ -5352,7 +5415,7 @@ fn run() -> io::Result<()> {
                         output_results_paf(
                             &impg,
                             &mut results,
-                            &mut find_output_stream(&output_prefix, "paf")?,
+                            &mut find_output_stream(&target_output_prefix, "paf")?,
                             &name,
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
@@ -5365,7 +5428,7 @@ fn run() -> io::Result<()> {
                             // Partitioned mode: split query region into sub-windows
                             output_results_gfa_partitioned(
                                 &impg,
-                                &mut find_output_stream(&output_prefix, "gfa")?,
+                                &mut find_output_stream(&target_output_prefix, "gfa")?,
                                 sequence_index.as_ref().unwrap(),
                                 scoring_params,
                                 &engine_opts,
@@ -5379,7 +5442,7 @@ fn run() -> io::Result<()> {
                             output_results_gfa(
                                 &impg,
                                 &mut results,
-                                &mut find_output_stream(&output_prefix, "gfa")?,
+                                &mut find_output_stream(&target_output_prefix, "gfa")?,
                                 sequence_index.as_ref().unwrap(),
                                 &name,
                                 query.effective_merge_distance(),
@@ -5395,7 +5458,7 @@ fn run() -> io::Result<()> {
                         if let Some(ps) = engine_opts.partition_size {
                             output_results_vcf_partitioned(
                                 &impg,
-                                &mut find_output_stream(&output_prefix, "vcf")?,
+                                &mut find_output_stream(&target_output_prefix, "vcf")?,
                                 sequence_index.as_ref().unwrap(),
                                 scoring_params,
                                 &engine_opts,
@@ -5410,7 +5473,7 @@ fn run() -> io::Result<()> {
                             output_results_vcf(
                                 &impg,
                                 &mut results,
-                                &mut find_output_stream(&output_prefix, "vcf")?,
+                                &mut find_output_stream(&target_output_prefix, "vcf")?,
                                 sequence_index.as_ref().unwrap(),
                                 &reference_names,
                                 query.effective_merge_distance(),
@@ -5424,7 +5487,7 @@ fn run() -> io::Result<()> {
                         output_results_maf(
                             &impg,
                             &mut results,
-                            &mut find_output_stream(&output_prefix, "maf")?,
+                            &mut find_output_stream(&target_output_prefix, "maf")?,
                             sequence_index.as_ref().unwrap(),
                             &name,
                             query.effective_merge_distance(),
@@ -5436,7 +5499,7 @@ fn run() -> io::Result<()> {
                         output_results_fasta(
                             &impg,
                             &mut results,
-                            &mut find_output_stream(&output_prefix, "fa")?,
+                            &mut find_output_stream(&target_output_prefix, "fa")?,
                             sequence_index.as_ref().unwrap(),
                             &name,
                             query.effective_merge_distance(),
@@ -5448,7 +5511,7 @@ fn run() -> io::Result<()> {
                         output_results_fasta(
                             &impg,
                             &mut results,
-                            &mut find_output_stream(&output_prefix, "fa")?,
+                            &mut find_output_stream(&target_output_prefix, "fa")?,
                             sequence_index.as_ref().unwrap(),
                             &name,
                             query.effective_merge_distance(),
@@ -5460,7 +5523,7 @@ fn run() -> io::Result<()> {
                         output_results_paf(
                             &impg,
                             &mut results,
-                            &mut find_output_stream(&output_prefix, "paf")?,
+                            &mut find_output_stream(&target_output_prefix, "paf")?,
                             &name,
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
@@ -5480,7 +5543,7 @@ fn run() -> io::Result<()> {
                     }
                     "gbwt" => {
                         let seq_idx = sequence_index.as_ref().unwrap();
-                        let gbwt_prefix = output_prefix.as_ref().ok_or_else(|| {
+                        let gbwt_prefix = target_output_prefix.as_ref().ok_or_else(|| {
                             io::Error::new(
                                 io::ErrorKind::InvalidInput,
                                 "Output prefix (-O) is required for 'gbwt' output format",
@@ -5527,6 +5590,14 @@ fn run() -> io::Result<()> {
                         ));
                     }
                 }
+                info!(
+                    "Query complete: {} ({}:{}-{}) in {}",
+                    name,
+                    target_name,
+                    target_range.0,
+                    target_range.1,
+                    format_duration(target_query_start.elapsed())
+                );
             }
             } // end of else (normal query path)
         }
@@ -7940,6 +8011,71 @@ fn find_output_stream(basename: &Option<String>, extension: &str) -> io::Result<
     }
 }
 
+fn sanitize_output_stem(name: &str) -> String {
+    let mut stem = String::with_capacity(name.len());
+    for c in name.trim().chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+            stem.push(c);
+        } else {
+            stem.push('_');
+        }
+    }
+    let stem = stem.trim_matches('_');
+    if stem.is_empty() || stem == "." || stem == ".." {
+        "region".to_string()
+    } else {
+        stem.to_string()
+    }
+}
+
+fn bed_graph_output_dir(
+    output_prefix: &Option<String>,
+    output_format: &str,
+    target_bed: &Option<String>,
+) -> io::Result<Option<PathBuf>> {
+    if target_bed.is_none() || !matches!(output_format, "gfa" | "vcf" | "gbwt") {
+        return Ok(None);
+    }
+    let dir = output_prefix.as_ref().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "-O/--output-prefix is required for `query -b ... -o {output_format}`; \
+                 with BED graph output it is treated as an output directory and files \
+                 are named from BED column 4"
+            ),
+        )
+    })?;
+    let dir = PathBuf::from(dir);
+    if dir.exists() && !dir.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "BED graph output path '{}' exists and is not a directory",
+                dir.display()
+            ),
+        ));
+    }
+    fs::create_dir_all(&dir)?;
+    Ok(Some(dir))
+}
+
+fn output_prefix_for_target(
+    output_prefix: &Option<String>,
+    bed_graph_dir: Option<&Path>,
+    range_name: &str,
+) -> Option<String> {
+    if let Some(dir) = bed_graph_dir {
+        Some(
+            dir.join(sanitize_output_stem(range_name))
+                .to_string_lossy()
+                .into_owned(),
+        )
+    } else {
+        output_prefix.clone()
+    }
+}
+
 fn graph_output_extension(output_format: &str) -> &'static str {
     match output_format {
         "vcf" => "vcf",
@@ -10167,6 +10303,38 @@ mod tests {
     }
 
     #[test]
+    fn test_bed_graph_output_uses_bed_name_as_file_stem() {
+        assert_eq!(sanitize_output_stem("AMY1A"), "AMY1A");
+        assert_eq!(sanitize_output_stem("C4A/C4B locus"), "C4A_C4B_locus");
+        assert_eq!(sanitize_output_stem(".."), "region");
+
+        let dir = tempfile::tempdir().unwrap();
+        let output_root = dir.path().join("graphs");
+        let output_prefix = Some(output_root.to_string_lossy().to_string());
+        let target_bed = Some("regions.bed".to_string());
+        let graph_dir = bed_graph_output_dir(&output_prefix, "gfa", &target_bed)
+            .unwrap()
+            .unwrap();
+        assert_eq!(graph_dir, output_root);
+        assert!(graph_dir.is_dir());
+
+        let target_prefix =
+            output_prefix_for_target(&output_prefix, Some(&graph_dir), "C4A/C4B locus").unwrap();
+        assert!(target_prefix.ends_with("graphs/C4A_C4B_locus"));
+    }
+
+    #[test]
+    fn test_bed_graph_output_requires_directory_prefix_for_graph_formats() {
+        let target_bed = Some("regions.bed".to_string());
+        let err = bed_graph_output_dir(&None, "gfa", &target_bed).unwrap_err();
+        assert!(err.to_string().contains("-O/--output-prefix is required"));
+
+        assert!(bed_graph_output_dir(&None, "bed", &target_bed)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn test_syng_gfa_intervals_are_merged_before_graph_build() {
         let mut seq_index = SequenceIndex::new();
         seq_index.get_or_insert_id("GRCh38#0#chr1", Some(1_000));
@@ -10260,6 +10428,8 @@ mod tests {
             "fasta+paf  FASTA sequences plus PAF-like interval mappings",
             "fasta-aln  FASTA alignment output",
             "gbwt       region-specific syng GBWT/khash output",
+            "For BED graph output (`-b regions.bed -o gfa|vcf|gbwt`)",
+            "named from BED column 4",
             "`--gfa-engine syng` emits a syng syncmer GFA",
             "defaults to syng:blunt; use syng:raw",
             "-o gfa:syng:blunt,k=63,s=8,seed=7",
