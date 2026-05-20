@@ -500,15 +500,10 @@ fn range_sequence(graph: &Graph, range: &PathRange) -> Vec<u8> {
     seq
 }
 
-fn traversal_stats(ranges: &[PathRange]) -> TraversalStats {
-    if ranges.is_empty() {
+fn traversal_stats_from_lengths(mut lengths: Vec<usize>) -> TraversalStats {
+    if lengths.is_empty() {
         return TraversalStats::default();
     }
-
-    let mut lengths = ranges
-        .iter()
-        .map(|range| range.sequence.len())
-        .collect::<Vec<_>>();
     lengths.sort_unstable();
 
     TraversalStats {
@@ -610,7 +605,13 @@ fn find_candidate_frontier(
     }
     let root_path_idx = 0;
     let root_path = &graph.paths[root_path_idx];
-    let root_positions = path_positions(graph, root_path_idx);
+    let path_positions_by_path: Vec<Vec<usize>> = graph
+        .paths
+        .iter()
+        .enumerate()
+        .map(|(idx, _)| path_positions(graph, idx))
+        .collect();
+    let root_positions = &path_positions_by_path[root_path_idx];
     let render_start = Instant::now();
     log::info!(
         "crush discovery: rendering working graph with {} segment(s), {} path(s)",
@@ -644,6 +645,10 @@ fn find_candidate_frontier(
         .map(|(idx, segment)| (segment.id.as_str(), idx))
         .collect::<FxHashMap<_, _>>();
     let id_map_elapsed = id_map_start.elapsed();
+    let path_index_start = Instant::now();
+    let path_step_indexes: Vec<FxHashMap<Step, Vec<usize>>> =
+        graph.paths.par_iter().map(path_step_index).collect();
+    let path_index_elapsed = path_index_start.elapsed();
 
     let sites_seen = decomposition.sites.len();
     let candidate_start = Instant::now();
@@ -661,18 +666,15 @@ fn find_candidate_frontier(
             let root_span = root_positions[exit_step + 1] - root_positions[begin];
 
             let mut ranges = Vec::new();
-            for path_idx in 0..graph.paths.len() {
-                if let Some((range_begin, range_end)) =
-                    unique_anchor_range(&graph.paths[path_idx], entry, exit)
+            for (path_idx, path_index) in path_step_indexes.iter().enumerate() {
+                if let Some((range_begin, range_end)) = unique_anchor_range(path_index, entry, exit)
                 {
-                    let mut range = PathRange {
+                    ranges.push(PathRange {
                         path_idx,
                         begin_step: range_begin,
                         end_step: range_end,
                         sequence: Vec::new(),
-                    };
-                    range.sequence = range_sequence(graph, &range);
-                    ranges.push(range);
+                    });
                 }
             }
 
@@ -680,25 +682,14 @@ fn find_candidate_frontier(
                 return None;
             }
 
-            let distinct_sequences: BTreeSet<Vec<u8>> =
-                ranges.iter().map(|r| r.sequence.clone()).collect();
-            if distinct_sequences.len() < 2 {
-                return None;
-            }
-
-            let signature = candidate_signature(
-                graph,
-                root_path_idx,
-                &root_positions,
-                begin,
-                exit_step,
-                &ranges,
-            );
-            if seen.contains(&signature) {
-                return None;
-            }
-
-            let traversal_stats = traversal_stats(&ranges);
+            let lengths = ranges
+                .iter()
+                .map(|range| {
+                    let positions = &path_positions_by_path[range.path_idx];
+                    positions[range.end_step] - positions[range.begin_step]
+                })
+                .collect::<Vec<_>>();
+            let traversal_stats = traversal_stats_from_lengths(lengths);
             let within_budget = (config.max_bubble_span == 0
                 || root_span <= config.max_bubble_span)
                 && ranges.len() <= config.max_traversals
@@ -706,6 +697,17 @@ fn find_candidate_frontier(
                 && (config.max_median_traversal_len == 0
                     || traversal_stats.median_len <= config.max_median_traversal_len)
                 && traversal_stats.total_len <= config.max_total_sequence;
+            let signature = candidate_signature(
+                graph,
+                root_path_idx,
+                root_positions,
+                begin,
+                exit_step,
+                &ranges,
+            );
+            if seen.contains(&signature) {
+                return None;
+            }
 
             Some(BubbleCandidate {
                 ranges,
@@ -735,30 +737,42 @@ fn find_candidate_frontier(
         candidates_seen,
         ..CandidateFrontier::default()
     };
+    let mut occupied_by_path: Vec<Vec<(usize, usize)>> = vec![Vec::new(); graph.paths.len()];
     for candidate in candidates {
         if !candidate.within_budget {
             frontier.bailed.push(candidate);
             continue;
         }
-        if frontier
-            .selected
-            .iter()
-            .any(|selected| candidates_conflict(selected, &candidate))
-        {
+        if candidate_conflicts_with_occupied(&occupied_by_path, &candidate) {
             continue;
         }
+        mark_candidate_occupied(&mut occupied_by_path, &candidate);
         frontier.selected.push(candidate);
     }
+    let selected_before_materialize = frontier.selected.len();
+    let materialize_start = Instant::now();
+    frontier.selected = frontier
+        .selected
+        .into_par_iter()
+        .filter_map(|mut candidate| {
+            materialize_candidate_sequences(graph, &mut candidate).then_some(candidate)
+        })
+        .collect();
+    let materialize_elapsed = materialize_start.elapsed();
     let select_elapsed = select_start.elapsed();
 
     log::info!(
-        "crush discovery detail: render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, candidate-build {:.2?}, select {:.2?}",
+        "crush discovery detail: render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, path-index {:.2?}, candidate-build {:.2?}, select+materialize {:.2?} ({} -> {} selected, materialize {:.2?})",
         render_elapsed,
         parse_elapsed,
         decompose_elapsed,
         id_map_elapsed,
+        path_index_elapsed,
         candidate_elapsed,
-        select_elapsed
+        select_elapsed,
+        selected_before_materialize,
+        frontier.selected.len(),
+        materialize_elapsed
     );
 
     Ok(frontier)
@@ -770,26 +784,51 @@ impl BubbleCandidate {
     }
 }
 
-fn candidates_conflict(a: &BubbleCandidate, b: &BubbleCandidate) -> bool {
-    for a_range in &a.ranges {
-        for b_range in &b.ranges {
-            if a_range.path_idx == b_range.path_idx
-                && ranges_overlap(
-                    a_range.begin_step,
-                    a_range.end_step,
-                    b_range.begin_step,
-                    b_range.end_step,
-                )
-            {
-                return true;
-            }
+fn candidate_conflicts_with_occupied(
+    occupied_by_path: &[Vec<(usize, usize)>],
+    candidate: &BubbleCandidate,
+) -> bool {
+    candidate.ranges.iter().any(|range| {
+        range_conflicts_with_occupied(
+            &occupied_by_path[range.path_idx],
+            range.begin_step,
+            range.end_step,
+        )
+    })
+}
+
+fn mark_candidate_occupied(
+    occupied_by_path: &mut [Vec<(usize, usize)>],
+    candidate: &BubbleCandidate,
+) {
+    for range in &candidate.ranges {
+        insert_occupied_range(
+            &mut occupied_by_path[range.path_idx],
+            range.begin_step,
+            range.end_step,
+        );
+    }
+}
+
+fn range_conflicts_with_occupied(occupied: &[(usize, usize)], begin: usize, end: usize) -> bool {
+    let insert_pos = occupied.partition_point(|&(occupied_begin, _)| occupied_begin < begin);
+    if insert_pos > 0 {
+        let (_, previous_end) = occupied[insert_pos - 1];
+        if previous_end > begin {
+            return true;
+        }
+    }
+    if let Some(&(next_begin, _)) = occupied.get(insert_pos) {
+        if next_begin < end {
+            return true;
         }
     }
     false
 }
 
-fn ranges_overlap(a_begin: usize, a_end: usize, b_begin: usize, b_end: usize) -> bool {
-    a_begin < b_end && b_begin < a_end
+fn insert_occupied_range(occupied: &mut Vec<(usize, usize)>, begin: usize, end: usize) {
+    let insert_pos = occupied.partition_point(|&(occupied_begin, _)| occupied_begin < begin);
+    occupied.insert(insert_pos, (begin, end));
 }
 
 fn step_from_povu(id_to_idx: &FxHashMap<&str, usize>, step: &PovuStep) -> Option<Step> {
@@ -807,23 +846,47 @@ fn povu_to_io_error(err: povu::Error) -> io::Error {
     )
 }
 
-fn unique_anchor_range(path: &Path, entry: Step, exit: Step) -> Option<(usize, usize)> {
+fn path_step_index(path: &Path) -> FxHashMap<Step, Vec<usize>> {
+    let mut index: FxHashMap<Step, Vec<usize>> = FxHashMap::default();
+    for (idx, &step) in path.steps.iter().enumerate() {
+        index.entry(step).or_default().push(idx);
+    }
+    index
+}
+
+fn unique_anchor_range(
+    path_index: &FxHashMap<Step, Vec<usize>>,
+    entry: Step,
+    exit: Step,
+) -> Option<(usize, usize)> {
+    let starts = path_index.get(&entry)?;
+    let exits = path_index.get(&exit)?;
     let mut found = None;
-    for (i, &step) in path.steps.iter().enumerate() {
-        if step != entry {
+    for &i in starts {
+        let exit_pos = exits.partition_point(|&j| j <= i);
+        if exit_pos >= exits.len() {
             continue;
         }
-        for j in i + 1..path.steps.len() {
-            if path.steps[j] == exit {
-                if found.is_some() {
-                    return None;
-                }
-                found = Some((i, j + 1));
-                break;
-            }
+        let j = exits[exit_pos];
+        if found.is_some() {
+            return None;
         }
+        found = Some((i, j + 1));
     }
     found
+}
+
+fn materialize_candidate_sequences(graph: &Graph, candidate: &mut BubbleCandidate) -> bool {
+    for range in &mut candidate.ranges {
+        range.sequence = range_sequence(graph, range);
+    }
+    let Some(first) = candidate.ranges.first() else {
+        return false;
+    };
+    candidate
+        .ranges
+        .iter()
+        .any(|range| range.sequence != first.sequence)
 }
 
 fn candidate_signature(
@@ -834,17 +897,17 @@ fn candidate_signature(
     exit_step: usize,
     ranges: &[PathRange],
 ) -> String {
-    let mut seqs: Vec<String> = ranges
+    let mut coords: Vec<String> = ranges
         .iter()
-        .map(|r| String::from_utf8_lossy(&r.sequence).to_string())
+        .map(|r| format!("{}:{}-{}", r.path_idx, r.begin_step, r.end_step))
         .collect();
-    seqs.sort();
+    coords.sort();
     format!(
         "{}:{}-{}:{}",
         graph.paths[ref_path_idx].name,
         ref_positions[begin],
         ref_positions[exit_step + 1],
-        seqs.join("|")
+        coords.join("|")
     )
 }
 
@@ -1375,6 +1438,28 @@ P\tins\t1+,2+,3+\t*
     }
 
     #[test]
+    fn skips_sequence_identical_bubbles_after_deferred_materialization() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tC
+S\t4\tT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+P\tref\t1+,2+,4+\t*
+P\talt\t1+,3+,4+\t*
+";
+        let before = seq_map(gfa);
+        let resolved = resolve_gfa_bubbles(gfa, &ResolutionConfig::default()).unwrap();
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert_eq!(resolved.stats.resolved, 0);
+        assert_eq!(resolved.stats.bailed, 0);
+    }
+
+    #[test]
     fn bails_out_when_candidate_exceeds_median_traversal_budget() {
         let gfa = "\
 H\tVN:Z:1.0
@@ -1535,6 +1620,141 @@ P\talt\t1+,3+,4+\t*
         assert_eq!(before, seq_map(&resolved.gfa));
         assert_eq!(resolved.gfa, gfa);
         assert_eq!(resolved.stats.resolved, 0);
+    }
+
+    #[test]
+    fn indexed_anchor_lookup_rejects_ambiguous_entry_exit_pairs() {
+        let entry = Step {
+            node: 0,
+            rev: false,
+        };
+        let exit = Step {
+            node: 2,
+            rev: false,
+        };
+        let ambiguous = Path {
+            name: "ambiguous".to_string(),
+            steps: vec![
+                entry,
+                Step {
+                    node: 1,
+                    rev: false,
+                },
+                exit,
+                entry,
+                Step {
+                    node: 1,
+                    rev: false,
+                },
+                exit,
+            ],
+        };
+        assert_eq!(
+            unique_anchor_range(&path_step_index(&ambiguous), entry, exit),
+            None
+        );
+
+        let unique = Path {
+            name: "unique".to_string(),
+            steps: vec![
+                entry,
+                Step {
+                    node: 1,
+                    rev: false,
+                },
+                exit,
+                entry,
+            ],
+        };
+        assert_eq!(
+            unique_anchor_range(&path_step_index(&unique), entry, exit),
+            Some((0, 3))
+        );
+    }
+
+    #[test]
+    fn occupied_interval_frontier_only_rejects_overlaps_on_same_path() {
+        let mut occupied_by_path = vec![Vec::new(), Vec::new()];
+        let selected = BubbleCandidate {
+            ranges: vec![
+                PathRange {
+                    path_idx: 0,
+                    begin_step: 10,
+                    end_step: 20,
+                    sequence: Vec::new(),
+                },
+                PathRange {
+                    path_idx: 1,
+                    begin_step: 30,
+                    end_step: 40,
+                    sequence: Vec::new(),
+                },
+            ],
+            signature: "selected".to_string(),
+            within_budget: true,
+            root_start_step: 0,
+            root_end_step: 1,
+            root_span: 10,
+            traversal_stats: TraversalStats::default(),
+        };
+        mark_candidate_occupied(&mut occupied_by_path, &selected);
+
+        let adjacent = BubbleCandidate {
+            ranges: vec![PathRange {
+                path_idx: 0,
+                begin_step: 20,
+                end_step: 25,
+                sequence: Vec::new(),
+            }],
+            signature: "adjacent".to_string(),
+            within_budget: true,
+            root_start_step: 0,
+            root_end_step: 1,
+            root_span: 5,
+            traversal_stats: TraversalStats::default(),
+        };
+        assert!(!candidate_conflicts_with_occupied(
+            &occupied_by_path,
+            &adjacent
+        ));
+
+        let overlapping = BubbleCandidate {
+            ranges: vec![PathRange {
+                path_idx: 0,
+                begin_step: 19,
+                end_step: 25,
+                sequence: Vec::new(),
+            }],
+            signature: "overlapping".to_string(),
+            within_budget: true,
+            root_start_step: 0,
+            root_end_step: 1,
+            root_span: 6,
+            traversal_stats: TraversalStats::default(),
+        };
+        assert!(candidate_conflicts_with_occupied(
+            &occupied_by_path,
+            &overlapping
+        ));
+
+        let same_coordinates_different_path = BubbleCandidate {
+            ranges: vec![PathRange {
+                path_idx: 1,
+                begin_step: 10,
+                end_step: 20,
+                sequence: Vec::new(),
+            }],
+            signature: "different-path".to_string(),
+            within_budget: true,
+            root_start_step: 0,
+            root_end_step: 1,
+            root_span: 10,
+            traversal_stats: TraversalStats::default(),
+        };
+        assert!(!candidate_conflicts_with_occupied(
+            &occupied_by_path,
+            &same_coordinates_different_path
+        ));
     }
 
     #[test]
