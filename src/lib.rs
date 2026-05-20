@@ -278,11 +278,16 @@ impl SyngImpgWrapper {
             syncmer_len,
         );
         let query_range_len = (range_end - range_start).max(0) as u64;
+        let effective_min = syng_transitive::effective_min_chain_anchors(
+            query_range_len,
+            syncmer_len,
+            min_anchors,
+        );
         let min_extent_bp = (query_range_len as f64 * min_fraction.max(0.0)) as u64;
         chained
             .into_iter()
             .filter(|c| {
-                if c.anchors.len() < min_anchors {
+                if c.anchors.len() < effective_min {
                     return false;
                 }
                 if min_extent_bp == 0 {
@@ -461,6 +466,15 @@ pub fn write_syng_region_gfa_from_sequences<W: std::io::Write>(
         return Ok(());
     }
 
+    let total_start = std::time::Instant::now();
+    let total_bp: usize = sequences.iter().map(|(_, seq)| seq.len()).sum();
+    log::info!(
+        "[syng region gfa] rendering {} sequence(s), {} bp, mode={}",
+        sequences.len(),
+        total_bp,
+        mode.label()
+    );
+
     let tempdir = tempfile::Builder::new()
         .prefix("impg-syng-gfa-")
         .tempdir()?;
@@ -472,14 +486,35 @@ pub fn write_syng_region_gfa_from_sequences<W: std::io::Write>(
         .iter()
         .map(|(name, seq)| (name.clone(), seq.as_slice()))
         .collect();
+    let build_start = std::time::Instant::now();
     source_index.build_region_gbwt(&seq_refs, region_prefix)?;
+    log::info!(
+        "[syng region gfa] built regional syng GBWT in {:.3}s",
+        build_start.elapsed().as_secs_f64()
+    );
 
     let fasta_path = tempdir.path().join("region.fa");
+    let fasta_start = std::time::Instant::now();
     write_fasta_records(&fasta_path, sequences)?;
+    log::info!(
+        "[syng region gfa] wrote temporary FASTA in {:.3}s",
+        fasta_start.elapsed().as_secs_f64()
+    );
     let sequence_files = vec![fasta_path.to_string_lossy().to_string()];
+    let seqidx_start = std::time::Instant::now();
     let sequence_index = sequence_index::UnifiedSequenceIndex::from_files(&sequence_files)?;
+    log::info!(
+        "[syng region gfa] built temporary sequence index in {:.3}s",
+        seqidx_start.elapsed().as_secs_f64()
+    );
+    let load_start = std::time::Instant::now();
     let region_index = syng::SyngIndex::load(region_prefix, source_index.params)?;
+    log::info!(
+        "[syng region gfa] loaded regional syng index in {:.3}s",
+        load_start.elapsed().as_secs_f64()
+    );
 
+    let write_start = std::time::Instant::now();
     commands::syng2gfa::write_gfa_with_mode(
         &region_index,
         out,
@@ -487,6 +522,11 @@ pub fn write_syng_region_gfa_from_sequences<W: std::io::Write>(
         Some(&sequence_index),
         mode,
     )?;
+    log::info!(
+        "[syng region gfa] wrote regional GFA in {:.3}s; total {:.3}s",
+        write_start.elapsed().as_secs_f64(),
+        total_start.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 
@@ -497,13 +537,63 @@ fn build_syng_region_gfa_from_intervals(
     sequence_index: &sequence_index::UnifiedSequenceIndex,
     mode: commands::syng2gfa::SyngGfaMode,
 ) -> std::io::Result<String> {
-    let sequences = graph::prepare_sequences(impg, query_intervals, sequence_index)?;
-    let fetched: Vec<(String, Vec<u8>)> = sequences
-        .into_iter()
-        .map(|(seq, meta)| (meta.path_name(), seq.into_bytes()))
-        .collect();
+    let range_start = std::time::Instant::now();
+    let ranges: Vec<commands::syng2gfa::SyngGfaPathRange> = query_intervals
+        .iter()
+        .map(|interval| {
+            let seq_name = impg
+                .seq_index()
+                .get_name(interval.metadata)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("Sequence name not found for ID {}", interval.metadata),
+                    )
+                })?;
+            let path_idx = syng_idx
+                .name_map
+                .name_to_path
+                .get(seq_name)
+                .copied()
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("Sequence '{seq_name}' not found in syng name map"),
+                    )
+                })? as usize;
+            let (start, end, strand) = if interval.first <= interval.last {
+                (interval.first as u64, interval.last as u64, '+')
+            } else {
+                (interval.last as u64, interval.first as u64, '-')
+            };
+            Ok(commands::syng2gfa::SyngGfaPathRange {
+                path_idx,
+                name: format!("{seq_name}:{start}-{end}"),
+                start,
+                end,
+                strand,
+            })
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+    log::info!(
+        "[syng region gfa] prepared {} direct syng path range(s) in {:.3}s",
+        ranges.len(),
+        range_start.elapsed().as_secs_f64()
+    );
     let mut out = Vec::new();
-    write_syng_region_gfa_from_sequences(syng_idx, &fetched, &mut out, mode)?;
+    let write_start = std::time::Instant::now();
+    commands::syng2gfa::write_range_gfa_with_mode(
+        syng_idx,
+        &ranges,
+        &mut out,
+        commands::syng2gfa::GfaVersion::V1_0,
+        Some(sequence_index),
+        mode,
+    )?;
+    log::info!(
+        "[syng region gfa] wrote direct syng range GFA in {:.3}s",
+        write_start.elapsed().as_secs_f64()
+    );
     String::from_utf8(out).map_err(|e| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,

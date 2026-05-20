@@ -758,10 +758,55 @@ fn dedupe_strand_overlaps(
     out
 }
 
-/// Default minimum anchor count per chain for emission. Chains with
-/// fewer anchors (singletons = 1) are filtered out — they have no
-/// mutual-best colinear partner and are the weakest possible evidence.
-pub const DEFAULT_MIN_CHAIN_ANCHORS: usize = 2;
+/// Default cap on the adaptive minimum anchor count per chain for emission.
+///
+/// Bounded GBWT-walk seeds already carry several consecutive syncmers (the CLI
+/// default is 5), so a threshold of 2 lets one weak exact island through. The
+/// default cap of 20 requires multiple seed islands for locus-scale queries,
+/// which suppresses paralog/repeat noise in loci such as AMY. The effective
+/// threshold is scaled by the query span in [`effective_min_chain_anchors`], so
+/// short queries do not have to satisfy a fixed 20-anchor floor.
+pub const DEFAULT_MIN_CHAIN_ANCHORS: usize = 20;
+
+/// Target scale for adaptive syng chain support.
+///
+/// The default support threshold grows by roughly one anchor per 5 kb until it
+/// reaches [`DEFAULT_MIN_CHAIN_ANCHORS`]. This keeps small queries usable while
+/// still requiring several bounded exact-walk seed islands for large local
+/// graph queries.
+pub const DEFAULT_MIN_CHAIN_ANCHOR_SPACING_BP: u64 = 5_000;
+
+/// Effective syng chain anchor threshold for a specific query span.
+///
+/// `requested_min` is treated as a user/CLI cap. The returned value scales with
+/// the query span and is additionally capped by a conservative estimate of how
+/// many 63 bp-style syncmer-width anchors can fit in the query. `0` disables
+/// the anchor-count filter.
+pub fn effective_min_chain_anchors(
+    query_range_len: u64,
+    syncmer_len: u64,
+    requested_min: usize,
+) -> usize {
+    if requested_min == 0 {
+        return 0;
+    }
+
+    let span_scaled = query_range_len
+        .saturating_add(DEFAULT_MIN_CHAIN_ANCHOR_SPACING_BP - 1)
+        / DEFAULT_MIN_CHAIN_ANCHOR_SPACING_BP;
+    let span_scaled = (span_scaled as usize).max(1);
+
+    let syncmer_width_cap = if syncmer_len == 0 {
+        requested_min
+    } else {
+        let cap = query_range_len
+            .saturating_add(syncmer_len - 1)
+            / syncmer_len;
+        (cap as usize).max(1)
+    };
+
+    requested_min.min(span_scaled).min(syncmer_width_cap).max(1)
+}
 
 /// Run one hop of syng-seeded homology query.
 pub fn one_hop(
@@ -820,9 +865,9 @@ pub fn one_hop_ext(
 /// ends-only projection per chain.
 ///
 /// Chains are dropped at emission when either:
-///   - anchor count < `min_chain_anchors` (default 2: drop singletons)
+///   - anchor count is below the query-scaled effective `min_chain_anchors`
 ///   - query-extent / query_range_len < `min_chain_fraction`
-///     (default 0.0: no length filter)
+///     (default 0.0 in the library helper: no length filter)
 #[allow(clippy::too_many_arguments)]
 pub fn one_hop_ext_visited(
     syng_index: &SyngIndex,
@@ -904,20 +949,13 @@ pub fn one_hop_ext_visited_with_seed_filter(
         target_span_cap,
     );
     let pre_filter = hits.len();
-    // Filter chains by anchor count. Default min=2 drops singletons
-    // (one-anchor chains with no mutual-best colinear partner — mostly
-    // noise in repeat-dense regions). Users who want to keep
-    // singletons set --syng-min-chain-anchors 1.
+    // Filter chains by anchor count. The default requires support from
+    // multiple bounded GBWT-walk seed islands, not just a single weak
+    // island in a repeat-dense region. Users who want exploratory local
+    // chains or singletons can lower --syng-min-chain-anchors.
     //
-    // Auto-relax for short queries: a query range shorter than
-    // 2 × syncmer_len can't physically host a chain of 2 distinct
-    // syncmer anchors, so filtering would drop everything. Fall back
-    // to min=1 when the range is too small for the requested minimum.
-    let effective_min = if query_range_len < syncmer_len.saturating_mul(min_chain_anchors as u64) {
-        1
-    } else {
-        min_chain_anchors
-    };
+    let effective_min =
+        effective_min_chain_anchors(query_range_len, syncmer_len, min_chain_anchors);
     // Chain query-extent = a_last.query_pos + syncmer_len - a_first.query_pos.
     // Threshold in bp; 0 means "no extent filter".
     let min_chain_extent_bp = (query_range_len as f64 * min_chain_fraction.max(0.0)) as u64;
@@ -1585,6 +1623,19 @@ mod tests {
             span_cap >= query_len + merge_distance as u64,
             "-d should contribute to the pre-refinement target span cap"
         );
+    }
+
+    #[test]
+    fn effective_min_chain_anchors_scales_with_query_span() {
+        assert_eq!(effective_min_chain_anchors(0, TEST_SYNCMER_LEN, 20), 1);
+        assert_eq!(effective_min_chain_anchors(63, TEST_SYNCMER_LEN, 20), 1);
+        assert_eq!(effective_min_chain_anchors(1_000, TEST_SYNCMER_LEN, 20), 1);
+        assert_eq!(effective_min_chain_anchors(10_000, TEST_SYNCMER_LEN, 20), 2);
+        assert_eq!(effective_min_chain_anchors(50_000, TEST_SYNCMER_LEN, 20), 10);
+        assert_eq!(effective_min_chain_anchors(100_000, TEST_SYNCMER_LEN, 20), 20);
+        assert_eq!(effective_min_chain_anchors(400_000, TEST_SYNCMER_LEN, 20), 20);
+        assert_eq!(effective_min_chain_anchors(50_000, TEST_SYNCMER_LEN, 3), 3);
+        assert_eq!(effective_min_chain_anchors(50_000, TEST_SYNCMER_LEN, 0), 0);
     }
 
     #[test]

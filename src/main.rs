@@ -18,7 +18,7 @@ use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use rustc_hash::FxHashMap;
 use std::collections::{hash_map::DefaultHasher, BTreeMap};
-use std::fs::File;
+use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::num::NonZeroUsize;
@@ -3446,6 +3446,9 @@ Output formats:
   fasta-aln  FASTA alignment output from the local POA/MAF path
   gbwt       region-specific syng GBWT/khash output; requires -O and sequence files
 
+For BED graph output (`-b regions.bed -o gfa|vcf|gbwt`), `-O` is an output
+directory and each BED row is written to its own file named from BED column 4.
+
 Syng notes:
   With -a/--alignment pointing to a syng index, supported query outputs are
   bed, bedpe, gfa, vcf, fasta, and gbwt. Use -o gfa for a local sequence GFA from
@@ -3500,14 +3503,14 @@ GFA engine shorthand:
         #[clap(long, value_parser, default_value_t = 1_000)]
         syng_extend_budget: u64,
 
-        /// Minimum anchor count for a syng chain to be emitted. Chains
-        /// with fewer anchors than this are dropped at emission. Default
-        /// 2 filters singletons (one-anchor chains with no colinear
-        /// mutual-best partner — weakest possible evidence, mostly
-        /// noise in repeat-dense regions). Set to 1 to keep singletons
-        /// (useful when you want every syncmer match reported).
+        /// Maximum adaptive minimum anchor count for a syng chain to be
+        /// emitted. The effective threshold scales with query span (roughly
+        /// one anchor per 5 kb, capped by this value). The default cap 20
+        /// requires support from multiple bounded GBWT-walk seed islands for
+        /// locus-scale queries without making short queries satisfy 20 anchors.
+        /// Set 0 to disable anchor-count filtering.
         #[arg(help_heading = "Syng input")]
-        #[clap(long, value_parser, default_value_t = 2)]
+        #[clap(long, value_parser, default_value_t = impg::syng_transitive::DEFAULT_MIN_CHAIN_ANCHORS)]
         syng_min_chain_anchors: usize,
 
         /// Minimum chain query-extent as a fraction of the queried
@@ -3912,7 +3915,7 @@ GFA engine shorthand:
             alias = "iterations",
             alias = "max-rounds",
             value_parser = parse_usize_size,
-            default_value = "64"
+            default_value = "1"
         )]
         max_iterations: usize,
 
@@ -4742,6 +4745,15 @@ fn run() -> io::Result<()> {
                         "Output prefix (-O) is required for 'gbwt' output format",
                     ));
                 }
+                let bed_graph_dir =
+                    bed_graph_output_dir(&output_prefix, resolved_format, &query.target_bed)?;
+                if let Some(dir) = &bed_graph_dir {
+                    info!(
+                        "BED graph output: writing one {} per BED row under {} using BED column 4 names",
+                        resolved_format,
+                        dir.display()
+                    );
+                }
 
                 let scoring_params = if matches!(resolved_format, "gfa" | "vcf") {
                     Some(parse_poa_scoring_string(&engine_cli.poa_scoring)?)
@@ -4774,6 +4786,9 @@ fn run() -> io::Result<()> {
                 // an outer par_iter over tiles oversubscribes and
                 // actually slowed things down in measurement.
                 for (target_name, (range_start, range_end), name) in &target_ranges {
+                    let target_query_start = Instant::now();
+                    let target_output_prefix =
+                        output_prefix_for_target(&output_prefix, bed_graph_dir.as_deref(), name);
                     info!("Syng query: {} ({}:{}-{})", name, target_name, range_start, range_end);
 
                     match resolved_format {
@@ -4814,7 +4829,7 @@ fn run() -> io::Result<()> {
                                 wrapper.seq_index(),
                             );
                             let ext = if resolved_format == "bedpe" { "bedpe" } else { "bed" };
-                            let mut out = find_output_stream(&output_prefix, ext)?;
+                            let mut out = find_output_stream(&target_output_prefix, ext)?;
                             if resolved_format == "bedpe" {
                                 output_results_bedpe(
                                     &wrapper,
@@ -4874,19 +4889,32 @@ fn run() -> io::Result<()> {
                                         syng_extension,
                                     )?
                                 };
-                                let query_intervals: Vec<coitrees::Interval<u32>> = intervals
-                                    .iter()
-                                    .filter_map(|iv| syng_interval_to_coitree(iv, wrapper.seq_index()))
-                                    .collect();
+                                let query_intervals = syng_intervals_to_merged_query_intervals(
+                                    &intervals,
+                                    target_name,
+                                    *range_start,
+                                    *range_end,
+                                    wrapper.seq_index(),
+                                    query.effective_merge_distance(),
+                                    query.merge_strands_for_output(resolved_format),
+                                );
 
                                 if query_intervals.is_empty() {
-                                    let mut out = find_output_stream(&output_prefix, output_ext)?;
+                                    let mut out = find_output_stream(&target_output_prefix, output_ext)?;
                                     write_graph_output(
                                         String::from("H\tVN:Z:1.0\n"),
                                         resolved_format,
                                         &mut out,
                                         &reference_names,
                                     )?;
+                                    info!(
+                                        "Syng query complete: {} ({}:{}-{}) in {}",
+                                        name,
+                                        target_name,
+                                        range_start,
+                                        range_end,
+                                        format_duration(target_query_start.elapsed())
+                                    );
                                     continue;
                                 }
 
@@ -4897,7 +4925,7 @@ fn run() -> io::Result<()> {
                                     scoring_params,
                                     &engine_opts,
                                 )?;
-                                let mut out = find_output_stream(&output_prefix, output_ext)?;
+                                let mut out = find_output_stream(&target_output_prefix, output_ext)?;
                                 write_graph_output(
                                     gfa_output,
                                     resolved_format,
@@ -4941,10 +4969,15 @@ fn run() -> io::Result<()> {
                                     } else {
                                         query_raw_syng(target_name, window_start, window_end, syng_padding, syng_extension)?
                                     };
-                                    let window_intervals: Vec<Interval<u32>> = intervals
-                                        .iter()
-                                        .filter_map(|iv| syng_interval_to_coitree(iv, wrapper.seq_index()))
-                                        .collect();
+                                    let window_intervals = syng_intervals_to_merged_query_intervals(
+                                        &intervals,
+                                        target_name,
+                                        window_start,
+                                        window_end,
+                                        wrapper.seq_index(),
+                                        query.effective_merge_distance(),
+                                        query.merge_strands_for_output(resolved_format),
+                                    );
                                     info!(
                                         "  [syng sub-window {}] {}:{}-{} → {} intervals",
                                         window_idx, target_name, window_start, window_end,
@@ -4958,13 +4991,21 @@ fn run() -> io::Result<()> {
                                 }
 
                                 if partitions.is_empty() {
-                                    let mut out = find_output_stream(&output_prefix, output_ext)?;
+                                    let mut out = find_output_stream(&target_output_prefix, output_ext)?;
                                     write_graph_output(
                                         String::from("H\tVN:Z:1.0\n"),
                                         resolved_format,
                                         &mut out,
                                         &reference_names,
                                     )?;
+                                    info!(
+                                        "Syng query complete: {} ({}:{}-{}) in {}",
+                                        name,
+                                        target_name,
+                                        range_start,
+                                        range_end,
+                                        format_duration(target_query_start.elapsed())
+                                    );
                                     continue;
                                 }
 
@@ -4975,7 +5016,7 @@ fn run() -> io::Result<()> {
                                     scoring_params,
                                     &engine_opts,
                                 )?;
-                                let mut out = find_output_stream(&output_prefix, output_ext)?;
+                                let mut out = find_output_stream(&target_output_prefix, output_ext)?;
                                 write_graph_output(
                                     gfa_output,
                                     resolved_format,
@@ -5003,19 +5044,32 @@ fn run() -> io::Result<()> {
                                 } else {
                                     query_raw_syng(target_name, *range_start, *range_end, syng_padding, syng_extension)?
                                 };
-                                let query_intervals: Vec<coitrees::Interval<u32>> = intervals
-                                    .iter()
-                                    .filter_map(|iv| syng_interval_to_coitree(iv, wrapper.seq_index()))
-                                    .collect();
+                                let query_intervals = syng_intervals_to_merged_query_intervals(
+                                    &intervals,
+                                    target_name,
+                                    *range_start,
+                                    *range_end,
+                                    wrapper.seq_index(),
+                                    query.effective_merge_distance(),
+                                    query.merge_strands_for_output(resolved_format),
+                                );
 
                                 if query_intervals.is_empty() {
-                                    let mut out = find_output_stream(&output_prefix, output_ext)?;
+                                    let mut out = find_output_stream(&target_output_prefix, output_ext)?;
                                     write_graph_output(
                                         String::from("H\tVN:Z:1.0\n"),
                                         resolved_format,
                                         &mut out,
                                         &reference_names,
                                     )?;
+                                    info!(
+                                        "Syng query complete: {} ({}:{}-{}) in {}",
+                                        name,
+                                        target_name,
+                                        range_start,
+                                        range_end,
+                                        format_duration(target_query_start.elapsed())
+                                    );
                                     continue;
                                 }
 
@@ -5026,7 +5080,7 @@ fn run() -> io::Result<()> {
                                     scoring_params,
                                     &engine_opts,
                                 )?;
-                                let mut out = find_output_stream(&output_prefix, output_ext)?;
+                                let mut out = find_output_stream(&target_output_prefix, output_ext)?;
                                 write_graph_output(
                                     gfa_output,
                                     resolved_format,
@@ -5056,7 +5110,7 @@ fn run() -> io::Result<()> {
                             } else {
                                 query_raw_syng(target_name, *range_start, *range_end, syng_padding, syng_extension)?
                             };
-                            let mut out = find_output_stream(&output_prefix, "fa")?;
+                            let mut out = find_output_stream(&target_output_prefix, "fa")?;
                             for iv in &intervals {
                                 let sequence = seq_idx.fetch_sequence(&iv.genome, iv.start as i32, iv.end as i32)?;
                                 writeln!(out, ">{}:{}-{}({})", iv.genome, iv.start, iv.end, iv.strand)?;
@@ -5085,7 +5139,7 @@ fn run() -> io::Result<()> {
                             } else {
                                 query_raw_syng(target_name, *range_start, *range_end, syng_padding, syng_extension)?
                             };
-                            let gbwt_prefix = output_prefix.as_ref().unwrap();
+                            let gbwt_prefix = target_output_prefix.as_ref().unwrap();
 
                             // Fetch sequences for all intervals
                             let fetched: Vec<(String, Vec<u8>)> = intervals
@@ -5107,6 +5161,14 @@ fn run() -> io::Result<()> {
                         }
                         _ => unreachable!(),
                     }
+                    info!(
+                        "Syng query complete: {} ({}:{}-{}) in {}",
+                        name,
+                        target_name,
+                        range_start,
+                        range_end,
+                        format_duration(target_query_start.elapsed())
+                    );
                 }
                 // Skip the rest of the normal query path
             } else {
@@ -5274,6 +5336,15 @@ fn run() -> io::Result<()> {
                     "Output prefix (-O) is required for 'gbwt' output format",
                 ));
             }
+            let bed_graph_dir =
+                bed_graph_output_dir(&output_prefix, resolved_output_format, &query.target_bed)?;
+            if let Some(dir) = &bed_graph_dir {
+                info!(
+                    "BED graph output: writing one {} per BED row under {} using BED column 4 names",
+                    resolved_output_format,
+                    dir.display()
+                );
+            }
 
             // Extract reverse_complement before moving gfa_maf_fasta
             let reverse_complement = gfa_maf_fasta.reverse_complement;
@@ -5290,6 +5361,13 @@ fn run() -> io::Result<()> {
             // Process all target ranges in a unified loop
             info!("Querying target ranges");
             for (target_name, target_range, name) in target_ranges {
+                let target_query_start = Instant::now();
+                let target_output_prefix =
+                    output_prefix_for_target(&output_prefix, bed_graph_dir.as_deref(), &name);
+                info!(
+                    "Query: {} ({}:{}-{})",
+                    name, target_name, target_range.0, target_range.1
+                );
                 let mut results = perform_query(
                     &impg,
                     &target_name,
@@ -5312,7 +5390,7 @@ fn run() -> io::Result<()> {
                         output_results_bed(
                             &impg,
                             &mut results,
-                            &mut find_output_stream(&output_prefix, "bed")?,
+                            &mut find_output_stream(&target_output_prefix, "bed")?,
                             &name,
                             query.effective_merge_distance(),
                             query.merge_strands_for_output("bed"),
@@ -5325,7 +5403,7 @@ fn run() -> io::Result<()> {
                         output_results_bedpe(
                             &impg,
                             &mut results,
-                            &mut find_output_stream(&output_prefix, "bed")?,
+                            &mut find_output_stream(&target_output_prefix, "bed")?,
                             &name,
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
@@ -5337,7 +5415,7 @@ fn run() -> io::Result<()> {
                         output_results_paf(
                             &impg,
                             &mut results,
-                            &mut find_output_stream(&output_prefix, "paf")?,
+                            &mut find_output_stream(&target_output_prefix, "paf")?,
                             &name,
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
@@ -5350,7 +5428,7 @@ fn run() -> io::Result<()> {
                             // Partitioned mode: split query region into sub-windows
                             output_results_gfa_partitioned(
                                 &impg,
-                                &mut find_output_stream(&output_prefix, "gfa")?,
+                                &mut find_output_stream(&target_output_prefix, "gfa")?,
                                 sequence_index.as_ref().unwrap(),
                                 scoring_params,
                                 &engine_opts,
@@ -5364,7 +5442,7 @@ fn run() -> io::Result<()> {
                             output_results_gfa(
                                 &impg,
                                 &mut results,
-                                &mut find_output_stream(&output_prefix, "gfa")?,
+                                &mut find_output_stream(&target_output_prefix, "gfa")?,
                                 sequence_index.as_ref().unwrap(),
                                 &name,
                                 query.effective_merge_distance(),
@@ -5380,7 +5458,7 @@ fn run() -> io::Result<()> {
                         if let Some(ps) = engine_opts.partition_size {
                             output_results_vcf_partitioned(
                                 &impg,
-                                &mut find_output_stream(&output_prefix, "vcf")?,
+                                &mut find_output_stream(&target_output_prefix, "vcf")?,
                                 sequence_index.as_ref().unwrap(),
                                 scoring_params,
                                 &engine_opts,
@@ -5395,7 +5473,7 @@ fn run() -> io::Result<()> {
                             output_results_vcf(
                                 &impg,
                                 &mut results,
-                                &mut find_output_stream(&output_prefix, "vcf")?,
+                                &mut find_output_stream(&target_output_prefix, "vcf")?,
                                 sequence_index.as_ref().unwrap(),
                                 &reference_names,
                                 query.effective_merge_distance(),
@@ -5409,7 +5487,7 @@ fn run() -> io::Result<()> {
                         output_results_maf(
                             &impg,
                             &mut results,
-                            &mut find_output_stream(&output_prefix, "maf")?,
+                            &mut find_output_stream(&target_output_prefix, "maf")?,
                             sequence_index.as_ref().unwrap(),
                             &name,
                             query.effective_merge_distance(),
@@ -5421,7 +5499,7 @@ fn run() -> io::Result<()> {
                         output_results_fasta(
                             &impg,
                             &mut results,
-                            &mut find_output_stream(&output_prefix, "fa")?,
+                            &mut find_output_stream(&target_output_prefix, "fa")?,
                             sequence_index.as_ref().unwrap(),
                             &name,
                             query.effective_merge_distance(),
@@ -5433,7 +5511,7 @@ fn run() -> io::Result<()> {
                         output_results_fasta(
                             &impg,
                             &mut results,
-                            &mut find_output_stream(&output_prefix, "fa")?,
+                            &mut find_output_stream(&target_output_prefix, "fa")?,
                             sequence_index.as_ref().unwrap(),
                             &name,
                             query.effective_merge_distance(),
@@ -5445,7 +5523,7 @@ fn run() -> io::Result<()> {
                         output_results_paf(
                             &impg,
                             &mut results,
-                            &mut find_output_stream(&output_prefix, "paf")?,
+                            &mut find_output_stream(&target_output_prefix, "paf")?,
                             &name,
                             query.effective_merge_distance(),
                             query.original_sequence_coordinates,
@@ -5465,7 +5543,7 @@ fn run() -> io::Result<()> {
                     }
                     "gbwt" => {
                         let seq_idx = sequence_index.as_ref().unwrap();
-                        let gbwt_prefix = output_prefix.as_ref().ok_or_else(|| {
+                        let gbwt_prefix = target_output_prefix.as_ref().ok_or_else(|| {
                             io::Error::new(
                                 io::ErrorKind::InvalidInput,
                                 "Output prefix (-O) is required for 'gbwt' output format",
@@ -5512,6 +5590,14 @@ fn run() -> io::Result<()> {
                         ));
                     }
                 }
+                info!(
+                    "Query complete: {} ({}:{}-{}) in {}",
+                    name,
+                    target_name,
+                    target_range.0,
+                    target_range.1,
+                    format_duration(target_query_start.elapsed())
+                );
             }
             } // end of else (normal query path)
         }
@@ -7925,6 +8011,71 @@ fn find_output_stream(basename: &Option<String>, extension: &str) -> io::Result<
     }
 }
 
+fn sanitize_output_stem(name: &str) -> String {
+    let mut stem = String::with_capacity(name.len());
+    for c in name.trim().chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+            stem.push(c);
+        } else {
+            stem.push('_');
+        }
+    }
+    let stem = stem.trim_matches('_');
+    if stem.is_empty() || stem == "." || stem == ".." {
+        "region".to_string()
+    } else {
+        stem.to_string()
+    }
+}
+
+fn bed_graph_output_dir(
+    output_prefix: &Option<String>,
+    output_format: &str,
+    target_bed: &Option<String>,
+) -> io::Result<Option<PathBuf>> {
+    if target_bed.is_none() || !matches!(output_format, "gfa" | "vcf" | "gbwt") {
+        return Ok(None);
+    }
+    let dir = output_prefix.as_ref().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "-O/--output-prefix is required for `query -b ... -o {output_format}`; \
+                 with BED graph output it is treated as an output directory and files \
+                 are named from BED column 4"
+            ),
+        )
+    })?;
+    let dir = PathBuf::from(dir);
+    if dir.exists() && !dir.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "BED graph output path '{}' exists and is not a directory",
+                dir.display()
+            ),
+        ));
+    }
+    fs::create_dir_all(&dir)?;
+    Ok(Some(dir))
+}
+
+fn output_prefix_for_target(
+    output_prefix: &Option<String>,
+    bed_graph_dir: Option<&Path>,
+    range_name: &str,
+) -> Option<String> {
+    if let Some(dir) = bed_graph_dir {
+        Some(
+            dir.join(sanitize_output_stem(range_name))
+                .to_string_lossy()
+                .into_owned(),
+        )
+    } else {
+        output_prefix.clone()
+    }
+}
+
 fn graph_output_extension(output_format: &str) -> &'static str {
     match output_format {
         "vcf" => "vcf",
@@ -8664,12 +8815,22 @@ fn syng_intervals_to_adjusted(
         .collect()
 }
 
-fn syng_interval_to_coitree(
-    iv: &impg::syng::HomologousInterval,
+fn syng_intervals_to_merged_query_intervals(
+    intervals: &[impg::syng::HomologousInterval],
+    query_name: &str,
+    range_start: i32,
+    range_end: i32,
     seq_index: &SequenceIndex,
-) -> Option<Interval<u32>> {
-    let id = seq_index.get_id(&iv.genome)?;
-    Some(Interval::new(iv.start as i32, iv.end as i32, id))
+    merge_distance: i32,
+    merge_strands: bool,
+) -> Vec<Interval<u32>> {
+    let mut adjusted =
+        syng_intervals_to_adjusted(intervals, query_name, range_start, range_end, seq_index);
+    merge_query_adjusted_intervals(&mut adjusted, merge_distance, merge_strands);
+    adjusted
+        .into_iter()
+        .map(|(query_interval, _, _)| query_interval)
+        .collect()
 }
 
 fn output_results_bed(
@@ -10142,6 +10303,85 @@ mod tests {
     }
 
     #[test]
+    fn test_bed_graph_output_uses_bed_name_as_file_stem() {
+        assert_eq!(sanitize_output_stem("AMY1A"), "AMY1A");
+        assert_eq!(sanitize_output_stem("C4A/C4B locus"), "C4A_C4B_locus");
+        assert_eq!(sanitize_output_stem(".."), "region");
+
+        let dir = tempfile::tempdir().unwrap();
+        let output_root = dir.path().join("graphs");
+        let output_prefix = Some(output_root.to_string_lossy().to_string());
+        let target_bed = Some("regions.bed".to_string());
+        let graph_dir = bed_graph_output_dir(&output_prefix, "gfa", &target_bed)
+            .unwrap()
+            .unwrap();
+        assert_eq!(graph_dir, output_root);
+        assert!(graph_dir.is_dir());
+
+        let target_prefix =
+            output_prefix_for_target(&output_prefix, Some(&graph_dir), "C4A/C4B locus").unwrap();
+        assert!(target_prefix.ends_with("graphs/C4A_C4B_locus"));
+    }
+
+    #[test]
+    fn test_bed_graph_output_requires_directory_prefix_for_graph_formats() {
+        let target_bed = Some("regions.bed".to_string());
+        let err = bed_graph_output_dir(&None, "gfa", &target_bed).unwrap_err();
+        assert!(err.to_string().contains("-O/--output-prefix is required"));
+
+        assert!(bed_graph_output_dir(&None, "bed", &target_bed)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_syng_gfa_intervals_are_merged_before_graph_build() {
+        let mut seq_index = SequenceIndex::new();
+        seq_index.get_or_insert_id("GRCh38#0#chr1", Some(1_000));
+        seq_index.get_or_insert_id("sample#1#ctg", Some(1_000));
+        let intervals = vec![
+            impg::syng::HomologousInterval {
+                genome: "sample#1#ctg".to_string(),
+                start: 10,
+                end: 100,
+                strand: '+',
+                cigar: None,
+            },
+            impg::syng::HomologousInterval {
+                genome: "sample#1#ctg".to_string(),
+                start: 150,
+                end: 220,
+                strand: '+',
+                cigar: None,
+            },
+        ];
+
+        let merged = syng_intervals_to_merged_query_intervals(
+            &intervals,
+            "GRCh38#0#chr1",
+            0,
+            300,
+            &seq_index,
+            100,
+            true,
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].first, 10);
+        assert_eq!(merged[0].last, 220);
+
+        let unmerged = syng_intervals_to_merged_query_intervals(
+            &intervals,
+            "GRCh38#0#chr1",
+            0,
+            300,
+            &seq_index,
+            10,
+            true,
+        );
+        assert_eq!(unmerged.len(), 2);
+    }
+
+    #[test]
     fn test_parse_merge_distance_accepts_metric_suffixes() {
         assert_eq!(parse_merge_distance("50000").unwrap(), 50_000);
         assert_eq!(parse_merge_distance("50k").unwrap(), 50_000);
@@ -10188,6 +10428,8 @@ mod tests {
             "fasta+paf  FASTA sequences plus PAF-like interval mappings",
             "fasta-aln  FASTA alignment output",
             "gbwt       region-specific syng GBWT/khash output",
+            "For BED graph output (`-b regions.bed -o gfa|vcf|gbwt`)",
+            "named from BED column 4",
             "`--gfa-engine syng` emits a syng syncmer GFA",
             "defaults to syng:blunt; use syng:raw",
             "-o gfa:syng:blunt,k=63,s=8,seed=7",
@@ -10378,6 +10620,7 @@ mod tests {
                 assert_eq!(crush.max_median_traversal_len, 1_000);
                 assert_eq!(crush.max_traversal_len, 10_000);
                 assert_eq!(crush.max_traversals, 10_000);
+                assert_eq!(crush.max_iterations, 1);
             }
             _ => panic!("expected query command"),
         }
