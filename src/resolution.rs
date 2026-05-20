@@ -14,7 +14,6 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeSet;
 use std::io;
-use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 /// Configuration for exact path-preserving bubble resolution.
@@ -37,7 +36,7 @@ pub struct ResolutionConfig {
     pub max_total_sequence: usize,
     /// Maximum number of path-supported traversals through one replacement.
     pub max_traversals: usize,
-    /// One-pass small-tangle polish rounds after BiWFA/seqwish induction.
+    /// One-pass small-tangle polish rounds after BiWFA in-memory induction.
     ///
     /// This pass is deliberately scale-limited: small STR / indel tangles are
     /// implementation artifacts, while larger VNTR / recombination structures
@@ -66,7 +65,7 @@ impl ResolutionMethod {
             "auto" => Some(Self::Auto),
             "poa" | "spoa" => Some(Self::Poa),
             "poasta" => Some(Self::Poasta),
-            "biwfa" | "wfa" | "seqwish" | "biwfa-seqwish" | "allwave" => Some(Self::Biwfa),
+            "biwfa" | "wfa" => Some(Self::Biwfa),
             _ => None,
         }
     }
@@ -89,8 +88,6 @@ pub const DEFAULT_POLISH_MAX_TRAVERSAL_LEN: usize = 2_000;
 pub const DEFAULT_POLISH_MAX_MEDIAN_TRAVERSAL_LEN: usize = 256;
 pub const DEFAULT_POLISH_MAX_TOTAL_SEQUENCE: usize = 1_000_000;
 pub const DEFAULT_POLISH_MAX_TRAVERSALS: usize = 10_000;
-
-static SEQWISH_REPLACEMENT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 impl Default for ResolutionConfig {
     fn default() -> Self {
@@ -1087,7 +1084,7 @@ fn build_replacement(candidate: &BubbleCandidate, config: &ResolutionConfig) -> 
             log::debug!("POASTA replacement failed; falling back to SPOA: {err}");
             build_poa_replacement(candidate, config)
         }),
-        ResolutionMethod::Biwfa => build_biwfa_seqwish_replacement(candidate, config),
+        ResolutionMethod::Biwfa => build_biwfa_inmemory_replacement(candidate, config),
     }
 }
 
@@ -1215,7 +1212,13 @@ fn build_poasta_replacement(
     Ok(replacement)
 }
 
-fn build_biwfa_seqwish_replacement(
+#[derive(Clone, Debug)]
+struct StarAlignmentRow {
+    inserts: Vec<Vec<u8>>,
+    bases: Vec<Option<u8>>,
+}
+
+fn build_biwfa_inmemory_replacement(
     candidate: &BubbleCandidate,
     config: &ResolutionConfig,
 ) -> io::Result<Graph> {
@@ -1225,37 +1228,211 @@ fn build_biwfa_seqwish_replacement(
         .enumerate()
         .map(|(i, range)| format!("__impg_bubble_path{}_{}", range.path_idx, i))
         .collect();
-    let sequences = headers
+    let root_idx = candidate
+        .ranges
         .iter()
-        .cloned()
-        .zip(candidate.ranges.iter().map(|range| range.sequence.clone()))
-        .collect::<Vec<_>>();
+        .enumerate()
+        .max_by_key(|(_, range)| range.sequence.len())
+        .map(|(idx, _)| idx)
+        .ok_or_else(|| io::Error::other("BiWFA replacement has no traversals"))?;
+    let root = &candidate.ranges[root_idx].sequence;
+    let root_len = root.len();
 
-    let mut graph_config = crate::commands::graph::GraphBuildConfig::default();
-    graph_config.num_threads = rayon::current_num_threads().max(1);
-    graph_config.show_progress = false;
-    graph_config.no_filter = true;
-    graph_config.min_match_len = 1;
-    graph_config.repeat_max = 0;
-    graph_config.min_repeat_dist = 0;
-    graph_config.transclose_batch = 1_000_000;
+    let rows = candidate
+        .ranges
+        .iter()
+        .enumerate()
+        .map(|(idx, range)| {
+            if idx == root_idx {
+                Ok(root_alignment_row(root))
+            } else {
+                align_to_root_row(&headers[idx], &range.sequence, &headers[root_idx], root)
+            }
+        })
+        .collect::<io::Result<Vec<_>>>()?;
 
-    // seqwish keeps process-global tempfile state, so replacement graph
-    // induction must be serialized even while candidate discovery/materialize
-    // remains parallel. The expensive BiWFA pair alignment inside the helper is
-    // still rayon-parallel.
-    let lock = SEQWISH_REPLACEMENT_LOCK.get_or_init(|| Mutex::new(()));
-    let _guard = lock
-        .lock()
-        .map_err(|_| io::Error::other("seqwish replacement lock is poisoned"))?;
-    let gfa = crate::syng_graph::build_gfa_syng_native_from_sequences(&sequences, &graph_config)?;
-    drop(_guard);
+    let mut replacement = build_star_column_graph(&headers, &rows, root_len);
+    let has_empty_path = replacement.paths.iter().any(|path| path.steps.is_empty());
+    if !has_empty_path {
+        let compacted = unchop_gfa(&render_graph(&replacement))?;
+        replacement = parse_gfa(&compacted)?;
+        order_replacement_paths(&mut replacement, &headers)?;
+    }
 
-    let polished = polish_replacement_gfa(&gfa, config)?;
-    let mut replacement = parse_gfa(&polished)?;
-    order_replacement_paths(&mut replacement, &headers)?;
-    validate_replacement_paths(&replacement, candidate, "BiWFA/seqwish")?;
+    if !has_empty_path {
+        let polished = polish_replacement_gfa(&render_graph(&replacement), config)?;
+        replacement = parse_gfa(&polished)?;
+        order_replacement_paths(&mut replacement, &headers)?;
+    }
+    validate_replacement_paths(&replacement, candidate, "BiWFA/in-memory")?;
     Ok(replacement)
+}
+
+fn root_alignment_row(root: &[u8]) -> StarAlignmentRow {
+    StarAlignmentRow {
+        inserts: vec![Vec::new(); root.len() + 1],
+        bases: root.iter().map(|&base| Some(base)).collect(),
+    }
+}
+
+fn align_to_root_row(
+    query_name: &str,
+    query: &[u8],
+    root_name: &str,
+    root: &[u8],
+) -> io::Result<StarAlignmentRow> {
+    if root.is_empty() {
+        return Ok(StarAlignmentRow {
+            inserts: vec![query.to_vec()],
+            bases: Vec::new(),
+        });
+    }
+
+    if query.is_empty() {
+        return Ok(StarAlignmentRow {
+            inserts: vec![Vec::new(); root.len() + 1],
+            bases: vec![None; root.len()],
+        });
+    }
+
+    let paf = crate::syng_graph::pairwise_biwfa_paf(query_name, query, root_name, root)
+        .ok_or_else(|| io::Error::other("BiWFA root alignment failed"))?;
+    let cigar = paf_cigar(&paf)
+        .ok_or_else(|| io::Error::other("BiWFA root alignment did not emit cg:Z CIGAR"))?;
+    row_from_query_root_cigar(query, root.len(), cigar)
+}
+
+fn paf_cigar(paf: &str) -> Option<&str> {
+    paf.trim_end()
+        .split('\t')
+        .find_map(|field| field.strip_prefix("cg:Z:"))
+}
+
+fn row_from_query_root_cigar(
+    query: &[u8],
+    root_len: usize,
+    cigar: &str,
+) -> io::Result<StarAlignmentRow> {
+    let mut row = StarAlignmentRow {
+        inserts: vec![Vec::new(); root_len + 1],
+        bases: vec![None; root_len],
+    };
+    let mut q = 0usize;
+    let mut r = 0usize;
+    let mut len = 0usize;
+
+    for ch in cigar.bytes() {
+        if ch.is_ascii_digit() {
+            len = len
+                .checked_mul(10)
+                .and_then(|v| v.checked_add((ch - b'0') as usize))
+                .ok_or_else(|| io::Error::other("BiWFA CIGAR run length overflow"))?;
+            continue;
+        }
+        if len == 0 {
+            return Err(io::Error::other("BiWFA CIGAR has zero-length operation"));
+        }
+        match ch {
+            b'M' | b'=' | b'X' => {
+                if q + len > query.len() || r + len > root_len {
+                    return Err(io::Error::other("BiWFA CIGAR match overconsumes sequence"));
+                }
+                for _ in 0..len {
+                    row.bases[r] = Some(query[q]);
+                    q += 1;
+                    r += 1;
+                }
+            }
+            b'I' => {
+                if q + len > query.len() || r > root_len {
+                    return Err(io::Error::other("BiWFA CIGAR insertion overconsumes query"));
+                }
+                row.inserts[r].extend_from_slice(&query[q..q + len]);
+                q += len;
+            }
+            b'D' => {
+                if r + len > root_len {
+                    return Err(io::Error::other("BiWFA CIGAR deletion overconsumes root"));
+                }
+                r += len;
+            }
+            other => {
+                return Err(io::Error::other(format!(
+                    "BiWFA CIGAR contains unsupported op '{}'",
+                    other as char
+                )));
+            }
+        }
+        len = 0;
+    }
+
+    if len != 0 {
+        return Err(io::Error::other("BiWFA CIGAR ended before operation"));
+    }
+    if q != query.len() || r != root_len {
+        return Err(io::Error::other(format!(
+            "BiWFA CIGAR consumed query/root {q}/{r}, expected {}/{}",
+            query.len(),
+            root_len
+        )));
+    }
+    Ok(row)
+}
+
+fn build_star_column_graph(
+    headers: &[String],
+    rows: &[StarAlignmentRow],
+    root_len: usize,
+) -> Graph {
+    let mut segments = Vec::new();
+    let mut node_by_site_allele: FxHashMap<(usize, Vec<u8>), usize> = FxHashMap::default();
+    let get_node =
+        |site: usize,
+         seq: &[u8],
+         segments: &mut Vec<Segment>,
+         node_by_site_allele: &mut FxHashMap<(usize, Vec<u8>), usize>| {
+            let key = (site, seq.to_vec());
+            if let Some(&node) = node_by_site_allele.get(&key) {
+                return node;
+            }
+            let node = segments.len();
+            segments.push(Segment {
+                id: (node + 1).to_string(),
+                seq: seq.to_vec(),
+            });
+            node_by_site_allele.insert(key, node);
+            node
+        };
+
+    let mut paths = Vec::with_capacity(rows.len());
+    for (idx, row) in rows.iter().enumerate() {
+        let mut steps = Vec::new();
+        for pos in 0..=root_len {
+            if !row.inserts[pos].is_empty() {
+                let site = pos * 2;
+                let node = get_node(
+                    site,
+                    &row.inserts[pos],
+                    &mut segments,
+                    &mut node_by_site_allele,
+                );
+                steps.push(Step { node, rev: false });
+            }
+            if pos < root_len {
+                if let Some(base) = row.bases[pos] {
+                    let site = pos * 2 + 1;
+                    let node = get_node(site, &[base], &mut segments, &mut node_by_site_allele);
+                    steps.push(Step { node, rev: false });
+                }
+            }
+        }
+        paths.push(Path {
+            name: headers[idx].clone(),
+            steps,
+        });
+    }
+
+    Graph { segments, paths }
 }
 
 fn polish_replacement_gfa(gfa: &str, config: &ResolutionConfig) -> io::Result<String> {
@@ -1593,7 +1770,7 @@ P\tins\t1+,2+,3+\t*
     }
 
     #[test]
-    fn resolves_insertion_bubble_with_biwfa_seqwish_without_changing_path_sequences() {
+    fn resolves_insertion_bubble_with_biwfa_inmemory_without_changing_path_sequences() {
         let gfa = "\
 H\tVN:Z:1.0
 S\t1\tAC

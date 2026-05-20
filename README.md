@@ -412,8 +412,9 @@ fails.
 Default query mode runs BiWFA boundary refinement and so requires
 `--sequence-files`. Pass `--syng-raw` for the raw syncmer-resolution
 pass-through. Tune via `--syng-padding`, `--syng-min-chain-anchors`
-(lower -> more paralog hits; default `2` is conservative on duplicated
-loci like C4), `--syng-min-chain-fraction` (default `0.5`; set `0` for
+(lower -> more paralog hits; default is an adaptive cap derived from
+query length, syncmer density, and expected exact-syncmer survival at
+95% identity), `--syng-min-chain-fraction` (default `0.5`; set `0` for
 exploratory local-chain discovery), and the seed-frequency filters
 `--syng-seed-max-occurrences` / `--syng-seed-drop-top-fraction`.
 By default syng query drops the top 0.05% most frequent query-local seed
@@ -428,6 +429,17 @@ region-specific sub-GBWT. The syng prefix passed to `-a` is resolved
 relative to cwd, so either `cd` to the index directory or pass an absolute
 path. For a focused syng-backed local GFA recipe, see
 [`docs/syng-gfa-query.md`](docs/syng-gfa-query.md).
+
+For graph outputs, `query -o gfa|vcf --render-graph` also renders the final
+1D graph with `gfalook`. The default image is PNG beside the `-O` output prefix
+(`<prefix>.png`); `--render-graph-output` overrides the image path, and
+`--render-graph-format svg` or a `.svg` suffix emits SVG. With `-b regions.bed`
+graph output, `-O` is a directory for the graph files and the render output is
+written per BED row using the sanitized BED column 4 name.
+
+If you already have a local GFA, call variants directly with POVU via
+`impg gfa2vcf -g local.gfa -o local.vcf -r ref_path`. This is the same
+GFA-to-VCF conversion used internally by `query -o vcf` and `partition -o vcf`.
 
 ## GFA engines
 

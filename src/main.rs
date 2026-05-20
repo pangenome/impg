@@ -25,6 +25,7 @@ use std::num::NonZeroUsize;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{
     atomic::{AtomicU64, AtomicUsize, Ordering},
     Arc,
@@ -2146,6 +2147,53 @@ struct EngineCliOpts {
     debug_dir: Option<String>,
 }
 
+/// Optional 1D graph rendering for query GFA/VCF outputs.
+#[derive(Parser, Debug, Clone)]
+#[command(next_help_heading = "Graph rendering")]
+struct GraphRenderOpts {
+    /// Render the final query graph with gfalook. Defaults to PNG beside the
+    /// graph output when -O is set; use --render-graph-output to override.
+    #[clap(long, action)]
+    render_graph: bool,
+
+    /// Output image file or, for BED graph output, output directory. Extension
+    /// selects png/svg; extensionless paths use --render-graph-format.
+    #[clap(long, value_parser)]
+    render_graph_output: Option<String>,
+
+    /// Default render image format when the render path has no .png/.svg extension.
+    #[clap(long, value_parser = parse_graph_render_format, default_value = "png")]
+    render_graph_format: String,
+
+    /// Render width in pixels.
+    #[clap(long, value_parser, default_value_t = 3200)]
+    render_graph_width: u32,
+
+    /// Render height in pixels.
+    #[clap(long, value_parser, default_value_t = 1800)]
+    render_graph_height: u32,
+
+    /// Pixel height for each path row.
+    #[clap(long, value_parser, default_value_t = 3)]
+    render_graph_path_height: u32,
+}
+
+impl GraphRenderOpts {
+    fn requested(&self) -> bool {
+        self.render_graph || self.render_graph_output.is_some()
+    }
+}
+
+fn parse_graph_render_format(value: &str) -> Result<String, String> {
+    let value = value.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "png" | "svg" => Ok(value),
+        _ => Err(format!(
+            "invalid graph render format '{value}' (expected png or svg)"
+        )),
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ParsedGfaEngine {
     engine: GfaEngine,
@@ -3545,6 +3593,10 @@ Output formats:
 
 For BED graph output (`-b regions.bed -o gfa|vcf|gbwt`), `-O` is an output
 directory and each BED row is written to its own file named from BED column 4.
+Use `--render-graph` with `-o gfa|vcf` to also write a gfalook 1D rendering
+of the final graph. PNG is the default; use `--render-graph-format svg` or a
+`.svg` output path for SVG. With BED graph output the render output is a
+directory and receives one image per BED row.
 
 Syng notes:
   With -a/--alignment pointing to a syng index, supported query outputs are
@@ -3602,10 +3654,11 @@ GFA engine shorthand:
         syng_extend_budget: u64,
 
         /// Maximum adaptive minimum anchor count for a syng chain to be
-        /// emitted. The effective threshold scales with query span (roughly
-        /// one anchor per 5 kb, capped by this value). The default cap 20
-        /// requires support from multiple bounded GBWT-walk seed islands for
-        /// locus-scale queries without making short queries satisfy 20 anchors.
+        /// emitted. The effective threshold is estimated from query span,
+        /// syncmer density, and 95% identity, then capped by this value. The
+        /// default is a high ceiling, not a fixed floor, so short queries keep
+        /// a small support requirement while long repeat-dense loci require
+        /// multiple bounded GBWT-walk seed islands.
         /// Set 0 to disable anchor-count filtering.
         #[arg(help_heading = "Syng input")]
         #[clap(long, value_parser, default_value_t = impg::syng_transitive::DEFAULT_MIN_CHAIN_ANCHORS)]
@@ -3680,6 +3733,9 @@ GFA engine shorthand:
 
         #[clap(flatten)]
         engine_cli: EngineCliOpts,
+
+        #[clap(flatten)]
+        graph_render: GraphRenderOpts,
 
         // --- General ---
         #[clap(flatten)]
@@ -4037,7 +4093,7 @@ GFA engine shorthand:
         #[clap(long, value_parser = parse_usize_size, default_value = "10k")]
         max_traversals: usize,
 
-        /// Small-tangle SPOA polish rounds after BiWFA/seqwish induction; 0 disables
+        /// Small-tangle SPOA polish rounds after BiWFA in-memory induction; 0 disables
         #[clap(long, alias = "polish-iterations", value_parser = parse_usize_size, default_value = "1")]
         polish_rounds: usize,
 
@@ -4060,6 +4116,26 @@ GFA engine shorthand:
         /// Resolver method: auto, poa, poasta, or biwfa
         #[clap(long, value_parser, default_value = "auto")]
         method: String,
+
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+
+    /// Call VCF variants from an existing GFA using POVU
+    #[command(alias = "gfa-to-vcf", alias = "povu")]
+    Gfa2vcf {
+        /// Input GFA path, or '-' for stdin
+        #[clap(short = 'g', long, value_parser)]
+        gfa: String,
+
+        /// Output VCF path, or '-' for stdout
+        #[clap(short = 'o', long, value_parser, default_value = "-")]
+        output: String,
+
+        /// Reference path/name hint for POVU. May be repeated; if omitted,
+        /// POVU uses its default reference selection.
+        #[clap(short = 'r', long = "reference-name", alias = "ref", value_parser)]
+        reference_names: Vec<String>,
 
         #[clap(flatten)]
         common: CommonOpts,
@@ -4705,6 +4781,7 @@ fn run() -> io::Result<()> {
             output_prefix,
             gfa_maf_fasta,
             engine_cli,
+            graph_render,
         } => {
             initialize_threads_and_log(&common);
             let mut engine_cli = engine_cli;
@@ -4776,6 +4853,12 @@ fn run() -> io::Result<()> {
                             "syng index queries currently support 'bed', 'bedpe', 'gfa', 'vcf', 'fasta', and 'gbwt' output formats, not '{}'",
                             resolved_format
                         ),
+                    ));
+                }
+                if graph_render.requested() && !matches!(resolved_format, "gfa" | "vcf") {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--render-graph is only supported with query graph output (-o gfa or -o vcf)",
                     ));
                 }
 
@@ -5027,12 +5110,16 @@ fn run() -> io::Result<()> {
                                 );
 
                                 if query_intervals.is_empty() {
-                                    let mut out = find_output_stream(&target_output_prefix, output_ext)?;
-                                    write_graph_output(
-                                        String::from("H\tVN:Z:1.0\n"),
+                                    write_graph_output_and_render(
+                                        "H\tVN:Z:1.0\n",
                                         resolved_format,
-                                        &mut out,
+                                        &target_output_prefix,
+                                        output_ext,
                                         &reference_names,
+                                        &graph_render,
+                                        bed_graph_dir.as_deref(),
+                                        name,
+                                        common.threads.get(),
                                     )?;
                                     info!(
                                         "Syng query complete: {} ({}:{}-{}) in {}",
@@ -5052,12 +5139,16 @@ fn run() -> io::Result<()> {
                                     scoring_params,
                                     &engine_opts,
                                 )?;
-                                let mut out = find_output_stream(&target_output_prefix, output_ext)?;
-                                write_graph_output(
-                                    gfa_output,
+                                write_graph_output_and_render(
+                                    &gfa_output,
                                     resolved_format,
-                                    &mut out,
+                                    &target_output_prefix,
+                                    output_ext,
                                     &reference_names,
+                                    &graph_render,
+                                    bed_graph_dir.as_deref(),
+                                    name,
+                                    common.threads.get(),
                                 )?;
                             } else if let Some(partition_size) = engine_opts.partition_size {
                                 // ─── Sub-windowed path: syng-at-the-outer-level ───
@@ -5118,12 +5209,16 @@ fn run() -> io::Result<()> {
                                 }
 
                                 if partitions.is_empty() {
-                                    let mut out = find_output_stream(&target_output_prefix, output_ext)?;
-                                    write_graph_output(
-                                        String::from("H\tVN:Z:1.0\n"),
+                                    write_graph_output_and_render(
+                                        "H\tVN:Z:1.0\n",
                                         resolved_format,
-                                        &mut out,
+                                        &target_output_prefix,
+                                        output_ext,
                                         &reference_names,
+                                        &graph_render,
+                                        bed_graph_dir.as_deref(),
+                                        name,
+                                        common.threads.get(),
                                     )?;
                                     info!(
                                         "Syng query complete: {} ({}:{}-{}) in {}",
@@ -5143,12 +5238,16 @@ fn run() -> io::Result<()> {
                                     scoring_params,
                                     &engine_opts,
                                 )?;
-                                let mut out = find_output_stream(&target_output_prefix, output_ext)?;
-                                write_graph_output(
-                                    gfa_output,
+                                write_graph_output_and_render(
+                                    &gfa_output,
                                     resolved_format,
-                                    &mut out,
+                                    &target_output_prefix,
+                                    output_ext,
                                     &reference_names,
+                                    &graph_render,
+                                    bed_graph_dir.as_deref(),
+                                    name,
+                                    common.threads.get(),
                                 )?;
                             } else {
                                 // ─── Flat path: one query_region, one engine run ───
@@ -5182,12 +5281,16 @@ fn run() -> io::Result<()> {
                                 );
 
                                 if query_intervals.is_empty() {
-                                    let mut out = find_output_stream(&target_output_prefix, output_ext)?;
-                                    write_graph_output(
-                                        String::from("H\tVN:Z:1.0\n"),
+                                    write_graph_output_and_render(
+                                        "H\tVN:Z:1.0\n",
                                         resolved_format,
-                                        &mut out,
+                                        &target_output_prefix,
+                                        output_ext,
                                         &reference_names,
+                                        &graph_render,
+                                        bed_graph_dir.as_deref(),
+                                        name,
+                                        common.threads.get(),
                                     )?;
                                     info!(
                                         "Syng query complete: {} ({}:{}-{}) in {}",
@@ -5207,12 +5310,16 @@ fn run() -> io::Result<()> {
                                     scoring_params,
                                     &engine_opts,
                                 )?;
-                                let mut out = find_output_stream(&target_output_prefix, output_ext)?;
-                                write_graph_output(
-                                    gfa_output,
+                                write_graph_output_and_render(
+                                    &gfa_output,
                                     resolved_format,
-                                    &mut out,
+                                    &target_output_prefix,
+                                    output_ext,
                                     &reference_names,
+                                    &graph_render,
+                                    bed_graph_dir.as_deref(),
+                                    name,
+                                    common.threads.get(),
                                 )?;
                             }
                         }
@@ -5441,6 +5548,12 @@ fn run() -> io::Result<()> {
             } else {
                 output_format.as_str()
             };
+            if graph_render.requested() && !matches!(resolved_output_format, "gfa" | "vcf") {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--render-graph is only supported with query graph output (-o gfa or -o vcf)",
+                ));
+            }
 
             // Validate --approximate mode output format compatibility
             if query.approximate
@@ -5555,7 +5668,7 @@ fn run() -> io::Result<()> {
                             // Partitioned mode: split query region into sub-windows
                             output_results_gfa_partitioned(
                                 &impg,
-                                &mut find_output_stream(&target_output_prefix, "gfa")?,
+                                &target_output_prefix,
                                 sequence_index.as_ref().unwrap(),
                                 scoring_params,
                                 &engine_opts,
@@ -5564,18 +5677,25 @@ fn run() -> io::Result<()> {
                                 ps,
                                 &query,
                                 subset_filter.as_ref(),
+                                &graph_render,
+                                bed_graph_dir.as_deref(),
+                                &name,
+                                common.threads.get(),
                             )?;
                         } else {
                             output_results_gfa(
                                 &impg,
                                 &mut results,
-                                &mut find_output_stream(&target_output_prefix, "gfa")?,
+                                &target_output_prefix,
                                 sequence_index.as_ref().unwrap(),
                                 &name,
                                 query.effective_merge_distance(),
                                 query.merge_strands_for_output("gfa"),
                                 scoring_params,
                                 &engine_opts,
+                                &graph_render,
+                                bed_graph_dir.as_deref(),
+                                common.threads.get(),
                             )?;
                         }
                     }
@@ -5585,7 +5705,7 @@ fn run() -> io::Result<()> {
                         if let Some(ps) = engine_opts.partition_size {
                             output_results_vcf_partitioned(
                                 &impg,
-                                &mut find_output_stream(&target_output_prefix, "vcf")?,
+                                &target_output_prefix,
                                 sequence_index.as_ref().unwrap(),
                                 scoring_params,
                                 &engine_opts,
@@ -5595,18 +5715,26 @@ fn run() -> io::Result<()> {
                                 &query,
                                 subset_filter.as_ref(),
                                 &reference_names,
+                                &name,
+                                &graph_render,
+                                bed_graph_dir.as_deref(),
+                                common.threads.get(),
                             )?;
                         } else {
                             output_results_vcf(
                                 &impg,
                                 &mut results,
-                                &mut find_output_stream(&target_output_prefix, "vcf")?,
+                                &target_output_prefix,
                                 sequence_index.as_ref().unwrap(),
                                 &reference_names,
+                                &name,
                                 query.effective_merge_distance(),
                                 query.merge_strands_for_output("vcf"),
                                 scoring_params,
                                 &engine_opts,
+                                &graph_render,
+                                bed_graph_dir.as_deref(),
+                                common.threads.get(),
                             )?;
                         }
                     }
@@ -6752,6 +6880,34 @@ fn run() -> io::Result<()> {
             } else {
                 let mut out = BufWriter::with_capacity(1024 * 1024, File::create(&output)?);
                 out.write_all(resolved.gfa.as_bytes())?;
+                out.flush()?;
+            }
+        }
+        Args::Gfa2vcf {
+            gfa,
+            output,
+            reference_names,
+            common,
+        } => {
+            initialize_threads_and_log(&common);
+            let mut gfa_text = String::new();
+            if gfa == "-" {
+                io::stdin().read_to_string(&mut gfa_text)?;
+            } else {
+                File::open(&gfa)?.read_to_string(&mut gfa_text)?;
+            }
+
+            let vcf = impg::gfa_to_vcf_string(&gfa_text, &reference_names)?;
+            if output == "-" {
+                let stdout = io::stdout();
+                let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
+                out.write_all(vcf.as_bytes())?;
+                out.flush()?;
+            } else {
+                let output_path = Path::new(&output);
+                ensure_parent_dir(output_path)?;
+                let mut out = BufWriter::with_capacity(1024 * 1024, File::create(output_path)?);
+                out.write_all(vcf.as_bytes())?;
                 out.flush()?;
             }
         }
@@ -8143,13 +8299,28 @@ fn get_auto_reader(path: &str) -> io::Result<Box<dyn BufRead>> {
     Ok(Box::new(BufReader::new(reader)))
 }
 
+fn output_path_for_basename(basename: &Option<String>, extension: &str) -> Option<PathBuf> {
+    basename
+        .as_ref()
+        .map(|name| PathBuf::from(format!("{}.{}", name, extension)))
+}
+
+fn ensure_parent_dir(path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    Ok(())
+}
+
 /// Helper function to return a Write implementer that is either standard output or a file with the
 /// appropriate basename and extension. When no basename is provided, uses standard output.
 fn find_output_stream(basename: &Option<String>, extension: &str) -> io::Result<Box<dyn Write>> {
-    match basename {
-        Some(name) => {
-            let filename = format!("{}.{}", name, extension);
-            let file = File::create(filename)?;
+    match output_path_for_basename(basename, extension) {
+        Some(path) => {
+            ensure_parent_dir(&path)?;
+            let file = File::create(path)?;
             Ok(Box::new(BufWriter::new(file)))
         }
         None => Ok(Box::new(BufWriter::new(io::stdout()))),
@@ -8237,15 +8408,156 @@ fn vcf_reference_names(range_name: &str, target_name: &str) -> Vec<String> {
 }
 
 fn write_graph_output(
-    mut gfa_output: String,
+    gfa_output: &str,
     output_format: &str,
     out: &mut dyn Write,
     reference_names: &[String],
 ) -> io::Result<()> {
     if output_format == "vcf" {
-        gfa_output = impg::gfa_to_vcf_string(&gfa_output, reference_names)?;
+        let vcf_output = impg::gfa_to_vcf_string(gfa_output, reference_names)?;
+        out.write_all(vcf_output.as_bytes())
+    } else {
+        out.write_all(gfa_output.as_bytes())
     }
-    out.write_all(gfa_output.as_bytes())
+}
+
+fn write_graph_output_and_render(
+    gfa_output: &str,
+    output_format: &str,
+    target_output_prefix: &Option<String>,
+    output_ext: &str,
+    reference_names: &[String],
+    graph_render: &GraphRenderOpts,
+    bed_graph_dir: Option<&Path>,
+    range_name: &str,
+    threads: usize,
+) -> io::Result<()> {
+    let output_path = output_path_for_basename(target_output_prefix, output_ext);
+    {
+        let mut out = find_output_stream(target_output_prefix, output_ext)?;
+        write_graph_output(gfa_output, output_format, &mut out, reference_names)?;
+        out.flush()?;
+    }
+
+    if let Some(render_path) =
+        graph_render_path_for_target(graph_render, target_output_prefix, bed_graph_dir, range_name)?
+    {
+        let gfa_input_path = if output_format == "gfa" {
+            output_path.as_deref()
+        } else {
+            None
+        };
+        render_graph_image(gfa_output, gfa_input_path, &render_path, graph_render, threads)?;
+    }
+    Ok(())
+}
+
+fn graph_render_path_for_target(
+    graph_render: &GraphRenderOpts,
+    output_prefix: &Option<String>,
+    bed_graph_dir: Option<&Path>,
+    range_name: &str,
+) -> io::Result<Option<PathBuf>> {
+    if !graph_render.requested() {
+        return Ok(None);
+    }
+
+    let mut path = if let Some(raw) = &graph_render.render_graph_output {
+        let raw_path = PathBuf::from(raw);
+        if bed_graph_dir.is_some() || raw_path.is_dir() || raw.ends_with(std::path::MAIN_SEPARATOR)
+        {
+            raw_path.join(sanitize_output_stem(range_name))
+        } else {
+            raw_path
+        }
+    } else if let Some(prefix) = output_prefix_for_target(output_prefix, bed_graph_dir, range_name) {
+        PathBuf::from(prefix)
+    } else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--render-graph needs -O/--output-prefix or --render-graph-output",
+        ));
+    };
+
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext)
+            if ext.eq_ignore_ascii_case("png") || ext.eq_ignore_ascii_case("svg") => {}
+        _ => {
+            path.set_extension(&graph_render.render_graph_format);
+        }
+    }
+    ensure_parent_dir(&path)?;
+    Ok(Some(path))
+}
+
+fn render_graph_image(
+    gfa_output: &str,
+    gfa_input_path: Option<&Path>,
+    render_path: &Path,
+    graph_render: &GraphRenderOpts,
+    threads: usize,
+) -> io::Result<()> {
+    if !gfa_output.lines().any(|line| line.starts_with("S\t")) {
+        warn!(
+            "Skipping graph render to {} because the query graph has no segment records",
+            render_path.display()
+        );
+        return Ok(());
+    }
+
+    let mut temp_gfa = None;
+    let input_path = if let Some(path) = gfa_input_path {
+        path.to_path_buf()
+    } else {
+        let mut temp = tempfile::Builder::new()
+            .prefix("impg-render-")
+            .suffix(".gfa")
+            .tempfile()?;
+        temp.write_all(gfa_output.as_bytes())?;
+        temp.flush()?;
+        let path = temp.path().to_path_buf();
+        temp_gfa = Some(temp);
+        path
+    };
+
+    let t0 = Instant::now();
+    let status = Command::new("gfalook")
+        .arg("-i")
+        .arg(&input_path)
+        .arg("-o")
+        .arg(render_path)
+        .arg("-x")
+        .arg(graph_render.render_graph_width.to_string())
+        .arg("-y")
+        .arg(graph_render.render_graph_height.to_string())
+        .arg("-a")
+        .arg(graph_render.render_graph_path_height.to_string())
+        .arg("-t")
+        .arg(threads.max(1).to_string())
+        .status()
+        .map_err(|e| {
+            if e.kind() == io::ErrorKind::NotFound {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "Could not run gfalook for --render-graph; install gfalook or omit --render-graph",
+                )
+            } else {
+                io::Error::other(format!("Failed to run gfalook: {e}"))
+            }
+        })?;
+    drop(temp_gfa);
+    if !status.success() {
+        return Err(io::Error::other(format!(
+            "gfalook failed while rendering {}",
+            render_path.display()
+        )));
+    }
+    info!(
+        "Rendered query graph image {} in {}",
+        render_path.display(),
+        format_duration(t0.elapsed())
+    );
+    Ok(())
 }
 
 /// Load/generate index based on common and alignment options
@@ -9235,13 +9547,16 @@ fn output_results_paf(
 fn output_results_gfa(
     impg: &impl ImpgIndex,
     results: &mut Vec<AdjustedInterval>,
-    out: &mut dyn Write,
+    target_output_prefix: &Option<String>,
     sequence_index: &UnifiedSequenceIndex,
-    _name: &str,
+    name: &str,
     merge_distance: i32,
     merge_strands: bool,
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
     engine_opts: &EngineOpts,
+    graph_render: &GraphRenderOpts,
+    bed_graph_dir: Option<&Path>,
+    threads: usize,
 ) -> io::Result<()> {
     // Merge intervals if needed
     merge_query_adjusted_intervals(results, merge_distance, merge_strands);
@@ -9259,21 +9574,33 @@ fn output_results_gfa(
         scoring_params,
         engine_opts,
     )?;
-    out.write_all(gfa_output.as_bytes())?;
-
-    Ok(())
+    write_graph_output_and_render(
+        &gfa_output,
+        "gfa",
+        target_output_prefix,
+        "gfa",
+        &[],
+        graph_render,
+        bed_graph_dir,
+        name,
+        threads,
+    )
 }
 
 fn output_results_vcf(
     impg: &impl ImpgIndex,
     results: &mut Vec<AdjustedInterval>,
-    out: &mut dyn Write,
+    target_output_prefix: &Option<String>,
     sequence_index: &UnifiedSequenceIndex,
     reference_names: &[String],
+    range_name: &str,
     merge_distance: i32,
     merge_strands: bool,
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
     engine_opts: &EngineOpts,
+    graph_render: &GraphRenderOpts,
+    bed_graph_dir: Option<&Path>,
+    threads: usize,
 ) -> io::Result<()> {
     merge_query_adjusted_intervals(results, merge_distance, merge_strands);
 
@@ -9289,10 +9616,17 @@ fn output_results_vcf(
         scoring_params,
         engine_opts,
     )?;
-    let vcf_output = impg::gfa_to_vcf_string(&gfa_output, reference_names)?;
-    out.write_all(vcf_output.as_bytes())?;
-
-    Ok(())
+    write_graph_output_and_render(
+        &gfa_output,
+        "vcf",
+        target_output_prefix,
+        "vcf",
+        reference_names,
+        graph_render,
+        bed_graph_dir,
+        range_name,
+        threads,
+    )
 }
 
 /// Partitioned GFA output for the query command: splits the query region into
@@ -9300,7 +9634,7 @@ fn output_results_vcf(
 /// GFA pipeline (per-partition engine → lace → gfaffix).
 fn output_results_gfa_partitioned(
     impg: &impl ImpgIndex,
-    out: &mut dyn Write,
+    target_output_prefix: &Option<String>,
     sequence_index: &UnifiedSequenceIndex,
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
     engine_opts: &EngineOpts,
@@ -9309,6 +9643,10 @@ fn output_results_gfa_partitioned(
     partition_size: usize,
     query: &QueryOpts,
     subset_filter: Option<&SubsetFilter>,
+    graph_render: &GraphRenderOpts,
+    bed_graph_dir: Option<&Path>,
+    range_name: &str,
+    threads: usize,
 ) -> io::Result<()> {
     let (start, end) = target_range;
     let ps = partition_size as i32;
@@ -9361,14 +9699,22 @@ fn output_results_gfa_partitioned(
         scoring_params,
         engine_opts,
     )?;
-    out.write_all(gfa_output.as_bytes())?;
-
-    Ok(())
+    write_graph_output_and_render(
+        &gfa_output,
+        "gfa",
+        target_output_prefix,
+        "gfa",
+        &[],
+        graph_render,
+        bed_graph_dir,
+        range_name,
+        threads,
+    )
 }
 
 fn output_results_vcf_partitioned(
     impg: &impl ImpgIndex,
-    out: &mut dyn Write,
+    target_output_prefix: &Option<String>,
     sequence_index: &UnifiedSequenceIndex,
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
     engine_opts: &EngineOpts,
@@ -9378,29 +9724,62 @@ fn output_results_vcf_partitioned(
     query: &QueryOpts,
     subset_filter: Option<&SubsetFilter>,
     reference_names: &[String],
+    range_name: &str,
+    graph_render: &GraphRenderOpts,
+    bed_graph_dir: Option<&Path>,
+    threads: usize,
 ) -> io::Result<()> {
-    let mut gfa = Vec::new();
-    output_results_gfa_partitioned(
+    let (start, end) = target_range;
+    let ps = partition_size as i32;
+    let mut partitions: Vec<Vec<Interval<u32>>> = Vec::new();
+    let mut window_start = start;
+    while window_start < end {
+        let window_end = (window_start + ps).min(end);
+        let mut results = perform_query(
+            impg,
+            target_name,
+            (window_start, window_end),
+            false,
+            query.min_result_identity,
+            query.min_output_length,
+            query.transitive,
+            query.transitive_opts.transitive_dfs,
+            &query.transitive_opts,
+            Some(sequence_index),
+            query.approximate,
+            subset_filter,
+        )?;
+        if !results.is_empty() {
+            merge_query_adjusted_intervals(
+                &mut results,
+                query.effective_merge_distance(),
+                query.merge_strands_for_output("gfa"),
+            );
+            let query_intervals: Vec<Interval<u32>> =
+                results.drain(..).map(|(qi, _, _)| qi).collect();
+            partitions.push(query_intervals);
+        }
+        window_start = window_end;
+    }
+
+    let gfa_output = impg::partitioned_gfa_pipeline(
+        &partitions,
         impg,
-        &mut gfa,
         sequence_index,
         scoring_params,
         engine_opts,
-        target_name,
-        target_range,
-        partition_size,
-        query,
-        subset_filter,
     )?;
-    let gfa_output = String::from_utf8(gfa).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("partitioned GFA output is not UTF-8: {e}"),
-        )
-    })?;
-    let vcf_output = impg::gfa_to_vcf_string(&gfa_output, reference_names)?;
-    out.write_all(vcf_output.as_bytes())?;
-    Ok(())
+    write_graph_output_and_render(
+        &gfa_output,
+        "vcf",
+        target_output_prefix,
+        "vcf",
+        reference_names,
+        graph_render,
+        bed_graph_dir,
+        range_name,
+        threads,
+    )
 }
 
 fn output_results_fasta(
@@ -10479,6 +10858,81 @@ mod tests {
             .is_none());
     }
 
+    fn test_graph_render_opts() -> GraphRenderOpts {
+        GraphRenderOpts {
+            render_graph: true,
+            render_graph_output: None,
+            render_graph_format: "png".to_string(),
+            render_graph_width: 800,
+            render_graph_height: 300,
+            render_graph_path_height: 4,
+        }
+    }
+
+    #[test]
+    fn test_graph_render_path_defaults_beside_output_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = Some(dir.path().join("amy").to_string_lossy().to_string());
+        let render = test_graph_render_opts();
+        let path = graph_render_path_for_target(&render, &prefix, None, "AMY locus")
+            .unwrap()
+            .unwrap();
+        assert_eq!(path, dir.path().join("amy.png"));
+    }
+
+    #[test]
+    fn test_graph_render_path_uses_bed_row_stems_under_render_dir() {
+        let out_dir = tempfile::tempdir().unwrap();
+        let graph_dir = tempfile::tempdir().unwrap();
+        let mut render = test_graph_render_opts();
+        render.render_graph = false;
+        render.render_graph_output = Some(out_dir.path().to_string_lossy().to_string());
+        let path = graph_render_path_for_target(
+            &render,
+            &Some("ignored".to_string()),
+            Some(graph_dir.path()),
+            "C4A/C4B locus",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(path, out_dir.path().join("C4A_C4B_locus.png"));
+    }
+
+    #[test]
+    fn test_graph_render_path_svg_extension_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut render = test_graph_render_opts();
+        render.render_graph_output = Some(dir.path().join("view.svg").to_string_lossy().to_string());
+        let path = graph_render_path_for_target(&render, &None, None, "x")
+            .unwrap()
+            .unwrap();
+        assert_eq!(path, dir.path().join("view.svg"));
+    }
+
+    #[test]
+    fn test_find_output_stream_creates_parent_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = Some(dir.path().join("nested/out").to_string_lossy().to_string());
+        {
+            let mut out = find_output_stream(&prefix, "bed").unwrap();
+            writeln!(out, "chr1\t0\t1").unwrap();
+        }
+        assert!(dir.path().join("nested/out.bed").exists());
+    }
+
+    #[test]
+    fn test_render_graph_image_with_gfalook_when_available() {
+        if Command::new("gfalook").arg("--help").output().is_err() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("tiny.png");
+        let render = test_graph_render_opts();
+        let gfa = "H\tVN:Z:1.0\nS\t1\tACGT\nP\tpath\t1+\t*\n";
+        render_graph_image(gfa, None, &out, &render, 1).unwrap();
+        assert!(out.metadata().unwrap().len() > 0);
+    }
+
     #[test]
     fn test_syng_gfa_intervals_are_merged_before_graph_build() {
         let mut seq_index = SequenceIndex::new();
@@ -10982,6 +11436,42 @@ mod tests {
             }
             _ => panic!("expected query command"),
         }
+    }
+
+    #[test]
+    fn test_gfa2vcf_cli_accepts_reference_names() {
+        let args = Args::try_parse_from([
+            "impg",
+            "gfa2vcf",
+            "-g",
+            "graph.gfa",
+            "-o",
+            "calls.vcf",
+            "-r",
+            "ref",
+            "--reference-name",
+            "GRCh38#0#chr1",
+        ])
+        .unwrap();
+        match args {
+            Args::Gfa2vcf {
+                gfa,
+                output,
+                reference_names,
+                ..
+            } => {
+                assert_eq!(gfa, "graph.gfa");
+                assert_eq!(output, "calls.vcf");
+                assert_eq!(reference_names, vec!["ref", "GRCh38#0#chr1"]);
+            }
+            _ => panic!("expected gfa2vcf command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_to_vcf_alias_parses() {
+        let args = Args::try_parse_from(["impg", "gfa-to-vcf", "-g", "-", "-o", "-"]).unwrap();
+        assert!(matches!(args, Args::Gfa2vcf { .. }));
     }
 
     #[test]

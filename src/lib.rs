@@ -284,9 +284,10 @@ impl SyngImpgWrapper {
             syncmer_len,
         );
         let query_range_len = (range_end - range_start).max(0) as u64;
-        let effective_min = syng_transitive::effective_min_chain_anchors(
+        let effective_min = syng_transitive::effective_min_chain_anchors_for_syncmer(
             query_range_len,
             syncmer_len,
+            self.syng_index.params.k as u64,
             min_anchors,
         );
         let min_extent_bp = (query_range_len as f64 * min_fraction.max(0.0)) as u64;
