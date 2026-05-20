@@ -1018,7 +1018,7 @@ fn apply_replacement_frontier(graph: &Graph, plans: &[ReplacementPlan]) -> io::R
 
 fn build_replacement(candidate: &BubbleCandidate, config: &ResolutionConfig) -> io::Result<Graph> {
     let method = match config.method {
-        ResolutionMethod::Auto => ResolutionMethod::Poasta,
+        ResolutionMethod::Auto => ResolutionMethod::Poa,
         method => method,
     };
     match method {

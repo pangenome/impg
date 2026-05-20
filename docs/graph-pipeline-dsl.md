@@ -153,7 +153,9 @@ traverse it. `max-span` is optional and disabled by default; when set, it caps
 the span on the POVU root path, currently the first GFA path, so it is a rooted
 coordinate guard rather than the main runtime budget.
 
-`method=auto` currently tries the POASTA graph builder first and falls back to
-the SPOA-backed `poa` resolver if exact path-sequence validation fails. The
-intended next tier is a SweepGA/FastGA + filtering + seqwish resolver for
-bubbles that are too large for direct POA.
+`method=auto` currently uses the global/end-to-end SPOA-backed `poa` resolver.
+`method=poasta` is available for explicit experiments, but it is not the
+default until the POASTA GFA export path is proven to preserve clipped `W`
+walks exactly through impg's rewrite step. The intended next tier is a
+SweepGA/FastGA + filtering + seqwish resolver for bubbles that are too large
+for direct POA.
