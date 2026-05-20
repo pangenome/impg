@@ -6,7 +6,9 @@
 //! eligible unseen bubbles remain. It intentionally avoids lossy representative
 //! collapse and coordinate sidecars; emitted paths are the coordinate system.
 
-use crate::graph::{build_spoa_engine, feed_sequences_to_graph, reverse_complement, unchop_gfa};
+use crate::graph::{
+    build_global_spoa_engine, feed_sequences_to_graph, reverse_complement, unchop_gfa,
+};
 use povu::native_gfa::{Step as PovuStep, Strand as PovuStrand};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -1033,7 +1035,7 @@ fn build_poa_replacement(
     candidate: &BubbleCandidate,
     config: &ResolutionConfig,
 ) -> io::Result<Graph> {
-    let (mut graph, mut engine) = build_spoa_engine(config.scoring_params);
+    let (mut graph, mut engine) = build_global_spoa_engine(config.scoring_params);
     let headers: Vec<String> = candidate
         .ranges
         .iter()
@@ -1524,7 +1526,7 @@ P\touter_alt\t1+,7+,6+\t*
         let resolved = resolve_gfa_bubbles(
             gfa,
             &ResolutionConfig {
-                max_iterations: 4,
+                max_iterations: 1,
                 method: ResolutionMethod::Poa,
                 ..ResolutionConfig::default()
             },

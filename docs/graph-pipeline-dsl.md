@@ -143,8 +143,9 @@ transform is exposed directly:
 impg crush -g local.blunt.gfa -o local.crushed.gfa
 ```
 
-The defaults are sized for human panels (`64` rounds and `10k` path traversals
-per candidate). Traversal count is deliberately a high safety rail. The main
+The defaults are sized for human panels (`1` frontier round and `10k` path
+traversals per candidate). Traversal count is deliberately a high safety rail.
+The main
 alignment budgets are `max-median-traversal-len` (default `1k`),
 `max-traversal-len` (default `10k`), and `max-total-seq`, because a common
 allele represented by many haplotypes should not fail only because many paths

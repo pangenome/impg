@@ -307,10 +307,24 @@ fn format_fasta_alignment_from_msa(
 pub(crate) fn build_spoa_engine(
     scoring_params: (u8, u8, u8, u8, u8, u8),
 ) -> (SpoaGraph, AlignmentEngine) {
+    build_spoa_engine_with_alignment(scoring_params, SpoaAlignmentType::kSW)
+}
+
+/// Build a global/end-to-end SPOA graph and alignment engine.
+pub(crate) fn build_global_spoa_engine(
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+) -> (SpoaGraph, AlignmentEngine) {
+    build_spoa_engine_with_alignment(scoring_params, SpoaAlignmentType::kNW)
+}
+
+fn build_spoa_engine_with_alignment(
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+    alignment_type: SpoaAlignmentType,
+) -> (SpoaGraph, AlignmentEngine) {
     let (match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2) = scoring_params;
     let graph = SpoaGraph::new();
     let engine = AlignmentEngine::new_convex(
-        SpoaAlignmentType::kSW,
+        alignment_type,
         match_score as i8,
         -(mismatch as i8),
         -(gap_open1 as i8),
@@ -920,6 +934,28 @@ P\tseq2:0-8\t1+,3+\t*
         let gfa = "H\tVN:Z:1.0\n";
         let msa = gfa_to_msa(gfa);
         assert!(msa.is_empty());
+    }
+
+    #[test]
+    fn global_spoa_engine_penalizes_unaligned_ends() {
+        let scoring = (1, 4, 6, 2, 26, 1);
+        let first = "AAAACCCC";
+        let second = "CCCCGGGG";
+
+        let (mut local_graph, mut local_engine) = build_spoa_engine(scoring);
+        let (_, local_alignment) = local_engine.align(first, &local_graph);
+        local_graph.add_alignment(local_alignment, first);
+        let (local_score, _) = local_engine.align(second, &local_graph);
+
+        let (mut global_graph, mut global_engine) = build_global_spoa_engine(scoring);
+        let (_, global_alignment) = global_engine.align(first, &global_graph);
+        global_graph.add_alignment(global_alignment, first);
+        let (global_score, _) = global_engine.align(second, &global_graph);
+
+        assert!(
+            global_score < local_score,
+            "global alignment should penalize terminal sequence absent from the graph"
+        );
     }
 
     #[test]
