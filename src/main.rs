@@ -2243,13 +2243,33 @@ fn parse_crush_stage(
                 config.max_traversals =
                     parse_usize_size_engine_param(raw, &param.key, &param.value)?;
             }
+            "polish-rounds" | "polish-iterations" => {
+                config.polish_iterations =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "polish-max-traversal-len" | "polish-max-traversal-length" => {
+                config.polish_max_traversal_len =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "polish-max-median-traversal-len" | "polish-max-median-traversal-length" => {
+                config.polish_max_median_traversal_len =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "polish-max-total-sequence" | "polish-max-total-seq" | "polish-max-sequence" => {
+                config.polish_max_total_sequence =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "polish-max-traversals" => {
+                config.polish_max_traversals =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
             "method" => {
                 let Some(method) = impg::resolution::ResolutionMethod::parse_name(&param.value)
                 else {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, poa, or poasta)",
+                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, poa, poasta, or biwfa)",
                             raw, param.value
                         ),
                     ));
@@ -3939,7 +3959,27 @@ GFA engine shorthand:
         #[clap(long, value_parser = parse_usize_size, default_value = "10k")]
         max_traversals: usize,
 
-        /// Resolver method: auto, poa, or poasta
+        /// Small-tangle SPOA polish rounds after BiWFA/seqwish induction; 0 disables
+        #[clap(long, alias = "polish-iterations", value_parser = parse_usize_size, default_value = "1")]
+        polish_rounds: usize,
+
+        /// Maximum traversal length for the small-tangle polish pass
+        #[clap(long, alias = "polish-max-traversal-length", value_parser = parse_usize_size, default_value = "2k")]
+        polish_max_traversal_len: usize,
+
+        /// Maximum median traversal length for the small-tangle polish pass
+        #[clap(long, alias = "polish-max-median-traversal-length", value_parser = parse_usize_size, default_value = "256")]
+        polish_max_median_traversal_len: usize,
+
+        /// Maximum total sequence across all traversals in one polish candidate
+        #[clap(long, alias = "polish-max-total-seq", value_parser = parse_usize_size, default_value = "1m")]
+        polish_max_total_sequence: usize,
+
+        /// Maximum number of path-supported traversals through one polish candidate
+        #[clap(long, value_parser = parse_usize_size, default_value = "10k")]
+        polish_max_traversals: usize,
+
+        /// Resolver method: auto, poa, poasta, or biwfa
         #[clap(long, value_parser, default_value = "auto")]
         method: String,
 
@@ -6552,6 +6592,11 @@ fn run() -> io::Result<()> {
             max_median_traversal_len,
             max_total_sequence,
             max_traversals,
+            polish_rounds,
+            polish_max_traversal_len,
+            polish_max_median_traversal_len,
+            polish_max_total_sequence,
+            polish_max_traversals,
             method,
             common,
         } => {
@@ -6568,10 +6613,16 @@ fn run() -> io::Result<()> {
                     "--max-traversals must be > 0",
                 ));
             }
+            if polish_max_traversals == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--polish-max-traversals must be > 0",
+                ));
+            }
             let Some(method) = impg::resolution::ResolutionMethod::parse_name(&method) else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "--method must be one of: auto, poa, poasta",
+                    "--method must be one of: auto, poa, poasta, biwfa",
                 ));
             };
 
@@ -6590,6 +6641,11 @@ fn run() -> io::Result<()> {
                 max_median_traversal_len,
                 max_total_sequence,
                 max_traversals,
+                polish_iterations: polish_rounds,
+                polish_max_traversal_len,
+                polish_max_median_traversal_len,
+                polish_max_total_sequence,
+                polish_max_traversals,
                 ..Default::default()
             };
             let resolved = impg::resolution::resolve_gfa_bubbles(&gfa_text, &config)?;
@@ -10567,7 +10623,7 @@ mod tests {
             "-d",
             "0",
             "-o",
-            "gfa:syng:crush,method=poasta,max-median-traversal-len=2k,max-traversals=64,max-rounds=7",
+            "gfa:syng:crush,method=biwfa,max-median-traversal-len=10k,max-traversals=64,max-rounds=7,polish-max-median-traversal-len=128,polish-rounds=1",
         ])
         .unwrap();
         match args {
@@ -10581,17 +10637,19 @@ mod tests {
                 assert_eq!(output_format, "gfa");
                 assert_eq!(
                     engine_cli.engine_raw,
-                    "syng:crush,method=poasta,max-median-traversal-len=2k,max-traversals=64,max-rounds=7"
+                    "syng:crush,method=biwfa,max-median-traversal-len=10k,max-traversals=64,max-rounds=7,polish-max-median-traversal-len=128,polish-rounds=1"
                 );
                 let parsed = engine_cli.parse_engine().unwrap();
                 assert_eq!(parsed.engine, GfaEngine::SyngNative);
                 assert_eq!(parsed.syng_gfa_mode, Some(SyngGfaMode::Blunt));
                 let crush = parsed.crush_config.unwrap();
-                assert_eq!(crush.method, impg::resolution::ResolutionMethod::Poasta);
+                assert_eq!(crush.method, impg::resolution::ResolutionMethod::Biwfa);
                 assert_eq!(crush.max_bubble_span, 0);
-                assert_eq!(crush.max_median_traversal_len, 2_000);
+                assert_eq!(crush.max_median_traversal_len, 10_000);
                 assert_eq!(crush.max_traversals, 64);
                 assert_eq!(crush.max_iterations, 7);
+                assert_eq!(crush.polish_max_median_traversal_len, 128);
+                assert_eq!(crush.polish_iterations, 1);
             }
             _ => panic!("expected query command"),
         }
@@ -10621,6 +10679,8 @@ mod tests {
                 assert_eq!(crush.max_traversal_len, 10_000);
                 assert_eq!(crush.max_traversals, 10_000);
                 assert_eq!(crush.max_iterations, 1);
+                assert_eq!(crush.polish_iterations, 1);
+                assert_eq!(crush.polish_max_median_traversal_len, 256);
             }
             _ => panic!("expected query command"),
         }
