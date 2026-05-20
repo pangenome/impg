@@ -908,10 +908,10 @@ pub fn one_hop_ext_visited_with_seed_filter(
         target_span_cap,
     );
     let pre_filter = hits.len();
-    // Filter chains by anchor count. Default min=2 drops singletons
-    // (one-anchor chains with no mutual-best colinear partner — mostly
-    // noise in repeat-dense regions). Users who want to keep
-    // singletons set --syng-min-chain-anchors 1.
+    // Filter chains by anchor count. The default requires support from
+    // multiple bounded GBWT-walk seed islands, not just a single weak
+    // island in a repeat-dense region. Users who want exploratory local
+    // chains or singletons can lower --syng-min-chain-anchors.
     //
     // Auto-relax for short queries: a query range shorter than
     // 2 × syncmer_len can't physically host a chain of 2 distinct
