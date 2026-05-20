@@ -56,6 +56,8 @@ pub enum GfaEngine {
     SyngNative,
 }
 
+pub const DEFAULT_SYNG_GFA_SORT_PIPELINE: &str = "Ygs";
+
 /// Resolved engine configuration passed to subcommand functions.
 pub struct EngineOpts {
     pub engine: GfaEngine,
@@ -74,6 +76,10 @@ pub struct EngineOpts {
     pub partition_size: Option<usize>,
     /// Optional exact path-preserving blunt-graph resolution pass.
     pub crush_config: Option<resolution::ResolutionConfig>,
+    /// Optional final gfasort pipeline, e.g. `Ygs` or `Yg`. Currently enabled
+    /// by default for syng-native GFA output and disabled for already-normalized
+    /// alignment engines.
+    pub graph_sort_pipeline: Option<String>,
 }
 
 /// Minimal ImpgIndex wrapper around a SequenceIndex for syng query path.
@@ -630,21 +636,33 @@ pub fn dispatch_gfa_engine(
 }
 
 fn apply_graph_transforms(
-    gfa: String,
+    mut gfa: String,
     engine_opts: &EngineOpts,
 ) -> std::io::Result<String> {
-    let Some(config) = &engine_opts.crush_config else {
-        return Ok(gfa);
-    };
-    let resolved = resolution::resolve_gfa_bubbles(&gfa, config)?;
-    log::info!(
-        "crush: {} resolved, {} bailed, {} candidates seen across {} rounds",
-        resolved.stats.resolved,
-        resolved.stats.bailed,
-        resolved.stats.candidates_seen,
-        resolved.stats.iterations
-    );
-    Ok(resolved.gfa)
+    if let Some(config) = &engine_opts.crush_config {
+        let resolved = resolution::resolve_gfa_bubbles(&gfa, config)?;
+        log::info!(
+            "crush: {} resolved, {} bailed, {} candidates seen across {} rounds",
+            resolved.stats.resolved,
+            resolved.stats.bailed,
+            resolved.stats.candidates_seen,
+            resolved.stats.iterations
+        );
+        gfa = resolved.gfa;
+    }
+
+    if let Some(pipeline) = &engine_opts.graph_sort_pipeline {
+        let t0 = std::time::Instant::now();
+        let sorted = graph::sort_gfa_pipeline(&gfa, pipeline, engine_opts.pipeline.num_threads)?;
+        log::info!(
+            "gfasort: pipeline '{}' sorted graph in {:.3}s",
+            pipeline,
+            t0.elapsed().as_secs_f64()
+        );
+        Ok(sorted)
+    } else {
+        Ok(gfa)
+    }
 }
 
 /// Convert an in-memory GFA string to VCF using the native Rust POVU path.
@@ -1199,6 +1217,7 @@ P\talt\t1+,3+,4+\t*
             poa_padding_fraction: 0.001,
             partition_size: None,
             crush_config: Some(resolution::ResolutionConfig::default()),
+            graph_sort_pipeline: None,
         };
         let out = super::apply_graph_transforms(gfa.to_string(), &opts).unwrap();
         let after = resolution::path_sequences(&out).unwrap();

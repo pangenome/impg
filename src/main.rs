@@ -2153,6 +2153,7 @@ struct ParsedGfaEngine {
     syng_gfa_mode: Option<SyngGfaMode>,
     syng_params: Option<impg::syng::SyncmerParams>,
     crush_config: Option<impg::resolution::ResolutionConfig>,
+    graph_sort_pipeline: Option<String>,
 }
 
 fn set_syng_gfa_mode(
@@ -2304,6 +2305,60 @@ fn parse_crush_stage(
         ));
     }
     Ok(config)
+}
+
+fn parse_graph_sort_stage(
+    raw: &str,
+    stage: &GraphPipelineStage,
+) -> io::Result<Option<String>> {
+    let mut pipeline = Some(impg::DEFAULT_SYNG_GFA_SORT_PIPELINE.to_string());
+    for param in &stage.params {
+        match param.key.as_str() {
+            "mode" | "pipeline" => {
+                let value = param.value.trim();
+                if matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "none" | "no" | "off" | "false" | "unsorted" | "nosort" | "no-sort"
+                ) {
+                    pipeline = None;
+                } else {
+                    validate_gfasort_pipeline_param(raw, value)?;
+                    pipeline = Some(value.to_string());
+                };
+            }
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Invalid --gfa-engine '{}': unknown sort parameter '{}'",
+                        raw, other
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(pipeline)
+}
+
+fn validate_gfasort_pipeline_param(raw: &str, value: &str) -> io::Result<()> {
+    if value.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Invalid --gfa-engine '{}': sort pipeline is empty", raw),
+        ));
+    }
+    for c in value.chars() {
+        if !matches!(c, 'Y' | 'g' | 's' | 'S' | 'u') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Invalid --gfa-engine '{}': unsupported sort pipeline step '{}' in '{}' (expected any of: Y, g, s, S, u)",
+                    raw, c, value
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_syng_assertion_params(
@@ -2493,6 +2548,11 @@ impl EngineCliOpts {
         let mut syncmer_seed: Option<u32> = None;
         let mut saw_syng_param = false;
         let mut crush_config = None;
+        let mut graph_sort_pipeline = if is_syng {
+            Some(impg::DEFAULT_SYNG_GFA_SORT_PIPELINE.to_string())
+        } else {
+            None
+        };
 
         parse_engine_stage_params(
             raw,
@@ -2528,6 +2588,21 @@ impl EngineCliOpts {
                         ));
                     }
                     crush_config = Some(parse_crush_stage(raw, stage)?);
+                }
+                "sort" if is_syng => {
+                    graph_sort_pipeline = parse_graph_sort_stage(raw, stage)?;
+                }
+                "nosort" | "no-sort" | "unsorted" if is_syng => {
+                    if !stage.params.is_empty() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!(
+                                "Invalid --gfa-engine '{}': '{}' does not take parameters",
+                                raw, stage.name
+                            ),
+                        ));
+                    }
+                    graph_sort_pipeline = None;
                 }
                 stage_name if !is_syng && stage.params.is_empty() => {
                     partition_size = Some(parse_window(stage_name)?);
@@ -2574,6 +2649,7 @@ impl EngineCliOpts {
             syng_gfa_mode,
             syng_params,
             crush_config,
+            graph_sort_pipeline,
         })
     }
 
@@ -2660,6 +2736,7 @@ impl EngineCliOpts {
             parsed.syng_gfa_mode,
             parsed.syng_params,
             parsed.crush_config,
+            parsed.graph_sort_pipeline,
         )
     }
 }
@@ -3473,9 +3550,10 @@ Syng notes:
   With -a/--alignment pointing to a syng index, supported query outputs are
   bed, bedpe, gfa, vcf, fasta, and gbwt. Use -o gfa for a local sequence GFA from
   query-selected intervals. `--gfa-engine syng` emits a syng syncmer GFA and
-  defaults to syng:blunt; use syng:raw to preserve native overlaps. The compact
-  forms `-o gfa:syng:blunt,k=63,s=8,seed=7`, `-o gfa:syng:crush`,
-  and `-o vcf:syng` are accepted
+  defaults to syng:blunt plus gfasort pipeline Ygs; use syng:raw to preserve
+  native overlaps and `:nosort` to skip final ordering. The compact forms
+  `-o gfa:syng:blunt,k=63,s=8,seed=7`, `-o gfa:syng:crush`,
+  `-o gfa:syng:crush:sort,pipeline=Yg`, and `-o vcf:syng` are accepted
   as shorthand. Use
   `impg syng2gfa` to dump the whole syng syncmer graph instead.
 
@@ -4514,7 +4592,10 @@ fn run() -> io::Result<()> {
                     None
                 };
 
-                let engine_config = engine_cli.build(common.threads.get())?;
+                let mut engine_config = engine_cli.build(common.threads.get())?;
+                if output_format != "gfa" {
+                    engine_config.graph_sort_pipeline = None;
+                }
                 let wrapper = {
                     let base = impg::SyngImpgWrapper::new(syng_index, seq_index, syng_padding);
                     if syng_min_chain_anchors > 0 {
@@ -4568,7 +4649,10 @@ fn run() -> io::Result<()> {
             )?;
 
             // Build engine config (resolves temp_dir and sparsify internally)
-            let engine_config = engine_cli.build(common.threads.get())?;
+            let mut engine_config = engine_cli.build(common.threads.get())?;
+            if output_format != "gfa" {
+                engine_config.graph_sort_pipeline = None;
+            }
 
             // Initialize impg after validation
             let impg = initialize_index(
@@ -4892,7 +4976,10 @@ fn run() -> io::Result<()> {
                             }
                         }
                         "gfa" | "vcf" => {
-                            let engine_opts = engine_cli.build(common.threads.get())?;
+                            let mut engine_opts = engine_cli.build(common.threads.get())?;
+                            if resolved_format != "gfa" {
+                                engine_opts.graph_sort_pipeline = None;
+                            }
                             let output_ext = graph_output_extension(resolved_format);
                             let reference_names = vcf_reference_names(name, target_name);
 
@@ -7722,6 +7809,7 @@ fn build_engine_opts(
     syng_gfa_mode: Option<SyngGfaMode>,
     syng_params: Option<impg::syng::SyncmerParams>,
     crush_config: Option<impg::resolution::ResolutionConfig>,
+    graph_sort_pipeline: Option<String>,
 ) -> io::Result<EngineOpts> {
     let pipeline = graph::GraphBuildConfig {
         num_threads,
@@ -7761,6 +7849,7 @@ fn build_engine_opts(
         pipeline,
         partition_size,
         crush_config,
+        graph_sort_pipeline,
         target_poa_lengths: smooth.parse_target_poa_lengths()?,
         max_node_length: smooth.max_node_length,
         poa_padding_fraction: smooth.poa_padding_fraction,
@@ -10487,9 +10576,11 @@ mod tests {
             "For BED graph output (`-b regions.bed -o gfa|vcf|gbwt`)",
             "named from BED column 4",
             "`--gfa-engine syng` emits a syng syncmer GFA",
-            "defaults to syng:blunt; use syng:raw",
+            "defaults to syng:blunt plus gfasort pipeline Ygs",
+            "`:nosort` to skip final ordering",
             "-o gfa:syng:blunt,k=63,s=8,seed=7",
             "-o gfa:syng:crush",
+            "-o gfa:syng:crush:sort,pipeline=Yg",
             "-o vcf:syng",
             "-o gfa:wfmash:seqwish",
             "`impg syng2gfa` to dump the whole syng syncmer graph",
@@ -10520,6 +10611,10 @@ mod tests {
                 assert_eq!(parsed.engine, GfaEngine::SyngNative);
                 assert_eq!(parsed.syng_gfa_mode, Some(SyngGfaMode::Blunt));
                 assert_eq!(parsed.syng_params, None);
+                assert_eq!(
+                    parsed.graph_sort_pipeline.as_deref(),
+                    Some(impg::DEFAULT_SYNG_GFA_SORT_PIPELINE)
+                );
             }
             _ => panic!("expected query command"),
         }
@@ -10543,6 +10638,10 @@ mod tests {
                 let parsed = engine_cli.parse_engine().unwrap();
                 assert_eq!(parsed.engine, GfaEngine::SyngNative);
                 assert_eq!(parsed.syng_gfa_mode, Some(SyngGfaMode::Raw));
+                assert_eq!(
+                    parsed.graph_sort_pipeline.as_deref(),
+                    Some(impg::DEFAULT_SYNG_GFA_SORT_PIPELINE)
+                );
                 assert_eq!(
                     parsed.syng_params,
                     Some(impg::syng::SyncmerParams { k: 8, w: 55, seed: 7 })
@@ -10575,6 +10674,10 @@ mod tests {
                 let parsed = engine_cli.parse_engine().unwrap();
                 assert_eq!(parsed.syng_gfa_mode, Some(SyngGfaMode::Blunt));
                 assert_eq!(
+                    parsed.graph_sort_pipeline.as_deref(),
+                    Some(impg::DEFAULT_SYNG_GFA_SORT_PIPELINE)
+                );
+                assert_eq!(
                     parsed.syng_params,
                     Some(impg::syng::SyncmerParams { k: 8, w: 55, seed: 7 })
                 );
@@ -10606,6 +10709,10 @@ mod tests {
                 assert_eq!(engine_cli.engine_raw, "syng,k=63,s=8,seed=7:blunt");
                 let parsed = engine_cli.parse_engine().unwrap();
                 assert_eq!(parsed.syng_gfa_mode, Some(SyngGfaMode::Blunt));
+                assert_eq!(
+                    parsed.graph_sort_pipeline.as_deref(),
+                    Some(impg::DEFAULT_SYNG_GFA_SORT_PIPELINE)
+                );
                 assert_eq!(
                     parsed.syng_params,
                     Some(impg::syng::SyncmerParams { k: 8, w: 55, seed: 7 })
@@ -10642,6 +10749,10 @@ mod tests {
                 let parsed = engine_cli.parse_engine().unwrap();
                 assert_eq!(parsed.engine, GfaEngine::SyngNative);
                 assert_eq!(parsed.syng_gfa_mode, Some(SyngGfaMode::Blunt));
+                assert_eq!(
+                    parsed.graph_sort_pipeline.as_deref(),
+                    Some(impg::DEFAULT_SYNG_GFA_SORT_PIPELINE)
+                );
                 let crush = parsed.crush_config.unwrap();
                 assert_eq!(crush.method, impg::resolution::ResolutionMethod::Biwfa);
                 assert_eq!(crush.max_bubble_span, 0);
@@ -10672,6 +10783,10 @@ mod tests {
                 let parsed = engine_cli.parse_engine().unwrap();
                 assert_eq!(parsed.engine, GfaEngine::SyngNative);
                 assert_eq!(parsed.syng_gfa_mode, Some(SyngGfaMode::Blunt));
+                assert_eq!(
+                    parsed.graph_sort_pipeline.as_deref(),
+                    Some(impg::DEFAULT_SYNG_GFA_SORT_PIPELINE)
+                );
                 let crush = parsed.crush_config.unwrap();
                 assert_eq!(crush.method, impg::resolution::ResolutionMethod::Auto);
                 assert_eq!(crush.max_bubble_span, 0);
@@ -10681,6 +10796,62 @@ mod tests {
                 assert_eq!(crush.max_iterations, 1);
                 assert_eq!(crush.polish_iterations, 1);
                 assert_eq!(crush.polish_max_median_traversal_len, 256);
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_accepts_syng_sort_stage() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush:sort,pipeline=sYgs",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                assert_eq!(parsed.graph_sort_pipeline.as_deref(), Some("sYgs"));
+                assert!(parsed.crush_config.is_some());
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_accepts_syng_nosort_stage() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush:nosort",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                assert_eq!(parsed.graph_sort_pipeline, None);
+                assert!(parsed.crush_config.is_some());
             }
             _ => panic!("expected query command"),
         }

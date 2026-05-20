@@ -111,6 +111,11 @@ impg query -a panel.syng -r 'GRCh38#0#chr6:31982056-32035418' \
   -d 50k -x -o gfa --gfa-engine syng \
   --sequence-files panel.agc --force-large-region -O c4.syng-blunt
 
+# Syng-native crush graph, sorted with the default gfasort Ygs pipeline
+impg query -a panel.syng -r 'GRCh38#0#chr6:31982056-32035418' \
+  -d 50k -x -o gfa:syng:crush \
+  --sequence-files panel.agc --force-large-region -O c4.syng-crush
+
 # VCF calls from the same local syng graph, using POVU
 impg query -a panel.syng -r 'GRCh38#0#chr6:31982056-32035418' \
   -d 50k -x -o vcf:syng \
@@ -125,6 +130,11 @@ impg query -a panel.syng -r 'GRCh38#0#chr6:31982056-32035418' \
 impg query -a panel.syng -r 'GRCh38#0#chr6:31982056-32035418' \
   -d 50k -x -o gfa --gfa-engine syng:raw \
   --sequence-files panel.agc --force-large-region -O c4.syng-raw
+
+# Faster visualization-oriented order; use :nosort to preserve construction order
+impg query -a panel.syng -r 'GRCh38#0#chr6:31982056-32035418' \
+  -d 50k -x -o gfa:syng:crush:sort,pipeline=Yg \
+  --sequence-files panel.agc --force-large-region -O c4.syng-crush.yg
 
 # Syng-native blunt graph for every discovered partition
 impg partition -a panel.syng -w 1m -d 50k -o gfa --gfa-engine syng \
@@ -141,6 +151,11 @@ pggb:10000    partitioned mode with 10 kb windows
 syng          syng syncmer graph, defaults to syng:blunt
 syng:blunt    syng graph processed through pangenome/bluntg; links are 0M
 syng:raw      native syng overlap graph
+syng:crush    syng:blunt plus exact path-preserving bubble resolution
+syng:...:sort,pipeline=Ygs
+              final gfasort ordering; Ygs is the default for syng GFA output
+syng:...:nosort
+              disable final gfasort ordering
 ```
 
 `query` and `partition` differ only in how they gather local intervals. Once
@@ -167,6 +182,10 @@ same staged syntax.
 `gfa:syng:crush,method=auto,max-median-traversal-len=1k` emits blunt syng GFA
 and then runs exact path-preserving bubble resolution; see
 `docs/graph-pipeline-dsl.md`.
+For syng GFA output, `impg` then runs an internal gfasort pass by default using
+pipeline `Ygs` (path-guided SGD, grooming, topological ordering). The pipeline
+can be changed with a sort stage, for example
+`gfa:syng:crush:sort,pipeline=Yg`, or disabled with `gfa:syng:crush:nosort`.
 
 The transform can also be run on an existing blunt GFA:
 
