@@ -17,7 +17,7 @@ them and are separated by commas:
 syng,k=63,s=8,seed=7:blunt
 seqwish,min-match-len=70
 pggb,window=20k
-syng,k=63,s=8:crush,max-span=10k,max-traversals=10k
+syng,k=63,s=8:crush,max-traversal-len=1k,max-traversals=10k
 ```
 
 This is a graph-pipeline DSL, not a general shell pipeline. Each stage is a
@@ -109,7 +109,7 @@ Examples:
 syng,k=63,s=8,seed=7
 seqwish,min-match-len=70,sparse-factor=0.001
 pggb,window=20k
-crush,max-span=10k,max-traversal-len=10k,max-traversals=10k,method=poa
+crush,method=auto,max-median-traversal-len=1k,max-traversal-len=10k
 ```
 
 Unknown parameters should be errors, not warnings. Silent ignoring would make
@@ -120,7 +120,7 @@ graph parameterization hard to reproduce.
 `src/resolution.rs` does not implement its own flubble finder. It passes the
 current blunt GFA to `povu-rs` and calls `NativeGfa::decompose_flubbles`, then
 uses POVU's site IDs, parent/child relationships, entry/exit steps, and
-reference spans to schedule exact path-preserving replacement.
+root-path spans to schedule exact path-preserving replacement.
 
 The crush loop is iterative because each exact replacement changes the local
 graph topology and therefore can create, remove, or expose nested POVU sites.
@@ -145,6 +145,14 @@ impg crush -g local.blunt.gfa -o local.crushed.gfa
 
 The defaults are sized for human panels (`512` rounds and `10k` path traversals
 per candidate). Traversal count is deliberately a high safety rail. The main
-alignment budgets are `max-span`, `max-traversal-len`, and `max-total-seq`,
-because a common allele represented by many haplotypes should not fail only
-because many paths traverse it.
+alignment budgets are `max-median-traversal-len` (default `1k`),
+`max-traversal-len` (default `10k`), and `max-total-seq`, because a common
+allele represented by many haplotypes should not fail only because many paths
+traverse it. `max-span` is optional and disabled by default; when set, it caps
+the span on the POVU root path, currently the first GFA path, so it is a rooted
+coordinate guard rather than the main runtime budget.
+
+`method=auto` currently tries the POASTA graph builder first and falls back to
+the SPOA-backed `poa` resolver if exact path-sequence validation fails. The
+intended next tier is a SweepGA/FastGA + filtering + seqwish resolver for
+bubbles that are too large for direct POA.

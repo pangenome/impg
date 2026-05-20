@@ -163,8 +163,9 @@ gfa:<stage>[,<key=value>...][:<stage>[,<key=value>...]...]
 
 For example, `gfa:syng,k=63,s=8,seed=7:blunt` and the legacy
 `gfa:syng:blunt,k=63,s=8,seed=7` are both accepted. Graph transforms use the
-same staged syntax. `gfa:syng:crush,max-span=10k,max-traversals=10k` emits
-blunt syng GFA and then runs exact path-preserving bubble resolution; see
+same staged syntax.
+`gfa:syng:crush,method=auto,max-median-traversal-len=1k` emits blunt syng GFA
+and then runs exact path-preserving bubble resolution; see
 `docs/graph-pipeline-dsl.md`.
 
 The transform can also be run on an existing blunt GFA:

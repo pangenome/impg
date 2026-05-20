@@ -12,16 +12,24 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeSet;
 use std::io;
+use std::time::Instant;
 
 /// Configuration for exact path-preserving bubble resolution.
 #[derive(Clone, Debug)]
 pub struct ResolutionConfig {
     /// Maximum number of frontier replacement rounds.
     pub max_iterations: usize,
-    /// Maximum reference path span, in bp, for a candidate bubble.
+    /// Local graph induction method used for selected bubbles.
+    pub method: ResolutionMethod,
+    /// Maximum root path span, in bp, for a candidate bubble.
+    ///
+    /// The root path is the first path in the input GFA. This is a rooted POVU
+    /// decomposition coordinate, not necessarily an external reference genome.
     pub max_bubble_span: usize,
     /// Maximum length of any observed traversal through the bubble.
     pub max_traversal_len: usize,
+    /// Maximum median traversal length. A value of 0 disables this guard.
+    pub max_median_traversal_len: usize,
     /// Maximum sum of traversal sequence lengths for one replacement.
     pub max_total_sequence: usize,
     /// Maximum number of path-supported traversals through one replacement.
@@ -30,9 +38,33 @@ pub struct ResolutionConfig {
     pub scoring_params: (u8, u8, u8, u8, u8, u8),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResolutionMethod {
+    Auto,
+    Poa,
+    Poasta,
+}
+
+impl ResolutionMethod {
+    pub fn parse_name(value: &str) -> Option<Self> {
+        match value.replace('_', "-").to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "poa" | "spoa" => Some(Self::Poa),
+            "poasta" => Some(Self::Poasta),
+            _ => None,
+        }
+    }
+}
+
 pub const DEFAULT_MAX_ITERATIONS: usize = 512;
-pub const DEFAULT_MAX_BUBBLE_SPAN: usize = 10_000;
+/// By default, do not cap by rooted path span.
+///
+/// `max_bubble_span` is a POVU root-path coordinate guard. The root is currently
+/// the first GFA path, so this is intentionally not part of the default runtime
+/// budget. Use traversal length/count/total sequence for the real work cap.
+pub const DEFAULT_MAX_BUBBLE_SPAN: usize = 0;
 pub const DEFAULT_MAX_TRAVERSAL_LEN: usize = 10_000;
+pub const DEFAULT_MAX_MEDIAN_TRAVERSAL_LEN: usize = 1_000;
 pub const DEFAULT_MAX_TOTAL_SEQUENCE: usize = 1_000_000;
 pub const DEFAULT_MAX_TRAVERSALS: usize = 10_000;
 
@@ -40,8 +72,10 @@ impl Default for ResolutionConfig {
     fn default() -> Self {
         Self {
             max_iterations: DEFAULT_MAX_ITERATIONS,
+            method: ResolutionMethod::Auto,
             max_bubble_span: DEFAULT_MAX_BUBBLE_SPAN,
             max_traversal_len: DEFAULT_MAX_TRAVERSAL_LEN,
+            max_median_traversal_len: DEFAULT_MAX_MEDIAN_TRAVERSAL_LEN,
             max_total_sequence: DEFAULT_MAX_TOTAL_SEQUENCE,
             max_traversals: DEFAULT_MAX_TRAVERSALS,
             scoring_params: (1, 4, 6, 2, 26, 1),
@@ -103,15 +137,28 @@ struct BubbleCandidate {
     ranges: Vec<PathRange>,
     signature: String,
     within_budget: bool,
-    reference_start_step: usize,
-    reference_end_step: usize,
-    ref_span: usize,
+    root_start_step: usize,
+    root_end_step: usize,
+    root_span: usize,
+    traversal_stats: TraversalStats,
 }
 
 #[derive(Clone, Debug, Default)]
 struct CandidateFrontier {
     selected: Vec<BubbleCandidate>,
-    bailed_signatures: Vec<String>,
+    bailed: Vec<BubbleCandidate>,
+    sites_seen: usize,
+    candidates_seen: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct TraversalStats {
+    count: usize,
+    min_len: usize,
+    median_len: usize,
+    p90_len: usize,
+    max_len: usize,
+    total_len: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -153,14 +200,39 @@ pub fn resolve_gfa_bubbles(gfa: &str, config: &ResolutionConfig) -> io::Result<R
     let mut changed = false;
 
     for round in 0..config.max_iterations {
+        let round_start = Instant::now();
+        let discovery_start = Instant::now();
         let frontier = find_candidate_frontier(&graph, config, &seen)?;
-        if frontier.selected.is_empty() && frontier.bailed_signatures.is_empty() {
+        let discovery_elapsed = discovery_start.elapsed();
+        if frontier.selected.is_empty() && frontier.bailed.is_empty() {
+            log::info!(
+                "crush round {}: no eligible candidates from {} POVU site(s) in {:.2?}",
+                round + 1,
+                frontier.sites_seen,
+                discovery_elapsed
+            );
             break;
         }
         stats.iterations = round + 1;
 
-        for signature in frontier.bailed_signatures {
-            seen.insert(signature);
+        log::info!(
+            "crush round {}: {} POVU site(s), {} unseen polymorphic candidate(s), {} selected, {} over budget in {:.2?}",
+            round + 1,
+            frontier.sites_seen,
+            frontier.candidates_seen,
+            frontier.selected.len(),
+            frontier.bailed.len(),
+            discovery_elapsed
+        );
+        log::info!(
+            "crush round {} traversal stats: {}; {}",
+            round + 1,
+            format_candidate_length_summary("selected", &frontier.selected),
+            format_candidate_length_summary("over-budget", &frontier.bailed)
+        );
+
+        for candidate in frontier.bailed {
+            seen.insert(candidate.signature);
             stats.candidates_seen += 1;
             stats.bailed += 1;
         }
@@ -174,16 +246,19 @@ pub fn resolve_gfa_bubbles(gfa: &str, config: &ResolutionConfig) -> io::Result<R
             stats.candidates_seen += 1;
         }
 
+        let selected_count = frontier.selected.len();
+        let build_start = Instant::now();
         let build_results = frontier
             .selected
             .into_par_iter()
             .map(|candidate| {
-                build_poa_replacement(&candidate, config).map(|replacement| ReplacementPlan {
+                build_replacement(&candidate, config).map(|replacement| ReplacementPlan {
                     candidate,
                     replacement,
                 })
             })
             .collect::<Vec<_>>();
+        let build_elapsed = build_start.elapsed();
 
         let mut plans = Vec::new();
         for result in build_results {
@@ -202,13 +277,30 @@ pub fn resolve_gfa_bubbles(gfa: &str, config: &ResolutionConfig) -> io::Result<R
         }
 
         if plans.is_empty() {
+            log::info!(
+                "crush round {}: 0/{} replacement(s) built in {:.2?}",
+                round + 1,
+                selected_count,
+                build_elapsed
+            );
             continue;
         }
 
         let resolved_count = plans.len();
+        let rewrite_start = Instant::now();
         graph = apply_replacement_frontier(&graph, &plans)?;
+        let rewrite_elapsed = rewrite_start.elapsed();
         changed = true;
         stats.resolved += resolved_count;
+        log::info!(
+            "crush round {}: resolved {}/{} replacement(s) in {:.2?}; rewrite+validate {:.2?}; total {:.2?}",
+            round + 1,
+            resolved_count,
+            selected_count,
+            build_elapsed,
+            rewrite_elapsed,
+            round_start.elapsed()
+        );
     }
 
     Ok(ResolvedGfa {
@@ -301,7 +393,27 @@ fn parse_gfa(gfa: &str) -> io::Result<Graph> {
                     });
                 }
             }
-            "H" | "W" | "C" | "J" => {}
+            "W" => {
+                if fields.len() < 7 {
+                    return Err(invalid_gfa(line_no, "W line has fewer than 7 fields"));
+                }
+                let mut steps = Vec::new();
+                for (id, rev) in parse_w_walk(fields[6])
+                    .ok_or_else(|| invalid_gfa(line_no, "W line has a malformed walk"))?
+                {
+                    let Some(&node) = id_to_idx.get(id) else {
+                        return Err(invalid_gfa(line_no, "W line references unknown segment"));
+                    };
+                    steps.push(Step { node, rev });
+                }
+                if !steps.is_empty() {
+                    paths.push(Path {
+                        name: fields[3].to_string(),
+                        steps,
+                    });
+                }
+            }
+            "H" | "C" | "J" => {}
             _ => {}
         }
     }
@@ -322,6 +434,31 @@ fn parse_p_step(step: &str) -> Option<(&str, bool)> {
     } else {
         step.strip_suffix('-').map(|id| (id, true))
     }
+}
+
+fn parse_w_walk(walk: &str) -> Option<Vec<(&str, bool)>> {
+    let mut steps = Vec::new();
+    let mut start = None;
+    let mut rev = false;
+    for (idx, ch) in walk.char_indices() {
+        if ch != '>' && ch != '<' {
+            continue;
+        }
+        if let Some(prev_start) = start {
+            if prev_start == idx {
+                return None;
+            }
+            steps.push((&walk[prev_start..idx], rev));
+        }
+        start = Some(idx + ch.len_utf8());
+        rev = ch == '<';
+    }
+    let prev_start = start?;
+    if prev_start == walk.len() {
+        return None;
+    }
+    steps.push((&walk[prev_start..], rev));
+    Some(steps)
 }
 
 fn path_sequence(graph: &Graph, path: &Path) -> io::Result<Vec<u8>> {
@@ -352,6 +489,95 @@ fn range_sequence(graph: &Graph, range: &PathRange) -> Vec<u8> {
     seq
 }
 
+fn traversal_stats(ranges: &[PathRange]) -> TraversalStats {
+    if ranges.is_empty() {
+        return TraversalStats::default();
+    }
+
+    let mut lengths = ranges
+        .iter()
+        .map(|range| range.sequence.len())
+        .collect::<Vec<_>>();
+    lengths.sort_unstable();
+
+    TraversalStats {
+        count: lengths.len(),
+        min_len: lengths[0],
+        median_len: lengths[lengths.len() / 2],
+        p90_len: lengths[percentile_index(lengths.len(), 90, 100)],
+        max_len: *lengths.last().unwrap_or(&0),
+        total_len: lengths.iter().sum(),
+    }
+}
+
+fn percentile_index(len: usize, numerator: usize, denominator: usize) -> usize {
+    if len == 0 || denominator == 0 {
+        return 0;
+    }
+    let rank = len.saturating_mul(numerator).div_ceil(denominator);
+    rank.saturating_sub(1).min(len - 1)
+}
+
+fn format_candidate_length_summary(label: &str, candidates: &[BubbleCandidate]) -> String {
+    if candidates.is_empty() {
+        return format!("{label} none");
+    }
+
+    let mut max_lengths = candidates
+        .iter()
+        .map(|candidate| candidate.traversal_stats.max_len)
+        .collect::<Vec<_>>();
+    let mut median_lengths = candidates
+        .iter()
+        .map(|candidate| candidate.traversal_stats.median_len)
+        .collect::<Vec<_>>();
+    let mut p90_lengths = candidates
+        .iter()
+        .map(|candidate| candidate.traversal_stats.p90_len)
+        .collect::<Vec<_>>();
+    let traversal_counts = candidates
+        .iter()
+        .map(|candidate| candidate.traversal_stats.count)
+        .collect::<Vec<_>>();
+    let max_total = candidates
+        .iter()
+        .map(|candidate| candidate.traversal_stats.total_len)
+        .max()
+        .unwrap_or(0);
+    let max_root_span = candidates
+        .iter()
+        .map(|candidate| candidate.root_span)
+        .max()
+        .unwrap_or(0);
+
+    let max_len = *max_lengths.iter().max().unwrap_or(&0);
+    let max_median = *median_lengths.iter().max().unwrap_or(&0);
+    let max_p90 = *p90_lengths.iter().max().unwrap_or(&0);
+    let max_traversals = *traversal_counts.iter().max().unwrap_or(&0);
+
+    format!(
+        "{label} n={}, max-len median/max={}/{}, median-len median/max={}/{}, p90-len median/max={}/{}, traversals max={}, total max={}, root-span max={}",
+        candidates.len(),
+        median_value(&mut max_lengths),
+        max_len,
+        median_value(&mut median_lengths),
+        max_median,
+        median_value(&mut p90_lengths),
+        max_p90,
+        max_traversals,
+        max_total,
+        max_root_span
+    )
+}
+
+fn median_value(values: &mut [usize]) -> usize {
+    if values.is_empty() {
+        return 0;
+    }
+    values.sort_unstable();
+    values[values.len() / 2]
+}
+
 fn path_positions(graph: &Graph, path_idx: usize) -> Vec<usize> {
     let path = &graph.paths[path_idx];
     let mut positions = Vec::with_capacity(path.steps.len() + 1);
@@ -371,97 +597,123 @@ fn find_candidate_frontier(
     if graph.paths.is_empty() || graph.paths[0].steps.len() < 2 {
         return Ok(CandidateFrontier::default());
     }
-    let ref_path_idx = 0;
-    let ref_path = &graph.paths[ref_path_idx];
-    let ref_positions = path_positions(graph, ref_path_idx);
+    let root_path_idx = 0;
+    let root_path = &graph.paths[root_path_idx];
+    let root_positions = path_positions(graph, root_path_idx);
+    let render_start = Instant::now();
     let rendered = render_graph(graph);
+    let render_elapsed = render_start.elapsed();
+    let parse_start = Instant::now();
     let native_graph = povu::NativeGfa::parse(&rendered).map_err(povu_to_io_error)?;
-    let reference_names = vec![ref_path.name.clone()];
+    let parse_elapsed = parse_start.elapsed();
+    let reference_names = vec![root_path.name.clone()];
+    let decompose_start = Instant::now();
     let decomposition = native_graph
         .decompose_flubbles(&reference_names)
         .map_err(povu_to_io_error)?;
+    let decompose_elapsed = decompose_start.elapsed();
+    let id_map_start = Instant::now();
     let id_to_idx = graph
         .segments
         .iter()
         .enumerate()
         .map(|(idx, segment)| (segment.id.as_str(), idx))
         .collect::<FxHashMap<_, _>>();
+    let id_map_elapsed = id_map_start.elapsed();
 
-    let mut candidates = Vec::new();
-    for site in &decomposition.sites {
-        let begin = site.reference_start_step;
-        let exit_step = site.reference_end_step;
-        if exit_step + 1 >= ref_positions.len() {
-            continue;
-        }
-        let Some(entry) = step_from_povu(&id_to_idx, &site.start) else {
-            continue;
-        };
-        let Some(exit) = step_from_povu(&id_to_idx, &site.end) else {
-            continue;
-        };
-        let ref_span = ref_positions[exit_step + 1] - ref_positions[begin];
-
-        let mut ranges = Vec::new();
-        for path_idx in 0..graph.paths.len() {
-            if let Some((range_begin, range_end)) =
-                unique_anchor_range(&graph.paths[path_idx], entry, exit)
-            {
-                let mut range = PathRange {
-                    path_idx,
-                    begin_step: range_begin,
-                    end_step: range_end,
-                    sequence: Vec::new(),
-                };
-                range.sequence = range_sequence(graph, &range);
-                ranges.push(range);
+    let sites_seen = decomposition.sites.len();
+    let candidate_start = Instant::now();
+    let mut candidates = decomposition
+        .sites
+        .par_iter()
+        .filter_map(|site| {
+            let begin = site.reference_start_step;
+            let exit_step = site.reference_end_step;
+            if exit_step + 1 >= root_positions.len() {
+                return None;
             }
-        }
+            let entry = step_from_povu(&id_to_idx, &site.start)?;
+            let exit = step_from_povu(&id_to_idx, &site.end)?;
+            let root_span = root_positions[exit_step + 1] - root_positions[begin];
 
-        if ranges.len() < 2 {
-            continue;
-        }
+            let mut ranges = Vec::new();
+            for path_idx in 0..graph.paths.len() {
+                if let Some((range_begin, range_end)) =
+                    unique_anchor_range(&graph.paths[path_idx], entry, exit)
+                {
+                    let mut range = PathRange {
+                        path_idx,
+                        begin_step: range_begin,
+                        end_step: range_end,
+                        sequence: Vec::new(),
+                    };
+                    range.sequence = range_sequence(graph, &range);
+                    ranges.push(range);
+                }
+            }
 
-        let distinct_sequences: BTreeSet<Vec<u8>> =
-            ranges.iter().map(|r| r.sequence.clone()).collect();
-        if distinct_sequences.len() < 2 {
-            continue;
-        }
+            if ranges.len() < 2 {
+                return None;
+            }
 
-        let signature = candidate_signature(graph, ref_path_idx, begin, exit_step, &ranges);
-        if seen.contains(&signature) {
-            continue;
-        }
+            let distinct_sequences: BTreeSet<Vec<u8>> =
+                ranges.iter().map(|r| r.sequence.clone()).collect();
+            if distinct_sequences.len() < 2 {
+                return None;
+            }
 
-        let max_traversal_len = ranges.iter().map(|r| r.sequence.len()).max().unwrap_or(0);
-        let total_sequence = ranges.iter().map(|r| r.sequence.len()).sum::<usize>();
-        let within_budget = ref_span <= config.max_bubble_span
-            && ranges.len() <= config.max_traversals
-            && max_traversal_len <= config.max_traversal_len
-            && total_sequence <= config.max_total_sequence;
+            let signature = candidate_signature(
+                graph,
+                root_path_idx,
+                &root_positions,
+                begin,
+                exit_step,
+                &ranges,
+            );
+            if seen.contains(&signature) {
+                return None;
+            }
 
-        candidates.push(BubbleCandidate {
-            ranges,
-            signature,
-            within_budget,
-            reference_start_step: begin,
-            reference_end_step: exit_step,
-            ref_span,
-        });
-    }
+            let traversal_stats = traversal_stats(&ranges);
+            let within_budget = (config.max_bubble_span == 0
+                || root_span <= config.max_bubble_span)
+                && ranges.len() <= config.max_traversals
+                && traversal_stats.max_len <= config.max_traversal_len
+                && (config.max_median_traversal_len == 0
+                    || traversal_stats.median_len <= config.max_median_traversal_len)
+                && traversal_stats.total_len <= config.max_total_sequence;
 
+            Some(BubbleCandidate {
+                ranges,
+                signature,
+                within_budget,
+                root_start_step: begin,
+                root_end_step: exit_step,
+                root_span,
+                traversal_stats,
+            })
+        })
+        .collect::<Vec<_>>();
+    let candidate_elapsed = candidate_start.elapsed();
+    let candidates_seen = candidates.len();
+
+    let select_start = Instant::now();
     candidates.sort_by(|a, b| {
-        b.reference_step_span()
-            .cmp(&a.reference_step_span())
-            .then_with(|| b.ref_span.cmp(&a.ref_span))
-            .then_with(|| a.reference_start_step.cmp(&b.reference_start_step))
-            .then_with(|| a.reference_end_step.cmp(&b.reference_end_step))
+        b.root_step_span()
+            .cmp(&a.root_step_span())
+            .then_with(|| b.root_span.cmp(&a.root_span))
+            .then_with(|| a.root_start_step.cmp(&b.root_start_step))
+            .then_with(|| a.root_end_step.cmp(&b.root_end_step))
     });
 
-    let mut frontier = CandidateFrontier::default();
+    let mut frontier = CandidateFrontier {
+        sites_seen,
+        candidates_seen,
+        ..CandidateFrontier::default()
+    };
     for candidate in candidates {
         if !candidate.within_budget {
-            frontier.bailed_signatures.push(candidate.signature);
+            frontier.bailed.push(candidate);
             continue;
         }
         if frontier
@@ -473,14 +725,24 @@ fn find_candidate_frontier(
         }
         frontier.selected.push(candidate);
     }
+    let select_elapsed = select_start.elapsed();
+
+    log::info!(
+        "crush discovery detail: render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, candidate-build {:.2?}, select {:.2?}",
+        render_elapsed,
+        parse_elapsed,
+        decompose_elapsed,
+        id_map_elapsed,
+        candidate_elapsed,
+        select_elapsed
+    );
 
     Ok(frontier)
 }
 
 impl BubbleCandidate {
-    fn reference_step_span(&self) -> usize {
-        self.reference_end_step
-            .saturating_sub(self.reference_start_step)
+    fn root_step_span(&self) -> usize {
+        self.root_end_step.saturating_sub(self.root_start_step)
     }
 }
 
@@ -543,11 +805,11 @@ fn unique_anchor_range(path: &Path, entry: Step, exit: Step) -> Option<(usize, u
 fn candidate_signature(
     graph: &Graph,
     ref_path_idx: usize,
+    ref_positions: &[usize],
     begin: usize,
     exit_step: usize,
     ranges: &[PathRange],
 ) -> String {
-    let positions = path_positions(graph, ref_path_idx);
     let mut seqs: Vec<String> = ranges
         .iter()
         .map(|r| String::from_utf8_lossy(&r.sequence).to_string())
@@ -556,8 +818,8 @@ fn candidate_signature(
     format!(
         "{}:{}-{}:{}",
         graph.paths[ref_path_idx].name,
-        positions[begin],
-        positions[exit_step + 1],
+        ref_positions[begin],
+        ref_positions[exit_step + 1],
         seqs.join("|")
     )
 }
@@ -567,9 +829,10 @@ fn apply_replacement_frontier(graph: &Graph, plans: &[ReplacementPlan]) -> io::R
 
     for (plan_idx, plan) in plans.iter().enumerate() {
         for (range_idx, range) in plan.candidate.ranges.iter().enumerate() {
-            let path = plan.replacement.paths.get(range_idx).ok_or_else(|| {
-                io::Error::other("replacement path missing for candidate range")
-            })?;
+            let path =
+                plan.replacement.paths.get(range_idx).ok_or_else(|| {
+                    io::Error::other("replacement path missing for candidate range")
+                })?;
             let steps = path
                 .steps
                 .iter()
@@ -663,6 +926,21 @@ fn apply_replacement_frontier(graph: &Graph, plans: &[ReplacementPlan]) -> io::R
     Ok(next)
 }
 
+fn build_replacement(candidate: &BubbleCandidate, config: &ResolutionConfig) -> io::Result<Graph> {
+    let method = match config.method {
+        ResolutionMethod::Auto => ResolutionMethod::Poasta,
+        method => method,
+    };
+    match method {
+        ResolutionMethod::Auto => unreachable!("auto is resolved before replacement dispatch"),
+        ResolutionMethod::Poa => build_poa_replacement(candidate, config),
+        ResolutionMethod::Poasta => build_poasta_replacement(candidate, config).or_else(|err| {
+            log::debug!("POASTA replacement failed; falling back to SPOA: {err}");
+            build_poa_replacement(candidate, config)
+        }),
+    }
+}
+
 fn build_poa_replacement(
     candidate: &BubbleCandidate,
     config: &ResolutionConfig,
@@ -710,6 +988,148 @@ fn build_poa_replacement(
     }
 
     Ok(replacement)
+}
+
+fn build_poasta_replacement(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+) -> io::Result<Graph> {
+    use poasta::aligner::config::{Affine2PieceMinGapCost, AffineMinGapCost};
+    use poasta::aligner::scoring::{AlignmentType, GapAffine, GapAffine2Piece};
+    use poasta::aligner::PoastaAligner;
+    use poasta::graphs::poa::POAGraph;
+    use poasta::io::graph::graph_to_gfa;
+
+    let headers: Vec<String> = candidate
+        .ranges
+        .iter()
+        .enumerate()
+        .map(|(i, range)| format!("__impg_bubble_path{}_{}", range.path_idx, i))
+        .collect();
+    let sequences: Vec<&[u8]> = candidate
+        .ranges
+        .iter()
+        .map(|range| range.sequence.as_slice())
+        .collect();
+    let weights = sequences
+        .iter()
+        .map(|sequence| vec![1usize; sequence.len()])
+        .collect::<Vec<_>>();
+    let (_, mismatch, gap_open, gap_extend, gap_open2, gap_extend2) = config.scoring_params;
+    let mut graph = POAGraph::<u32>::new();
+
+    if gap_extend > gap_extend2 {
+        let scoring = GapAffine2Piece::new(mismatch, gap_extend, gap_open, gap_extend2, gap_open2);
+        let mut aligner =
+            PoastaAligner::new(Affine2PieceMinGapCost(scoring), AlignmentType::Global);
+        add_poasta_sequences(
+            &mut graph,
+            &mut aligner,
+            &headers,
+            &sequences,
+            &weights,
+        )?;
+    } else {
+        let scoring = GapAffine::new(mismatch, gap_extend, gap_open);
+        let mut aligner = PoastaAligner::new(AffineMinGapCost(scoring), AlignmentType::Global);
+        add_poasta_sequences(
+            &mut graph,
+            &mut aligner,
+            &headers,
+            &sequences,
+            &weights,
+        )?;
+    }
+
+    let mut gfa = Vec::new();
+    graph_to_gfa(&mut gfa, &graph).map_err(|err| {
+        io::Error::other(format!(
+            "POASTA replacement GFA generation failed: {err}"
+        ))
+    })?;
+    let gfa = String::from_utf8(gfa).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("POASTA replacement GFA is not UTF-8: {err}"),
+        )
+    })?;
+    let mut replacement = parse_gfa(&gfa)?;
+    order_replacement_paths(&mut replacement, &headers)?;
+
+    if replacement.paths.len() != candidate.ranges.len() {
+        return Err(io::Error::other(format!(
+            "POASTA replacement emitted {} paths for {} traversals",
+            replacement.paths.len(),
+            candidate.ranges.len()
+        )));
+    }
+
+    for (idx, range) in candidate.ranges.iter().enumerate() {
+        let observed = path_sequence(&replacement, &replacement.paths[idx])?;
+        if observed != range.sequence {
+            return Err(io::Error::other(format!(
+                "POASTA replacement path {} changed sequence length {} -> {}",
+                idx,
+                range.sequence.len(),
+                observed.len()
+            )));
+        }
+    }
+
+    Ok(replacement)
+}
+
+fn add_poasta_sequences<C>(
+    graph: &mut poasta::graphs::poa::POAGraph<u32>,
+    aligner: &mut poasta::aligner::PoastaAligner<C>,
+    headers: &[String],
+    sequences: &[&[u8]],
+    weights: &[Vec<usize>],
+) -> io::Result<()>
+where
+    C: poasta::aligner::config::AlignmentConfig,
+{
+    for (idx, sequence) in sequences.iter().enumerate() {
+        if graph.is_empty() {
+            graph
+                .add_alignment_with_weights(&headers[idx], sequence, None, &weights[idx])
+                .map_err(poasta_to_io_error)?;
+        } else {
+            let result = aligner.align::<u32, _>(graph, sequence);
+            graph
+                .add_alignment_with_weights(
+                    &headers[idx],
+                    sequence,
+                    Some(&result.alignment),
+                    &weights[idx],
+                )
+                .map_err(poasta_to_io_error)?;
+        }
+    }
+    Ok(())
+}
+
+fn poasta_to_io_error(err: poasta::errors::PoastaError) -> io::Error {
+    io::Error::other(format!("POASTA replacement failed: {err}"))
+}
+
+fn order_replacement_paths(graph: &mut Graph, headers: &[String]) -> io::Result<()> {
+    let mut paths_by_name = graph
+        .paths
+        .drain(..)
+        .map(|path| (path.name.clone(), path))
+        .collect::<FxHashMap<_, _>>();
+    let mut ordered = Vec::with_capacity(headers.len());
+    for header in headers {
+        let Some(path) = paths_by_name.remove(header) else {
+            return Err(io::Error::other(format!(
+                "replacement graph is missing path '{header}'"
+            )));
+        };
+        ordered.push(path);
+    }
+    graph.paths = ordered;
+    Ok(())
 }
 
 fn path_sequences_equal(before: &Graph, after: &Graph) -> io::Result<bool> {
@@ -863,6 +1283,19 @@ mod tests {
     }
 
     #[test]
+    fn parses_w_walks_as_paths() {
+        let gfa = "\
+H\tVN:Z:1.1
+S\ts0\tAC
+S\ts1\tGT
+L\ts0\t+\ts1\t-\t0M
+W\t*\t0\twalk0\t0\t4\t>s0<s1
+";
+        let seqs = seq_map(gfa);
+        assert_eq!(seqs["walk0"], "ACAC");
+    }
+
+    #[test]
     fn resolves_simple_snp_bubble_without_changing_path_sequences() {
         let gfa = "\
 H\tVN:Z:1.0
@@ -906,6 +1339,59 @@ P\tins\t1+,2+,3+\t*
     }
 
     #[test]
+    fn resolves_insertion_bubble_with_poasta_without_changing_path_sequences() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tAC
+S\t2\tGGG
+S\t3\tTA
+L\t1\t+\t3\t+\t0M
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t3\t+\t0M
+P\tref\t1+,3+\t*
+P\tins\t1+,2+,3+\t*
+";
+        let before = seq_map(gfa);
+        let resolved = resolve_gfa_bubbles(
+            gfa,
+            &ResolutionConfig {
+                method: ResolutionMethod::Poasta,
+                ..ResolutionConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert_eq!(resolved.stats.resolved, 1);
+    }
+
+    #[test]
+    fn bails_out_when_candidate_exceeds_median_traversal_budget() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tAC
+S\t2\tGGG
+S\t3\tTA
+L\t1\t+\t3\t+\t0M
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t3\t+\t0M
+P\tref\t1+,3+\t*
+P\tins\t1+,2+,3+\t*
+";
+        let before = seq_map(gfa);
+        let resolved = resolve_gfa_bubbles(
+            gfa,
+            &ResolutionConfig {
+                max_median_traversal_len: 4,
+                ..ResolutionConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert_eq!(resolved.stats.resolved, 0);
+        assert!(resolved.stats.bailed >= 1);
+    }
+
+    #[test]
     fn resolves_maximal_eligible_nested_site_first() {
         let gfa = "\
 H\tVN:Z:1.0
@@ -943,6 +1429,7 @@ P\touter_alt\t1+,7+,6+\t*
             gfa,
             &ResolutionConfig {
                 max_iterations: 4,
+                method: ResolutionMethod::Poa,
                 ..ResolutionConfig::default()
             },
         )

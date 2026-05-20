@@ -38,6 +38,7 @@ indexmap = { version = "2", features = ["rayon"] }
 nalgebra = "0.33"
 indicatif = "0.18"
 spoa_rs = { git = "https://github.com/AndreaGuarracino/spoa-rs.git" }
+poasta = "0.1.0"
 rust-htslib = { version = "1.0.0", default-features = false, features = ["libdeflate"] }
 csv = "1.3"
 serde_json = "1.0"
@@ -75,7 +76,7 @@ seqwish = { git = "https://github.com/pangenome/seqwish", branch = "rust-2" }
 # Dependencies for graph sorting
 gfasort = { git = "https://github.com/pangenome/gfasort", rev = "f15d8ebfdc632af2333f277cb9da0748d8fba7aa" }
 bluntg = { git = "https://github.com/pangenome/bluntg" }
-povu = { package = "povu-rs", git = "https://github.com/pangenome/povu", rev = "a6e4b54363dfcf033010329eb37104a168e833b7", default-features = false }
+povu = { package = "povu-rs", git = "https://github.com/pangenome/povu", rev = "0c9f21a40e7755293f5b21f33a7e2c894dc6cb15", default-features = false }
 
 [build-dependencies]
 cc = "1"
