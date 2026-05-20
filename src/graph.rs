@@ -6,7 +6,10 @@ use std::io::{self, BufWriter, Write};
 
 // Gfasort imports for graph sorting
 use gfasort::gfa_parser::load_gfa_from_str;
-use gfasort::ygs::{unchop_only, ygs_sort, YgsParams};
+use gfasort::ygs::{
+    groom_only, priority_topological_sort_only, sgd_sort_only, topological_sort_only, unchop_only,
+    ygs_sort, YgsParams,
+};
 
 #[derive(Clone)]
 pub struct SequenceMetadata {
@@ -758,6 +761,19 @@ pub fn normalize_and_sort(gfa: String, num_threads: usize) -> io::Result<String>
 }
 
 pub fn sort_gfa(gfa_content: &str, num_threads: usize) -> io::Result<String> {
+    sort_gfa_pipeline(gfa_content, "Ygs", num_threads)
+}
+
+pub fn sort_gfa_pipeline(
+    gfa_content: &str,
+    pipeline: &str,
+    num_threads: usize,
+) -> io::Result<String> {
+    let pipeline = pipeline.trim();
+    if pipeline.is_empty() {
+        return Ok(gfa_content.to_string());
+    }
+
     // Load GFA directly from string (no temp file round-trip)
     let mut graph = load_gfa_from_str(gfa_content)
         .map_err(|e| io::Error::other(format!("Failed to load GFA for sorting: {}", e)))?;
@@ -768,11 +784,38 @@ pub fn sort_gfa(gfa_content: &str, num_threads: usize) -> io::Result<String> {
         return Ok(gfa_content.to_string());
     }
 
-    // Create Ygs parameters from the graph
-    let params = YgsParams::from_graph(&graph, 0, num_threads);
+    for c in pipeline.chars() {
+        match c {
+            'Y' | 'g' | 's' | 'S' | 'u' => {}
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "unsupported gfasort pipeline step '{other}' in '{pipeline}' (expected any of: Y, g, s, S, u)"
+                    ),
+                ));
+            }
+        }
+    }
 
-    // Sort the graph using Ygs pipeline (path-guided SGD + grooming + topological sort)
-    ygs_sort(&mut graph, &params);
+    // Create Ygs parameters from the initial graph, matching the gfasort CLI.
+    let params = YgsParams::from_graph(&graph, 0, num_threads);
+    let sgd_params = params.path_sgd.clone();
+
+    if pipeline == "Ygs" {
+        ygs_sort(&mut graph, &params);
+    } else {
+        for c in pipeline.chars() {
+            match c {
+                'Y' => sgd_sort_only(&mut graph, sgd_params.clone(), 0),
+                'g' => groom_only(&mut graph, 0),
+                's' => topological_sort_only(&mut graph, 0),
+                'S' => priority_topological_sort_only(&mut graph, 0),
+                'u' => unchop_only(&mut graph, 0),
+                _ => unreachable!("gfasort pipeline was validated"),
+            }
+        }
+    }
 
     // Write sorted GFA to string
     let mut sorted_output = Vec::new();
@@ -786,6 +829,10 @@ pub fn sort_gfa(gfa_content: &str, num_threads: usize) -> io::Result<String> {
             format!("Invalid UTF-8 in sorted GFA: {}", e),
         )
     })
+}
+
+pub fn sort_gfa_yg(gfa_content: &str, num_threads: usize) -> io::Result<String> {
+    sort_gfa_pipeline(gfa_content, "Yg", num_threads)
 }
 
 /// Run gfaffix graph normalization on a GFA string.
