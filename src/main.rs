@@ -3500,11 +3500,12 @@ GFA engine shorthand:
         #[clap(long, value_parser, default_value_t = 1_000)]
         syng_extend_budget: u64,
 
-        /// Minimum anchor count for a syng chain to be emitted. Chains
-        /// with fewer anchors than this are dropped at emission. Default
-        /// 20 requires support from multiple bounded GBWT-walk seed islands;
-        /// lower this for exploratory local-chain discovery or very sparse
-        /// indexes.
+        /// Maximum adaptive minimum anchor count for a syng chain to be
+        /// emitted. The effective threshold scales with query span (roughly
+        /// one anchor per 5 kb, capped by this value). The default cap 20
+        /// requires support from multiple bounded GBWT-walk seed islands for
+        /// locus-scale queries without making short queries satisfy 20 anchors.
+        /// Set 0 to disable anchor-count filtering.
         #[arg(help_heading = "Syng input")]
         #[clap(long, value_parser, default_value_t = impg::syng_transitive::DEFAULT_MIN_CHAIN_ANCHORS)]
         syng_min_chain_anchors: usize,
