@@ -760,52 +760,63 @@ fn dedupe_strand_overlaps(
 
 /// Default cap on the adaptive minimum anchor count per chain for emission.
 ///
-/// Bounded GBWT-walk seeds already carry several consecutive syncmers (the CLI
-/// default is 5), so a threshold of 2 lets one weak exact island through. The
-/// default cap of 20 requires multiple seed islands for locus-scale queries,
-/// which suppresses paralog/repeat noise in loci such as AMY. The effective
-/// threshold is scaled by the query span in [`effective_min_chain_anchors`], so
-/// short queries do not have to satisfy a fixed 20-anchor floor.
-pub const DEFAULT_MIN_CHAIN_ANCHORS: usize = 20;
+/// This is deliberately a high ceiling, not a floor. The actual threshold is
+/// derived from query length, syncmer density, and an assumed identity in
+/// [`effective_min_chain_anchors_for_syncmer`]. Short queries therefore keep a
+/// small support requirement, while long repeat-dense loci can require many
+/// independent seed islands.
+pub const DEFAULT_MIN_CHAIN_ANCHORS: usize = 1_000;
 
-/// Target scale for adaptive syng chain support.
+/// Default identity used to estimate how many exact syncmers should survive in
+/// a true homologous chain.
+pub const DEFAULT_MIN_CHAIN_IDENTITY: f64 = 0.95;
+
+/// Fraction of expected exact shared syncmers required for emission.
 ///
-/// The default support threshold grows by roughly one anchor per 5 kb until it
-/// reaches [`DEFAULT_MIN_CHAIN_ANCHORS`]. This keeps small queries usable while
-/// still requiring several bounded exact-walk seed islands for large local
-/// graph queries.
-pub const DEFAULT_MIN_CHAIN_ANCHOR_SPACING_BP: u64 = 5_000;
+/// We do not require the full expectation because SNP clustering, local
+/// divergence, structural variation, and syncmer-selection edge effects all
+/// lower observed anchor counts. The value is high enough to reject weak
+/// paralog/repeat chains in AMY-scale loci while preserving short-query
+/// sensitivity.
+pub const DEFAULT_MIN_CHAIN_EXPECTED_FRACTION: f64 = 0.10;
 
 /// Effective syng chain anchor threshold for a specific query span.
 ///
 /// `requested_min` is treated as a user/CLI cap. The returned value scales with
-/// the query span and is additionally capped by a conservative estimate of how
-/// many 63 bp-style syncmer-width anchors can fit in the query. `0` disables
-/// the anchor-count filter.
-pub fn effective_min_chain_anchors(
+/// the query span and the expected exact-syncmer survival at 95% identity. `0`
+/// disables the anchor-count filter.
+pub fn effective_min_chain_anchors_for_syncmer(
     query_range_len: u64,
     syncmer_len: u64,
+    smer_len: u64,
     requested_min: usize,
 ) -> usize {
     if requested_min == 0 {
         return 0;
     }
 
-    let span_scaled = query_range_len
-        .saturating_add(DEFAULT_MIN_CHAIN_ANCHOR_SPACING_BP - 1)
-        / DEFAULT_MIN_CHAIN_ANCHOR_SPACING_BP;
-    let span_scaled = (span_scaled as usize).max(1);
+    let density = closed_syncmer_density(syncmer_len, smer_len);
+    let exact_survival = DEFAULT_MIN_CHAIN_IDENTITY.powf(syncmer_len as f64);
+    let expected_shared =
+        query_range_len as f64 * density * exact_survival * DEFAULT_MIN_CHAIN_EXPECTED_FRACTION;
+    let required = expected_shared.ceil() as usize;
+    requested_min.min(required.max(1))
+}
 
-    let syncmer_width_cap = if syncmer_len == 0 {
-        requested_min
-    } else {
-        let cap = query_range_len
-            .saturating_add(syncmer_len - 1)
-            / syncmer_len;
-        (cap as usize).max(1)
-    };
+pub fn effective_min_chain_anchors(
+    query_range_len: u64,
+    syncmer_len: u64,
+    requested_min: usize,
+) -> usize {
+    effective_min_chain_anchors_for_syncmer(query_range_len, syncmer_len, 8, requested_min)
+}
 
-    requested_min.min(span_scaled).min(syncmer_width_cap).max(1)
+fn closed_syncmer_density(syncmer_len: u64, smer_len: u64) -> f64 {
+    if syncmer_len == 0 || smer_len == 0 || smer_len > syncmer_len {
+        return 1.0;
+    }
+    let window_count = syncmer_len - smer_len + 1;
+    2.0 / (window_count as f64 + 1.0)
 }
 
 /// Run one hop of syng-seeded homology query.
@@ -949,13 +960,16 @@ pub fn one_hop_ext_visited_with_seed_filter(
         target_span_cap,
     );
     let pre_filter = hits.len();
-    // Filter chains by anchor count. The default requires support from
-    // multiple bounded GBWT-walk seed islands, not just a single weak
-    // island in a repeat-dense region. Users who want exploratory local
-    // chains or singletons can lower --syng-min-chain-anchors.
-    //
-    let effective_min =
-        effective_min_chain_anchors(query_range_len, syncmer_len, min_chain_anchors);
+    // Filter chains by a length-scaled anchor-count model. The default
+    // estimates how many exact syncmers should survive at high identity and
+    // requires a fraction of that, so short queries stay sensitive while
+    // long repeat-dense loci need multiple bounded GBWT-walk seed islands.
+    let effective_min = effective_min_chain_anchors_for_syncmer(
+        query_range_len,
+        syncmer_len,
+        syng_index.params.k as u64,
+        min_chain_anchors,
+    );
     // Chain query-extent = a_last.query_pos + syncmer_len - a_first.query_pos.
     // Threshold in bp; 0 means "no extent filter".
     let min_chain_extent_bp = (query_range_len as f64 * min_chain_fraction.max(0.0)) as u64;
@@ -1627,13 +1641,25 @@ mod tests {
 
     #[test]
     fn effective_min_chain_anchors_scales_with_query_span() {
-        assert_eq!(effective_min_chain_anchors(0, TEST_SYNCMER_LEN, 20), 1);
-        assert_eq!(effective_min_chain_anchors(63, TEST_SYNCMER_LEN, 20), 1);
-        assert_eq!(effective_min_chain_anchors(1_000, TEST_SYNCMER_LEN, 20), 1);
-        assert_eq!(effective_min_chain_anchors(10_000, TEST_SYNCMER_LEN, 20), 2);
-        assert_eq!(effective_min_chain_anchors(50_000, TEST_SYNCMER_LEN, 20), 10);
-        assert_eq!(effective_min_chain_anchors(100_000, TEST_SYNCMER_LEN, 20), 20);
-        assert_eq!(effective_min_chain_anchors(400_000, TEST_SYNCMER_LEN, 20), 20);
+        assert_eq!(effective_min_chain_anchors(0, TEST_SYNCMER_LEN, 1_000), 1);
+        assert_eq!(effective_min_chain_anchors(63, TEST_SYNCMER_LEN, 1_000), 1);
+        assert_eq!(effective_min_chain_anchors(1_000, TEST_SYNCMER_LEN, 1_000), 1);
+        assert_eq!(
+            effective_min_chain_anchors(10_000, TEST_SYNCMER_LEN, 1_000),
+            2
+        );
+        assert_eq!(
+            effective_min_chain_anchors(50_000, TEST_SYNCMER_LEN, 1_000),
+            7
+        );
+        assert_eq!(
+            effective_min_chain_anchors(100_000, TEST_SYNCMER_LEN, 1_000),
+            14
+        );
+        assert_eq!(
+            effective_min_chain_anchors(400_000, TEST_SYNCMER_LEN, 1_000),
+            56
+        );
         assert_eq!(effective_min_chain_anchors(50_000, TEST_SYNCMER_LEN, 3), 3);
         assert_eq!(effective_min_chain_anchors(50_000, TEST_SYNCMER_LEN, 0), 0);
     }

@@ -159,11 +159,12 @@ coordinate guard rather than the main runtime budget.
 default until the POASTA GFA export path is proven to preserve clipped `W`
 walks exactly through impg's rewrite step.
 
-`method=biwfa` is the coarse condenser path. It runs full-length BiWFA on a
-tree/neighbor/random sparse pair set for the selected POVU bubble traversals,
-feeds those PAF alignments to seqwish, then runs one small-scale SPOA polish
-pass over the induced replacement graph. The two scales are intentionally
-separate: `max-median-traversal-len` controls which biological bubble
-traversals may be induced by BiWFA/seqwish, while
+`method=biwfa` is the coarse condenser path. It aligns every selected POVU
+bubble traversal end-to-end against the longest traversal with BiWFA, induces a
+path-preserving in-memory column graph from those root alignments, then runs one
+small-scale SPOA polish pass over the induced replacement graph. This avoids a
+seqwish transitive-closure step inside bounded bubble replacement. The two
+scales are intentionally separate: `max-median-traversal-len` controls which
+biological bubble traversals may be induced by BiWFA, while
 `polish-max-median-traversal-len` controls the tiny STR/indel tangles we are
 willing to clean inside that induced graph.

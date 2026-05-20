@@ -3602,10 +3602,11 @@ GFA engine shorthand:
         syng_extend_budget: u64,
 
         /// Maximum adaptive minimum anchor count for a syng chain to be
-        /// emitted. The effective threshold scales with query span (roughly
-        /// one anchor per 5 kb, capped by this value). The default cap 20
-        /// requires support from multiple bounded GBWT-walk seed islands for
-        /// locus-scale queries without making short queries satisfy 20 anchors.
+        /// emitted. The effective threshold is estimated from query span,
+        /// syncmer density, and 95% identity, then capped by this value. The
+        /// default is a high ceiling, not a fixed floor, so short queries keep
+        /// a small support requirement while long repeat-dense loci require
+        /// multiple bounded GBWT-walk seed islands.
         /// Set 0 to disable anchor-count filtering.
         #[arg(help_heading = "Syng input")]
         #[clap(long, value_parser, default_value_t = impg::syng_transitive::DEFAULT_MIN_CHAIN_ANCHORS)]
@@ -4037,7 +4038,7 @@ GFA engine shorthand:
         #[clap(long, value_parser = parse_usize_size, default_value = "10k")]
         max_traversals: usize,
 
-        /// Small-tangle SPOA polish rounds after BiWFA/seqwish induction; 0 disables
+        /// Small-tangle SPOA polish rounds after BiWFA in-memory induction; 0 disables
         #[clap(long, alias = "polish-iterations", value_parser = parse_usize_size, default_value = "1")]
         polish_rounds: usize,
 
