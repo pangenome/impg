@@ -44,6 +44,27 @@ impg query \
 
 This writes `c4.query.gfa`.
 
+Add `--render-graph` to also write a 1D `gfalook` rendering of the final graph:
+
+```bash
+impg query \
+  -a panel.syng \
+  -r 'GRCh38#0#chr6:31982056-32035418' \
+  -d 50k \
+  -x \
+  -o gfa:syng:crush \
+  --sequence-files panel.agc \
+  --force-large-region \
+  --render-graph \
+  -O c4.syng-crush
+```
+
+This writes `c4.syng-crush.gfa` and `c4.syng-crush.png`. PNG is the default;
+use `--render-graph-format svg` or `--render-graph-output c4.svg` for SVG.
+The renderer consumes the final graph after the configured graph transforms,
+so syng output is rendered after the default `Ygs` sort unless `:nosort` is
+explicitly requested.
+
 Important flags:
 
 - `-d 50k` is required. It merges query-gathered ranges separated by at most
@@ -70,6 +91,10 @@ impg query \
   --force-large-region \
   -O regions
 ```
+
+With `--render-graph`, images are written per BED row as well. By default they
+go beside the graph outputs under `regions`; `--render-graph-output renders`
+uses a separate render directory. Filenames are sanitized from BED column 4.
 
 BED rows use the syng path name in column 1:
 
@@ -196,6 +221,15 @@ impg crush -g local.blunt.gfa -o local.crushed.gfa
 VCF output uses the same engine dispatch and passes the local GFA to POVU:
 `-o vcf:syng`, `-o vcf:pggb`, `-o vcf:seqwish`, and `-o vcf:poa` are
 equivalent to `-o vcf --gfa-engine <engine>`.
+
+If the graph already exists, call POVU directly through impg:
+
+```bash
+impg gfa2vcf -g c4.syng-crush.gfa -o c4.syng-crush.vcf -r ref_path_name
+```
+
+`-r/--reference-name` is a path/name hint for POVU and can be repeated. This
+uses the same Rust POVU conversion as `query -o vcf`.
 
 ## Raw Syng Graph Dump
 
