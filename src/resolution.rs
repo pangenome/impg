@@ -14,6 +14,7 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeSet;
 use std::io;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 /// Configuration for exact path-preserving bubble resolution.
@@ -36,6 +37,17 @@ pub struct ResolutionConfig {
     pub max_total_sequence: usize,
     /// Maximum number of path-supported traversals through one replacement.
     pub max_traversals: usize,
+    /// One-pass small-tangle polish rounds after BiWFA/seqwish induction.
+    ///
+    /// This pass is deliberately scale-limited: small STR / indel tangles are
+    /// implementation artifacts, while larger VNTR / recombination structures
+    /// are often biological signal and should remain represented unless the
+    /// user explicitly raises these budgets.
+    pub polish_iterations: usize,
+    pub polish_max_traversal_len: usize,
+    pub polish_max_median_traversal_len: usize,
+    pub polish_max_total_sequence: usize,
+    pub polish_max_traversals: usize,
     /// SPOA scoring parameters: (match, mismatch, gap_open, gap_ext, gap_open2, gap_ext2).
     pub scoring_params: (u8, u8, u8, u8, u8, u8),
 }
@@ -45,6 +57,7 @@ pub enum ResolutionMethod {
     Auto,
     Poa,
     Poasta,
+    Biwfa,
 }
 
 impl ResolutionMethod {
@@ -53,6 +66,7 @@ impl ResolutionMethod {
             "auto" => Some(Self::Auto),
             "poa" | "spoa" => Some(Self::Poa),
             "poasta" => Some(Self::Poasta),
+            "biwfa" | "wfa" | "seqwish" | "biwfa-seqwish" | "allwave" => Some(Self::Biwfa),
             _ => None,
         }
     }
@@ -70,6 +84,13 @@ pub const DEFAULT_MAX_TRAVERSAL_LEN: usize = 10_000;
 pub const DEFAULT_MAX_MEDIAN_TRAVERSAL_LEN: usize = 1_000;
 pub const DEFAULT_MAX_TOTAL_SEQUENCE: usize = 1_000_000;
 pub const DEFAULT_MAX_TRAVERSALS: usize = 10_000;
+pub const DEFAULT_POLISH_ITERATIONS: usize = 1;
+pub const DEFAULT_POLISH_MAX_TRAVERSAL_LEN: usize = 2_000;
+pub const DEFAULT_POLISH_MAX_MEDIAN_TRAVERSAL_LEN: usize = 256;
+pub const DEFAULT_POLISH_MAX_TOTAL_SEQUENCE: usize = 1_000_000;
+pub const DEFAULT_POLISH_MAX_TRAVERSALS: usize = 10_000;
+
+static SEQWISH_REPLACEMENT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 impl Default for ResolutionConfig {
     fn default() -> Self {
@@ -81,6 +102,11 @@ impl Default for ResolutionConfig {
             max_median_traversal_len: DEFAULT_MAX_MEDIAN_TRAVERSAL_LEN,
             max_total_sequence: DEFAULT_MAX_TOTAL_SEQUENCE,
             max_traversals: DEFAULT_MAX_TRAVERSALS,
+            polish_iterations: DEFAULT_POLISH_ITERATIONS,
+            polish_max_traversal_len: DEFAULT_POLISH_MAX_TRAVERSAL_LEN,
+            polish_max_median_traversal_len: DEFAULT_POLISH_MAX_MEDIAN_TRAVERSAL_LEN,
+            polish_max_total_sequence: DEFAULT_POLISH_MAX_TOTAL_SEQUENCE,
+            polish_max_traversals: DEFAULT_POLISH_MAX_TRAVERSALS,
             scoring_params: (1, 4, 6, 2, 26, 1),
         }
     }
@@ -202,13 +228,27 @@ pub fn resolve_gfa_bubbles(gfa: &str, config: &ResolutionConfig) -> io::Result<R
         "crush: parsing input GFA ({} bytes) before bubble decomposition",
         gfa.len()
     );
-    let mut graph = parse_gfa(gfa)?;
+    let graph = parse_gfa(gfa)?;
     log::info!(
         "crush: parsed input GFA into {} segment(s), {} path(s) in {:.2?}",
         graph.segments.len(),
         graph.paths.len(),
         parse_start.elapsed()
     );
+    resolve_graph_bubbles(graph, Some(gfa), config, true)
+}
+
+fn resolve_gfa_bubbles_quiet(gfa: &str, config: &ResolutionConfig) -> io::Result<ResolvedGfa> {
+    let graph = parse_gfa(gfa)?;
+    resolve_graph_bubbles(graph, Some(gfa), config, false)
+}
+
+fn resolve_graph_bubbles(
+    mut graph: Graph,
+    original_gfa: Option<&str>,
+    config: &ResolutionConfig,
+    emit_logs: bool,
+) -> io::Result<ResolvedGfa> {
     let mut stats = ResolutionStats::default();
     let mut seen: FxHashSet<String> = FxHashSet::default();
     let mut changed = false;
@@ -216,34 +256,38 @@ pub fn resolve_gfa_bubbles(gfa: &str, config: &ResolutionConfig) -> io::Result<R
     for round in 0..config.max_iterations {
         let round_start = Instant::now();
         let discovery_start = Instant::now();
-        let frontier = find_candidate_frontier(&graph, config, &seen)?;
+        let frontier = find_candidate_frontier(&graph, config, &seen, emit_logs)?;
         let discovery_elapsed = discovery_start.elapsed();
         if frontier.selected.is_empty() && frontier.bailed.is_empty() {
-            log::info!(
-                "crush round {}: no eligible candidates from {} POVU site(s) in {:.2?}",
-                round + 1,
-                frontier.sites_seen,
-                discovery_elapsed
-            );
+            if emit_logs {
+                log::info!(
+                    "crush round {}: no eligible candidates from {} POVU site(s) in {:.2?}",
+                    round + 1,
+                    frontier.sites_seen,
+                    discovery_elapsed
+                );
+            }
             break;
         }
         stats.iterations = round + 1;
 
-        log::info!(
-            "crush round {}: {} POVU site(s), {} unseen polymorphic candidate(s), {} selected, {} over budget in {:.2?}",
-            round + 1,
-            frontier.sites_seen,
-            frontier.candidates_seen,
-            frontier.selected.len(),
-            frontier.bailed.len(),
-            discovery_elapsed
-        );
-        log::info!(
-            "crush round {} traversal stats: {}; {}",
-            round + 1,
-            format_candidate_length_summary("selected", &frontier.selected),
-            format_candidate_length_summary("over-budget", &frontier.bailed)
-        );
+        if emit_logs {
+            log::info!(
+                "crush round {}: {} POVU site(s), {} unseen polymorphic candidate(s), {} selected, {} over budget in {:.2?}",
+                round + 1,
+                frontier.sites_seen,
+                frontier.candidates_seen,
+                frontier.selected.len(),
+                frontier.bailed.len(),
+                discovery_elapsed
+            );
+            log::info!(
+                "crush round {} traversal stats: {}; {}",
+                round + 1,
+                format_candidate_length_summary("selected", &frontier.selected),
+                format_candidate_length_summary("over-budget", &frontier.bailed)
+            );
+        }
 
         for candidate in frontier.bailed {
             seen.insert(candidate.signature);
@@ -291,12 +335,14 @@ pub fn resolve_gfa_bubbles(gfa: &str, config: &ResolutionConfig) -> io::Result<R
         }
 
         if plans.is_empty() {
-            log::info!(
-                "crush round {}: 0/{} replacement(s) built in {:.2?}",
-                round + 1,
-                selected_count,
-                build_elapsed
-            );
+            if emit_logs {
+                log::info!(
+                    "crush round {}: 0/{} replacement(s) built in {:.2?}",
+                    round + 1,
+                    selected_count,
+                    build_elapsed
+                );
+            }
             continue;
         }
 
@@ -306,22 +352,26 @@ pub fn resolve_gfa_bubbles(gfa: &str, config: &ResolutionConfig) -> io::Result<R
         let rewrite_elapsed = rewrite_start.elapsed();
         changed = true;
         stats.resolved += resolved_count;
-        log::info!(
-            "crush round {}: resolved {}/{} replacement(s) in {:.2?}; rewrite+validate {:.2?}; total {:.2?}",
-            round + 1,
-            resolved_count,
-            selected_count,
-            build_elapsed,
-            rewrite_elapsed,
-            round_start.elapsed()
-        );
+        if emit_logs {
+            log::info!(
+                "crush round {}: resolved {}/{} replacement(s) in {:.2?}; rewrite+validate {:.2?}; total {:.2?}",
+                round + 1,
+                resolved_count,
+                selected_count,
+                build_elapsed,
+                rewrite_elapsed,
+                round_start.elapsed()
+            );
+        }
     }
 
     Ok(ResolvedGfa {
         gfa: if changed {
             render_graph(&graph)
         } else {
-            gfa.to_string()
+            original_gfa
+                .map(str::to_string)
+                .unwrap_or_else(|| render_graph(&graph))
         },
         stats,
     })
@@ -602,6 +652,7 @@ fn find_candidate_frontier(
     graph: &Graph,
     config: &ResolutionConfig,
     seen: &FxHashSet<String>,
+    emit_logs: bool,
 ) -> io::Result<CandidateFrontier> {
     if graph.paths.is_empty() || graph.paths[0].steps.len() < 2 {
         return Ok(CandidateFrontier::default());
@@ -616,26 +667,32 @@ fn find_candidate_frontier(
         .collect();
     let root_positions = &path_positions_by_path[root_path_idx];
     let render_start = Instant::now();
-    log::info!(
-        "crush discovery: rendering working graph with {} segment(s), {} path(s)",
-        graph.segments.len(),
-        graph.paths.len()
-    );
+    if emit_logs {
+        log::info!(
+            "crush discovery: rendering working graph with {} segment(s), {} path(s)",
+            graph.segments.len(),
+            graph.paths.len()
+        );
+    }
     let rendered = render_graph(graph);
     let render_elapsed = render_start.elapsed();
     let parse_start = Instant::now();
-    log::info!(
-        "crush discovery: parsing rendered graph with POVU ({} bytes)",
-        rendered.len()
-    );
+    if emit_logs {
+        log::info!(
+            "crush discovery: parsing rendered graph with POVU ({} bytes)",
+            rendered.len()
+        );
+    }
     let native_graph = povu::NativeGfa::parse(&rendered).map_err(povu_to_io_error)?;
     let parse_elapsed = parse_start.elapsed();
     let reference_names = vec![root_path.name.clone()];
     let decompose_start = Instant::now();
-    log::info!(
-        "crush discovery: decomposing rendered graph with POVU using root '{}'",
-        root_path.name
-    );
+    if emit_logs {
+        log::info!(
+            "crush discovery: decomposing rendered graph with POVU using root '{}'",
+            root_path.name
+        );
+    }
     let decomposition = native_graph
         .decompose_flubbles(&reference_names)
         .map_err(povu_to_io_error)?;
@@ -764,19 +821,21 @@ fn find_candidate_frontier(
     let materialize_elapsed = materialize_start.elapsed();
     let select_elapsed = select_start.elapsed();
 
-    log::info!(
-        "crush discovery detail: render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, path-index {:.2?}, candidate-build {:.2?}, select+materialize {:.2?} ({} -> {} selected, materialize {:.2?})",
-        render_elapsed,
-        parse_elapsed,
-        decompose_elapsed,
-        id_map_elapsed,
-        path_index_elapsed,
-        candidate_elapsed,
-        select_elapsed,
-        selected_before_materialize,
-        frontier.selected.len(),
-        materialize_elapsed
-    );
+    if emit_logs {
+        log::info!(
+            "crush discovery detail: render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, path-index {:.2?}, candidate-build {:.2?}, select+materialize {:.2?} ({} -> {} selected, materialize {:.2?})",
+            render_elapsed,
+            parse_elapsed,
+            decompose_elapsed,
+            id_map_elapsed,
+            path_index_elapsed,
+            candidate_elapsed,
+            select_elapsed,
+            selected_before_materialize,
+            frontier.selected.len(),
+            materialize_elapsed
+        );
+    }
 
     Ok(frontier)
 }
@@ -1028,6 +1087,7 @@ fn build_replacement(candidate: &BubbleCandidate, config: &ResolutionConfig) -> 
             log::debug!("POASTA replacement failed; falling back to SPOA: {err}");
             build_poa_replacement(candidate, config)
         }),
+        ResolutionMethod::Biwfa => build_biwfa_seqwish_replacement(candidate, config),
     }
 }
 
@@ -1153,6 +1213,98 @@ fn build_poasta_replacement(
     }
 
     Ok(replacement)
+}
+
+fn build_biwfa_seqwish_replacement(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+) -> io::Result<Graph> {
+    let headers: Vec<String> = candidate
+        .ranges
+        .iter()
+        .enumerate()
+        .map(|(i, range)| format!("__impg_bubble_path{}_{}", range.path_idx, i))
+        .collect();
+    let sequences = headers
+        .iter()
+        .cloned()
+        .zip(candidate.ranges.iter().map(|range| range.sequence.clone()))
+        .collect::<Vec<_>>();
+
+    let mut graph_config = crate::commands::graph::GraphBuildConfig::default();
+    graph_config.num_threads = rayon::current_num_threads().max(1);
+    graph_config.show_progress = false;
+    graph_config.no_filter = true;
+    graph_config.min_match_len = 1;
+    graph_config.repeat_max = 0;
+    graph_config.min_repeat_dist = 0;
+    graph_config.transclose_batch = 1_000_000;
+
+    // seqwish keeps process-global tempfile state, so replacement graph
+    // induction must be serialized even while candidate discovery/materialize
+    // remains parallel. The expensive BiWFA pair alignment inside the helper is
+    // still rayon-parallel.
+    let lock = SEQWISH_REPLACEMENT_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock
+        .lock()
+        .map_err(|_| io::Error::other("seqwish replacement lock is poisoned"))?;
+    let gfa = crate::syng_graph::build_gfa_syng_native_from_sequences(&sequences, &graph_config)?;
+    drop(_guard);
+
+    let polished = polish_replacement_gfa(&gfa, config)?;
+    let mut replacement = parse_gfa(&polished)?;
+    order_replacement_paths(&mut replacement, &headers)?;
+    validate_replacement_paths(&replacement, candidate, "BiWFA/seqwish")?;
+    Ok(replacement)
+}
+
+fn polish_replacement_gfa(gfa: &str, config: &ResolutionConfig) -> io::Result<String> {
+    if config.polish_iterations == 0 {
+        return Ok(gfa.to_string());
+    }
+    let polish_config = ResolutionConfig {
+        max_iterations: config.polish_iterations,
+        method: ResolutionMethod::Poa,
+        max_bubble_span: 0,
+        max_traversal_len: config.polish_max_traversal_len,
+        max_median_traversal_len: config.polish_max_median_traversal_len,
+        max_total_sequence: config.polish_max_total_sequence,
+        max_traversals: config.polish_max_traversals,
+        polish_iterations: 0,
+        polish_max_traversal_len: config.polish_max_traversal_len,
+        polish_max_median_traversal_len: config.polish_max_median_traversal_len,
+        polish_max_total_sequence: config.polish_max_total_sequence,
+        polish_max_traversals: config.polish_max_traversals,
+        scoring_params: config.scoring_params,
+    };
+    resolve_gfa_bubbles_quiet(gfa, &polish_config).map(|resolved| resolved.gfa)
+}
+
+fn validate_replacement_paths(
+    replacement: &Graph,
+    candidate: &BubbleCandidate,
+    method: &str,
+) -> io::Result<()> {
+    if replacement.paths.len() != candidate.ranges.len() {
+        return Err(io::Error::other(format!(
+            "{method} replacement emitted {} paths for {} traversals",
+            replacement.paths.len(),
+            candidate.ranges.len()
+        )));
+    }
+
+    for (idx, range) in candidate.ranges.iter().enumerate() {
+        let observed = path_sequence(replacement, &replacement.paths[idx])?;
+        if observed != range.sequence {
+            return Err(io::Error::other(format!(
+                "{method} replacement path {} changed sequence length {} -> {}",
+                idx,
+                range.sequence.len(),
+                observed.len()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn add_poasta_sequences<C>(
@@ -1432,6 +1584,33 @@ P\tins\t1+,2+,3+\t*
             gfa,
             &ResolutionConfig {
                 method: ResolutionMethod::Poasta,
+                ..ResolutionConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert_eq!(resolved.stats.resolved, 1);
+    }
+
+    #[test]
+    fn resolves_insertion_bubble_with_biwfa_seqwish_without_changing_path_sequences() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tAC
+S\t2\tGGG
+S\t3\tTA
+L\t1\t+\t3\t+\t0M
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t3\t+\t0M
+P\tref\t1+,3+\t*
+P\tins\t1+,2+,3+\t*
+";
+        let before = seq_map(gfa);
+        let resolved = resolve_gfa_bubbles(
+            gfa,
+            &ResolutionConfig {
+                method: ResolutionMethod::Biwfa,
+                max_median_traversal_len: 10_000,
                 ..ResolutionConfig::default()
             },
         )

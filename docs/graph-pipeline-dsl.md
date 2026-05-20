@@ -110,6 +110,7 @@ syng,k=63,s=8,seed=7
 seqwish,min-match-len=70,sparse-factor=0.001
 pggb,window=20k
 crush,method=auto,max-median-traversal-len=1k,max-traversal-len=10k
+crush,method=biwfa,max-median-traversal-len=10k,polish-max-median-traversal-len=256
 ```
 
 Unknown parameters should be errors, not warnings. Silent ignoring would make
@@ -156,6 +157,13 @@ coordinate guard rather than the main runtime budget.
 `method=auto` currently uses the global/end-to-end SPOA-backed `poa` resolver.
 `method=poasta` is available for explicit experiments, but it is not the
 default until the POASTA GFA export path is proven to preserve clipped `W`
-walks exactly through impg's rewrite step. The intended next tier is a
-SweepGA/FastGA + filtering + seqwish resolver for bubbles that are too large
-for direct POA.
+walks exactly through impg's rewrite step.
+
+`method=biwfa` is the coarse condenser path. It runs full-length BiWFA on a
+tree/neighbor/random sparse pair set for the selected POVU bubble traversals,
+feeds those PAF alignments to seqwish, then runs one small-scale SPOA polish
+pass over the induced replacement graph. The two scales are intentionally
+separate: `max-median-traversal-len` controls which biological bubble
+traversals may be induced by BiWFA/seqwish, while
+`polish-max-median-traversal-len` controls the tiny STR/indel tangles we are
+willing to clean inside that induced graph.
