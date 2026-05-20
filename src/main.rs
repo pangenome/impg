@@ -4874,10 +4874,15 @@ fn run() -> io::Result<()> {
                                         syng_extension,
                                     )?
                                 };
-                                let query_intervals: Vec<coitrees::Interval<u32>> = intervals
-                                    .iter()
-                                    .filter_map(|iv| syng_interval_to_coitree(iv, wrapper.seq_index()))
-                                    .collect();
+                                let query_intervals = syng_intervals_to_merged_query_intervals(
+                                    &intervals,
+                                    target_name,
+                                    *range_start,
+                                    *range_end,
+                                    wrapper.seq_index(),
+                                    query.effective_merge_distance(),
+                                    query.merge_strands_for_output(resolved_format),
+                                );
 
                                 if query_intervals.is_empty() {
                                     let mut out = find_output_stream(&output_prefix, output_ext)?;
@@ -4941,10 +4946,15 @@ fn run() -> io::Result<()> {
                                     } else {
                                         query_raw_syng(target_name, window_start, window_end, syng_padding, syng_extension)?
                                     };
-                                    let window_intervals: Vec<Interval<u32>> = intervals
-                                        .iter()
-                                        .filter_map(|iv| syng_interval_to_coitree(iv, wrapper.seq_index()))
-                                        .collect();
+                                    let window_intervals = syng_intervals_to_merged_query_intervals(
+                                        &intervals,
+                                        target_name,
+                                        window_start,
+                                        window_end,
+                                        wrapper.seq_index(),
+                                        query.effective_merge_distance(),
+                                        query.merge_strands_for_output(resolved_format),
+                                    );
                                     info!(
                                         "  [syng sub-window {}] {}:{}-{} → {} intervals",
                                         window_idx, target_name, window_start, window_end,
@@ -5003,10 +5013,15 @@ fn run() -> io::Result<()> {
                                 } else {
                                     query_raw_syng(target_name, *range_start, *range_end, syng_padding, syng_extension)?
                                 };
-                                let query_intervals: Vec<coitrees::Interval<u32>> = intervals
-                                    .iter()
-                                    .filter_map(|iv| syng_interval_to_coitree(iv, wrapper.seq_index()))
-                                    .collect();
+                                let query_intervals = syng_intervals_to_merged_query_intervals(
+                                    &intervals,
+                                    target_name,
+                                    *range_start,
+                                    *range_end,
+                                    wrapper.seq_index(),
+                                    query.effective_merge_distance(),
+                                    query.merge_strands_for_output(resolved_format),
+                                );
 
                                 if query_intervals.is_empty() {
                                     let mut out = find_output_stream(&output_prefix, output_ext)?;
@@ -8664,12 +8679,22 @@ fn syng_intervals_to_adjusted(
         .collect()
 }
 
-fn syng_interval_to_coitree(
-    iv: &impg::syng::HomologousInterval,
+fn syng_intervals_to_merged_query_intervals(
+    intervals: &[impg::syng::HomologousInterval],
+    query_name: &str,
+    range_start: i32,
+    range_end: i32,
     seq_index: &SequenceIndex,
-) -> Option<Interval<u32>> {
-    let id = seq_index.get_id(&iv.genome)?;
-    Some(Interval::new(iv.start as i32, iv.end as i32, id))
+    merge_distance: i32,
+    merge_strands: bool,
+) -> Vec<Interval<u32>> {
+    let mut adjusted =
+        syng_intervals_to_adjusted(intervals, query_name, range_start, range_end, seq_index);
+    merge_query_adjusted_intervals(&mut adjusted, merge_distance, merge_strands);
+    adjusted
+        .into_iter()
+        .map(|(query_interval, _, _)| query_interval)
+        .collect()
 }
 
 fn output_results_bed(
@@ -10139,6 +10164,53 @@ mod tests {
         let opts = minimal_query_opts(None, true);
         opts.validate_merge_distance("query").unwrap();
         assert_eq!(opts.effective_merge_distance(), -1);
+    }
+
+    #[test]
+    fn test_syng_gfa_intervals_are_merged_before_graph_build() {
+        let mut seq_index = SequenceIndex::new();
+        seq_index.get_or_insert_id("GRCh38#0#chr1", Some(1_000));
+        seq_index.get_or_insert_id("sample#1#ctg", Some(1_000));
+        let intervals = vec![
+            impg::syng::HomologousInterval {
+                genome: "sample#1#ctg".to_string(),
+                start: 10,
+                end: 100,
+                strand: '+',
+                cigar: None,
+            },
+            impg::syng::HomologousInterval {
+                genome: "sample#1#ctg".to_string(),
+                start: 150,
+                end: 220,
+                strand: '+',
+                cigar: None,
+            },
+        ];
+
+        let merged = syng_intervals_to_merged_query_intervals(
+            &intervals,
+            "GRCh38#0#chr1",
+            0,
+            300,
+            &seq_index,
+            100,
+            true,
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].first, 10);
+        assert_eq!(merged[0].last, 220);
+
+        let unmerged = syng_intervals_to_merged_query_intervals(
+            &intervals,
+            "GRCh38#0#chr1",
+            0,
+            300,
+            &seq_index,
+            10,
+            true,
+        );
+        assert_eq!(unmerged.len(), 2);
     }
 
     #[test]
