@@ -758,10 +758,14 @@ fn dedupe_strand_overlaps(
     out
 }
 
-/// Default minimum anchor count per chain for emission. Chains with
-/// fewer anchors (singletons = 1) are filtered out — they have no
-/// mutual-best colinear partner and are the weakest possible evidence.
-pub const DEFAULT_MIN_CHAIN_ANCHORS: usize = 2;
+/// Default minimum anchor count per chain for emission.
+///
+/// Bounded GBWT-walk seeds already carry several consecutive syncmers (the CLI
+/// default is 5), so a threshold of 2 lets one weak exact island through. A
+/// 20-anchor default requires multiple seed islands before a chain can project
+/// a locus-scale interval, which suppresses paralog/repeat noise in loci such
+/// as AMY while still auto-relaxing for very short queries below.
+pub const DEFAULT_MIN_CHAIN_ANCHORS: usize = 20;
 
 /// Run one hop of syng-seeded homology query.
 pub fn one_hop(

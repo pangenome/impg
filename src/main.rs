@@ -3502,12 +3502,11 @@ GFA engine shorthand:
 
         /// Minimum anchor count for a syng chain to be emitted. Chains
         /// with fewer anchors than this are dropped at emission. Default
-        /// 2 filters singletons (one-anchor chains with no colinear
-        /// mutual-best partner — weakest possible evidence, mostly
-        /// noise in repeat-dense regions). Set to 1 to keep singletons
-        /// (useful when you want every syncmer match reported).
+        /// 20 requires support from multiple bounded GBWT-walk seed islands;
+        /// lower this for exploratory local-chain discovery or very sparse
+        /// indexes.
         #[arg(help_heading = "Syng input")]
-        #[clap(long, value_parser, default_value_t = 2)]
+        #[clap(long, value_parser, default_value_t = impg::syng_transitive::DEFAULT_MIN_CHAIN_ANCHORS)]
         syng_min_chain_anchors: usize,
 
         /// Minimum chain query-extent as a fraction of the queried
