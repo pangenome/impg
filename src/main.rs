@@ -3912,7 +3912,7 @@ GFA engine shorthand:
             alias = "iterations",
             alias = "max-rounds",
             value_parser = parse_usize_size,
-            default_value = "512"
+            default_value = "64"
         )]
         max_iterations: usize,
 

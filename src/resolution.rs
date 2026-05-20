@@ -56,7 +56,7 @@ impl ResolutionMethod {
     }
 }
 
-pub const DEFAULT_MAX_ITERATIONS: usize = 512;
+pub const DEFAULT_MAX_ITERATIONS: usize = 64;
 /// By default, do not cap by rooted path span.
 ///
 /// `max_bubble_span` is a POVU root-path coordinate guard. The root is currently
