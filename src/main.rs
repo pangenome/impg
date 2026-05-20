@@ -3915,7 +3915,7 @@ GFA engine shorthand:
             alias = "iterations",
             alias = "max-rounds",
             value_parser = parse_usize_size,
-            default_value = "64"
+            default_value = "1"
         )]
         max_iterations: usize,
 
@@ -10620,6 +10620,7 @@ mod tests {
                 assert_eq!(crush.max_median_traversal_len, 1_000);
                 assert_eq!(crush.max_traversal_len, 10_000);
                 assert_eq!(crush.max_traversals, 10_000);
+                assert_eq!(crush.max_iterations, 1);
             }
             _ => panic!("expected query command"),
         }

@@ -56,7 +56,8 @@ impl ResolutionMethod {
     }
 }
 
-pub const DEFAULT_MAX_ITERATIONS: usize = 64;
+/// One frontier round is the fast default. More rounds are explicit polishing.
+pub const DEFAULT_MAX_ITERATIONS: usize = 1;
 /// By default, do not cap by rooted path span.
 ///
 /// `max_bubble_span` is a POVU root-path coordinate guard. The root is currently
