@@ -72,7 +72,7 @@ gzp = "1.0.1"
 # this impg tree just calls them. Handles 1 _or many_ input FASTAs.
 sweepga = { git = "https://github.com/pangenome/sweepga", rev = "ddd31d39b6a68fc972025b048076032341b66835", default-features = false }
 seqwish = { git = "https://github.com/pangenome/seqwish", branch = "rust-2" }
-allwave = { git = "https://github.com/pangenome/allwave", branch = "eg/remove-edlib-orientation", default-features = false }
+allwave = { git = "https://github.com/pangenome/allwave", rev = "dd939bfcf57f99031325979425a303b853692988", default-features = false }
 
 # Dependencies for graph sorting
 gfasort = { git = "https://github.com/pangenome/gfasort", rev = "f15d8ebfdc632af2333f277cb9da0748d8fba7aa" }

@@ -39,13 +39,13 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 [[package]]
 name = "allwave"
 version = "0.1.0"
-source = "git+https://github.com/pangenome/allwave?branch=eg%2Fremove-edlib-orientation#8734cbfadfcf6011c963e2cb6bfe827978e9ce12"
+source = "git+https://github.com/pangenome/allwave?rev=dd939bfcf57f99031325979425a303b853692988#dd939bfcf57f99031325979425a303b853692988"
 dependencies = [
  "atty",
  "bio",
  "clap",
  "indicatif 0.17.11",
- "lib_wfa2 0.1.0 (git+https://github.com/ekg/lib_wfa2?branch=eg%2Flibrary-only-build)",
+ "lib_wfa2 0.1.0 (git+https://github.com/ekg/lib_wfa2?rev=28f4c67ed93979c9114b55dc7ebc58376af09c04)",
  "noodles 0.94.0",
  "rand 0.8.5",
  "rayon",
@@ -1749,7 +1749,7 @@ dependencies = [
 [[package]]
 name = "lib_wfa2"
 version = "0.1.0"
-source = "git+https://github.com/ekg/lib_wfa2?branch=eg%2Flibrary-only-build#435901c88704a68a80a476b07667579f16360df9"
+source = "git+https://github.com/ekg/lib_wfa2?rev=28f4c67ed93979c9114b55dc7ebc58376af09c04#28f4c67ed93979c9114b55dc7ebc58376af09c04"
 
 [[package]]
 name = "lib_wfa2"
