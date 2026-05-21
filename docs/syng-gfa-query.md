@@ -207,6 +207,10 @@ same staged syntax.
 `gfa:syng:crush,method=auto,max-median-traversal-len=1k` emits blunt syng GFA
 and then runs exact path-preserving bubble resolution; see
 `docs/graph-pipeline-dsl.md`.
+Crush methods include `poa`, `biwfa`, `allwave`, and `sweepga`; for example,
+`gfa:syng:crush,method=allwave,k-nearest=5,k-farthest=2` uses AllWave's
+many-sequence pair selection and Mash orientation detection inside each
+selected POVU bubble.
 For syng GFA output, `impg` then runs an internal gfasort pass by default using
 pipeline `Ygs` (path-guided SGD, grooming, topological ordering). The pipeline
 can be changed with a sort stage, for example

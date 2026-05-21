@@ -13,7 +13,7 @@ use povu::native_gfa::{Step as PovuStep, Strand as PovuStrand};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeSet;
-use std::io;
+use std::io::{self, Read};
 use std::time::Instant;
 
 /// Configuration for exact path-preserving bubble resolution.
@@ -47,6 +47,24 @@ pub struct ResolutionConfig {
     pub polish_max_median_traversal_len: usize,
     pub polish_max_total_sequence: usize,
     pub polish_max_traversals: usize,
+    /// Pair-sampling nearest-neighbor count for many-sequence pairwise engines.
+    pub pair_k_nearest: usize,
+    /// Pair-sampling farthest-neighbor count for diversity/stranger joins.
+    pub pair_k_farthest: usize,
+    /// Deterministic random pair fraction added after tree/kNN sampling.
+    pub pair_random_fraction: f64,
+    /// Mash k-mer size for pair selection.
+    pub pair_mash_k: usize,
+    /// SweepGA aligner backend used by `method=sweepga`.
+    pub sweepga_aligner: String,
+    /// SweepGA/FastGA k-mer frequency.
+    pub sweepga_kmer_frequency: usize,
+    /// SweepGA minimum alignment length.
+    pub sweepga_min_aln_length: u64,
+    /// SweepGA wfmash percent identity. `None` lets wfmash auto-estimate.
+    pub sweepga_map_pct_identity: Option<String>,
+    /// Skip SweepGA post-alignment filtering and feed selected pair alignments directly.
+    pub sweepga_no_filter: bool,
     /// SPOA scoring parameters: (match, mismatch, gap_open, gap_ext, gap_open2, gap_ext2).
     pub scoring_params: (u8, u8, u8, u8, u8, u8),
 }
@@ -57,6 +75,8 @@ pub enum ResolutionMethod {
     Poa,
     Poasta,
     Biwfa,
+    Allwave,
+    Sweepga,
 }
 
 impl ResolutionMethod {
@@ -66,6 +86,8 @@ impl ResolutionMethod {
             "poa" | "spoa" => Some(Self::Poa),
             "poasta" => Some(Self::Poasta),
             "biwfa" | "wfa" => Some(Self::Biwfa),
+            "allwave" | "aw" => Some(Self::Allwave),
+            "sweepga" | "sw" => Some(Self::Sweepga),
             _ => None,
         }
     }
@@ -88,6 +110,12 @@ pub const DEFAULT_POLISH_MAX_TRAVERSAL_LEN: usize = 2_000;
 pub const DEFAULT_POLISH_MAX_MEDIAN_TRAVERSAL_LEN: usize = 256;
 pub const DEFAULT_POLISH_MAX_TOTAL_SEQUENCE: usize = 1_000_000;
 pub const DEFAULT_POLISH_MAX_TRAVERSALS: usize = 10_000;
+pub const DEFAULT_PAIR_K_NEAREST: usize = 3;
+pub const DEFAULT_PAIR_K_FARTHEST: usize = 1;
+pub const DEFAULT_PAIR_RANDOM_FRACTION: f64 = 0.01;
+pub const DEFAULT_PAIR_MASH_K: usize = 15;
+pub const DEFAULT_SWEEPGA_KMER_FREQUENCY: usize = 10;
+pub const DEFAULT_SWEEPGA_MIN_ALN_LENGTH: u64 = 0;
 
 impl Default for ResolutionConfig {
     fn default() -> Self {
@@ -104,6 +132,15 @@ impl Default for ResolutionConfig {
             polish_max_median_traversal_len: DEFAULT_POLISH_MAX_MEDIAN_TRAVERSAL_LEN,
             polish_max_total_sequence: DEFAULT_POLISH_MAX_TOTAL_SEQUENCE,
             polish_max_traversals: DEFAULT_POLISH_MAX_TRAVERSALS,
+            pair_k_nearest: DEFAULT_PAIR_K_NEAREST,
+            pair_k_farthest: DEFAULT_PAIR_K_FARTHEST,
+            pair_random_fraction: DEFAULT_PAIR_RANDOM_FRACTION,
+            pair_mash_k: DEFAULT_PAIR_MASH_K,
+            sweepga_aligner: "fastga".to_string(),
+            sweepga_kmer_frequency: DEFAULT_SWEEPGA_KMER_FREQUENCY,
+            sweepga_min_aln_length: DEFAULT_SWEEPGA_MIN_ALN_LENGTH,
+            sweepga_map_pct_identity: None,
+            sweepga_no_filter: true,
             scoring_params: (1, 4, 6, 2, 26, 1),
         }
     }
@@ -1085,7 +1122,157 @@ fn build_replacement(candidate: &BubbleCandidate, config: &ResolutionConfig) -> 
             build_poa_replacement(candidate, config)
         }),
         ResolutionMethod::Biwfa => build_biwfa_inmemory_replacement(candidate, config),
+        ResolutionMethod::Allwave => build_allwave_seqwish_replacement(candidate, config),
+        ResolutionMethod::Sweepga => build_sweepga_seqwish_replacement(candidate, config),
     }
+}
+
+fn candidate_named_sequences(candidate: &BubbleCandidate) -> (Vec<String>, Vec<(String, Vec<u8>)>) {
+    let headers: Vec<String> = candidate
+        .ranges
+        .iter()
+        .enumerate()
+        .map(|(i, range)| format!("__impg_bubble_path{}_{}", range.path_idx, i))
+        .collect();
+    let seqs = headers
+        .iter()
+        .cloned()
+        .zip(candidate.ranges.iter().map(|range| range.sequence.clone()))
+        .collect();
+    (headers, seqs)
+}
+
+fn seqwish_replacement_config(
+    _config: &ResolutionConfig,
+) -> crate::commands::graph::GraphBuildConfig {
+    crate::commands::graph::GraphBuildConfig {
+        num_threads: rayon::current_num_threads().max(1),
+        show_progress: false,
+        min_aln_length: 0,
+        input_paf: None,
+        no_filter: true,
+        sparsify: sweepga::knn_graph::SparsificationStrategy::None,
+        ..crate::commands::graph::GraphBuildConfig::default()
+    }
+}
+
+fn finalize_pairwise_induced_replacement(
+    gfa: String,
+    headers: &[String],
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+    method: &str,
+) -> io::Result<Graph> {
+    let compacted = unchop_gfa(&gfa)?;
+    let mut replacement = parse_gfa(&compacted)?;
+    order_replacement_paths(&mut replacement, headers)?;
+    if config.polish_iterations > 0 {
+        let polished = polish_replacement_gfa(&render_graph(&replacement), config)?;
+        replacement = parse_gfa(&polished)?;
+        order_replacement_paths(&mut replacement, headers)?;
+    }
+    validate_replacement_paths(&replacement, candidate, method)?;
+    Ok(replacement)
+}
+
+fn build_allwave_seqwish_replacement(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+) -> io::Result<Graph> {
+    let (headers, seqs) = candidate_named_sequences(candidate);
+    let sequences: Vec<allwave::Sequence> = seqs
+        .iter()
+        .map(|(id, seq)| allwave::Sequence {
+            id: id.clone(),
+            seq: seq.clone(),
+        })
+        .collect();
+
+    let (_, mismatch, gap_open, gap_extend, gap_open2, gap_extend2) = config.scoring_params;
+    let params = allwave::AlignmentParams {
+        match_score: 0,
+        mismatch_penalty: mismatch as i32,
+        gap_open: gap_open as i32,
+        gap_extend: gap_extend as i32,
+        gap2_open: Some(gap_open2 as i32),
+        gap2_extend: Some(gap_extend2 as i32),
+        max_divergence: None,
+    };
+    let sparsification = allwave::SparsificationStrategy::TreeSampling(
+        config.pair_k_nearest,
+        config.pair_k_farthest,
+        config.pair_random_fraction,
+        Some(config.pair_mash_k),
+    );
+    let aligner =
+        allwave::AllPairIterator::with_options(&sequences, params, true, true, sparsification);
+    let pair_count = aligner.pair_count();
+    let mut lines: Vec<String> = aligner
+        .into_par_iter()
+        .map(|alignment| allwave::alignment_to_paf(&alignment, &sequences))
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    lines.sort_unstable();
+    let paf = if lines.is_empty() {
+        String::new()
+    } else {
+        let mut out = lines.join("\n");
+        out.push('\n');
+        out
+    };
+    log::debug!(
+        "crush allwave: {} traversal(s), {} selected pair alignment(s), {} PAF byte(s)",
+        sequences.len(),
+        pair_count,
+        paf.len()
+    );
+
+    let graph_config = seqwish_replacement_config(config);
+    let gfa = crate::syng_graph::build_gfa_from_paf_and_sequences(&seqs, &paf, &graph_config)?;
+    finalize_pairwise_induced_replacement(gfa, &headers, candidate, config, "AllWave/seqwish")
+}
+
+fn build_sweepga_seqwish_replacement(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+) -> io::Result<Graph> {
+    let (headers, seqs) = candidate_named_sequences(candidate);
+    let named: Vec<(String, &[u8])> = seqs
+        .iter()
+        .map(|(name, seq)| (name.clone(), seq.as_slice()))
+        .collect();
+    let align_config = sweepga::library_api::SweepgaAlignConfig {
+        num_threads: rayon::current_num_threads().max(1),
+        kmer_frequency: config.sweepga_kmer_frequency,
+        min_aln_length: config.sweepga_min_aln_length,
+        no_filter: config.sweepga_no_filter,
+        sparsify: sweepga::knn_graph::SparsificationStrategy::TreeSampling(
+            config.pair_k_nearest,
+            config.pair_k_farthest,
+            config.pair_random_fraction,
+        ),
+        mash_params: sweepga::knn_graph::MashParams {
+            kmer_size: config.pair_mash_k,
+            ..sweepga::knn_graph::MashParams::default()
+        },
+        aligner: config.sweepga_aligner.clone(),
+        map_pct_identity: config.sweepga_map_pct_identity.clone(),
+        ..sweepga::library_api::SweepgaAlignConfig::default()
+    };
+    let paf_file = sweepga::library_api::sweepga_align(&named, &align_config)
+        .map_err(|err| io::Error::other(format!("SweepGA replacement alignment failed: {err}")))?;
+    let mut paf = String::new();
+    std::fs::File::open(paf_file.path())?.read_to_string(&mut paf)?;
+    log::debug!(
+        "crush sweepga: {} traversal(s), {} PAF byte(s) from {} backend",
+        seqs.len(),
+        paf.len(),
+        config.sweepga_aligner
+    );
+
+    let graph_config = seqwish_replacement_config(config);
+    let gfa = crate::syng_graph::build_gfa_from_paf_and_sequences(&seqs, &paf, &graph_config)?;
+    finalize_pairwise_induced_replacement(gfa, &headers, candidate, config, "SweepGA/seqwish")
 }
 
 fn build_poa_replacement(
@@ -1453,6 +1640,7 @@ fn polish_replacement_gfa(gfa: &str, config: &ResolutionConfig) -> io::Result<St
         polish_max_total_sequence: config.polish_max_total_sequence,
         polish_max_traversals: config.polish_max_traversals,
         scoring_params: config.scoring_params,
+        ..ResolutionConfig::default()
     };
     resolve_gfa_bubbles_quiet(gfa, &polish_config).map(|resolved| resolved.gfa)
 }
@@ -1787,6 +1975,33 @@ P\tins\t1+,2+,3+\t*
             gfa,
             &ResolutionConfig {
                 method: ResolutionMethod::Biwfa,
+                max_median_traversal_len: 10_000,
+                ..ResolutionConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert_eq!(resolved.stats.resolved, 1);
+    }
+
+    #[test]
+    fn resolves_insertion_bubble_with_allwave_without_changing_path_sequences() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tAC
+S\t2\tGGG
+S\t3\tTA
+L\t1\t+\t3\t+\t0M
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t3\t+\t0M
+P\tref\t1+,3+\t*
+P\tins\t1+,2+,3+\t*
+";
+        let before = seq_map(gfa);
+        let resolved = resolve_gfa_bubbles(
+            gfa,
+            &ResolutionConfig {
+                method: ResolutionMethod::Allwave,
                 max_median_traversal_len: 10_000,
                 ..ResolutionConfig::default()
             },

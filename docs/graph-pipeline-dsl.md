@@ -111,6 +111,8 @@ seqwish,min-match-len=70,sparse-factor=0.001
 pggb,window=20k
 crush,method=auto,max-median-traversal-len=1k,max-traversal-len=10k
 crush,method=biwfa,max-median-traversal-len=10k,polish-max-median-traversal-len=256
+crush,method=allwave,k-nearest=5,k-farthest=2,random-fraction=0.05,mash-k=17
+crush,method=sweepga,aligner=fastga,kmer-frequency=42,no-filter=true
 ```
 
 Unknown parameters should be errors, not warnings. Silent ignoring would make
@@ -168,3 +170,18 @@ scales are intentionally separate: `max-median-traversal-len` controls which
 biological bubble traversals may be induced by BiWFA, while
 `polish-max-median-traversal-len` controls the tiny STR/indel tangles we are
 willing to clean inside that induced graph.
+
+`method=allwave` is the many-sequence BiWFA path. It gives every selected
+POVU bubble traversal to AllWave at once, uses AllWave's tree/kNN pair
+selection and strand-specific Mash orientation detection, emits oriented PAF,
+and induces the replacement graph through seqwish. This is useful when a bubble
+has many homologous traversals and root-star alignment is too biased. The
+replacement is still exact-path validated after graph induction.
+
+`method=sweepga` uses SweepGA as the replaceable alignment provider before the
+same seqwish induction and validation step. It is intentionally separate from
+`method=allwave`: SweepGA has different filtering/scaling semantics, and its
+knobs can be used to leave harder bubbles in the graph for a later small SPOA
+crush pass. The shared pair-sampling knobs are `k-nearest`, `k-farthest`,
+`random-fraction`, and `mash-k`; SweepGA-specific knobs include `aligner`,
+`kmer-frequency`, `min-aln-length`, `map-pct-identity`, and `no-filter`.

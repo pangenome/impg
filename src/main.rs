@@ -2256,6 +2256,20 @@ fn parse_usize_size_engine_param(raw: &str, key: &str, value: &str) -> io::Resul
     })
 }
 
+fn parse_bool_engine_param(raw: &str, key: &str, value: &str) -> io::Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': {}='{}' is not a boolean",
+                raw, key, value
+            ),
+        )),
+    }
+}
+
 fn parse_crush_stage(
     raw: &str,
     stage: &GraphPipelineStage,
@@ -2312,13 +2326,53 @@ fn parse_crush_stage(
                 config.polish_max_traversals =
                     parse_usize_size_engine_param(raw, &param.key, &param.value)?;
             }
+            "k-nearest" | "k-near" | "near" | "tree-near" => {
+                config.pair_k_nearest =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "k-farthest" | "k-far" | "far" | "tree-far" => {
+                config.pair_k_farthest =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "random-fraction" | "random" | "tree-random" => {
+                config.pair_random_fraction = param.value.parse().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': {}='{}' is not a valid fraction",
+                            raw, param.key, param.value
+                        ),
+                    )
+                })?;
+            }
+            "mash-k" | "mash-kmer" | "kmer-size" => {
+                config.pair_mash_k =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "sweepga-aligner" | "aligner" => {
+                config.sweepga_aligner = param.value.clone();
+            }
+            "sweepga-kmer-frequency" | "kmer-frequency" | "fastga-frequency" => {
+                config.sweepga_kmer_frequency =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "sweepga-min-aln-length" | "min-aln-length" => {
+                config.sweepga_min_aln_length =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)? as u64;
+            }
+            "sweepga-map-pct-identity" | "map-pct-identity" => {
+                config.sweepga_map_pct_identity = Some(param.value.clone());
+            }
+            "sweepga-no-filter" | "no-filter" => {
+                config.sweepga_no_filter = parse_bool_engine_param(raw, &param.key, &param.value)?;
+            }
             "method" => {
                 let Some(method) = impg::resolution::ResolutionMethod::parse_name(&param.value)
                 else {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, poa, poasta, or biwfa)",
+                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, poa, poasta, biwfa, allwave, or sweepga)",
                             raw, param.value
                         ),
                     ));
@@ -2350,6 +2404,33 @@ fn parse_crush_stage(
                 "Invalid --gfa-engine '{}': crush max-traversals must be > 0",
                 raw
             ),
+        ));
+    }
+    if config.pair_k_nearest == 0
+        && config.pair_k_farthest == 0
+        && config.pair_random_fraction <= 0.0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': crush pair sampling would select no pairs",
+                raw
+            ),
+        ));
+    }
+    if !(0.0..=1.0).contains(&config.pair_random_fraction) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': random-fraction must be between 0 and 1",
+                raw
+            ),
+        ));
+    }
+    if !(3..=31).contains(&config.pair_mash_k) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Invalid --gfa-engine '{}': mash-k must be between 3 and 31", raw),
         ));
     }
     Ok(config)
@@ -3616,6 +3697,8 @@ GFA engine shorthand:
   name the aligner prefix, e.g. `-o gfa:wfmash:seqwish`,
   `-o gfa:fastga:pggb`, or `-o gfa:sweepga:seqwish`. Add `:crush` to run
   exact path-preserving blunt-graph resolution, e.g. `-o gfa:syng:crush`.
+  Crush methods include poa, biwfa, allwave, and sweepga; e.g.
+  `-o gfa:syng:crush,method=allwave,k-nearest=5,k-farthest=2`.
 ")]
     Query {
         // --- Input ---
@@ -4113,9 +4196,45 @@ GFA engine shorthand:
         #[clap(long, value_parser = parse_usize_size, default_value = "10k")]
         polish_max_traversals: usize,
 
-        /// Resolver method: auto, poa, poasta, or biwfa
+        /// Resolver method: auto, poa, poasta, biwfa, allwave, or sweepga
         #[clap(long, value_parser, default_value = "auto")]
         method: String,
+
+        /// Pair-sampling nearest-neighbor count for allwave/sweepga crush
+        #[clap(long, value_parser = parse_usize_size, default_value = "3")]
+        k_nearest: usize,
+
+        /// Pair-sampling farthest-neighbor count for allwave/sweepga crush
+        #[clap(long, value_parser = parse_usize_size, default_value = "1")]
+        k_farthest: usize,
+
+        /// Deterministic random pair fraction for allwave/sweepga crush
+        #[clap(long, value_parser, default_value = "0.01")]
+        random_fraction: f64,
+
+        /// Mash k-mer size for allwave/sweepga pair selection
+        #[clap(long, value_parser = parse_usize_size, default_value = "15")]
+        mash_k: usize,
+
+        /// SweepGA aligner backend for --method sweepga: fastga or wfmash
+        #[clap(long, value_parser, default_value = "fastga")]
+        sweepga_aligner: String,
+
+        /// SweepGA/FastGA k-mer frequency for --method sweepga
+        #[clap(long, value_parser = parse_usize_size, default_value = "10")]
+        sweepga_kmer_frequency: usize,
+
+        /// SweepGA minimum alignment length for --method sweepga
+        #[clap(long, value_parser = parse_usize_size, default_value = "0")]
+        sweepga_min_aln_length: usize,
+
+        /// SweepGA wfmash percent identity for --method sweepga
+        #[clap(long, value_parser)]
+        sweepga_map_pct_identity: Option<String>,
+
+        /// Skip SweepGA post-alignment filtering for --method sweepga
+        #[clap(long, value_parser, default_value_t = true)]
+        sweepga_no_filter: bool,
 
         #[clap(flatten)]
         common: CommonOpts,
@@ -6813,6 +6932,15 @@ fn run() -> io::Result<()> {
             polish_max_total_sequence,
             polish_max_traversals,
             method,
+            k_nearest,
+            k_farthest,
+            random_fraction,
+            mash_k,
+            sweepga_aligner,
+            sweepga_kmer_frequency,
+            sweepga_min_aln_length,
+            sweepga_map_pct_identity,
+            sweepga_no_filter,
             common,
         } => {
             initialize_threads_and_log(&common);
@@ -6837,9 +6965,27 @@ fn run() -> io::Result<()> {
             let Some(method) = impg::resolution::ResolutionMethod::parse_name(&method) else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "--method must be one of: auto, poa, poasta, biwfa",
+                    "--method must be one of: auto, poa, poasta, biwfa, allwave, sweepga",
                 ));
             };
+            if k_nearest == 0 && k_farthest == 0 && random_fraction <= 0.0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--k-nearest/--k-farthest/--random-fraction would select no pairs",
+                ));
+            }
+            if !(0.0..=1.0).contains(&random_fraction) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--random-fraction must be between 0 and 1",
+                ));
+            }
+            if !(3..=31).contains(&mash_k) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--mash-k must be between 3 and 31",
+                ));
+            }
 
             let mut gfa_text = String::new();
             if gfa == "-" {
@@ -6861,6 +7007,15 @@ fn run() -> io::Result<()> {
                 polish_max_median_traversal_len,
                 polish_max_total_sequence,
                 polish_max_traversals,
+                pair_k_nearest: k_nearest,
+                pair_k_farthest: k_farthest,
+                pair_random_fraction: random_fraction,
+                pair_mash_k: mash_k,
+                sweepga_aligner,
+                sweepga_kmer_frequency,
+                sweepga_min_aln_length: sweepga_min_aln_length as u64,
+                sweepga_map_pct_identity,
+                sweepga_no_filter,
                 ..Default::default()
             };
             let resolved = impg::resolution::resolve_gfa_bubbles(&gfa_text, &config)?;
@@ -11037,6 +11192,7 @@ mod tests {
             "-o gfa:syng:crush:sort,pipeline=Yg",
             "-o vcf:syng",
             "-o gfa:wfmash:seqwish",
+            "Crush methods include poa, biwfa, allwave, and sweepga",
             "`impg syng2gfa` to dump the whole syng syncmer graph",
         ] {
             assert!(
@@ -11215,6 +11371,71 @@ mod tests {
                 assert_eq!(crush.max_iterations, 7);
                 assert_eq!(crush.polish_max_median_traversal_len, 128);
                 assert_eq!(crush.polish_iterations, 1);
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_accepts_allwave_crush_params() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush,method=allwave,k-nearest=5,k-farthest=2,random-fraction=0.05,mash-k=17",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                let crush = parsed.crush_config.unwrap();
+                assert_eq!(crush.method, impg::resolution::ResolutionMethod::Allwave);
+                assert_eq!(crush.pair_k_nearest, 5);
+                assert_eq!(crush.pair_k_farthest, 2);
+                assert!((crush.pair_random_fraction - 0.05).abs() < f64::EPSILON);
+                assert_eq!(crush.pair_mash_k, 17);
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_accepts_sweepga_crush_params() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush,method=sweepga,aligner=wfmash,kmer-frequency=42,min-aln-length=1k,map-pct-identity=90,no-filter=false",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                let crush = parsed.crush_config.unwrap();
+                assert_eq!(crush.method, impg::resolution::ResolutionMethod::Sweepga);
+                assert_eq!(crush.sweepga_aligner, "wfmash");
+                assert_eq!(crush.sweepga_kmer_frequency, 42);
+                assert_eq!(crush.sweepga_min_aln_length, 1_000);
+                assert_eq!(crush.sweepga_map_pct_identity.as_deref(), Some("90"));
+                assert!(!crush.sweepga_no_filter);
             }
             _ => panic!("expected query command"),
         }
