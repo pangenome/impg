@@ -53,7 +53,7 @@ onecode = { git = "https://github.com/pangenome/onecode-rs", rev = "38182c7acf7c
 #tpa = { path = "/home/guarracino/git/tpa" }
 tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "49f1801f9e0108c211571fa2614e517009446afe" }
 # Dependencies for 1ALN and TPA formats (for alignments) support
-lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2", rev = "8859b6a214141968f37d9bcb22552408318adda0" }
+lib_wfa2 = { git = "https://github.com/ekg/lib_wfa2", rev = "2f9d9a48addee5185d8ff6ed0594182558d60818" }
 #lib_wfa2 = { path = "/home/guarracino/Dropbox/git//lib_wfa2"}
 #tracepoints = { path = "/home/guarracino/Dropbox/git/tracepoints"}
 tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints", rev = "66a5511b0b84d8502f9d7c99efd150616ff2cae3" }
@@ -72,7 +72,7 @@ gzp = "1.0.1"
 # this impg tree just calls them. Handles 1 _or many_ input FASTAs.
 sweepga = { git = "https://github.com/pangenome/sweepga", rev = "ddd31d39b6a68fc972025b048076032341b66835", default-features = false }
 seqwish = { git = "https://github.com/pangenome/seqwish", branch = "rust-2" }
-allwave = { git = "https://github.com/pangenome/allwave", rev = "dd939bfcf57f99031325979425a303b853692988", default-features = false }
+allwave = { git = "https://github.com/pangenome/allwave", rev = "6b2798aa9fd405abe680cfb1e644331eff9d58e0", default-features = false }
 
 # Dependencies for graph sorting
 gfasort = { git = "https://github.com/pangenome/gfasort", rev = "f15d8ebfdc632af2333f277cb9da0748d8fba7aa" }
@@ -81,6 +81,9 @@ povu = { package = "povu-rs", git = "https://github.com/pangenome/povu", rev = "
 
 [build-dependencies]
 cc = "1"
+
+[patch."https://github.com/AndreaGuarracino/lib_wfa2"]
+lib_wfa2 = { git = "https://github.com/ekg/lib_wfa2", rev = "2f9d9a48addee5185d8ff6ed0594182558d60818" }
 
 [dev-dependencies]
 ahash = "0.8"
