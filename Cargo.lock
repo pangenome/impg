@@ -39,7 +39,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 [[package]]
 name = "allwave"
 version = "0.1.0"
-source = "git+https://github.com/pangenome/allwave?branch=eg%2Foptional-edlib-orientation#e8e51745633d272a4d8339debb9bbff91f17e3db"
+source = "git+https://github.com/pangenome/allwave?branch=eg%2Fremove-edlib-orientation#b85ed9d9df3f84e9cc768fee2d13384085fd9756"
 dependencies = [
  "atty",
  "bio",
