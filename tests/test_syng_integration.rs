@@ -174,9 +174,8 @@ fn create_test_agc(path: &str) {
         }),
     ];
 
-    let mut compressor =
-        StreamingQueueCompressor::with_splitters(path, config, AHashSet::new())
-            .expect("Failed to create AGC compressor");
+    let mut compressor = StreamingQueueCompressor::with_splitters(path, config, AHashSet::new())
+        .expect("Failed to create AGC compressor");
 
     for (sample, contig, data) in samples {
         compressor
@@ -367,7 +366,11 @@ fn test_syng_render_bundle_preserves_source_namespace() {
 
     let namespace = std::fs::read_to_string(bundle.join("namespace.json")).unwrap();
     assert!(namespace.contains("sampleA#0#chr1"), "{}", namespace);
-    assert!(namespace.contains("\"sample\": \"sampleA\""), "{}", namespace);
+    assert!(
+        namespace.contains("\"sample\": \"sampleA\""),
+        "{}",
+        namespace
+    );
     assert!(namespace.contains("\"haplotype\": \"0\""), "{}", namespace);
     assert!(namespace.contains("fragment_001"), "{}", namespace);
     assert!(namespace.contains("\"pansn\": null"), "{}", namespace);
@@ -377,7 +380,11 @@ fn test_syng_render_bundle_preserves_source_namespace() {
     let translation_tsv = std::fs::read_to_string(bundle.join("translation.tsv")).unwrap();
     assert!(translation_tsv.contains("\npath\t"), "{}", translation_tsv);
     assert!(translation_tsv.contains("\nstep\t"), "{}", translation_tsv);
-    assert!(translation_tsv.contains("sampleA#0#chr1"), "{}", translation_tsv);
+    assert!(
+        translation_tsv.contains("sampleA#0#chr1"),
+        "{}",
+        translation_tsv
+    );
 
     let gfa = std::fs::read_to_string(bundle.join("graph.gfa")).unwrap();
     assert!(gfa.starts_with("H\tVN:Z:1.0\n"), "{}", gfa);
@@ -431,7 +438,11 @@ fn test_syng_render_bundle_preserves_source_namespace() {
         String::from_utf8_lossy(&genotype_bundle.stderr)
     );
     let genotype_stdout = String::from_utf8_lossy(&genotype_bundle.stdout);
-    assert!(genotype_stdout.contains("#impg genotype cos"), "{}", genotype_stdout);
+    assert!(
+        genotype_stdout.contains("#impg genotype cos"),
+        "{}",
+        genotype_stdout
+    );
     assert!(
         genotype_stdout.contains("sampleA#0#chr1"),
         "bundle genotype should report rendered paths with source names:\n{}",
@@ -554,11 +565,26 @@ fn test_syng_agc_build_produces_non_empty_index() {
     let meta_path = format!("{}.syng.meta", out_prefix.to_str().unwrap());
 
     assert!(std::path::Path::new(&gbwt_path).exists(), ".1gbwt missing");
-    assert!(std::path::Path::new(&khash_path).exists(), ".1khash missing");
-    assert!(std::path::Path::new(&names_path).exists(), ".syng.names missing");
-    assert!(std::path::Path::new(&spos_path).exists(), ".syng.spos missing");
-    assert!(std::path::Path::new(&pstep_path).exists(), ".syng.pstep missing");
-    assert!(std::path::Path::new(&meta_path).exists(), ".syng.meta missing");
+    assert!(
+        std::path::Path::new(&khash_path).exists(),
+        ".1khash missing"
+    );
+    assert!(
+        std::path::Path::new(&names_path).exists(),
+        ".syng.names missing"
+    );
+    assert!(
+        std::path::Path::new(&spos_path).exists(),
+        ".syng.spos missing"
+    );
+    assert!(
+        std::path::Path::new(&pstep_path).exists(),
+        ".syng.pstep missing"
+    );
+    assert!(
+        std::path::Path::new(&meta_path).exists(),
+        ".syng.meta missing"
+    );
 
     // Key assertion: the GBWT must contain actual vertex data, not just a
     // schema header. The yeast235 bug slipped through because nothing
@@ -619,11 +645,8 @@ fn test_syng_agc_roundtrip_query() {
     );
 
     // Load the index back and run a query on the shared backbone region.
-    let index = impg::syng::SyngIndex::load(
-        out_prefix_str,
-        impg::syng::SyncmerParams::default(),
-    )
-    .expect("Failed to load built AGC-derived syng index");
+    let index = impg::syng::SyngIndex::load(out_prefix_str, impg::syng::SyncmerParams::default())
+        .expect("Failed to load built AGC-derived syng index");
 
     assert_eq!(
         index.name_map.path_to_name.len(),
@@ -704,11 +727,8 @@ fn test_syng_agc_parallel_dictionary_roundtrip_query() {
         String::from_utf8_lossy(&build_output.stderr)
     );
 
-    let index = impg::syng::SyngIndex::load(
-        out_prefix_str,
-        impg::syng::SyncmerParams::default(),
-    )
-    .expect("Failed to load AGC parallel-dictionary syng index");
+    let index = impg::syng::SyngIndex::load(out_prefix_str, impg::syng::SyncmerParams::default())
+        .expect("Failed to load AGC parallel-dictionary syng index");
     let query_name = index
         .name_map
         .path_to_name
@@ -780,10 +800,9 @@ fn test_syng_fasta_build_produces_non_empty_index() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let gbwt_size =
-        std::fs::metadata(format!("{}.1gbwt", out_prefix.to_str().unwrap()))
-            .unwrap()
-            .len();
+    let gbwt_size = std::fs::metadata(format!("{}.1gbwt", out_prefix.to_str().unwrap()))
+        .unwrap()
+        .len();
     assert!(
         gbwt_size > 2000,
         ".1gbwt is only {} bytes from FASTA build",
@@ -841,10 +860,9 @@ fn test_syng_fasta_parallel_dictionary_build_produces_non_empty_index() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let gbwt_size =
-        std::fs::metadata(format!("{}.1gbwt", out_prefix.to_str().unwrap()))
-            .unwrap()
-            .len();
+    let gbwt_size = std::fs::metadata(format!("{}.1gbwt", out_prefix.to_str().unwrap()))
+        .unwrap()
+        .len();
     assert!(
         gbwt_size > 2000,
         ".1gbwt is only {} bytes from parallel FASTA build",
@@ -958,9 +976,18 @@ fn test_syng_map_cli_gaf_and_paf() {
     );
     let gaf_stdout = String::from_utf8_lossy(&gaf.stdout);
     let gaf_lines: Vec<&str> = gaf_stdout.lines().collect();
-    assert_eq!(gaf_lines.len(), 1, "expected one GAF line, got:\n{}", gaf_stdout);
+    assert_eq!(
+        gaf_lines.len(),
+        1,
+        "expected one GAF line, got:\n{}",
+        gaf_stdout
+    );
     let gaf_fields: Vec<&str> = gaf_lines[0].split('\t').collect();
-    assert!(gaf_fields.len() >= 12, "GAF line has too few fields: {}", gaf_lines[0]);
+    assert!(
+        gaf_fields.len() >= 12,
+        "GAF line has too few fields: {}",
+        gaf_lines[0]
+    );
     assert_eq!(gaf_fields[0], "read1");
     assert!(
         gaf_fields[5].contains('>') || gaf_fields[5].contains('<'),
@@ -1039,7 +1066,12 @@ fn test_syng_map_cli_gaf_and_paf() {
     );
     for line in pack_lines.iter().skip(1) {
         let fields: Vec<&str> = line.split('\t').collect();
-        assert_eq!(fields.len(), 2, "pack line should have two fields: {}", line);
+        assert_eq!(
+            fields.len(),
+            2,
+            "pack line should have two fields: {}",
+            line
+        );
         let node_id = fields[0].parse::<u32>().unwrap();
         let count = fields[1].parse::<u64>().unwrap();
         assert!(
@@ -1048,7 +1080,11 @@ fn test_syng_map_cli_gaf_and_paf() {
             node_id,
             pack_stdout
         );
-        assert_eq!(count, 1, "single-read pack count should be 1 for {}", node_id);
+        assert_eq!(
+            count, 1,
+            "single-read pack count should be 1 for {}",
+            node_id
+        );
     }
     let pack_zst_path = dir.join("pack.tsv.zst");
     let pack_zst = Command::new(&bin)
@@ -1184,7 +1220,12 @@ fn test_syng_map_cli_gaf_and_paf() {
         expected_pack_nodes.len()
     );
     for &node_id in &expected_pack_nodes {
-        assert_eq!(dense[(node_id - 1) as usize], 1, "packbin count for {}", node_id);
+        assert_eq!(
+            dense[(node_id - 1) as usize],
+            1,
+            "packbin count for {}",
+            node_id
+        );
     }
 
     let proj_path = dir.join("sample.proj");
@@ -1214,9 +1255,14 @@ fn test_syng_map_cli_gaf_and_paf() {
         String::from_utf8_lossy(&proj.stderr)
     );
     assert!(proj_path.join("manifest.json").exists());
-    assert_eq!(&std::fs::read(proj_path.join("sample.pack")).unwrap()[..8], b"IMPGPKB1");
-    let mut gaf_decoder =
-        zstd::stream::read::Decoder::new(std::fs::File::open(proj_path.join("reads.gaf.zst")).unwrap()).unwrap();
+    assert_eq!(
+        &std::fs::read(proj_path.join("sample.pack")).unwrap()[..8],
+        b"IMPGPKB1"
+    );
+    let mut gaf_decoder = zstd::stream::read::Decoder::new(
+        std::fs::File::open(proj_path.join("reads.gaf.zst")).unwrap(),
+    )
+    .unwrap();
     let mut projected_gaf = String::new();
     {
         use std::io::Read;
@@ -1350,7 +1396,9 @@ fn test_syng_map_cli_gaf_and_paf() {
         String::from_utf8_lossy(&pack_khash_only.stderr)
     );
     assert_eq!(
-        String::from_utf8_lossy(&pack_khash_only.stdout).lines().next(),
+        String::from_utf8_lossy(&pack_khash_only.stdout)
+            .lines()
+            .next(),
         Some("#node_id\tcount"),
         "expected pack header with only .1khash/.meta present"
     );
@@ -1401,7 +1449,9 @@ fn test_syng_map_cli_gaf_and_paf() {
         "parallel GAF mapping should preserve deterministic output order"
     );
     assert_eq!(
-        String::from_utf8_lossy(&gaf_threads_2.stdout).lines().count(),
+        String::from_utf8_lossy(&gaf_threads_2.stdout)
+            .lines()
+            .count(),
         2050,
         "expected one GAF record per repeated query read"
     );
@@ -1711,7 +1761,10 @@ fn test_syng_genotype_cos_cli_permutations() {
             }
         }
     }
-    assert_eq!(checked, 24, "expected to exercise the full genotype CLI matrix");
+    assert_eq!(
+        checked, 24,
+        "expected to exercise the full genotype CLI matrix"
+    );
 
     let genotype_proj = Command::new(&bin)
         .args([
@@ -2290,7 +2343,11 @@ fn test_syng_infer_pack_partitions_and_discovery() {
         .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
         .collect();
     assert_eq!(bed_rows.len(), 2, "target BED top-n 1 should emit two rows");
-    assert!(bed_rows.iter().all(|row| row.ends_with("\tPASS")), "{}", decoded);
+    assert!(
+        bed_rows.iter().all(|row| row.ends_with("\tPASS")),
+        "{}",
+        decoded
+    );
 
     let partitions_path = dir.join("partitions.bed");
     {
@@ -2345,12 +2402,16 @@ fn test_syng_infer_pack_partitions_and_discovery() {
         "ready partition BED should emit one top row per partition"
     );
     assert!(
-        partition_rows.iter().any(|row| row.split('\t').nth(1) == Some("p0")),
+        partition_rows
+            .iter()
+            .any(|row| row.split('\t').nth(1) == Some("p0")),
         "{}",
         partition_stdout
     );
     assert!(
-        partition_rows.iter().any(|row| row.split('\t').nth(1) == Some("p1")),
+        partition_rows
+            .iter()
+            .any(|row| row.split('\t').nth(1) == Some("p1")),
         "{}",
         partition_stdout
     );
@@ -2415,7 +2476,11 @@ fn test_syng_infer_pack_partitions_and_discovery() {
         String::from_utf8_lossy(&infer_discovery.stderr)
     );
     let discovery_stdout = String::from_utf8_lossy(&infer_discovery.stdout);
-    assert!(discovery_stdout.contains("#impg infer"), "{}", discovery_stdout);
+    assert!(
+        discovery_stdout.contains("#impg infer"),
+        "{}",
+        discovery_stdout
+    );
     assert!(
         discovery_stdout
             .lines()
@@ -2580,7 +2645,12 @@ fn test_syng_infer_read_walk_links_phase_recombinant_mosaic() {
         .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
         .map(|line| line.split('\t').collect())
         .collect();
-    assert_eq!(rows.len(), 4, "expected two phases across two partitions:\n{}", mosaic);
+    assert_eq!(
+        rows.len(),
+        4,
+        "expected two phases across two partitions:\n{}",
+        mosaic
+    );
     assert!(
         rows.iter()
             .filter(|row| row[1] == "right")
@@ -2835,8 +2905,10 @@ fn test_syng_infer_cnv_repeated_syncmer_path_calls_duplicated_haplotype() {
         String::from_utf8_lossy(&map.stderr)
     );
 
-    let mut gaf_decoder =
-        zstd::stream::read::Decoder::new(std::fs::File::open(proj_path.join("reads.gaf.zst")).unwrap()).unwrap();
+    let mut gaf_decoder = zstd::stream::read::Decoder::new(
+        std::fs::File::open(proj_path.join("reads.gaf.zst")).unwrap(),
+    )
+    .unwrap();
     let mut gaf = String::new();
     {
         use std::io::Read;
@@ -2961,7 +3033,9 @@ fn test_syng_infer_cnv_repeated_syncmer_path_calls_duplicated_haplotype() {
         mosaic
     );
     assert!(
-        rows.iter().skip(2).any(|row| row[16].parse::<f64>().unwrap() > 0.0),
+        rows.iter()
+            .skip(2)
+            .any(|row| row[16].parse::<f64>().unwrap() > 0.0),
         "repeated-node read walks should still contribute nonzero transition reward:\n{}",
         mosaic
     );
@@ -3208,16 +3282,9 @@ fn test_syng_infer_nested_sv_noisy_low_coverage_phase_blocks() {
     let reads_path = dir.join("complex_noisy_low_coverage_reads.fq");
     {
         let mut f = std::fs::File::create(&reads_path).unwrap();
-        let reads = write_tiled_fastq_with_errors(
-            &mut f,
-            "complex",
-            &hap_complex,
-            650,
-            425,
-            6,
-            173,
-        )
-        .unwrap();
+        let reads =
+            write_tiled_fastq_with_errors(&mut f, "complex", &hap_complex, 650, 425, 6, 173)
+                .unwrap();
         assert!(
             reads <= 6,
             "test should remain low coverage, wrote {} reads",
@@ -3314,7 +3381,9 @@ fn test_syng_infer_nested_sv_noisy_low_coverage_phase_blocks() {
         mosaic
     );
     assert!(
-        rows.iter().skip(1).any(|row| row[16].parse::<f64>().unwrap() > 0.0),
+        rows.iter()
+            .skip(1)
+            .any(|row| row[16].parse::<f64>().unwrap() > 0.0),
         "noisy low-coverage read walks should still contribute transition evidence:\n{}",
         mosaic
     );
@@ -3498,7 +3567,12 @@ fn test_syng_infer_read_walk_emission_resolves_order_decoy() {
         .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
         .map(|line| line.split('\t').collect())
         .collect();
-    assert_eq!(rows.len(), 1, "expected a single stitched interval:\n{}", mosaic);
+    assert_eq!(
+        rows.len(),
+        1,
+        "expected a single stitched interval:\n{}",
+        mosaic
+    );
     assert!(
         rows[0][5] == "sampleRef#0#chr1" && rows[0][19].parse::<f64>().unwrap() > 0.0,
         "whole-read-walk emission should choose the true A-B-A-C-A path and expose support:\n{}",
@@ -3672,7 +3746,10 @@ fn test_syng_infer_paralogous_swapped_copies_avoid_decoy_collapse() {
         .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
         .map(|line| line.split('\t').collect())
         .collect();
-    let ba_rows = rows.iter().filter(|row| row[5] == "sampleBA#0#chr1").count();
+    let ba_rows = rows
+        .iter()
+        .filter(|row| row[5] == "sampleBA#0#chr1")
+        .count();
     assert!(
         ba_rows >= 2,
         "swapped-paralog evidence should copy multiple blocks from sampleBA:\n{}",
@@ -3686,7 +3763,9 @@ fn test_syng_infer_paralogous_swapped_copies_avoid_decoy_collapse() {
         mosaic
     );
     assert!(
-        rows.iter().skip(1).any(|row| row[16].parse::<f64>().unwrap() > 0.0),
+        rows.iter()
+            .skip(1)
+            .any(|row| row[16].parse::<f64>().unwrap() > 0.0),
         "paralog-spanning reads should contribute transition evidence:\n{}",
         mosaic
     );
@@ -3869,8 +3948,12 @@ fn test_syng_identical_sequences_build_and_query() {
     .expect("load failed");
 
     // Verify start_counts are distinct (the bug used to save both as 0)
-    let start_a = index.name_map.path_starts[0].as_ref().expect("seqA missing");
-    let start_b = index.name_map.path_starts[1].as_ref().expect("seqB missing");
+    let start_a = index.name_map.path_starts[0]
+        .as_ref()
+        .expect("seqA missing");
+    let start_b = index.name_map.path_starts[1]
+        .as_ref()
+        .expect("seqB missing");
     assert_eq!(
         start_a.start_node, start_b.start_node,
         "identical sequences should share start_node"
@@ -4094,7 +4177,11 @@ fn test_partition_syng_gfa_blunt_engine() {
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("gfa"))
         .collect();
-    assert!(!gfa_files.is_empty(), "No GFA files produced in {:?}", out_folder);
+    assert!(
+        !gfa_files.is_empty(),
+        "No GFA files produced in {:?}",
+        out_folder
+    );
 
     let mut saw_segment = false;
     let mut nonzero_links = Vec::new();
@@ -4107,7 +4194,10 @@ fn test_partition_syng_gfa_blunt_engine() {
                 .map(|line| line.to_string()),
         );
     }
-    assert!(saw_segment, "partition syng GFA should contain segment lines");
+    assert!(
+        saw_segment,
+        "partition syng GFA should contain segment lines"
+    );
     assert!(
         nonzero_links.is_empty(),
         "syng partition GFA should be bluntified to 0M links. Nonzero links: {:?}",
@@ -4202,14 +4292,22 @@ fn test_query_syng_gfa_subwindow_splitter() {
             "query",
             "-d",
             "0",
-            "-a", syng_prefix.to_str().unwrap(),
-            "--sequence-files", fasta_path.to_str().unwrap(),
-            "-r", "sampleA#0#chr1:0-3000",
-            "-o", "gfa",
-            "--gfa-engine", "poa:1000",
-            "-O", out_prefix.to_str().unwrap(),
-            "-t", "1",
-            "-v", "2",  // info-level logging to capture sub-window log lines
+            "-a",
+            syng_prefix.to_str().unwrap(),
+            "--sequence-files",
+            fasta_path.to_str().unwrap(),
+            "-r",
+            "sampleA#0#chr1:0-3000",
+            "-o",
+            "gfa",
+            "--gfa-engine",
+            "poa:1000",
+            "-O",
+            out_prefix.to_str().unwrap(),
+            "-t",
+            "1",
+            "-v",
+            "2", // info-level logging to capture sub-window log lines
         ])
         .env("RUST_LOG", "info")
         .output()
@@ -4287,7 +4385,11 @@ fn test_syng_rc_homolog_end_to_end() {
         writeln!(f).unwrap();
     }
 
-    let params = impg::syng::SyncmerParams { k: 8, w: 55, seed: 7 };
+    let params = impg::syng::SyncmerParams {
+        k: 8,
+        w: 55,
+        seed: 7,
+    };
     let syng_index = impg::syng::SyngIndex::build(
         params,
         vec![
@@ -4296,9 +4398,9 @@ fn test_syng_rc_homolog_end_to_end() {
         ]
         .into_iter(),
     );
-    let sequence_index = impg::sequence_index::UnifiedSequenceIndex::from_files(&[
-        fasta_path.to_string_lossy().to_string(),
-    ])
+    let sequence_index = impg::sequence_index::UnifiedSequenceIndex::from_files(&[fasta_path
+        .to_string_lossy()
+        .to_string()])
     .unwrap();
 
     // Query the middle of the inverted region on genome_a.
@@ -4317,7 +4419,9 @@ fn test_syng_rc_homolog_end_to_end() {
     assert!(
         !rc_raw.is_empty(),
         "raw query should report at least one '-' strand homolog on genome_b; got: {:?}",
-        raw.iter().map(|iv| (&iv.genome, iv.start, iv.end, iv.strand)).collect::<Vec<_>>()
+        raw.iter()
+            .map(|iv| (&iv.genome, iv.start, iv.end, iv.strand))
+            .collect::<Vec<_>>()
     );
 
     // (2) Boundary realignment produces tight coordinates for the RC homolog.
@@ -4338,7 +4442,10 @@ fn test_syng_rc_homolog_end_to_end() {
     assert!(
         !rc_refined.is_empty(),
         "refined query should keep the '-' strand homolog; got: {:?}",
-        refined.iter().map(|iv| (&iv.genome, iv.start, iv.end, iv.strand)).collect::<Vec<_>>()
+        refined
+            .iter()
+            .map(|iv| (&iv.genome, iv.start, iv.end, iv.strand))
+            .collect::<Vec<_>>()
     );
 
     // The expected refined forward-strand region on genome_b:
@@ -4353,15 +4460,24 @@ fn test_syng_rc_homolog_end_to_end() {
         .map(|iv| {
             let lo = iv.start.max(expected_start);
             let hi = iv.end.min(expected_end);
-            if hi > lo { hi - lo } else { 0 }
+            if hi > lo {
+                hi - lo
+            } else {
+                0
+            }
         })
         .sum::<u64>();
     assert!(
         overlap_bp >= 200,
         "RC refined intervals should collectively overlap the expected RC window \
          [{}, {}) by at least 200bp; got {}bp overlap. Intervals: {:?}",
-        expected_start, expected_end, overlap_bp,
-        rc_refined.iter().map(|iv| (iv.start, iv.end)).collect::<Vec<_>>()
+        expected_start,
+        expected_end,
+        overlap_bp,
+        rc_refined
+            .iter()
+            .map(|iv| (iv.start, iv.end))
+            .collect::<Vec<_>>()
     );
 
     // Base-content validation: for each refined '-' interval, RC'ing the
@@ -4454,7 +4570,11 @@ fn test_syng_boundary_realign_tightens_edges() {
     }
 
     // Build the syng index in-process.
-    let params = impg::syng::SyncmerParams { k: 8, w: 55, seed: 7 };
+    let params = impg::syng::SyncmerParams {
+        k: 8,
+        w: 55,
+        seed: 7,
+    };
     let sequences = vec![
         ("genome_a".to_string(), seq_a.clone()),
         ("genome_b".to_string(), seq_b.clone()),
@@ -4462,9 +4582,9 @@ fn test_syng_boundary_realign_tightens_edges() {
     let syng_index = impg::syng::SyngIndex::build(params, sequences.into_iter());
 
     // Build the file-backed sequence index.
-    let sequence_index = impg::sequence_index::UnifiedSequenceIndex::from_files(&[
-        fasta_path.to_string_lossy().to_string(),
-    ])
+    let sequence_index = impg::sequence_index::UnifiedSequenceIndex::from_files(&[fasta_path
+        .to_string_lossy()
+        .to_string()])
     .unwrap();
 
     let padding = 120; // default
@@ -4610,7 +4730,11 @@ fn test_syng_query_reconstructs_homology_with_diffs() {
         writeln!(f).unwrap();
     }
 
-    let params = impg::syng::SyncmerParams { k: 8, w: 55, seed: 7 };
+    let params = impg::syng::SyncmerParams {
+        k: 8,
+        w: 55,
+        seed: 7,
+    };
     let syng_index = impg::syng::SyngIndex::build(
         params,
         vec![
@@ -4620,9 +4744,9 @@ fn test_syng_query_reconstructs_homology_with_diffs() {
         ]
         .into_iter(),
     );
-    let sequence_index = impg::sequence_index::UnifiedSequenceIndex::from_files(&[
-        fasta_path.to_string_lossy().to_string(),
-    ])
+    let sequence_index = impg::sequence_index::UnifiedSequenceIndex::from_files(&[fasta_path
+        .to_string_lossy()
+        .to_string()])
     .unwrap();
 
     // Query the middle 2kb of genome_a: [500, 2500).
@@ -4660,12 +4784,16 @@ fn test_syng_query_reconstructs_homology_with_diffs() {
 
     // Step 1: no fragmentation.
     assert_eq!(
-        on_b.len(), 1,
-        "expected exactly one forward-strand homolog on genome_b; got {:?}", on_b
+        on_b.len(),
+        1,
+        "expected exactly one forward-strand homolog on genome_b; got {:?}",
+        on_b
     );
     assert_eq!(
-        on_c.len(), 1,
-        "expected exactly one forward-strand homolog on genome_c; got {:?}", on_c
+        on_c.len(),
+        1,
+        "expected exactly one forward-strand homolog on genome_c; got {:?}",
+        on_c
     );
 
     // Step 2: refined edges match biological truth within a few bp.
@@ -4676,7 +4804,9 @@ fn test_syng_query_reconstructs_homology_with_diffs() {
     assert!(
         b_start.abs_diff(500) <= tol && b_end.abs_diff(2500) <= tol,
         "refined genome_b interval should snap to [500, 2500) within {}bp; got [{}, {})",
-        tol, b_start, b_end
+        tol,
+        b_start,
+        b_end
     );
     assert!(
         c_start.abs_diff(500) <= tol && c_end.abs_diff(2490) <= tol,

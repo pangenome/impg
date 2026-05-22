@@ -1,10 +1,12 @@
 //! Bubble-guided graph resolution primitives.
 //!
 //! This module implements the first conservative slice of hierarchical graph
-//! resolution: detect simple path-supported bubbles in a blunt GFA, replace a
-//! bounded bubble with an exact path-preserving POA graph, and repeat until no
-//! eligible unseen bubbles remain. It intentionally avoids lossy representative
-//! collapse and coordinate sidecars; emitted paths are the coordinate system.
+//! resolution: detect path-supported bubbles in a blunt GFA, replace bounded
+//! single-entry/single-exit bubbles with exact path-preserving local graph
+//! induction, and repeat until no eligible unseen bubbles remain. The default
+//! resolver uses AllWave/seqwish followed by a small SPOA polish. It
+//! intentionally avoids lossy representative collapse and coordinate sidecars;
+//! emitted paths are the coordinate system.
 
 use crate::graph::{
     build_global_spoa_engine, feed_sequences_to_graph, reverse_complement, unchop_gfa,
@@ -23,6 +25,22 @@ pub struct ResolutionConfig {
     pub max_iterations: usize,
     /// Local graph induction method used for selected bubbles.
     pub method: ResolutionMethod,
+    /// Maximum traversal length for `method=auto` to use direct SPOA.
+    ///
+    /// Larger eligible single-entry/single-exit bubbles go through AllWave /
+    /// seqwish induction first, then the bounded SPOA polish pass. Set to 0 to
+    /// force the AllWave-first path for every auto-selected bubble.
+    pub auto_spoa_max_traversal_len: usize,
+    /// Maximum total traversal sequence for `method=auto` to route to
+    /// AllWave/seqwish. Dense many-haplotype local bubbles above this limit
+    /// stay on direct SPOA, because seqwish transclosure can dominate runtime
+    /// in repetitive loci. Set to 0 to disable this guard.
+    pub auto_allwave_max_total_sequence: usize,
+    /// Maximum number of traversals for `method=auto` to route to
+    /// AllWave/seqwish. Dense high-copy bubbles above this limit stay on
+    /// direct SPOA, which is more predictable for hundreds of short traversals.
+    /// Set to 0 to disable this guard.
+    pub auto_allwave_max_traversals: usize,
     /// Maximum root path span, in bp, for a candidate bubble.
     ///
     /// The root path is the first path in the input GFA. This is a rooted POVU
@@ -30,6 +48,12 @@ pub struct ResolutionConfig {
     pub max_bubble_span: usize,
     /// Maximum length of any observed traversal through the bubble.
     pub max_traversal_len: usize,
+    /// Minimum length of the longest observed traversal through the bubble.
+    ///
+    /// This lets callers run hierarchical passes explicitly, e.g. first crush
+    /// parent-scale bubbles with a pairwise graph-induction engine, then run a
+    /// separate SPOA pass over remaining small local bubbles.
+    pub min_traversal_len: usize,
     /// Maximum median traversal length. A value of 0 disables this guard.
     pub max_median_traversal_len: usize,
     /// Maximum sum of traversal sequence lengths for one replacement.
@@ -55,6 +79,13 @@ pub struct ResolutionConfig {
     pub pair_random_fraction: f64,
     /// Mash k-mer size for pair selection.
     pub pair_mash_k: usize,
+    /// Minimum exact-match length used by seqwish when inducing replacement graphs.
+    ///
+    /// This is deliberately separate from the outer graph builder defaults:
+    /// bubble-local induction in repetitive loci should ignore short
+    /// off-diagonal matches while still allowing the pairwise alignment engine
+    /// to align full traversal sequences end-to-end.
+    pub replacement_seqwish_min_match_len: u64,
     /// SweepGA aligner backend used by `method=sweepga`.
     pub sweepga_aligner: String,
     /// SweepGA/FastGA k-mer frequency.
@@ -72,10 +103,17 @@ pub struct ResolutionConfig {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResolutionMethod {
     Auto,
+    /// Direct SPOA replacement.
     Poa,
+    /// POASTA replacement, falling back to SPOA if graph export fails validation.
     Poasta,
-    Biwfa,
+    /// Debug/diagnostic resolver: align every traversal to one root with BiWFA
+    /// and build a star-column graph. This is path-preserving but intentionally
+    /// not the graph-quality default.
+    StarBiwfa,
+    /// Sparse many-to-many BiWFA with AllWave, seqwish induction, then SPOA polish.
     Allwave,
+    /// SweepGA/FastGA or wfmash pair selection and graph induction, then SPOA polish.
     Sweepga,
 }
 
@@ -85,7 +123,7 @@ impl ResolutionMethod {
             "auto" => Some(Self::Auto),
             "poa" | "spoa" => Some(Self::Poa),
             "poasta" => Some(Self::Poasta),
-            "biwfa" | "wfa" => Some(Self::Biwfa),
+            "star-biwfa" | "biwfa-star" | "biwfa" | "wfa" => Some(Self::StarBiwfa),
             "allwave" | "aw" => Some(Self::Allwave),
             "sweepga" | "sw" => Some(Self::Sweepga),
             _ => None,
@@ -102,9 +140,13 @@ pub const DEFAULT_MAX_ITERATIONS: usize = 1;
 /// budget. Use traversal length/count/total sequence for the real work cap.
 pub const DEFAULT_MAX_BUBBLE_SPAN: usize = 0;
 pub const DEFAULT_MAX_TRAVERSAL_LEN: usize = 10_000;
+pub const DEFAULT_MIN_TRAVERSAL_LEN: usize = 0;
 pub const DEFAULT_MAX_MEDIAN_TRAVERSAL_LEN: usize = 1_000;
 pub const DEFAULT_MAX_TOTAL_SEQUENCE: usize = 1_000_000;
 pub const DEFAULT_MAX_TRAVERSALS: usize = 10_000;
+pub const DEFAULT_AUTO_SPOA_MAX_TRAVERSAL_LEN: usize = 2_000;
+pub const DEFAULT_AUTO_ALLWAVE_MAX_TOTAL_SEQUENCE: usize = 200_000;
+pub const DEFAULT_AUTO_ALLWAVE_MAX_TRAVERSALS: usize = 128;
 pub const DEFAULT_POLISH_ITERATIONS: usize = 1;
 pub const DEFAULT_POLISH_MAX_TRAVERSAL_LEN: usize = 2_000;
 pub const DEFAULT_POLISH_MAX_MEDIAN_TRAVERSAL_LEN: usize = 256;
@@ -114,6 +156,7 @@ pub const DEFAULT_PAIR_K_NEAREST: usize = 3;
 pub const DEFAULT_PAIR_K_FARTHEST: usize = 1;
 pub const DEFAULT_PAIR_RANDOM_FRACTION: f64 = 0.01;
 pub const DEFAULT_PAIR_MASH_K: usize = 15;
+pub const DEFAULT_REPLACEMENT_SEQWISH_MIN_MATCH_LEN: u64 = 79;
 pub const DEFAULT_SWEEPGA_KMER_FREQUENCY: usize = 10;
 pub const DEFAULT_SWEEPGA_MIN_ALN_LENGTH: u64 = 0;
 
@@ -122,8 +165,12 @@ impl Default for ResolutionConfig {
         Self {
             max_iterations: DEFAULT_MAX_ITERATIONS,
             method: ResolutionMethod::Auto,
+            auto_spoa_max_traversal_len: DEFAULT_AUTO_SPOA_MAX_TRAVERSAL_LEN,
+            auto_allwave_max_total_sequence: DEFAULT_AUTO_ALLWAVE_MAX_TOTAL_SEQUENCE,
+            auto_allwave_max_traversals: DEFAULT_AUTO_ALLWAVE_MAX_TRAVERSALS,
             max_bubble_span: DEFAULT_MAX_BUBBLE_SPAN,
             max_traversal_len: DEFAULT_MAX_TRAVERSAL_LEN,
+            min_traversal_len: DEFAULT_MIN_TRAVERSAL_LEN,
             max_median_traversal_len: DEFAULT_MAX_MEDIAN_TRAVERSAL_LEN,
             max_total_sequence: DEFAULT_MAX_TOTAL_SEQUENCE,
             max_traversals: DEFAULT_MAX_TRAVERSALS,
@@ -136,6 +183,7 @@ impl Default for ResolutionConfig {
             pair_k_farthest: DEFAULT_PAIR_K_FARTHEST,
             pair_random_fraction: DEFAULT_PAIR_RANDOM_FRACTION,
             pair_mash_k: DEFAULT_PAIR_MASH_K,
+            replacement_seqwish_min_match_len: DEFAULT_REPLACEMENT_SEQWISH_MIN_MATCH_LEN,
             sweepga_aligner: "fastga".to_string(),
             sweepga_kmer_frequency: DEFAULT_SWEEPGA_KMER_FREQUENCY,
             sweepga_min_aln_length: DEFAULT_SWEEPGA_MIN_ALN_LENGTH,
@@ -323,14 +371,19 @@ fn resolve_graph_bubbles(
             );
         }
 
-        for candidate in frontier.bailed {
-            seen.insert(candidate.signature);
+        for _candidate in frontier.bailed {
             stats.candidates_seen += 1;
             stats.bailed += 1;
         }
 
         if frontier.selected.is_empty() {
-            continue;
+            if emit_logs {
+                log::info!(
+                    "crush round {}: stopping because remaining candidate(s) are over budget",
+                    round + 1
+                );
+            }
+            break;
         }
 
         for candidate in &frontier.selected {
@@ -784,6 +837,9 @@ fn find_candidate_frontier(
                 })
                 .collect::<Vec<_>>();
             let traversal_stats = traversal_stats_from_lengths(lengths);
+            if traversal_stats.max_len < config.min_traversal_len {
+                return None;
+            }
             let within_budget = (config.max_bubble_span == 0
                 || root_span <= config.max_bubble_span)
                 && ranges.len() <= config.max_traversals
@@ -1111,7 +1167,7 @@ fn apply_replacement_frontier(graph: &Graph, plans: &[ReplacementPlan]) -> io::R
 
 fn build_replacement(candidate: &BubbleCandidate, config: &ResolutionConfig) -> io::Result<Graph> {
     let method = match config.method {
-        ResolutionMethod::Auto => ResolutionMethod::Poa,
+        ResolutionMethod::Auto => auto_replacement_method(candidate, config),
         method => method,
     };
     match method {
@@ -1121,9 +1177,33 @@ fn build_replacement(candidate: &BubbleCandidate, config: &ResolutionConfig) -> 
             log::debug!("POASTA replacement failed; falling back to SPOA: {err}");
             build_poa_replacement(candidate, config)
         }),
-        ResolutionMethod::Biwfa => build_biwfa_inmemory_replacement(candidate, config),
+        ResolutionMethod::StarBiwfa => build_biwfa_inmemory_replacement(candidate, config),
         ResolutionMethod::Allwave => build_allwave_seqwish_replacement(candidate, config),
         ResolutionMethod::Sweepga => build_sweepga_seqwish_replacement(candidate, config),
+    }
+}
+
+fn auto_replacement_method(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+) -> ResolutionMethod {
+    // Keep very small local tangles on the deterministic SPOA path. Above this
+    // cutoff, use the intended many-to-many AllWave/seqwish path and then run
+    // the bounded SPOA polish in `finalize_pairwise_induced_replacement`.
+    if config.auto_spoa_max_traversal_len > 0
+        && candidate.traversal_stats.max_len <= config.auto_spoa_max_traversal_len
+    {
+        ResolutionMethod::Poa
+    } else if config.auto_allwave_max_total_sequence > 0
+        && candidate.traversal_stats.total_len > config.auto_allwave_max_total_sequence
+    {
+        ResolutionMethod::Poa
+    } else if config.auto_allwave_max_traversals > 0
+        && candidate.traversal_stats.count > config.auto_allwave_max_traversals
+    {
+        ResolutionMethod::Poa
+    } else {
+        ResolutionMethod::Allwave
     }
 }
 
@@ -1149,6 +1229,7 @@ fn seqwish_replacement_config(
         num_threads: rayon::current_num_threads().max(1),
         show_progress: false,
         min_aln_length: 0,
+        min_match_len: _config.replacement_seqwish_min_match_len,
         input_paf: None,
         no_filter: true,
         sparsify: sweepga::knn_graph::SparsificationStrategy::None,
@@ -1180,6 +1261,16 @@ fn build_allwave_seqwish_replacement(
     config: &ResolutionConfig,
 ) -> io::Result<Graph> {
     let (headers, seqs) = candidate_named_sequences(candidate);
+    let non_empty = seqs.iter().filter(|(_, seq)| !seq.is_empty()).count();
+    if non_empty < 2 {
+        log::debug!(
+            "crush allwave: {} traversal(s), {} non-empty; falling back to SPOA",
+            seqs.len(),
+            non_empty
+        );
+        return build_poa_replacement(candidate, config);
+    }
+
     let sequences: Vec<allwave::Sequence> = seqs
         .iter()
         .map(|(id, seq)| allwave::Sequence {
@@ -1198,15 +1289,26 @@ fn build_allwave_seqwish_replacement(
         gap2_extend: Some(gap_extend2 as i32),
         max_divergence: None,
     };
-    let sparsification = allwave::SparsificationStrategy::TreeSampling(
-        config.pair_k_nearest,
-        config.pair_k_farthest,
-        config.pair_random_fraction,
-        Some(config.pair_mash_k),
-    );
+    let sparsification = if sequences.len() <= 3 {
+        allwave::SparsificationStrategy::None
+    } else {
+        allwave::SparsificationStrategy::TreeSampling(
+            config.pair_k_nearest,
+            config.pair_k_farthest,
+            config.pair_random_fraction,
+            Some(config.pair_mash_k),
+        )
+    };
     let aligner =
         allwave::AllPairIterator::with_options(&sequences, params, true, true, sparsification);
     let pair_count = aligner.pair_count();
+    if pair_count == 0 {
+        log::debug!(
+            "crush allwave: selected zero pair alignments for {} traversal(s); falling back to SPOA",
+            sequences.len()
+        );
+        return build_poa_replacement(candidate, config);
+    }
     let mut lines: Vec<String> = aligner
         .into_par_iter()
         .map(|alignment| allwave::alignment_to_paf(&alignment, &sequences))
@@ -1639,6 +1741,9 @@ fn polish_replacement_gfa(gfa: &str, config: &ResolutionConfig) -> io::Result<St
         polish_max_median_traversal_len: config.polish_max_median_traversal_len,
         polish_max_total_sequence: config.polish_max_total_sequence,
         polish_max_traversals: config.polish_max_traversals,
+        auto_spoa_max_traversal_len: 0,
+        auto_allwave_max_total_sequence: 0,
+        auto_allwave_max_traversals: 0,
         scoring_params: config.scoring_params,
         ..ResolutionConfig::default()
     };
@@ -1958,7 +2063,7 @@ P\tins\t1+,2+,3+\t*
     }
 
     #[test]
-    fn resolves_insertion_bubble_with_biwfa_inmemory_without_changing_path_sequences() {
+    fn resolves_insertion_bubble_with_star_biwfa_without_changing_path_sequences() {
         let gfa = "\
 H\tVN:Z:1.0
 S\t1\tAC
@@ -1974,7 +2079,7 @@ P\tins\t1+,2+,3+\t*
         let resolved = resolve_gfa_bubbles(
             gfa,
             &ResolutionConfig {
-                method: ResolutionMethod::Biwfa,
+                method: ResolutionMethod::StarBiwfa,
                 max_median_traversal_len: 10_000,
                 ..ResolutionConfig::default()
             },
@@ -1988,9 +2093,9 @@ P\tins\t1+,2+,3+\t*
     fn resolves_insertion_bubble_with_allwave_without_changing_path_sequences() {
         let gfa = "\
 H\tVN:Z:1.0
-S\t1\tAC
-S\t2\tGGG
-S\t3\tTA
+S\t1\tAAAAAAAAAAAAAAAAAAAA
+S\t2\tCCCCCCCCCCCCCCCCCCCC
+S\t3\tTTTTTTTTTTTTTTTTTTTT
 L\t1\t+\t3\t+\t0M
 L\t1\t+\t2\t+\t0M
 L\t2\t+\t3\t+\t0M
@@ -2009,6 +2114,106 @@ P\tins\t1+,2+,3+\t*
         .unwrap();
         assert_eq!(before, seq_map(&resolved.gfa));
         assert_eq!(resolved.stats.resolved, 1);
+    }
+
+    #[test]
+    fn auto_routes_small_bubbles_to_spoa_and_larger_bubbles_to_allwave() {
+        let mut candidate = BubbleCandidate {
+            ranges: Vec::new(),
+            signature: "route".to_string(),
+            within_budget: true,
+            root_start_step: 0,
+            root_end_step: 1,
+            root_span: 0,
+            traversal_stats: TraversalStats {
+                count: 2,
+                max_len: 128,
+                ..TraversalStats::default()
+            },
+        };
+        let config = ResolutionConfig::default();
+        assert_eq!(
+            auto_replacement_method(&candidate, &config),
+            ResolutionMethod::Poa
+        );
+
+        candidate.traversal_stats.max_len = config.auto_spoa_max_traversal_len + 1;
+        candidate.traversal_stats.total_len = config.auto_allwave_max_total_sequence;
+        assert_eq!(
+            auto_replacement_method(&candidate, &config),
+            ResolutionMethod::Allwave
+        );
+
+        candidate.traversal_stats.count = config.auto_allwave_max_traversals + 1;
+        assert_eq!(
+            auto_replacement_method(&candidate, &config),
+            ResolutionMethod::Poa
+        );
+
+        candidate.traversal_stats.count = 2;
+        candidate.traversal_stats.total_len = config.auto_allwave_max_total_sequence + 1;
+        assert_eq!(
+            auto_replacement_method(&candidate, &config),
+            ResolutionMethod::Poa
+        );
+
+        let config = ResolutionConfig {
+            auto_spoa_max_traversal_len: 0,
+            auto_allwave_max_total_sequence: 0,
+            auto_allwave_max_traversals: 0,
+            ..ResolutionConfig::default()
+        };
+        candidate.traversal_stats.max_len = 1;
+        assert_eq!(
+            auto_replacement_method(&candidate, &config),
+            ResolutionMethod::Allwave
+        );
+    }
+
+    #[test]
+    fn auto_resolves_indel_ladder_without_changing_path_sequences() {
+        let long_ref = "ACGT".repeat(80);
+        let long_alt = format!(
+            "{}{}{}",
+            "ACGT".repeat(35),
+            "TTGGAACCGGTT",
+            "ACGT".repeat(42)
+        );
+        let gfa = format!(
+            "\
+H\tVN:Z:1.0
+S\t1\tAAAA
+S\t2\tC
+S\t3\tG
+S\t4\tTTTT
+S\t5\tGGGGGGGG
+S\t6\tCCCC
+S\t7\t{long_ref}
+S\t8\t{long_alt}
+S\t9\tTATA
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+L\t4\t+\t6\t+\t0M
+L\t4\t+\t5\t+\t0M
+L\t5\t+\t6\t+\t0M
+L\t6\t+\t7\t+\t0M
+L\t7\t+\t9\t+\t0M
+L\t6\t+\t8\t+\t0M
+L\t8\t+\t9\t+\t0M
+P\tref\t1+,2+,4+,6+,7+,9+\t*
+P\tsnp\t1+,3+,4+,6+,7+,9+\t*
+P\tins\t1+,2+,4+,5+,6+,7+,9+\t*
+P\tlong_alt\t1+,2+,4+,6+,8+,9+\t*
+P\tcombo\t1+,3+,4+,5+,6+,8+,9+\t*
+"
+        );
+        let before = seq_map(&gfa);
+        let resolved = resolve_gfa_bubbles(&gfa, &ResolutionConfig::default()).unwrap();
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert!(resolved.stats.resolved >= 1, "{:?}", resolved.stats);
+        assert_eq!(resolved.stats.bailed, 0, "{:?}", resolved.stats);
     }
 
     #[test]
@@ -2147,6 +2352,50 @@ P\tright_alt\t1+,2+,3+,4+,8+,6+\t*
         assert_eq!(resolved.stats.iterations, 1);
         assert_eq!(resolved.stats.resolved, 2);
         assert_eq!(resolved.stats.bailed, 0);
+    }
+
+    #[test]
+    fn over_budget_candidates_are_not_marked_seen() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tT
+S\t5\tA
+S\t6\tGGGGGGGG
+S\t7\tT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+L\t4\t+\t5\t+\t0M
+L\t5\t+\t7\t+\t0M
+L\t4\t+\t6\t+\t0M
+L\t6\t+\t7\t+\t0M
+P\tref\t1+,2+,4+,5+,7+\t*
+P\tleft_alt\t1+,3+,4+,5+,7+\t*
+P\tright_alt\t1+,2+,4+,6+,7+\t*
+";
+        let before = seq_map(gfa);
+        let resolved = resolve_gfa_bubbles(
+            gfa,
+            &ResolutionConfig {
+                max_iterations: 2,
+                method: ResolutionMethod::Poa,
+                max_traversal_len: 5,
+                ..ResolutionConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert_eq!(resolved.stats.resolved, 1, "{:?}", resolved.stats);
+        assert_eq!(resolved.stats.iterations, 2, "{:?}", resolved.stats);
+        assert!(
+            resolved.stats.bailed >= 2,
+            "over-budget candidate should still be visible in the second round: {:?}",
+            resolved.stats
+        );
     }
 
     #[test]

@@ -433,9 +433,10 @@ path. For a focused syng-backed local GFA recipe, see
 For graph outputs, `query -o gfa|vcf --render-graph` also renders the final
 1D graph with `gfalook`. The default image is PNG beside the `-O` output prefix
 (`<prefix>.png`); `--render-graph-output` overrides the image path, and
-`--render-graph-format svg` or a `.svg` suffix emits SVG. With `-b regions.bed`
-graph output, `-O` is a directory for the graph files and the render output is
-written per BED row using the sanitized BED column 4 name.
+`--render-graph-format svg` or a `.svg` suffix emits SVG. Add
+`--render-graph-depth` to pass `-m` to `gfalook` for mean-depth coloring. With
+`-b regions.bed` graph output, `-O` is a directory for the graph files and the
+render output is written per BED row using the sanitized BED column 4 name.
 
 If you already have a local GFA, call variants directly with POVU via
 `impg gfa2vcf -g local.gfa -o local.vcf -r ref_path`. This is the same
@@ -458,6 +459,14 @@ For syng-index queries, `--gfa-engine syng` defaults to `syng:blunt`.
 The compact form `-o gfa:syng:blunt,k=63,s=8,seed=7` is accepted as
 shorthand for `-o gfa --gfa-engine syng:blunt,k=63,s=8,seed=7`; the
 `k/s/seed` tail is checked against the loaded syng index.
+Syng GFA extraction removes the top 0.05% most frequent local syncmer nodes
+from the raw topology and splits rare repeated-copy local syncmer contexts by
+default, so high-copy repeats and single-syncmer repeat loops do not become
+global graph glue. Use
+`-o gfa:syng:nomask` to disable this, or
+`-o gfa:syng:mask,top=0.001,max-occ=500:crush` to tune it.
+Add `:cut-ns`, for example `-o gfa:syng:cut-ns:crush`, to drop assembly N-runs
+from fetched gap DNA and split graph paths at those breaks.
 
 The same shorthand works for the other engines: `-o gfa:pggb`,
 `-o gfa:seqwish`, `-o gfa:poa`, and `-o gfa:syng`. Alignment-backed graph

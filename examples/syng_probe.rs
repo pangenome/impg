@@ -1,7 +1,7 @@
 // Probe: compare absolute syncmer positions from syng's C iterator against
 // the walk_path positions in query_region_with_anchors. For a sequence where
 // the first syncmer is NOT at position 0, the delta is exposed.
-use impg::syng::{SyngIndex, SyncmerParams};
+use impg::syng::{SyncmerParams, SyngIndex};
 use impg::syng_ffi;
 
 fn make_seq(len: usize, seed: u64) -> Vec<u8> {
@@ -9,7 +9,9 @@ fn make_seq(len: usize, seed: u64) -> Vec<u8> {
     let mut s = Vec::with_capacity(len);
     let mut state: u64 = seed;
     for _ in 0..len {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         s.push(bases[((state >> 33) & 3) as usize]);
     }
     s
@@ -33,11 +35,8 @@ fn raw_syncmer_positions(seq: &[u8], params: SyncmerParams) -> Vec<i32> {
 
     let mut positions = Vec::new();
     unsafe {
-        let sh = syng_ffi::impg_seqhashCreateSafe(
-            params.k as i32,
-            params.w as i32,
-            params.seed as i32,
-        );
+        let sh =
+            syng_ffi::impg_seqhashCreateSafe(params.k as i32, params.w as i32, params.seed as i32);
         let sit = syng_ffi::syncmerIterator(sh, seq_buf.as_mut_ptr() as *mut i8, seq_len as i32);
         let mut pos: i32 = 0;
         while syng_ffi::syncmerNext(sit, std::ptr::null_mut(), &mut pos, std::ptr::null_mut()) {
@@ -50,7 +49,11 @@ fn raw_syncmer_positions(seq: &[u8], params: SyncmerParams) -> Vec<i32> {
 }
 
 fn main() {
-    let params = SyncmerParams { k: 8, w: 55, seed: 7 };
+    let params = SyncmerParams {
+        k: 8,
+        w: 55,
+        seed: 7,
+    };
 
     // Try many seeds to find one whose first syncmer is NOT at position 0.
     // Syng's first syncmer lands anywhere in [0, w+k) depending on the seq.
@@ -69,10 +72,7 @@ fn main() {
         // Build an index with this sequence and compare what
         // query_region_with_anchors reports for the shared syncmers of the
         // sequence against itself.
-        let idx = SyngIndex::build(
-            params,
-            vec![("seq".to_string(), seq.clone())].into_iter(),
-        );
+        let idx = SyngIndex::build(params, vec![("seq".to_string(), seq.clone())].into_iter());
 
         let anchored = idx
             .query_region_with_anchors("seq", 0, seq.len() as u64, 0)

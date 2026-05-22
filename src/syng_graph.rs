@@ -165,17 +165,19 @@ pub fn pairwise_biwfa_paf(
     if q_consumed != a_len || t_consumed != b_len {
         log::debug!(
             "syng_graph: dropping pair {}/{} — cigar consumes q={} t={} but lens are q={} t={}",
-            a_name, b_name, q_consumed, t_consumed, a_len, b_len
+            a_name,
+            b_name,
+            q_consumed,
+            t_consumed,
+            a_len,
+            b_len
         );
         return None;
     }
     let cigar_str = compact_cigar(&paf_cigar_bytes);
     Some(format!(
         "{}\t{}\t{}\t{}\t+\t{}\t{}\t{}\t{}\t{}\t{}\t255\tcg:Z:{}\n",
-        a_name, a_len, 0, a_len,
-        b_name, b_len, 0, b_len,
-        matches, block_len,
-        cigar_str,
+        a_name, a_len, 0, a_len, b_name, b_len, 0, b_len, matches, block_len, cigar_str,
     ))
 }
 
@@ -191,9 +193,7 @@ pub fn all_pairs_paf(seqs: &[(String, Vec<u8>)]) -> String {
         .collect();
     pairs
         .par_iter()
-        .filter_map(|&(i, j)| {
-            pairwise_biwfa_paf(&seqs[i].0, &seqs[i].1, &seqs[j].0, &seqs[j].1)
-        })
+        .filter_map(|&(i, j)| pairwise_biwfa_paf(&seqs[i].0, &seqs[i].1, &seqs[j].0, &seqs[j].1))
         .collect::<Vec<_>>()
         .concat()
 }
@@ -226,9 +226,7 @@ pub fn sparse_pairs_paf(
     );
     pairs
         .par_iter()
-        .filter_map(|&(i, j)| {
-            pairwise_biwfa_paf(&seqs[i].0, &seqs[i].1, &seqs[j].0, &seqs[j].1)
-        })
+        .filter_map(|&(i, j)| pairwise_biwfa_paf(&seqs[i].0, &seqs[i].1, &seqs[j].0, &seqs[j].1))
         .collect::<Vec<_>>()
         .concat()
 }
@@ -299,10 +297,11 @@ pub fn anchor_seeded_biwfa_paf_strand(
     let mut paf_cigar: Vec<u8> = Vec::new();
 
     let push_gap = |paf_cigar: &mut Vec<u8>,
-                    a_start: usize, a_end: usize,
-                    b_start: usize, b_end: usize|
-        -> bool
-    {
+                    a_start: usize,
+                    a_end: usize,
+                    b_start: usize,
+                    b_end: usize|
+     -> bool {
         let a_gap = &a_seq[a_start..a_end];
         let b_gap = &b_seq[b_start..b_end];
         if a_gap.is_empty() && b_gap.is_empty() {
@@ -407,17 +406,19 @@ pub fn anchor_seeded_biwfa_paf_strand(
     if q_consumed != a_len || t_consumed != b_len {
         log::debug!(
             "anchor_seeded: dropping {}/{}: q={} t={} vs a_len={} b_len={}",
-            a_name, b_name, q_consumed, t_consumed, a_len, b_len
+            a_name,
+            b_name,
+            q_consumed,
+            t_consumed,
+            a_len,
+            b_len
         );
         return None;
     }
     let cigar_str = compact_cigar(&paf_cigar);
     Some(format!(
         "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t255\tcg:Z:{}\n",
-        a_name, a_len, 0, a_len, paf_strand,
-        b_name, b_len, 0, b_len,
-        matches, block_len,
-        cigar_str,
+        a_name, a_len, 0, a_len, paf_strand, b_name, b_len, 0, b_len, matches, block_len, cigar_str,
     ))
 }
 
@@ -556,10 +557,18 @@ pub fn build_paf_anchor_seeded(
     ) {
         Ok(cs) => cs,
         Err(e) => {
-            log::debug!("syng re-query failed: {}; falling back to full-pair BiWFA", e);
+            log::debug!(
+                "syng re-query failed: {}; falling back to full-pair BiWFA",
+                e
+            );
             return sparse_pairs_paf(
-                &members.iter().map(|(n, s, _)| (n.clone(), s.clone())).collect::<Vec<_>>(),
-                k_near, k_far, random_fraction,
+                &members
+                    .iter()
+                    .map(|(n, s, _)| (n.clone(), s.clone()))
+                    .collect::<Vec<_>>(),
+                k_near,
+                k_far,
+                random_fraction,
             );
         }
     };
@@ -578,7 +587,10 @@ pub fn build_paf_anchor_seeded(
     let mut chains_by_genome: HashMap<String, Vec<&crate::syng::HomologousIntervalWithAnchors>> =
         HashMap::new();
     for c in &chains {
-        chains_by_genome.entry(c.genome.clone()).or_default().push(c);
+        chains_by_genome
+            .entry(c.genome.clone())
+            .or_default()
+            .push(c);
     }
 
     // Diagnostic counters — emitted at end.
@@ -595,7 +607,10 @@ pub fn build_paf_anchor_seeded(
     // (pairs whose sequences are similar tend to share anchors).
     let raw: Vec<Vec<u8>> = members.iter().map(|(_, s, _)| s.clone()).collect();
     let pairs = sweepga::knn_graph::extract_tree_pairs(
-        &raw, k_near, k_far, random_fraction,
+        &raw,
+        k_near,
+        k_far,
+        random_fraction,
         &sweepga::knn_graph::MashParams::default(),
     );
     let dt_pairs = t_pairs.elapsed();
@@ -611,10 +626,14 @@ pub fn build_paf_anchor_seeded(
             // partition emits forward intervals; this is just a guard.
             if a_meta.strand == '+' && b_meta.strand == '+' {
                 let ac = best_overlapping_chain(
-                    chains_by_genome.get(&a_meta.chrom), a_meta.fwd_start, a_meta.fwd_end,
+                    chains_by_genome.get(&a_meta.chrom),
+                    a_meta.fwd_start,
+                    a_meta.fwd_end,
                 );
                 let bc = best_overlapping_chain(
-                    chains_by_genome.get(&b_meta.chrom), b_meta.fwd_start, b_meta.fwd_end,
+                    chains_by_genome.get(&b_meta.chrom),
+                    b_meta.fwd_start,
+                    b_meta.fwd_end,
                 );
                 if let (Some(ac), Some(bc)) = (ac, bc) {
                     // Pair-relative strand: '+' if both chains agree, '-' if
@@ -623,8 +642,7 @@ pub fn build_paf_anchor_seeded(
                     // relative orientation w.r.t. each other (even if both
                     // are flipped w.r.t. the seed). Mixed-strand pairs need
                     // one side reverse-complemented.
-                    let pair_strand_relative =
-                        if ac.strand == bc.strand { '+' } else { '-' };
+                    let pair_strand_relative = if ac.strand == bc.strand { '+' } else { '-' };
 
                     let a_start_i = a_meta.fwd_start as i64;
                     let b_start_i = b_meta.fwd_start as i64;
@@ -683,7 +701,12 @@ pub fn build_paf_anchor_seeded(
                             b_seq
                         };
                         if let Some(line) = anchor_seeded_biwfa_paf_strand(
-                            a_name, a_seq, b_name, b_oriented, &colinear, syncmer_len,
+                            a_name,
+                            a_seq,
+                            b_name,
+                            b_oriented,
+                            &colinear,
+                            syncmer_len,
                             pair_strand_relative,
                         ) {
                             counter_anchor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -790,9 +813,15 @@ mod tests {
         let b = b"ACGTAACGT".to_vec();
         let line = pairwise_biwfa_paf("a", &a, "b", &b).unwrap();
         // PAF reports query length 8, target length 9.
-        assert!(line.starts_with("a\t8\t0\t8\t+\tb\t9\t0\t9\t"), "unexpected PAF: {line}");
+        assert!(
+            line.starts_with("a\t8\t0\t8\t+\tb\t9\t0\t9\t"),
+            "unexpected PAF: {line}"
+        );
         // CIGAR should contain a 1D (deletion on query = extra base in target).
-        assert!(line.contains("1D") || line.contains("1I"), "no indel op: {line}");
+        assert!(
+            line.contains("1D") || line.contains("1I"),
+            "no indel op: {line}"
+        );
     }
 
     #[test]
@@ -818,11 +847,14 @@ mod tests {
         // Same query/target but target has one extra A in the first gap.
         let a: Vec<u8> = b"ACGTACGTACGT".to_vec();
         let b: Vec<u8> = b"ACGTAACGTACGT".to_vec(); // one extra A at position 4
-        // Anchor at (4,5): aligns a[4..8]=ACGT to b[5..9]=ACGT
+                                                    // Anchor at (4,5): aligns a[4..8]=ACGT to b[5..9]=ACGT
         let anchors = vec![(4, 5)];
         let line = anchor_seeded_biwfa_paf("q", &a, "t", &b, &anchors, 4).unwrap();
         // query 12, target 13, one deletion from query side.
-        assert!(line.starts_with("q\t12\t0\t12\t+\tt\t13\t0\t13"), "unexpected: {line}");
+        assert!(
+            line.starts_with("q\t12\t0\t12\t+\tt\t13\t0\t13"),
+            "unexpected: {line}"
+        );
     }
 
     #[test]

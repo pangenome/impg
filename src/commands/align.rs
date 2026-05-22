@@ -118,7 +118,9 @@ pub fn generate_pairs_for_sequences(
         | SparsificationStrategy::Random(_)
         | SparsificationStrategy::WfmashDensity(_) => {
             sweepga::knn_graph::select_pairs_haplotype_aware_no_sketch(
-                &names, strategy, mash_params,
+                &names,
+                strategy,
+                mash_params,
             )
         }
         _ => {
@@ -156,7 +158,9 @@ fn generate_pairs(
         | SparsificationStrategy::Random(_)
         | SparsificationStrategy::WfmashDensity(_) => {
             sweepga::knn_graph::select_pairs_haplotype_aware_no_sketch(
-                &names, strategy, mash_params,
+                &names,
+                strategy,
+                mash_params,
             )
         }
         _ => {
@@ -283,9 +287,9 @@ fn write_wfmash_joblist<W: Write>(
     writer: &mut W,
     config: &AlignConfig,
 ) -> io::Result<usize> {
-    use sweepga::pansn::{extract_pansn_key, PanSnLevel};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+    use sweepga::pansn::{extract_pansn_key, PanSnLevel};
 
     // Contig index → haplotype key.
     let hap_of: Vec<String> = sequences
@@ -306,8 +310,7 @@ fn write_wfmash_joblist<W: Write>(
 
     // Collapse selected contig pairs to unique (target_hap, query_hap)
     // keys. Sort order is (target, query) so output is reproducible.
-    let mut seen: std::collections::BTreeSet<(String, String)> =
-        std::collections::BTreeSet::new();
+    let mut seen: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
     for &(i, j) in pairs {
         let (a, b) = (&hap_of[i], &hap_of[j]);
         let pair = if a <= b {

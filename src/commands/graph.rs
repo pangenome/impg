@@ -7,7 +7,7 @@ use log::info;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Instant;
 
 use bitvec::prelude::*;
@@ -32,6 +32,8 @@ use seqwish::intervaltree::{AdaptiveTree, IntervalTree};
 use seqwish::links::{derive_links, RankSelectBitVector};
 use seqwish::seqindex::SeqIndex;
 use seqwish::transclosure::compute_transitive_closures;
+
+static SEQWISH_INDUCTION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// Configuration for graph building.
 #[derive(Clone)]
@@ -163,6 +165,14 @@ pub fn induce_graph_from_alignment<W: Write>(
     output: &mut W,
     config: &GraphBuildConfig,
 ) -> io::Result<usize> {
+    // The seqwish crate uses process-global temporary-file bookkeeping and
+    // cleanup. Keep concurrent in-process inductions from deleting each
+    // other's temp files while still allowing each induction to use threads.
+    let _seqwish_guard = SEQWISH_INDUCTION_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| io::Error::other("seqwish induction lock poisoned"))?;
+
     let combined_fasta = aln_result.combined_fasta;
     let filtered_paf = aln_result.filtered_paf;
 

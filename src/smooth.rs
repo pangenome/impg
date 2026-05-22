@@ -998,9 +998,8 @@ fn passthrough_block_gfa(
             let (node_idx, _) = path.steps[step_idx];
             if let std::collections::hash_map::Entry::Vacant(e) = node_remap.entry(node_idx) {
                 e.insert(next_id);
-                let seq = std::str::from_utf8(&graph.nodes[node_idx]).map_err(|err| {
-                    io::Error::other(format!("non-UTF8 node sequence: {}", err))
-                })?;
+                let seq = std::str::from_utf8(&graph.nodes[node_idx])
+                    .map_err(|err| io::Error::other(format!("non-UTF8 node sequence: {}", err)))?;
                 out.push_str(&format!("S\t{}\t{}\n", next_id, seq));
                 next_id += 1;
             }
@@ -1543,9 +1542,20 @@ P\tchr2:200-212\t1+,2+,3+\t*
         assert_eq!(p_lines.len(), 2, "one P-line per path-range");
         // Names carry full input bp range, so the lacer sees consecutive ranges
         // and can join across blocks.
-        let names: Vec<&str> = p_lines.iter().map(|l| l.split('\t').nth(1).unwrap()).collect();
-        assert!(names.iter().any(|n| *n == "chr1:100-108"), "got {:?}", names);
-        assert!(names.iter().any(|n| *n == "chr2:200-212"), "got {:?}", names);
+        let names: Vec<&str> = p_lines
+            .iter()
+            .map(|l| l.split('\t').nth(1).unwrap())
+            .collect();
+        assert!(
+            names.iter().any(|n| *n == "chr1:100-108"),
+            "got {:?}",
+            names
+        );
+        assert!(
+            names.iter().any(|n| *n == "chr2:200-212"),
+            "got {:?}",
+            names
+        );
         // 3 distinct nodes touched → 3 S-lines with local IDs 1..=3.
         let s_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("S\t")).collect();
         assert_eq!(s_lines.len(), 3);

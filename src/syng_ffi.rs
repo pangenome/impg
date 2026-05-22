@@ -157,22 +157,11 @@ extern "C" {
     pub fn syngBWTpathAdd(sbp: *mut SyngBWTpath, next_node: I32, offset: U32);
     pub fn syngBWTpathFinish(sbp: *mut SyngBWTpath);
 
-    pub fn syngBWTpathStartOld(
-        sb: *mut SyngBWT,
-        start_node: I32,
-        count: U32,
-    ) -> *mut SyngBWTpath;
-    pub fn syngBWTpathNext(
-        sbp: *mut SyngBWTpath,
-        next_node: *mut I32,
-        next_pos: *mut U32,
-    ) -> bool;
+    pub fn syngBWTpathStartOld(sb: *mut SyngBWT, start_node: I32, count: U32) -> *mut SyngBWTpath;
+    pub fn syngBWTpathNext(sbp: *mut SyngBWTpath, next_node: *mut I32, next_pos: *mut U32) -> bool;
 
-    pub fn syngBWTmatchStart(
-        sb: *mut SyngBWT,
-        start_node: I32,
-        high: *mut U32,
-    ) -> *mut SyngBWTpath;
+    pub fn syngBWTmatchStart(sb: *mut SyngBWT, start_node: I32, high: *mut U32)
+        -> *mut SyngBWTpath;
     pub fn syngBWTmatchNext(
         sbp: *mut SyngBWTpath,
         next_node: I32,
@@ -239,8 +228,7 @@ extern "C" {
     pub fn seqhashWrite(sh: *mut Seqhash, f: *mut c_void);
     pub fn seqhashRead(f: *mut c_void) -> *mut Seqhash;
 
-    pub fn seqhashIterator(sh: *mut Seqhash, s: *mut c_char, len: c_int)
-        -> *mut SeqhashIterator;
+    pub fn seqhashIterator(sh: *mut Seqhash, s: *mut c_char, len: c_int) -> *mut SeqhashIterator;
     pub fn seqhashNext(
         si: *mut SeqhashIterator,
         kmer: *mut U64,
@@ -248,11 +236,7 @@ extern "C" {
         is_f: *mut bool,
     ) -> bool;
 
-    pub fn syncmerIterator(
-        sh: *mut Seqhash,
-        s: *mut c_char,
-        len: c_int,
-    ) -> *mut SeqhashIterator;
+    pub fn syncmerIterator(sh: *mut Seqhash, s: *mut c_char, len: c_int) -> *mut SeqhashIterator;
     pub fn syncmerNext(
         si: *mut SeqhashIterator,
         kmer: *mut U64,

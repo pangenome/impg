@@ -77,7 +77,10 @@ fn resolve_syng_syncmer_params(
     let total_k = match (syncmer_length, legacy_syncmer_w) {
         (Some(total), None) => total,
         (None, Some(w)) => s.checked_add(w).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "syng syncmer length overflowed u32")
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "syng syncmer length overflowed u32",
+            )
         })?,
         (None, None) => 63,
         (Some(_), Some(_)) => unreachable!("clap conflicts_with prevents this"),
@@ -265,10 +268,7 @@ fn ragc_numeric_to_ascii(seq: &[u8]) -> Vec<u8> {
 fn read_syng_fasta_sequences(fasta_path: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
     let file = File::open(fasta_path)?;
     let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
-        io::Error::other(format!(
-            "Failed to open reader for '{}': {}",
-            fasta_path, e
-        ))
+        io::Error::other(format!("Failed to open reader for '{}': {}", fasta_path, e))
     })?;
     let reader = BufReader::new(reader);
 
@@ -320,12 +320,17 @@ fn collect_syng_agc_records(agc_path: &str) -> io::Result<Vec<SyngAgcRecord>> {
             .list_contigs_names_only(&sample)
             .unwrap_or_default();
         for contig in contigs {
-            let length = decompressor.get_contig_length(&sample, &contig).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Failed to get length for contig '{}@{}': {}", contig, sample, e),
-                )
-            })?;
+            let length = decompressor
+                .get_contig_length(&sample, &contig)
+                .map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "Failed to get length for contig '{}@{}': {}",
+                            contig, sample, e
+                        ),
+                    )
+                })?;
             records.push(SyngAgcRecord {
                 name: syng_sequence_name(&sample, &contig),
                 sample: sample.clone(),
@@ -403,9 +408,8 @@ fn is_blank_line_bytes(line: &[u8]) -> bool {
 
 fn read_query_sequences(path: &str) -> io::Result<Vec<(String, Vec<u8>)>> {
     let file = File::open(path)?;
-    let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
-        io::Error::other(format!("Failed to open reader for '{}': {}", path, e))
-    })?;
+    let (reader, _format) = niffler::get_reader(Box::new(file))
+        .map_err(|e| io::Error::other(format!("Failed to open reader for '{}': {}", path, e)))?;
     let mut reader = BufReader::with_capacity(8 * 1024 * 1024, reader);
 
     let mut first_line = String::new();
@@ -660,7 +664,10 @@ struct SyngGafMapProfile {
 }
 
 fn add_profile_duration(counter: &AtomicU64, duration: Duration) {
-    counter.fetch_add(duration.as_nanos().min(u128::from(u64::MAX)) as u64, Ordering::Relaxed);
+    counter.fetch_add(
+        duration.as_nanos().min(u128::from(u64::MAX)) as u64,
+        Ordering::Relaxed,
+    );
 }
 
 fn add_profile_len(counter: &AtomicU64, len: usize) {
@@ -673,8 +680,7 @@ fn profile_duration(counter: &AtomicU64) -> Duration {
 
 fn create_map_output_writer(path: &str) -> io::Result<Box<dyn Write + Send>> {
     let file = File::create(path)?;
-    let writer: Box<dyn Write + Send> =
-        Box::new(BufWriter::with_capacity(1024 * 1024, file));
+    let writer: Box<dyn Write + Send> = Box::new(BufWriter::with_capacity(1024 * 1024, file));
     if path.ends_with(".zst") || path.ends_with(".zstd") {
         niffler::send::get_writer(
             writer,
@@ -951,9 +957,8 @@ where
     F: FnMut(usize, SyngGafQueryChunk) -> io::Result<()>,
 {
     let file = File::open(path)?;
-    let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
-        io::Error::other(format!("Failed to open reader for '{}': {}", path, e))
-    })?;
+    let (reader, _format) = niffler::get_reader(Box::new(file))
+        .map_err(|e| io::Error::other(format!("Failed to open reader for '{}': {}", path, e)))?;
     let mut reader = BufReader::with_capacity(8 * 1024 * 1024, reader);
 
     let mut first_line = Vec::new();
@@ -1020,9 +1025,9 @@ fn emit_syng_map_gaf_sequential<W: Write>(
     min_anchors: usize,
     syncmer_len: u64,
 ) -> io::Result<SyngGafMapStats> {
-    let mut worker = syng_matcher.worker().map_err(|e| {
-        io::Error::new(e.kind(), format!("failed to create syng GAF worker: {e}"))
-    })?;
+    let mut worker = syng_matcher
+        .worker()
+        .map_err(|e| io::Error::new(e.kind(), format!("failed to create syng GAF worker: {e}")))?;
     let mut stats = SyngGafMapStats::default();
 
     stream_query_chunks_with(query_path, |_, chunk| {
@@ -1063,10 +1068,9 @@ fn emit_syng_map_gaf<W: Write + Send>(
 
     let queue_capacity = threads.saturating_mul(4).max(1);
     let (query_tx, query_rx) = channel::bounded::<(usize, SyngGafQueryChunk)>(queue_capacity);
-    let (result_tx, result_rx) =
-        channel::bounded::<(usize, SyngGafMapChunk)>(queue_capacity);
-    let profile = std::env::var_os("IMPG_PROFILE_MAP")
-        .map(|_| Arc::new(SyngGafMapProfile::default()));
+    let (result_tx, result_rx) = channel::bounded::<(usize, SyngGafMapChunk)>(queue_capacity);
+    let profile =
+        std::env::var_os("IMPG_PROFILE_MAP").map(|_| Arc::new(SyngGafMapProfile::default()));
 
     let stats = std::thread::scope(|scope| {
         let writer_profile = profile.clone();
@@ -1256,9 +1260,9 @@ fn collect_syng_map_pack_counts_sequential(
     query_path: &str,
     min_anchors: usize,
 ) -> io::Result<(FxHashMap<u32, u64>, SyngPackMapStats)> {
-    let mut worker = syng_matcher.worker().map_err(|e| {
-        io::Error::new(e.kind(), format!("failed to create syng pack worker: {e}"))
-    })?;
+    let mut worker = syng_matcher
+        .worker()
+        .map_err(|e| io::Error::new(e.kind(), format!("failed to create syng pack worker: {e}")))?;
     let mut counts = FxHashMap::default();
     let mut stats = SyngPackMapStats::default();
 
@@ -1290,17 +1294,19 @@ fn collect_syng_map_pack_counts(
     let (result_tx, result_rx) = channel::bounded::<SyngPackMapChunk>(queue_capacity);
 
     std::thread::scope(|scope| {
-        let collector = scope.spawn(move || -> io::Result<(FxHashMap<u32, u64>, SyngPackMapStats)> {
-            let mut counts = FxHashMap::default();
-            let mut stats = SyngPackMapStats::default();
-            while let Ok(chunk) = result_rx.recv() {
-                stats.queries += chunk.queries;
-                stats.records += chunk.records;
-                stats.anchors += chunk.anchors;
-                merge_syng_pack_counts(&mut counts, chunk.counts);
-            }
-            Ok((counts, stats))
-        });
+        let collector = scope.spawn(
+            move || -> io::Result<(FxHashMap<u32, u64>, SyngPackMapStats)> {
+                let mut counts = FxHashMap::default();
+                let mut stats = SyngPackMapStats::default();
+                while let Ok(chunk) = result_rx.recv() {
+                    stats.queries += chunk.queries;
+                    stats.records += chunk.records;
+                    stats.anchors += chunk.anchors;
+                    merge_syng_pack_counts(&mut counts, chunk.counts);
+                }
+                Ok((counts, stats))
+            },
+        );
 
         let mut workers = Vec::with_capacity(threads);
         for _ in 0..threads {
@@ -1363,8 +1369,7 @@ fn emit_syng_map_pack<W: Write + Send>(
 ) -> io::Result<()> {
     let start = Instant::now();
     let threads = rayon::current_num_threads();
-    let (counts, stats) =
-        collect_syng_map_pack_counts(syng_matcher, query_path, min_anchors)?;
+    let (counts, stats) = collect_syng_map_pack_counts(syng_matcher, query_path, min_anchors)?;
     let nodes = write_syng_map_pack(out, counts)?;
     info!(
         "Mapped {} query sequences to pack coverage over {} nodes ({} retained reads, {} syncmer anchors) in {:.3}s using {} threads",
@@ -1389,8 +1394,7 @@ fn emit_syng_map_pack_binary<W: Write + Send>(
     let start = Instant::now();
     let threads = rayon::current_num_threads();
     let universe_nodes = syng_matcher.num_syncmer_nodes();
-    let (counts, stats) =
-        collect_syng_map_pack_counts(syng_matcher, query_path, min_anchors)?;
+    let (counts, stats) = collect_syng_map_pack_counts(syng_matcher, query_path, min_anchors)?;
     let nodes = write_syng_map_pack_binary(
         out,
         counts,
@@ -1435,13 +1439,13 @@ fn emit_syng_map_projection(
         root.display()
     );
     {
-        let mut pack_out = create_plain_map_output_writer(
-            pack_path
-                .to_str()
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "projection pack path is not UTF-8")
-                })?,
-        )?;
+        let mut pack_out =
+            create_plain_map_output_writer(pack_path.to_str().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "projection pack path is not UTF-8",
+                )
+            })?)?;
         emit_syng_map_pack_binary(
             &mut pack_out,
             syng_matcher,
@@ -1453,13 +1457,12 @@ fn emit_syng_map_projection(
         pack_out.flush()?;
     }
     {
-        let mut gaf_out = create_map_output_writer(
-            gaf_path
-                .to_str()
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "projection GAF path is not UTF-8")
-                })?,
-        )?;
+        let mut gaf_out = create_map_output_writer(gaf_path.to_str().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "projection GAF path is not UTF-8",
+            )
+        })?)?;
         emit_syng_map_gaf(&mut gaf_out, syng_matcher, query_path, min_anchors)?;
         gaf_out.flush()?;
     }
@@ -1607,7 +1610,9 @@ fn stream_read_syncmer_index_query_paths(
             let base_read_ordinal = next_read_ordinal;
             next_read_ordinal = next_read_ordinal
                 .checked_add(chunk.len() as u64)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "read count overflow"))?;
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "read count overflow")
+                })?;
             tx.send((base_read_ordinal, chunk)).map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::BrokenPipe,
@@ -1650,18 +1655,13 @@ fn write_read_syncmer_index_files(
     while i < pairs.len() {
         let node_id = packed_read_syncmer_node(pairs[i]);
         if stats.nodes % u64::from(node_sample_rate) == 0 {
-            write_node_sample_entry(
-                &mut sample_out,
-                node_id,
-                previous_node_id,
-                post_offset,
-            )?;
+            write_node_sample_entry(&mut sample_out, node_id, previous_node_id, post_offset)?;
             stats.samples += 1;
         }
 
-        let node_delta = node_id.checked_sub(previous_node_id).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "node ids are not sorted")
-        })?;
+        let node_delta = node_id
+            .checked_sub(previous_node_id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "node ids are not sorted"))?;
         let group_start = i;
         while i < pairs.len() && packed_read_syncmer_node(pairs[i]) == node_id {
             i += 1;
@@ -1999,7 +1999,7 @@ fn setup_temp_dir(temp_dir: &str) -> io::Result<()> {
     Ok(())
 }
 
-use impg::commands::syng2gfa::SyngGfaMode;
+use impg::commands::syng2gfa::{SyngGfaFrequencyMask, SyngGfaMode};
 use impg::graph_pipeline::{GraphPipelineSpec, GraphPipelineStage};
 use impg::{EngineOpts, GfaEngine};
 use sweepga::knn_graph::SparsificationStrategy;
@@ -2176,11 +2176,70 @@ struct GraphRenderOpts {
     /// Pixel height for each path row.
     #[clap(long, value_parser, default_value_t = 3)]
     render_graph_path_height: u32,
+
+    /// Pass -m to gfalook, coloring the 1D graph by mean path depth.
+    #[clap(long, alias = "render-graph-depth", action)]
+    render_graph_mean_depth: bool,
 }
 
 impl GraphRenderOpts {
     fn requested(&self) -> bool {
         self.render_graph || self.render_graph_output.is_some()
+    }
+}
+
+/// Optional graph characterization report for query GFA/VCF outputs.
+#[derive(Parser, Debug, Clone)]
+#[command(next_help_heading = "Graph characterization")]
+struct GraphReportCliOpts {
+    /// Write an LLM-readable graph characterization report beside each graph output.
+    #[clap(long, action)]
+    describe_graph: bool,
+
+    /// Output report file or, for BED graph output, output directory. Extension
+    /// selects md/json/tsv; extensionless paths use --graph-report-format.
+    #[clap(long, value_parser)]
+    graph_report_output: Option<String>,
+
+    /// Report format for --describe-graph.
+    #[clap(long, value_parser = parse_graph_report_format, default_value = "markdown")]
+    graph_report_format: String,
+
+    /// Number of long links, path jumps, depth runs, and POVU sites to list.
+    #[clap(long, value_parser, default_value_t = 10)]
+    graph_report_top: usize,
+
+    /// Include POVU flubble/site decomposition in the graph report.
+    #[clap(long, action)]
+    graph_report_povu: bool,
+
+    /// Reference path/name hint for the POVU decomposition. May be repeated.
+    #[clap(
+        long = "graph-report-reference-name",
+        alias = "graph-report-ref",
+        value_parser
+    )]
+    graph_report_reference_names: Vec<String>,
+}
+
+impl GraphReportCliOpts {
+    fn requested(&self) -> bool {
+        self.describe_graph || self.graph_report_output.is_some()
+    }
+
+    fn options(
+        &self,
+        fallback_reference_names: &[String],
+    ) -> impg::graph_report::GraphReportOptions {
+        let mut options = impg::graph_report::GraphReportOptions::default();
+        options.top_n = self.graph_report_top.max(1);
+        options.include_povu = self.graph_report_povu;
+        options.povu_reference_names = if self.graph_report_reference_names.is_empty() {
+            fallback_reference_names.to_vec()
+        } else {
+            self.graph_report_reference_names.clone()
+        };
+        options
     }
 }
 
@@ -2194,12 +2253,24 @@ fn parse_graph_render_format(value: &str) -> Result<String, String> {
     }
 }
 
+fn parse_graph_report_format(value: &str) -> Result<String, String> {
+    let value = value.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "markdown" | "md" => Ok("markdown".to_string()),
+        "json" | "tsv" => Ok(value),
+        _ => Err(format!(
+            "invalid graph report format '{value}' (expected markdown, json, or tsv)"
+        )),
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ParsedGfaEngine {
     engine: GfaEngine,
     partition_size: Option<usize>,
     syng_gfa_mode: Option<SyngGfaMode>,
     syng_params: Option<impg::syng::SyncmerParams>,
+    syng_gfa_frequency_mask: SyngGfaFrequencyMask,
     crush_config: Option<impg::resolution::ResolutionConfig>,
     graph_sort_pipeline: Option<String>,
 }
@@ -2270,6 +2341,117 @@ fn parse_bool_engine_param(raw: &str, key: &str, value: &str) -> io::Result<bool
     }
 }
 
+fn parse_f64_engine_param(raw: &str, key: &str, value: &str) -> io::Result<f64> {
+    value.parse::<f64>().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': {}='{}' is not a number",
+                raw, key, value
+            ),
+        )
+    })
+}
+
+fn parse_syng_mask_stage(
+    raw: &str,
+    stage: &GraphPipelineStage,
+    mut mask: SyngGfaFrequencyMask,
+) -> io::Result<SyngGfaFrequencyMask> {
+    if stage.params.is_empty()
+        && matches!(
+            stage.name.as_str(),
+            "nomask" | "no-mask" | "unmask" | "nofilter" | "no-filter" | "unfilter"
+        )
+    {
+        return Ok(SyngGfaFrequencyMask::disabled());
+    }
+    if stage.params.is_empty() {
+        return Ok(mask);
+    }
+    for param in &stage.params {
+        match param.key.as_str() {
+            "top" | "drop-top" | "drop-top-fraction" | "top-fraction" | "fraction" => {
+                mask.drop_top_fraction = parse_f64_engine_param(raw, &param.key, &param.value)?;
+            }
+            "max-occurrences" | "max-occurrence" | "max-occ" => {
+                let value = parse_u32_engine_param(raw, &param.key, &param.value)?;
+                mask.max_occurrences = (value > 0).then_some(value);
+            }
+            "repeat-minor"
+            | "repeat-max-minor"
+            | "local-repeat-minor"
+            | "local-repeat-max-minor"
+            | "context-minor"
+            | "context-max-minor" => {
+                mask.local_repeat_max_minor =
+                    parse_u32_engine_param(raw, &param.key, &param.value)?;
+            }
+            "repeat-dominance"
+            | "local-repeat-dominance"
+            | "context-dominance"
+            | "min-dominance" => {
+                mask.local_repeat_min_dominant_fraction =
+                    parse_f64_engine_param(raw, &param.key, &param.value)?;
+            }
+            "cut-ns" | "cut-n" | "break-ns" | "break-n" | "cut-n-gaps" | "break-n-gaps" => {
+                mask.cut_n_gaps = parse_bool_engine_param(raw, &param.key, &param.value)?;
+            }
+            "cut-n-min-run" | "cut-n-min-len" | "n-cut-min-run" | "n-cut-min-len" => {
+                mask.cut_n_min_run = parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "enabled" | "enable" => {
+                if parse_bool_engine_param(raw, &param.key, &param.value)? {
+                    if !mask.enabled() {
+                        mask = SyngGfaFrequencyMask::local_default();
+                    }
+                } else {
+                    mask = SyngGfaFrequencyMask::disabled();
+                }
+            }
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Invalid --gfa-engine '{}': unknown syng mask parameter '{}'",
+                        raw, other
+                    ),
+                ));
+            }
+        }
+    }
+    if !mask.drop_top_fraction.is_finite() || !(0.0..1.0).contains(&mask.drop_top_fraction) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': syng mask top fraction must be finite and in [0, 1)",
+                raw
+            ),
+        ));
+    }
+    if !mask.local_repeat_min_dominant_fraction.is_finite()
+        || !(0.0..=1.0).contains(&mask.local_repeat_min_dominant_fraction)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': syng local repeat dominance must be finite and in [0, 1]",
+                raw
+            ),
+        ));
+    }
+    if mask.cut_n_min_run == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': syng N-cut minimum run length must be > 0",
+                raw
+            ),
+        ));
+    }
+    Ok(mask)
+}
+
 fn parse_crush_stage(
     raw: &str,
     stage: &GraphPipelineStage,
@@ -2289,6 +2471,13 @@ fn parse_crush_stage(
                 config.max_traversal_len =
                     parse_usize_size_engine_param(raw, &param.key, &param.value)?;
             }
+            "min-traversal-len"
+            | "min-traversal-length"
+            | "min-max-traversal-len"
+            | "min-max-traversal-length" => {
+                config.min_traversal_len =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
             "max-median-traversal-len"
             | "max-median-traversal-length"
             | "median-traversal-len"
@@ -2304,6 +2493,25 @@ fn parse_crush_stage(
             }
             "max-traversals" => {
                 config.max_traversals =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "auto-spoa-max-traversal-len"
+            | "auto-spoa-max-traversal-length"
+            | "auto-spoa-max-len"
+            | "small-spoa-max-traversal-len"
+            | "small-spoa-max-len" => {
+                config.auto_spoa_max_traversal_len =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "auto-allwave-max-total-sequence"
+            | "auto-allwave-max-total-seq"
+            | "auto-allwave-max-sequence"
+            | "auto-allwave-max-seq" => {
+                config.auto_allwave_max_total_sequence =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "auto-allwave-max-traversals" | "auto-allwave-max-travs" => {
+                config.auto_allwave_max_traversals =
                     parse_usize_size_engine_param(raw, &param.key, &param.value)?;
             }
             "polish-rounds" | "polish-iterations" => {
@@ -2346,8 +2554,16 @@ fn parse_crush_stage(
                 })?;
             }
             "mash-k" | "mash-kmer" | "kmer-size" => {
-                config.pair_mash_k =
-                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+                config.pair_mash_k = parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "seqwish-k"
+            | "seqwish-min-match-len"
+            | "seqwish-min-match-length"
+            | "replacement-seqwish-k"
+            | "replacement-min-match-len"
+            | "replacement-min-match-length" => {
+                config.replacement_seqwish_min_match_len =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)? as u64;
             }
             "sweepga-aligner" | "aligner" => {
                 config.sweepga_aligner = param.value.clone();
@@ -2372,7 +2588,7 @@ fn parse_crush_stage(
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, poa, poasta, biwfa, allwave, or sweepga)",
+                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, allwave, poa, poasta, star-biwfa, or sweepga)",
                             raw, param.value
                         ),
                     ));
@@ -2406,6 +2622,15 @@ fn parse_crush_stage(
             ),
         ));
     }
+    if config.min_traversal_len > config.max_traversal_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': min-traversal-len exceeds max-traversal-len",
+                raw
+            ),
+        ));
+    }
     if config.pair_k_nearest == 0
         && config.pair_k_farthest == 0
         && config.pair_random_fraction <= 0.0
@@ -2430,16 +2655,25 @@ fn parse_crush_stage(
     if !(3..=31).contains(&config.pair_mash_k) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("Invalid --gfa-engine '{}': mash-k must be between 3 and 31", raw),
+            format!(
+                "Invalid --gfa-engine '{}': mash-k must be between 3 and 31",
+                raw
+            ),
+        ));
+    }
+    if config.replacement_seqwish_min_match_len == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': seqwish minimum match length must be > 0",
+                raw
+            ),
         ));
     }
     Ok(config)
 }
 
-fn parse_graph_sort_stage(
-    raw: &str,
-    stage: &GraphPipelineStage,
-) -> io::Result<Option<String>> {
+fn parse_graph_sort_stage(raw: &str, stage: &GraphPipelineStage) -> io::Result<Option<String>> {
     let mut pipeline = Some(impg::DEFAULT_SYNG_GFA_SORT_PIPELINE.to_string());
     for param in &stage.params {
         match param.key.as_str() {
@@ -2537,6 +2771,7 @@ fn parse_engine_stage_params<F>(
     syncmer_length: &mut Option<u32>,
     smer_length: &mut Option<u32>,
     syncmer_seed: &mut Option<u32>,
+    syng_gfa_frequency_mask: &mut SyngGfaFrequencyMask,
     saw_syng_param: &mut bool,
 ) -> io::Result<()>
 where
@@ -2552,8 +2787,54 @@ where
                 "mode" => {
                     set_syng_gfa_mode(raw, syng_gfa_mode, SyngGfaMode::parse(&param.value)?)?;
                 }
-                "k" | "syncmer" | "syncmer-length" | "s" | "smer" | "smer-length"
-                | "seed" => assertion_stage.params.push(param.clone()),
+                "k" | "syncmer" | "syncmer-length" | "s" | "smer" | "smer-length" | "seed" => {
+                    assertion_stage.params.push(param.clone())
+                }
+                "mask-top" | "mask-drop-top" | "mask-drop-top-fraction" => {
+                    syng_gfa_frequency_mask.drop_top_fraction =
+                        parse_f64_engine_param(raw, &param.key, &param.value)?;
+                }
+                "mask-max-occurrences" | "mask-max-occurrence" | "mask-max-occ" => {
+                    let value = parse_u32_engine_param(raw, &param.key, &param.value)?;
+                    syng_gfa_frequency_mask.max_occurrences = (value > 0).then_some(value);
+                }
+                "mask-repeat-minor"
+                | "mask-repeat-max-minor"
+                | "mask-local-repeat-minor"
+                | "mask-local-repeat-max-minor"
+                | "mask-context-minor"
+                | "mask-context-max-minor" => {
+                    syng_gfa_frequency_mask.local_repeat_max_minor =
+                        parse_u32_engine_param(raw, &param.key, &param.value)?;
+                }
+                "mask-repeat-dominance"
+                | "mask-local-repeat-dominance"
+                | "mask-context-dominance"
+                | "mask-min-dominance" => {
+                    syng_gfa_frequency_mask.local_repeat_min_dominant_fraction =
+                        parse_f64_engine_param(raw, &param.key, &param.value)?;
+                }
+                "cut-ns" | "cut-n" | "break-ns" | "break-n" | "cut-n-gaps" | "break-n-gaps"
+                | "mask-cut-ns" | "mask-cut-n" | "filter-cut-ns" => {
+                    syng_gfa_frequency_mask.cut_n_gaps =
+                        parse_bool_engine_param(raw, &param.key, &param.value)?;
+                }
+                "cut-n-min-run"
+                | "cut-n-min-len"
+                | "n-cut-min-run"
+                | "n-cut-min-len"
+                | "mask-cut-n-min-run"
+                | "filter-cut-n-min-run" => {
+                    syng_gfa_frequency_mask.cut_n_min_run =
+                        parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+                }
+                "mask" | "frequency-mask" | "filter" | "frequency-filter" => {
+                    if !parse_bool_engine_param(raw, &param.key, &param.value)? {
+                        *syng_gfa_frequency_mask = SyngGfaFrequencyMask::disabled();
+                    } else if !syng_gfa_frequency_mask.enabled() {
+                        *syng_gfa_frequency_mask = SyngGfaFrequencyMask::local_default();
+                    }
+                }
                 "window" | "window-size" => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -2581,7 +2862,41 @@ where
             smer_length,
             syncmer_seed,
             saw_syng_param,
-        )
+        )?;
+        if !syng_gfa_frequency_mask.drop_top_fraction.is_finite()
+            || !(0.0..1.0).contains(&syng_gfa_frequency_mask.drop_top_fraction)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Invalid --gfa-engine '{}': syng mask top fraction must be finite and in [0, 1)",
+                    raw
+                ),
+            ));
+        }
+        if !syng_gfa_frequency_mask
+            .local_repeat_min_dominant_fraction
+            .is_finite()
+            || !(0.0..=1.0).contains(&syng_gfa_frequency_mask.local_repeat_min_dominant_fraction)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Invalid --gfa-engine '{}': syng local repeat dominance must be finite and in [0, 1]",
+                    raw
+                ),
+            ));
+        }
+        if syng_gfa_frequency_mask.cut_n_min_run == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Invalid --gfa-engine '{}': syng N-cut minimum run length must be > 0",
+                    raw
+                ),
+            ));
+        }
+        Ok(())
     } else {
         for param in &stage.params {
             match param.key.as_str() {
@@ -2677,6 +2992,11 @@ impl EngineCliOpts {
         let mut syncmer_seed: Option<u32> = None;
         let mut saw_syng_param = false;
         let mut crush_config = None;
+        let mut syng_gfa_frequency_mask = if is_syng {
+            SyngGfaFrequencyMask::local_default()
+        } else {
+            SyngGfaFrequencyMask::disabled()
+        };
         let mut graph_sort_pipeline = if is_syng {
             Some(impg::DEFAULT_SYNG_GFA_SORT_PIPELINE.to_string())
         } else {
@@ -2693,6 +3013,7 @@ impl EngineCliOpts {
             &mut syncmer_length,
             &mut smer_length,
             &mut syncmer_seed,
+            &mut syng_gfa_frequency_mask,
             &mut saw_syng_param,
         )?;
 
@@ -2721,6 +3042,24 @@ impl EngineCliOpts {
                 "sort" if is_syng => {
                     graph_sort_pipeline = parse_graph_sort_stage(raw, stage)?;
                 }
+                "mask" | "frequency-mask" | "freq-mask" | "filter" | "frequency-filter"
+                | "freq-filter"
+                    if is_syng =>
+                {
+                    syng_gfa_frequency_mask =
+                        parse_syng_mask_stage(raw, stage, syng_gfa_frequency_mask)?;
+                }
+                "cut-ns" | "cut-n" | "break-ns" | "break-n" if is_syng => {
+                    syng_gfa_frequency_mask.cut_n_gaps = true;
+                    syng_gfa_frequency_mask =
+                        parse_syng_mask_stage(raw, stage, syng_gfa_frequency_mask)?;
+                }
+                "nomask" | "no-mask" | "unmask" | "nofilter" | "no-filter" | "unfilter"
+                    if is_syng =>
+                {
+                    syng_gfa_frequency_mask =
+                        parse_syng_mask_stage(raw, stage, syng_gfa_frequency_mask)?;
+                }
                 "nosort" | "no-sort" | "unsorted" if is_syng => {
                     if !stage.params.is_empty() {
                         return Err(io::Error::new(
@@ -2739,7 +3078,10 @@ impl EngineCliOpts {
                 other => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        format!("Invalid --gfa-engine '{}': unsupported pipeline stage '{}'", raw, other),
+                        format!(
+                            "Invalid --gfa-engine '{}': unsupported pipeline stage '{}'",
+                            raw, other
+                        ),
                     ));
                 }
             }
@@ -2747,10 +3089,7 @@ impl EngineCliOpts {
         if is_syng && syng_gfa_mode.is_none() {
             syng_gfa_mode = Some(SyngGfaMode::Blunt);
         }
-        if is_syng
-            && crush_config.is_some()
-            && matches!(syng_gfa_mode, Some(SyngGfaMode::Raw))
-        {
+        if is_syng && crush_config.is_some() && matches!(syng_gfa_mode, Some(SyngGfaMode::Raw)) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
@@ -2777,6 +3116,7 @@ impl EngineCliOpts {
             partition_size,
             syng_gfa_mode,
             syng_params,
+            syng_gfa_frequency_mask,
             crush_config,
             graph_sort_pipeline,
         })
@@ -2864,6 +3204,7 @@ impl EngineCliOpts {
             parsed.partition_size,
             parsed.syng_gfa_mode,
             parsed.syng_params,
+            parsed.syng_gfa_frequency_mask,
             parsed.crush_config,
             parsed.graph_sort_pipeline,
         )
@@ -3297,7 +3638,12 @@ enum GenotypeCommand {
     #[command(alias = "cosigt")]
     Cos {
         /// Syng index prefix or .1khash/.1gbwt/.spos/.pstep/.names/.meta path
-        #[clap(short = 'a', long, value_parser, required_unless_present = "render_bundle")]
+        #[clap(
+            short = 'a',
+            long,
+            value_parser,
+            required_unless_present = "render_bundle"
+        )]
         index: Option<String>,
 
         /// Render bundle directory produced by `impg render --engine syng-native`
@@ -3313,7 +3659,12 @@ enum GenotypeCommand {
         proj: Option<String>,
 
         /// Reference path range to genotype, in the format `seq_name:start-end`
-        #[clap(short = 'r', long, value_parser, required_unless_present = "render_bundle")]
+        #[clap(
+            short = 'r',
+            long,
+            value_parser,
+            required_unless_present = "render_bundle"
+        )]
         target_range: Option<String>,
 
         /// Candidate extraction mode
@@ -3677,16 +4028,29 @@ directory and each BED row is written to its own file named from BED column 4.
 Use `--render-graph` with `-o gfa|vcf` to also write a gfalook 1D rendering
 of the final graph. PNG is the default; use `--render-graph-format svg` or a
 `.svg` output path for SVG. With BED graph output the render output is a
-directory and receives one image per BED row.
+directory and receives one image per BED row. Add `--render-graph-depth` to
+pass `-m` to gfalook and color the 1D rendering by mean path depth.
+Use `--describe-graph` with `-o gfa|vcf` to also write a Markdown/JSON/TSV
+graph characterization report. The report summarizes topology, layout stress,
+path-depth architecture, repeat-glue signals, and optional POVU flubbles
+(`--graph-report-povu`). With BED graph output the report output is a directory
+and receives one report per BED row.
 
 Syng notes:
   With -a/--alignment pointing to a syng index, supported query outputs are
   bed, bedpe, gfa, vcf, fasta, and gbwt. Use -o gfa for a local sequence GFA from
   query-selected intervals. `--gfa-engine syng` emits a syng syncmer GFA and
   defaults to syng:blunt plus gfasort pipeline Ygs; use syng:raw to preserve
-  native overlaps and `:nosort` to skip final ordering. The compact forms
+  native overlaps and `:nosort` to skip final ordering. Syng GFA extraction
+  filters the top 0.05% high-frequency local syncmer nodes from the raw syng
+  topology before bluntification and clones rare repeated-copy local syncmer
+  contexts by default so repeats seed ranges but do not glue unrelated copies;
+  use `:nomask` or `:nofilter` to disable this or
+  `:mask,top=0.001,max-occ=500` to tune it. Add `:cut-ns` to drop ambiguous
+  N-runs from fetched gap DNA and split emitted graph paths at those breaks.
+  The compact forms
   `-o gfa:syng:blunt,k=63,s=8,seed=7`, `-o gfa:syng:crush`,
-  `-o gfa:syng:crush:sort,pipeline=Yg`, and `-o vcf:syng` are accepted
+  `-o gfa:syng:crush:sort,pipeline=Ygs`, and `-o vcf:syng` are accepted
   as shorthand. Use
   `impg syng2gfa` to dump the whole syng syncmer graph instead.
 
@@ -3697,7 +4061,7 @@ GFA engine shorthand:
   name the aligner prefix, e.g. `-o gfa:wfmash:seqwish`,
   `-o gfa:fastga:pggb`, or `-o gfa:sweepga:seqwish`. Add `:crush` to run
   exact path-preserving blunt-graph resolution, e.g. `-o gfa:syng:crush`.
-  Crush methods include poa, biwfa, allwave, and sweepga; e.g.
+  Crush methods include allwave, poa, poasta, star-biwfa, and sweepga; e.g.
   `-o gfa:syng:crush,method=allwave,k-nearest=5,k-farthest=2`.
 ")]
     Query {
@@ -3736,12 +4100,11 @@ GFA engine shorthand:
         #[clap(long, value_parser, default_value_t = 1_000)]
         syng_extend_budget: u64,
 
-        /// Maximum adaptive minimum anchor count for a syng chain to be
-        /// emitted. The effective threshold is estimated from query span,
-        /// syncmer density, and 95% identity, then capped by this value. The
-        /// default is a high ceiling, not a fixed floor, so short queries keep
-        /// a small support requirement while long repeat-dense loci require
-        /// multiple bounded GBWT-walk seed islands.
+        /// Maximum adaptive minimum anchor count for a syng scaffold chain
+        /// to be emitted. The effective threshold is estimated from query
+        /// span, syncmer density, and 95% identity, then capped by this
+        /// value. The default keeps short queries proportional while avoiding
+        /// dropout in large CNV/SV loci whose valid scaffold chains are local.
         /// Set 0 to disable anchor-count filtering.
         #[arg(help_heading = "Syng input")]
         #[clap(long, value_parser, default_value_t = impg::syng_transitive::DEFAULT_MIN_CHAIN_ANCHORS)]
@@ -3750,11 +4113,11 @@ GFA engine shorthand:
         /// Minimum chain query-extent as a fraction of the queried
         /// range (0.0 to 1.0). Chains whose anchor span on the query
         /// axis covers less than `fraction × query_range_len` are
-        /// dropped. Default 0.5 keeps locus-scale chains and prevents
-        /// isolated local homologies from being projected to the full
-        /// query. Set 0.0 for exploratory local-chain discovery.
+        /// dropped. Default 0.0 leaves short-hit suppression to the
+        /// SweepGA scaffold filter, which is safer for large CNV and
+        /// multi-bubble loci. Raise for strict locus-scale projection.
         #[arg(help_heading = "Syng input")]
-        #[clap(long, value_parser, default_value_t = 0.5)]
+        #[clap(long, value_parser, default_value_t = 0.0)]
         syng_min_chain_fraction: f64,
 
         /// Drop this fraction of the query syncmer seed nodes with the
@@ -3819,6 +4182,9 @@ GFA engine shorthand:
 
         #[clap(flatten)]
         graph_render: GraphRenderOpts,
+
+        #[clap(flatten)]
+        graph_report: GraphReportCliOpts,
 
         // --- General ---
         #[clap(flatten)]
@@ -3927,7 +4293,12 @@ GFA engine shorthand:
     /// Infer allele calls across ranges or partitions from graph-derived evidence
     Infer {
         /// Syng index prefix or .1khash/.1gbwt/.spos/.pstep/.names/.meta path
-        #[clap(short = 'a', long, value_parser, required_unless_present = "render_bundle")]
+        #[clap(
+            short = 'a',
+            long,
+            value_parser,
+            required_unless_present = "render_bundle"
+        )]
         index: Option<String>,
 
         /// Render bundle directory produced by `impg render --engine syng-native`
@@ -4164,6 +4535,10 @@ GFA engine shorthand:
         #[clap(long, alias = "max-traversal-length", value_parser = parse_usize_size, default_value = "10k")]
         max_traversal_len: usize,
 
+        /// Minimum longest-traversal length for a candidate; useful for large-first passes
+        #[clap(long, alias = "min-traversal-length", alias = "min-max-traversal-len", value_parser = parse_usize_size, default_value = "0")]
+        min_traversal_len: usize,
+
         /// Maximum median traversal length through one candidate; 0 disables this guard
         #[clap(long, alias = "max-median-traversal-length", value_parser = parse_usize_size, default_value = "1k")]
         max_median_traversal_len: usize,
@@ -4175,6 +4550,18 @@ GFA engine shorthand:
         /// Maximum number of path-supported traversals through one candidate
         #[clap(long, value_parser = parse_usize_size, default_value = "10k")]
         max_traversals: usize,
+
+        /// Maximum traversal length for auto mode to use direct SPOA before AllWave; 0 disables
+        #[clap(long, alias = "small-spoa-max-len", value_parser = parse_usize_size, default_value = "2k")]
+        auto_spoa_max_traversal_len: usize,
+
+        /// Maximum total traversal sequence for auto mode to use AllWave; 0 disables
+        #[clap(long, alias = "auto-allwave-max-total-seq", value_parser = parse_usize_size, default_value = "200k")]
+        auto_allwave_max_total_sequence: usize,
+
+        /// Maximum traversal count for auto mode to use AllWave; 0 disables
+        #[clap(long, alias = "auto-allwave-max-travs", value_parser = parse_usize_size, default_value = "128")]
+        auto_allwave_max_traversals: usize,
 
         /// Small-tangle SPOA polish rounds after BiWFA in-memory induction; 0 disables
         #[clap(long, alias = "polish-iterations", value_parser = parse_usize_size, default_value = "1")]
@@ -4196,7 +4583,7 @@ GFA engine shorthand:
         #[clap(long, value_parser = parse_usize_size, default_value = "10k")]
         polish_max_traversals: usize,
 
-        /// Resolver method: auto, poa, poasta, biwfa, allwave, or sweepga
+        /// Resolver method: auto, allwave, poa, poasta, star-biwfa, or sweepga
         #[clap(long, value_parser, default_value = "auto")]
         method: String,
 
@@ -4216,6 +4603,16 @@ GFA engine shorthand:
         #[clap(long, value_parser = parse_usize_size, default_value = "15")]
         mash_k: usize,
 
+        /// Minimum exact-match length used by seqwish when inducing replacement graphs
+        #[clap(
+            long = "seqwish-k",
+            alias = "seqwish-min-match-len",
+            alias = "replacement-seqwish-k",
+            value_parser = parse_usize_size,
+            default_value = "79"
+        )]
+        replacement_seqwish_min_match_len: usize,
+
         /// SweepGA aligner backend for --method sweepga: fastga or wfmash
         #[clap(long, value_parser, default_value = "fastga")]
         sweepga_aligner: String,
@@ -4233,7 +4630,13 @@ GFA engine shorthand:
         sweepga_map_pct_identity: Option<String>,
 
         /// Skip SweepGA post-alignment filtering for --method sweepga
-        #[clap(long, value_parser, default_value_t = true)]
+        #[clap(
+            long,
+            value_parser = clap::value_parser!(bool),
+            default_value_t = true,
+            default_missing_value = "true",
+            num_args = 0..=1
+        )]
         sweepga_no_filter: bool,
 
         #[clap(flatten)]
@@ -4253,6 +4656,37 @@ GFA engine shorthand:
 
         /// Reference path/name hint for POVU. May be repeated; if omitted,
         /// POVU uses its default reference selection.
+        #[clap(short = 'r', long = "reference-name", alias = "ref", value_parser)]
+        reference_names: Vec<String>,
+
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+
+    /// Describe GFA topology, layout stress, repeats, and optional POVU flubbles
+    #[command(alias = "describe-graph", alias = "describe-gfa")]
+    GraphReport {
+        /// Input GFA path, or '-' for stdin
+        #[clap(short = 'g', long, value_parser)]
+        gfa: String,
+
+        /// Output report path, or '-' for stdout
+        #[clap(short = 'o', long, value_parser, default_value = "-")]
+        output: String,
+
+        /// Report format: markdown, json, or tsv
+        #[clap(long, value_parser = parse_graph_report_format, default_value = "markdown")]
+        format: String,
+
+        /// Number of long links, path jumps, depth runs, and POVU sites to list
+        #[clap(long, value_parser, default_value_t = 10)]
+        top: usize,
+
+        /// Include POVU flubble/site decomposition
+        #[clap(long, action)]
+        povu: bool,
+
+        /// Reference path/name hint for POVU. May be repeated.
         #[clap(short = 'r', long = "reference-name", alias = "ref", value_parser)]
         reference_names: Vec<String>,
 
@@ -4762,7 +5196,8 @@ fn run() -> io::Result<()> {
                 }
 
                 info!("Loading syng index from prefix: {}", syng_prefix);
-                let syng_index = impg::syng::SyngIndex::load(syng_prefix, impg::syng::SyncmerParams::default())?;
+                let syng_index =
+                    impg::syng::SyngIndex::load(syng_prefix, impg::syng::SyncmerParams::default())?;
                 let seq_index = syng_index.build_seq_index();
 
                 let reverse_complement = gfa_maf_fasta.reverse_complement;
@@ -4825,62 +5260,62 @@ fn run() -> io::Result<()> {
                     !no_rehome_singletons,
                 )?;
             } else {
-            // ─── Normal (alignment-based) partition path ────────────────────
+                // ─── Normal (alignment-based) partition path ────────────────────
 
-            // Resolve alignment files once (supports process substitution inputs)
-            let alignment_files = resolve_alignment_files(&alignment)?;
+                // Resolve alignment files once (supports process substitution inputs)
+                let alignment_files = resolve_alignment_files(&alignment)?;
 
-            // Extract fields and resolve sequence files before moving gfa_maf_fasta
-            let reverse_complement = gfa_maf_fasta.reverse_complement;
-            let sequence_files_for_impg = gfa_maf_fasta.sequence.resolve_sequence_files()?;
+                // Extract fields and resolve sequence files before moving gfa_maf_fasta
+                let reverse_complement = gfa_maf_fasta.reverse_complement;
+                let sequence_files_for_impg = gfa_maf_fasta.sequence.resolve_sequence_files()?;
 
-            // Setup POA/sequence resources
-            let (sequence_index, scoring_params) = gfa_maf_fasta.setup_output_resources(
-                &output_format,
-                false,
-                alignment_files.as_slice(),
-                approximate,
-                &engine_cli.poa_scoring,
-            )?;
+                // Setup POA/sequence resources
+                let (sequence_index, scoring_params) = gfa_maf_fasta.setup_output_resources(
+                    &output_format,
+                    false,
+                    alignment_files.as_slice(),
+                    approximate,
+                    &engine_cli.poa_scoring,
+                )?;
 
-            // Build engine config (resolves temp_dir and sparsify internally)
-            let mut engine_config = engine_cli.build(common.threads.get())?;
-            if output_format != "gfa" {
-                engine_config.graph_sort_pipeline = None;
-            }
+                // Build engine config (resolves temp_dir and sparsify internally)
+                let mut engine_config = engine_cli.build(common.threads.get())?;
+                if output_format != "gfa" {
+                    engine_config.graph_sort_pipeline = None;
+                }
 
-            // Initialize impg after validation
-            let impg = initialize_index(
-                &common,
-                &alignment,
-                alignment_files.as_slice(),
-                sequence_files_for_impg,
-            )?;
+                // Initialize impg after validation
+                let impg = initialize_index(
+                    &common,
+                    &alignment,
+                    alignment_files.as_slice(),
+                    sequence_files_for_impg,
+                )?;
 
-            partition::partition_alignments(
-                &impg,
-                window_size,
-                starting_sequences_file.as_deref(),
-                &selection_mode,
-                merge_distance,
-                min_result_identity,
-                min_missing_size,
-                min_boundary_distance,
-                transitive_opts.transitive_dfs,
-                transitive_opts.max_depth,
-                transitive_opts.effective_min_transitive_len(),
-                transitive_opts.min_distance_between_ranges,
-                &output_format,
-                output_folder.as_deref(),
-                sequence_index.as_ref(),
-                scoring_params,
-                reverse_complement,
-                common.verbose > 1,
-                separate_files,
-                approximate,
-                &engine_config,
-                !no_rehome_singletons,
-            )?;
+                partition::partition_alignments(
+                    &impg,
+                    window_size,
+                    starting_sequences_file.as_deref(),
+                    &selection_mode,
+                    merge_distance,
+                    min_result_identity,
+                    min_missing_size,
+                    min_boundary_distance,
+                    transitive_opts.transitive_dfs,
+                    transitive_opts.max_depth,
+                    transitive_opts.effective_min_transitive_len(),
+                    transitive_opts.min_distance_between_ranges,
+                    &output_format,
+                    output_folder.as_deref(),
+                    sequence_index.as_ref(),
+                    scoring_params,
+                    reverse_complement,
+                    common.verbose > 1,
+                    separate_files,
+                    approximate,
+                    &engine_config,
+                    !no_rehome_singletons,
+                )?;
             }
         }
         Args::Query {
@@ -4901,6 +5336,7 @@ fn run() -> io::Result<()> {
             gfa_maf_fasta,
             engine_cli,
             graph_render,
+            graph_report,
         } => {
             initialize_threads_and_log(&common);
             let mut engine_cli = engine_cli;
@@ -4964,8 +5400,15 @@ fn run() -> io::Result<()> {
                 // (conflicts_with_all handles this at clap level, but be explicit)
 
                 // Only bed, bedpe, gfa, vcf, fasta, and gbwt output are supported for syng queries
-                let resolved_format = if output_format == "auto" { "bed" } else { output_format.as_str() };
-                if !matches!(resolved_format, "bed" | "bedpe" | "gfa" | "vcf" | "fasta" | "gbwt") {
+                let resolved_format = if output_format == "auto" {
+                    "bed"
+                } else {
+                    output_format.as_str()
+                };
+                if !matches!(
+                    resolved_format,
+                    "bed" | "bedpe" | "gfa" | "vcf" | "fasta" | "gbwt"
+                ) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
@@ -4980,9 +5423,16 @@ fn run() -> io::Result<()> {
                         "--render-graph is only supported with query graph output (-o gfa or -o vcf)",
                     ));
                 }
+                if graph_report.requested() && !matches!(resolved_format, "gfa" | "vcf") {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--describe-graph is only supported with query graph output (-o gfa or -o vcf)",
+                    ));
+                }
 
                 info!("Loading syng index from prefix: {}", syng_prefix);
-                let syng_index = impg::syng::SyngIndex::load(syng_prefix, impg::syng::SyncmerParams::default())?;
+                let syng_index =
+                    impg::syng::SyngIndex::load(syng_prefix, impg::syng::SyncmerParams::default())?;
                 let seq_index_built = syng_index.build_seq_index();
                 // Wrap once; wrapper owns syng_index and seq_index for the rest of the path.
                 let wrapper = impg::SyngImpgWrapper::new(syng_index, seq_index_built, syng_padding);
@@ -4994,30 +5444,31 @@ fn run() -> io::Result<()> {
                 };
 
                 // Parse target ranges
-                let target_ranges: Vec<(String, (i32, i32), String)> = if let Some(ref target_range_str) = query.target_range {
-                    if target_range_str.contains(':') {
-                        vec![partition::parse_target_range(target_range_str)?]
+                let target_ranges: Vec<(String, (i32, i32), String)> =
+                    if let Some(ref target_range_str) = query.target_range {
+                        if target_range_str.contains(':') {
+                            vec![partition::parse_target_range(target_range_str)?]
+                        } else {
+                            // Whole sequence
+                            let seq_name = target_range_str.as_str();
+                            let seq_len = wrapper
+                                .seq_index()
+                                .get_id(seq_name)
+                                .and_then(|id| wrapper.seq_index().get_len_from_id(id))
+                                .ok_or_else(|| {
+                                    io::Error::new(
+                                        io::ErrorKind::NotFound,
+                                        format!("Sequence '{}' not found in syng index", seq_name),
+                                    )
+                                })? as i32;
+                            let name = format!("{}:{}-{}", seq_name, 0, seq_len);
+                            vec![(seq_name.to_string(), (0, seq_len), name)]
+                        }
+                    } else if let Some(ref target_bed) = query.target_bed {
+                        partition::parse_bed_file(target_bed)?
                     } else {
-                        // Whole sequence
-                        let seq_name = target_range_str.as_str();
-                        let seq_len = wrapper
-                            .seq_index()
-                            .get_id(seq_name)
-                            .and_then(|id| wrapper.seq_index().get_len_from_id(id))
-                            .ok_or_else(|| {
-                                io::Error::new(
-                                    io::ErrorKind::NotFound,
-                                    format!("Sequence '{}' not found in syng index", seq_name),
-                                )
-                            })? as i32;
-                        let name = format!("{}:{}-{}", seq_name, 0, seq_len);
-                        vec![(seq_name.to_string(), (0, seq_len), name)]
-                    }
-                } else if let Some(ref target_bed) = query.target_bed {
-                    partition::parse_bed_file(target_bed)?
-                } else {
-                    unreachable!();
-                };
+                        unreachable!();
+                    };
 
                 // Boundary-realignment default path: needs a UnifiedSequenceIndex to
                 // fetch small windows around each fuzzy edge. --syng-raw opts out and
@@ -5042,10 +5493,9 @@ fn run() -> io::Result<()> {
                 // Boundary realignment also needs them for edge-window fetches.
                 let sequence_files_supplied =
                     !gfa_maf_fasta.sequence.resolve_sequence_files()?.is_empty();
-                let needs_sequences =
-                    matches!(resolved_format, "gfa" | "vcf" | "fasta" | "gbwt")
-                        || use_boundary_realign
-                        || sequence_files_supplied;
+                let needs_sequences = matches!(resolved_format, "gfa" | "vcf" | "fasta" | "gbwt")
+                    || use_boundary_realign
+                    || sequence_files_supplied;
                 let sequence_index = if needs_sequences {
                     let si = gfa_maf_fasta.sequence.build_sequence_index()?;
                     if si.is_none() {
@@ -5087,24 +5537,24 @@ fn run() -> io::Result<()> {
                     None
                 };
 
-                let query_raw_syng = |
-                    target_name: &str,
-                    range_start: i32,
-                    range_end: i32,
-                    padding: u64,
-                    extension: u64,
-                | -> io::Result<Vec<impg::syng::HomologousInterval>> {
-                    let start = range_start.max(0) as u64;
-                    let end = range_end.max(range_start).max(0) as u64;
-                    wrapper.syng_index().query_region_ext_with_seed_filter(
-                        target_name,
-                        start,
-                        end,
-                        padding,
-                        extension,
-                        syng_seed_filter,
-                    )
-                };
+                let query_raw_syng =
+                    |target_name: &str,
+                     range_start: i32,
+                     range_end: i32,
+                     padding: u64,
+                     extension: u64|
+                     -> io::Result<Vec<impg::syng::HomologousInterval>> {
+                        let start = range_start.max(0) as u64;
+                        let end = range_end.max(range_start).max(0) as u64;
+                        wrapper.syng_index().query_region_ext_with_seed_filter(
+                            target_name,
+                            start,
+                            end,
+                            padding,
+                            extension,
+                            syng_seed_filter,
+                        )
+                    };
 
                 // Process each target range. Serial outer — the
                 // per-tile query already uses the rayon pool
@@ -5115,7 +5565,10 @@ fn run() -> io::Result<()> {
                     let target_query_start = Instant::now();
                     let target_output_prefix =
                         output_prefix_for_target(&output_prefix, bed_graph_dir.as_deref(), name);
-                    info!("Syng query: {} ({}:{}-{})", name, target_name, range_start, range_end);
+                    info!(
+                        "Syng query: {} ({}:{}-{})",
+                        name, target_name, range_start, range_end
+                    );
 
                     match resolved_format {
                         "bed" | "bedpe" => {
@@ -5154,7 +5607,11 @@ fn run() -> io::Result<()> {
                                 *range_end,
                                 wrapper.seq_index(),
                             );
-                            let ext = if resolved_format == "bedpe" { "bedpe" } else { "bed" };
+                            let ext = if resolved_format == "bedpe" {
+                                "bedpe"
+                            } else {
+                                "bed"
+                            };
                             let mut out = find_output_stream(&target_output_prefix, ext)?;
                             if resolved_format == "bedpe" {
                                 output_results_bedpe(
@@ -5236,6 +5693,7 @@ fn run() -> io::Result<()> {
                                         output_ext,
                                         &reference_names,
                                         &graph_render,
+                                        &graph_report,
                                         bed_graph_dir.as_deref(),
                                         name,
                                         common.threads.get(),
@@ -5265,6 +5723,7 @@ fn run() -> io::Result<()> {
                                     output_ext,
                                     &reference_names,
                                     &graph_render,
+                                    &graph_report,
                                     bed_graph_dir.as_deref(),
                                     name,
                                     common.threads.get(),
@@ -5304,7 +5763,13 @@ fn run() -> io::Result<()> {
                                             sequence_index.as_ref().unwrap(),
                                         )?
                                     } else {
-                                        query_raw_syng(target_name, window_start, window_end, syng_padding, syng_extension)?
+                                        query_raw_syng(
+                                            target_name,
+                                            window_start,
+                                            window_end,
+                                            syng_padding,
+                                            syng_extension,
+                                        )?
                                     };
                                     let window_intervals = syng_intervals_to_merged_query_intervals(
                                         &intervals,
@@ -5317,7 +5782,10 @@ fn run() -> io::Result<()> {
                                     );
                                     info!(
                                         "  [syng sub-window {}] {}:{}-{} → {} intervals",
-                                        window_idx, target_name, window_start, window_end,
+                                        window_idx,
+                                        target_name,
+                                        window_start,
+                                        window_end,
                                         window_intervals.len()
                                     );
                                     if !window_intervals.is_empty() {
@@ -5335,6 +5803,7 @@ fn run() -> io::Result<()> {
                                         output_ext,
                                         &reference_names,
                                         &graph_render,
+                                        &graph_report,
                                         bed_graph_dir.as_deref(),
                                         name,
                                         common.threads.get(),
@@ -5364,6 +5833,7 @@ fn run() -> io::Result<()> {
                                     output_ext,
                                     &reference_names,
                                     &graph_render,
+                                    &graph_report,
                                     bed_graph_dir.as_deref(),
                                     name,
                                     common.threads.get(),
@@ -5387,7 +5857,13 @@ fn run() -> io::Result<()> {
                                         sequence_index.as_ref().unwrap(),
                                     )?
                                 } else {
-                                    query_raw_syng(target_name, *range_start, *range_end, syng_padding, syng_extension)?
+                                    query_raw_syng(
+                                        target_name,
+                                        *range_start,
+                                        *range_end,
+                                        syng_padding,
+                                        syng_extension,
+                                    )?
                                 };
                                 let query_intervals = syng_intervals_to_merged_query_intervals(
                                     &intervals,
@@ -5407,6 +5883,7 @@ fn run() -> io::Result<()> {
                                         output_ext,
                                         &reference_names,
                                         &graph_render,
+                                        &graph_report,
                                         bed_graph_dir.as_deref(),
                                         name,
                                         common.threads.get(),
@@ -5436,6 +5913,7 @@ fn run() -> io::Result<()> {
                                     output_ext,
                                     &reference_names,
                                     &graph_render,
+                                    &graph_report,
                                     bed_graph_dir.as_deref(),
                                     name,
                                     common.threads.get(),
@@ -5461,12 +5939,26 @@ fn run() -> io::Result<()> {
                                     seq_idx,
                                 )?
                             } else {
-                                query_raw_syng(target_name, *range_start, *range_end, syng_padding, syng_extension)?
+                                query_raw_syng(
+                                    target_name,
+                                    *range_start,
+                                    *range_end,
+                                    syng_padding,
+                                    syng_extension,
+                                )?
                             };
                             let mut out = find_output_stream(&target_output_prefix, "fa")?;
                             for iv in &intervals {
-                                let sequence = seq_idx.fetch_sequence(&iv.genome, iv.start as i32, iv.end as i32)?;
-                                writeln!(out, ">{}:{}-{}({})", iv.genome, iv.start, iv.end, iv.strand)?;
+                                let sequence = seq_idx.fetch_sequence(
+                                    &iv.genome,
+                                    iv.start as i32,
+                                    iv.end as i32,
+                                )?;
+                                writeln!(
+                                    out,
+                                    ">{}:{}-{}({})",
+                                    iv.genome, iv.start, iv.end, iv.strand
+                                )?;
                                 out.write_all(&sequence)?;
                                 writeln!(out)?;
                             }
@@ -5490,7 +5982,13 @@ fn run() -> io::Result<()> {
                                     seq_idx,
                                 )?
                             } else {
-                                query_raw_syng(target_name, *range_start, *range_end, syng_padding, syng_extension)?
+                                query_raw_syng(
+                                    target_name,
+                                    *range_start,
+                                    *range_end,
+                                    syng_padding,
+                                    syng_extension,
+                                )?
                             };
                             let gbwt_prefix = target_output_prefix.as_ref().unwrap();
 
@@ -5498,8 +5996,15 @@ fn run() -> io::Result<()> {
                             let fetched: Vec<(String, Vec<u8>)> = intervals
                                 .iter()
                                 .map(|iv| {
-                                    let sequence = seq_idx.fetch_sequence(&iv.genome, iv.start as i32, iv.end as i32)?;
-                                    let seq_name = format!("{}:{}-{}({})", iv.genome, iv.start, iv.end, iv.strand);
+                                    let sequence = seq_idx.fetch_sequence(
+                                        &iv.genome,
+                                        iv.start as i32,
+                                        iv.end as i32,
+                                    )?;
+                                    let seq_name = format!(
+                                        "{}:{}-{}({})",
+                                        iv.genome, iv.start, iv.end, iv.strand
+                                    );
                                     Ok((seq_name, sequence))
                                 })
                                 .collect::<io::Result<Vec<_>>>()?;
@@ -5509,8 +6014,13 @@ fn run() -> io::Result<()> {
                                 .map(|(name, seq)| (name.clone(), seq.as_slice()))
                                 .collect();
 
-                            wrapper.syng_index().build_region_gbwt(&seq_refs, gbwt_prefix)?;
-                            info!("Wrote region GBWT: {}.1gbwt + {}.1khash", gbwt_prefix, gbwt_prefix);
+                            wrapper
+                                .syng_index()
+                                .build_region_gbwt(&seq_refs, gbwt_prefix)?;
+                            info!(
+                                "Wrote region GBWT: {}.1gbwt + {}.1khash",
+                                gbwt_prefix, gbwt_prefix
+                            );
                         }
                         _ => unreachable!(),
                     }
@@ -5525,454 +6035,474 @@ fn run() -> io::Result<()> {
                 }
                 // Skip the rest of the normal query path
             } else {
-            // ─── Normal (alignment-based) query path ──────────────────────
+                // ─── Normal (alignment-based) query path ──────────────────────
 
-            // Resolve alignment files once (handles process substitution inputs)
-            let alignment_files = resolve_alignment_files(&alignment)?;
+                // Resolve alignment files once (handles process substitution inputs)
+                let alignment_files = resolve_alignment_files(&alignment)?;
 
-            // Early validation for approximate mode (before expensive operations)
-            if query.approximate {
-                // Check that all alignment files are tracepoint-based (.1aln or .tpa)
-                let non_tracepoint_files: Vec<&String> = alignment_files
-                    .iter()
-                    .filter(|f| !f.ends_with(".1aln") && !f.ends_with(".tpa"))
-                    .collect();
+                // Early validation for approximate mode (before expensive operations)
+                if query.approximate {
+                    // Check that all alignment files are tracepoint-based (.1aln or .tpa)
+                    let non_tracepoint_files: Vec<&String> = alignment_files
+                        .iter()
+                        .filter(|f| !f.ends_with(".1aln") && !f.ends_with(".tpa"))
+                        .collect();
 
-                if !non_tracepoint_files.is_empty() {
-                    return Err(io::Error::new(
+                    if !non_tracepoint_files.is_empty() {
+                        return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
                             "--approximate mode only works with tracepoint alignment files (.1aln or .tpa), found {} incompatible files.",
                             non_tracepoint_files.len()
                         ),
                     ));
+                    }
+
+                    validate_approximate_mode_min_length(
+                        query.transitive_opts.min_transitive_len,
+                        query.transitive,
+                    )?;
                 }
 
-                validate_approximate_mode_min_length(
-                    query.transitive_opts.min_transitive_len,
-                    query.transitive,
+                // Extract sequence files before consuming gfa_maf_fasta
+                let sequence_files_for_impg = gfa_maf_fasta.sequence.resolve_sequence_files()?;
+
+                // Load subset filter if provided
+                let subset_filter = load_subset_filter_if_provided(&query.subset_sequence_list)?;
+
+                // Initialize impg after validation but before target range validation (which needs seq_index)
+                let impg = initialize_index(
+                    &common,
+                    &alignment,
+                    alignment_files.as_slice(),
+                    sequence_files_for_impg,
                 )?;
-            }
 
-            // Extract sequence files before consuming gfa_maf_fasta
-            let sequence_files_for_impg = gfa_maf_fasta.sequence.resolve_sequence_files()?;
+                // Parse engine spec early (engine + optional partition size)
+                let parsed_gfa_engine = engine_cli.parse_engine()?;
+                let parsed_engine = parsed_gfa_engine.engine;
+                let parsed_partition_size = parsed_gfa_engine.partition_size;
 
-            // Load subset filter if provided
-            let subset_filter = load_subset_filter_if_provided(&query.subset_sequence_list)?;
-
-            // Initialize impg after validation but before target range validation (which needs seq_index)
-            let impg = initialize_index(
-                &common,
-                &alignment,
-                alignment_files.as_slice(),
-                sequence_files_for_impg,
-            )?;
-
-            // Parse engine spec early (engine + optional partition size)
-            let parsed_gfa_engine = engine_cli.parse_engine()?;
-            let parsed_engine = parsed_gfa_engine.engine;
-            let parsed_partition_size = parsed_gfa_engine.partition_size;
-
-            // For size validation, flat POA on "gfa" needs the same limit as the old "gfa-poa"
-            let size_check_format = if matches!(output_format.as_str(), "gfa" | "vcf")
-                && parsed_engine == GfaEngine::Poa
-            {
-                "gfa-poa"
-            } else {
-                &output_format
-            };
-
-            // Parse and validate all target ranges, tracking which parameter was used
-            let (target_ranges, from_range_param) = if let Some(target_range_str) =
-                &query.target_range
-            {
-                let (target_name, target_range, name) = if target_range_str.contains(':') {
-                    partition::parse_target_range(target_range_str)?
+                // For size validation, flat POA on "gfa" needs the same limit as the old "gfa-poa"
+                let size_check_format = if matches!(output_format.as_str(), "gfa" | "vcf")
+                    && parsed_engine == GfaEngine::Poa
+                {
+                    "gfa-poa"
                 } else {
-                    // No interval specified: use the whole sequence [0, len)
-                    let seq_name = target_range_str;
-                    let seq_id = impg.seq_index().get_id(seq_name).ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::NotFound,
-                            format!("Sequence '{seq_name}' not found in index"),
-                        )
-                    })?;
-                    let seq_len = impg.seq_index().get_len_from_id(seq_id).ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("Could not get length for sequence '{seq_name}'"),
-                        )
-                    })? as i32;
-                    let name = format!("{}:{}-{}", seq_name, 0, seq_len);
-                    (seq_name.to_string(), (0, seq_len), name)
+                    &output_format
                 };
-                // Validate sequence exists and range is within bounds
-                validate_sequence_range(
-                    &target_name,
-                    target_range.0,
-                    target_range.1,
-                    impg.seq_index(),
-                )?;
-                validate_range_min_length(
-                    target_range.0,
-                    target_range.1,
-                    &name,
-                    query.transitive_opts.effective_min_transitive_len(),
-                )?;
-                // Skip region size validation when --partition-size is set (each sub-window is within limits)
-                if parsed_partition_size.is_none() {
-                    validate_region_size(
+
+                // Parse and validate all target ranges, tracking which parameter was used
+                let (target_ranges, from_range_param) = if let Some(target_range_str) =
+                    &query.target_range
+                {
+                    let (target_name, target_range, name) = if target_range_str.contains(':') {
+                        partition::parse_target_range(target_range_str)?
+                    } else {
+                        // No interval specified: use the whole sequence [0, len)
+                        let seq_name = target_range_str;
+                        let seq_id = impg.seq_index().get_id(seq_name).ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::NotFound,
+                                format!("Sequence '{seq_name}' not found in index"),
+                            )
+                        })?;
+                        let seq_len = impg.seq_index().get_len_from_id(seq_id).ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("Could not get length for sequence '{seq_name}'"),
+                            )
+                        })? as i32;
+                        let name = format!("{}:{}-{}", seq_name, 0, seq_len);
+                        (seq_name.to_string(), (0, seq_len), name)
+                    };
+                    // Validate sequence exists and range is within bounds
+                    validate_sequence_range(
+                        &target_name,
                         target_range.0,
                         target_range.1,
-                        size_check_format,
-                        query.effective_merge_distance(),
-                        gfa_maf_fasta.force_large_region,
+                        impg.seq_index(),
                     )?;
-                }
-                (vec![(target_name, target_range, name)], true)
-            } else if let Some(target_bed) = &query.target_bed {
-                let targets = partition::parse_bed_file(target_bed)?;
-                // Validate all entries in the BED file
-                for (seq_name, (start, end), name) in &targets {
-                    validate_sequence_range(seq_name, *start, *end, impg.seq_index())?;
                     validate_range_min_length(
-                        *start,
-                        *end,
-                        name,
+                        target_range.0,
+                        target_range.1,
+                        &name,
                         query.transitive_opts.effective_min_transitive_len(),
                     )?;
-                    // Skip region size validation when --partition-size is set
+                    // Skip region size validation when --partition-size is set (each sub-window is within limits)
                     if parsed_partition_size.is_none() {
                         validate_region_size(
-                            *start,
-                            *end,
+                            target_range.0,
+                            target_range.1,
                             size_check_format,
                             query.effective_merge_distance(),
                             gfa_maf_fasta.force_large_region,
                         )?;
                     }
-                }
-                (targets, false)
-            } else {
-                unreachable!("Already validated that either target_range or target_bed is present");
-            };
-
-            // Resolve output format based on 'auto' and parameter used
-            let resolved_output_format = if output_format == "auto" {
-                if from_range_param {
-                    "bed"
+                    (vec![(target_name, target_range, name)], true)
+                } else if let Some(target_bed) = &query.target_bed {
+                    let targets = partition::parse_bed_file(target_bed)?;
+                    // Validate all entries in the BED file
+                    for (seq_name, (start, end), name) in &targets {
+                        validate_sequence_range(seq_name, *start, *end, impg.seq_index())?;
+                        validate_range_min_length(
+                            *start,
+                            *end,
+                            name,
+                            query.transitive_opts.effective_min_transitive_len(),
+                        )?;
+                        // Skip region size validation when --partition-size is set
+                        if parsed_partition_size.is_none() {
+                            validate_region_size(
+                                *start,
+                                *end,
+                                size_check_format,
+                                query.effective_merge_distance(),
+                                gfa_maf_fasta.force_large_region,
+                            )?;
+                        }
+                    }
+                    (targets, false)
                 } else {
-                    "bedpe"
-                }
-            } else {
-                output_format.as_str()
-            };
-            if graph_render.requested() && !matches!(resolved_output_format, "gfa" | "vcf") {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "--render-graph is only supported with query graph output (-o gfa or -o vcf)",
-                ));
-            }
+                    unreachable!(
+                        "Already validated that either target_range or target_bed is present"
+                    );
+                };
 
-            // Validate --approximate mode output format compatibility
-            if query.approximate
-                && resolved_output_format != "bed"
-                && resolved_output_format != "bedpe"
-            {
-                return Err(io::Error::new(
+                // Resolve output format based on 'auto' and parameter used
+                let resolved_output_format = if output_format == "auto" {
+                    if from_range_param {
+                        "bed"
+                    } else {
+                        "bedpe"
+                    }
+                } else {
+                    output_format.as_str()
+                };
+                if graph_render.requested() && !matches!(resolved_output_format, "gfa" | "vcf") {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--render-graph is only supported with query graph output (-o gfa or -o vcf)",
+                    ));
+                }
+                if graph_report.requested() && !matches!(resolved_output_format, "gfa" | "vcf") {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--describe-graph is only supported with query graph output (-o gfa or -o vcf)",
+                    ));
+                }
+
+                // Validate --approximate mode output format compatibility
+                if query.approximate
+                    && resolved_output_format != "bed"
+                    && resolved_output_format != "bedpe"
+                {
+                    return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
                         "--approximate mode is only compatible with 'bed' and 'bedpe' output formats, not '{}'",
                         resolved_output_format
                     ),
                 ));
-            }
+                }
 
-            // Validate gbwt output requires -O prefix
-            if resolved_output_format == "gbwt" && output_prefix.is_none() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Output prefix (-O) is required for 'gbwt' output format",
-                ));
-            }
-            let bed_graph_dir =
-                bed_graph_output_dir(&output_prefix, resolved_output_format, &query.target_bed)?;
-            if let Some(dir) = &bed_graph_dir {
-                info!(
+                // Validate gbwt output requires -O prefix
+                if resolved_output_format == "gbwt" && output_prefix.is_none() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Output prefix (-O) is required for 'gbwt' output format",
+                    ));
+                }
+                let bed_graph_dir = bed_graph_output_dir(
+                    &output_prefix,
+                    resolved_output_format,
+                    &query.target_bed,
+                )?;
+                if let Some(dir) = &bed_graph_dir {
+                    info!(
                     "BED graph output: writing one {} per BED row under {} using BED column 4 names",
                     resolved_output_format,
                     dir.display()
                 );
-            }
+                }
 
-            // Extract reverse_complement before moving gfa_maf_fasta
-            let reverse_complement = gfa_maf_fasta.reverse_complement;
+                // Extract reverse_complement before moving gfa_maf_fasta
+                let reverse_complement = gfa_maf_fasta.reverse_complement;
 
-            // Setup POA/sequence resources
-            let (sequence_index, scoring_params) = gfa_maf_fasta.setup_output_resources(
-                resolved_output_format,
-                query.original_sequence_coordinates,
-                alignment_files.as_slice(),
-                query.approximate,
-                &engine_cli.poa_scoring,
-            )?;
-
-            // Process all target ranges in a unified loop
-            info!("Querying target ranges");
-            for (target_name, target_range, name) in target_ranges {
-                let target_query_start = Instant::now();
-                let target_output_prefix =
-                    output_prefix_for_target(&output_prefix, bed_graph_dir.as_deref(), &name);
-                info!(
-                    "Query: {} ({}:{}-{})",
-                    name, target_name, target_range.0, target_range.1
-                );
-                let mut results = perform_query(
-                    &impg,
-                    &target_name,
-                    target_range,
-                    resolved_output_format == "paf" || resolved_output_format == "bedpe", // Store CIGAR for PAF/BEDPE output
-                    query.min_result_identity,
-                    query.min_output_length,
-                    query.transitive,
-                    query.transitive_opts.transitive_dfs,
-                    &query.transitive_opts,
-                    sequence_index.as_ref(),
+                // Setup POA/sequence resources
+                let (sequence_index, scoring_params) = gfa_maf_fasta.setup_output_resources(
+                    resolved_output_format,
+                    query.original_sequence_coordinates,
+                    alignment_files.as_slice(),
                     query.approximate,
-                    subset_filter.as_ref(),
+                    &engine_cli.poa_scoring,
                 )?;
 
-                // Output results based on the resolved format
-                match resolved_output_format {
-                    "bed" => {
-                        // BED format - include the first element
-                        output_results_bed(
-                            &impg,
-                            &mut results,
-                            &mut find_output_stream(&target_output_prefix, "bed")?,
-                            &name,
-                            query.effective_merge_distance(),
-                            query.merge_strands_for_output("bed"),
-                            query.original_sequence_coordinates,
-                        )?;
-                    }
-                    "bedpe" => {
-                        // Skip the first element (the input range) for BEDPE output
-                        results.remove(0);
-                        output_results_bedpe(
-                            &impg,
-                            &mut results,
-                            &mut find_output_stream(&target_output_prefix, "bed")?,
-                            &name,
-                            query.effective_merge_distance(),
-                            query.original_sequence_coordinates,
-                        )?;
-                    }
-                    "paf" => {
-                        // Skip the first element (the input range) for PAF output
-                        results.remove(0);
-                        output_results_paf(
-                            &impg,
-                            &mut results,
-                            &mut find_output_stream(&target_output_prefix, "paf")?,
-                            &name,
-                            query.effective_merge_distance(),
-                            query.original_sequence_coordinates,
-                            sequence_index.as_ref(),
-                        )?;
-                    }
-                    "gfa" => {
-                        let engine_opts = engine_cli.build(common.threads.get())?;
-                        if let Some(ps) = engine_opts.partition_size {
-                            // Partitioned mode: split query region into sub-windows
-                            output_results_gfa_partitioned(
-                                &impg,
-                                &target_output_prefix,
-                                sequence_index.as_ref().unwrap(),
-                                scoring_params,
-                                &engine_opts,
-                                &target_name,
-                                target_range,
-                                ps,
-                                &query,
-                                subset_filter.as_ref(),
-                                &graph_render,
-                                bed_graph_dir.as_deref(),
-                                &name,
-                                common.threads.get(),
-                            )?;
-                        } else {
-                            output_results_gfa(
+                // Process all target ranges in a unified loop
+                info!("Querying target ranges");
+                for (target_name, target_range, name) in target_ranges {
+                    let target_query_start = Instant::now();
+                    let target_output_prefix =
+                        output_prefix_for_target(&output_prefix, bed_graph_dir.as_deref(), &name);
+                    info!(
+                        "Query: {} ({}:{}-{})",
+                        name, target_name, target_range.0, target_range.1
+                    );
+                    let mut results = perform_query(
+                        &impg,
+                        &target_name,
+                        target_range,
+                        resolved_output_format == "paf" || resolved_output_format == "bedpe", // Store CIGAR for PAF/BEDPE output
+                        query.min_result_identity,
+                        query.min_output_length,
+                        query.transitive,
+                        query.transitive_opts.transitive_dfs,
+                        &query.transitive_opts,
+                        sequence_index.as_ref(),
+                        query.approximate,
+                        subset_filter.as_ref(),
+                    )?;
+
+                    // Output results based on the resolved format
+                    match resolved_output_format {
+                        "bed" => {
+                            // BED format - include the first element
+                            output_results_bed(
                                 &impg,
                                 &mut results,
-                                &target_output_prefix,
+                                &mut find_output_stream(&target_output_prefix, "bed")?,
+                                &name,
+                                query.effective_merge_distance(),
+                                query.merge_strands_for_output("bed"),
+                                query.original_sequence_coordinates,
+                            )?;
+                        }
+                        "bedpe" => {
+                            // Skip the first element (the input range) for BEDPE output
+                            results.remove(0);
+                            output_results_bedpe(
+                                &impg,
+                                &mut results,
+                                &mut find_output_stream(&target_output_prefix, "bed")?,
+                                &name,
+                                query.effective_merge_distance(),
+                                query.original_sequence_coordinates,
+                            )?;
+                        }
+                        "paf" => {
+                            // Skip the first element (the input range) for PAF output
+                            results.remove(0);
+                            output_results_paf(
+                                &impg,
+                                &mut results,
+                                &mut find_output_stream(&target_output_prefix, "paf")?,
+                                &name,
+                                query.effective_merge_distance(),
+                                query.original_sequence_coordinates,
+                                sequence_index.as_ref(),
+                            )?;
+                        }
+                        "gfa" => {
+                            let engine_opts = engine_cli.build(common.threads.get())?;
+                            if let Some(ps) = engine_opts.partition_size {
+                                // Partitioned mode: split query region into sub-windows
+                                output_results_gfa_partitioned(
+                                    &impg,
+                                    &target_output_prefix,
+                                    sequence_index.as_ref().unwrap(),
+                                    scoring_params,
+                                    &engine_opts,
+                                    &target_name,
+                                    target_range,
+                                    ps,
+                                    &query,
+                                    subset_filter.as_ref(),
+                                    &graph_render,
+                                    &graph_report,
+                                    bed_graph_dir.as_deref(),
+                                    &name,
+                                    common.threads.get(),
+                                )?;
+                            } else {
+                                output_results_gfa(
+                                    &impg,
+                                    &mut results,
+                                    &target_output_prefix,
+                                    sequence_index.as_ref().unwrap(),
+                                    &name,
+                                    query.effective_merge_distance(),
+                                    query.merge_strands_for_output("gfa"),
+                                    scoring_params,
+                                    &engine_opts,
+                                    &graph_render,
+                                    &graph_report,
+                                    bed_graph_dir.as_deref(),
+                                    common.threads.get(),
+                                )?;
+                            }
+                        }
+                        "vcf" => {
+                            let engine_opts = engine_cli.build(common.threads.get())?;
+                            let reference_names = vcf_reference_names(&name, &target_name);
+                            if let Some(ps) = engine_opts.partition_size {
+                                output_results_vcf_partitioned(
+                                    &impg,
+                                    &target_output_prefix,
+                                    sequence_index.as_ref().unwrap(),
+                                    scoring_params,
+                                    &engine_opts,
+                                    &target_name,
+                                    target_range,
+                                    ps,
+                                    &query,
+                                    subset_filter.as_ref(),
+                                    &reference_names,
+                                    &name,
+                                    &graph_render,
+                                    &graph_report,
+                                    bed_graph_dir.as_deref(),
+                                    common.threads.get(),
+                                )?;
+                            } else {
+                                output_results_vcf(
+                                    &impg,
+                                    &mut results,
+                                    &target_output_prefix,
+                                    sequence_index.as_ref().unwrap(),
+                                    &reference_names,
+                                    &name,
+                                    query.effective_merge_distance(),
+                                    query.merge_strands_for_output("vcf"),
+                                    scoring_params,
+                                    &engine_opts,
+                                    &graph_render,
+                                    &graph_report,
+                                    bed_graph_dir.as_deref(),
+                                    common.threads.get(),
+                                )?;
+                            }
+                        }
+                        "maf" => {
+                            output_results_maf(
+                                &impg,
+                                &mut results,
+                                &mut find_output_stream(&target_output_prefix, "maf")?,
                                 sequence_index.as_ref().unwrap(),
                                 &name,
                                 query.effective_merge_distance(),
-                                query.merge_strands_for_output("gfa"),
-                                scoring_params,
-                                &engine_opts,
-                                &graph_render,
-                                bed_graph_dir.as_deref(),
-                                common.threads.get(),
+                                query.merge_strands_for_output("maf"),
+                                scoring_params.unwrap(),
                             )?;
                         }
-                    }
-                    "vcf" => {
-                        let engine_opts = engine_cli.build(common.threads.get())?;
-                        let reference_names = vcf_reference_names(&name, &target_name);
-                        if let Some(ps) = engine_opts.partition_size {
-                            output_results_vcf_partitioned(
-                                &impg,
-                                &target_output_prefix,
-                                sequence_index.as_ref().unwrap(),
-                                scoring_params,
-                                &engine_opts,
-                                &target_name,
-                                target_range,
-                                ps,
-                                &query,
-                                subset_filter.as_ref(),
-                                &reference_names,
-                                &name,
-                                &graph_render,
-                                bed_graph_dir.as_deref(),
-                                common.threads.get(),
-                            )?;
-                        } else {
-                            output_results_vcf(
+                        "fasta" => {
+                            output_results_fasta(
                                 &impg,
                                 &mut results,
-                                &target_output_prefix,
+                                &mut find_output_stream(&target_output_prefix, "fa")?,
                                 sequence_index.as_ref().unwrap(),
-                                &reference_names,
                                 &name,
                                 query.effective_merge_distance(),
-                                query.merge_strands_for_output("vcf"),
-                                scoring_params,
-                                &engine_opts,
-                                &graph_render,
-                                bed_graph_dir.as_deref(),
-                                common.threads.get(),
+                                query.merge_strands_for_output("fasta"),
+                                reverse_complement,
                             )?;
                         }
-                    }
-                    "maf" => {
-                        output_results_maf(
-                            &impg,
-                            &mut results,
-                            &mut find_output_stream(&target_output_prefix, "maf")?,
-                            sequence_index.as_ref().unwrap(),
-                            &name,
-                            query.effective_merge_distance(),
-                            query.merge_strands_for_output("maf"),
-                            scoring_params.unwrap(),
-                        )?;
-                    }
-                    "fasta" => {
-                        output_results_fasta(
-                            &impg,
-                            &mut results,
-                            &mut find_output_stream(&target_output_prefix, "fa")?,
-                            sequence_index.as_ref().unwrap(),
-                            &name,
-                            query.effective_merge_distance(),
-                            query.merge_strands_for_output("fasta"),
-                            reverse_complement,
-                        )?;
-                    }
-                    "fasta+paf" => {
-                        output_results_fasta(
-                            &impg,
-                            &mut results,
-                            &mut find_output_stream(&target_output_prefix, "fa")?,
-                            sequence_index.as_ref().unwrap(),
-                            &name,
-                            query.effective_merge_distance(),
-                            query.merge_strands_for_output("fasta"),
-                            reverse_complement,
-                        )?;
-                        // Skip the first element (the input range) for PAF output
-                        results.remove(0);
-                        output_results_paf(
-                            &impg,
-                            &mut results,
-                            &mut find_output_stream(&target_output_prefix, "paf")?,
-                            &name,
-                            query.effective_merge_distance(),
-                            query.original_sequence_coordinates,
-                            sequence_index.as_ref(),
-                        )?;
-                    }
-                    "fasta-aln" => {
-                        output_results_fasta_aln(
-                            &impg,
-                            &mut results,
-                            sequence_index.as_ref().unwrap(),
-                            name.clone(),
-                            query.effective_merge_distance(),
-                            query.merge_strands_for_output("fasta-aln"),
-                            scoring_params.unwrap(),
-                        )?;
-                    }
-                    "gbwt" => {
-                        let seq_idx = sequence_index.as_ref().unwrap();
-                        let gbwt_prefix = target_output_prefix.as_ref().ok_or_else(|| {
-                            io::Error::new(
+                        "fasta+paf" => {
+                            output_results_fasta(
+                                &impg,
+                                &mut results,
+                                &mut find_output_stream(&target_output_prefix, "fa")?,
+                                sequence_index.as_ref().unwrap(),
+                                &name,
+                                query.effective_merge_distance(),
+                                query.merge_strands_for_output("fasta"),
+                                reverse_complement,
+                            )?;
+                            // Skip the first element (the input range) for PAF output
+                            results.remove(0);
+                            output_results_paf(
+                                &impg,
+                                &mut results,
+                                &mut find_output_stream(&target_output_prefix, "paf")?,
+                                &name,
+                                query.effective_merge_distance(),
+                                query.original_sequence_coordinates,
+                                sequence_index.as_ref(),
+                            )?;
+                        }
+                        "fasta-aln" => {
+                            output_results_fasta_aln(
+                                &impg,
+                                &mut results,
+                                sequence_index.as_ref().unwrap(),
+                                name.clone(),
+                                query.effective_merge_distance(),
+                                query.merge_strands_for_output("fasta-aln"),
+                                scoring_params.unwrap(),
+                            )?;
+                        }
+                        "gbwt" => {
+                            let seq_idx = sequence_index.as_ref().unwrap();
+                            let gbwt_prefix = target_output_prefix.as_ref().ok_or_else(|| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidInput,
+                                    "Output prefix (-O) is required for 'gbwt' output format",
+                                )
+                            })?;
+
+                            // Merge intervals before fetching
+                            merge_query_adjusted_intervals(
+                                &mut results,
+                                query.effective_merge_distance(),
+                                query.merge_strands_for_output("gbwt"),
+                            );
+
+                            // Fetch sequences for all result intervals
+                            let fetched: Vec<(String, Vec<u8>)> = results
+                                .iter()
+                                .map(|(qi, _, _)| {
+                                    let qname = impg.seq_index().get_name(qi.metadata).unwrap();
+                                    let (start, end, strand) = if qi.first <= qi.last {
+                                        (qi.first, qi.last, '+')
+                                    } else {
+                                        (qi.last, qi.first, '-')
+                                    };
+                                    let sequence = seq_idx.fetch_sequence(qname, start, end)?;
+                                    let seq_name =
+                                        format!("{}:{}-{}({})", qname, start, end, strand);
+                                    Ok((seq_name, sequence))
+                                })
+                                .collect::<io::Result<Vec<_>>>()?;
+
+                            let seq_refs: Vec<(String, &[u8])> = fetched
+                                .iter()
+                                .map(|(name, seq)| (name.clone(), seq.as_slice()))
+                                .collect();
+
+                            // Build region GBWT using default syncmer params
+                            let region_index =
+                                impg::syng::SyngIndex::new(impg::syng::SyncmerParams::default());
+                            region_index.build_region_gbwt(&seq_refs, gbwt_prefix)?;
+                            info!(
+                                "Wrote region GBWT: {}.1gbwt + {}.1khash",
+                                gbwt_prefix, gbwt_prefix
+                            );
+                        }
+                        _ => {
+                            return Err(io::Error::new(
                                 io::ErrorKind::InvalidInput,
-                                "Output prefix (-O) is required for 'gbwt' output format",
-                            )
-                        })?;
-
-                        // Merge intervals before fetching
-                        merge_query_adjusted_intervals(
-                            &mut results,
-                            query.effective_merge_distance(),
-                            query.merge_strands_for_output("gbwt"),
-                        );
-
-                        // Fetch sequences for all result intervals
-                        let fetched: Vec<(String, Vec<u8>)> = results
-                            .iter()
-                            .map(|(qi, _, _)| {
-                                let qname = impg.seq_index().get_name(qi.metadata).unwrap();
-                                let (start, end, strand) = if qi.first <= qi.last {
-                                    (qi.first, qi.last, '+')
-                                } else {
-                                    (qi.last, qi.first, '-')
-                                };
-                                let sequence = seq_idx.fetch_sequence(qname, start, end)?;
-                                let seq_name = format!("{}:{}-{}({})", qname, start, end, strand);
-                                Ok((seq_name, sequence))
-                            })
-                            .collect::<io::Result<Vec<_>>>()?;
-
-                        let seq_refs: Vec<(String, &[u8])> = fetched
-                            .iter()
-                            .map(|(name, seq)| (name.clone(), seq.as_slice()))
-                            .collect();
-
-                        // Build region GBWT using default syncmer params
-                        let region_index = impg::syng::SyngIndex::new(impg::syng::SyncmerParams::default());
-                        region_index.build_region_gbwt(&seq_refs, gbwt_prefix)?;
-                        info!("Wrote region GBWT: {}.1gbwt + {}.1khash", gbwt_prefix, gbwt_prefix);
+                                format!("Invalid output format: {resolved_output_format}"),
+                            ));
+                        }
                     }
-                    _ => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("Invalid output format: {resolved_output_format}"),
-                        ));
-                    }
+                    info!(
+                        "Query complete: {} ({}:{}-{}) in {}",
+                        name,
+                        target_name,
+                        target_range.0,
+                        target_range.1,
+                        format_duration(target_query_start.elapsed())
+                    );
                 }
-                info!(
-                    "Query complete: {} ({}:{}-{}) in {}",
-                    name,
-                    target_name,
-                    target_range.0,
-                    target_range.1,
-                    format_duration(target_query_start.elapsed())
-                );
-            }
             } // end of else (normal query path)
         }
         Args::Refine {
@@ -6536,7 +7066,10 @@ fn run() -> io::Result<()> {
             if score != "cos" {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("unsupported infer --score '{}'; currently only 'cos' is supported", score),
+                    format!(
+                        "unsupported infer --score '{}'; currently only 'cos' is supported",
+                        score
+                    ),
                 ));
             }
             if window_size == 0 {
@@ -6749,7 +7282,7 @@ fn run() -> io::Result<()> {
                     stdout.flush()?;
                 }
             }
-        },
+        }
         Args::Stats {
             common,
             alignment,
@@ -6923,9 +7456,13 @@ fn run() -> io::Result<()> {
             max_iterations,
             max_span,
             max_traversal_len,
+            min_traversal_len,
             max_median_traversal_len,
             max_total_sequence,
             max_traversals,
+            auto_spoa_max_traversal_len,
+            auto_allwave_max_total_sequence,
+            auto_allwave_max_traversals,
             polish_rounds,
             polish_max_traversal_len,
             polish_max_median_traversal_len,
@@ -6936,6 +7473,7 @@ fn run() -> io::Result<()> {
             k_farthest,
             random_fraction,
             mash_k,
+            replacement_seqwish_min_match_len,
             sweepga_aligner,
             sweepga_kmer_frequency,
             sweepga_min_aln_length,
@@ -6962,10 +7500,16 @@ fn run() -> io::Result<()> {
                     "--polish-max-traversals must be > 0",
                 ));
             }
+            if min_traversal_len > max_traversal_len {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--min-traversal-len must be <= --max-traversal-len",
+                ));
+            }
             let Some(method) = impg::resolution::ResolutionMethod::parse_name(&method) else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "--method must be one of: auto, poa, poasta, biwfa, allwave, sweepga",
+                    "--method must be one of: auto, allwave, poa, poasta, star-biwfa, sweepga",
                 ));
             };
             if k_nearest == 0 && k_farthest == 0 && random_fraction <= 0.0 {
@@ -6986,6 +7530,12 @@ fn run() -> io::Result<()> {
                     "--mash-k must be between 3 and 31",
                 ));
             }
+            if replacement_seqwish_min_match_len == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--seqwish-k/--seqwish-min-match-len must be > 0",
+                ));
+            }
 
             let mut gfa_text = String::new();
             if gfa == "-" {
@@ -6999,9 +7549,13 @@ fn run() -> io::Result<()> {
                 method,
                 max_bubble_span: max_span,
                 max_traversal_len,
+                min_traversal_len,
                 max_median_traversal_len,
                 max_total_sequence,
                 max_traversals,
+                auto_spoa_max_traversal_len,
+                auto_allwave_max_total_sequence,
+                auto_allwave_max_traversals,
                 polish_iterations: polish_rounds,
                 polish_max_traversal_len,
                 polish_max_median_traversal_len,
@@ -7011,6 +7565,7 @@ fn run() -> io::Result<()> {
                 pair_k_farthest: k_farthest,
                 pair_random_fraction: random_fraction,
                 pair_mash_k: mash_k,
+                replacement_seqwish_min_match_len: replacement_seqwish_min_match_len as u64,
                 sweepga_aligner,
                 sweepga_kmer_frequency,
                 sweepga_min_aln_length: sweepga_min_aln_length as u64,
@@ -7066,6 +7621,43 @@ fn run() -> io::Result<()> {
                 out.flush()?;
             }
         }
+        Args::GraphReport {
+            gfa,
+            output,
+            format,
+            top,
+            povu,
+            reference_names,
+            common,
+        } => {
+            initialize_threads_and_log(&common);
+            let mut gfa_text = String::new();
+            if gfa == "-" {
+                io::stdin().read_to_string(&mut gfa_text)?;
+            } else {
+                File::open(&gfa)?.read_to_string(&mut gfa_text)?;
+            }
+            let options = impg::graph_report::GraphReportOptions {
+                top_n: top.max(1),
+                include_povu: povu,
+                povu_reference_names: reference_names,
+                ..Default::default()
+            };
+            let report = impg::graph_report::describe_gfa(&gfa, &gfa_text, &options)?;
+            let text = impg::graph_report::format_report(&report, &format)?;
+            if output == "-" {
+                let stdout = io::stdout();
+                let mut out = BufWriter::with_capacity(1024 * 1024, stdout.lock());
+                out.write_all(text.as_bytes())?;
+                out.flush()?;
+            } else {
+                let output_path = Path::new(&output);
+                ensure_parent_dir(output_path)?;
+                let mut out = BufWriter::with_capacity(1024 * 1024, File::create(output_path)?);
+                out.write_all(text.as_bytes())?;
+                out.flush()?;
+            }
+        }
         Args::Render {
             index,
             target_range,
@@ -7111,10 +7703,7 @@ fn run() -> io::Result<()> {
             // Short-circuit: execute a pre-generated joblist and exit.
             if let Some(joblist_path) = run_joblist {
                 let jobs = jobs.unwrap_or_else(|| common.threads.get());
-                impg::commands::align::run_joblist(
-                    std::path::Path::new(&joblist_path),
-                    jobs,
-                )?;
+                impg::commands::align::run_joblist(std::path::Path::new(&joblist_path), jobs)?;
                 return Ok(());
             }
 
@@ -7250,7 +7839,10 @@ fn run() -> io::Result<()> {
                 };
                 match output_format.as_str() {
                     "gaf" => {
-                        info!("Loading syng syncmer dictionary from prefix: {}", syng_prefix);
+                        info!(
+                            "Loading syng syncmer dictionary from prefix: {}",
+                            syng_prefix
+                        );
                         let syng_matcher = impg::syng::SyngMatcher::load(
                             &syng_prefix,
                             impg::syng::SyncmerParams::default(),
@@ -7258,7 +7850,10 @@ fn run() -> io::Result<()> {
                         emit_syng_map_gaf(&mut out, &syng_matcher, &query, min_anchors)?;
                     }
                     format if impg::pack::is_tsv_format(format) => {
-                        info!("Loading syng syncmer dictionary from prefix: {}", syng_prefix);
+                        info!(
+                            "Loading syng syncmer dictionary from prefix: {}",
+                            syng_prefix
+                        );
                         let syng_matcher = impg::syng::SyngMatcher::load(
                             &syng_prefix,
                             impg::syng::SyncmerParams::default(),
@@ -7266,7 +7861,10 @@ fn run() -> io::Result<()> {
                         emit_syng_map_pack(&mut out, &syng_matcher, &query, min_anchors)?;
                     }
                     format if impg::pack::is_binary_format(format) => {
-                        info!("Loading syng syncmer dictionary from prefix: {}", syng_prefix);
+                        info!(
+                            "Loading syng syncmer dictionary from prefix: {}",
+                            syng_prefix
+                        );
                         let syng_matcher = impg::syng::SyngMatcher::load(
                             &syng_prefix,
                             impg::syng::SyncmerParams::default(),
@@ -7281,7 +7879,10 @@ fn run() -> io::Result<()> {
                         )?;
                     }
                     "proj" => {
-                        info!("Loading syng syncmer dictionary from prefix: {}", syng_prefix);
+                        info!(
+                            "Loading syng syncmer dictionary from prefix: {}",
+                            syng_prefix
+                        );
                         let syng_matcher = impg::syng::SyngMatcher::load(
                             &syng_prefix,
                             impg::syng::SyncmerParams::default(),
@@ -7324,7 +7925,10 @@ fn run() -> io::Result<()> {
                 let mut out = Vec::new();
                 match output_format.as_str() {
                     "gaf" => {
-                        info!("Loading syng syncmer dictionary from prefix: {}", syng_prefix);
+                        info!(
+                            "Loading syng syncmer dictionary from prefix: {}",
+                            syng_prefix
+                        );
                         let syng_matcher = impg::syng::SyngMatcher::load(
                             &syng_prefix,
                             impg::syng::SyncmerParams::default(),
@@ -7332,7 +7936,10 @@ fn run() -> io::Result<()> {
                         emit_syng_map_gaf(&mut out, &syng_matcher, &query, min_anchors)?;
                     }
                     format if impg::pack::is_tsv_format(format) => {
-                        info!("Loading syng syncmer dictionary from prefix: {}", syng_prefix);
+                        info!(
+                            "Loading syng syncmer dictionary from prefix: {}",
+                            syng_prefix
+                        );
                         let syng_matcher = impg::syng::SyngMatcher::load(
                             &syng_prefix,
                             impg::syng::SyncmerParams::default(),
@@ -7340,7 +7947,10 @@ fn run() -> io::Result<()> {
                         emit_syng_map_pack(&mut out, &syng_matcher, &query, min_anchors)?;
                     }
                     format if impg::pack::is_binary_format(format) => {
-                        info!("Loading syng syncmer dictionary from prefix: {}", syng_prefix);
+                        info!(
+                            "Loading syng syncmer dictionary from prefix: {}",
+                            syng_prefix
+                        );
                         let syng_matcher = impg::syng::SyngMatcher::load(
                             &syng_prefix,
                             impg::syng::SyncmerParams::default(),
@@ -7399,7 +8009,10 @@ fn run() -> io::Result<()> {
             initialize_threads_and_log(&common);
 
             let syng_prefix = detect_syng_prefix(&index).unwrap_or(index);
-            info!("Loading syng syncmer dictionary from prefix: {}", syng_prefix);
+            info!(
+                "Loading syng syncmer dictionary from prefix: {}",
+                syng_prefix
+            );
             let syng_matcher =
                 impg::syng::SyngMatcher::load(&syng_prefix, impg::syng::SyncmerParams::default())?;
             build_read_syncmer_index(
@@ -7542,8 +8155,8 @@ fn run() -> io::Result<()> {
                     );
 
                     let config = ragc_core::DecompressorConfig { verbosity: 0 };
-                    let mut decompressor =
-                        ragc_core::Decompressor::open(&agc_path, config).map_err(|e| {
+                    let mut decompressor = ragc_core::Decompressor::open(&agc_path, config)
+                        .map_err(|e| {
                             io::Error::new(
                                 io::ErrorKind::InvalidData,
                                 format!("Failed to open AGC file '{}': {}", agc_path, e),
@@ -7556,8 +8169,8 @@ fn run() -> io::Result<()> {
                         let contig_start = Instant::now();
                         let seq = read_syng_agc_record(&mut decompressor, record)?;
                         info!("  Processing {} ({} bp)", record.name, seq.len());
-                        let stats = index
-                            .add_sequence_with_existing_syncmers(record.name.clone(), seq)?;
+                        let stats =
+                            index.add_sequence_with_existing_syncmers(record.name.clone(), seq)?;
                         sequence_count += 1;
                         indexed_bp += stats.sequence_len as u64;
                         total_syncmers += stats.syncmers;
@@ -7586,103 +8199,104 @@ fn run() -> io::Result<()> {
                     );
                     index
                 } else {
-                // Stream sequences from AGC
-                let input_start = Instant::now();
-                info!(
-                    "Reading sequences from AGC: {} at +{}",
-                    agc_path,
-                    format_duration(total_start.elapsed())
-                );
-                let config = ragc_core::DecompressorConfig { verbosity: 0 };
-                let mut decompressor =
-                    ragc_core::Decompressor::open(&agc_path, config).map_err(|e| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("Failed to open AGC file '{}': {}", agc_path, e),
-                        )
-                    })?;
-
-                let samples = decompressor.list_samples();
-                info!("Found {} AGC samples", samples.len());
-                let mut index = impg::syng::SyngIndex::new(params);
-                configure_position_sampling(&mut index)?;
-                let mut sequence_count = 0usize;
-                let mut total_bp = 0u64;
-                let mut total_syncmers = 0usize;
-                for (sample_idx, sample) in samples.iter().enumerate() {
-                    let sample_start = Instant::now();
-                    let contigs = decompressor
-                        .list_contigs_names_only(sample)
-                        .unwrap_or_default();
+                    // Stream sequences from AGC
+                    let input_start = Instant::now();
                     info!(
-                        "Including sample {}/{}: {} ({} contigs) at +{}",
-                        sample_idx + 1,
-                        samples.len(),
-                        sample,
-                        contigs.len(),
+                        "Reading sequences from AGC: {} at +{}",
+                        agc_path,
                         format_duration(total_start.elapsed())
                     );
-                    let mut sample_sequences = 0usize;
-                    let mut sample_bp = 0u64;
-                    let mut sample_syncmers = 0usize;
-                    for (contig_idx, contig) in contigs.iter().enumerate() {
-                        let contig_start = Instant::now();
-                        // NOTE: Do NOT use `decompressor.get_contig()` here — it has a
-                        // bug in ragc-core where it skips the detail-reload after a
-                        // `list_contigs_names_only()` call (it checks contig count, which
-                        // is populated, instead of `are_details_loaded()`), and silently
-                        // returns an empty Vec. Use get_contig_length + get_contig_range
-                        // instead — both correctly reload details. Same pattern as
-                        // src/agc_index.rs.
-                        let length = decompressor
-                            .get_contig_length(sample, contig)
-                            .map_err(|e| {
-                                io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    format!(
-                                        "Failed to get length for contig '{}@{}': {}",
-                                        contig, sample, e
-                                    ),
-                                )
-                            })?;
-                        let contig_data = decompressor
-                            .get_contig_range(sample, contig, 0, length)
-                            .map_err(|e| {
-                                io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    format!(
-                                        "Failed to decompress contig '{}@{}': {}",
-                                        contig, sample, e
-                                    ),
-                                )
-                            })?;
+                    let config = ragc_core::DecompressorConfig { verbosity: 0 };
+                    let mut decompressor = ragc_core::Decompressor::open(&agc_path, config)
+                        .map_err(|e| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("Failed to open AGC file '{}': {}", agc_path, e),
+                            )
+                        })?;
 
-                        let seq: Vec<u8> = contig_data
-                            .iter()
-                            .map(|&b| match b {
-                                0 => b'A',
-                                1 => b'C',
-                                2 => b'G',
-                                3 => b'T',
-                                _ => b'N',
-                            })
-                            .collect();
-
-                        // Use the primary FASTA/AGC contig token as the syng
-                        // path name. AGC may retain the full FASTA defline
-                        // (`name description`), but queries should address the
-                        // stable primary name only.
-                        let name = syng_sequence_name(sample, contig);
-                        let seq_len = seq.len();
-                        info!("  Processing {} ({} bp)", name, seq_len);
-                        let stats = index.add_sequence(name.clone(), seq);
-                        sequence_count += 1;
-                        total_bp += stats.sequence_len as u64;
-                        total_syncmers += stats.syncmers;
-                        sample_sequences += 1;
-                        sample_bp += stats.sequence_len as u64;
-                        sample_syncmers += stats.syncmers;
+                    let samples = decompressor.list_samples();
+                    info!("Found {} AGC samples", samples.len());
+                    let mut index = impg::syng::SyngIndex::new(params);
+                    configure_position_sampling(&mut index)?;
+                    let mut sequence_count = 0usize;
+                    let mut total_bp = 0u64;
+                    let mut total_syncmers = 0usize;
+                    for (sample_idx, sample) in samples.iter().enumerate() {
+                        let sample_start = Instant::now();
+                        let contigs = decompressor
+                            .list_contigs_names_only(sample)
+                            .unwrap_or_default();
                         info!(
+                            "Including sample {}/{}: {} ({} contigs) at +{}",
+                            sample_idx + 1,
+                            samples.len(),
+                            sample,
+                            contigs.len(),
+                            format_duration(total_start.elapsed())
+                        );
+                        let mut sample_sequences = 0usize;
+                        let mut sample_bp = 0u64;
+                        let mut sample_syncmers = 0usize;
+                        for (contig_idx, contig) in contigs.iter().enumerate() {
+                            let contig_start = Instant::now();
+                            // NOTE: Do NOT use `decompressor.get_contig()` here — it has a
+                            // bug in ragc-core where it skips the detail-reload after a
+                            // `list_contigs_names_only()` call (it checks contig count, which
+                            // is populated, instead of `are_details_loaded()`), and silently
+                            // returns an empty Vec. Use get_contig_length + get_contig_range
+                            // instead — both correctly reload details. Same pattern as
+                            // src/agc_index.rs.
+                            let length =
+                                decompressor
+                                    .get_contig_length(sample, contig)
+                                    .map_err(|e| {
+                                        io::Error::new(
+                                            io::ErrorKind::InvalidData,
+                                            format!(
+                                                "Failed to get length for contig '{}@{}': {}",
+                                                contig, sample, e
+                                            ),
+                                        )
+                                    })?;
+                            let contig_data = decompressor
+                                .get_contig_range(sample, contig, 0, length)
+                                .map_err(|e| {
+                                    io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        format!(
+                                            "Failed to decompress contig '{}@{}': {}",
+                                            contig, sample, e
+                                        ),
+                                    )
+                                })?;
+
+                            let seq: Vec<u8> = contig_data
+                                .iter()
+                                .map(|&b| match b {
+                                    0 => b'A',
+                                    1 => b'C',
+                                    2 => b'G',
+                                    3 => b'T',
+                                    _ => b'N',
+                                })
+                                .collect();
+
+                            // Use the primary FASTA/AGC contig token as the syng
+                            // path name. AGC may retain the full FASTA defline
+                            // (`name description`), but queries should address the
+                            // stable primary name only.
+                            let name = syng_sequence_name(sample, contig);
+                            let seq_len = seq.len();
+                            info!("  Processing {} ({} bp)", name, seq_len);
+                            let stats = index.add_sequence(name.clone(), seq);
+                            sequence_count += 1;
+                            total_bp += stats.sequence_len as u64;
+                            total_syncmers += stats.syncmers;
+                            sample_sequences += 1;
+                            sample_bp += stats.sequence_len as u64;
+                            sample_syncmers += stats.syncmers;
+                            info!(
                             "  Indexed contig {}/{} {}: {} bp, {} syncmers, indexed={}, elapsed {}, total {} sequences / {} bp / {} syncmers at +{}",
                             contig_idx + 1,
                             contigs.len(),
@@ -7696,8 +8310,8 @@ fn run() -> io::Result<()> {
                             total_syncmers,
                             format_duration(total_start.elapsed())
                         );
-                    }
-                    info!(
+                        }
+                        info!(
                         "Finished sample {}/{}: {} ({} sequences, {} bp, {} syncmers) in {} at +{}",
                         sample_idx + 1,
                         samples.len(),
@@ -7708,16 +8322,16 @@ fn run() -> io::Result<()> {
                         format_duration(sample_start.elapsed()),
                         format_duration(total_start.elapsed())
                     );
-                }
+                    }
 
-                info!(
-                    "Built syng paths from {} sequences ({} bp, {} syncmers) in {}",
-                    sequence_count,
-                    total_bp,
-                    total_syncmers,
-                    format_duration(input_start.elapsed())
-                );
-                index
+                    info!(
+                        "Built syng paths from {} sequences ({} bp, {} syncmers) in {}",
+                        sequence_count,
+                        total_bp,
+                        total_syncmers,
+                        format_duration(input_start.elapsed())
+                    );
+                    index
                 }
             } else if let Some(fasta_path) = fasta {
                 if parallel_dictionary {
@@ -7729,8 +8343,7 @@ fn run() -> io::Result<()> {
                     );
                     let sequences = read_syng_fasta_sequences(&fasta_path)?;
                     let total_sequences = sequences.len();
-                    let total_bp: u64 =
-                        sequences.iter().map(|(_, seq)| seq.len() as u64).sum();
+                    let total_bp: u64 = sequences.iter().map(|(_, seq)| seq.len() as u64).sum();
                     info!(
                         "Read {} FASTA sequences ({} bp) for dictionary prepass",
                         sequences.len(),
@@ -7793,51 +8406,45 @@ fn run() -> io::Result<()> {
                     );
                     index
                 } else {
-                // Read sequences from FASTA
-                let input_start = Instant::now();
-                info!(
-                    "Reading sequences from FASTA: {} at +{}",
-                    fasta_path,
-                    format_duration(total_start.elapsed())
-                );
+                    // Read sequences from FASTA
+                    let input_start = Instant::now();
+                    info!(
+                        "Reading sequences from FASTA: {} at +{}",
+                        fasta_path,
+                        format_duration(total_start.elapsed())
+                    );
 
-                let file = File::open(&fasta_path)?;
-                let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
-                    io::Error::other(format!(
-                        "Failed to open reader for '{}': {}",
-                        fasta_path, e
-                    ))
-                })?;
-                let reader = BufReader::new(reader);
+                    let file = File::open(&fasta_path)?;
+                    let (reader, _format) = niffler::get_reader(Box::new(file)).map_err(|e| {
+                        io::Error::other(format!(
+                            "Failed to open reader for '{}': {}",
+                            fasta_path, e
+                        ))
+                    })?;
+                    let reader = BufReader::new(reader);
 
-                let mut index = impg::syng::SyngIndex::new(params);
-                configure_position_sampling(&mut index)?;
-                let mut current_name = String::new();
-                let mut current_seq = Vec::new();
-                let mut sequence_count = 0usize;
-                let mut total_bp = 0u64;
-                let mut total_syncmers = 0usize;
+                    let mut index = impg::syng::SyngIndex::new(params);
+                    configure_position_sampling(&mut index)?;
+                    let mut current_name = String::new();
+                    let mut current_seq = Vec::new();
+                    let mut sequence_count = 0usize;
+                    let mut total_bp = 0u64;
+                    let mut total_syncmers = 0usize;
 
-                for line in reader.lines() {
-                    let line = line?;
-                    if line.starts_with('>') {
-                        if !current_name.is_empty() && !current_seq.is_empty() {
-                            let seq_start = Instant::now();
-                            let seq_len = current_seq.len();
-                            info!(
-                                "  Processing {} ({} bp)",
-                                current_name,
-                                seq_len
-                            );
-                            let name = std::mem::take(&mut current_name);
-                            let stats = index.add_sequence(
-                                name.clone(),
-                                std::mem::take(&mut current_seq),
-                            );
-                            sequence_count += 1;
-                            total_bp += stats.sequence_len as u64;
-                            total_syncmers += stats.syncmers;
-                            info!(
+                    for line in reader.lines() {
+                        let line = line?;
+                        if line.starts_with('>') {
+                            if !current_name.is_empty() && !current_seq.is_empty() {
+                                let seq_start = Instant::now();
+                                let seq_len = current_seq.len();
+                                info!("  Processing {} ({} bp)", current_name, seq_len);
+                                let name = std::mem::take(&mut current_name);
+                                let stats = index
+                                    .add_sequence(name.clone(), std::mem::take(&mut current_seq));
+                                sequence_count += 1;
+                                total_bp += stats.sequence_len as u64;
+                                total_syncmers += stats.syncmers;
+                                info!(
                                 "  Indexed {}: {} bp, {} syncmers, indexed={}, elapsed {}, total {} sequences / {} bp / {} syncmers at +{}",
                                 name,
                                 stats.sequence_len,
@@ -7849,32 +8456,28 @@ fn run() -> io::Result<()> {
                                 total_syncmers,
                                 format_duration(total_start.elapsed())
                             );
+                            }
+                            current_name = line
+                                .strip_prefix('>')
+                                .unwrap_or("")
+                                .split_whitespace()
+                                .next()
+                                .unwrap_or("")
+                                .to_string();
+                            current_seq.clear();
+                        } else {
+                            current_seq.extend(line.trim().as_bytes());
                         }
-                        current_name = line
-                            .strip_prefix('>')
-                            .unwrap_or("")
-                            .split_whitespace()
-                            .next()
-                            .unwrap_or("")
-                            .to_string();
-                        current_seq.clear();
-                    } else {
-                        current_seq.extend(line.trim().as_bytes());
                     }
-                }
-                if !current_name.is_empty() && !current_seq.is_empty() {
-                    let seq_start = Instant::now();
-                    let seq_len = current_seq.len();
-                    info!(
-                        "  Processing {} ({} bp)",
-                        current_name,
-                        seq_len
-                    );
-                    let stats = index.add_sequence(current_name.clone(), current_seq);
-                    sequence_count += 1;
-                    total_bp += stats.sequence_len as u64;
-                    total_syncmers += stats.syncmers;
-                    info!(
+                    if !current_name.is_empty() && !current_seq.is_empty() {
+                        let seq_start = Instant::now();
+                        let seq_len = current_seq.len();
+                        info!("  Processing {} ({} bp)", current_name, seq_len);
+                        let stats = index.add_sequence(current_name.clone(), current_seq);
+                        sequence_count += 1;
+                        total_bp += stats.sequence_len as u64;
+                        total_syncmers += stats.syncmers;
+                        info!(
                         "  Indexed {}: {} bp, {} syncmers, indexed={}, elapsed {}, total {} sequences / {} bp / {} syncmers at +{}",
                         current_name,
                         stats.sequence_len,
@@ -7886,16 +8489,16 @@ fn run() -> io::Result<()> {
                         total_syncmers,
                         format_duration(total_start.elapsed())
                     );
-                }
+                    }
 
-                info!(
-                    "Built syng paths from {} sequences ({} bp, {} syncmers) in {}",
-                    sequence_count,
-                    total_bp,
-                    total_syncmers,
-                    format_duration(input_start.elapsed())
-                );
-                index
+                    info!(
+                        "Built syng paths from {} sequences ({} bp, {} syncmers) in {}",
+                        sequence_count,
+                        total_bp,
+                        total_syncmers,
+                        format_duration(input_start.elapsed())
+                    );
+                    index
                 }
             } else {
                 unreachable!()
@@ -7931,7 +8534,10 @@ fn run() -> io::Result<()> {
                 "Name map contains {} sequences",
                 index.name_map.path_to_name.len()
             );
-            info!("Total syng build time: {}", format_duration(total_start.elapsed()));
+            info!(
+                "Total syng build time: {}",
+                format_duration(total_start.elapsed())
+            );
         }
         Args::Syng2gfa {
             syng_prefix,
@@ -8119,6 +8725,7 @@ fn build_engine_opts(
     partition_size: Option<usize>,
     syng_gfa_mode: Option<SyngGfaMode>,
     syng_params: Option<impg::syng::SyncmerParams>,
+    syng_gfa_frequency_mask: SyngGfaFrequencyMask,
     crush_config: Option<impg::resolution::ResolutionConfig>,
     graph_sort_pipeline: Option<String>,
 ) -> io::Result<EngineOpts> {
@@ -8157,6 +8764,7 @@ fn build_engine_opts(
         engine,
         syng_gfa_mode,
         syng_params,
+        syng_gfa_frequency_mask,
         pipeline,
         partition_size,
         crush_config,
@@ -8455,9 +9063,19 @@ fn get_auto_reader(path: &str) -> io::Result<Box<dyn BufRead>> {
 }
 
 fn output_path_for_basename(basename: &Option<String>, extension: &str) -> Option<PathBuf> {
-    basename
-        .as_ref()
-        .map(|name| PathBuf::from(format!("{}.{}", name, extension)))
+    basename.as_ref().map(|name| {
+        let path = PathBuf::from(name);
+        let wanted = extension.trim_start_matches('.');
+        if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case(wanted))
+        {
+            path
+        } else {
+            PathBuf::from(format!("{}.{}", name, wanted))
+        }
+    })
 }
 
 fn ensure_parent_dir(path: &Path) -> io::Result<()> {
@@ -8583,6 +9201,7 @@ fn write_graph_output_and_render(
     output_ext: &str,
     reference_names: &[String],
     graph_render: &GraphRenderOpts,
+    graph_report: &GraphReportCliOpts,
     bed_graph_dir: Option<&Path>,
     range_name: &str,
     threads: usize,
@@ -8594,15 +9213,38 @@ fn write_graph_output_and_render(
         out.flush()?;
     }
 
-    if let Some(render_path) =
-        graph_render_path_for_target(graph_render, target_output_prefix, bed_graph_dir, range_name)?
-    {
+    if let Some(render_path) = graph_render_path_for_target(
+        graph_render,
+        target_output_prefix,
+        bed_graph_dir,
+        range_name,
+    )? {
         let gfa_input_path = if output_format == "gfa" {
             output_path.as_deref()
         } else {
             None
         };
-        render_graph_image(gfa_output, gfa_input_path, &render_path, graph_render, threads)?;
+        render_graph_image(
+            gfa_output,
+            gfa_input_path,
+            &render_path,
+            graph_render,
+            threads,
+        )?;
+    }
+    if let Some(report_path) = graph_report_path_for_target(
+        graph_report,
+        target_output_prefix,
+        bed_graph_dir,
+        range_name,
+    )? {
+        write_graph_characterization_report(
+            gfa_output,
+            reference_names,
+            graph_report,
+            &report_path,
+            range_name,
+        )?;
     }
     Ok(())
 }
@@ -8625,7 +9267,8 @@ fn graph_render_path_for_target(
         } else {
             raw_path
         }
-    } else if let Some(prefix) = output_prefix_for_target(output_prefix, bed_graph_dir, range_name) {
+    } else if let Some(prefix) = output_prefix_for_target(output_prefix, bed_graph_dir, range_name)
+    {
         PathBuf::from(prefix)
     } else {
         return Err(io::Error::new(
@@ -8635,14 +9278,99 @@ fn graph_render_path_for_target(
     };
 
     match path.extension().and_then(|ext| ext.to_str()) {
-        Some(ext)
-            if ext.eq_ignore_ascii_case("png") || ext.eq_ignore_ascii_case("svg") => {}
+        Some(ext) if ext.eq_ignore_ascii_case("png") || ext.eq_ignore_ascii_case("svg") => {}
         _ => {
             path.set_extension(&graph_render.render_graph_format);
         }
     }
     ensure_parent_dir(&path)?;
     Ok(Some(path))
+}
+
+fn graph_report_extension(format: &str) -> &'static str {
+    match format {
+        "json" => "json",
+        "tsv" => "tsv",
+        _ => "report.md",
+    }
+}
+
+fn graph_report_path_for_target(
+    graph_report: &GraphReportCliOpts,
+    output_prefix: &Option<String>,
+    bed_graph_dir: Option<&Path>,
+    range_name: &str,
+) -> io::Result<Option<PathBuf>> {
+    if !graph_report.requested() {
+        return Ok(None);
+    }
+
+    let mut path = if let Some(raw) = &graph_report.graph_report_output {
+        if raw == "-" {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--graph-report-output '-' is not supported from `query`; use `impg graph-report -g -` for stdin/stdout reports",
+            ));
+        }
+        let raw_path = PathBuf::from(raw);
+        if bed_graph_dir.is_some() || raw_path.is_dir() || raw.ends_with(std::path::MAIN_SEPARATOR)
+        {
+            raw_path.join(sanitize_output_stem(range_name))
+        } else {
+            raw_path
+        }
+    } else if let Some(prefix) = output_prefix_for_target(output_prefix, bed_graph_dir, range_name)
+    {
+        PathBuf::from(prefix)
+    } else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--describe-graph needs -O/--output-prefix or --graph-report-output",
+        ));
+    };
+
+    let desired = graph_report_extension(&graph_report.graph_report_format);
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext)
+            if ext.eq_ignore_ascii_case("md")
+                || ext.eq_ignore_ascii_case("markdown")
+                || ext.eq_ignore_ascii_case("json")
+                || ext.eq_ignore_ascii_case("tsv") => {}
+        _ => {
+            if desired == "report.md" {
+                path.set_extension("report.md");
+            } else {
+                path.set_extension(desired);
+            }
+        }
+    }
+    ensure_parent_dir(&path)?;
+    Ok(Some(path))
+}
+
+fn write_graph_characterization_report(
+    gfa_output: &str,
+    reference_names: &[String],
+    graph_report: &GraphReportCliOpts,
+    report_path: &Path,
+    range_name: &str,
+) -> io::Result<()> {
+    let mut options = graph_report.options(reference_names);
+    if options.povu_reference_names.is_empty() && !range_name.is_empty() {
+        options.povu_reference_names.push(range_name.to_string());
+    }
+    let report =
+        impg::graph_report::describe_gfa(report_path.display().to_string(), gfa_output, &options)?;
+    let text = impg::graph_report::format_report(&report, &graph_report.graph_report_format)?;
+    ensure_parent_dir(report_path)?;
+    let mut out = BufWriter::new(File::create(report_path)?);
+    out.write_all(text.as_bytes())?;
+    out.flush()?;
+    info!(
+        "Wrote graph characterization report {}",
+        report_path.display()
+    );
+    Ok(())
 }
 
 fn render_graph_image(
@@ -8676,7 +9404,8 @@ fn render_graph_image(
     };
 
     let t0 = Instant::now();
-    let status = Command::new("gfalook")
+    let mut command = Command::new("gfalook");
+    command
         .arg("-i")
         .arg(&input_path)
         .arg("-o")
@@ -8688,18 +9417,20 @@ fn render_graph_image(
         .arg("-a")
         .arg(graph_render.render_graph_path_height.to_string())
         .arg("-t")
-        .arg(threads.max(1).to_string())
-        .status()
-        .map_err(|e| {
-            if e.kind() == io::ErrorKind::NotFound {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "Could not run gfalook for --render-graph; install gfalook or omit --render-graph",
-                )
-            } else {
-                io::Error::other(format!("Failed to run gfalook: {e}"))
-            }
-        })?;
+        .arg(threads.max(1).to_string());
+    if graph_render.render_graph_mean_depth {
+        command.arg("-m");
+    }
+    let status = command.status().map_err(|e| {
+        if e.kind() == io::ErrorKind::NotFound {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "Could not run gfalook for --render-graph; install gfalook or omit --render-graph",
+            )
+        } else {
+            io::Error::other(format!("Failed to run gfalook: {e}"))
+        }
+    })?;
     drop(temp_gfa);
     if !status.success() {
         return Err(io::Error::other(format!(
@@ -9710,6 +10441,7 @@ fn output_results_gfa(
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
     engine_opts: &EngineOpts,
     graph_render: &GraphRenderOpts,
+    graph_report: &GraphReportCliOpts,
     bed_graph_dir: Option<&Path>,
     threads: usize,
 ) -> io::Result<()> {
@@ -9736,6 +10468,7 @@ fn output_results_gfa(
         "gfa",
         &[],
         graph_render,
+        graph_report,
         bed_graph_dir,
         name,
         threads,
@@ -9754,6 +10487,7 @@ fn output_results_vcf(
     scoring_params: Option<(u8, u8, u8, u8, u8, u8)>,
     engine_opts: &EngineOpts,
     graph_render: &GraphRenderOpts,
+    graph_report: &GraphReportCliOpts,
     bed_graph_dir: Option<&Path>,
     threads: usize,
 ) -> io::Result<()> {
@@ -9778,6 +10512,7 @@ fn output_results_vcf(
         "vcf",
         reference_names,
         graph_render,
+        graph_report,
         bed_graph_dir,
         range_name,
         threads,
@@ -9799,6 +10534,7 @@ fn output_results_gfa_partitioned(
     query: &QueryOpts,
     subset_filter: Option<&SubsetFilter>,
     graph_render: &GraphRenderOpts,
+    graph_report: &GraphReportCliOpts,
     bed_graph_dir: Option<&Path>,
     range_name: &str,
     threads: usize,
@@ -9861,6 +10597,7 @@ fn output_results_gfa_partitioned(
         "gfa",
         &[],
         graph_render,
+        graph_report,
         bed_graph_dir,
         range_name,
         threads,
@@ -9881,6 +10618,7 @@ fn output_results_vcf_partitioned(
     reference_names: &[String],
     range_name: &str,
     graph_render: &GraphRenderOpts,
+    graph_report: &GraphReportCliOpts,
     bed_graph_dir: Option<&Path>,
     threads: usize,
 ) -> io::Result<()> {
@@ -9931,6 +10669,7 @@ fn output_results_vcf_partitioned(
         "vcf",
         reference_names,
         graph_render,
+        graph_report,
         bed_graph_dir,
         range_name,
         threads,
@@ -10444,10 +11183,7 @@ fn merge_adjusted_intervals(results: &mut Vec<AdjustedInterval>, merge_distance:
 /// Non-empty CIGARs are concatenated in query order; the concatenation is
 /// only semantically meaningful when the merged chunks were contiguous, so
 /// PAF output should keep using `merge_adjusted_intervals`.
-fn merge_adjusted_intervals_gap_2d(
-    results: &mut Vec<AdjustedInterval>,
-    merge_distance: i32,
-) {
+fn merge_adjusted_intervals_gap_2d(results: &mut Vec<AdjustedInterval>, merge_distance: i32) {
     if results.len() <= 1 || merge_distance < 0 {
         return;
     }
@@ -10476,7 +11212,11 @@ fn merge_adjusted_intervals_gap_2d(
     for ((_, _, strand_fwd), mut indices) in groups {
         indices.sort_by_key(|&i| {
             let q = &results[i].0;
-            if strand_fwd { q.first } else { -q.first }
+            if strand_fwd {
+                q.first
+            } else {
+                -q.first
+            }
         });
         for a_pos in 0..indices.len() {
             let ia = indices[a_pos];
@@ -10492,7 +11232,11 @@ fn merge_adjusted_intervals_gap_2d(
                 let ib = indices[b_pos];
                 let qb = results[ib].0;
                 let tb = results[ib].2;
-                let qb_start = if strand_fwd { qb.first as i64 } else { qb.last as i64 };
+                let qb_start = if strand_fwd {
+                    qb.first as i64
+                } else {
+                    qb.last as i64
+                };
                 // Reject strictly-backward starts only. Equal starts are fine
                 // (syng: every row shares the full query tile). Forward progress
                 // on the target axis below does the real work of ordering.
@@ -10534,7 +11278,9 @@ fn merge_adjusted_intervals_gap_2d(
             continue;
         }
         let r = uf_find(&mut parent, i);
-        let Some(members) = buckets.remove(&r) else { continue };
+        let Some(members) = buckets.remove(&r) else {
+            continue;
+        };
         for &m in &members {
             taken[m] = true;
         }
@@ -10545,7 +11291,11 @@ fn merge_adjusted_intervals_gap_2d(
         let mut ordered = members.clone();
         ordered.sort_by_key(|&idx| {
             let q = &results[idx].0;
-            if strand_fwd { q.first } else { -q.first }
+            if strand_fwd {
+                q.first
+            } else {
+                -q.first
+            }
         });
         let first = &results[ordered[0]];
         let (mut q_lo, mut q_hi) = (first.0.first, first.0.last);
@@ -10567,14 +11317,25 @@ fn merge_adjusted_intervals_gap_2d(
             cigar.extend_from_slice(c);
         }
         merge_consecutive_cigar_ops(&mut cigar);
-        let q_iv = coitrees::Interval { first: q_lo, last: q_hi, metadata: q_meta };
-        let t_iv = coitrees::Interval { first: t_lo, last: t_hi, metadata: t_meta };
+        let q_iv = coitrees::Interval {
+            first: q_lo,
+            last: q_hi,
+            metadata: q_meta,
+        };
+        let t_iv = coitrees::Interval {
+            first: t_lo,
+            last: t_hi,
+            metadata: t_meta,
+        };
         merged.push((q_iv, cigar, t_iv));
     }
 
     let count = merged.len();
     *results = merged;
-    info!("Collected {} merged intervals (gap-2d, d={})", count, merge_distance);
+    info!(
+        "Collected {} merged intervals (gap-2d, d={})",
+        count, merge_distance
+    );
 }
 
 // Merge consecutive operations of the same type
@@ -11021,6 +11782,18 @@ mod tests {
             render_graph_width: 800,
             render_graph_height: 300,
             render_graph_path_height: 4,
+            render_graph_mean_depth: false,
+        }
+    }
+
+    fn test_graph_report_opts() -> GraphReportCliOpts {
+        GraphReportCliOpts {
+            describe_graph: true,
+            graph_report_output: None,
+            graph_report_format: "markdown".to_string(),
+            graph_report_top: 10,
+            graph_report_povu: false,
+            graph_report_reference_names: Vec::new(),
         }
     }
 
@@ -11057,11 +11830,72 @@ mod tests {
     fn test_graph_render_path_svg_extension_wins() {
         let dir = tempfile::tempdir().unwrap();
         let mut render = test_graph_render_opts();
-        render.render_graph_output = Some(dir.path().join("view.svg").to_string_lossy().to_string());
+        render.render_graph_output =
+            Some(dir.path().join("view.svg").to_string_lossy().to_string());
         let path = graph_render_path_for_target(&render, &None, None, "x")
             .unwrap()
             .unwrap();
         assert_eq!(path, dir.path().join("view.svg"));
+    }
+
+    #[test]
+    fn test_graph_report_path_defaults_beside_output_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = Some(dir.path().join("amy").to_string_lossy().to_string());
+        let report = test_graph_report_opts();
+        let path = graph_report_path_for_target(&report, &prefix, None, "AMY locus")
+            .unwrap()
+            .unwrap();
+        assert_eq!(path, dir.path().join("amy.report.md"));
+    }
+
+    #[test]
+    fn test_graph_report_path_uses_bed_row_stems_under_report_dir() {
+        let out_dir = tempfile::tempdir().unwrap();
+        let graph_dir = tempfile::tempdir().unwrap();
+        let mut report = test_graph_report_opts();
+        report.describe_graph = false;
+        report.graph_report_output = Some(out_dir.path().to_string_lossy().to_string());
+        let path = graph_report_path_for_target(
+            &report,
+            &Some("ignored".to_string()),
+            Some(graph_dir.path()),
+            "C4A/C4B locus",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(path, out_dir.path().join("C4A_C4B_locus.report.md"));
+    }
+
+    #[test]
+    fn test_graph_report_cli_parse() {
+        let args = Args::try_parse_from([
+            "impg",
+            "graph-report",
+            "-g",
+            "x.gfa",
+            "--format",
+            "json",
+            "--povu",
+            "-r",
+            "ref",
+        ])
+        .unwrap();
+        match args {
+            Args::GraphReport {
+                gfa,
+                format,
+                povu,
+                reference_names,
+                ..
+            } => {
+                assert_eq!(gfa, "x.gfa");
+                assert_eq!(format, "json");
+                assert!(povu);
+                assert_eq!(reference_names, vec!["ref"]);
+            }
+            _ => panic!("expected graph-report command"),
+        }
     }
 
     #[test]
@@ -11073,6 +11907,21 @@ mod tests {
             writeln!(out, "chr1\t0\t1").unwrap();
         }
         assert!(dir.path().join("nested/out.bed").exists());
+    }
+
+    #[test]
+    fn test_output_path_respects_explicit_extension() {
+        let prefix = Some("graph".to_string());
+        assert_eq!(
+            output_path_for_basename(&prefix, "gfa").unwrap(),
+            PathBuf::from("graph.gfa")
+        );
+
+        let explicit = Some("graph.gfa".to_string());
+        assert_eq!(
+            output_path_for_basename(&explicit, "gfa").unwrap(),
+            PathBuf::from("graph.gfa")
+        );
     }
 
     #[test]
@@ -11187,12 +12036,18 @@ mod tests {
             "`--gfa-engine syng` emits a syng syncmer GFA",
             "defaults to syng:blunt plus gfasort pipeline Ygs",
             "`:nosort` to skip final ordering",
+            "filters the top 0.05% high-frequency local syncmer nodes",
+            "`:nomask` or `:nofilter`",
+            "rare repeated-copy",
+            ":mask,top=0.001,max-occ=500",
+            "`:cut-ns`",
+            "`--render-graph-depth`",
             "-o gfa:syng:blunt,k=63,s=8,seed=7",
             "-o gfa:syng:crush",
-            "-o gfa:syng:crush:sort,pipeline=Yg",
+            "-o gfa:syng:crush:sort,pipeline=Ygs",
             "-o vcf:syng",
             "-o gfa:wfmash:seqwish",
-            "Crush methods include poa, biwfa, allwave, and sweepga",
+            "Crush methods include allwave, poa, poasta, star-biwfa, and sweepga",
             "`impg syng2gfa` to dump the whole syng syncmer graph",
         ] {
             assert!(
@@ -11254,7 +12109,11 @@ mod tests {
                 );
                 assert_eq!(
                     parsed.syng_params,
-                    Some(impg::syng::SyncmerParams { k: 8, w: 55, seed: 7 })
+                    Some(impg::syng::SyncmerParams {
+                        k: 8,
+                        w: 55,
+                        seed: 7
+                    })
                 );
             }
             _ => panic!("expected query command"),
@@ -11289,7 +12148,11 @@ mod tests {
                 );
                 assert_eq!(
                     parsed.syng_params,
-                    Some(impg::syng::SyncmerParams { k: 8, w: 55, seed: 7 })
+                    Some(impg::syng::SyncmerParams {
+                        k: 8,
+                        w: 55,
+                        seed: 7
+                    })
                 );
             }
             _ => panic!("expected query command"),
@@ -11325,7 +12188,11 @@ mod tests {
                 );
                 assert_eq!(
                     parsed.syng_params,
-                    Some(impg::syng::SyncmerParams { k: 8, w: 55, seed: 7 })
+                    Some(impg::syng::SyncmerParams {
+                        k: 8,
+                        w: 55,
+                        seed: 7
+                    })
                 );
             }
             _ => panic!("expected query command"),
@@ -11340,7 +12207,7 @@ mod tests {
             "-d",
             "0",
             "-o",
-            "gfa:syng:crush,method=biwfa,max-median-traversal-len=10k,max-traversals=64,max-rounds=7,polish-max-median-traversal-len=128,polish-rounds=1",
+            "gfa:syng:crush,method=star-biwfa,min-traversal-len=2k,max-median-traversal-len=10k,max-traversals=64,max-rounds=7,auto-spoa-max-len=0,auto-allwave-max-total-seq=250k,auto-allwave-max-traversals=96,polish-max-median-traversal-len=128,polish-rounds=1",
         ])
         .unwrap();
         match args {
@@ -11354,7 +12221,7 @@ mod tests {
                 assert_eq!(output_format, "gfa");
                 assert_eq!(
                     engine_cli.engine_raw,
-                    "syng:crush,method=biwfa,max-median-traversal-len=10k,max-traversals=64,max-rounds=7,polish-max-median-traversal-len=128,polish-rounds=1"
+                    "syng:crush,method=star-biwfa,min-traversal-len=2k,max-median-traversal-len=10k,max-traversals=64,max-rounds=7,auto-spoa-max-len=0,auto-allwave-max-total-seq=250k,auto-allwave-max-traversals=96,polish-max-median-traversal-len=128,polish-rounds=1"
                 );
                 let parsed = engine_cli.parse_engine().unwrap();
                 assert_eq!(parsed.engine, GfaEngine::SyngNative);
@@ -11363,12 +12230,20 @@ mod tests {
                     parsed.graph_sort_pipeline.as_deref(),
                     Some(impg::DEFAULT_SYNG_GFA_SORT_PIPELINE)
                 );
+                assert_eq!(
+                    parsed.syng_gfa_frequency_mask,
+                    SyngGfaFrequencyMask::local_default()
+                );
                 let crush = parsed.crush_config.unwrap();
-                assert_eq!(crush.method, impg::resolution::ResolutionMethod::Biwfa);
+                assert_eq!(crush.method, impg::resolution::ResolutionMethod::StarBiwfa);
                 assert_eq!(crush.max_bubble_span, 0);
+                assert_eq!(crush.min_traversal_len, 2_000);
                 assert_eq!(crush.max_median_traversal_len, 10_000);
                 assert_eq!(crush.max_traversals, 64);
                 assert_eq!(crush.max_iterations, 7);
+                assert_eq!(crush.auto_spoa_max_traversal_len, 0);
+                assert_eq!(crush.auto_allwave_max_total_sequence, 250_000);
+                assert_eq!(crush.auto_allwave_max_traversals, 96);
                 assert_eq!(crush.polish_max_median_traversal_len, 128);
                 assert_eq!(crush.polish_iterations, 1);
             }
@@ -11384,7 +12259,7 @@ mod tests {
             "-d",
             "0",
             "-o",
-            "gfa:syng:crush,method=allwave,k-nearest=5,k-farthest=2,random-fraction=0.05,mash-k=17",
+            "gfa:syng:crush,method=allwave,k-nearest=5,k-farthest=2,random-fraction=0.05,mash-k=17,seqwish-k=79",
         ])
         .unwrap();
         match args {
@@ -11403,6 +12278,166 @@ mod tests {
                 assert_eq!(crush.pair_k_farthest, 2);
                 assert!((crush.pair_random_fraction - 0.05).abs() < f64::EPSILON);
                 assert_eq!(crush.pair_mash_k, 17);
+                assert_eq!(crush.replacement_seqwish_min_match_len, 79);
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_accepts_syng_frequency_mask_stage() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:mask,top=0.001,max-occ=500:crush",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                assert_eq!(
+                    parsed.syng_gfa_frequency_mask,
+                    SyngGfaFrequencyMask {
+                        drop_top_fraction: 0.001,
+                        max_occurrences: Some(500),
+                        local_repeat_max_minor:
+                            impg::commands::syng2gfa::DEFAULT_GFA_LOCAL_REPEAT_MAX_MINOR,
+                        local_repeat_min_dominant_fraction:
+                            impg::commands::syng2gfa::DEFAULT_GFA_LOCAL_REPEAT_MIN_DOMINANT_FRACTION,
+                        cut_n_gaps: false,
+                        cut_n_min_run: impg::commands::syng2gfa::DEFAULT_GFA_CUT_N_MIN_RUN,
+                    }
+                );
+                assert!(parsed.crush_config.is_some());
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_accepts_syng_nomask_stage() {
+        let args =
+            Args::try_parse_from(["impg", "query", "-d", "0", "-o", "gfa:syng:nomask"]).unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                assert_eq!(
+                    parsed.syng_gfa_frequency_mask,
+                    SyngGfaFrequencyMask::disabled()
+                );
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_accepts_syng_filter_aliases() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:filter,top=0.002",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                assert_eq!(parsed.syng_gfa_frequency_mask.drop_top_fraction, 0.002);
+            }
+            _ => panic!("expected query command"),
+        }
+
+        let args =
+            Args::try_parse_from(["impg", "query", "-d", "0", "-o", "gfa:syng:nofilter"]).unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                assert_eq!(
+                    parsed.syng_gfa_frequency_mask,
+                    SyngGfaFrequencyMask::disabled()
+                );
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_accepts_syng_cut_ns_stage() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:cut-ns,cut-n-min-run=10:crush",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                assert!(parsed.syng_gfa_frequency_mask.cut_n_gaps);
+                assert_eq!(parsed.syng_gfa_frequency_mask.cut_n_min_run, 10);
+                assert!(parsed.crush_config.is_some());
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_query_render_graph_mean_depth_cli_parse() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "--render-graph",
+            "--render-graph-depth",
+        ])
+        .unwrap();
+        match args {
+            Args::Query { graph_render, .. } => {
+                assert!(graph_render.render_graph);
+                assert!(graph_render.render_graph_mean_depth);
             }
             _ => panic!("expected query command"),
         }
@@ -11443,8 +12478,8 @@ mod tests {
 
     #[test]
     fn test_gfa_output_format_syng_crush_uses_safe_defaults() {
-        let args = Args::try_parse_from(["impg", "query", "-d", "0", "-o", "gfa:syng:crush"])
-            .unwrap();
+        let args =
+            Args::try_parse_from(["impg", "query", "-d", "0", "-o", "gfa:syng:crush"]).unwrap();
         match args {
             Args::Query {
                 output_format,
@@ -11465,12 +12500,17 @@ mod tests {
                 let crush = parsed.crush_config.unwrap();
                 assert_eq!(crush.method, impg::resolution::ResolutionMethod::Auto);
                 assert_eq!(crush.max_bubble_span, 0);
+                assert_eq!(crush.min_traversal_len, 0);
                 assert_eq!(crush.max_median_traversal_len, 1_000);
                 assert_eq!(crush.max_traversal_len, 10_000);
                 assert_eq!(crush.max_traversals, 10_000);
+                assert_eq!(crush.auto_spoa_max_traversal_len, 2_000);
+                assert_eq!(crush.auto_allwave_max_total_sequence, 200_000);
+                assert_eq!(crush.auto_allwave_max_traversals, 128);
                 assert_eq!(crush.max_iterations, 1);
                 assert_eq!(crush.polish_iterations, 1);
                 assert_eq!(crush.polish_max_median_traversal_len, 256);
+                assert_eq!(crush.replacement_seqwish_min_match_len, 79);
             }
             _ => panic!("expected query command"),
         }
@@ -11506,15 +12546,9 @@ mod tests {
 
     #[test]
     fn test_gfa_output_format_accepts_syng_nosort_stage() {
-        let args = Args::try_parse_from([
-            "impg",
-            "query",
-            "-d",
-            "0",
-            "-o",
-            "gfa:syng:crush:nosort",
-        ])
-        .unwrap();
+        let args =
+            Args::try_parse_from(["impg", "query", "-d", "0", "-o", "gfa:syng:crush:nosort"])
+                .unwrap();
         match args {
             Args::Query {
                 output_format,
@@ -11534,15 +12568,8 @@ mod tests {
 
     #[test]
     fn test_gfa_output_format_rejects_raw_syng_crush() {
-        let args = Args::try_parse_from([
-            "impg",
-            "query",
-            "-d",
-            "0",
-            "-o",
-            "gfa:syng:raw:crush",
-        ])
-        .unwrap();
+        let args =
+            Args::try_parse_from(["impg", "query", "-d", "0", "-o", "gfa:syng:raw:crush"]).unwrap();
         match args {
             Args::Query {
                 output_format,
@@ -11559,15 +12586,9 @@ mod tests {
 
     #[test]
     fn test_gfa_output_format_can_carry_alignment_pipeline_spec() {
-        let args = Args::try_parse_from([
-            "impg",
-            "query",
-            "-d",
-            "0",
-            "-o",
-            "gfa:wfmash:seqwish:10k",
-        ])
-        .unwrap();
+        let args =
+            Args::try_parse_from(["impg", "query", "-d", "0", "-o", "gfa:wfmash:seqwish:10k"])
+                .unwrap();
         match args {
             Args::Query {
                 output_format,
@@ -11640,8 +12661,7 @@ mod tests {
 
     #[test]
     fn test_vcf_output_format_can_carry_engine_spec() {
-        let args = Args::try_parse_from(["impg", "query", "-d", "0", "-o", "vcf:syng"])
-            .unwrap();
+        let args = Args::try_parse_from(["impg", "query", "-d", "0", "-o", "vcf:syng"]).unwrap();
         match args {
             Args::Query {
                 output_format,
@@ -11778,10 +12798,7 @@ mod tests {
 
     #[test]
     fn test_read_syncmer_index_path_avoids_double_suffix() {
-        assert_eq!(
-            read_syncmer_index_path("sample", "post"),
-            "sample.r2s.post"
-        );
+        assert_eq!(read_syncmer_index_path("sample", "post"), "sample.r2s.post");
         assert_eq!(
             read_syncmer_index_path("sample.r2s", "post"),
             "sample.r2s.post"
@@ -11791,10 +12808,7 @@ mod tests {
     #[test]
     fn test_syng_sequence_name_uses_primary_defline_token() {
         assert_eq!(
-            syng_sequence_name(
-                "GRCh38",
-                "GRCh38#0#chr6  AC:CM000668.2  LN:170805979"
-            ),
+            syng_sequence_name("GRCh38", "GRCh38#0#chr6  AC:CM000668.2  LN:170805979"),
             "GRCh38#0#chr6"
         );
         assert_eq!(

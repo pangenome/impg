@@ -9,7 +9,7 @@
 //!   cargo run --release --example syng_anchor_probe -- \
 //!       /home/erik/scrapy/yeast235 'S288C#0#chrIV' 408000 410000 'AAA#0#chrIV'
 
-use impg::syng::{SyngIndex, SyncmerParams};
+use impg::syng::{SyncmerParams, SyngIndex};
 use std::env;
 
 fn main() {
@@ -27,8 +27,7 @@ fn main() {
     let qe: u64 = args[4].parse().expect("qe must be u64");
     let target_path = &args[5];
 
-    let idx = SyngIndex::load(prefix, SyncmerParams::default())
-        .expect("failed to load syng index");
+    let idx = SyngIndex::load(prefix, SyncmerParams::default()).expect("failed to load syng index");
 
     eprintln!("Query: {}:{}-{}", query_name, qs, qe);
     eprintln!("Target: {}", target_path);
@@ -55,7 +54,10 @@ fn main() {
         );
         let mut anchors = h.anchors.clone();
         anchors.sort_by_key(|a| a.query_pos);
-        println!("# {}:{}-{}  strand={}", target_path, h.start, h.end, h.strand);
+        println!(
+            "# {}:{}-{}  strand={}",
+            target_path, h.start, h.end, h.strand
+        );
         println!("# q_pos\tt_pos\tdelta_t_minus_q\tnode_id");
         for a in &anchors {
             let dt: i64 = a.target_pos as i64 - a.query_pos as i64;
@@ -67,11 +69,15 @@ fn main() {
             let t_span = (last.target_pos as i64 - first.target_pos as i64).unsigned_abs();
             eprintln!(
                 "  first_anchor (q={}, t={}, dt={})",
-                first.query_pos, first.target_pos, first.target_pos as i64 - first.query_pos as i64
+                first.query_pos,
+                first.target_pos,
+                first.target_pos as i64 - first.query_pos as i64
             );
             eprintln!(
                 "  last_anchor  (q={}, t={}, dt={})",
-                last.query_pos, last.target_pos, last.target_pos as i64 - last.query_pos as i64
+                last.query_pos,
+                last.target_pos,
+                last.target_pos as i64 - last.query_pos as i64
             );
             eprintln!(
                 "  anchor span: q_span={}bp t_span={}bp indel_imbalance={}bp",

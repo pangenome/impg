@@ -48,7 +48,26 @@ syng,mode=blunt
 syng,mode=raw
 syng,k=63,s=8,seed=7:blunt
 syng:blunt,k=63,s=8,seed=7
+syng:mask,top=0.001,max-occ=500
+syng:filter,top=0.001,max-occ=500
+syng:cut-ns
+syng:filter,cut-ns=true,cut-n-min-run=10
+syng:nomask
+syng:nofilter
 ```
+
+For syng GFA extraction, `syng` defaults to a small raw-layer high-frequency
+syncmer filter: the top 0.05% most frequent local syncmer nodes are removed
+from the raw syng topology before bluntification and bridged by sequence. Rare
+repeated-copy local syncmer contexts are still split rather than emitted as one
+globally shared graph node. This is a graph-materialization policy, separate
+from the query seed filter.
+
+`syng:cut-ns` is an optional materialization policy for assembly gaps. It drops
+N-runs from fetched inter-syncmer DNA and splits emitted GFA paths at those
+breaks, preventing large path-private `N` segments from dominating graph
+layouts. `cut-n-min-run` controls the minimum ambiguous run length and defaults
+to `1`.
 
 Supported legacy alignment prefixes remain:
 
@@ -156,10 +175,13 @@ traverse it. `max-span` is optional and disabled by default; when set, it caps
 the span on the POVU root path, currently the first GFA path, so it is a rooted
 coordinate guard rather than the main runtime budget.
 
-`method=auto` currently uses the global/end-to-end SPOA-backed `poa` resolver.
-`method=poasta` is available for explicit experiments, but it is not the
-default until the POASTA GFA export path is proven to preserve clipped `W`
-walks exactly through impg's rewrite step.
+`method=auto` uses direct global/end-to-end SPOA for bubbles whose longest
+traversal is at most `auto-spoa-max-len` (default `2k`) and for dense bubbles
+above the AllWave safety rails. Remaining bounded bubbles use the AllWave /
+seqwish path, followed by the small SPOA polish pass. `method=poasta` is
+available for explicit experiments, but it is not the default until the POASTA
+GFA export path is proven to preserve clipped `W` walks exactly through impg's
+rewrite step.
 
 `method=biwfa` is the coarse condenser path. It aligns every selected POVU
 bubble traversal end-to-end against the longest traversal with BiWFA, induces a

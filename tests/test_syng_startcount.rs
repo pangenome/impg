@@ -134,7 +134,10 @@ fn test_start_count_increments_on_second_path() {
         syng_ffi::syngBWTdestroy(gbwt);
 
         assert_eq!(j1, 0, "First path should have j_last=0");
-        assert_eq!(j2, 1, "Second path should have j_last=1 (startCount incrementing)");
+        assert_eq!(
+            j2, 1,
+            "Second path should have j_last=1 (startCount incrementing)"
+        );
         assert_eq!(j3, 2, "Third path should have j_last=2");
     }
 }
@@ -148,12 +151,16 @@ fn test_start_count_node5_long() {
         let gbwt = syng_ffi::syngBWTcreate(63, 0);
         let sbp_a = syng_ffi::syngBWTpathStartNew(gbwt, 5);
         let j_a = (*sbp_a).j_last;
-        for k in 6..=55i32 { syng_ffi::syngBWTpathAdd(sbp_a, k, 10); }
+        for k in 6..=55i32 {
+            syng_ffi::syngBWTpathAdd(sbp_a, k, 10);
+        }
         syng_ffi::syngBWTpathFinish(sbp_a);
 
         let sbp_b = syng_ffi::syngBWTpathStartNew(gbwt, 5);
         let j_b = (*sbp_b).j_last;
-        for k in 6..=55i32 { syng_ffi::syngBWTpathAdd(sbp_b, k, 10); }
+        for k in 6..=55i32 {
+            syng_ffi::syngBWTpathAdd(sbp_b, k, 10);
+        }
         syng_ffi::syngBWTpathFinish(sbp_b);
         syng_ffi::syngBWTdestroy(gbwt);
 
@@ -254,7 +261,10 @@ fn test_start_count_with_long_paths_and_rc() {
         syng_ffi::syngBWTdestroy(gbwt);
 
         assert_eq!(j_a, 0);
-        assert_eq!(j_b, 1, "Path B should have j_last=1 (not 0) — bug repro if this fails");
+        assert_eq!(
+            j_b, 1,
+            "Path B should have j_last=1 (not 0) — bug repro if this fails"
+        );
     }
 }
 
@@ -286,11 +296,21 @@ fn test_identical_sequences_get_distinct_start_counts() {
 
     let mut index = SyngIndex::build(params, sequences.into_iter());
 
-    let start_a = index.name_map.path_starts[0].as_ref().expect("seqA missing");
-    let start_b = index.name_map.path_starts[1].as_ref().expect("seqB missing");
+    let start_a = index.name_map.path_starts[0]
+        .as_ref()
+        .expect("seqA missing");
+    let start_b = index.name_map.path_starts[1]
+        .as_ref()
+        .expect("seqB missing");
 
-    eprintln!("seqA: start_node={} start_count={}", start_a.start_node, start_a.start_count);
-    eprintln!("seqB: start_node={} start_count={}", start_b.start_node, start_b.start_count);
+    eprintln!(
+        "seqA: start_node={} start_count={}",
+        start_a.start_node, start_a.start_count
+    );
+    eprintln!(
+        "seqB: start_node={} start_count={}",
+        start_b.start_node, start_b.start_count
+    );
 
     assert_eq!(
         start_a.start_node, start_b.start_node,
@@ -316,7 +336,8 @@ fn test_identical_sequences_get_distinct_start_counts() {
 
     // Query seqB — if the start_count was wrong, this will crash with
     // "syngBWTpathStartOld ... >= startCount" in the C layer.
-    let intervals = loaded.query_region("seqB", 0, 1000, 0)
+    let intervals = loaded
+        .query_region("seqB", 0, 1000, 0)
         .expect("query_region for seqB should succeed");
     eprintln!("query_region(seqB) returned {} intervals", intervals.len());
     assert!(!intervals.is_empty(), "Should find at least self-hit");
