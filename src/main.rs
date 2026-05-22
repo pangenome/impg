@@ -2583,6 +2583,40 @@ fn parse_crush_stage(
             "sweepga-map-pct-identity" | "map-pct-identity" => {
                 config.sweepga_map_pct_identity = Some(param.value.clone());
             }
+            "max-pair-alignments" | "max-pairs" | "max-alignments" => {
+                config.max_pair_alignments =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "max-replacement-paf-bytes" | "max-paf-bytes" | "max-paf" => {
+                config.max_replacement_paf_bytes =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "max-round-score-growth" | "max-score-growth" => {
+                config.max_round_score_growth = param.value.parse().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': {}='{}' is not a valid fraction",
+                            raw, param.key, param.value
+                        ),
+                    )
+                })?;
+            }
+            "min-round-score-improvement" | "min-score-improvement" => {
+                config.min_round_score_improvement = param.value.parse().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': {}='{}' is not a valid fraction",
+                            raw, param.key, param.value
+                        ),
+                    )
+                })?;
+            }
+            "disable-round-quality-check" | "no-round-quality-check" => {
+                config.disable_round_quality_check =
+                    parse_bool_engine_param(raw, &param.key, &param.value)?;
+            }
             "sweepga-no-filter" | "no-filter" => {
                 config.sweepga_no_filter = parse_bool_engine_param(raw, &param.key, &param.value)?;
             }
@@ -2662,6 +2696,24 @@ fn parse_crush_stage(
             io::ErrorKind::InvalidInput,
             format!(
                 "Invalid --gfa-engine '{}': random-fraction must be between 0 and 1",
+                raw
+            ),
+        ));
+    }
+    if config.max_round_score_growth < 0.0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': max-round-score-growth must be non-negative",
+                raw
+            ),
+        ));
+    }
+    if config.min_round_score_improvement < 0.0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': min-round-score-improvement must be non-negative",
                 raw
             ),
         ));
@@ -4646,6 +4698,26 @@ GFA engine shorthand:
         /// SweepGA wfmash percent identity for --method sweepga
         #[clap(long, value_parser)]
         sweepga_map_pct_identity: Option<String>,
+
+        /// Maximum selected/produced pair alignments for one pairwise replacement; 0 disables
+        #[clap(long, value_parser = parse_usize_size, default_value = "10k")]
+        max_pair_alignments: usize,
+
+        /// Maximum PAF bytes handed to seqwish for one replacement; 0 disables
+        #[clap(long, value_parser = parse_usize_size, default_value = "67108864")]
+        max_replacement_paf_bytes: usize,
+
+        /// Maximum allowed round-level graph-complexity score growth before rollback
+        #[clap(long, value_parser, default_value = "0.02")]
+        max_round_score_growth: f64,
+
+        /// Required fractional graph-complexity score improvement per accepted round
+        #[clap(long, value_parser, default_value = "0.0")]
+        min_round_score_improvement: f64,
+
+        /// Disable round-level graph-quality rollback/stopping checks
+        #[clap(long, action)]
+        disable_round_quality_check: bool,
 
         /// Skip SweepGA post-alignment filtering for --method sweepga
         #[clap(
@@ -7507,6 +7579,11 @@ fn run() -> io::Result<()> {
             sweepga_kmer_frequency,
             sweepga_min_aln_length,
             sweepga_map_pct_identity,
+            max_pair_alignments,
+            max_replacement_paf_bytes,
+            max_round_score_growth,
+            min_round_score_improvement,
+            disable_round_quality_check,
             sweepga_no_filter,
             sweepga_sparse_pairs,
             common,
@@ -7572,6 +7649,18 @@ fn run() -> io::Result<()> {
                     "--seqwish-k/--seqwish-min-match-len must be > 0",
                 ));
             }
+            if max_round_score_growth < 0.0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--max-round-score-growth must be non-negative",
+                ));
+            }
+            if min_round_score_improvement < 0.0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--min-round-score-improvement must be non-negative",
+                ));
+            }
 
             let mut gfa_text = String::new();
             if gfa == "-" {
@@ -7607,6 +7696,11 @@ fn run() -> io::Result<()> {
                 sweepga_kmer_frequency,
                 sweepga_min_aln_length: sweepga_min_aln_length as u64,
                 sweepga_map_pct_identity,
+                max_pair_alignments,
+                max_replacement_paf_bytes,
+                max_round_score_growth,
+                min_round_score_improvement,
+                disable_round_quality_check,
                 sweepga_no_filter,
                 sweepga_sparse_pairs,
                 ..Default::default()
@@ -12297,7 +12391,7 @@ mod tests {
             "-d",
             "0",
             "-o",
-            "gfa:syng:crush,method=allwave,k-nearest=5,k-farthest=2,pair-trees=3,random-fraction=0.05,mash-k=17,seqwish-k=79",
+            "gfa:syng:crush,method=allwave,k-nearest=5,k-farthest=2,pair-trees=3,random-fraction=0.05,mash-k=17,seqwish-k=79,max-pair-alignments=20k,max-paf-bytes=128m,max-round-score-growth=0.05,min-round-score-improvement=0.001",
         ])
         .unwrap();
         match args {
@@ -12318,6 +12412,10 @@ mod tests {
                 assert!((crush.pair_random_fraction - 0.05).abs() < f64::EPSILON);
                 assert_eq!(crush.pair_mash_k, 17);
                 assert_eq!(crush.replacement_seqwish_min_match_len, 79);
+                assert_eq!(crush.max_pair_alignments, 20_000);
+                assert_eq!(crush.max_replacement_paf_bytes, 128_000_000);
+                assert!((crush.max_round_score_growth - 0.05).abs() < f64::EPSILON);
+                assert!((crush.min_round_score_improvement - 0.001).abs() < f64::EPSILON);
             }
             _ => panic!("expected query command"),
         }
@@ -12552,6 +12650,11 @@ mod tests {
                 assert_eq!(crush.polish_max_median_traversal_len, 256);
                 assert_eq!(crush.pair_tree_count, 1);
                 assert_eq!(crush.replacement_seqwish_min_match_len, 79);
+                assert_eq!(crush.max_pair_alignments, 10_000);
+                assert_eq!(crush.max_replacement_paf_bytes, 64 * 1024 * 1024);
+                assert!((crush.max_round_score_growth - 0.02).abs() < f64::EPSILON);
+                assert_eq!(crush.min_round_score_improvement, 0.0);
+                assert!(!crush.disable_round_quality_check);
                 assert!(!crush.sweepga_sparse_pairs);
             }
             _ => panic!("expected query command"),

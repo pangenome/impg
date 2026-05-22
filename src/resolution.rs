@@ -102,6 +102,33 @@ pub struct ResolutionConfig {
     pub sweepga_min_aln_length: u64,
     /// SweepGA wfmash percent identity. `None` lets wfmash auto-estimate.
     pub sweepga_map_pct_identity: Option<String>,
+    /// Maximum selected pair alignments for one pairwise graph induction.
+    ///
+    /// The selected-pair graph is only a guide for seqwish transitive closure.
+    /// Past this point, repetitive parent bubbles can produce dense enough
+    /// alignments that graph induction is dominated by closure rather than
+    /// useful local condensation. Set to 0 to disable this guard.
+    pub max_pair_alignments: usize,
+    /// Maximum PAF bytes handed to seqwish for one replacement.
+    ///
+    /// This catches parent-scale candidates whose pair count looks acceptable
+    /// but whose alignments cover too many repetitive positions. Set to 0 to
+    /// disable this guard.
+    pub max_replacement_paf_bytes: usize,
+    /// Maximum allowed round-level graph-complexity score growth.
+    ///
+    /// A round whose score grows by more than this fraction is rolled back and
+    /// stops the run. The score combines segment sequence, path steps, links,
+    /// and path white-space bridges in current segment order.
+    pub max_round_score_growth: f64,
+    /// Required fractional graph-complexity score improvement per round.
+    ///
+    /// If positive, rounds with less improvement are rolled back and stop the
+    /// run. This is useful for exploratory multi-round crushing where parent
+    /// bubbles become expensive after the main condensation has happened.
+    pub min_round_score_improvement: f64,
+    /// Disable round-level quality acceptance checks.
+    pub disable_round_quality_check: bool,
     /// Skip SweepGA post-alignment filtering and feed selected pair alignments directly.
     pub sweepga_no_filter: bool,
     /// Force sparse pair dispatch for SweepGA/FastGA graph induction.
@@ -175,6 +202,10 @@ pub const DEFAULT_PAIR_MASH_K: usize = 15;
 pub const DEFAULT_REPLACEMENT_SEQWISH_MIN_MATCH_LEN: u64 = 79;
 pub const DEFAULT_SWEEPGA_KMER_FREQUENCY: usize = 10;
 pub const DEFAULT_SWEEPGA_MIN_ALN_LENGTH: u64 = 0;
+pub const DEFAULT_MAX_PAIR_ALIGNMENTS: usize = 10_000;
+pub const DEFAULT_MAX_REPLACEMENT_PAF_BYTES: usize = 64 * 1024 * 1024;
+pub const DEFAULT_MAX_ROUND_SCORE_GROWTH: f64 = 0.02;
+pub const DEFAULT_MIN_ROUND_SCORE_IMPROVEMENT: f64 = 0.0;
 
 impl Default for ResolutionConfig {
     fn default() -> Self {
@@ -205,6 +236,11 @@ impl Default for ResolutionConfig {
             sweepga_kmer_frequency: DEFAULT_SWEEPGA_KMER_FREQUENCY,
             sweepga_min_aln_length: DEFAULT_SWEEPGA_MIN_ALN_LENGTH,
             sweepga_map_pct_identity: None,
+            max_pair_alignments: DEFAULT_MAX_PAIR_ALIGNMENTS,
+            max_replacement_paf_bytes: DEFAULT_MAX_REPLACEMENT_PAF_BYTES,
+            max_round_score_growth: DEFAULT_MAX_ROUND_SCORE_GROWTH,
+            min_round_score_improvement: DEFAULT_MIN_ROUND_SCORE_IMPROVEMENT,
+            disable_round_quality_check: false,
             sweepga_no_filter: true,
             sweepga_sparse_pairs: false,
             scoring_params: (1, 4, 6, 2, 26, 1),
@@ -269,7 +305,21 @@ struct BubbleCandidate {
     root_start_step: usize,
     root_end_step: usize,
     root_span: usize,
+    total_steps: usize,
+    unique_steps: usize,
     traversal_stats: TraversalStats,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct GraphQuality {
+    segments: usize,
+    segment_bp: usize,
+    links: usize,
+    path_steps: usize,
+    path_white_space_bp_total: u64,
+    path_white_space_bp_p99: usize,
+    path_white_space_bp_max: usize,
+    score: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -355,6 +405,7 @@ fn resolve_graph_bubbles(
 
     for round in 0..config.max_iterations {
         let round_start = Instant::now();
+        let before_quality = graph_quality(&graph);
         let discovery_start = Instant::now();
         let frontier = find_candidate_frontier(&graph, config, &seen, emit_logs)?;
         let discovery_elapsed = discovery_start.elapsed();
@@ -453,19 +504,40 @@ fn resolve_graph_bubbles(
 
         let resolved_count = plans.len();
         let rewrite_start = Instant::now();
-        graph = apply_replacement_frontier(&graph, &plans)?;
+        let next_graph = apply_replacement_frontier(&graph, &plans)?;
         let rewrite_elapsed = rewrite_start.elapsed();
+        let after_quality = graph_quality(&next_graph);
+        if round > 0 && !config.disable_round_quality_check {
+            let decision = round_quality_decision(before_quality, after_quality, config);
+            if let RoundQualityDecision::Reject { reason } = decision {
+                stats.bailed += resolved_count;
+                if emit_logs {
+                    log::info!(
+                        "crush round {}: rejecting {} replacement(s): {}; before {}; after {}",
+                        round + 1,
+                        resolved_count,
+                        reason,
+                        before_quality.summary(),
+                        after_quality.summary()
+                    );
+                }
+                break;
+            }
+        }
+        graph = next_graph;
         changed = true;
         stats.resolved += resolved_count;
         if emit_logs {
             log::info!(
-                "crush round {}: resolved {}/{} replacement(s) in {:.2?}; rewrite+validate {:.2?}; total {:.2?}",
+                "crush round {}: resolved {}/{} replacement(s) in {:.2?}; rewrite+validate {:.2?}; total {:.2?}; quality {} -> {}",
                 round + 1,
                 resolved_count,
                 selected_count,
                 build_elapsed,
                 rewrite_elapsed,
-                round_start.elapsed()
+                round_start.elapsed(),
+                before_quality.summary(),
+                after_quality.summary()
             );
         }
     }
@@ -708,6 +780,11 @@ fn format_candidate_length_summary(label: &str, candidates: &[BubbleCandidate]) 
         .map(|candidate| candidate.traversal_stats.total_len)
         .max()
         .unwrap_or(0);
+    let max_step_savings = candidates
+        .iter()
+        .map(BubbleCandidate::estimated_step_savings)
+        .max()
+        .unwrap_or(0);
     let max_root_span = candidates
         .iter()
         .map(|candidate| candidate.root_span)
@@ -720,7 +797,7 @@ fn format_candidate_length_summary(label: &str, candidates: &[BubbleCandidate]) 
     let max_traversals = *traversal_counts.iter().max().unwrap_or(&0);
 
     format!(
-        "{label} n={}, max-len median/max={}/{}, median-len median/max={}/{}, p90-len median/max={}/{}, traversals max={}, total max={}, root-span max={}",
+        "{label} n={}, max-len median/max={}/{}, median-len median/max={}/{}, p90-len median/max={}/{}, traversals max={}, total max={}, step-savings max={}, root-span max={}",
         candidates.len(),
         median_value(&mut max_lengths),
         max_len,
@@ -730,6 +807,7 @@ fn format_candidate_length_summary(label: &str, candidates: &[BubbleCandidate]) 
         max_p90,
         max_traversals,
         max_total,
+        max_step_savings,
         max_root_span
     )
 }
@@ -740,6 +818,151 @@ fn median_value(values: &mut [usize]) -> usize {
     }
     values.sort_unstable();
     values[values.len() / 2]
+}
+
+enum RoundQualityDecision {
+    Accept,
+    Reject { reason: String },
+}
+
+impl GraphQuality {
+    fn summary(&self) -> String {
+        format!(
+            "score={}, segments={}, segment-bp={}, links={}, path-steps={}, ws-total={}, ws-p99={}, ws-max={}",
+            self.score,
+            self.segments,
+            self.segment_bp,
+            self.links,
+            self.path_steps,
+            self.path_white_space_bp_total,
+            self.path_white_space_bp_p99,
+            self.path_white_space_bp_max
+        )
+    }
+}
+
+fn round_quality_decision(
+    before: GraphQuality,
+    after: GraphQuality,
+    config: &ResolutionConfig,
+) -> RoundQualityDecision {
+    if before.score == 0 {
+        return RoundQualityDecision::Accept;
+    }
+
+    let before_score = before.score as f64;
+    let after_score = after.score as f64;
+    let growth = (after_score - before_score) / before_score;
+    if growth > config.max_round_score_growth {
+        return RoundQualityDecision::Reject {
+            reason: format!(
+                "complexity score grew by {:.4}, above allowed {:.4}",
+                growth, config.max_round_score_growth
+            ),
+        };
+    }
+
+    if config.min_round_score_improvement > 0.0 {
+        let improvement = (before_score - after_score) / before_score;
+        if improvement < config.min_round_score_improvement {
+            return RoundQualityDecision::Reject {
+                reason: format!(
+                    "complexity score improved by {:.4}, below required {:.4}",
+                    improvement, config.min_round_score_improvement
+                ),
+            };
+        }
+    }
+
+    RoundQualityDecision::Accept
+}
+
+fn graph_quality(graph: &Graph) -> GraphQuality {
+    let segments = graph.segments.len();
+    let segment_bp = graph
+        .segments
+        .iter()
+        .map(|segment| segment.seq.len())
+        .sum::<usize>();
+    let path_steps = graph
+        .paths
+        .iter()
+        .map(|path| path.steps.len())
+        .sum::<usize>();
+    let mut links = BTreeSet::new();
+    let mut white_space_gaps = Vec::new();
+    let segment_starts = segment_starts(graph);
+    for path in &graph.paths {
+        for pair in path.steps.windows(2) {
+            let from = pair[0];
+            let to = pair[1];
+            links.insert((from.node, from.rev, to.node, to.rev));
+            white_space_gaps.push(ordered_gap_bp(graph, &segment_starts, from.node, to.node));
+        }
+    }
+    white_space_gaps.sort_unstable();
+    let path_white_space_bp_total_u128 = white_space_gaps
+        .iter()
+        .map(|&gap| gap as u128)
+        .sum::<u128>();
+    let path_white_space_bp_total = path_white_space_bp_total_u128.min(u64::MAX as u128) as u64;
+    let path_white_space_bp_p99 = quantile_usize(&white_space_gaps, 99, 100);
+    let path_white_space_bp_max = white_space_gaps.last().copied().unwrap_or(0);
+
+    // This intentionally approximates rendered graph cost while still pushing
+    // down long path white-space bridges. The divisor keeps bridge cost large
+    // enough to matter without overwhelming path-step/sequence condensation.
+    let score = (segment_bp as u128)
+        .saturating_add(path_steps as u128)
+        .saturating_add((links.len() as u128).saturating_mul(4))
+        .saturating_add(path_white_space_bp_total_u128 / 64)
+        .min(u64::MAX as u128) as u64;
+
+    GraphQuality {
+        segments,
+        segment_bp,
+        links: links.len(),
+        path_steps,
+        path_white_space_bp_total,
+        path_white_space_bp_p99,
+        path_white_space_bp_max,
+        score,
+    }
+}
+
+fn segment_starts(graph: &Graph) -> Vec<usize> {
+    let mut starts = Vec::with_capacity(graph.segments.len());
+    let mut offset = 0usize;
+    for segment in &graph.segments {
+        starts.push(offset);
+        offset = offset.saturating_add(segment.seq.len());
+    }
+    starts
+}
+
+fn ordered_gap_bp(graph: &Graph, starts: &[usize], from: usize, to: usize) -> usize {
+    let Some(&from_start) = starts.get(from) else {
+        return 0;
+    };
+    let Some(&to_start) = starts.get(to) else {
+        return 0;
+    };
+    let from_end = from_start.saturating_add(graph.segments[from].seq.len());
+    let to_end = to_start.saturating_add(graph.segments[to].seq.len());
+    if from_end <= to_start {
+        to_start.saturating_sub(from_end)
+    } else if to_end <= from_start {
+        from_start.saturating_sub(to_end)
+    } else {
+        0
+    }
+}
+
+fn quantile_usize(values: &[usize], numerator: usize, denominator: usize) -> usize {
+    if values.is_empty() || denominator == 0 {
+        return 0;
+    }
+    values[percentile_index(values.len(), numerator, denominator)]
 }
 
 fn path_positions(graph: &Graph, path_idx: usize) -> Vec<usize> {
@@ -855,6 +1078,17 @@ fn find_candidate_frontier(
                 })
                 .collect::<Vec<_>>();
             let traversal_stats = traversal_stats_from_lengths(lengths);
+            let total_steps = ranges
+                .iter()
+                .map(|range| range.end_step.saturating_sub(range.begin_step))
+                .sum::<usize>();
+            let mut unique_steps = FxHashSet::default();
+            for range in &ranges {
+                let path = &graph.paths[range.path_idx];
+                for step_idx in range.begin_step..range.end_step {
+                    unique_steps.insert(path.steps[step_idx]);
+                }
+            }
             if traversal_stats.max_len < config.min_traversal_len {
                 return None;
             }
@@ -884,6 +1118,8 @@ fn find_candidate_frontier(
                 root_start_step: begin,
                 root_end_step: exit_step,
                 root_span,
+                total_steps,
+                unique_steps: unique_steps.len(),
                 traversal_stats,
             })
         })
@@ -893,8 +1129,10 @@ fn find_candidate_frontier(
 
     let select_start = Instant::now();
     candidates.sort_by(|a, b| {
-        b.root_step_span()
-            .cmp(&a.root_step_span())
+        b.estimated_step_savings()
+            .cmp(&a.estimated_step_savings())
+            .then_with(|| b.unique_steps.cmp(&a.unique_steps))
+            .then_with(|| b.root_step_span().cmp(&a.root_step_span()))
             .then_with(|| b.root_span.cmp(&a.root_span))
             .then_with(|| a.root_start_step.cmp(&b.root_start_step))
             .then_with(|| a.root_end_step.cmp(&b.root_end_step))
@@ -951,6 +1189,12 @@ fn find_candidate_frontier(
 impl BubbleCandidate {
     fn root_step_span(&self) -> usize {
         self.root_end_step.saturating_sub(self.root_start_step)
+    }
+
+    fn estimated_step_savings(&self) -> usize {
+        self.total_steps
+            .saturating_sub(self.traversal_stats.count)
+            .saturating_add(self.unique_steps.saturating_sub(1))
     }
 }
 
@@ -1411,6 +1655,13 @@ fn build_allwave_seqwish_replacement(
         );
         return build_poa_replacement(candidate, config);
     }
+    if config.max_pair_alignments > 0 && pairs.len() > config.max_pair_alignments {
+        return Err(io::Error::other(format!(
+            "AllWave replacement selected {} pair alignments, above max-pair-alignments {}",
+            pairs.len(),
+            config.max_pair_alignments
+        )));
+    }
     let orientation_params = allwave::AlignmentParams::edit_distance();
     let mut lines: Vec<String> = pairs
         .par_iter()
@@ -1437,6 +1688,13 @@ fn build_allwave_seqwish_replacement(
         out.push('\n');
         out
     };
+    if config.max_replacement_paf_bytes > 0 && paf.len() > config.max_replacement_paf_bytes {
+        return Err(io::Error::other(format!(
+            "AllWave replacement produced {} PAF bytes, above max-replacement-paf-bytes {}",
+            paf.len(),
+            config.max_replacement_paf_bytes
+        )));
+    }
     log::debug!(
         "crush allwave: {} traversal(s), {} selected pair alignment(s), {} unique PAF line(s), {} PAF byte(s)",
         sequences.len(),
@@ -1511,6 +1769,20 @@ fn build_sweepga_seqwish_replacement(
         out.push('\n');
         out
     };
+    if config.max_pair_alignments > 0 && paf_lines.len() > config.max_pair_alignments {
+        return Err(io::Error::other(format!(
+            "SweepGA replacement produced {} pair alignments, above max-pair-alignments {}",
+            paf_lines.len(),
+            config.max_pair_alignments
+        )));
+    }
+    if config.max_replacement_paf_bytes > 0 && paf.len() > config.max_replacement_paf_bytes {
+        return Err(io::Error::other(format!(
+            "SweepGA replacement produced {} PAF bytes, above max-replacement-paf-bytes {}",
+            paf.len(),
+            config.max_replacement_paf_bytes
+        )));
+    }
     log::debug!(
         "crush sweepga: {} traversal(s), {} unique PAF line(s), {} PAF byte(s) from {} backend ({})",
         seqs.len(),
@@ -2273,6 +2545,8 @@ P\tins\t1+,2+,3+\t*
             root_start_step: 0,
             root_end_step: 1,
             root_span: 0,
+            total_steps: 0,
+            unique_steps: 0,
             traversal_stats: TraversalStats {
                 count: 2,
                 max_len: 128,
@@ -2339,6 +2613,85 @@ P\tins\t1+,2+,3+\t*
         assert_ne!(first, second);
         assert!(first.iter().all(|(i, j)| i != j));
         assert!(second.iter().all(|(i, j)| i != j));
+    }
+
+    #[test]
+    fn graph_quality_penalizes_path_white_space_bridges() {
+        let spacer = "A".repeat(1024);
+        let compact = parse_gfa(&format!(
+            "\
+H\tVN:Z:1.0
+S\t1\tAAAA
+S\t2\t{spacer}
+S\t3\tGGGG
+P\tp\t1+,2+,3+\t*
+"
+        ))
+        .unwrap();
+        let bridged = parse_gfa(&format!(
+            "\
+H\tVN:Z:1.0
+S\t1\tAAAA
+S\t2\t{spacer}
+S\t3\tGGGG
+P\tp\t1+,3+\t*
+"
+        ))
+        .unwrap();
+        let compact_quality = graph_quality(&compact);
+        let bridged_quality = graph_quality(&bridged);
+        assert_eq!(compact_quality.path_white_space_bp_total, 0);
+        assert_eq!(bridged_quality.path_white_space_bp_total, 1024);
+        assert!(bridged_quality.score > compact_quality.score);
+    }
+
+    #[test]
+    fn round_quality_rejects_large_complexity_growth() {
+        let before = GraphQuality {
+            score: 1_000,
+            ..GraphQuality::default()
+        };
+        let after = GraphQuality {
+            score: 1_100,
+            ..GraphQuality::default()
+        };
+        let config = ResolutionConfig {
+            max_round_score_growth: 0.02,
+            ..ResolutionConfig::default()
+        };
+        assert!(matches!(
+            round_quality_decision(before, after, &config),
+            RoundQualityDecision::Reject { .. }
+        ));
+    }
+
+    #[test]
+    fn allwave_pair_alignment_cap_bails_before_seqwish() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tAAAAAAAAAAAAAAAAAAAA
+S\t2\tCCCCCCCCCCCCCCCCCCCC
+S\t3\tTTTTTTTTTTTTTTTTTTTT
+L\t1\t+\t3\t+\t0M
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t3\t+\t0M
+P\tref\t1+,3+\t*
+P\tins\t1+,2+,3+\t*
+";
+        let before = seq_map(gfa);
+        let resolved = resolve_gfa_bubbles(
+            gfa,
+            &ResolutionConfig {
+                method: ResolutionMethod::Allwave,
+                max_pair_alignments: 1,
+                max_median_traversal_len: 10_000,
+                ..ResolutionConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert_eq!(resolved.stats.resolved, 0);
+        assert_eq!(resolved.stats.bailed, 1);
     }
 
     #[test]
@@ -2689,6 +3042,8 @@ P\talt\t1+,3+,4+\t*
             root_start_step: 0,
             root_end_step: 1,
             root_span: 10,
+            total_steps: 20,
+            unique_steps: 2,
             traversal_stats: TraversalStats::default(),
         };
         mark_candidate_occupied(&mut occupied_by_path, &selected);
@@ -2705,6 +3060,8 @@ P\talt\t1+,3+,4+\t*
             root_start_step: 0,
             root_end_step: 1,
             root_span: 5,
+            total_steps: 5,
+            unique_steps: 1,
             traversal_stats: TraversalStats::default(),
         };
         assert!(!candidate_conflicts_with_occupied(
@@ -2724,6 +3081,8 @@ P\talt\t1+,3+,4+\t*
             root_start_step: 0,
             root_end_step: 1,
             root_span: 6,
+            total_steps: 6,
+            unique_steps: 1,
             traversal_stats: TraversalStats::default(),
         };
         assert!(candidate_conflicts_with_occupied(
@@ -2743,6 +3102,8 @@ P\talt\t1+,3+,4+\t*
             root_start_step: 0,
             root_end_step: 1,
             root_span: 10,
+            total_steps: 10,
+            unique_steps: 1,
             traversal_stats: TraversalStats::default(),
         };
         assert!(!candidate_conflicts_with_occupied(
