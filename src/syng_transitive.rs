@@ -1308,6 +1308,7 @@ pub fn query_transitive_ext(
     min_chain_fraction: f64,
     sequence_index: &UnifiedSequenceIndex,
 ) -> io::Result<Vec<HomologousInterval>> {
+    let merge_distance = extend_budget.min(i32::MAX as u64) as i32;
     query_transitive_ext_with_seed_filter(
         syng_index,
         query_name,
@@ -1320,7 +1321,7 @@ pub fn query_transitive_ext(
         min_chain_anchors,
         min_chain_fraction,
         SyngSeedFilter::default(),
-        -1,
+        merge_distance,
         sequence_index,
     )
 }
