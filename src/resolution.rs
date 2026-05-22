@@ -14,7 +14,8 @@ use crate::graph::{
 use povu::native_gfa::{Step as PovuStep, Strand as PovuStrand};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
+use std::hash::{Hash, Hasher};
 use std::io::{self, Read};
 use std::time::Instant;
 
@@ -75,6 +76,13 @@ pub struct ResolutionConfig {
     pub pair_k_nearest: usize,
     /// Pair-sampling farthest-neighbor count for diversity/stranger joins.
     pub pair_k_farthest: usize,
+    /// Number of independent tree-sampling passes to union for pairwise engines.
+    ///
+    /// Additional trees use nearby Mash k-mer sizes to perturb nearest/farthest
+    /// neighborhoods deterministically. This is more aggressive than raising
+    /// random sampling alone and is aimed at underaligned local bubbles where
+    /// one tree misses important allelic bridges.
+    pub pair_tree_count: usize,
     /// Deterministic random pair fraction added after tree/kNN sampling.
     pub pair_random_fraction: f64,
     /// Mash k-mer size for pair selection.
@@ -96,6 +104,13 @@ pub struct ResolutionConfig {
     pub sweepga_map_pct_identity: Option<String>,
     /// Skip SweepGA post-alignment filtering and feed selected pair alignments directly.
     pub sweepga_no_filter: bool,
+    /// Force sparse pair dispatch for SweepGA/FastGA graph induction.
+    ///
+    /// FastGA does not have a cheap pairs-file mode here, so the default for
+    /// FastGA is one all-vs-all batch followed by SweepGA filtering. Sparse
+    /// pairs are still useful with wfmash, where the pairs file is honored by a
+    /// single aligner invocation.
+    pub sweepga_sparse_pairs: bool,
     /// SPOA scoring parameters: (match, mismatch, gap_open, gap_ext, gap_open2, gap_ext2).
     pub scoring_params: (u8, u8, u8, u8, u8, u8),
 }
@@ -154,6 +169,7 @@ pub const DEFAULT_POLISH_MAX_TOTAL_SEQUENCE: usize = 1_000_000;
 pub const DEFAULT_POLISH_MAX_TRAVERSALS: usize = 10_000;
 pub const DEFAULT_PAIR_K_NEAREST: usize = 3;
 pub const DEFAULT_PAIR_K_FARTHEST: usize = 1;
+pub const DEFAULT_PAIR_TREE_COUNT: usize = 1;
 pub const DEFAULT_PAIR_RANDOM_FRACTION: f64 = 0.01;
 pub const DEFAULT_PAIR_MASH_K: usize = 15;
 pub const DEFAULT_REPLACEMENT_SEQWISH_MIN_MATCH_LEN: u64 = 79;
@@ -181,6 +197,7 @@ impl Default for ResolutionConfig {
             polish_max_traversals: DEFAULT_POLISH_MAX_TRAVERSALS,
             pair_k_nearest: DEFAULT_PAIR_K_NEAREST,
             pair_k_farthest: DEFAULT_PAIR_K_FARTHEST,
+            pair_tree_count: DEFAULT_PAIR_TREE_COUNT,
             pair_random_fraction: DEFAULT_PAIR_RANDOM_FRACTION,
             pair_mash_k: DEFAULT_PAIR_MASH_K,
             replacement_seqwish_min_match_len: DEFAULT_REPLACEMENT_SEQWISH_MIN_MATCH_LEN,
@@ -189,6 +206,7 @@ impl Default for ResolutionConfig {
             sweepga_min_aln_length: DEFAULT_SWEEPGA_MIN_ALN_LENGTH,
             sweepga_map_pct_identity: None,
             sweepga_no_filter: true,
+            sweepga_sparse_pairs: false,
             scoring_params: (1, 4, 6, 2, 26, 1),
         }
     }
@@ -1237,6 +1255,102 @@ fn seqwish_replacement_config(
     }
 }
 
+fn tree_mash_k_schedule(base: usize, count: usize) -> Vec<usize> {
+    let base = base.clamp(3, 31);
+    let mut values = Vec::with_capacity(count.max(1));
+    values.push(base);
+    let mut delta = 2usize;
+    while values.len() < count.max(1) {
+        let high = base.saturating_add(delta);
+        if high <= 31 && !values.contains(&high) {
+            values.push(high);
+            if values.len() >= count {
+                break;
+            }
+        }
+        if let Some(low) = base.checked_sub(delta) {
+            if low >= 3 && !values.contains(&low) {
+                values.push(low);
+                if values.len() >= count {
+                    break;
+                }
+            }
+        }
+        if high > 31 && base < delta + 3 {
+            break;
+        }
+        delta = delta.saturating_add(2);
+    }
+    values.truncate(count.max(1));
+    values
+}
+
+fn allwave_pair_schedule(
+    sequences: &[allwave::Sequence],
+    config: &ResolutionConfig,
+) -> Vec<(usize, usize)> {
+    let n = sequences.len();
+    if n < 2 {
+        return Vec::new();
+    }
+    if n <= 3 {
+        return (0..n)
+            .flat_map(|i| (0..n).filter(move |&j| i != j).map(move |j| (i, j)))
+            .collect();
+    }
+
+    let mut pairs = HashSet::new();
+    for (tree_idx, mash_k) in tree_mash_k_schedule(config.pair_mash_k, config.pair_tree_count)
+        .into_iter()
+        .enumerate()
+    {
+        pairs.extend(allwave::knn_graph::extract_tree_pairs(
+            sequences,
+            config.pair_k_nearest,
+            config.pair_k_farthest,
+            0.0,
+            mash_k,
+        ));
+        pairs.extend(salted_random_pairs(
+            sequences,
+            config.pair_random_fraction,
+            tree_idx,
+        ));
+    }
+
+    let mut ordered: Vec<(usize, usize)> = pairs.into_iter().collect();
+    ordered.sort_unstable();
+    ordered
+}
+
+fn salted_random_pairs(
+    sequences: &[allwave::Sequence],
+    fraction: f64,
+    salt: usize,
+) -> Vec<(usize, usize)> {
+    if fraction <= 0.0 {
+        return Vec::new();
+    }
+    let n = sequences.len();
+    let mut pairs = Vec::new();
+    for i in 0..n {
+        for j in 0..n {
+            if i == j {
+                continue;
+            }
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            salt.hash(&mut hasher);
+            sequences[i].id.hash(&mut hasher);
+            sequences[j].id.hash(&mut hasher);
+            let normalized = hasher.finish() as f64 / u64::MAX as f64;
+            if normalized < fraction {
+                pairs.push((i, j));
+            }
+        }
+    }
+    pairs
+}
+
 fn finalize_pairwise_induced_replacement(
     gfa: String,
     headers: &[String],
@@ -1289,32 +1403,33 @@ fn build_allwave_seqwish_replacement(
         gap2_extend: Some(gap_extend2 as i32),
         max_divergence: None,
     };
-    let sparsification = if sequences.len() <= 3 {
-        allwave::SparsificationStrategy::None
-    } else {
-        allwave::SparsificationStrategy::TreeSampling(
-            config.pair_k_nearest,
-            config.pair_k_farthest,
-            config.pair_random_fraction,
-            Some(config.pair_mash_k),
-        )
-    };
-    let aligner =
-        allwave::AllPairIterator::with_options(&sequences, params, true, true, sparsification);
-    let pair_count = aligner.pair_count();
-    if pair_count == 0 {
+    let pairs = allwave_pair_schedule(&sequences, config);
+    if pairs.is_empty() {
         log::debug!(
             "crush allwave: selected zero pair alignments for {} traversal(s); falling back to SPOA",
             sequences.len()
         );
         return build_poa_replacement(candidate, config);
     }
-    let mut lines: Vec<String> = aligner
-        .into_par_iter()
-        .map(|alignment| allwave::alignment_to_paf(&alignment, &sequences))
+    let orientation_params = allwave::AlignmentParams::edit_distance();
+    let mut lines: Vec<String> = pairs
+        .par_iter()
+        .map(|&(i, j)| {
+            let alignment = allwave::alignment::align_pair(
+                &sequences[i],
+                &sequences[j],
+                i,
+                j,
+                &params,
+                &orientation_params,
+                true,
+            );
+            allwave::alignment_to_paf(&alignment, &sequences)
+        })
         .filter(|line| !line.trim().is_empty())
         .collect();
     lines.sort_unstable();
+    lines.dedup();
     let paf = if lines.is_empty() {
         String::new()
     } else {
@@ -1323,9 +1438,10 @@ fn build_allwave_seqwish_replacement(
         out
     };
     log::debug!(
-        "crush allwave: {} traversal(s), {} selected pair alignment(s), {} PAF byte(s)",
+        "crush allwave: {} traversal(s), {} selected pair alignment(s), {} unique PAF line(s), {} PAF byte(s)",
         sequences.len(),
-        pair_count,
+        pairs.len(),
+        lines.len(),
         paf.len()
     );
 
@@ -1343,33 +1459,65 @@ fn build_sweepga_seqwish_replacement(
         .iter()
         .map(|(name, seq)| (name.clone(), seq.as_slice()))
         .collect();
-    let align_config = sweepga::library_api::SweepgaAlignConfig {
-        num_threads: rayon::current_num_threads().max(1),
-        kmer_frequency: config.sweepga_kmer_frequency,
-        min_aln_length: config.sweepga_min_aln_length,
-        no_filter: config.sweepga_no_filter,
-        sparsify: sweepga::knn_graph::SparsificationStrategy::TreeSampling(
-            config.pair_k_nearest,
-            config.pair_k_farthest,
-            config.pair_random_fraction,
-        ),
-        mash_params: sweepga::knn_graph::MashParams {
-            kmer_size: config.pair_mash_k,
-            ..sweepga::knn_graph::MashParams::default()
-        },
-        aligner: config.sweepga_aligner.clone(),
-        map_pct_identity: config.sweepga_map_pct_identity.clone(),
-        ..sweepga::library_api::SweepgaAlignConfig::default()
+    let mut paf_lines = Vec::new();
+    let sparse_pairs = config.sweepga_sparse_pairs || config.sweepga_aligner == "wfmash";
+    let mash_schedule = if sparse_pairs {
+        tree_mash_k_schedule(config.pair_mash_k, config.pair_tree_count)
+    } else {
+        vec![config.pair_mash_k]
     };
-    let paf_file = sweepga::library_api::sweepga_align(&named, &align_config)
-        .map_err(|err| io::Error::other(format!("SweepGA replacement alignment failed: {err}")))?;
-    let mut paf = String::new();
-    std::fs::File::open(paf_file.path())?.read_to_string(&mut paf)?;
+    for mash_k in mash_schedule {
+        let align_config = sweepga::library_api::SweepgaAlignConfig {
+            num_threads: rayon::current_num_threads().max(1),
+            kmer_frequency: config.sweepga_kmer_frequency,
+            min_aln_length: config.sweepga_min_aln_length,
+            no_filter: config.sweepga_no_filter,
+            sparsify: if sparse_pairs {
+                sweepga::knn_graph::SparsificationStrategy::TreeSampling(
+                    config.pair_k_nearest,
+                    config.pair_k_farthest,
+                    config.pair_random_fraction,
+                )
+            } else {
+                sweepga::knn_graph::SparsificationStrategy::None
+            },
+            mash_params: sweepga::knn_graph::MashParams {
+                kmer_size: mash_k,
+                ..sweepga::knn_graph::MashParams::default()
+            },
+            aligner: config.sweepga_aligner.clone(),
+            map_pct_identity: config.sweepga_map_pct_identity.clone(),
+            ..sweepga::library_api::SweepgaAlignConfig::default()
+        };
+        let paf_file =
+            sweepga::library_api::sweepga_align(&named, &align_config).map_err(|err| {
+                io::Error::other(format!("SweepGA replacement alignment failed: {err}"))
+            })?;
+        let mut chunk = String::new();
+        std::fs::File::open(paf_file.path())?.read_to_string(&mut chunk)?;
+        paf_lines.extend(
+            chunk
+                .lines()
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned),
+        );
+    }
+    paf_lines.sort_unstable();
+    paf_lines.dedup();
+    let paf = if paf_lines.is_empty() {
+        String::new()
+    } else {
+        let mut out = paf_lines.join("\n");
+        out.push('\n');
+        out
+    };
     log::debug!(
-        "crush sweepga: {} traversal(s), {} PAF byte(s) from {} backend",
+        "crush sweepga: {} traversal(s), {} unique PAF line(s), {} PAF byte(s) from {} backend ({})",
         seqs.len(),
+        paf_lines.len(),
         paf.len(),
-        config.sweepga_aligner
+        config.sweepga_aligner,
+        if sparse_pairs { "sparse pairs" } else { "all pairs" }
     );
 
     let graph_config = seqwish_replacement_config(config);
@@ -2168,6 +2316,29 @@ P\tins\t1+,2+,3+\t*
             auto_replacement_method(&candidate, &config),
             ResolutionMethod::Allwave
         );
+    }
+
+    #[test]
+    fn multi_tree_mash_schedule_perturbs_k_deterministically() {
+        assert_eq!(tree_mash_k_schedule(15, 1), vec![15]);
+        assert_eq!(tree_mash_k_schedule(15, 5), vec![15, 17, 13, 19, 11]);
+        assert_eq!(tree_mash_k_schedule(3, 3), vec![3, 5, 7]);
+        assert_eq!(tree_mash_k_schedule(31, 3), vec![31, 29, 27]);
+    }
+
+    #[test]
+    fn salted_random_pair_sampling_changes_between_trees() {
+        let sequences = (0..8)
+            .map(|idx| allwave::Sequence {
+                id: format!("seq{idx}"),
+                seq: b"ACGTACGTACGTACGT".to_vec(),
+            })
+            .collect::<Vec<_>>();
+        let first = salted_random_pairs(&sequences, 0.25, 0);
+        let second = salted_random_pairs(&sequences, 0.25, 1);
+        assert_ne!(first, second);
+        assert!(first.iter().all(|(i, j)| i != j));
+        assert!(second.iter().all(|(i, j)| i != j));
     }
 
     #[test]

@@ -2542,6 +2542,10 @@ fn parse_crush_stage(
                 config.pair_k_farthest =
                     parse_usize_size_engine_param(raw, &param.key, &param.value)?;
             }
+            "pair-trees" | "tree-count" | "k-trees" | "trees" => {
+                config.pair_tree_count =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
             "random-fraction" | "random" | "tree-random" => {
                 config.pair_random_fraction = param.value.parse().map_err(|_| {
                     io::Error::new(
@@ -2581,6 +2585,10 @@ fn parse_crush_stage(
             }
             "sweepga-no-filter" | "no-filter" => {
                 config.sweepga_no_filter = parse_bool_engine_param(raw, &param.key, &param.value)?;
+            }
+            "sweepga-sparse-pairs" | "sparse-pairs" => {
+                config.sweepga_sparse_pairs =
+                    parse_bool_engine_param(raw, &param.key, &param.value)?;
             }
             "method" => {
                 let Some(method) = impg::resolution::ResolutionMethod::parse_name(&param.value)
@@ -2641,6 +2649,12 @@ fn parse_crush_stage(
                 "Invalid --gfa-engine '{}': crush pair sampling would select no pairs",
                 raw
             ),
+        ));
+    }
+    if config.pair_tree_count == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Invalid --gfa-engine '{}': pair-trees must be > 0", raw),
         ));
     }
     if !(0.0..=1.0).contains(&config.pair_random_fraction) {
@@ -4595,6 +4609,10 @@ GFA engine shorthand:
         #[clap(long, value_parser = parse_usize_size, default_value = "1")]
         k_farthest: usize,
 
+        /// Independent tree-sampling passes to union for allwave/sweepga crush
+        #[clap(long = "pair-trees", alias = "k-trees", value_parser = parse_usize_size, default_value = "1")]
+        pair_tree_count: usize,
+
         /// Deterministic random pair fraction for allwave/sweepga crush
         #[clap(long, value_parser, default_value = "0.01")]
         random_fraction: f64,
@@ -4638,6 +4656,16 @@ GFA engine shorthand:
             num_args = 0..=1
         )]
         sweepga_no_filter: bool,
+
+        /// Force sparse pairwise dispatch for --method sweepga; useful with wfmash pairs files, slow with FastGA
+        #[clap(
+            long,
+            value_parser = clap::value_parser!(bool),
+            default_value_t = false,
+            default_missing_value = "true",
+            num_args = 0..=1
+        )]
+        sweepga_sparse_pairs: bool,
 
         #[clap(flatten)]
         common: CommonOpts,
@@ -7471,6 +7499,7 @@ fn run() -> io::Result<()> {
             method,
             k_nearest,
             k_farthest,
+            pair_tree_count,
             random_fraction,
             mash_k,
             replacement_seqwish_min_match_len,
@@ -7479,6 +7508,7 @@ fn run() -> io::Result<()> {
             sweepga_min_aln_length,
             sweepga_map_pct_identity,
             sweepga_no_filter,
+            sweepga_sparse_pairs,
             common,
         } => {
             initialize_threads_and_log(&common);
@@ -7524,6 +7554,12 @@ fn run() -> io::Result<()> {
                     "--random-fraction must be between 0 and 1",
                 ));
             }
+            if pair_tree_count == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--pair-trees/--k-trees must be > 0",
+                ));
+            }
             if !(3..=31).contains(&mash_k) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -7563,6 +7599,7 @@ fn run() -> io::Result<()> {
                 polish_max_traversals,
                 pair_k_nearest: k_nearest,
                 pair_k_farthest: k_farthest,
+                pair_tree_count,
                 pair_random_fraction: random_fraction,
                 pair_mash_k: mash_k,
                 replacement_seqwish_min_match_len: replacement_seqwish_min_match_len as u64,
@@ -7571,6 +7608,7 @@ fn run() -> io::Result<()> {
                 sweepga_min_aln_length: sweepga_min_aln_length as u64,
                 sweepga_map_pct_identity,
                 sweepga_no_filter,
+                sweepga_sparse_pairs,
                 ..Default::default()
             };
             let resolved = impg::resolution::resolve_gfa_bubbles(&gfa_text, &config)?;
@@ -12259,7 +12297,7 @@ mod tests {
             "-d",
             "0",
             "-o",
-            "gfa:syng:crush,method=allwave,k-nearest=5,k-farthest=2,random-fraction=0.05,mash-k=17,seqwish-k=79",
+            "gfa:syng:crush,method=allwave,k-nearest=5,k-farthest=2,pair-trees=3,random-fraction=0.05,mash-k=17,seqwish-k=79",
         ])
         .unwrap();
         match args {
@@ -12276,6 +12314,7 @@ mod tests {
                 assert_eq!(crush.method, impg::resolution::ResolutionMethod::Allwave);
                 assert_eq!(crush.pair_k_nearest, 5);
                 assert_eq!(crush.pair_k_farthest, 2);
+                assert_eq!(crush.pair_tree_count, 3);
                 assert!((crush.pair_random_fraction - 0.05).abs() < f64::EPSILON);
                 assert_eq!(crush.pair_mash_k, 17);
                 assert_eq!(crush.replacement_seqwish_min_match_len, 79);
@@ -12451,7 +12490,7 @@ mod tests {
             "-d",
             "0",
             "-o",
-            "gfa:syng:crush,method=sweepga,aligner=wfmash,kmer-frequency=42,min-aln-length=1k,map-pct-identity=90,no-filter=false",
+            "gfa:syng:crush,method=sweepga,aligner=wfmash,kmer-frequency=42,min-aln-length=1k,map-pct-identity=90,no-filter=false,sparse-pairs=true",
         ])
         .unwrap();
         match args {
@@ -12471,6 +12510,7 @@ mod tests {
                 assert_eq!(crush.sweepga_min_aln_length, 1_000);
                 assert_eq!(crush.sweepga_map_pct_identity.as_deref(), Some("90"));
                 assert!(!crush.sweepga_no_filter);
+                assert!(crush.sweepga_sparse_pairs);
             }
             _ => panic!("expected query command"),
         }
@@ -12510,7 +12550,9 @@ mod tests {
                 assert_eq!(crush.max_iterations, 1);
                 assert_eq!(crush.polish_iterations, 1);
                 assert_eq!(crush.polish_max_median_traversal_len, 256);
+                assert_eq!(crush.pair_tree_count, 1);
                 assert_eq!(crush.replacement_seqwish_min_match_len, 79);
+                assert!(!crush.sweepga_sparse_pairs);
             }
             _ => panic!("expected query command"),
         }
