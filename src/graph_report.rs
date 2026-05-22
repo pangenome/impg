@@ -16,6 +16,10 @@ pub struct GraphReportOptions {
     pub warn_duplicate_sequence_frac: f64,
     pub repeat_context_max_minor: usize,
     pub repeat_context_min_dominance: f64,
+    pub min_white_space_gap_bp: usize,
+    pub min_white_space_region_support: usize,
+    pub max_path_white_space_p99: usize,
+    pub max_sparse_coverage_path_fraction: f64,
     pub include_povu: bool,
     pub povu_reference_names: Vec<String>,
 }
@@ -34,6 +38,10 @@ impl Default for GraphReportOptions {
             warn_duplicate_sequence_frac: 0.10,
             repeat_context_max_minor: 2,
             repeat_context_min_dominance: 0.80,
+            min_white_space_gap_bp: 1_000,
+            min_white_space_region_support: 1,
+            max_path_white_space_p99: 5_000,
+            max_sparse_coverage_path_fraction: 0.25,
             include_povu: false,
             povu_reference_names: Vec::new(),
         }
@@ -46,9 +54,14 @@ pub struct GraphReport {
     pub status: String,
     pub failures: Vec<String>,
     pub warnings: Vec<String>,
+    pub white_space_gap_threshold_bp: usize,
+    pub sparse_coverage_path_fraction_threshold: f64,
     pub metrics: GraphMetrics,
     pub top_long_links: Vec<LinkJump>,
     pub top_path_jumps: Vec<PathJump>,
+    pub top_white_space_jumps: Vec<WhiteSpaceJump>,
+    pub top_white_space_regions: Vec<WhiteSpaceRegion>,
+    pub sparse_coverage_runs: Vec<SparseCoverageRun>,
     pub top_depth_nodes: Vec<DepthNode>,
     pub depth_runs: Vec<DepthRun>,
     pub local_repeat_contexts: Vec<LocalRepeatContext>,
@@ -76,6 +89,20 @@ pub struct GraphMetrics {
     pub path_jump_p95: usize,
     pub path_jump_p99: usize,
     pub path_jump_max: usize,
+    pub path_white_space_bp_p95: usize,
+    pub path_white_space_bp_p99: usize,
+    pub path_white_space_bp_max: usize,
+    pub path_white_space_bp_total: u64,
+    pub path_white_space_bp_mean: f64,
+    pub path_white_space_bridges: usize,
+    pub path_white_space_bridges_ge_threshold: usize,
+    pub segment_occupancy_bp_fraction: f64,
+    pub segment_white_space_bp_fraction: f64,
+    pub segment_white_space_bp_total: u64,
+    pub segment_occupancy_path_fraction_p05: f64,
+    pub segment_occupancy_path_fraction_median: f64,
+    pub segment_occupancy_path_fraction_p95: f64,
+    pub sparse_coverage_segment_bp: usize,
     pub duplicate_sequence_groups: usize,
     pub duplicate_sequence_nodes: usize,
     pub duplicate_sequence_frac: f64,
@@ -111,6 +138,41 @@ pub struct PathJump {
     pub from: String,
     pub to: String,
     pub jump: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WhiteSpaceJump {
+    pub path: String,
+    pub step: usize,
+    pub from: String,
+    pub to: String,
+    pub gap_bp: usize,
+    pub from_order: usize,
+    pub to_order: usize,
+    pub gap_start_bp: usize,
+    pub gap_end_bp: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WhiteSpaceRegion {
+    pub start_bp: usize,
+    pub end_bp: usize,
+    pub length_bp: usize,
+    pub crossing_path_steps: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SparseCoverageRun {
+    pub start_order: usize,
+    pub end_order: usize,
+    pub nodes: usize,
+    pub start_node: String,
+    pub end_node: String,
+    pub bp: usize,
+    pub missing_path_bp: u64,
+    pub min_path_fraction: f64,
+    pub max_path_fraction: f64,
+    pub mean_path_fraction: f64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -206,9 +268,14 @@ pub fn describe_gfa(
 ) -> io::Result<GraphReport> {
     let parsed = parse_gfa(gfa_text);
     let metrics = compute_metrics(&parsed, options);
+    let bp_starts = segment_bp_starts(&parsed);
     let path_support = path_pair_support(&parsed.paths);
     let top_long_links = top_link_jumps(&parsed, &path_support, options.top_n);
     let top_path_jumps = top_path_jumps(&parsed, options.top_n);
+    let top_white_space_jumps = top_white_space_jumps(&parsed, &bp_starts, options.top_n);
+    let top_white_space_regions =
+        top_white_space_regions(&parsed, &bp_starts, options.top_n, options);
+    let sparse_coverage_runs = sparse_coverage_runs(&parsed, options.top_n, options);
     let top_depth_nodes = top_depth_nodes(&parsed, options.top_n);
     let depth_runs = depth_runs(&parsed, options.top_n);
     let mut local_repeat_contexts = local_repeat_contexts(&parsed.paths, options);
@@ -253,6 +320,9 @@ pub fn describe_gfa(
     if metrics.path_jump_p99 > options.max_path_jump_p99 {
         failures.push("path_jump_p99".to_string());
     }
+    if metrics.path_white_space_bp_p99 > options.max_path_white_space_p99 {
+        failures.push("path_white_space_bp_p99".to_string());
+    }
     if metrics.segments > 0
         && metrics.link_jump_max > (metrics.segments as f64 * options.max_link_jump_frac) as usize
     {
@@ -280,9 +350,14 @@ pub fn describe_gfa(
         status,
         failures,
         warnings,
+        white_space_gap_threshold_bp: options.min_white_space_gap_bp,
+        sparse_coverage_path_fraction_threshold: options.max_sparse_coverage_path_fraction,
         metrics,
         top_long_links,
         top_path_jumps,
+        top_white_space_jumps,
+        top_white_space_regions,
+        sparse_coverage_runs,
         top_depth_nodes,
         depth_runs,
         local_repeat_contexts,
@@ -335,6 +410,15 @@ impl GraphReport {
             m.path_depth_max,
             m.reused_nodes
         ));
+        out.push_str(&format!(
+            "- Path-by-segment occupancy: {:.3} covered, {:.3} white-space cells ({} missing path-bp); node occupancy fractions p05 {:.3}, median {:.3}, p95 {:.3}\n",
+            m.segment_occupancy_bp_fraction,
+            m.segment_white_space_bp_fraction,
+            m.segment_white_space_bp_total,
+            m.segment_occupancy_path_fraction_p05,
+            m.segment_occupancy_path_fraction_median,
+            m.segment_occupancy_path_fraction_p95
+        ));
         if !self.top_depth_nodes.is_empty() {
             out.push_str("- Highest path-depth nodes:\n");
             for node in &self.top_depth_nodes {
@@ -364,6 +448,27 @@ impl GraphReport {
                     run.min_depth,
                     run.max_depth,
                     run.mean_depth
+                ));
+            }
+        }
+        if !self.sparse_coverage_runs.is_empty() {
+            out.push_str(&format!(
+                "- Largest sparse-coverage runs by missing path-bp (segment path fraction <= {:.3}):\n",
+                self.sparse_coverage_path_fraction_threshold
+            ));
+            for run in &self.sparse_coverage_runs {
+                out.push_str(&format!(
+                    "  - orders {}-{} ({} nodes, {} bp, `{}` to `{}`): missing path-bp {}, path fraction min/mean/max {:.3}/{:.3}/{:.3}\n",
+                    run.start_order,
+                    run.end_order,
+                    run.nodes,
+                    run.bp,
+                    run.start_node,
+                    run.end_node,
+                    run.missing_path_bp,
+                    run.min_path_fraction,
+                    run.mean_path_fraction,
+                    run.max_path_fraction
                 ));
             }
         }
@@ -431,12 +536,49 @@ impl GraphReport {
             "- Consecutive path-step jumps: p95 {}, p99 {}, max {}\n",
             m.path_jump_p95, m.path_jump_p99, m.path_jump_max
         ));
+        out.push_str(&format!(
+            "- Path white-space bridges in current segment order: {} nonzero, {} >= {} bp; total {} bp, mean {:.1}, p95 {}, p99 {}, max {}\n",
+            m.path_white_space_bridges,
+            m.path_white_space_bridges_ge_threshold,
+            self.white_space_gap_threshold_bp,
+            m.path_white_space_bp_total,
+            m.path_white_space_bp_mean,
+            m.path_white_space_bp_p95,
+            m.path_white_space_bp_p99,
+            m.path_white_space_bp_max
+        ));
         if !self.top_long_links.is_empty() {
             out.push_str("- Top long links:\n");
             for link in &self.top_long_links {
                 out.push_str(&format!(
                     "  - `{}` -> `{}`: jump {}, path_support {}\n",
                     link.from, link.to, link.jump, link.path_support
+                ));
+            }
+        }
+        if !self.top_white_space_jumps.is_empty() {
+            out.push_str("- Top path white-space bridges:\n");
+            for jump in &self.top_white_space_jumps {
+                out.push_str(&format!(
+                    "  - `{}` step {}: `{}` -> `{}` bridges {} bp (orders {} -> {}, gap bp {}-{})\n",
+                    jump.path,
+                    jump.step,
+                    jump.from,
+                    jump.to,
+                    jump.gap_bp,
+                    jump.from_order,
+                    jump.to_order,
+                    jump.gap_start_bp,
+                    jump.gap_end_bp
+                ));
+            }
+        }
+        if !self.top_white_space_regions.is_empty() {
+            out.push_str("- Most-crossed white-space intervals:\n");
+            for region in &self.top_white_space_regions {
+                out.push_str(&format!(
+                    "  - bp {}-{} ({} bp): crossed by {} consecutive path step(s)\n",
+                    region.start_bp, region.end_bp, region.length_bp, region.crossing_path_steps
                 ));
             }
         }
@@ -497,37 +639,86 @@ impl GraphReport {
         let common_end = m.common_end.as_ref().map(|s| s.node.as_str()).unwrap_or("");
         let start_frac = m.common_start.as_ref().map(|s| s.fraction).unwrap_or(0.0);
         let end_frac = m.common_end.as_ref().map(|s| s.fraction).unwrap_or(0.0);
-        format!(
-            "source\tstatus\tfailures\twarnings\tsegments\tlinks\tpaths\tpath_steps\tcomponents\tlargest_component_frac\tinternal_tips\tcommon_start\tcommon_start_frac\tcommon_end\tcommon_end_frac\tlink_jump_p99\tlink_jump_max\tpath_jump_p99\tpath_jump_max\tpath_depth_median\tpath_depth_p95\tpath_depth_max\treused_nodes\tduplicate_sequence_frac\tlocal_repeat_context_nodes\tlocal_repeat_context_occurrences\tpovu_sites\tpovu_leaf_sites\n{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{:.6}\t{}\t{:.6}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.6}\t{}\t{}\t{}\t{}\n",
-            self.source,
-            self.status,
+        let header = [
+            "source",
+            "status",
+            "failures",
+            "warnings",
+            "segments",
+            "links",
+            "paths",
+            "path_steps",
+            "components",
+            "largest_component_frac",
+            "internal_tips",
+            "common_start",
+            "common_start_frac",
+            "common_end",
+            "common_end_frac",
+            "link_jump_p99",
+            "link_jump_max",
+            "path_jump_p99",
+            "path_jump_max",
+            "path_white_space_bp_p99",
+            "path_white_space_bp_max",
+            "path_white_space_bridges_ge_threshold",
+            "segment_occupancy_bp_fraction",
+            "segment_white_space_bp_fraction",
+            "segment_white_space_bp_total",
+            "sparse_coverage_segment_bp",
+            "path_depth_median",
+            "path_depth_p95",
+            "path_depth_max",
+            "reused_nodes",
+            "duplicate_sequence_frac",
+            "local_repeat_context_nodes",
+            "local_repeat_context_occurrences",
+            "povu_sites",
+            "povu_leaf_sites",
+        ];
+        let values = vec![
+            self.source.clone(),
+            self.status.clone(),
             self.failures.join(","),
             self.warnings.join(","),
-            m.segments,
-            m.links,
-            m.paths,
-            m.path_steps,
-            m.components,
-            m.largest_component_frac,
-            m.internal_tips,
-            common_start,
-            start_frac,
-            common_end,
-            end_frac,
-            m.link_jump_p99,
-            m.link_jump_max,
-            m.path_jump_p99,
-            m.path_jump_max,
-            m.path_depth_median,
-            m.path_depth_p95,
-            m.path_depth_max,
-            m.reused_nodes,
-            m.duplicate_sequence_frac,
-            m.local_repeat_context_nodes,
-            m.local_repeat_context_occurrences,
-            self.povu.as_ref().map(|p| p.sites).unwrap_or(0),
-            self.povu.as_ref().map(|p| p.leaf_sites).unwrap_or(0)
-        )
+            m.segments.to_string(),
+            m.links.to_string(),
+            m.paths.to_string(),
+            m.path_steps.to_string(),
+            m.components.to_string(),
+            format!("{:.6}", m.largest_component_frac),
+            m.internal_tips.to_string(),
+            common_start.to_string(),
+            format!("{:.6}", start_frac),
+            common_end.to_string(),
+            format!("{:.6}", end_frac),
+            m.link_jump_p99.to_string(),
+            m.link_jump_max.to_string(),
+            m.path_jump_p99.to_string(),
+            m.path_jump_max.to_string(),
+            m.path_white_space_bp_p99.to_string(),
+            m.path_white_space_bp_max.to_string(),
+            m.path_white_space_bridges_ge_threshold.to_string(),
+            format!("{:.6}", m.segment_occupancy_bp_fraction),
+            format!("{:.6}", m.segment_white_space_bp_fraction),
+            m.segment_white_space_bp_total.to_string(),
+            m.sparse_coverage_segment_bp.to_string(),
+            m.path_depth_median.to_string(),
+            m.path_depth_p95.to_string(),
+            m.path_depth_max.to_string(),
+            m.reused_nodes.to_string(),
+            format!("{:.6}", m.duplicate_sequence_frac),
+            m.local_repeat_context_nodes.to_string(),
+            m.local_repeat_context_occurrences.to_string(),
+            self.povu.as_ref().map(|p| p.sites).unwrap_or(0).to_string(),
+            self.povu
+                .as_ref()
+                .map(|p| p.leaf_sites)
+                .unwrap_or(0)
+                .to_string(),
+        ];
+        debug_assert_eq!(header.len(), values.len());
+        format!("{}\n{}\n", header.join("\t"), values.join("\t"))
     }
 
     fn interpretation_lines(&self) -> Vec<String> {
@@ -567,6 +758,14 @@ impl GraphReport {
             lines.push(
                 "Current segment-order link jumps are bounded relative to graph size.".to_string(),
             );
+        }
+        if m.segment_white_space_bp_fraction > 0.50 {
+            lines.push("More than half of the path-by-segment matrix is white space; in a homologous core locus this usually means underalignment, repeat/paralog splitting, or large rare insertions rather than a compact pangenome representation.".to_string());
+        } else if m.segment_white_space_bp_fraction > 0.20 {
+            lines.push("The path-by-segment matrix has substantial white space; inspect the sparse-coverage runs to distinguish real insertion alleles from repeat-driven underalignment.".to_string());
+        }
+        if m.path_white_space_bp_p99 > self.white_space_gap_threshold_bp {
+            lines.push("Many consecutive path steps bridge long sorted-order gaps; these are the horizontal white-space spans visible in path renders and are direct targets for additional local alignment/crushing.".to_string());
         }
         if m.local_repeat_context_occurrences > 0 {
             lines.push("Rare repeated local contexts remain; these are candidates for single-syncmer repeat-loop glue or local copy-specific boundary artifacts.".to_string());
@@ -773,6 +972,56 @@ fn compute_metrics(parsed: &ParsedGfa, options: &GraphReportOptions) -> GraphMet
         })
         .collect();
     let path_jumps = sorted_jumps(&parsed.order, path_pairs.into_iter());
+    let bp_starts = segment_bp_starts(parsed);
+    let mut path_white_space_bps = path_white_space_gaps(parsed, &bp_starts);
+    path_white_space_bps.sort_unstable();
+    let path_white_space_bp_total_u128 = path_white_space_bps
+        .iter()
+        .map(|&gap| gap as u128)
+        .sum::<u128>();
+    let path_white_space_bp_total = path_white_space_bp_total_u128.min(u64::MAX as u128) as u64;
+    let path_white_space_bridges = path_white_space_bps.iter().filter(|&&gap| gap > 0).count();
+    let path_white_space_bridges_ge_threshold = path_white_space_bps
+        .iter()
+        .filter(|&&gap| gap >= options.min_white_space_gap_bp)
+        .count();
+    let path_white_space_bp_mean = if path_white_space_bps.is_empty() {
+        0.0
+    } else {
+        path_white_space_bp_total_u128 as f64 / path_white_space_bps.len() as f64
+    };
+    let distinct_depths = distinct_path_depths(parsed);
+    let mut occupancy_path_fracs = Vec::with_capacity(parsed.order.len());
+    let mut observed_path_bp = 0u128;
+    let mut sparse_coverage_segment_bp = 0usize;
+    for node in parsed.order.keys() {
+        let len = parsed.segment_lengths.get(node).copied().unwrap_or(0);
+        let distinct_paths = distinct_depths.get(node.as_str()).copied().unwrap_or(0);
+        observed_path_bp += len as u128 * distinct_paths as u128;
+        let frac = if parsed.paths.is_empty() {
+            0.0
+        } else {
+            distinct_paths as f64 / parsed.paths.len() as f64
+        };
+        occupancy_path_fracs.push(frac);
+        if frac <= options.max_sparse_coverage_path_fraction {
+            sparse_coverage_segment_bp += len;
+        }
+    }
+    occupancy_path_fracs.sort_unstable_by(f64::total_cmp);
+    let possible_path_bp = parsed.paths.len() as u128
+        * parsed.segment_lengths.values().copied().sum::<usize>() as u128;
+    let segment_white_space_bp = possible_path_bp.saturating_sub(observed_path_bp);
+    let segment_occupancy_bp_fraction = if possible_path_bp == 0 {
+        0.0
+    } else {
+        observed_path_bp as f64 / possible_path_bp as f64
+    };
+    let segment_white_space_bp_fraction = if possible_path_bp == 0 {
+        0.0
+    } else {
+        segment_white_space_bp as f64 / possible_path_bp as f64
+    };
     let common_start = top_support(&starts, parsed.paths.len());
     let common_end = top_support(&ends, parsed.paths.len());
     let duplicate_sequence_groups = parsed
@@ -830,6 +1079,20 @@ fn compute_metrics(parsed: &ParsedGfa, options: &GraphReportOptions) -> GraphMet
         path_jump_p95: quantile(&path_jumps, 0.95),
         path_jump_p99: quantile(&path_jumps, 0.99),
         path_jump_max: path_jumps.last().copied().unwrap_or(0),
+        path_white_space_bp_p95: quantile(&path_white_space_bps, 0.95),
+        path_white_space_bp_p99: quantile(&path_white_space_bps, 0.99),
+        path_white_space_bp_max: path_white_space_bps.last().copied().unwrap_or(0),
+        path_white_space_bp_total,
+        path_white_space_bp_mean,
+        path_white_space_bridges,
+        path_white_space_bridges_ge_threshold,
+        segment_occupancy_bp_fraction,
+        segment_white_space_bp_fraction,
+        segment_white_space_bp_total: segment_white_space_bp.min(u64::MAX as u128) as u64,
+        segment_occupancy_path_fraction_p05: quantile_f64(&occupancy_path_fracs, 0.05),
+        segment_occupancy_path_fraction_median: quantile_f64(&occupancy_path_fracs, 0.50),
+        segment_occupancy_path_fraction_p95: quantile_f64(&occupancy_path_fracs, 0.95),
+        sparse_coverage_segment_bp,
         duplicate_sequence_groups,
         duplicate_sequence_nodes,
         duplicate_sequence_frac,
@@ -904,6 +1167,64 @@ fn quantile(values: &[usize], frac: f64) -> usize {
         .saturating_sub(1)
         .min(values.len() - 1);
     values[idx]
+}
+
+fn quantile_f64(values: &[f64], frac: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let idx = ((frac * values.len() as f64).ceil() as usize)
+        .saturating_sub(1)
+        .min(values.len() - 1);
+    values[idx]
+}
+
+fn segment_bp_starts(parsed: &ParsedGfa) -> HashMap<String, usize> {
+    let mut nodes_by_order = vec![String::new(); parsed.order.len()];
+    for (node, &order) in &parsed.order {
+        if order < nodes_by_order.len() {
+            nodes_by_order[order] = node.clone();
+        }
+    }
+    let mut starts = HashMap::with_capacity(parsed.order.len());
+    let mut offset = 0usize;
+    for node in nodes_by_order {
+        starts.insert(node.clone(), offset);
+        offset = offset.saturating_add(parsed.segment_lengths.get(&node).copied().unwrap_or(0));
+    }
+    starts
+}
+
+fn ordered_gap_bp(
+    parsed: &ParsedGfa,
+    bp_starts: &HashMap<String, usize>,
+    from: &str,
+    to: &str,
+) -> Option<(usize, usize, usize)> {
+    let from_start = *bp_starts.get(from)?;
+    let to_start = *bp_starts.get(to)?;
+    let from_end = from_start.saturating_add(parsed.segment_lengths.get(from).copied()?);
+    let to_end = to_start.saturating_add(parsed.segment_lengths.get(to).copied()?);
+    if from_end <= to_start {
+        Some((to_start.saturating_sub(from_end), from_end, to_start))
+    } else if to_end <= from_start {
+        Some((from_start.saturating_sub(to_end), to_end, from_start))
+    } else {
+        Some((0, from_start.min(to_start), from_end.max(to_end)))
+    }
+}
+
+fn path_white_space_gaps(parsed: &ParsedGfa, bp_starts: &HashMap<String, usize>) -> Vec<usize> {
+    parsed
+        .paths
+        .iter()
+        .flat_map(|path| {
+            path.steps.windows(2).filter_map(|pair| {
+                ordered_gap_bp(parsed, bp_starts, &pair[0].node, &pair[1].node)
+                    .map(|(gap, _, _)| gap)
+            })
+        })
+        .collect()
 }
 
 fn endpoint_counts(paths: &[PathWalk]) -> (HashMap<String, usize>, HashMap<String, usize>) {
@@ -1014,6 +1335,99 @@ fn top_path_jumps(parsed: &ParsedGfa, top_n: usize) -> Vec<PathJump> {
     jumps
 }
 
+fn top_white_space_jumps(
+    parsed: &ParsedGfa,
+    bp_starts: &HashMap<String, usize>,
+    top_n: usize,
+) -> Vec<WhiteSpaceJump> {
+    let mut jumps = Vec::new();
+    for path in &parsed.paths {
+        for (idx, pair) in path.steps.windows(2).enumerate() {
+            let Some((gap_bp, gap_start_bp, gap_end_bp)) =
+                ordered_gap_bp(parsed, bp_starts, &pair[0].node, &pair[1].node)
+            else {
+                continue;
+            };
+            if gap_bp == 0 {
+                continue;
+            }
+            let Some(&from_order) = parsed.order.get(&pair[0].node) else {
+                continue;
+            };
+            let Some(&to_order) = parsed.order.get(&pair[1].node) else {
+                continue;
+            };
+            jumps.push(WhiteSpaceJump {
+                path: path.name.clone(),
+                step: idx,
+                from: step_label(&pair[0]),
+                to: step_label(&pair[1]),
+                gap_bp,
+                from_order,
+                to_order,
+                gap_start_bp,
+                gap_end_bp,
+            });
+        }
+    }
+    jumps.sort_unstable_by_key(|jump| {
+        Reverse((jump.gap_bp, jump.from_order.abs_diff(jump.to_order)))
+    });
+    jumps.truncate(top_n);
+    jumps
+}
+
+fn top_white_space_regions(
+    parsed: &ParsedGfa,
+    bp_starts: &HashMap<String, usize>,
+    top_n: usize,
+    options: &GraphReportOptions,
+) -> Vec<WhiteSpaceRegion> {
+    let mut events: BTreeMap<usize, isize> = BTreeMap::new();
+    for path in &parsed.paths {
+        for pair in path.steps.windows(2) {
+            let Some((gap_bp, gap_start_bp, gap_end_bp)) =
+                ordered_gap_bp(parsed, bp_starts, &pair[0].node, &pair[1].node)
+            else {
+                continue;
+            };
+            if gap_bp < options.min_white_space_gap_bp || gap_start_bp >= gap_end_bp {
+                continue;
+            }
+            *events.entry(gap_start_bp).or_default() += 1;
+            *events.entry(gap_end_bp).or_default() -= 1;
+        }
+    }
+
+    let mut regions = Vec::new();
+    let mut current_support = 0isize;
+    let mut previous_pos = None;
+    for (pos, delta) in events {
+        if let Some(start) = previous_pos {
+            if pos > start && current_support >= options.min_white_space_region_support as isize {
+                regions.push(WhiteSpaceRegion {
+                    start_bp: start,
+                    end_bp: pos,
+                    length_bp: pos.saturating_sub(start),
+                    crossing_path_steps: current_support as usize,
+                });
+            }
+        }
+        current_support += delta;
+        previous_pos = Some(pos);
+    }
+
+    regions.sort_unstable_by_key(|region| {
+        Reverse((
+            region.crossing_path_steps,
+            region.length_bp,
+            region.start_bp,
+        ))
+    });
+    regions.truncate(top_n);
+    regions
+}
+
 fn top_depth_nodes(parsed: &ParsedGfa, top_n: usize) -> Vec<DepthNode> {
     #[derive(Default)]
     struct Acc {
@@ -1094,6 +1508,19 @@ fn path_depths(parsed: &ParsedGfa) -> Vec<usize> {
         .collect()
 }
 
+fn distinct_path_depths(parsed: &ParsedGfa) -> HashMap<&str, usize> {
+    let mut depths: HashMap<&str, usize> = HashMap::new();
+    for path in &parsed.paths {
+        let mut seen_in_path: HashSet<&str> = HashSet::new();
+        for step in &path.steps {
+            if seen_in_path.insert(step.node.as_str()) {
+                *depths.entry(step.node.as_str()).or_insert(0) += 1;
+            }
+        }
+    }
+    depths
+}
+
 fn depth_runs(parsed: &ParsedGfa, top_n: usize) -> Vec<DepthRun> {
     if parsed.order.is_empty() || parsed.paths.is_empty() {
         return Vec::new();
@@ -1168,6 +1595,106 @@ fn make_depth_run(
             0.0
         } else {
             sum as f64 / slice.len() as f64
+        },
+    }
+}
+
+fn sparse_coverage_runs(
+    parsed: &ParsedGfa,
+    top_n: usize,
+    options: &GraphReportOptions,
+) -> Vec<SparseCoverageRun> {
+    if parsed.order.is_empty() || parsed.paths.is_empty() {
+        return Vec::new();
+    }
+    let mut nodes_by_order = vec![String::new(); parsed.order.len()];
+    for (node, &order) in &parsed.order {
+        if order < nodes_by_order.len() {
+            nodes_by_order[order] = node.clone();
+        }
+    }
+    let distinct_depths = distinct_path_depths(parsed);
+    let fractions_by_order = nodes_by_order
+        .iter()
+        .map(|node| {
+            distinct_depths.get(node.as_str()).copied().unwrap_or(0) as f64
+                / parsed.paths.len() as f64
+        })
+        .collect::<Vec<_>>();
+
+    let mut runs = Vec::new();
+    let mut start = None;
+    for (idx, &fraction) in fractions_by_order.iter().enumerate() {
+        if fraction <= options.max_sparse_coverage_path_fraction {
+            start.get_or_insert(idx);
+        } else if let Some(run_start) = start.take() {
+            runs.push(make_sparse_coverage_run(
+                run_start,
+                idx.saturating_sub(1),
+                &nodes_by_order,
+                &fractions_by_order,
+                parsed,
+            ));
+        }
+    }
+    if let Some(run_start) = start {
+        runs.push(make_sparse_coverage_run(
+            run_start,
+            fractions_by_order.len().saturating_sub(1),
+            &nodes_by_order,
+            &fractions_by_order,
+            parsed,
+        ));
+    }
+
+    runs.sort_unstable_by_key(|run| {
+        Reverse((run.missing_path_bp, run.bp as u64, run.nodes as u64))
+    });
+    runs.truncate(top_n);
+    runs
+}
+
+fn make_sparse_coverage_run(
+    start_order: usize,
+    end_order: usize,
+    nodes_by_order: &[String],
+    fractions_by_order: &[f64],
+    parsed: &ParsedGfa,
+) -> SparseCoverageRun {
+    let mut bp = 0usize;
+    let mut missing_path_bp = 0u128;
+    let mut observed_path_bp = 0u128;
+    let mut min_path_fraction = f64::INFINITY;
+    let mut max_path_fraction = 0.0f64;
+    for idx in start_order..=end_order {
+        let node = &nodes_by_order[idx];
+        let len = parsed.segment_lengths.get(node).copied().unwrap_or(0);
+        let fraction = fractions_by_order[idx];
+        let distinct_paths = (fraction * parsed.paths.len() as f64).round() as usize;
+        bp = bp.saturating_add(len);
+        observed_path_bp += len as u128 * distinct_paths as u128;
+        missing_path_bp += len as u128 * parsed.paths.len().saturating_sub(distinct_paths) as u128;
+        min_path_fraction = min_path_fraction.min(fraction);
+        max_path_fraction = max_path_fraction.max(fraction);
+    }
+    SparseCoverageRun {
+        start_order,
+        end_order,
+        nodes: end_order.saturating_sub(start_order) + 1,
+        start_node: nodes_by_order[start_order].clone(),
+        end_node: nodes_by_order[end_order].clone(),
+        bp,
+        missing_path_bp: missing_path_bp.min(u64::MAX as u128) as u64,
+        min_path_fraction: if min_path_fraction.is_finite() {
+            min_path_fraction
+        } else {
+            0.0
+        },
+        max_path_fraction,
+        mean_path_fraction: if bp == 0 || parsed.paths.is_empty() {
+            0.0
+        } else {
+            observed_path_bp as f64 / (bp as f64 * parsed.paths.len() as f64)
         },
     }
 }
@@ -1325,10 +1852,40 @@ P\tp2\t1+,4+\t*
         assert_eq!(report.metrics.paths, 2);
         assert_eq!(report.metrics.components, 1);
         assert_eq!(report.metrics.link_jump_max, 3);
+        assert_eq!(report.metrics.path_white_space_bp_max, 8);
+        assert!(report.metrics.segment_white_space_bp_fraction > 0.0);
         assert_eq!(report.top_depth_nodes[0].total_occurrences, 2);
         assert_eq!(report.top_long_links[0].from, "1");
         assert_eq!(report.top_long_links[0].to, "4");
         assert_eq!(report.top_long_links[0].path_support, 1);
+    }
+
+    #[test]
+    fn reports_bp_white_space_and_sparse_coverage_runs() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tAAAA
+S\t2\tCCCCCCCC
+S\t3\tGGGG
+S\t4\tTTTT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+P\twith_insertion\t1+,2+,4+\t*
+P\twithout_insertion\t1+,3+,4+\t*
+";
+        let opts = GraphReportOptions {
+            min_white_space_gap_bp: 1,
+            max_sparse_coverage_path_fraction: 0.50,
+            ..Default::default()
+        };
+        let report = describe_gfa("white.gfa", gfa, &opts).unwrap();
+        assert_eq!(report.metrics.path_white_space_bp_max, 8);
+        assert_eq!(report.metrics.path_white_space_bridges_ge_threshold, 2);
+        assert_eq!(report.top_white_space_jumps[0].gap_bp, 8);
+        assert!(!report.sparse_coverage_runs.is_empty());
+        assert!(report.to_markdown().contains("Path-by-segment occupancy"));
     }
 
     #[test]
