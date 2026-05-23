@@ -187,10 +187,13 @@ default chosen just above Alu length; the long-term default should be derived
 from the expected identity / repeat model for the local sequence set. Direct
 SPOA/POASTA replacements are exact path-sequence validated and are not rejected
 by the graph-layout quality heuristic; pairwise-induced replacements still must
-pass local and round-level quality guards. `method=poasta` is
-available for explicit experiments, but it is not the default until the POASTA
-GFA export path is proven to preserve clipped `W` walks exactly through impg's
-rewrite step.
+pass local and round-level quality guards. `method=poasta` constructs POASTA in
+global/end-to-end mode with `GapAffine2Piece` costs from `poa-scoring`, and impg
+normalizes POASTA's clipped `W` walk GFA export before exact sequence
+validation. It remains an explicit experimental method because POASTA 0.1.0's
+public API does not give impg a stable exact numeric score contract for
+independently asserting long-gap two-piece affine costs; current tests validate
+structural wiring plus exact path preservation.
 
 `method=biwfa` is the coarse condenser path. It aligns every selected POVU
 bubble traversal end-to-end against the longest traversal with BiWFA, induces a

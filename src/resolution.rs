@@ -1554,10 +1554,7 @@ fn build_replacement_with_method(
     match method {
         ResolutionMethod::Auto => unreachable!("auto is resolved before replacement dispatch"),
         ResolutionMethod::Poa => build_poa_replacement(candidate, config),
-        ResolutionMethod::Poasta => build_poasta_replacement(candidate, config).or_else(|err| {
-            log::debug!("POASTA replacement failed; falling back to SPOA: {err}");
-            build_poa_replacement(candidate, config)
-        }),
+        ResolutionMethod::Poasta => build_poasta_replacement(candidate, config),
         ResolutionMethod::StarBiwfa => build_biwfa_inmemory_replacement(candidate, config),
         ResolutionMethod::Allwave => build_allwave_seqwish_replacement(candidate, config),
         ResolutionMethod::Sweepga => build_sweepga_seqwish_replacement(candidate, config),
@@ -1972,8 +1969,7 @@ fn build_poasta_replacement(
     candidate: &BubbleCandidate,
     config: &ResolutionConfig,
 ) -> io::Result<Graph> {
-    use poasta::aligner::config::{Affine2PieceMinGapCost, AffineMinGapCost};
-    use poasta::aligner::scoring::{AlignmentType, GapAffine, GapAffine2Piece};
+    use poasta::aligner::config::Affine2PieceMinGapCost;
     use poasta::aligner::PoastaAligner;
     use poasta::graphs::poa::POAGraph;
     use poasta::io::graph::graph_to_gfa;
@@ -1993,19 +1989,11 @@ fn build_poasta_replacement(
         .iter()
         .map(|sequence| vec![1usize; sequence.len()])
         .collect::<Vec<_>>();
-    let (_, mismatch, gap_open, gap_extend, gap_open2, gap_extend2) = config.scoring_params;
     let mut graph = POAGraph::<u32>::new();
 
-    if gap_extend > gap_extend2 {
-        let scoring = GapAffine2Piece::new(mismatch, gap_extend, gap_open, gap_extend2, gap_open2);
-        let mut aligner =
-            PoastaAligner::new(Affine2PieceMinGapCost(scoring), AlignmentType::Global);
-        add_poasta_sequences(&mut graph, &mut aligner, &headers, &sequences, &weights)?;
-    } else {
-        let scoring = GapAffine::new(mismatch, gap_extend, gap_open);
-        let mut aligner = PoastaAligner::new(AffineMinGapCost(scoring), AlignmentType::Global);
-        add_poasta_sequences(&mut graph, &mut aligner, &headers, &sequences, &weights)?;
-    }
+    let scoring = poasta_two_piece_scoring(config.scoring_params)?;
+    let mut aligner = PoastaAligner::new(Affine2PieceMinGapCost(scoring), poasta_alignment_type());
+    add_poasta_sequences(&mut graph, &mut aligner, &headers, &sequences, &weights)?;
 
     let mut gfa = Vec::new();
     graph_to_gfa(&mut gfa, &graph).map_err(|err| {
@@ -2017,30 +2005,60 @@ fn build_poasta_replacement(
             format!("POASTA replacement GFA is not UTF-8: {err}"),
         )
     })?;
-    let mut replacement = parse_gfa(&gfa)?;
-    order_replacement_paths(&mut replacement, &headers)?;
+    let expected_paths = headers
+        .into_iter()
+        .zip(candidate.ranges.iter().map(|range| range.sequence.clone()))
+        .collect::<Vec<_>>();
+    let replacement = poasta_gfa_to_exact_graph(&gfa, &expected_paths)?;
+    validate_expected_paths(&replacement, &expected_paths, "POASTA")?;
 
-    if replacement.paths.len() != candidate.ranges.len() {
-        return Err(io::Error::other(format!(
-            "POASTA replacement emitted {} paths for {} traversals",
-            replacement.paths.len(),
-            candidate.ranges.len()
-        )));
+    Ok(replacement)
+}
+
+fn poasta_uses_two_piece_affine(scoring_params: (u8, u8, u8, u8, u8, u8)) -> bool {
+    let (_, _, _, gap_extend, _, gap_extend2) = scoring_params;
+    gap_extend > gap_extend2
+}
+
+fn poasta_two_piece_scoring(
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+) -> io::Result<poasta::aligner::scoring::GapAffine2Piece> {
+    let (_, mismatch, gap_open, gap_extend, gap_open2, gap_extend2) = scoring_params;
+    if !poasta_uses_two_piece_affine(scoring_params) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "POASTA crush requires two-piece affine scoring with gap_extend1 > gap_extend2; got gap_open1={gap_open}, gap_extend1={gap_extend}, gap_open2={gap_open2}, gap_extend2={gap_extend2}"
+            ),
+        ));
     }
+    Ok(poasta::aligner::scoring::GapAffine2Piece::new(
+        mismatch,
+        gap_extend,
+        gap_open,
+        gap_extend2,
+        gap_open2,
+    ))
+}
 
-    for (idx, range) in candidate.ranges.iter().enumerate() {
-        let observed = path_sequence(&replacement, &replacement.paths[idx])?;
-        if observed != range.sequence {
-            return Err(io::Error::other(format!(
-                "POASTA replacement path {} changed sequence length {} -> {}",
-                idx,
-                range.sequence.len(),
-                observed.len()
-            )));
+fn poasta_alignment_type() -> poasta::aligner::scoring::AlignmentType {
+    poasta::aligner::scoring::AlignmentType::Global
+}
+
+fn poasta_gfa_to_exact_graph(gfa: &str, expected_paths: &[(String, Vec<u8>)]) -> io::Result<Graph> {
+    let headers = expected_paths
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    if let Ok(mut direct) = parse_gfa(gfa) {
+        if order_replacement_paths(&mut direct, &headers).is_ok()
+            && validate_expected_paths(&direct, expected_paths, "POASTA").is_ok()
+        {
+            return Ok(direct);
         }
     }
 
-    Ok(replacement)
+    poasta_gfa_walks_to_exact_graph(gfa, expected_paths)
 }
 
 #[derive(Clone, Debug)]
@@ -2319,6 +2337,286 @@ fn validate_replacement_paths(
     Ok(())
 }
 
+fn validate_expected_paths(
+    graph: &Graph,
+    expected_paths: &[(String, Vec<u8>)],
+    method: &str,
+) -> io::Result<()> {
+    if graph.paths.len() != expected_paths.len() {
+        return Err(io::Error::other(format!(
+            "{method} replacement emitted {} paths for {} traversals",
+            graph.paths.len(),
+            expected_paths.len()
+        )));
+    }
+
+    for (idx, ((name, expected), path)) in expected_paths.iter().zip(&graph.paths).enumerate() {
+        let observed = path_sequence(graph, path)?;
+        if observed != *expected {
+            return Err(io::Error::other(format!(
+                "{method} replacement path '{}' at index {} changed sequence length {} -> {}",
+                name,
+                idx,
+                expected.len(),
+                observed.len()
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct PoastaWalk {
+    name: String,
+    reported_start: Option<usize>,
+    reported_end: Option<usize>,
+    steps: Vec<Step>,
+}
+
+fn poasta_gfa_walks_to_exact_graph(
+    gfa: &str,
+    expected_paths: &[(String, Vec<u8>)],
+) -> io::Result<Graph> {
+    let (segments, walks) = parse_poasta_gfa_segments_and_walks(gfa)?;
+    let mut walks_by_name = walks
+        .into_iter()
+        .map(|walk| (walk.name.clone(), walk))
+        .collect::<FxHashMap<_, _>>();
+    let mut output_segments = Vec::new();
+    let mut node_by_slice: FxHashMap<(usize, bool, usize, usize), usize> = FxHashMap::default();
+    let mut output_paths = Vec::with_capacity(expected_paths.len());
+
+    for (path_name, expected_sequence) in expected_paths {
+        let walk = walks_by_name.remove(path_name).ok_or_else(|| {
+            io::Error::other(format!(
+                "POASTA replacement graph is missing walk/path '{path_name}'"
+            ))
+        })?;
+        let pieces = poasta_walk_pieces(&segments, &walk)?;
+        let raw_sequence = pieces
+            .iter()
+            .flat_map(|piece| piece.sequence.iter().copied())
+            .collect::<Vec<_>>();
+        let (clip_start, clip_end) = find_expected_interval(
+            &raw_sequence,
+            expected_sequence,
+            walk.reported_start,
+            walk.reported_end,
+            path_name,
+        )?;
+        let mut steps = Vec::new();
+
+        for piece in pieces {
+            let from = piece.start.max(clip_start);
+            let to = piece.end.min(clip_end);
+            if from >= to {
+                continue;
+            }
+            let local_start = from - piece.start;
+            let local_end = to - piece.start;
+            let node = poasta_slice_node(
+                &segments,
+                &mut output_segments,
+                &mut node_by_slice,
+                piece.node,
+                piece.rev,
+                local_start,
+                local_end,
+            )?;
+            steps.push(Step { node, rev: false });
+        }
+
+        output_paths.push(Path {
+            name: path_name.clone(),
+            steps,
+        });
+    }
+
+    let graph = Graph {
+        segments: output_segments,
+        paths: output_paths,
+    };
+    validate_expected_paths(&graph, expected_paths, "POASTA")?;
+    Ok(graph)
+}
+
+fn parse_poasta_gfa_segments_and_walks(gfa: &str) -> io::Result<(Vec<Segment>, Vec<PoastaWalk>)> {
+    let mut segments = Vec::new();
+    let mut id_to_idx: FxHashMap<String, usize> = FxHashMap::default();
+    let mut pending_walks = Vec::new();
+
+    for (line_no, line) in gfa.lines().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let fields = line.split('\t').collect::<Vec<_>>();
+        match fields[0] {
+            "S" => {
+                if fields.len() < 3 {
+                    return Err(invalid_gfa(line_no, "S line has fewer than 3 fields"));
+                }
+                let id = fields[1].to_string();
+                if id_to_idx.contains_key(&id) {
+                    return Err(invalid_gfa(line_no, "duplicate segment ID"));
+                }
+                id_to_idx.insert(id.clone(), segments.len());
+                segments.push(Segment {
+                    id,
+                    seq: fields[2].as_bytes().to_vec(),
+                });
+            }
+            "W" => {
+                if fields.len() < 7 {
+                    return Err(invalid_gfa(line_no, "W line has fewer than 7 fields"));
+                }
+                pending_walks.push((
+                    line_no,
+                    fields[3].to_string(),
+                    fields[4].parse::<usize>().ok(),
+                    fields[5].parse::<usize>().ok(),
+                    fields[6].to_string(),
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    let mut walks = Vec::with_capacity(pending_walks.len());
+    for (line_no, name, reported_start, reported_end, raw_walk) in pending_walks {
+        let mut steps = Vec::new();
+        for (id, rev) in parse_w_walk(&raw_walk)
+            .ok_or_else(|| invalid_gfa(line_no, "W line has a malformed walk"))?
+        {
+            let Some(&node) = id_to_idx.get(id) else {
+                return Err(invalid_gfa(line_no, "W line references unknown segment"));
+            };
+            steps.push(Step { node, rev });
+        }
+        walks.push(PoastaWalk {
+            name,
+            reported_start,
+            reported_end,
+            steps,
+        });
+    }
+
+    Ok((segments, walks))
+}
+
+struct PoastaWalkPiece {
+    node: usize,
+    rev: bool,
+    start: usize,
+    end: usize,
+    sequence: Vec<u8>,
+}
+
+fn poasta_walk_pieces(segments: &[Segment], walk: &PoastaWalk) -> io::Result<Vec<PoastaWalkPiece>> {
+    let mut offset = 0usize;
+    let mut pieces = Vec::with_capacity(walk.steps.len());
+    for step in &walk.steps {
+        let segment = segments.get(step.node).ok_or_else(|| {
+            io::Error::other("POASTA replacement walk references an out-of-range segment")
+        })?;
+        let sequence = if step.rev {
+            reverse_complement(&segment.seq)
+        } else {
+            segment.seq.clone()
+        };
+        let start = offset;
+        offset = offset
+            .checked_add(sequence.len())
+            .ok_or_else(|| io::Error::other("POASTA replacement walk length overflow"))?;
+        pieces.push(PoastaWalkPiece {
+            node: step.node,
+            rev: step.rev,
+            start,
+            end: offset,
+            sequence,
+        });
+    }
+    Ok(pieces)
+}
+
+fn find_expected_interval(
+    raw_sequence: &[u8],
+    expected_sequence: &[u8],
+    reported_start: Option<usize>,
+    reported_end: Option<usize>,
+    path_name: &str,
+) -> io::Result<(usize, usize)> {
+    if expected_sequence.is_empty() {
+        let start = reported_start.unwrap_or(0).min(raw_sequence.len());
+        return Ok((start, start));
+    }
+
+    if let (Some(start), Some(end)) = (reported_start, reported_end) {
+        if start <= end
+            && end <= raw_sequence.len()
+            && raw_sequence.get(start..end) == Some(expected_sequence)
+        {
+            return Ok((start, end));
+        }
+    }
+
+    let mut matches = Vec::new();
+    if expected_sequence.len() <= raw_sequence.len() {
+        for start in 0..=raw_sequence.len() - expected_sequence.len() {
+            if &raw_sequence[start..start + expected_sequence.len()] == expected_sequence {
+                matches.push(start);
+            }
+        }
+    }
+    let Some(start) = matches
+        .into_iter()
+        .min_by_key(|start| reported_start.map_or(*start, |reported| start.abs_diff(reported)))
+    else {
+        return Err(io::Error::other(format!(
+            "POASTA replacement walk '{path_name}' does not contain the expected traversal sequence (walk length {}, expected length {})",
+            raw_sequence.len(),
+            expected_sequence.len()
+        )));
+    };
+    Ok((start, start + expected_sequence.len()))
+}
+
+fn poasta_slice_node(
+    source_segments: &[Segment],
+    output_segments: &mut Vec<Segment>,
+    node_by_slice: &mut FxHashMap<(usize, bool, usize, usize), usize>,
+    source_node: usize,
+    rev: bool,
+    local_start: usize,
+    local_end: usize,
+) -> io::Result<usize> {
+    let segment = source_segments.get(source_node).ok_or_else(|| {
+        io::Error::other("POASTA replacement walk references an out-of-range segment")
+    })?;
+    let segment_len = segment.seq.len();
+    if local_start > local_end || local_end > segment_len {
+        return Err(io::Error::other(
+            "POASTA replacement clipped walk slice is outside its segment",
+        ));
+    }
+    let key = (source_node, rev, local_start, local_end);
+    if let Some(&node) = node_by_slice.get(&key) {
+        return Ok(node);
+    }
+
+    let oriented = if rev {
+        reverse_complement(&segment.seq)
+    } else {
+        segment.seq.clone()
+    };
+    let node = output_segments.len();
+    output_segments.push(Segment {
+        id: format!("poasta_{}", node + 1),
+        seq: oriented[local_start..local_end].to_vec(),
+    });
+    node_by_slice.insert(key, node);
+    Ok(node)
+}
+
 fn add_poasta_sequences<C>(
     graph: &mut poasta::graphs::poa::POAGraph<u32>,
     aligner: &mut poasta::aligner::PoastaAligner<C>,
@@ -2524,6 +2822,26 @@ mod tests {
             .collect::<FxHashMap<_, _>>()
     }
 
+    fn poasta_resolution_config() -> ResolutionConfig {
+        ResolutionConfig {
+            method: ResolutionMethod::Poasta,
+            max_traversal_len: 100_000,
+            max_median_traversal_len: 100_000,
+            max_total_sequence: 10_000_000,
+            disable_round_quality_check: true,
+            ..ResolutionConfig::default()
+        }
+    }
+
+    fn assert_poasta_resolves_exact(gfa: &str, config: ResolutionConfig) -> ResolvedGfa {
+        let before = seq_map(gfa);
+        let resolved = resolve_gfa_bubbles(gfa, &config).unwrap();
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert_eq!(resolved.stats.resolved, 1, "{:?}", resolved.stats);
+        assert_eq!(resolved.stats.bailed, 0, "{:?}", resolved.stats);
+        resolved
+    }
+
     #[test]
     fn parses_w_walks_as_paths() {
         let gfa = "\
@@ -2535,6 +2853,69 @@ W\t*\t0\twalk0\t0\t4\t>s0<s1
 ";
         let seqs = seq_map(gfa);
         assert_eq!(seqs["walk0"], "ACAC");
+    }
+
+    #[test]
+    fn poasta_alignment_config_is_global_and_uses_two_piece_scoring_params() {
+        use poasta::aligner::scoring::AlignmentCosts;
+
+        let scoring_params = ResolutionConfig::default().scoring_params;
+        let (_, mismatch, gap_open, gap_extend, gap_open2, gap_extend2) = scoring_params;
+        assert!(matches!(
+            poasta_alignment_type(),
+            poasta::aligner::scoring::AlignmentType::Global
+        ));
+        assert!(poasta_uses_two_piece_affine(scoring_params));
+        let scoring = poasta_two_piece_scoring(scoring_params).unwrap();
+        assert_eq!(scoring.mismatch(), mismatch);
+        assert_eq!(scoring.gap_open(), gap_open);
+        assert_eq!(scoring.gap_extend(), gap_extend);
+        assert_eq!(scoring.gap_open2(), gap_open2);
+        assert_eq!(scoring.gap_extend2(), gap_extend2);
+        assert!(poasta_uses_two_piece_affine((1, 4, 6, 4, 26, 1)));
+        let err = poasta_two_piece_scoring((1, 4, 6, 2, 26, 2)).unwrap_err();
+        assert!(err.to_string().contains("requires two-piece affine"));
+    }
+
+    #[test]
+    fn poasta_global_two_piece_aligner_handles_end_indel_case() {
+        use poasta::aligner::config::Affine2PieceMinGapCost;
+        use poasta::aligner::PoastaAligner;
+        use poasta::graphs::poa::POAGraph;
+
+        let scoring = poasta_two_piece_scoring((1, 4, 6, 4, 26, 1)).unwrap();
+        let mut graph = POAGraph::<u32>::new();
+        let reference = b"ACGT";
+        let weights = vec![1usize; reference.len()];
+        graph
+            .add_alignment_with_weights("ref", reference, None, &weights)
+            .unwrap();
+
+        let aligner = PoastaAligner::new(Affine2PieceMinGapCost(scoring), poasta_alignment_type());
+        let query = b"TTACGTAA";
+        let result = aligner.align::<u32, _>(&graph, query);
+
+        assert!(!result.alignment.is_empty());
+        assert!(
+            u32::from(result.score) > 0,
+            "global alignment should penalize non-matching query ends"
+        );
+    }
+
+    #[test]
+    fn poasta_gfa_clipped_w_walks_are_normalized_to_exact_paths() {
+        let gfa = "\
+H\tVN:Z:1.1
+S\ts0\tAACCGG
+W\t*\t0\tpath0\t2\t4\t>s0
+";
+        let expected_paths = vec![("path0".to_string(), b"CC".to_vec())];
+        let graph = poasta_gfa_to_exact_graph(gfa, &expected_paths).unwrap();
+        assert_eq!(graph.paths.len(), 1);
+        assert_eq!(
+            String::from_utf8(path_sequence(&graph, &graph.paths[0]).unwrap()).unwrap(),
+            "CC"
+        );
     }
 
     #[test]
@@ -2593,17 +2974,82 @@ L\t2\t+\t3\t+\t0M
 P\tref\t1+,3+\t*
 P\tins\t1+,2+,3+\t*
 ";
+        assert_poasta_resolves_exact(gfa, poasta_resolution_config());
+    }
+
+    #[test]
+    fn resolves_deletion_bubble_with_poasta_without_changing_path_sequences() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tGG
+S\t2\tCCCC
+S\t3\tAA
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t3\t+\t0M
+L\t1\t+\t3\t+\t0M
+P\tref\t1+,2+,3+\t*
+P\tdel\t1+,3+\t*
+";
         let before = seq_map(gfa);
-        let resolved = resolve_gfa_bubbles(
-            gfa,
-            &ResolutionConfig {
-                method: ResolutionMethod::Poasta,
-                ..ResolutionConfig::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(before, seq_map(&resolved.gfa));
-        assert_eq!(resolved.stats.resolved, 1);
+        assert_eq!(before["ref"], "GGCCCCAA");
+        assert_eq!(before["del"], "GGAA");
+        assert_poasta_resolves_exact(gfa, poasta_resolution_config());
+    }
+
+    #[test]
+    fn resolves_sv_like_bubble_with_poasta_without_changing_path_sequences() {
+        let ref_allele = format!(
+            "{}{}{}",
+            "ACGT".repeat(32),
+            "GATTACA".repeat(6),
+            "TT".repeat(24)
+        );
+        let alt_allele = format!(
+            "{}{}{}",
+            "TGCA".repeat(18),
+            "A".repeat(96),
+            "CCGG".repeat(9)
+        );
+        let gfa = format!(
+            "\
+H\tVN:Z:1.0
+S\t1\tGCGC
+S\t2\t{ref_allele}
+S\t3\t{alt_allele}
+S\t4\tTATA
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+P\tref\t1+,2+,4+\t*
+P\tsv_alt\t1+,3+,4+\t*
+"
+        );
+        assert_poasta_resolves_exact(&gfa, poasta_resolution_config());
+    }
+
+    #[test]
+    fn resolves_long_gap_bubble_with_poasta_two_piece_affine() {
+        let long_gap = "G".repeat(512);
+        let gfa = format!(
+            "\
+H\tVN:Z:1.0
+S\t1\tACGTACGT
+S\t2\t{long_gap}
+S\t3\tTGCATGCA
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t3\t+\t0M
+L\t1\t+\t3\t+\t0M
+P\tlong\t1+,2+,3+\t*
+P\tshort\t1+,3+\t*
+"
+        );
+        let config = ResolutionConfig {
+            scoring_params: (1, 4, 6, 4, 26, 1),
+            ..poasta_resolution_config()
+        };
+        assert!(poasta_uses_two_piece_affine(config.scoring_params));
+        assert_poasta_resolves_exact(&gfa, config);
     }
 
     #[test]
