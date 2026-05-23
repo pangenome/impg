@@ -261,14 +261,19 @@ impl GapInterner {
         }
     }
 
+    fn next_segment_id(&mut self) -> String {
+        let id = format!("{}", self.n_nodes as u64 + 1 + self.next_gap_id);
+        self.next_gap_id += 1;
+        id
+    }
+
     fn intern(&mut self, context: GapContext, seq: Vec<u8>) -> String {
         let key = GapKey { context, seq };
         if let Some(id) = self.keys.get(&key) {
             return id.clone();
         }
 
-        let id = format!("{}", self.n_nodes as u64 + 1 + self.next_gap_id);
-        self.next_gap_id += 1;
+        let id = self.next_segment_id();
         self.total_segment_bp += key.seq.len() as u64;
         self.segments.push(GapSegment {
             id: id.clone(),
@@ -1517,7 +1522,6 @@ pub fn write_range_gfa<W: Write>(
         );
     }
     let mut cloned_syncmers: Vec<(String, u32)> = Vec::new();
-    let mut next_mask_clone_id = 0usize;
     let mut n_local_repeat_clones = 0usize;
     let mut n_skipped = 0usize;
     let mut gaps_filled_with_ns = 0usize;
@@ -1554,8 +1558,7 @@ pub fn write_range_gfa<W: Write>(
             local_occurrences.sort_by_key(|occ| (occ.syncmer.abs(), occ.syncmer.occ));
             for occ in local_occurrences {
                 let node = occ.syncmer.abs();
-                let clone_id = format!("lc{}_{}", next_mask_clone_id, node);
-                next_mask_clone_id += 1;
+                let clone_id = gap_interner.next_segment_id();
                 cloned_syncmer_ids.insert(occ.syncmer.occ, clone_id.clone());
                 cloned_syncmers.push((clone_id, node));
                 n_local_repeat_clones += 1;
@@ -2163,5 +2166,23 @@ P\tp\t1+,2+,3+\t3M,1M\n";
         let different_sequence = gaps.intern(GapContext::Prefix { right: 7 }, b"ACGA".to_vec());
         assert_ne!(first, different_sequence);
         assert_eq!(gaps.len(), 3);
+    }
+
+    #[test]
+    fn test_extra_segment_ids_are_numeric_and_unique() {
+        let mut gaps = GapInterner::new(10);
+
+        let clone_id = gaps.next_segment_id();
+        let first_gap = gaps.intern(GapContext::Prefix { right: 7 }, b"ACGT".to_vec());
+        let same_gap = gaps.intern(GapContext::Prefix { right: 7 }, b"ACGT".to_vec());
+        let second_gap = gaps.intern(GapContext::Suffix { left: 7 }, b"ACGT".to_vec());
+
+        assert_eq!(clone_id, "11");
+        assert_eq!(first_gap, "12");
+        assert_eq!(same_gap, first_gap);
+        assert_eq!(second_gap, "13");
+        for id in [&clone_id, &first_gap, &second_gap] {
+            assert!(id.bytes().all(|b| b.is_ascii_digit()));
+        }
     }
 }

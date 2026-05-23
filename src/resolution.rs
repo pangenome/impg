@@ -507,7 +507,7 @@ fn resolve_graph_bubbles(
         let next_graph = apply_replacement_frontier(&graph, &plans)?;
         let rewrite_elapsed = rewrite_start.elapsed();
         let after_quality = graph_quality(&next_graph);
-        if round > 0 && !config.disable_round_quality_check {
+        if !config.disable_round_quality_check {
             let decision = round_quality_decision(before_quality, after_quality, config);
             if let RoundQualityDecision::Reject { reason } = decision {
                 stats.bailed += resolved_count;
@@ -2530,6 +2530,7 @@ P\tins\t1+,2+,3+\t*
             &ResolutionConfig {
                 method: ResolutionMethod::Allwave,
                 max_median_traversal_len: 10_000,
+                disable_round_quality_check: true,
                 ..ResolutionConfig::default()
             },
         )
@@ -2665,6 +2666,42 @@ P\tp\t1+,3+\t*
             round_quality_decision(before, after, &config),
             RoundQualityDecision::Reject { .. }
         ));
+    }
+
+    #[test]
+    fn first_crush_round_rejects_quality_regression() {
+        let seq1 = "ACGT".repeat(25);
+        let seq2 = "TGCA".repeat(25);
+        let gfa = format!(
+            "\
+H\tVN:Z:1.0
+S\t1\tC
+S\t2\t{seq1}
+S\t3\t{seq2}
+S\t4\tG
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+P\tref\t1+,2+,4+\t*
+P\talt\t1+,3+,4+\t*
+"
+        );
+        let before = seq_map(&gfa);
+        let resolved = resolve_gfa_bubbles(
+            &gfa,
+            &ResolutionConfig {
+                method: ResolutionMethod::StarBiwfa,
+                max_round_score_growth: 0.0,
+                ..ResolutionConfig::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(resolved.stats.resolved, 0);
+        assert_eq!(resolved.stats.bailed, 1);
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert_eq!(gfa, resolved.gfa);
     }
 
     #[test]
@@ -2870,6 +2907,7 @@ P\tright_alt\t1+,2+,3+,4+,8+,6+\t*
             gfa,
             &ResolutionConfig {
                 max_iterations: 1,
+                disable_round_quality_check: true,
                 ..ResolutionConfig::default()
             },
         )
