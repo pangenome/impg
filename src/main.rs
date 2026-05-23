@@ -2264,6 +2264,21 @@ fn parse_graph_report_format(value: &str) -> Result<String, String> {
     }
 }
 
+fn parse_flubble_path_embedding_mode(
+    value: &str,
+) -> Result<impg::graph_report::FlubblePathEmbeddingMode, String> {
+    let value = value.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "dominant" | "dom" => Ok(impg::graph_report::FlubblePathEmbeddingMode::Dominant),
+        "per-path" | "perpath" | "path" | "paths" | "all-paths" | "all" => {
+            Ok(impg::graph_report::FlubblePathEmbeddingMode::PerPath)
+        }
+        _ => Err(format!(
+            "invalid flubble path mode '{value}' (expected dominant or per-path)"
+        )),
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ParsedGfaEngine {
     engine: GfaEngine,
@@ -4851,13 +4866,17 @@ GFA engine shorthand:
         #[clap(long, action)]
         povu: bool,
 
-        /// Write a GFA copy with one dominant traversal P-line per POVU flubble
+        /// Write a GFA copy with diagnostic POVU flubble traversal P-lines
         #[clap(
             long = "flubble-path-gfa",
             alias = "povu-flubble-path-gfa",
             value_parser
         )]
         flubble_path_gfa: Option<String>,
+
+        /// Traversals to write with --flubble-path-gfa: dominant or per-path
+        #[clap(long, value_parser = parse_flubble_path_embedding_mode, default_value = "dominant")]
+        flubble_path_mode: impg::graph_report::FlubblePathEmbeddingMode,
 
         /// Reference path/name hint for POVU. May be repeated.
         #[clap(short = 'r', long = "reference-name", alias = "ref", value_parser)]
@@ -7837,6 +7856,7 @@ fn run() -> io::Result<()> {
             top,
             povu,
             flubble_path_gfa,
+            flubble_path_mode,
             reference_names,
             common,
         } => {
@@ -7868,9 +7888,10 @@ fn run() -> io::Result<()> {
                 out.flush()?;
             }
             if let Some(flubble_path_gfa) = flubble_path_gfa {
-                let (annotated_gfa, stats) = impg::graph_report::gfa_with_dominant_flubble_paths(
+                let (annotated_gfa, stats) = impg::graph_report::gfa_with_flubble_paths(
                     &gfa_text,
                     &options.povu_reference_names,
+                    flubble_path_mode,
                 )?;
                 let output_path = Path::new(&flubble_path_gfa);
                 ensure_parent_dir(output_path)?;
@@ -7878,7 +7899,8 @@ fn run() -> io::Result<()> {
                 out.write_all(annotated_gfa.as_bytes())?;
                 out.flush()?;
                 info!(
-                    "Wrote dominant flubble traversal GFA {} ({} site(s), {} path(s) added, {} without traversal)",
+                    "Wrote {:?} flubble traversal GFA {} ({} site(s), {} path(s) added, {} without traversal)",
+                    flubble_path_mode,
                     flubble_path_gfa,
                     stats.sites,
                     stats.paths_added,
@@ -12107,6 +12129,8 @@ mod tests {
             "--povu",
             "--flubble-path-gfa",
             "annotated.gfa",
+            "--flubble-path-mode",
+            "per-path",
             "-r",
             "ref",
         ])
@@ -12117,6 +12141,7 @@ mod tests {
                 format,
                 povu,
                 flubble_path_gfa,
+                flubble_path_mode,
                 reference_names,
                 ..
             } => {
@@ -12124,6 +12149,10 @@ mod tests {
                 assert_eq!(format, "json");
                 assert!(povu);
                 assert_eq!(flubble_path_gfa.as_deref(), Some("annotated.gfa"));
+                assert_eq!(
+                    flubble_path_mode,
+                    impg::graph_report::FlubblePathEmbeddingMode::PerPath
+                );
                 assert_eq!(reference_names, vec!["ref"]);
             }
             _ => panic!("expected graph-report command"),

@@ -246,6 +246,12 @@ pub struct FlubblePathEmbeddingStats {
     pub sites_without_traversal: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FlubblePathEmbeddingMode {
+    Dominant,
+    PerPath,
+}
+
 #[derive(Clone, Debug)]
 struct Step {
     node: String,
@@ -1839,6 +1845,18 @@ pub fn gfa_with_dominant_flubble_paths(
     gfa_text: &str,
     reference_names: &[String],
 ) -> io::Result<(String, FlubblePathEmbeddingStats)> {
+    gfa_with_flubble_paths(
+        gfa_text,
+        reference_names,
+        FlubblePathEmbeddingMode::Dominant,
+    )
+}
+
+pub fn gfa_with_flubble_paths(
+    gfa_text: &str,
+    reference_names: &[String],
+    mode: FlubblePathEmbeddingMode,
+) -> io::Result<(String, FlubblePathEmbeddingStats)> {
     let graph = povu::NativeGfa::parse(gfa_text)
         .map_err(|err| io::Error::other(format!("POVU parse failed: {err}")))?;
     let decomposition = graph
@@ -1862,34 +1880,32 @@ pub fn gfa_with_dominant_flubble_paths(
     };
 
     for (rank, site) in decomposition.sites.iter().enumerate() {
-        let Some(dominant) = dominant_flubble_traversal(&graph.paths, site) else {
-            stats.sites_without_traversal += 1;
-            continue;
-        };
         let span_steps = site
             .reference_end_step
             .saturating_sub(site.reference_start_step);
-        let name = unique_flubble_path_name(
-            rank,
-            site,
-            span_steps,
-            dominant.support,
-            dominant.total_hits,
-            dominant.paths,
-            &mut existing_path_names,
-        );
-        let walk = dominant
-            .steps
-            .iter()
-            .map(povu_step_to_p_line_token)
-            .collect::<Vec<_>>()
-            .join(",");
-        embedded.push_str("P\t");
-        embedded.push_str(&name);
-        embedded.push('\t');
-        embedded.push_str(&walk);
-        embedded.push_str("\t*\n");
-        stats.paths_added += 1;
+        let added = match mode {
+            FlubblePathEmbeddingMode::Dominant => append_dominant_flubble_path(
+                &mut embedded,
+                &mut existing_path_names,
+                &graph.paths,
+                site,
+                rank,
+                span_steps,
+            ),
+            FlubblePathEmbeddingMode::PerPath => append_per_path_flubble_paths(
+                &mut embedded,
+                &mut existing_path_names,
+                &graph.paths,
+                site,
+                rank,
+                span_steps,
+            ),
+        };
+        if added == 0 {
+            stats.sites_without_traversal += 1;
+        } else {
+            stats.paths_added += added;
+        }
     }
 
     Ok((embedded, stats))
@@ -1950,6 +1966,63 @@ fn dominant_flubble_traversal(
         })
 }
 
+fn append_dominant_flubble_path(
+    embedded: &mut String,
+    existing: &mut HashSet<String>,
+    paths: &[povu::native_gfa::PathRecord],
+    site: &povu::native_gfa::FlubbleSite,
+    rank: usize,
+    span_steps: usize,
+) -> usize {
+    let Some(dominant) = dominant_flubble_traversal(paths, site) else {
+        return 0;
+    };
+    let name = unique_flubble_path_name(
+        rank,
+        site,
+        span_steps,
+        dominant.support,
+        dominant.total_hits,
+        dominant.paths,
+        existing,
+    );
+    append_gfa_p_line(embedded, &name, &dominant.steps);
+    1
+}
+
+fn append_per_path_flubble_paths(
+    embedded: &mut String,
+    existing: &mut HashSet<String>,
+    paths: &[povu::native_gfa::PathRecord],
+    site: &povu::native_gfa::FlubbleSite,
+    rank: usize,
+    span_steps: usize,
+) -> usize {
+    let mut added = 0usize;
+    for (path_idx, path) in paths.iter().enumerate() {
+        let mut path_hits = 0usize;
+        for (start_idx, step) in path.steps.iter().enumerate() {
+            if step != &site.start {
+                continue;
+            }
+            let Some(end_offset) = path.steps[start_idx + 1..]
+                .iter()
+                .position(|candidate| candidate == &site.end)
+            else {
+                continue;
+            };
+            let end_idx = start_idx + 1 + end_offset;
+            let name = unique_per_path_flubble_path_name(
+                rank, site, span_steps, path_idx, path_hits, &path.name, existing,
+            );
+            append_gfa_p_line(embedded, &name, &path.steps[start_idx..=end_idx]);
+            added += 1;
+            path_hits += 1;
+        }
+    }
+    added
+}
+
 fn unique_flubble_path_name(
     rank: usize,
     site: &povu::native_gfa::FlubbleSite,
@@ -1975,6 +2048,47 @@ fn unique_flubble_path_name(
         }
     }
     unreachable!("unbounded suffix loop should always return")
+}
+
+fn unique_per_path_flubble_path_name(
+    rank: usize,
+    site: &povu::native_gfa::FlubbleSite,
+    span_steps: usize,
+    path_idx: usize,
+    path_hit: usize,
+    path_name: &str,
+    existing: &mut HashSet<String>,
+) -> String {
+    let leaf = if site.is_leaf { "leaf" } else { "internal" };
+    let id = sanitize_gfa_path_name(&site.id, 80);
+    let source = sanitize_gfa_path_name(path_name, 96);
+    let base = format!(
+        "_povu_flubble_path_{rank}_lv{}_{}_span{}_path{}_hit{}_{}_{}",
+        site.level, leaf, span_steps, path_idx, path_hit, source, id
+    );
+    if existing.insert(base.clone()) {
+        return base;
+    }
+    for suffix in 1usize.. {
+        let candidate = format!("{base}_{suffix}");
+        if existing.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded suffix loop should always return")
+}
+
+fn append_gfa_p_line(embedded: &mut String, name: &str, steps: &[povu::native_gfa::Step]) {
+    let walk = steps
+        .iter()
+        .map(povu_step_to_p_line_token)
+        .collect::<Vec<_>>()
+        .join(",");
+    embedded.push_str("P\t");
+    embedded.push_str(name);
+    embedded.push('\t');
+    embedded.push_str(&walk);
+    embedded.push_str("\t*\n");
 }
 
 fn sanitize_gfa_path_name(value: &str, max_len: usize) -> String {
@@ -2122,6 +2236,42 @@ P\talt2\t1+,3+,4+\t*
         assert!(
             annotated.contains("\t1+,3+,4+\t*"),
             "dominant alt traversal should be embedded:\n{annotated}"
+        );
+    }
+
+    #[test]
+    fn embeds_per_path_flubble_traversal_paths() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tAAA
+S\t2\tC
+S\t3\tG
+S\t4\tTTT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+P\tref\t1+,2+,4+\t*
+P\talt1\t1+,3+,4+\t*
+P\talt2\t1+,3+,4+\t*
+";
+        let (annotated, stats) =
+            gfa_with_flubble_paths(gfa, &["ref".to_string()], FlubblePathEmbeddingMode::PerPath)
+                .unwrap();
+        assert_eq!(stats.sites, 1);
+        assert_eq!(stats.paths_added, 3);
+        assert_eq!(stats.sites_without_traversal, 0);
+        assert!(
+            annotated.contains("_povu_flubble_path_0_lv0_leaf_span2_path0_hit0_ref"),
+            "{annotated}"
+        );
+        assert!(
+            annotated.contains("_povu_flubble_path_0_lv0_leaf_span2_path1_hit0_alt1"),
+            "{annotated}"
+        );
+        assert!(
+            annotated.contains("_povu_flubble_path_0_lv0_leaf_span2_path2_hit0_alt2"),
+            "{annotated}"
         );
     }
 
