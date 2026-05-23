@@ -4772,11 +4772,11 @@ GFA engine shorthand:
         #[clap(long, value_parser = parse_usize_size, default_value = "67108864")]
         max_replacement_paf_bytes: usize,
 
-        /// Maximum allowed round-level graph-complexity score growth before rollback
+        /// Maximum allowed round-level visual-tail score growth before rollback
         #[clap(long, value_parser, default_value = "0.02")]
         max_round_score_growth: f64,
 
-        /// Required fractional graph-complexity score improvement per accepted round
+        /// Required fractional visual-tail score improvement per accepted round
         #[clap(long, value_parser, default_value = "0.0")]
         min_round_score_improvement: f64,
 

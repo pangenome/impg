@@ -19,6 +19,9 @@ use std::hash::{Hash, Hasher};
 use std::io::{self, Read};
 use std::time::Instant;
 
+const GRAPH_QUALITY_LONG_BRIDGE_BP: usize = 10_000;
+const GRAPH_QUALITY_WHITE_SPACE_FLOOR_BP: usize = 1_000;
+
 /// Configuration for exact path-preserving bubble resolution.
 #[derive(Clone, Debug)]
 pub struct ResolutionConfig {
@@ -127,13 +130,14 @@ pub struct ResolutionConfig {
     /// but whose alignments cover too many repetitive positions. Set to 0 to
     /// disable this guard.
     pub max_replacement_paf_bytes: usize,
-    /// Maximum allowed round-level graph-complexity score growth.
+    /// Maximum allowed round-level graph visual-tail score growth.
     ///
     /// A round whose score grows by more than this fraction is rolled back and
-    /// stops the run. The score combines segment sequence, path steps, links,
-    /// and path white-space bridges in current segment order.
+    /// stops the run. The score is deliberately dominated by long rendered
+    /// path white-space bridges (`ws-p99` / `ws-max`) and only lightly
+    /// penalizes total white space, path steps, and link count.
     pub max_round_score_growth: f64,
-    /// Required fractional graph-complexity score improvement per round.
+    /// Required fractional graph visual-tail score improvement per round.
     ///
     /// If positive, rounds with less improvement are rolled back and stop the
     /// run. This is useful for exploratory multi-round crushing where parent
@@ -337,6 +341,7 @@ struct GraphQuality {
     path_white_space_bp_total: u64,
     path_white_space_bp_p99: usize,
     path_white_space_bp_max: usize,
+    path_white_space_long_bridges: usize,
     score: u64,
 }
 
@@ -948,7 +953,7 @@ enum RoundQualityDecision {
 impl GraphQuality {
     fn summary(&self) -> String {
         format!(
-            "score={}, segments={}, segment-bp={}, links={}, path-steps={}, ws-total={}, ws-p99={}, ws-max={}",
+            "score={}, segments={}, segment-bp={}, links={}, path-steps={}, ws-total={}, ws-p99={}, ws-max={}, ws-long>={}bp={}",
             self.score,
             self.segments,
             self.segment_bp,
@@ -956,7 +961,9 @@ impl GraphQuality {
             self.path_steps,
             self.path_white_space_bp_total,
             self.path_white_space_bp_p99,
-            self.path_white_space_bp_max
+            self.path_white_space_bp_max,
+            GRAPH_QUALITY_LONG_BRIDGE_BP,
+            self.path_white_space_long_bridges
         )
     }
 }
@@ -973,10 +980,14 @@ fn round_quality_decision(
     let before_score = before.score as f64;
     let after_score = after.score as f64;
     let growth = (after_score - before_score) / before_score;
-    if growth > config.max_round_score_growth {
+    let visual_tail_not_worse = quality_tail_bp(after.path_white_space_bp_p99)
+        <= quality_tail_bp(before.path_white_space_bp_p99)
+        && quality_tail_bp(after.path_white_space_bp_max)
+            <= quality_tail_bp(before.path_white_space_bp_max);
+    if growth > config.max_round_score_growth && !visual_tail_not_worse {
         return RoundQualityDecision::Reject {
             reason: format!(
-                "complexity score grew by {:.4}, above allowed {:.4}",
+                "visual-tail score grew by {:.4}, above allowed {:.4}",
                 growth, config.max_round_score_growth
             ),
         };
@@ -987,7 +998,7 @@ fn round_quality_decision(
         if improvement < config.min_round_score_improvement {
             return RoundQualityDecision::Reject {
                 reason: format!(
-                    "complexity score improved by {:.4}, below required {:.4}",
+                    "visual-tail score improved by {:.4}, below required {:.4}",
                     improvement, config.min_round_score_improvement
                 ),
             };
@@ -1028,14 +1039,24 @@ fn graph_quality(graph: &Graph) -> GraphQuality {
     let path_white_space_bp_total = path_white_space_bp_total_u128.min(u64::MAX as u128) as u64;
     let path_white_space_bp_p99 = quantile_usize(&white_space_gaps, 99, 100);
     let path_white_space_bp_max = white_space_gaps.last().copied().unwrap_or(0);
+    let path_white_space_long_bridges = white_space_gaps
+        .iter()
+        .filter(|&&gap| gap >= GRAPH_QUALITY_LONG_BRIDGE_BP)
+        .count();
 
-    // This intentionally approximates rendered graph cost while still pushing
-    // down long path white-space bridges. The divisor keeps bridge cost large
-    // enough to matter without overwhelming path-step/sequence condensation.
+    // This is a visual-tail score, not a raw complexity count. Crushing can
+    // legitimately increase path steps while improving the graph the user sees:
+    // fewer long empty jumps, tighter high-depth node reuse, and shorter
+    // segment sequence. Keep total white-space/path-step penalties light so
+    // useful POA rounds are not rejected merely because they split paths more
+    // finely.
     let score = (segment_bp as u128)
-        .saturating_add(path_steps as u128)
-        .saturating_add((links.len() as u128).saturating_mul(4))
-        .saturating_add(path_white_space_bp_total_u128 / 64)
+        .saturating_add(path_steps as u128 / 64)
+        .saturating_add((links.len() as u128).saturating_mul(2))
+        .saturating_add((quality_tail_bp(path_white_space_bp_p99) as u128).saturating_mul(1024))
+        .saturating_add((quality_tail_bp(path_white_space_bp_max) as u128).saturating_mul(16))
+        .saturating_add((path_white_space_long_bridges as u128).saturating_mul(128))
+        .saturating_add(path_white_space_bp_total_u128 / 8192)
         .min(u64::MAX as u128) as u64;
 
     GraphQuality {
@@ -1046,8 +1067,13 @@ fn graph_quality(graph: &Graph) -> GraphQuality {
         path_white_space_bp_total,
         path_white_space_bp_p99,
         path_white_space_bp_max,
+        path_white_space_long_bridges,
         score,
     }
+}
+
+fn quality_tail_bp(gap_bp: usize) -> usize {
+    gap_bp.saturating_sub(GRAPH_QUALITY_WHITE_SPACE_FLOOR_BP)
 }
 
 fn segment_starts(graph: &Graph) -> Vec<usize> {
@@ -3364,10 +3390,14 @@ P\tp\t1+,3+\t*
     fn round_quality_rejects_large_complexity_growth() {
         let before = GraphQuality {
             score: 1_000,
+            path_white_space_bp_p99: 1_000,
+            path_white_space_bp_max: 1_000,
             ..GraphQuality::default()
         };
         let after = GraphQuality {
             score: 1_100,
+            path_white_space_bp_p99: 1_100,
+            path_white_space_bp_max: 1_100,
             ..GraphQuality::default()
         };
         let config = ResolutionConfig {
@@ -3381,7 +3411,35 @@ P\tp\t1+,3+\t*
     }
 
     #[test]
-    fn first_crush_round_rejects_quality_regression() {
+    fn round_quality_accepts_visual_tail_improvement_despite_score_growth() {
+        let before = GraphQuality {
+            score: 325_840_371,
+            segment_bp: 375_672,
+            links: 23_153,
+            path_steps: 4_652_634,
+            path_white_space_bp_total: 20_526_045_040,
+            path_white_space_bp_p99: 152_234,
+            path_white_space_bp_max: 371_133,
+            ..GraphQuality::default()
+        };
+        let after = GraphQuality {
+            score: 353_545_876,
+            segment_bp: 351_791,
+            links: 24_418,
+            path_steps: 4_903_329,
+            path_white_space_bp_total: 22_284_357_408,
+            path_white_space_bp_p99: 150_370,
+            path_white_space_bp_max: 347_830,
+            ..GraphQuality::default()
+        };
+        assert!(matches!(
+            round_quality_decision(before, after, &ResolutionConfig::default()),
+            RoundQualityDecision::Accept
+        ));
+    }
+
+    #[test]
+    fn first_crush_round_accepts_path_step_growth_without_visual_tail_regression() {
         let seq1 = "ACGT".repeat(25);
         let seq2 = "TGCA".repeat(25);
         let gfa = format!(
@@ -3410,10 +3468,8 @@ P\talt\t1+,3+,4+\t*
         )
         .unwrap();
 
-        assert_eq!(resolved.stats.resolved, 0);
-        assert_eq!(resolved.stats.bailed, 1);
         assert_eq!(before, seq_map(&resolved.gfa));
-        assert_eq!(gfa, resolved.gfa);
+        assert_eq!(resolved.stats.resolved, 1);
     }
 
     #[test]

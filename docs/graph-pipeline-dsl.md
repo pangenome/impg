@@ -186,8 +186,12 @@ matches before the small SPOA polish pass. This is currently a human-repeat
 default chosen just above Alu length; the long-term default should be derived
 from the expected identity / repeat model for the local sequence set. Direct
 SPOA/POASTA replacements are exact path-sequence validated and are not rejected
-by the graph-layout quality heuristic; pairwise-induced replacements still must
-pass local and round-level quality guards. `method=poasta` constructs POASTA in
+by the local graph-layout quality heuristic; pairwise-induced replacements still
+must pass local quality guards. All methods pass the round-level visual-tail
+guard: the score is dominated by long path white-space bridges (`ws-p99` and
+`ws-max`) and only lightly penalizes total white space, path steps, and link
+count, so useful local crushing is not rolled back merely because it splits
+paths more finely. `method=poasta` constructs POASTA in
 global/end-to-end mode with `GapAffine2Piece` costs from `poa-scoring`, and impg
 normalizes POASTA's clipped `W` walk GFA export before exact sequence
 validation. It remains an explicit experimental method because POASTA 0.1.0's
