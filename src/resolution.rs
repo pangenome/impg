@@ -3,10 +3,10 @@
 //! This module implements the first conservative slice of hierarchical graph
 //! resolution: detect path-supported bubbles in a blunt GFA, replace bounded
 //! single-entry/single-exit bubbles with exact path-preserving local graph
-//! induction, and repeat until no eligible unseen bubbles remain. The default
-//! resolver uses AllWave/seqwish followed by a bounded POASTA polish. It
-//! intentionally avoids lossy representative collapse and coordinate sidecars;
-//! emitted paths are the coordinate system.
+//! induction, and repeat until no eligible unseen bubbles remain. Pairwise
+//! graph-induction resolvers are followed by a bounded bubble-aware POA polish.
+//! The implementation intentionally avoids lossy representative collapse and
+//! coordinate sidecars; emitted paths are the coordinate system.
 
 use crate::graph::{
     build_global_spoa_engine, feed_sequences_to_graph, reverse_complement, unchop_gfa,
@@ -39,8 +39,8 @@ pub struct ResolutionConfig {
     /// Legacy auto-routing limit retained for CLI compatibility.
     ///
     /// Auto mode now sends every bubble above the SPOA length cutoff through
-    /// pairwise graph induction and relies on local / round-level quality
-    /// guards instead of pre-filtering by direct-method budgets.
+    /// pairwise graph induction. Correctness is enforced by exact path
+    /// validation; graph-quality metrics are diagnostic telemetry only.
     pub auto_allwave_max_total_sequence: usize,
     /// Legacy auto-routing limit retained for CLI compatibility. See
     /// `auto_allwave_max_total_sequence`.
@@ -77,6 +77,8 @@ pub struct ResolutionConfig {
     pub polish_max_median_traversal_len: usize,
     pub polish_max_total_sequence: usize,
     pub polish_max_traversals: usize,
+    /// Local cleanup method after pairwise graph induction.
+    pub polish_method: ResolutionPolishMethod,
     /// Pair-sampling nearest-neighbor count for many-sequence pairwise engines.
     pub pair_k_nearest: usize,
     /// Pair-sampling farthest-neighbor count for diversity/stranger joins.
@@ -135,21 +137,6 @@ pub struct ResolutionConfig {
     /// but whose alignments cover too many repetitive positions. Set to 0 to
     /// disable this guard.
     pub max_replacement_paf_bytes: usize,
-    /// Maximum allowed round-level graph visual-tail score growth.
-    ///
-    /// A round whose score grows by more than this fraction is rolled back and
-    /// stops the run. The score is deliberately dominated by long rendered
-    /// path white-space bridges (`ws-p99` / `ws-max`) and only lightly
-    /// penalizes total white space, path steps, and link count.
-    pub max_round_score_growth: f64,
-    /// Required fractional graph visual-tail score improvement per round.
-    ///
-    /// If positive, rounds with less improvement are rolled back and stop the
-    /// run. This is useful for exploratory multi-round crushing where parent
-    /// bubbles become expensive after the main condensation has happened.
-    pub min_round_score_improvement: f64,
-    /// Disable round-level quality acceptance checks.
-    pub disable_round_quality_check: bool,
     /// Skip SweepGA post-alignment filtering and feed selected pair alignments directly.
     pub sweepga_no_filter: bool,
     /// Force sparse pair dispatch for SweepGA/FastGA graph induction.
@@ -180,6 +167,27 @@ pub enum ResolutionMethod {
     Sweepga,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResolutionPolishMethod {
+    /// Re-decompose the replacement with POVU and run direct SPOA on nested flubbles.
+    Poa,
+    /// Re-decompose the replacement with POVU and run POASTA on nested flubbles.
+    Poasta,
+    /// Run the smoothxg-style sorted block smoother on the replacement graph.
+    Smooth,
+}
+
+impl ResolutionPolishMethod {
+    pub fn parse_name(value: &str) -> Option<Self> {
+        match value.replace('_', "-").to_ascii_lowercase().as_str() {
+            "poa" | "spoa" | "flubble-poa" | "bubble-poa" => Some(Self::Poa),
+            "poasta" | "flubble-poasta" | "bubble-poasta" => Some(Self::Poasta),
+            "smooth" | "smoothxg" | "pggb" | "pggb-smooth" => Some(Self::Smooth),
+            _ => None,
+        }
+    }
+}
+
 impl ResolutionMethod {
     pub fn parse_name(value: &str) -> Option<Self> {
         match value.replace('_', "-").to_ascii_lowercase().as_str() {
@@ -202,8 +210,8 @@ pub const DEFAULT_MAX_ITERATIONS: usize = 1;
 /// `max_bubble_span` is a POVU root-path coordinate guard. The root is currently
 /// the first GFA path, so this is intentionally not part of the default runtime
 /// budget. Traversal length/count/total sequence caps apply to direct local
-/// replacement methods; pairwise induction methods are quality-guarded after
-/// replacement construction.
+/// replacement methods; pairwise induction methods are accepted after exact
+/// path validation.
 pub const DEFAULT_MAX_BUBBLE_SPAN: usize = 0;
 pub const DEFAULT_MAX_TRAVERSAL_LEN: usize = 10_000;
 pub const DEFAULT_MIN_TRAVERSAL_LEN: usize = 0;
@@ -230,9 +238,6 @@ pub const DEFAULT_SWEEPGA_KMER_FREQUENCY: usize = 10;
 pub const DEFAULT_SWEEPGA_MIN_ALN_LENGTH: u64 = 0;
 pub const DEFAULT_MAX_PAIR_ALIGNMENTS: usize = 10_000;
 pub const DEFAULT_MAX_REPLACEMENT_PAF_BYTES: usize = 64 * 1024 * 1024;
-pub const DEFAULT_MAX_ROUND_SCORE_GROWTH: f64 = 0.02;
-pub const DEFAULT_MIN_ROUND_SCORE_IMPROVEMENT: f64 = 0.0;
-
 impl Default for ResolutionConfig {
     fn default() -> Self {
         Self {
@@ -252,6 +257,7 @@ impl Default for ResolutionConfig {
             polish_max_median_traversal_len: DEFAULT_POLISH_MAX_MEDIAN_TRAVERSAL_LEN,
             polish_max_total_sequence: DEFAULT_POLISH_MAX_TOTAL_SEQUENCE,
             polish_max_traversals: DEFAULT_POLISH_MAX_TRAVERSALS,
+            polish_method: ResolutionPolishMethod::Poa,
             pair_k_nearest: DEFAULT_PAIR_K_NEAREST,
             pair_k_farthest: DEFAULT_PAIR_K_FARTHEST,
             pair_tree_count: DEFAULT_PAIR_TREE_COUNT,
@@ -268,9 +274,6 @@ impl Default for ResolutionConfig {
             sweepga_map_pct_identity: None,
             max_pair_alignments: DEFAULT_MAX_PAIR_ALIGNMENTS,
             max_replacement_paf_bytes: DEFAULT_MAX_REPLACEMENT_PAF_BYTES,
-            max_round_score_growth: DEFAULT_MAX_ROUND_SCORE_GROWTH,
-            min_round_score_improvement: DEFAULT_MIN_ROUND_SCORE_IMPROVEMENT,
-            disable_round_quality_check: false,
             sweepga_no_filter: false,
             sweepga_sparse_pairs: false,
             scoring_params: (1, 4, 6, 2, 26, 1),
@@ -419,11 +422,6 @@ pub fn resolve_gfa_bubbles(gfa: &str, config: &ResolutionConfig) -> io::Result<R
     resolve_graph_bubbles(graph, Some(gfa), config, true)
 }
 
-fn resolve_gfa_bubbles_quiet(gfa: &str, config: &ResolutionConfig) -> io::Result<ResolvedGfa> {
-    let graph = parse_gfa(gfa)?;
-    resolve_graph_bubbles(graph, Some(gfa), config, false)
-}
-
 fn resolve_graph_bubbles(
     mut graph: Graph,
     original_gfa: Option<&str>,
@@ -433,6 +431,21 @@ fn resolve_graph_bubbles(
     let mut stats = ResolutionStats::default();
     let mut seen: FxHashSet<String> = FxHashSet::default();
     let mut changed = false;
+    if emit_logs {
+        let (match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2) =
+            config.scoring_params;
+        log::info!(
+            "crush config: method={:?}, polish={:?}, poa-scoring={},{},{},{},{},{}",
+            config.method,
+            config.polish_method,
+            match_score,
+            mismatch,
+            gap_open1,
+            gap_extend1,
+            gap_open2,
+            gap_extend2
+        );
+    }
 
     for round in 0..config.max_iterations {
         let round_start = Instant::now();
@@ -515,27 +528,10 @@ fn resolve_graph_bubbles(
                         candidate.root_span
                     );
                 }
-                let quality_guarded = replacement_method_needs_quality_guard(method);
                 let result = (|| {
                     let replacement = build_replacement_with_method(&candidate, config, method)?;
                     if replacement.segments.is_empty() {
                         return Ok::<Option<ReplacementPlan>, io::Error>(None);
-                    }
-                    if !config.disable_round_quality_check && quality_guarded {
-                        let before = graph_quality(&candidate_original_graph(&graph, &candidate));
-                        let after = graph_quality(&replacement);
-                        if let RoundQualityDecision::Reject { reason } =
-                            round_quality_decision(before, after, config)
-                        {
-                            log::debug!(
-                                "resolution: rejecting local replacement {}: {}; before {}; after {}",
-                                candidate.signature,
-                                reason,
-                                before.summary(),
-                                after.summary()
-                            );
-                            return Ok::<Option<ReplacementPlan>, io::Error>(None);
-                        }
                     }
                     Ok::<Option<ReplacementPlan>, io::Error>(Some(ReplacementPlan {
                         candidate,
@@ -547,7 +543,7 @@ fn resolve_graph_bubbles(
                     if selected_count <= 32 || done == selected_count || done % 25 == 0 {
                         let status = match &result {
                             Ok(Some(_)) => "accepted",
-                            Ok(None) => "rejected",
+                            Ok(None) => "empty",
                             Err(_) => "failed",
                         };
                         log::info!(
@@ -565,12 +561,12 @@ fn resolve_graph_bubbles(
         let build_elapsed = build_start.elapsed();
 
         let mut plans = Vec::new();
-        let mut locally_rejected = 0usize;
+        let mut failed_or_empty = 0usize;
         for result in build_results {
             match result {
                 Ok(Some(plan)) => plans.push(plan),
                 Ok(None) => {
-                    locally_rejected += 1;
+                    failed_or_empty += 1;
                     stats.bailed += 1;
                 }
                 Err(err) => {
@@ -587,24 +583,24 @@ fn resolve_graph_bubbles(
         if plans.is_empty() {
             if emit_logs {
                 log::info!(
-                    "crush round {}: 0/{} replacement(s) accepted in {:.2?} ({} rejected by local quality/build)",
+                    "crush round {}: 0/{} replacement(s) accepted in {:.2?} ({} failed or produced empty replacements)",
                     round + 1,
                     selected_count,
                     build_elapsed,
-                    locally_rejected
+                    failed_or_empty
                 );
             }
             continue;
         }
 
-        if emit_logs && locally_rejected > 0 {
+        if emit_logs && failed_or_empty > 0 {
             log::info!(
-                "crush round {}: accepted {}/{} replacement(s) in {:.2?}; {} rejected by local quality/build",
+                "crush round {}: accepted {}/{} replacement(s) in {:.2?}; {} failed or produced empty replacements",
                 round + 1,
                 plans.len(),
                 selected_count,
                 build_elapsed,
-                locally_rejected
+                failed_or_empty
             );
         }
 
@@ -613,23 +609,6 @@ fn resolve_graph_bubbles(
         let next_graph = apply_replacement_frontier(&graph, &plans)?;
         let rewrite_elapsed = rewrite_start.elapsed();
         let after_quality = graph_quality(&next_graph);
-        if !config.disable_round_quality_check {
-            let decision = round_quality_decision(before_quality, after_quality, config);
-            if let RoundQualityDecision::Reject { reason } = decision {
-                stats.bailed += resolved_count;
-                if emit_logs {
-                    log::info!(
-                        "crush round {}: rejecting {} replacement(s): {}; before {}; after {}",
-                        round + 1,
-                        resolved_count,
-                        reason,
-                        before_quality.summary(),
-                        after_quality.summary()
-                    );
-                }
-                break;
-            }
-        }
         graph = next_graph;
         changed = true;
         stats.resolved += resolved_count;
@@ -990,11 +969,6 @@ fn median_value(values: &mut [usize]) -> usize {
     values[values.len() / 2]
 }
 
-enum RoundQualityDecision {
-    Accept,
-    Reject { reason: String },
-}
-
 impl GraphQuality {
     fn summary(&self) -> String {
         format!(
@@ -1011,46 +985,6 @@ impl GraphQuality {
             self.path_white_space_long_bridges
         )
     }
-}
-
-fn round_quality_decision(
-    before: GraphQuality,
-    after: GraphQuality,
-    config: &ResolutionConfig,
-) -> RoundQualityDecision {
-    if before.score == 0 {
-        return RoundQualityDecision::Accept;
-    }
-
-    let before_score = before.score as f64;
-    let after_score = after.score as f64;
-    let growth = (after_score - before_score) / before_score;
-    let visual_tail_not_worse = quality_tail_bp(after.path_white_space_bp_p99)
-        <= quality_tail_bp(before.path_white_space_bp_p99)
-        && quality_tail_bp(after.path_white_space_bp_max)
-            <= quality_tail_bp(before.path_white_space_bp_max);
-    if growth > config.max_round_score_growth && !visual_tail_not_worse {
-        return RoundQualityDecision::Reject {
-            reason: format!(
-                "visual-tail score grew by {:.4}, above allowed {:.4}",
-                growth, config.max_round_score_growth
-            ),
-        };
-    }
-
-    if config.min_round_score_improvement > 0.0 {
-        let improvement = (before_score - after_score) / before_score;
-        if improvement < config.min_round_score_improvement {
-            return RoundQualityDecision::Reject {
-                reason: format!(
-                    "visual-tail score improved by {:.4}, below required {:.4}",
-                    improvement, config.min_round_score_improvement
-                ),
-            };
-        }
-    }
-
-    RoundQualityDecision::Accept
 }
 
 fn graph_quality(graph: &Graph) -> GraphQuality {
@@ -1092,9 +1026,8 @@ fn graph_quality(graph: &Graph) -> GraphQuality {
     // This is a visual-tail score, not a raw complexity count. Crushing can
     // legitimately increase path steps while improving the graph the user sees:
     // fewer long empty jumps, tighter high-depth node reuse, and shorter
-    // segment sequence. Keep total white-space/path-step penalties light so
-    // useful POA rounds are not rejected merely because they split paths more
-    // finely.
+    // segment sequence. This is logged for diagnostics only; acceptance is
+    // based on exact replacement path validation.
     let score = (segment_bp as u128)
         .saturating_add(path_steps as u128 / 64)
         .saturating_add((links.len() as u128).saturating_mul(2))
@@ -1490,34 +1423,6 @@ fn materialize_candidate_sequences(graph: &Graph, candidate: &mut BubbleCandidat
         .any(|range| range.sequence != first.sequence)
 }
 
-fn candidate_original_graph(graph: &Graph, candidate: &BubbleCandidate) -> Graph {
-    let mut node_map: FxHashMap<usize, usize> = FxHashMap::default();
-    let mut segments = Vec::new();
-    let mut paths = Vec::with_capacity(candidate.ranges.len());
-
-    for (range_idx, range) in candidate.ranges.iter().enumerate() {
-        let source_path = &graph.paths[range.path_idx];
-        let mut steps = Vec::with_capacity(range.end_step.saturating_sub(range.begin_step));
-        for step in &source_path.steps[range.begin_step..range.end_step] {
-            let local_node = *node_map.entry(step.node).or_insert_with(|| {
-                let idx = segments.len();
-                segments.push(graph.segments[step.node].clone());
-                idx
-            });
-            steps.push(Step {
-                node: local_node,
-                rev: step.rev,
-            });
-        }
-        paths.push(Path {
-            name: format!("{}#range{}", source_path.name, range_idx),
-            steps,
-        });
-    }
-
-    Graph { segments, paths }
-}
-
 fn candidate_signature(
     graph: &Graph,
     ref_path_idx: usize,
@@ -1657,10 +1562,6 @@ fn candidate_replacement_method(
     }
 }
 
-fn replacement_method_needs_quality_guard(method: ResolutionMethod) -> bool {
-    !matches!(method, ResolutionMethod::Poa | ResolutionMethod::Poasta)
-}
-
 fn auto_replacement_method(
     candidate: &BubbleCandidate,
     config: &ResolutionConfig,
@@ -1685,6 +1586,15 @@ fn candidate_named_sequences(candidate: &BubbleCandidate) -> (Vec<String>, Vec<(
         .zip(candidate.ranges.iter().map(|range| range.sequence.clone()))
         .collect();
     (headers, seqs)
+}
+
+fn candidate_named_sequences_longest_first(
+    candidate: &BubbleCandidate,
+) -> (Vec<String>, Vec<(String, Vec<u8>)>) {
+    let (headers, seqs) = candidate_named_sequences(candidate);
+    let mut sorted = seqs;
+    sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
+    (headers, sorted)
 }
 
 fn seqwish_replacement_config(
@@ -1818,9 +1728,32 @@ fn finalize_pairwise_induced_replacement(
     let mut replacement = parse_gfa(&compacted)?;
     order_replacement_paths(&mut replacement, headers)?;
     if config.polish_iterations > 0 {
-        let polished = polish_replacement_gfa(&render_graph(&replacement), config)?;
-        replacement = parse_gfa(&polished)?;
-        order_replacement_paths(&mut replacement, headers)?;
+        let unpolished = replacement.clone();
+        match polish_replacement_gfa(&render_graph(&replacement), headers.len(), config) {
+            Ok(polished) => {
+                let polished_result = (|| {
+                    let mut polished_replacement = parse_gfa(&polished)?;
+                    order_replacement_paths(&mut polished_replacement, headers)?;
+                    validate_replacement_paths(&polished_replacement, candidate, method)?;
+                    Ok::<Graph, io::Error>(polished_replacement)
+                })();
+                match polished_result {
+                    Ok(polished_replacement) => replacement = polished_replacement,
+                    Err(err) => {
+                        log::debug!(
+                            "crush {method}: dropping SPOA polish output because validation failed: {err}"
+                        );
+                        replacement = unpolished;
+                    }
+                }
+            }
+            Err(err) => {
+                log::debug!(
+                    "crush {method}: SPOA polish failed; keeping unpolished replacement: {err}"
+                );
+                replacement = unpolished;
+            }
+        }
     }
     validate_replacement_paths(&replacement, candidate, method)?;
     Ok(replacement)
@@ -1999,16 +1932,14 @@ fn build_poa_replacement(
     config: &ResolutionConfig,
 ) -> io::Result<Graph> {
     let (mut graph, mut engine) = build_global_spoa_engine(config.scoring_params);
-    let headers: Vec<String> = candidate
-        .ranges
+    let (headers, sorted_sequences) = candidate_named_sequences_longest_first(candidate);
+    let sorted_headers = sorted_sequences
         .iter()
-        .enumerate()
-        .map(|(i, range)| format!("__impg_bubble_path{}_{}", range.path_idx, i))
-        .collect();
-    let sequences: Vec<String> = candidate
-        .ranges
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let sequences: Vec<String> = sorted_sequences
         .iter()
-        .map(|range| String::from_utf8_lossy(&range.sequence).to_string())
+        .map(|(_, sequence)| String::from_utf8_lossy(sequence).to_string())
         .collect();
 
     feed_sequences_to_graph(
@@ -2016,30 +1947,12 @@ fn build_poa_replacement(
         &mut graph,
         sequences.iter().map(|s| s.as_str()),
     );
-    let gfa = graph.generate_gfa(&headers, false);
+    let gfa = graph.generate_gfa(&sorted_headers, false);
     let gfa = unchop_gfa(&gfa)?;
-    let replacement = parse_gfa(&gfa)?;
+    let mut replacement = parse_gfa(&gfa)?;
+    order_replacement_paths(&mut replacement, &headers)?;
 
-    if replacement.paths.len() != candidate.ranges.len() {
-        return Err(io::Error::other(format!(
-            "SPOA replacement emitted {} paths for {} traversals",
-            replacement.paths.len(),
-            candidate.ranges.len()
-        )));
-    }
-
-    for (idx, range) in candidate.ranges.iter().enumerate() {
-        let observed = path_sequence(&replacement, &replacement.paths[idx])?;
-        if observed != range.sequence {
-            return Err(io::Error::other(format!(
-                "SPOA replacement path {} changed sequence length {} -> {}",
-                idx,
-                range.sequence.len(),
-                observed.len()
-            )));
-        }
-    }
-
+    validate_replacement_paths(&replacement, candidate, "SPOA")?;
     Ok(replacement)
 }
 
@@ -2052,16 +1965,14 @@ fn build_poasta_replacement(
     use poasta::graphs::poa::POAGraph;
     use poasta::io::graph::graph_to_gfa;
 
-    let headers: Vec<String> = candidate
-        .ranges
+    let (headers, sorted_sequences) = candidate_named_sequences_longest_first(candidate);
+    let sorted_headers = sorted_sequences
         .iter()
-        .enumerate()
-        .map(|(i, range)| format!("__impg_bubble_path{}_{}", range.path_idx, i))
-        .collect();
-    let sequences: Vec<&[u8]> = candidate
-        .ranges
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let sequences: Vec<&[u8]> = sorted_sequences
         .iter()
-        .map(|range| range.sequence.as_slice())
+        .map(|(_, sequence)| sequence.as_slice())
         .collect();
     let weights = sequences
         .iter()
@@ -2071,7 +1982,13 @@ fn build_poasta_replacement(
 
     let scoring = poasta_two_piece_scoring(config.scoring_params)?;
     let mut aligner = PoastaAligner::new(Affine2PieceMinGapCost(scoring), poasta_alignment_type());
-    add_poasta_sequences(&mut graph, &mut aligner, &headers, &sequences, &weights)?;
+    add_poasta_sequences(
+        &mut graph,
+        &mut aligner,
+        &sorted_headers,
+        &sequences,
+        &weights,
+    )?;
 
     let mut gfa = Vec::new();
     graph_to_gfa(&mut gfa, &graph).map_err(|err| {
@@ -2083,12 +2000,10 @@ fn build_poasta_replacement(
             format!("POASTA replacement GFA is not UTF-8: {err}"),
         )
     })?;
-    let expected_paths = headers
-        .into_iter()
-        .zip(candidate.ranges.iter().map(|range| range.sequence.clone()))
-        .collect::<Vec<_>>();
-    let replacement = poasta_gfa_to_exact_graph(&gfa, &expected_paths)?;
-    validate_expected_paths(&replacement, &expected_paths, "POASTA")?;
+    let expected_paths = sorted_sequences.into_iter().collect::<Vec<_>>();
+    let mut replacement = poasta_gfa_to_exact_graph(&gfa, &expected_paths)?;
+    order_replacement_paths(&mut replacement, &headers)?;
+    validate_replacement_paths(&replacement, candidate, "POASTA")?;
 
     Ok(replacement)
 }
@@ -2147,7 +2062,7 @@ struct StarAlignmentRow {
 
 fn build_biwfa_inmemory_replacement(
     candidate: &BubbleCandidate,
-    config: &ResolutionConfig,
+    _config: &ResolutionConfig,
 ) -> io::Result<Graph> {
     let headers: Vec<String> = candidate
         .ranges
@@ -2186,11 +2101,6 @@ fn build_biwfa_inmemory_replacement(
         order_replacement_paths(&mut replacement, &headers)?;
     }
 
-    if !has_empty_path {
-        let polished = polish_replacement_gfa(&render_graph(&replacement), config)?;
-        replacement = parse_gfa(&polished)?;
-        order_replacement_paths(&mut replacement, &headers)?;
-    }
     validate_replacement_paths(&replacement, candidate, "BiWFA/in-memory")?;
     Ok(replacement)
 }
@@ -2362,13 +2272,35 @@ fn build_star_column_graph(
     Graph { segments, paths }
 }
 
-fn polish_replacement_gfa(gfa: &str, config: &ResolutionConfig) -> io::Result<String> {
+fn polish_replacement_gfa(
+    gfa: &str,
+    n_haps: usize,
+    config: &ResolutionConfig,
+) -> io::Result<String> {
     if config.polish_iterations == 0 {
         return Ok(gfa.to_string());
     }
+    match config.polish_method {
+        ResolutionPolishMethod::Poa | ResolutionPolishMethod::Poasta => {
+            polish_replacement_gfa_with_flubbles(gfa, config)
+        }
+        ResolutionPolishMethod::Smooth => polish_replacement_gfa_with_smooth(gfa, n_haps, config),
+    }
+}
+
+fn polish_replacement_gfa_with_flubbles(
+    gfa: &str,
+    config: &ResolutionConfig,
+) -> io::Result<String> {
     let polish_config = ResolutionConfig {
         max_iterations: config.polish_iterations,
-        method: ResolutionMethod::Poasta,
+        method: match config.polish_method {
+            ResolutionPolishMethod::Poa => ResolutionMethod::Poa,
+            ResolutionPolishMethod::Poasta => ResolutionMethod::Poasta,
+            ResolutionPolishMethod::Smooth => {
+                unreachable!("smooth polish is dispatched separately")
+            }
+        },
         max_bubble_span: 0,
         max_traversal_len: config.polish_max_traversal_len,
         max_median_traversal_len: config.polish_max_median_traversal_len,
@@ -2379,13 +2311,88 @@ fn polish_replacement_gfa(gfa: &str, config: &ResolutionConfig) -> io::Result<St
         polish_max_median_traversal_len: config.polish_max_median_traversal_len,
         polish_max_total_sequence: config.polish_max_total_sequence,
         polish_max_traversals: config.polish_max_traversals,
+        polish_method: config.polish_method,
         auto_spoa_max_traversal_len: 0,
         auto_allwave_max_total_sequence: 0,
         auto_allwave_max_traversals: 0,
         scoring_params: config.scoring_params,
         ..ResolutionConfig::default()
     };
-    resolve_gfa_bubbles_quiet(gfa, &polish_config).map(|resolved| resolved.gfa)
+    let graph = parse_gfa(gfa)?;
+    resolve_graph_bubbles(graph, Some(gfa), &polish_config, false).map(|resolved| resolved.gfa)
+}
+
+fn polish_replacement_gfa_with_smooth(
+    gfa: &str,
+    n_haps: usize,
+    config: &ResolutionConfig,
+) -> io::Result<String> {
+    let before = parse_gfa(gfa)?;
+    let before_quality = graph_quality(&before);
+    let smooth_config = crate::smooth::SmoothConfig {
+        n_haps: n_haps.max(1),
+        num_threads: rayon::current_num_threads().max(1),
+        scoring_params: config.scoring_params,
+        pre_sorted: false,
+        ..crate::smooth::SmoothConfig::new(n_haps.max(1))
+    };
+    let smoothed = crate::smooth::smooth_gfa(gfa, &smooth_config)?;
+    let smoothed = strip_full_range_path_names(&smoothed)?;
+    let after = parse_gfa(&smoothed)?;
+    let after_quality = graph_quality(&after);
+    log::debug!(
+        "crush polish: accepted smooth pass: before {}; after {}",
+        before_quality.summary(),
+        after_quality.summary()
+    );
+    Ok(smoothed)
+}
+
+fn strip_full_range_path_names(gfa: &str) -> io::Result<String> {
+    let graph = parse_gfa(gfa)?;
+    let mut rename = FxHashMap::default();
+    for path in &graph.paths {
+        let Some((base, start, end)) = split_path_coordinate_suffix(&path.name) else {
+            continue;
+        };
+        let sequence_len = path_sequence(&graph, path)?.len();
+        if start == 0 && end == sequence_len {
+            rename.insert(path.name.clone(), base.to_string());
+        }
+    }
+    if rename.is_empty() {
+        return Ok(gfa.to_string());
+    }
+
+    let mut out = String::with_capacity(gfa.len());
+    for line in gfa.lines() {
+        if let Some(rest) = line.strip_prefix("P\t") {
+            let mut fields = rest.splitn(3, '\t');
+            if let (Some(name), Some(walk), Some(overlaps)) =
+                (fields.next(), fields.next(), fields.next())
+            {
+                if let Some(new_name) = rename.get(name) {
+                    out.push_str("P\t");
+                    out.push_str(new_name);
+                    out.push('\t');
+                    out.push_str(walk);
+                    out.push('\t');
+                    out.push_str(overlaps);
+                    out.push('\n');
+                    continue;
+                }
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+fn split_path_coordinate_suffix(name: &str) -> Option<(&str, usize, usize)> {
+    let (base, range) = name.rsplit_once(':')?;
+    let (start, end) = range.split_once('-')?;
+    Some((base, start.parse().ok()?, end.parse().ok()?))
 }
 
 fn validate_replacement_paths(
@@ -2906,7 +2913,6 @@ mod tests {
             max_traversal_len: 100_000,
             max_median_traversal_len: 100_000,
             max_total_sequence: 10_000_000,
-            disable_round_quality_check: true,
             ..ResolutionConfig::default()
         }
     }
@@ -3176,13 +3182,32 @@ P\tins\t1+,2+,3+\t*
             &ResolutionConfig {
                 method: ResolutionMethod::Allwave,
                 max_median_traversal_len: 10_000,
-                disable_round_quality_check: true,
                 ..ResolutionConfig::default()
             },
         )
         .unwrap();
         assert_eq!(before, seq_map(&resolved.gfa));
         assert_eq!(resolved.stats.resolved, 1);
+    }
+
+    #[test]
+    fn smooth_polish_preserves_replacement_path_sequences() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tAAAA
+S\t2\tCCCC
+S\t3\tGGGG
+S\t4\tTTTT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+P\tp0\t1+,2+,4+\t*
+P\tp1\t1+,3+,4+\t*
+";
+        let before = seq_map(gfa);
+        let polished = polish_replacement_gfa(gfa, 2, &ResolutionConfig::default()).unwrap();
+        assert_eq!(before, seq_map(&polished));
     }
 
     #[test]
@@ -3417,58 +3442,6 @@ P\tp\t1+,3+\t*
     }
 
     #[test]
-    fn round_quality_rejects_large_complexity_growth() {
-        let before = GraphQuality {
-            score: 1_000,
-            path_white_space_bp_p99: 1_000,
-            path_white_space_bp_max: 1_000,
-            ..GraphQuality::default()
-        };
-        let after = GraphQuality {
-            score: 1_100,
-            path_white_space_bp_p99: 1_100,
-            path_white_space_bp_max: 1_100,
-            ..GraphQuality::default()
-        };
-        let config = ResolutionConfig {
-            max_round_score_growth: 0.02,
-            ..ResolutionConfig::default()
-        };
-        assert!(matches!(
-            round_quality_decision(before, after, &config),
-            RoundQualityDecision::Reject { .. }
-        ));
-    }
-
-    #[test]
-    fn round_quality_accepts_visual_tail_improvement_despite_score_growth() {
-        let before = GraphQuality {
-            score: 325_840_371,
-            segment_bp: 375_672,
-            links: 23_153,
-            path_steps: 4_652_634,
-            path_white_space_bp_total: 20_526_045_040,
-            path_white_space_bp_p99: 152_234,
-            path_white_space_bp_max: 371_133,
-            ..GraphQuality::default()
-        };
-        let after = GraphQuality {
-            score: 353_545_876,
-            segment_bp: 351_791,
-            links: 24_418,
-            path_steps: 4_903_329,
-            path_white_space_bp_total: 22_284_357_408,
-            path_white_space_bp_p99: 150_370,
-            path_white_space_bp_max: 347_830,
-            ..GraphQuality::default()
-        };
-        assert!(matches!(
-            round_quality_decision(before, after, &ResolutionConfig::default()),
-            RoundQualityDecision::Accept
-        ));
-    }
-
-    #[test]
     fn first_crush_round_accepts_path_step_growth_without_visual_tail_regression() {
         let seq1 = "ACGT".repeat(25);
         let seq2 = "TGCA".repeat(25);
@@ -3492,7 +3465,6 @@ P\talt\t1+,3+,4+\t*
             &gfa,
             &ResolutionConfig {
                 method: ResolutionMethod::StarBiwfa,
-                max_round_score_growth: 0.0,
                 ..ResolutionConfig::default()
             },
         )
@@ -3500,25 +3472,6 @@ P\talt\t1+,3+,4+\t*
 
         assert_eq!(before, seq_map(&resolved.gfa));
         assert_eq!(resolved.stats.resolved, 1);
-    }
-
-    #[test]
-    fn direct_poa_replacements_bypass_local_quality_gate() {
-        assert!(!replacement_method_needs_quality_guard(
-            ResolutionMethod::Poa
-        ));
-        assert!(!replacement_method_needs_quality_guard(
-            ResolutionMethod::Poasta
-        ));
-        assert!(replacement_method_needs_quality_guard(
-            ResolutionMethod::StarBiwfa
-        ));
-        assert!(replacement_method_needs_quality_guard(
-            ResolutionMethod::Allwave
-        ));
-        assert!(replacement_method_needs_quality_guard(
-            ResolutionMethod::Sweepga
-        ));
     }
 
     #[test]
@@ -3750,7 +3703,6 @@ P\tright_alt\t1+,2+,3+,4+,8+,6+\t*
             gfa,
             &ResolutionConfig {
                 max_iterations: 1,
-                disable_round_quality_check: true,
                 ..ResolutionConfig::default()
             },
         )

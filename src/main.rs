@@ -2137,7 +2137,7 @@ struct EngineCliOpts {
 
     /// POA alignment scores as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2
     #[arg(help_heading = "Alignment options")]
-    #[clap(long, value_parser, default_value = "5,4,6,2,24,1")]
+    #[clap(long, value_parser, default_value = "1,4,6,2,26,1")]
     poa_scoring: String,
 
     #[clap(flatten)]
@@ -2615,6 +2615,20 @@ fn parse_crush_stage(
                 config.polish_max_traversals =
                     parse_usize_size_engine_param(raw, &param.key, &param.value)?;
             }
+            "polish-method" | "polish" => {
+                let Some(method) =
+                    impg::resolution::ResolutionPolishMethod::parse_name(&param.value)
+                else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': polish method '{}' is unsupported (expected poa, poasta, or smooth)",
+                            raw, param.value
+                        ),
+                    ));
+                };
+                config.polish_method = method;
+            }
             "k-nearest" | "k-near" | "near" | "tree-near" => {
                 config.pair_k_nearest =
                     parse_usize_size_engine_param(raw, &param.key, &param.value)?;
@@ -2676,6 +2690,17 @@ fn parse_crush_stage(
                 config.replacement_scaffold_filter =
                     parse_filter_mode_engine_param(raw, &param.key, &param.value)?;
             }
+            "poa-scoring" | "spoa-scoring" | "poasta-scoring" | "scoring" => {
+                config.scoring_params = parse_poa_scoring_string(&param.value).map_err(|err| {
+                    io::Error::new(
+                        err.kind(),
+                        format!(
+                            "Invalid --gfa-engine '{}': {}='{}': {}",
+                            raw, param.key, param.value, err
+                        ),
+                    )
+                })?;
+            }
             "sweepga-aligner" | "aligner" => {
                 config.sweepga_aligner = param.value.clone();
             }
@@ -2697,32 +2722,6 @@ fn parse_crush_stage(
             "max-replacement-paf-bytes" | "max-paf-bytes" | "max-paf" => {
                 config.max_replacement_paf_bytes =
                     parse_usize_size_engine_param(raw, &param.key, &param.value)?;
-            }
-            "max-round-score-growth" | "max-score-growth" => {
-                config.max_round_score_growth = param.value.parse().map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "Invalid --gfa-engine '{}': {}='{}' is not a valid fraction",
-                            raw, param.key, param.value
-                        ),
-                    )
-                })?;
-            }
-            "min-round-score-improvement" | "min-score-improvement" => {
-                config.min_round_score_improvement = param.value.parse().map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "Invalid --gfa-engine '{}': {}='{}' is not a valid fraction",
-                            raw, param.key, param.value
-                        ),
-                    )
-                })?;
-            }
-            "disable-round-quality-check" | "no-round-quality-check" => {
-                config.disable_round_quality_check =
-                    parse_bool_engine_param(raw, &param.key, &param.value)?;
             }
             "sweepga-no-filter" | "no-filter" => {
                 config.sweepga_no_filter = parse_bool_engine_param(raw, &param.key, &param.value)?;
@@ -2798,24 +2797,6 @@ fn parse_crush_stage(
             ),
         ));
     }
-    if config.max_round_score_growth < 0.0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "Invalid --gfa-engine '{}': max-round-score-growth must be non-negative",
-                raw
-            ),
-        ));
-    }
-    if config.min_round_score_improvement < 0.0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "Invalid --gfa-engine '{}': min-round-score-improvement must be non-negative",
-                raw
-            ),
-        ));
-    }
     if !(3..=31).contains(&config.pair_mash_k) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -2844,6 +2825,20 @@ fn parse_crush_stage(
         ));
     }
     Ok(config)
+}
+
+fn engine_raw_has_crush_scoring_param(raw: &str) -> bool {
+    GraphPipelineSpec::parse(raw).is_ok_and(|spec| {
+        spec.stages.iter().any(|stage| {
+            stage.name.eq_ignore_ascii_case("crush")
+                && stage.params.iter().any(|param| {
+                    matches!(
+                        param.key.as_str(),
+                        "poa-scoring" | "spoa-scoring" | "poasta-scoring" | "scoring"
+                    )
+                })
+        })
+    })
 }
 
 fn parse_graph_sort_stage(raw: &str, stage: &GraphPipelineStage) -> io::Result<Option<String>> {
@@ -3364,8 +3359,11 @@ impl EngineCliOpts {
         let mut parsed = self.parse_engine()?;
         let engine = parsed.engine;
         self.validate_engine_params(engine)?;
+        let crush_has_stage_scoring = engine_raw_has_crush_scoring_param(&self.engine_raw);
         if let Some(config) = parsed.crush_config.as_mut() {
-            config.scoring_params = self.parse_poa_scoring()?;
+            if !crush_has_stage_scoring {
+                config.scoring_params = self.parse_poa_scoring()?;
+            }
         }
 
         let sparsify = self.aln.sw.sparsify.clone();
@@ -4739,17 +4737,21 @@ GFA engine shorthand:
         #[clap(long, alias = "small-spoa-max-len", value_parser = parse_usize_size, default_value = "2k")]
         auto_spoa_max_traversal_len: usize,
 
-        /// Legacy auto-routing knob; pairwise methods are guarded by replacement quality
+        /// Legacy auto-routing knob retained for CLI compatibility
         #[clap(long, alias = "auto-allwave-max-total-seq", value_parser = parse_usize_size, default_value = "200k")]
         auto_allwave_max_total_sequence: usize,
 
-        /// Legacy auto-routing knob; pairwise methods are guarded by replacement quality
+        /// Legacy auto-routing knob retained for CLI compatibility
         #[clap(long, alias = "auto-allwave-max-travs", value_parser = parse_usize_size, default_value = "128")]
         auto_allwave_max_traversals: usize,
 
-        /// Small-tangle POASTA polish rounds after pairwise induction; use until-done to exhaust
+        /// Small-tangle polish rounds after pairwise induction; use until-done to exhaust
         #[clap(long, alias = "polish-iterations", value_parser = parse_round_count, default_value = "until-done")]
         polish_rounds: usize,
+
+        /// Polish method after pairwise induction: poa, poasta, or smooth
+        #[clap(long, value_parser, default_value = "poa")]
+        polish_method: String,
 
         /// Maximum traversal length for the small-tangle polish pass
         #[clap(long, alias = "polish-max-traversal-length", value_parser = parse_usize_size, default_value = "10k")]
@@ -4770,6 +4772,10 @@ GFA engine shorthand:
         /// Resolver method: auto, allwave, poa, poasta, star-biwfa, or sweepga
         #[clap(long, value_parser, default_value = "auto")]
         method: String,
+
+        /// POA/SPOA/POASTA scoring as match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2
+        #[clap(long = "poa-scoring", value_parser, default_value = "1,4,6,2,26,1")]
+        poa_scoring: String,
 
         /// Pair-sampling nearest-neighbor count for allwave/sweepga crush
         #[clap(long, value_parser = parse_usize_size, default_value = "3")]
@@ -4851,18 +4857,6 @@ GFA engine shorthand:
         /// Maximum PAF bytes handed to seqwish for one replacement; 0 disables
         #[clap(long, value_parser = parse_usize_size, default_value = "67108864")]
         max_replacement_paf_bytes: usize,
-
-        /// Maximum allowed round-level visual-tail score growth before rollback
-        #[clap(long, value_parser, default_value = "0.02")]
-        max_round_score_growth: f64,
-
-        /// Required fractional visual-tail score improvement per accepted round
-        #[clap(long, value_parser, default_value = "0.0")]
-        min_round_score_improvement: f64,
-
-        /// Disable round-level graph-quality rollback/stopping checks
-        #[clap(long, action)]
-        disable_round_quality_check: bool,
 
         /// Skip SweepGA post-alignment filtering for --method sweepga
         #[clap(
@@ -7721,11 +7715,13 @@ fn run() -> io::Result<()> {
             auto_allwave_max_total_sequence,
             auto_allwave_max_traversals,
             polish_rounds,
+            polish_method,
             polish_max_traversal_len,
             polish_max_median_traversal_len,
             polish_max_total_sequence,
             polish_max_traversals,
             method,
+            poa_scoring,
             k_nearest,
             k_farthest,
             pair_tree_count,
@@ -7742,9 +7738,6 @@ fn run() -> io::Result<()> {
             sweepga_map_pct_identity,
             max_pair_alignments,
             max_replacement_paf_bytes,
-            max_round_score_growth,
-            min_round_score_improvement,
-            disable_round_quality_check,
             sweepga_no_filter,
             sweepga_sparse_pairs,
             common,
@@ -7774,6 +7767,15 @@ fn run() -> io::Result<()> {
                     "--method must be one of: auto, allwave, poa, poasta, star-biwfa, sweepga",
                 ));
             };
+            let Some(polish_method) =
+                impg::resolution::ResolutionPolishMethod::parse_name(&polish_method)
+            else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--polish-method must be one of: poa, poasta, smooth",
+                ));
+            };
+            let poa_scoring = parse_poa_scoring_string(&poa_scoring)?;
             if k_nearest == 0 && k_farthest == 0 && random_fraction <= 0.0 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -7824,19 +7826,6 @@ fn run() -> io::Result<()> {
                         "--replacement-scaffold-filter must be like 1:1, 1:many, 1-many, 1-to-many, or many:many",
                     )
                 })?;
-            if max_round_score_growth < 0.0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "--max-round-score-growth must be non-negative",
-                ));
-            }
-            if min_round_score_improvement < 0.0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "--min-round-score-improvement must be non-negative",
-                ));
-            }
-
             let mut gfa_text = String::new();
             if gfa == "-" {
                 io::stdin().read_to_string(&mut gfa_text)?;
@@ -7857,6 +7846,7 @@ fn run() -> io::Result<()> {
                 auto_allwave_max_total_sequence,
                 auto_allwave_max_traversals,
                 polish_iterations: polish_rounds,
+                polish_method,
                 polish_max_traversal_len,
                 polish_max_median_traversal_len,
                 polish_max_total_sequence,
@@ -7877,11 +7867,9 @@ fn run() -> io::Result<()> {
                 sweepga_map_pct_identity,
                 max_pair_alignments,
                 max_replacement_paf_bytes,
-                max_round_score_growth,
-                min_round_score_improvement,
-                disable_round_quality_check,
                 sweepga_no_filter,
                 sweepga_sparse_pairs,
+                scoring_params: poa_scoring,
                 ..Default::default()
             };
             let resolved = impg::resolution::resolve_gfa_bubbles(&gfa_text, &config)?;
@@ -9157,11 +9145,12 @@ fn validate_selection_mode(mode: &str) -> io::Result<()> {
 
 /// Parse POA scoring string "match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2"
 fn parse_poa_scoring_string(s: &str) -> io::Result<(u8, u8, u8, u8, u8, u8)> {
-    let parts: Vec<&str> = s.split(',').collect();
+    let separator = if s.contains(',') { ',' } else { '/' };
+    let parts: Vec<&str> = s.split(separator).collect();
     if parts.len() != 6 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "POA scoring format should be 'match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2'",
+            "POA scoring format should be 'match,mismatch,gap_open1,gap_extend1,gap_open2,gap_extend2' (or slash-separated inside --gfa-engine)",
         ));
     }
     let parse_u8 = |s: &str, name: &str| {
@@ -12633,7 +12622,7 @@ mod tests {
             "-d",
             "0",
             "-o",
-            "gfa:syng:crush,method=allwave,k-nearest=5,k-farthest=2,pair-trees=3,random-fraction=0.05,mash-k=17,seqwish-k=79,min-map-length=500,min-identity=0.97,max-pair-alignments=20k,max-paf-bytes=128m,max-rounds=until-done,polish-rounds=until-done,max-round-score-growth=0.05,min-round-score-improvement=0.001",
+            "gfa:syng:crush,method=allwave,k-nearest=5,k-farthest=2,pair-trees=3,random-fraction=0.05,mash-k=17,seqwish-k=79,min-map-length=500,min-identity=0.97,max-pair-alignments=20k,max-paf-bytes=128m,max-rounds=until-done,polish-rounds=until-done,polish-method=smooth,poa-scoring=2/3/5/4/25/1",
         ])
         .unwrap();
         match args {
@@ -12660,8 +12649,11 @@ mod tests {
                 assert_eq!(crush.max_replacement_paf_bytes, 128_000_000);
                 assert_eq!(crush.max_iterations, usize::MAX);
                 assert_eq!(crush.polish_iterations, usize::MAX);
-                assert!((crush.max_round_score_growth - 0.05).abs() < f64::EPSILON);
-                assert!((crush.min_round_score_improvement - 0.001).abs() < f64::EPSILON);
+                assert_eq!(
+                    crush.polish_method,
+                    impg::resolution::ResolutionPolishMethod::Smooth
+                );
+                assert_eq!(crush.scoring_params, (2, 3, 5, 4, 25, 1));
             }
             _ => panic!("expected query command"),
         }
@@ -12864,6 +12856,28 @@ mod tests {
     }
 
     #[test]
+    fn test_crush_command_accepts_poa_scoring() {
+        let args = Args::try_parse_from([
+            "impg",
+            "crush",
+            "-g",
+            "in.gfa",
+            "--poa-scoring",
+            "2,3,5,4,25,1",
+        ])
+        .unwrap();
+        match args {
+            Args::Crush { poa_scoring, .. } => {
+                assert_eq!(
+                    parse_poa_scoring_string(&poa_scoring).unwrap(),
+                    (2, 3, 5, 4, 25, 1)
+                );
+            }
+            _ => panic!("expected crush command"),
+        }
+    }
+
+    #[test]
     fn test_gfa_output_format_rejects_invalid_replacement_filter_mode() {
         let args = Args::try_parse_from([
             "impg",
@@ -12923,6 +12937,10 @@ mod tests {
                 assert_eq!(crush.auto_allwave_max_traversals, 128);
                 assert_eq!(crush.max_iterations, 1);
                 assert_eq!(crush.polish_iterations, usize::MAX);
+                assert_eq!(
+                    crush.polish_method,
+                    impg::resolution::ResolutionPolishMethod::Poa
+                );
                 assert_eq!(crush.polish_max_traversal_len, 10_000);
                 assert_eq!(crush.polish_max_median_traversal_len, 1_000);
                 assert_eq!(crush.pair_tree_count, 1);
@@ -12933,9 +12951,6 @@ mod tests {
                 assert_eq!(crush.replacement_scaffold_filter, "1:1");
                 assert_eq!(crush.max_pair_alignments, 10_000);
                 assert_eq!(crush.max_replacement_paf_bytes, 64 * 1024 * 1024);
-                assert!((crush.max_round_score_growth - 0.02).abs() < f64::EPSILON);
-                assert_eq!(crush.min_round_score_improvement, 0.0);
-                assert!(!crush.disable_round_quality_check);
                 assert!(!crush.sweepga_no_filter);
                 assert!(!crush.sweepga_sparse_pairs);
             }
