@@ -2372,6 +2372,39 @@ fn parse_bool_engine_param(raw: &str, key: &str, value: &str) -> io::Result<bool
     }
 }
 
+fn normalize_filter_limit(part: &str) -> Option<&str> {
+    match part.trim().to_ascii_lowercase().as_str() {
+        "1" | "one" => Some("1"),
+        "many" | "n" | "inf" | "infinite" | "all" => Some("many"),
+        value if value.parse::<usize>().ok().is_some_and(|n| n > 0) => Some(part.trim()),
+        _ => None,
+    }
+}
+
+fn normalize_filter_mode_value(value: &str) -> Option<String> {
+    let normalized = value.trim().replace("-to-", ":");
+    let delimiter = if normalized.contains(':') { ':' } else { '-' };
+    let mut parts = normalized.split(delimiter);
+    let query = normalize_filter_limit(parts.next()?)?;
+    let target = normalize_filter_limit(parts.next()?)?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(format!("{query}:{target}"))
+}
+
+fn parse_filter_mode_engine_param(raw: &str, key: &str, value: &str) -> io::Result<String> {
+    normalize_filter_mode_value(value).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': {}='{}' is not a filter mode like 1:1, 1:many, 1-many, 1-to-many, or many:many",
+                raw, key, value
+            ),
+        )
+    })
+}
+
 fn parse_f64_engine_param(raw: &str, key: &str, value: &str) -> io::Result<f64> {
     value.parse::<f64>().map_err(|_| {
         io::Error::new(
@@ -2634,6 +2667,14 @@ fn parse_crush_stage(
                         ),
                     )
                 })?;
+            }
+            "replacement-num-mappings" | "replacement-mappings" | "num-mappings" => {
+                config.replacement_num_mappings =
+                    parse_filter_mode_engine_param(raw, &param.key, &param.value)?;
+            }
+            "replacement-scaffold-filter" | "scaffold-filter" => {
+                config.replacement_scaffold_filter =
+                    parse_filter_mode_engine_param(raw, &param.key, &param.value)?;
             }
             "sweepga-aligner" | "aligner" => {
                 config.sweepga_aligner = param.value.clone();
@@ -4778,6 +4819,14 @@ GFA engine shorthand:
             default_value = "0.0"
         )]
         replacement_min_identity: f64,
+
+        /// Plane-sweep mapping filter before replacement seqwish induction; accepts 1:1, 1-many, one-to-many, many:many
+        #[clap(long, value_parser, default_value = "1:1")]
+        replacement_num_mappings: String,
+
+        /// Scaffold-chain filter before replacement seqwish induction; accepts 1:1, 1-many, one-to-many, many:many
+        #[clap(long, value_parser, default_value = "1:1")]
+        replacement_scaffold_filter: String,
 
         /// SweepGA aligner backend for --method sweepga: fastga or wfmash
         #[clap(long, value_parser, default_value = "fastga")]
@@ -7685,6 +7734,8 @@ fn run() -> io::Result<()> {
             replacement_seqwish_min_match_len,
             replacement_min_map_length,
             replacement_min_identity,
+            replacement_num_mappings,
+            replacement_scaffold_filter,
             sweepga_aligner,
             sweepga_kmer_frequency,
             sweepga_min_aln_length,
@@ -7759,6 +7810,20 @@ fn run() -> io::Result<()> {
                     "--replacement-min-identity/--min-identity must be between 0 and 1",
                 ));
             }
+            let replacement_num_mappings = normalize_filter_mode_value(&replacement_num_mappings)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--replacement-num-mappings must be like 1:1, 1:many, 1-many, 1-to-many, or many:many",
+                    )
+                })?;
+            let replacement_scaffold_filter =
+                normalize_filter_mode_value(&replacement_scaffold_filter).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--replacement-scaffold-filter must be like 1:1, 1:many, 1-many, 1-to-many, or many:many",
+                    )
+                })?;
             if max_round_score_growth < 0.0 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -7804,6 +7869,8 @@ fn run() -> io::Result<()> {
                 replacement_seqwish_min_match_len: replacement_seqwish_min_match_len as u64,
                 replacement_min_map_length: replacement_min_map_length as u64,
                 replacement_min_identity,
+                replacement_num_mappings,
+                replacement_scaffold_filter,
                 sweepga_aligner,
                 sweepga_kmer_frequency,
                 sweepga_min_aln_length: sweepga_min_aln_length as u64,
@@ -12768,7 +12835,7 @@ mod tests {
             "-d",
             "0",
             "-o",
-            "gfa:syng:crush,method=sweepga,aligner=wfmash,kmer-frequency=42,min-aln-length=1k,map-pct-identity=90,no-filter=false,sparse-pairs=true",
+            "gfa:syng:crush,method=sweepga,aligner=wfmash,kmer-frequency=42,min-aln-length=1k,map-pct-identity=90,replacement-num-mappings=one-to-many,replacement-scaffold-filter=1-many,no-filter=false,sparse-pairs=true",
         ])
         .unwrap();
         match args {
@@ -12787,8 +12854,37 @@ mod tests {
                 assert_eq!(crush.sweepga_kmer_frequency, 42);
                 assert_eq!(crush.sweepga_min_aln_length, 1_000);
                 assert_eq!(crush.sweepga_map_pct_identity.as_deref(), Some("90"));
+                assert_eq!(crush.replacement_num_mappings, "1:many");
+                assert_eq!(crush.replacement_scaffold_filter, "1:many");
                 assert!(!crush.sweepga_no_filter);
                 assert!(crush.sweepga_sparse_pairs);
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_rejects_invalid_replacement_filter_mode() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush,replacement-scaffold-filter=nearby",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let err = engine_cli.parse_engine().unwrap_err();
+                assert!(err.to_string().contains("replacement-scaffold-filter"));
             }
             _ => panic!("expected query command"),
         }
@@ -12833,6 +12929,8 @@ mod tests {
                 assert_eq!(crush.replacement_seqwish_min_match_len, 311);
                 assert_eq!(crush.replacement_min_map_length, 0);
                 assert_eq!(crush.replacement_min_identity, 0.0);
+                assert_eq!(crush.replacement_num_mappings, "1:1");
+                assert_eq!(crush.replacement_scaffold_filter, "1:1");
                 assert_eq!(crush.max_pair_alignments, 10_000);
                 assert_eq!(crush.max_replacement_paf_bytes, 64 * 1024 * 1024);
                 assert!((crush.max_round_score_growth - 0.02).abs() < f64::EPSILON);

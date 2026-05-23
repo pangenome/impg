@@ -110,6 +110,10 @@ pub struct ResolutionConfig {
     /// A value of 0 disables this filter. This applies to both AllWave-produced
     /// PAF and SweepGA-produced PAF before they are passed into seqwish.
     pub replacement_min_identity: f64,
+    /// Plane-sweep mapping filter for pairwise replacement graph induction.
+    pub replacement_num_mappings: String,
+    /// Scaffold-chain filter for pairwise replacement graph induction.
+    pub replacement_scaffold_filter: String,
     /// SweepGA aligner backend used by `method=sweepga`.
     pub sweepga_aligner: String,
     /// SweepGA/FastGA k-mer frequency.
@@ -256,6 +260,8 @@ impl Default for ResolutionConfig {
             replacement_seqwish_min_match_len: DEFAULT_REPLACEMENT_SEQWISH_MIN_MATCH_LEN,
             replacement_min_map_length: DEFAULT_REPLACEMENT_MIN_MAP_LENGTH,
             replacement_min_identity: DEFAULT_REPLACEMENT_MIN_IDENTITY,
+            replacement_num_mappings: "1:1".to_string(),
+            replacement_scaffold_filter: "1:1".to_string(),
             sweepga_aligner: "fastga".to_string(),
             sweepga_kmer_frequency: DEFAULT_SWEEPGA_KMER_FREQUENCY,
             sweepga_min_aln_length: DEFAULT_SWEEPGA_MIN_ALN_LENGTH,
@@ -1698,8 +1704,8 @@ fn seqwish_replacement_config(
         min_identity: config.replacement_min_identity,
         input_paf: None,
         no_filter: config.sweepga_no_filter,
-        num_mappings: "1:1".to_string(),
-        scaffold_filter: "1:1".to_string(),
+        num_mappings: config.replacement_num_mappings.clone(),
+        scaffold_filter: config.replacement_scaffold_filter.clone(),
         sparsify: sweepga::knn_graph::SparsificationStrategy::None,
         ..crate::commands::graph::GraphBuildConfig::default()
     }
@@ -3527,11 +3533,17 @@ P\talt\t1+,3+,4+\t*
         assert_eq!(graph_config.min_match_len, 311);
         assert_eq!(graph_config.min_map_length, 311);
         assert!((graph_config.min_identity - 0.97).abs() < f64::EPSILON);
+        assert_eq!(graph_config.num_mappings, "1:1");
+        assert_eq!(graph_config.scaffold_filter, "1:1");
 
         config.replacement_min_map_length = 500;
+        config.replacement_num_mappings = "1:many".to_string();
+        config.replacement_scaffold_filter = "many:many".to_string();
         let graph_config = seqwish_replacement_config(&config);
         assert_eq!(graph_config.min_match_len, 311);
         assert_eq!(graph_config.min_map_length, 500);
+        assert_eq!(graph_config.num_mappings, "1:many");
+        assert_eq!(graph_config.scaffold_filter, "many:many");
     }
 
     #[test]
