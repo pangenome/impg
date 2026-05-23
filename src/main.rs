@@ -59,6 +59,13 @@ fn parse_usize_size(s: &str) -> Result<usize, String> {
     usize::try_from(value).map_err(|_| format!("size {value} exceeds usize::MAX"))
 }
 
+fn parse_round_count(s: &str) -> Result<usize, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "until-done" | "done" | "exhaustive" | "all" | "inf" | "infinite" => Ok(usize::MAX),
+        _ => parse_usize_size(s),
+    }
+}
+
 fn resolve_syng_syncmer_params(
     legacy_syncmer_k: Option<u32>,
     smer_length: Option<u32>,
@@ -2342,6 +2349,15 @@ fn parse_usize_size_engine_param(raw: &str, key: &str, value: &str) -> io::Resul
     })
 }
 
+fn parse_round_count_engine_param(raw: &str, key: &str, value: &str) -> io::Result<usize> {
+    parse_round_count(value).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Invalid --gfa-engine '{}': {}='{}': {}", raw, key, value, e),
+        )
+    })
+}
+
 fn parse_bool_engine_param(raw: &str, key: &str, value: &str) -> io::Result<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),
@@ -2493,7 +2509,7 @@ fn parse_crush_stage(
         match param.key.as_str() {
             "max-iterations" | "iterations" | "max-rounds" | "rounds" => {
                 config.max_iterations =
-                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+                    parse_round_count_engine_param(raw, &param.key, &param.value)?;
             }
             "max-span" | "max-bubble-span" | "span" => {
                 config.max_bubble_span =
@@ -2548,7 +2564,7 @@ fn parse_crush_stage(
             }
             "polish-rounds" | "polish-iterations" => {
                 config.polish_iterations =
-                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+                    parse_round_count_engine_param(raw, &param.key, &param.value)?;
             }
             "polish-max-traversal-len" | "polish-max-traversal-length" => {
                 config.polish_max_traversal_len =
@@ -4649,7 +4665,7 @@ GFA engine shorthand:
             long,
             alias = "iterations",
             alias = "max-rounds",
-            value_parser = parse_usize_size,
+            value_parser = parse_round_count,
             default_value = "1"
         )]
         max_iterations: usize,
@@ -4690,16 +4706,16 @@ GFA engine shorthand:
         #[clap(long, alias = "auto-allwave-max-travs", value_parser = parse_usize_size, default_value = "128")]
         auto_allwave_max_traversals: usize,
 
-        /// Small-tangle SPOA polish rounds after BiWFA in-memory induction; 0 disables
-        #[clap(long, alias = "polish-iterations", value_parser = parse_usize_size, default_value = "1")]
+        /// Small-tangle POASTA polish rounds after pairwise induction; use until-done to exhaust
+        #[clap(long, alias = "polish-iterations", value_parser = parse_round_count, default_value = "until-done")]
         polish_rounds: usize,
 
         /// Maximum traversal length for the small-tangle polish pass
-        #[clap(long, alias = "polish-max-traversal-length", value_parser = parse_usize_size, default_value = "2k")]
+        #[clap(long, alias = "polish-max-traversal-length", value_parser = parse_usize_size, default_value = "10k")]
         polish_max_traversal_len: usize,
 
         /// Maximum median traversal length for the small-tangle polish pass
-        #[clap(long, alias = "polish-max-median-traversal-length", value_parser = parse_usize_size, default_value = "256")]
+        #[clap(long, alias = "polish-max-median-traversal-length", value_parser = parse_usize_size, default_value = "1k")]
         polish_max_median_traversal_len: usize,
 
         /// Maximum total sequence across all traversals in one polish candidate
@@ -12550,7 +12566,7 @@ mod tests {
             "-d",
             "0",
             "-o",
-            "gfa:syng:crush,method=allwave,k-nearest=5,k-farthest=2,pair-trees=3,random-fraction=0.05,mash-k=17,seqwish-k=79,min-map-length=500,min-identity=0.97,max-pair-alignments=20k,max-paf-bytes=128m,max-round-score-growth=0.05,min-round-score-improvement=0.001",
+            "gfa:syng:crush,method=allwave,k-nearest=5,k-farthest=2,pair-trees=3,random-fraction=0.05,mash-k=17,seqwish-k=79,min-map-length=500,min-identity=0.97,max-pair-alignments=20k,max-paf-bytes=128m,max-rounds=until-done,polish-rounds=until-done,max-round-score-growth=0.05,min-round-score-improvement=0.001",
         ])
         .unwrap();
         match args {
@@ -12575,6 +12591,8 @@ mod tests {
                 assert!((crush.replacement_min_identity - 0.97).abs() < f64::EPSILON);
                 assert_eq!(crush.max_pair_alignments, 20_000);
                 assert_eq!(crush.max_replacement_paf_bytes, 128_000_000);
+                assert_eq!(crush.max_iterations, usize::MAX);
+                assert_eq!(crush.polish_iterations, usize::MAX);
                 assert!((crush.max_round_score_growth - 0.05).abs() < f64::EPSILON);
                 assert!((crush.min_round_score_improvement - 0.001).abs() < f64::EPSILON);
             }
@@ -12808,8 +12826,9 @@ mod tests {
                 assert_eq!(crush.auto_allwave_max_total_sequence, 200_000);
                 assert_eq!(crush.auto_allwave_max_traversals, 128);
                 assert_eq!(crush.max_iterations, 1);
-                assert_eq!(crush.polish_iterations, 1);
-                assert_eq!(crush.polish_max_median_traversal_len, 256);
+                assert_eq!(crush.polish_iterations, usize::MAX);
+                assert_eq!(crush.polish_max_traversal_len, 10_000);
+                assert_eq!(crush.polish_max_median_traversal_len, 1_000);
                 assert_eq!(crush.pair_tree_count, 1);
                 assert_eq!(crush.replacement_seqwish_min_match_len, 311);
                 assert_eq!(crush.replacement_min_map_length, 0);

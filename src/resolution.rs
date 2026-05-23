@@ -4,7 +4,7 @@
 //! resolution: detect path-supported bubbles in a blunt GFA, replace bounded
 //! single-entry/single-exit bubbles with exact path-preserving local graph
 //! induction, and repeat until no eligible unseen bubbles remain. The default
-//! resolver uses AllWave/seqwish followed by a small SPOA polish. It
+//! resolver uses AllWave/seqwish followed by a bounded POASTA polish. It
 //! intentionally avoids lossy representative collapse and coordinate sidecars;
 //! emitted paths are the coordinate system.
 
@@ -65,7 +65,7 @@ pub struct ResolutionConfig {
     pub max_total_sequence: usize,
     /// Maximum number of path-supported traversals through one direct replacement.
     pub max_traversals: usize,
-    /// One-pass small-tangle polish rounds after BiWFA in-memory induction.
+    /// Small-tangle POASTA polish rounds after pairwise graph induction.
     ///
     /// This pass is deliberately scale-limited: small STR / indel tangles are
     /// implementation artifacts, while larger VNTR / recombination structures
@@ -189,7 +189,8 @@ impl ResolutionMethod {
     }
 }
 
-/// One frontier round is the fast default. More rounds are explicit polishing.
+/// One parent frontier round is the fast default. Each selected parent
+/// replacement is internally polished until no bounded POASTA candidates remain.
 pub const DEFAULT_MAX_ITERATIONS: usize = 1;
 /// By default, do not cap by rooted path span.
 ///
@@ -207,9 +208,9 @@ pub const DEFAULT_MAX_TRAVERSALS: usize = 10_000;
 pub const DEFAULT_AUTO_SPOA_MAX_TRAVERSAL_LEN: usize = 2_000;
 pub const DEFAULT_AUTO_ALLWAVE_MAX_TOTAL_SEQUENCE: usize = 200_000;
 pub const DEFAULT_AUTO_ALLWAVE_MAX_TRAVERSALS: usize = 128;
-pub const DEFAULT_POLISH_ITERATIONS: usize = 1;
-pub const DEFAULT_POLISH_MAX_TRAVERSAL_LEN: usize = 2_000;
-pub const DEFAULT_POLISH_MAX_MEDIAN_TRAVERSAL_LEN: usize = 256;
+pub const DEFAULT_POLISH_ITERATIONS: usize = usize::MAX;
+pub const DEFAULT_POLISH_MAX_TRAVERSAL_LEN: usize = 10_000;
+pub const DEFAULT_POLISH_MAX_MEDIAN_TRAVERSAL_LEN: usize = 1_000;
 pub const DEFAULT_POLISH_MAX_TOTAL_SEQUENCE: usize = 1_000_000;
 pub const DEFAULT_POLISH_MAX_TRAVERSALS: usize = 10_000;
 pub const DEFAULT_PAIR_K_NEAREST: usize = 3;
@@ -842,9 +843,9 @@ fn candidate_selection_priority(candidate: &BubbleCandidate, config: &Resolution
         return 0;
     }
     match candidate_selection_method(candidate.traversal_stats, config) {
-        ResolutionMethod::Poa | ResolutionMethod::Poasta | ResolutionMethod::StarBiwfa => 0,
+        ResolutionMethod::Allwave | ResolutionMethod::Sweepga => 0,
+        ResolutionMethod::Poa | ResolutionMethod::Poasta | ResolutionMethod::StarBiwfa => 1,
         ResolutionMethod::Auto => unreachable!("auto candidate method should be resolved"),
-        ResolutionMethod::Allwave | ResolutionMethod::Sweepga => 1,
     }
 }
 
@@ -1622,7 +1623,7 @@ fn auto_replacement_method(
 ) -> ResolutionMethod {
     // Keep very small local tangles on the deterministic SPOA path. Larger or
     // high-copy bubbles need sparse many-to-many pair induction first; the
-    // bounded SPOA polish in `finalize_pairwise_induced_replacement` then
+    // bounded POASTA polish in `finalize_pairwise_induced_replacement` then
     // resolves the residual small tangles inside the replacement graph.
     candidate_selection_method(candidate.traversal_stats, config)
 }
@@ -2338,7 +2339,7 @@ fn polish_replacement_gfa(gfa: &str, config: &ResolutionConfig) -> io::Result<St
     }
     let polish_config = ResolutionConfig {
         max_iterations: config.polish_iterations,
-        method: ResolutionMethod::Poa,
+        method: ResolutionMethod::Poasta,
         max_bubble_span: 0,
         max_traversal_len: config.polish_max_traversal_len,
         max_median_traversal_len: config.polish_max_median_traversal_len,
@@ -3303,7 +3304,7 @@ P\tins\t1+,2+,3+\t*
     }
 
     #[test]
-    fn auto_prioritizes_direct_candidates_before_pairwise_candidates() {
+    fn auto_prioritizes_pairwise_parent_candidates_before_direct_candidates() {
         let config = ResolutionConfig::default();
         let mut candidate = BubbleCandidate {
             ranges: Vec::new(),
@@ -3319,9 +3320,9 @@ P\tins\t1+,2+,3+\t*
                 ..TraversalStats::default()
             },
         };
-        assert_eq!(candidate_selection_priority(&candidate, &config), 0);
-        candidate.traversal_stats.max_len = config.auto_spoa_max_traversal_len + 1;
         assert_eq!(candidate_selection_priority(&candidate, &config), 1);
+        candidate.traversal_stats.max_len = config.auto_spoa_max_traversal_len + 1;
+        assert_eq!(candidate_selection_priority(&candidate, &config), 0);
 
         let explicit_sweepga = ResolutionConfig {
             method: ResolutionMethod::Sweepga,
