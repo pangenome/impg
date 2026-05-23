@@ -2569,6 +2569,24 @@ fn parse_crush_stage(
                 config.replacement_seqwish_min_match_len =
                     parse_usize_size_engine_param(raw, &param.key, &param.value)? as u64;
             }
+            "replacement-min-map-length"
+            | "replacement-min-map-len"
+            | "min-map-length"
+            | "min-map-len" => {
+                config.replacement_min_map_length =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)? as u64;
+            }
+            "replacement-min-identity" | "min-identity" | "min-id" => {
+                config.replacement_min_identity = param.value.parse().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': {}='{}' is not a valid identity fraction",
+                            raw, param.key, param.value
+                        ),
+                    )
+                })?;
+            }
             "sweepga-aligner" | "aligner" => {
                 config.sweepga_aligner = param.value.clone();
             }
@@ -2723,6 +2741,15 @@ fn parse_crush_stage(
             io::ErrorKind::InvalidInput,
             format!(
                 "Invalid --gfa-engine '{}': seqwish minimum match length must be > 0",
+                raw
+            ),
+        ));
+    }
+    if !(0.0..=1.0).contains(&config.replacement_min_identity) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': replacement minimum identity must be between 0 and 1",
                 raw
             ),
         ));
@@ -4667,6 +4694,25 @@ GFA engine shorthand:
             default_value = "311"
         )]
         replacement_seqwish_min_match_len: usize,
+
+        /// Minimum pairwise mapping length kept before replacement seqwish induction; 0 follows --seqwish-k
+        #[clap(
+            long = "replacement-min-map-length",
+            alias = "replacement-min-map-len",
+            alias = "min-map-length",
+            value_parser = parse_usize_size,
+            default_value = "0"
+        )]
+        replacement_min_map_length: usize,
+
+        /// Minimum pairwise mapping identity kept before replacement seqwish induction; 0 disables
+        #[clap(
+            long = "replacement-min-identity",
+            alias = "min-identity",
+            value_parser,
+            default_value = "0.0"
+        )]
+        replacement_min_identity: f64,
 
         /// SweepGA aligner backend for --method sweepga: fastga or wfmash
         #[clap(long, value_parser, default_value = "fastga")]
@@ -7560,6 +7606,8 @@ fn run() -> io::Result<()> {
             random_fraction,
             mash_k,
             replacement_seqwish_min_match_len,
+            replacement_min_map_length,
+            replacement_min_identity,
             sweepga_aligner,
             sweepga_kmer_frequency,
             sweepga_min_aln_length,
@@ -7628,6 +7676,12 @@ fn run() -> io::Result<()> {
                     "--seqwish-k/--seqwish-min-match-len must be > 0",
                 ));
             }
+            if !(0.0..=1.0).contains(&replacement_min_identity) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--replacement-min-identity/--min-identity must be between 0 and 1",
+                ));
+            }
             if max_round_score_growth < 0.0 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -7671,6 +7725,8 @@ fn run() -> io::Result<()> {
                 pair_random_fraction: random_fraction,
                 pair_mash_k: mash_k,
                 replacement_seqwish_min_match_len: replacement_seqwish_min_match_len as u64,
+                replacement_min_map_length: replacement_min_map_length as u64,
+                replacement_min_identity,
                 sweepga_aligner,
                 sweepga_kmer_frequency,
                 sweepga_min_aln_length: sweepga_min_aln_length as u64,
@@ -12400,7 +12456,7 @@ mod tests {
             "-d",
             "0",
             "-o",
-            "gfa:syng:crush,method=allwave,k-nearest=5,k-farthest=2,pair-trees=3,random-fraction=0.05,mash-k=17,seqwish-k=79,max-pair-alignments=20k,max-paf-bytes=128m,max-round-score-growth=0.05,min-round-score-improvement=0.001",
+            "gfa:syng:crush,method=allwave,k-nearest=5,k-farthest=2,pair-trees=3,random-fraction=0.05,mash-k=17,seqwish-k=79,min-map-length=500,min-identity=0.97,max-pair-alignments=20k,max-paf-bytes=128m,max-round-score-growth=0.05,min-round-score-improvement=0.001",
         ])
         .unwrap();
         match args {
@@ -12421,6 +12477,8 @@ mod tests {
                 assert!((crush.pair_random_fraction - 0.05).abs() < f64::EPSILON);
                 assert_eq!(crush.pair_mash_k, 17);
                 assert_eq!(crush.replacement_seqwish_min_match_len, 79);
+                assert_eq!(crush.replacement_min_map_length, 500);
+                assert!((crush.replacement_min_identity - 0.97).abs() < f64::EPSILON);
                 assert_eq!(crush.max_pair_alignments, 20_000);
                 assert_eq!(crush.max_replacement_paf_bytes, 128_000_000);
                 assert!((crush.max_round_score_growth - 0.05).abs() < f64::EPSILON);
@@ -12659,6 +12717,8 @@ mod tests {
                 assert_eq!(crush.polish_max_median_traversal_len, 256);
                 assert_eq!(crush.pair_tree_count, 1);
                 assert_eq!(crush.replacement_seqwish_min_match_len, 311);
+                assert_eq!(crush.replacement_min_map_length, 0);
+                assert_eq!(crush.replacement_min_identity, 0.0);
                 assert_eq!(crush.max_pair_alignments, 10_000);
                 assert_eq!(crush.max_replacement_paf_bytes, 64 * 1024 * 1024);
                 assert!((crush.max_round_score_growth - 0.02).abs() < f64::EPSILON);

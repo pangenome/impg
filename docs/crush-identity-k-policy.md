@@ -62,6 +62,8 @@ target-anchors=3
 repeat-guard-k=311
 min-seqwish-k=31
 max-seqwish-k=511
+min-map-length=0
+min-identity=0.0
 ```
 
 The explicit integer remains exact and reproducible:
@@ -74,6 +76,13 @@ When `seqwish-k=auto`, crush should compute the value per candidate from the
 candidate traversal statistics and a global identity estimate. The first
 implementation can take `identity` explicitly. Later, impg can estimate it from
 a sample of accepted pairwise alignments and log the estimate once per run.
+
+The pairwise mapping filter should track the same scale. In current CLI terms,
+`min-map-length=0` means "use the resolved `seqwish-k`", while an explicit
+positive value overrides it. `min-identity` is independent: it filters
+inappropriate chains before seqwish sees them, which is important when large
+parent bubbles contain repetitive local homology that is chainable but not
+useful for local graph induction.
 
 ## Logging
 

@@ -95,6 +95,17 @@ pub struct ResolutionConfig {
     /// off-diagonal matches while still allowing the pairwise alignment engine
     /// to align full traversal sequences end-to-end.
     pub replacement_seqwish_min_match_len: u64,
+    /// Minimum pairwise mapping length kept before replacement seqwish induction.
+    ///
+    /// A value of 0 follows `replacement_seqwish_min_match_len`, so the PAF
+    /// filter and seqwish transitive closure agree on the minimum scale of
+    /// evidence allowed to glue sequence together.
+    pub replacement_min_map_length: u64,
+    /// Minimum pairwise mapping identity kept before replacement seqwish induction.
+    ///
+    /// A value of 0 disables this filter. This applies to both AllWave-produced
+    /// PAF and SweepGA-produced PAF before they are passed into seqwish.
+    pub replacement_min_identity: f64,
     /// SweepGA aligner backend used by `method=sweepga`.
     pub sweepga_aligner: String,
     /// SweepGA/FastGA k-mer frequency.
@@ -203,6 +214,8 @@ pub const DEFAULT_PAIR_TREE_COUNT: usize = 1;
 pub const DEFAULT_PAIR_RANDOM_FRACTION: f64 = 0.01;
 pub const DEFAULT_PAIR_MASH_K: usize = 15;
 pub const DEFAULT_REPLACEMENT_SEQWISH_MIN_MATCH_LEN: u64 = 311;
+pub const DEFAULT_REPLACEMENT_MIN_MAP_LENGTH: u64 = 0;
+pub const DEFAULT_REPLACEMENT_MIN_IDENTITY: f64 = 0.0;
 pub const DEFAULT_SWEEPGA_KMER_FREQUENCY: usize = 10;
 pub const DEFAULT_SWEEPGA_MIN_ALN_LENGTH: u64 = 0;
 pub const DEFAULT_MAX_PAIR_ALIGNMENTS: usize = 10_000;
@@ -235,6 +248,8 @@ impl Default for ResolutionConfig {
             pair_random_fraction: DEFAULT_PAIR_RANDOM_FRACTION,
             pair_mash_k: DEFAULT_PAIR_MASH_K,
             replacement_seqwish_min_match_len: DEFAULT_REPLACEMENT_SEQWISH_MIN_MATCH_LEN,
+            replacement_min_map_length: DEFAULT_REPLACEMENT_MIN_MAP_LENGTH,
+            replacement_min_identity: DEFAULT_REPLACEMENT_MIN_IDENTITY,
             sweepga_aligner: "fastga".to_string(),
             sweepga_kmer_frequency: DEFAULT_SWEEPGA_KMER_FREQUENCY,
             sweepga_min_aln_length: DEFAULT_SWEEPGA_MIN_ALN_LENGTH,
@@ -1604,11 +1619,18 @@ fn candidate_named_sequences(candidate: &BubbleCandidate) -> (Vec<String>, Vec<(
 fn seqwish_replacement_config(
     config: &ResolutionConfig,
 ) -> crate::commands::graph::GraphBuildConfig {
+    let min_map_length = if config.replacement_min_map_length == 0 {
+        config.replacement_seqwish_min_match_len
+    } else {
+        config.replacement_min_map_length
+    };
     crate::commands::graph::GraphBuildConfig {
         num_threads: rayon::current_num_threads().max(1),
         show_progress: false,
         min_aln_length: 0,
         min_match_len: config.replacement_seqwish_min_match_len,
+        min_map_length,
+        min_identity: config.replacement_min_identity,
         input_paf: None,
         no_filter: config.sweepga_no_filter,
         num_mappings: "1:1".to_string(),
@@ -3411,6 +3433,25 @@ P\talt\t1+,3+,4+\t*
         assert!(replacement_method_needs_quality_guard(
             ResolutionMethod::Sweepga
         ));
+    }
+
+    #[test]
+    fn replacement_seqwish_filter_defaults_to_seqwish_k_scale() {
+        let mut config = ResolutionConfig {
+            replacement_seqwish_min_match_len: 311,
+            replacement_min_map_length: 0,
+            replacement_min_identity: 0.97,
+            ..ResolutionConfig::default()
+        };
+        let graph_config = seqwish_replacement_config(&config);
+        assert_eq!(graph_config.min_match_len, 311);
+        assert_eq!(graph_config.min_map_length, 311);
+        assert!((graph_config.min_identity - 0.97).abs() < f64::EPSILON);
+
+        config.replacement_min_map_length = 500;
+        let graph_config = seqwish_replacement_config(&config);
+        assert_eq!(graph_config.min_match_len, 311);
+        assert_eq!(graph_config.min_map_length, 500);
     }
 
     #[test]

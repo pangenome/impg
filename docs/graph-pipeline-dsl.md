@@ -195,6 +195,14 @@ public API does not give impg a stable exact numeric score contract for
 independently asserting long-gap two-piece affine costs; current tests validate
 structural wiring plus exact path preservation.
 
+Pairwise-induced replacements are filtered before seqwish induction. `seqwish-k`
+sets the minimum exact-match scale used by seqwish transitive closure, and
+`min-map-length` / `replacement-min-map-length` sets the minimum PAF mapping
+length kept by the SweepGA filter. A value of `min-map-length=0` follows
+`seqwish-k`, so the default graph-induction mapping scale is also `311`.
+`min-identity` / `replacement-min-identity` can require a minimum mapping
+identity before a pairwise alignment is allowed to seed local graph induction.
+
 `method=biwfa` is the coarse condenser path. It aligns every selected POVU
 bubble traversal end-to-end against the longest traversal with BiWFA, induces a
 path-preserving in-memory column graph from those root alignments, then runs one
