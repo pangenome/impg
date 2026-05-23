@@ -2378,6 +2378,14 @@ fn parse_syng_mask_stage(
                 let value = parse_u32_engine_param(raw, &param.key, &param.value)?;
                 mask.max_occurrences = (value > 0).then_some(value);
             }
+            "min-shared-run"
+            | "min-run"
+            | "run"
+            | "shared-run"
+            | "mask-min-shared-run"
+            | "mask-min-run" => {
+                mask.min_shared_run = parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
             "repeat-minor"
             | "repeat-max-minor"
             | "local-repeat-minor"
@@ -2436,6 +2444,15 @@ fn parse_syng_mask_stage(
             io::ErrorKind::InvalidInput,
             format!(
                 "Invalid --gfa-engine '{}': syng local repeat dominance must be finite and in [0, 1]",
+                raw
+            ),
+        ));
+    }
+    if mask.min_shared_run == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': syng mask min-shared-run must be > 0",
                 raw
             ),
         ));
@@ -2882,6 +2899,14 @@ where
                     let value = parse_u32_engine_param(raw, &param.key, &param.value)?;
                     syng_gfa_frequency_mask.max_occurrences = (value > 0).then_some(value);
                 }
+                "mask-min-shared-run"
+                | "mask-min-run"
+                | "min-shared-run"
+                | "min-run"
+                | "shared-run" => {
+                    syng_gfa_frequency_mask.min_shared_run =
+                        parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+                }
                 "mask-repeat-minor"
                 | "mask-repeat-max-minor"
                 | "mask-local-repeat-minor"
@@ -2967,6 +2992,15 @@ where
                 io::ErrorKind::InvalidInput,
                 format!(
                     "Invalid --gfa-engine '{}': syng local repeat dominance must be finite and in [0, 1]",
+                    raw
+                ),
+            ));
+        }
+        if syng_gfa_frequency_mask.min_shared_run == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Invalid --gfa-engine '{}': syng mask min-shared-run must be > 0",
                     raw
                 ),
             ));
@@ -12496,7 +12530,7 @@ mod tests {
             "-d",
             "0",
             "-o",
-            "gfa:syng:mask,top=0.001,max-occ=500:crush",
+            "gfa:syng:mask,top=0.001,max-occ=500,min-run=3:crush",
         ])
         .unwrap();
         match args {
@@ -12514,6 +12548,7 @@ mod tests {
                     SyngGfaFrequencyMask {
                         drop_top_fraction: 0.001,
                         max_occurrences: Some(500),
+                        min_shared_run: 3,
                         local_repeat_max_minor:
                             impg::commands::syng2gfa::DEFAULT_GFA_LOCAL_REPEAT_MAX_MINOR,
                         local_repeat_min_dominant_fraction:

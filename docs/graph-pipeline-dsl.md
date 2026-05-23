@@ -203,6 +203,13 @@ length kept by the SweepGA filter. A value of `min-map-length=0` follows
 `min-identity` / `replacement-min-identity` can require a minimum mapping
 identity before a pairwise alignment is allowed to seed local graph induction.
 
+Syng-native graph extraction has an earlier raw-layer mask before bluntification
+or crush. `gfa:syng:mask,min-run=3:crush` removes locally shared syncmer nodes
+that never appear in a shared run of at least three syncmer anchors in any
+selected path range. Removed syncmer nodes are bridged in cis using the source
+sequence, so isolated shared syncmers do not become graph glue while the path
+sequence is preserved.
+
 `method=biwfa` is the coarse condenser path. It aligns every selected POVU
 bubble traversal end-to-end against the longest traversal with BiWFA, induces a
 path-preserving in-memory column graph from those root alignments, then runs one

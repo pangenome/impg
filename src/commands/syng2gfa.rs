@@ -50,6 +50,7 @@ pub const DEFAULT_GFA_CUT_N_MIN_RUN: usize = 1;
 pub struct SyngGfaFrequencyMask {
     pub drop_top_fraction: f64,
     pub max_occurrences: Option<u32>,
+    pub min_shared_run: usize,
     pub local_repeat_max_minor: u32,
     pub local_repeat_min_dominant_fraction: f64,
     pub cut_n_gaps: bool,
@@ -61,6 +62,7 @@ impl SyngGfaFrequencyMask {
         Self {
             drop_top_fraction: 0.0,
             max_occurrences: None,
+            min_shared_run: 1,
             local_repeat_max_minor: 0,
             local_repeat_min_dominant_fraction: DEFAULT_GFA_LOCAL_REPEAT_MIN_DOMINANT_FRACTION,
             cut_n_gaps: false,
@@ -72,6 +74,7 @@ impl SyngGfaFrequencyMask {
         Self {
             drop_top_fraction: DEFAULT_GFA_MASK_TOP_FRACTION,
             max_occurrences: None,
+            min_shared_run: 1,
             local_repeat_max_minor: DEFAULT_GFA_LOCAL_REPEAT_MAX_MINOR,
             local_repeat_min_dominant_fraction: DEFAULT_GFA_LOCAL_REPEAT_MIN_DOMINANT_FRACTION,
             cut_n_gaps: false,
@@ -82,12 +85,17 @@ impl SyngGfaFrequencyMask {
     pub fn enabled(self) -> bool {
         self.drop_top_fraction > 0.0
             || self.max_occurrences.is_some()
+            || self.min_shared_run > 1
             || self.local_repeat_max_minor > 0
             || self.cut_n_gaps
     }
 
     fn frequency_filter_enabled(self) -> bool {
         self.drop_top_fraction > 0.0 || self.max_occurrences.is_some()
+    }
+
+    fn shared_run_filter_enabled(self) -> bool {
+        self.min_shared_run > 1
     }
 }
 
@@ -958,6 +966,7 @@ fn collect_range_work(
     })
 }
 
+#[cfg(test)]
 fn collect_range_syncmer_nodes(
     index: &SyngIndex,
     range: &SyngGfaPathRange,
@@ -967,6 +976,75 @@ fn collect_range_syncmer_nodes(
         nodes.insert(node.unsigned_abs());
     }
     Ok(nodes)
+}
+
+fn collect_range_syncmer_walk_abs(
+    index: &SyngIndex,
+    range: &SyngGfaPathRange,
+) -> io::Result<Vec<u32>> {
+    Ok(index
+        .walk_path_range(range.path_idx, range.start, range.end)?
+        .into_iter()
+        .map(|(node, _)| node.unsigned_abs())
+        .collect())
+}
+
+fn weak_shared_run_syncmers(walks: &[Vec<u32>], min_shared_run: usize) -> FxHashSet<u32> {
+    if min_shared_run <= 1 || walks.is_empty() {
+        return FxHashSet::default();
+    }
+
+    let mut counts: FxHashMap<u32, u32> = FxHashMap::default();
+    for walk in walks {
+        for &node in walk {
+            *counts.entry(node).or_default() += 1;
+        }
+    }
+
+    let shared_nodes: FxHashSet<u32> = counts
+        .iter()
+        .filter_map(|(&node, &count)| (count > 1).then_some(node))
+        .collect();
+    if shared_nodes.is_empty() {
+        return FxHashSet::default();
+    }
+
+    let mut run_counts: FxHashMap<Vec<u32>, u32> = FxHashMap::default();
+    for walk in walks {
+        if walk.len() < min_shared_run {
+            continue;
+        }
+        for run in walk.windows(min_shared_run) {
+            let mut key = run.to_vec();
+            let rev: Vec<u32> = run.iter().rev().copied().collect();
+            if rev < key {
+                key = rev;
+            }
+            *run_counts.entry(key).or_default() += 1;
+        }
+    }
+
+    let mut strong_nodes = FxHashSet::default();
+    for walk in walks {
+        if walk.len() < min_shared_run {
+            continue;
+        }
+        for run in walk.windows(min_shared_run) {
+            let mut key = run.to_vec();
+            let rev: Vec<u32> = run.iter().rev().copied().collect();
+            if rev < key {
+                key = rev;
+            }
+            if run_counts.get(&key).copied().unwrap_or(0) > 1 {
+                strong_nodes.extend(run.iter().copied());
+            }
+        }
+    }
+
+    shared_nodes
+        .difference(&strong_nodes)
+        .copied()
+        .collect::<FxHashSet<_>>()
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -1458,28 +1536,51 @@ pub fn write_range_gfa<W: Write>(
     writeln!(writer, "H\tVN:Z:{}", version.header_tag())?;
 
     let syncmer_len_u64 = syncmer_len as u64;
-    let masked_syncmers = if frequency_mask.frequency_filter_enabled() {
+    let need_local_walks =
+        frequency_mask.frequency_filter_enabled() || frequency_mask.shared_run_filter_enabled();
+    let local_walks = if need_local_walks {
         let mask_collect_start = Instant::now();
-        let range_nodes: Vec<FxHashSet<u32>> = ranges
+        let walks: Vec<Vec<u32>> = ranges
             .par_iter()
-            .map(|range| collect_range_syncmer_nodes(index, range))
+            .map(|range| collect_range_syncmer_walk_abs(index, range))
             .collect::<io::Result<Vec<_>>>()?;
-        let all_local_syncmers =
-            range_nodes
-                .into_iter()
-                .fold(FxHashSet::default(), |mut acc, nodes| {
-                    acc.extend(nodes);
-                    acc
-                });
         info!(
-            "[syng2gfa] collected {} local syncmer node id(s) for raw-layer frequency filtering in {:.3}s using {} rayon threads",
-            all_local_syncmers.len(),
+            "[syng2gfa] collected {} local syncmer walk(s) for raw-layer masking in {:.3}s using {} rayon threads",
+            walks.len(),
             mask_collect_start.elapsed().as_secs_f64(),
             rayon::current_num_threads()
         );
-        frequency_masked_syncmers(index, &all_local_syncmers, frequency_mask)?
+        Some(walks)
+    } else {
+        None
+    };
+    let all_local_syncmers = local_walks
+        .as_ref()
+        .map(|walks| walks.iter().flatten().copied().collect::<FxHashSet<_>>());
+    let mut masked_syncmers = if frequency_mask.frequency_filter_enabled() {
+        frequency_masked_syncmers(
+            index,
+            all_local_syncmers.as_ref().expect("local syncmers"),
+            frequency_mask,
+        )?
     } else {
         FxHashSet::default()
+    };
+    if frequency_mask.shared_run_filter_enabled() {
+        let run_start = Instant::now();
+        let weak_runs = weak_shared_run_syncmers(
+            local_walks.as_ref().expect("local syncmer walks"),
+            frequency_mask.min_shared_run,
+        );
+        if !weak_runs.is_empty() {
+            info!(
+                "[syng2gfa] shared-run filtered {} local syncmer node(s) with no shared run of >= {} anchor(s) in {:.3}s",
+                weak_runs.len(),
+                frequency_mask.min_shared_run,
+                run_start.elapsed().as_secs_f64()
+            );
+            masked_syncmers.extend(weak_runs);
+        }
     };
 
     let collect_start = Instant::now();
@@ -2061,6 +2162,7 @@ P\tp\t1+,2+,3+\t3M,1M\n";
         let mask = SyngGfaFrequencyMask {
             drop_top_fraction: 0.5,
             max_occurrences: None,
+            min_shared_run: 1,
             local_repeat_max_minor: 0,
             local_repeat_min_dominant_fraction: DEFAULT_GFA_LOCAL_REPEAT_MIN_DOMINANT_FRACTION,
             cut_n_gaps: false,
@@ -2118,6 +2220,41 @@ P\tp\t1+,2+,3+\t3M,1M\n";
                 !path_step_ids.contains(&id),
                 "filtered syncmer {id} should not appear in P-line walks:\n{gfa}"
             );
+        }
+    }
+
+    #[test]
+    fn test_shared_run_filter_drops_only_nodes_without_supported_runs() {
+        let walks = vec![
+            vec![1, 2, 3, 10, 11, 12, 20],
+            vec![4, 2, 5, 10, 11, 12, 21],
+            vec![6, 3, 7, 30, 31],
+            vec![8, 9, 30, 31],
+        ];
+
+        let weak = weak_shared_run_syncmers(&walks, 2);
+        assert!(
+            weak.contains(&2),
+            "node 2 is shared only as an isolated singleton"
+        );
+        assert!(
+            weak.contains(&3),
+            "node 3 is shared only as an isolated singleton"
+        );
+        for node in [10, 11, 12, 30, 31] {
+            assert!(
+                !weak.contains(&node),
+                "node {node} appears inside a supported shared run"
+            );
+        }
+
+        let stricter = weak_shared_run_syncmers(&walks, 3);
+        assert!(
+            stricter.contains(&30) && stricter.contains(&31),
+            "run-of-two support should fail a run-of-three requirement"
+        );
+        for node in [10, 11, 12] {
+            assert!(!stricter.contains(&node));
         }
     }
 
