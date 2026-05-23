@@ -4851,6 +4851,14 @@ GFA engine shorthand:
         #[clap(long, action)]
         povu: bool,
 
+        /// Write a GFA copy with one dominant traversal P-line per POVU flubble
+        #[clap(
+            long = "flubble-path-gfa",
+            alias = "povu-flubble-path-gfa",
+            value_parser
+        )]
+        flubble_path_gfa: Option<String>,
+
         /// Reference path/name hint for POVU. May be repeated.
         #[clap(short = 'r', long = "reference-name", alias = "ref", value_parser)]
         reference_names: Vec<String>,
@@ -7828,6 +7836,7 @@ fn run() -> io::Result<()> {
             format,
             top,
             povu,
+            flubble_path_gfa,
             reference_names,
             common,
         } => {
@@ -7857,6 +7866,24 @@ fn run() -> io::Result<()> {
                 let mut out = BufWriter::with_capacity(1024 * 1024, File::create(output_path)?);
                 out.write_all(text.as_bytes())?;
                 out.flush()?;
+            }
+            if let Some(flubble_path_gfa) = flubble_path_gfa {
+                let (annotated_gfa, stats) = impg::graph_report::gfa_with_dominant_flubble_paths(
+                    &gfa_text,
+                    &options.povu_reference_names,
+                )?;
+                let output_path = Path::new(&flubble_path_gfa);
+                ensure_parent_dir(output_path)?;
+                let mut out = BufWriter::with_capacity(1024 * 1024, File::create(output_path)?);
+                out.write_all(annotated_gfa.as_bytes())?;
+                out.flush()?;
+                info!(
+                    "Wrote dominant flubble traversal GFA {} ({} site(s), {} path(s) added, {} without traversal)",
+                    flubble_path_gfa,
+                    stats.sites,
+                    stats.paths_added,
+                    stats.sites_without_traversal
+                );
             }
         }
         Args::Render {
@@ -12078,6 +12105,8 @@ mod tests {
             "--format",
             "json",
             "--povu",
+            "--flubble-path-gfa",
+            "annotated.gfa",
             "-r",
             "ref",
         ])
@@ -12087,12 +12116,14 @@ mod tests {
                 gfa,
                 format,
                 povu,
+                flubble_path_gfa,
                 reference_names,
                 ..
             } => {
                 assert_eq!(gfa, "x.gfa");
                 assert_eq!(format, "json");
                 assert!(povu);
+                assert_eq!(flubble_path_gfa.as_deref(), Some("annotated.gfa"));
                 assert_eq!(reference_names, vec!["ref"]);
             }
             _ => panic!("expected graph-report command"),
