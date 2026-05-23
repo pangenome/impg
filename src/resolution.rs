@@ -241,7 +241,7 @@ impl Default for ResolutionConfig {
             max_round_score_growth: DEFAULT_MAX_ROUND_SCORE_GROWTH,
             min_round_score_improvement: DEFAULT_MIN_ROUND_SCORE_IMPROVEMENT,
             disable_round_quality_check: false,
-            sweepga_no_filter: true,
+            sweepga_no_filter: false,
             sweepga_sparse_pairs: false,
             scoring_params: (1, 4, 6, 2, 26, 1),
         }
@@ -1485,15 +1485,17 @@ fn candidate_named_sequences(candidate: &BubbleCandidate) -> (Vec<String>, Vec<(
 }
 
 fn seqwish_replacement_config(
-    _config: &ResolutionConfig,
+    config: &ResolutionConfig,
 ) -> crate::commands::graph::GraphBuildConfig {
     crate::commands::graph::GraphBuildConfig {
         num_threads: rayon::current_num_threads().max(1),
         show_progress: false,
         min_aln_length: 0,
-        min_match_len: _config.replacement_seqwish_min_match_len,
+        min_match_len: config.replacement_seqwish_min_match_len,
         input_paf: None,
-        no_filter: true,
+        no_filter: config.sweepga_no_filter,
+        num_mappings: "1:1".to_string(),
+        scaffold_filter: "1:1".to_string(),
         sparsify: sweepga::knn_graph::SparsificationStrategy::None,
         ..crate::commands::graph::GraphBuildConfig::default()
     }
@@ -1729,7 +1731,7 @@ fn build_sweepga_seqwish_replacement(
             num_threads: rayon::current_num_threads().max(1),
             kmer_frequency: config.sweepga_kmer_frequency,
             min_aln_length: config.sweepga_min_aln_length,
-            no_filter: config.sweepga_no_filter,
+            no_filter: true,
             sparsify: if sparse_pairs {
                 sweepga::knn_graph::SparsificationStrategy::TreeSampling(
                     config.pair_k_nearest,

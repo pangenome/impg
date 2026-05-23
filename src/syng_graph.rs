@@ -422,6 +422,125 @@ pub fn anchor_seeded_biwfa_paf_strand(
     ))
 }
 
+/// Use SweepGA's scaffold-aware plane sweep to turn raw shared syncmer
+/// positions for one sequence pair into supported colinear anchor chains.
+///
+/// The anchors are exact PAF-style records in the oriented pair coordinate
+/// system. SweepGA builds scaffold chains from those records, filters the
+/// scaffold chains with the scaffold plane sweep, then returns the member
+/// records of the scaffold chains that survived. We keep all returned scaffold
+/// members, not just the largest inner chain.
+fn plane_sweep_pair_syncmer_anchors(
+    a_name: &str,
+    b_name: &str,
+    anchors: &[(usize, usize)],
+    syncmer_len: usize,
+) -> Vec<(usize, usize)> {
+    if anchors.is_empty() || syncmer_len == 0 {
+        return Vec::new();
+    }
+
+    use std::collections::BTreeMap;
+    use sweepga::mapping::ChainStatus;
+    use sweepga::paf_filter::{FilterConfig, FilterMode, PafFilter, RecordMeta, ScoringFunction};
+
+    let syncmer_len_u64 = syncmer_len as u64;
+    let mut sorted = anchors.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+
+    let records: Vec<RecordMeta> = sorted
+        .iter()
+        .enumerate()
+        .map(|(rank, &(ap, bp))| RecordMeta {
+            rank,
+            query_name: a_name.to_string(),
+            target_name: b_name.to_string(),
+            query_start: ap as u64,
+            query_end: ap as u64 + syncmer_len_u64,
+            target_start: bp as u64,
+            target_end: bp as u64 + syncmer_len_u64,
+            block_length: syncmer_len_u64,
+            identity: 1.0,
+            matches: syncmer_len_u64,
+            alignment_length: syncmer_len_u64,
+            strand: '+',
+            chain_id: None,
+            chain_status: ChainStatus::Unassigned,
+            discard: false,
+            overlapped: false,
+        })
+        .collect();
+
+    let filter_config = FilterConfig {
+        chain_gap: 0,
+        min_block_length: syncmer_len_u64,
+        mapping_filter_mode: FilterMode::ManyToMany,
+        mapping_max_per_query: None,
+        mapping_max_per_target: None,
+        plane_sweep_secondaries: 0,
+        scaffold_filter_mode: FilterMode::OneToOne,
+        scaffold_max_per_query: Some(1),
+        scaffold_max_per_target: Some(1),
+        overlap_threshold: 0.95,
+        sparsity: 1.0,
+        no_merge: true,
+        scaffold_gap: 50_000,
+        min_scaffold_length: syncmer_len_u64.saturating_mul(5),
+        scaffold_overlap_threshold: 0.5,
+        scaffold_max_deviation: syncmer_len_u64.saturating_mul(10),
+        prefix_delimiter: '#',
+        skip_prefix: true,
+        scoring_function: ScoringFunction::LogLengthIdentity,
+        min_identity: 0.0,
+        min_scaffold_identity: 0.0,
+    };
+
+    let passing = match PafFilter::new(filter_config)
+        .with_keep_self(true)
+        .with_scaffolds_only(true)
+        .apply_filters(records)
+    {
+        Ok(passing) => passing,
+        Err(err) => {
+            log::debug!("syng_graph: SweepGA anchor plane sweep failed: {err}");
+            return Vec::new();
+        }
+    };
+
+    let mut by_chain: BTreeMap<String, Vec<(usize, usize)>> = BTreeMap::new();
+    for (rank, meta) in passing {
+        let Some(&anchor) = sorted.get(rank) else {
+            continue;
+        };
+        if meta.chain_status == ChainStatus::Scaffold {
+            let chain_id = meta.chain_id.unwrap_or_else(|| format!("rank_{rank}"));
+            by_chain.entry(chain_id).or_default().push(anchor);
+        }
+    }
+
+    let mut anchors = Vec::new();
+    for (_chain_id, mut chain) in by_chain {
+        chain.sort_unstable();
+        chain.dedup();
+        anchors.extend(chain);
+    }
+    anchors.sort_unstable();
+    anchors.dedup();
+
+    let mut out = Vec::with_capacity(anchors.len());
+    let mut last_a_end = 0usize;
+    let mut last_b_end = 0usize;
+    for (ap, bp) in anchors {
+        if out.is_empty() || (ap >= last_a_end && bp >= last_b_end) {
+            last_a_end = ap.saturating_add(syncmer_len);
+            last_b_end = bp.saturating_add(syncmer_len);
+            out.push((ap, bp));
+        }
+    }
+    out
+}
+
 /// Build a GFA from a set of named sequences using pairwise BiWFA for
 /// alignments, feeding the resulting PAF through the existing seqwish
 /// induction pipeline in `crate::commands::graph::induce_graph_from_alignment`.
@@ -487,6 +606,14 @@ pub fn build_gfa_from_paf_and_sequences(
     paf_file.write_all(paf_content.as_bytes())?;
     paf_file.flush()?;
 
+    let total_bases = seqs.iter().map(|(_, seq)| seq.len() as u64).sum::<u64>();
+    let avg_seq_len = if seqs.is_empty() {
+        0
+    } else {
+        total_bases / seqs.len() as u64
+    };
+    let filtered_paf = crate::commands::graph::filter_generated_paf(paf_file, avg_seq_len, config)?;
+
     // Hand off to the shared seqwish induction pipeline.
     let num_seqs = seqs.len();
     let num_genomes = seqs
@@ -496,7 +623,7 @@ pub fn build_gfa_from_paf_and_sequences(
         .len();
     let aln_result = crate::commands::graph::AlignmentResult {
         combined_fasta,
-        filtered_paf: paf_file,
+        filtered_paf,
         num_sequences: num_seqs,
         num_genomes,
     };
@@ -596,6 +723,7 @@ pub fn build_paf_anchor_seeded(
     // Diagnostic counters — emitted at end.
     let counter_anchor = std::sync::atomic::AtomicUsize::new(0);
     let counter_fallback = std::sync::atomic::AtomicUsize::new(0);
+    let counter_skipped = std::sync::atomic::AtomicUsize::new(0);
 
     let t_pairs = std::time::Instant::now();
     // Pair selection uses mash distance from raw sequences. We tested
@@ -680,16 +808,13 @@ pub fn build_paf_anchor_seeded(
                             pair_anchors.push((a_local as usize, b_local as usize));
                         }
                     }
-                    pair_anchors.sort();
-                    let mut colinear: Vec<(usize, usize)> = Vec::with_capacity(pair_anchors.len());
-                    let mut last_b = 0i64;
-                    for (ap, bp) in pair_anchors {
-                        if bp as i64 >= last_b {
-                            colinear.push((ap, bp));
-                            last_b = (bp + syncmer_len) as i64;
-                        }
-                    }
-                    if !colinear.is_empty() {
+                    let filtered_anchors = plane_sweep_pair_syncmer_anchors(
+                        a_name,
+                        b_name,
+                        &pair_anchors,
+                        syncmer_len,
+                    );
+                    if !filtered_anchors.is_empty() {
                         // For mixed-strand pairs, rev-comp B before BiWFA
                         // and emit PAF strand '-'. Same-strand pairs use
                         // forward B and strand '+'.
@@ -705,13 +830,16 @@ pub fn build_paf_anchor_seeded(
                             a_seq,
                             b_name,
                             b_oriented,
-                            &colinear,
+                            &filtered_anchors,
                             syncmer_len,
                             pair_strand_relative,
                         ) {
                             counter_anchor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             return Some(line);
                         }
+                    } else if !pair_anchors.is_empty() {
+                        counter_skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        return None;
                     }
                 }
             }
@@ -725,13 +853,14 @@ pub fn build_paf_anchor_seeded(
     let dt_total = t_total.elapsed();
     let anchor_used = counter_anchor.load(std::sync::atomic::Ordering::Relaxed);
     let fallback_used = counter_fallback.load(std::sync::atomic::Ordering::Relaxed);
+    let skipped = counter_skipped.load(std::sync::atomic::Ordering::Relaxed);
     log::info!(
-        "syng_graph: PAF total {:.2}s = query {:.2}s + pair-select {:.2}s + align {:.2}s | anchor-seeded {} / fallback {} pairs ({} members, {} chains)",
+        "syng_graph: PAF total {:.2}s = query {:.2}s + pair-select {:.2}s + align {:.2}s | anchor-seeded {} / fallback {} / skipped {} pairs ({} members, {} chains)",
         dt_total.as_secs_f64(),
         dt_query.as_secs_f64(),
         dt_pairs.as_secs_f64(),
         dt_align.as_secs_f64(),
-        anchor_used, fallback_used, members.len(), chains.len(),
+        anchor_used, fallback_used, skipped, members.len(), chains.len(),
     );
 
     lines.concat()
@@ -872,6 +1001,43 @@ mod tests {
         let b = b"ACGTACGTACGT";
         let anchors = vec![(4, 8), (8, 4)]; // b_pos goes backward
         assert!(anchor_seeded_biwfa_paf("q", a, "t", b, &anchors, 2).is_none());
+    }
+
+    #[test]
+    fn pair_anchor_plane_sweep_keeps_supported_diagonal() {
+        let mut anchors: Vec<(usize, usize)> = (0..6).map(|i| (i * 200, i * 200)).collect();
+        anchors.push((1200, 100_000));
+
+        let filtered = plane_sweep_pair_syncmer_anchors("q", "t", &anchors, 100);
+
+        let expected: Vec<(usize, usize)> = (0..6).map(|i| (i * 200, i * 200)).collect();
+        assert_eq!(filtered, expected);
+    }
+
+    #[test]
+    fn pair_anchor_plane_sweep_keeps_indel_shifted_chain() {
+        let anchors = vec![
+            (0, 0),
+            (200, 200),
+            (400, 430),
+            (600, 630),
+            (800, 830),
+            (1_000, 1_030),
+        ];
+
+        let filtered = plane_sweep_pair_syncmer_anchors("q", "t", &anchors, 100);
+
+        assert_eq!(filtered, anchors);
+    }
+
+    #[test]
+    fn pair_anchor_plane_sweep_keeps_multiple_scaffold_chains() {
+        let mut anchors: Vec<(usize, usize)> = (0..5).map(|i| (i * 200, i * 200)).collect();
+        anchors.extend((0..5).map(|i| (100_000 + i * 200, 100_000 + i * 200)));
+
+        let filtered = plane_sweep_pair_syncmer_anchors("q", "t", &anchors, 100);
+
+        assert_eq!(filtered, anchors);
     }
 
     #[test]

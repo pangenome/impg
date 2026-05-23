@@ -3219,21 +3219,15 @@ impl EngineCliOpts {
             GfaEngine::Seqwish | GfaEngine::Pggb => {}
             GfaEngine::SyngNative => {
                 // Syng-native will generate its own alignments internally
-                // from syncmer anchors + BiWFA; the external-aligner knobs
-                // don't apply. Sparsification is driven by syng anchor
-                // density and sweepga::knn_graph, not --sparsify.
+                // from syncmer anchors + BiWFA. Sparsification is driven by
+                // syng anchor density and sweepga::knn_graph, not --sparsify.
+                // The generated PAF still flows through the shared SweepGA
+                // filter unless --no-filter is supplied.
                 if self.aln.sw.sparsify != SparsificationStrategy::None {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         "--sparsify controls external-aligner pair selection; \
                          --gfa-engine syng-native selects pairs from syng anchor counts",
-                    ));
-                }
-                if self.aln.sw.no_filter {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "--no-filter disables the post-alignment PAF filter; \
-                         --gfa-engine syng-native has no external filter step",
                     ));
                 }
             }
@@ -4723,7 +4717,7 @@ GFA engine shorthand:
         #[clap(
             long,
             value_parser = clap::value_parser!(bool),
-            default_value_t = true,
+            default_value_t = false,
             default_missing_value = "true",
             num_args = 0..=1
         )]
@@ -12655,6 +12649,7 @@ mod tests {
                 assert!((crush.max_round_score_growth - 0.02).abs() < f64::EPSILON);
                 assert_eq!(crush.min_round_score_improvement, 0.0);
                 assert!(!crush.disable_round_quality_check);
+                assert!(!crush.sweepga_no_filter);
                 assert!(!crush.sweepga_sparse_pairs);
             }
             _ => panic!("expected query command"),
