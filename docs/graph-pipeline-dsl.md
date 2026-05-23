@@ -175,10 +175,19 @@ traverse it. `max-span` is optional and disabled by default; when set, it caps
 the span on the POVU root path, currently the first GFA path, so it is a rooted
 coordinate guard rather than the main runtime budget.
 
-`method=auto` uses direct global/end-to-end SPOA for bubbles whose longest
-traversal is at most `auto-spoa-max-len` (default `2k`) and for dense bubbles
-above the AllWave safety rails. Remaining bounded bubbles use the AllWave /
-seqwish path, followed by the small SPOA polish pass. `method=poasta` is
+`method=auto` uses direct global/end-to-end SPOA only for bubbles whose longest
+traversal is at most `auto-spoa-max-len` (default `2k`) and whose traversal
+count / total sequence size are still inside the direct replacement budgets.
+Short but very high-copy bubbles are routed to the scalable pairwise induction
+path instead of being selection-guarded. Remaining bounded bubbles use pairwise
+graph induction, with seqwish using a high exact-match length by default
+(`seqwish-k=311`) so human repeats are not glued through short off-diagonal
+matches before the small SPOA polish pass. This is currently a human-repeat
+default chosen just above Alu length; the long-term default should be derived
+from the expected identity / repeat model for the local sequence set. Direct
+SPOA/POASTA replacements are exact path-sequence validated and are not rejected
+by the graph-layout quality heuristic; pairwise-induced replacements still must
+pass local and round-level quality guards. `method=poasta` is
 available for explicit experiments, but it is not the default until the POASTA
 GFA export path is proven to preserve clipped `W` walks exactly through impg's
 rewrite step.

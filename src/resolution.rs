@@ -202,7 +202,7 @@ pub const DEFAULT_PAIR_K_FARTHEST: usize = 1;
 pub const DEFAULT_PAIR_TREE_COUNT: usize = 1;
 pub const DEFAULT_PAIR_RANDOM_FRACTION: f64 = 0.01;
 pub const DEFAULT_PAIR_MASH_K: usize = 15;
-pub const DEFAULT_REPLACEMENT_SEQWISH_MIN_MATCH_LEN: u64 = 79;
+pub const DEFAULT_REPLACEMENT_SEQWISH_MIN_MATCH_LEN: u64 = 311;
 pub const DEFAULT_SWEEPGA_KMER_FREQUENCY: usize = 10;
 pub const DEFAULT_SWEEPGA_MIN_ALN_LENGTH: u64 = 0;
 pub const DEFAULT_MAX_PAIR_ALIGNMENTS: usize = 10_000;
@@ -469,11 +469,13 @@ fn resolve_graph_bubbles(
             .selected
             .into_par_iter()
             .map(|candidate| {
-                let replacement = build_replacement(&candidate, config)?;
+                let method = candidate_replacement_method(&candidate, config);
+                let quality_guarded = replacement_method_needs_quality_guard(method);
+                let replacement = build_replacement_with_method(&candidate, config, method)?;
                 if replacement.segments.is_empty() {
                     return Ok::<Option<ReplacementPlan>, io::Error>(None);
                 }
-                if !config.disable_round_quality_check {
+                if !config.disable_round_quality_check && quality_guarded {
                     let before = graph_quality(&candidate_original_graph(&graph, &candidate));
                     let after = graph_quality(&replacement);
                     if let RoundQualityDecision::Reject { reason } =
@@ -793,6 +795,7 @@ fn candidate_selection_method(
         ResolutionMethod::Auto => {
             if config.auto_spoa_max_traversal_len > 0
                 && traversal_stats.max_len <= config.auto_spoa_max_traversal_len
+                && direct_replacement_within_budget(traversal_stats, config)
             {
                 ResolutionMethod::Poa
             } else {
@@ -801,6 +804,17 @@ fn candidate_selection_method(
         }
         method => method,
     }
+}
+
+fn direct_replacement_within_budget(
+    traversal_stats: TraversalStats,
+    config: &ResolutionConfig,
+) -> bool {
+    traversal_stats.count <= config.max_traversals
+        && traversal_stats.max_len <= config.max_traversal_len
+        && (config.max_median_traversal_len == 0
+            || traversal_stats.median_len <= config.max_median_traversal_len)
+        && traversal_stats.total_len <= config.max_total_sequence
 }
 
 fn candidate_selection_priority(candidate: &BubbleCandidate, config: &ResolutionConfig) -> u8 {
@@ -832,11 +846,9 @@ fn candidate_within_selection_budget(
         return true;
     }
 
-    traversal_count <= config.max_traversals
-        && traversal_stats.max_len <= config.max_traversal_len
-        && (config.max_median_traversal_len == 0
-            || traversal_stats.median_len <= config.max_median_traversal_len)
-        && traversal_stats.total_len <= config.max_total_sequence
+    let mut stats = traversal_stats;
+    stats.count = traversal_count;
+    direct_replacement_within_budget(stats, config)
 }
 
 fn percentile_index(len: usize, numerator: usize, denominator: usize) -> usize {
@@ -1534,11 +1546,11 @@ fn apply_replacement_frontier(graph: &Graph, plans: &[ReplacementPlan]) -> io::R
     Ok(next)
 }
 
-fn build_replacement(candidate: &BubbleCandidate, config: &ResolutionConfig) -> io::Result<Graph> {
-    let method = match config.method {
-        ResolutionMethod::Auto => auto_replacement_method(candidate, config),
-        method => method,
-    };
+fn build_replacement_with_method(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+    method: ResolutionMethod,
+) -> io::Result<Graph> {
     match method {
         ResolutionMethod::Auto => unreachable!("auto is resolved before replacement dispatch"),
         ResolutionMethod::Poa => build_poa_replacement(candidate, config),
@@ -1550,6 +1562,20 @@ fn build_replacement(candidate: &BubbleCandidate, config: &ResolutionConfig) -> 
         ResolutionMethod::Allwave => build_allwave_seqwish_replacement(candidate, config),
         ResolutionMethod::Sweepga => build_sweepga_seqwish_replacement(candidate, config),
     }
+}
+
+fn candidate_replacement_method(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+) -> ResolutionMethod {
+    match config.method {
+        ResolutionMethod::Auto => auto_replacement_method(candidate, config),
+        method => method,
+    }
+}
+
+fn replacement_method_needs_quality_guard(method: ResolutionMethod) -> bool {
+    !matches!(method, ResolutionMethod::Poa | ResolutionMethod::Poasta)
 }
 
 fn auto_replacement_method(
@@ -2678,6 +2704,32 @@ P\tins\t1+,2+,3+\t*
             ResolutionMethod::Allwave
         );
 
+        candidate.traversal_stats = TraversalStats {
+            count: config.max_traversals + 1,
+            min_len: 128,
+            median_len: 128,
+            p90_len: 128,
+            max_len: 128,
+            total_len: 128,
+        };
+        assert_eq!(
+            auto_replacement_method(&candidate, &config),
+            ResolutionMethod::Allwave
+        );
+
+        candidate.traversal_stats = TraversalStats {
+            count: 2,
+            min_len: 128,
+            median_len: 128,
+            p90_len: 128,
+            max_len: 128,
+            total_len: config.max_total_sequence + 1,
+        };
+        assert_eq!(
+            auto_replacement_method(&candidate, &config),
+            ResolutionMethod::Allwave
+        );
+
         let config = ResolutionConfig {
             auto_spoa_max_traversal_len: 0,
             auto_allwave_max_total_sequence: 0,
@@ -2737,6 +2789,22 @@ P\tins\t1+,2+,3+\t*
             stats.count,
             stats,
             &span_limited_config
+        ));
+
+        let auto_config = ResolutionConfig {
+            method: ResolutionMethod::Auto,
+            auto_spoa_max_traversal_len: 1_000_000,
+            ..direct_config
+        };
+        assert_eq!(
+            candidate_selection_method(stats, &auto_config),
+            ResolutionMethod::Allwave
+        );
+        assert!(candidate_within_selection_budget(
+            1_000,
+            stats.count,
+            stats,
+            &auto_config
         ));
     }
 
@@ -2881,6 +2949,25 @@ P\talt\t1+,3+,4+\t*
     }
 
     #[test]
+    fn direct_poa_replacements_bypass_local_quality_gate() {
+        assert!(!replacement_method_needs_quality_guard(
+            ResolutionMethod::Poa
+        ));
+        assert!(!replacement_method_needs_quality_guard(
+            ResolutionMethod::Poasta
+        ));
+        assert!(replacement_method_needs_quality_guard(
+            ResolutionMethod::StarBiwfa
+        ));
+        assert!(replacement_method_needs_quality_guard(
+            ResolutionMethod::Allwave
+        ));
+        assert!(replacement_method_needs_quality_guard(
+            ResolutionMethod::Sweepga
+        ));
+    }
+
+    #[test]
     fn allwave_pair_alignment_cap_bails_before_seqwish() {
         let gfa = "\
 H\tVN:Z:1.0
@@ -2978,7 +3065,7 @@ P\talt\t1+,3+,4+\t*
     }
 
     #[test]
-    fn bails_out_when_candidate_exceeds_median_traversal_budget() {
+    fn direct_poa_bails_out_when_candidate_exceeds_median_traversal_budget() {
         let gfa = "\
 H\tVN:Z:1.0
 S\t1\tAC
@@ -2994,6 +3081,7 @@ P\tins\t1+,2+,3+\t*
         let resolved = resolve_gfa_bubbles(
             gfa,
             &ResolutionConfig {
+                method: ResolutionMethod::Poa,
                 max_median_traversal_len: 4,
                 ..ResolutionConfig::default()
             },
@@ -3139,7 +3227,7 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
     }
 
     #[test]
-    fn bails_out_when_candidate_exceeds_budget() {
+    fn direct_poa_bails_out_when_candidate_exceeds_budget() {
         let gfa = "\
 H\tVN:Z:1.0
 S\t1\tAC
@@ -3153,6 +3241,7 @@ P\tins\t1+,2+,3+\t*
 ";
         let before = seq_map(gfa);
         let config = ResolutionConfig {
+            method: ResolutionMethod::Poa,
             max_traversal_len: 4,
             ..ResolutionConfig::default()
         };

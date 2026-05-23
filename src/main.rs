@@ -4658,13 +4658,13 @@ GFA engine shorthand:
         #[clap(long, value_parser = parse_usize_size, default_value = "15")]
         mash_k: usize,
 
-        /// Minimum exact-match length used by seqwish when inducing replacement graphs
+        /// Minimum exact-match length used by seqwish when inducing crush replacement graphs
         #[clap(
             long = "seqwish-k",
             alias = "seqwish-min-match-len",
             alias = "replacement-seqwish-k",
             value_parser = parse_usize_size,
-            default_value = "79"
+            default_value = "311"
         )]
         replacement_seqwish_min_match_len: usize,
 
@@ -12658,7 +12658,7 @@ mod tests {
                 assert_eq!(crush.polish_iterations, 1);
                 assert_eq!(crush.polish_max_median_traversal_len, 256);
                 assert_eq!(crush.pair_tree_count, 1);
-                assert_eq!(crush.replacement_seqwish_min_match_len, 79);
+                assert_eq!(crush.replacement_seqwish_min_match_len, 311);
                 assert_eq!(crush.max_pair_alignments, 10_000);
                 assert_eq!(crush.max_replacement_paf_bytes, 64 * 1024 * 1024);
                 assert!((crush.max_round_score_growth - 0.02).abs() < f64::EPSILON);

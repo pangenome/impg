@@ -40,9 +40,13 @@ During syng native extraction, the top 0.05% most frequent local syncmer nodes
 are cloned by default, and rare repeated-copy local syncmer contexts are split.
 This keeps repetitive syncmers as sequence evidence without letting them act as
 global repeat-glue nodes.
-`method=auto` routes very small bubbles to global SPOA, moderate bubbles to
-allwave/seqwish plus small SPOA polish, and dense high-copy bubbles back to
-global SPOA.
+`method=auto` routes very small budget-safe bubbles to global SPOA and sends
+larger, wider, or high-copy bounded bubbles through pairwise graph induction.
+The replacement seqwish step uses `seqwish-k=311` by default in crush so human
+repeats require long exact matches before graph induction; residual bounded
+bubbles are then handled by global SPOA polish. Direct SPOA/POASTA replacements
+are accepted after exact path-sequence validation, while pairwise-induced
+replacements remain guarded by local and round graph-quality checks.
 
 ## Current HPRCv2 Validation Panel
 
