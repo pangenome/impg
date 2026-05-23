@@ -32,22 +32,22 @@ pub struct ResolutionConfig {
     /// seqwish induction first, then the bounded SPOA polish pass. Set to 0 to
     /// force the AllWave-first path for every auto-selected bubble.
     pub auto_spoa_max_traversal_len: usize,
-    /// Maximum total traversal sequence for `method=auto` to route to
-    /// AllWave/seqwish. Dense many-haplotype local bubbles above this limit
-    /// stay on direct SPOA, because seqwish transclosure can dominate runtime
-    /// in repetitive loci. Set to 0 to disable this guard.
+    /// Legacy auto-routing limit retained for CLI compatibility.
+    ///
+    /// Auto mode now sends every bubble above the SPOA length cutoff through
+    /// pairwise graph induction and relies on local / round-level quality
+    /// guards instead of pre-filtering by direct-method budgets.
     pub auto_allwave_max_total_sequence: usize,
-    /// Maximum number of traversals for `method=auto` to route to
-    /// AllWave/seqwish. Dense high-copy bubbles above this limit stay on
-    /// direct SPOA, which is more predictable for hundreds of short traversals.
-    /// Set to 0 to disable this guard.
+    /// Legacy auto-routing limit retained for CLI compatibility. See
+    /// `auto_allwave_max_total_sequence`.
     pub auto_allwave_max_traversals: usize,
     /// Maximum root path span, in bp, for a candidate bubble.
     ///
     /// The root path is the first path in the input GFA. This is a rooted POVU
     /// decomposition coordinate, not necessarily an external reference genome.
     pub max_bubble_span: usize,
-    /// Maximum length of any observed traversal through the bubble.
+    /// Maximum length of any observed traversal through the bubble for direct
+    /// replacement methods (`poa`, `poasta`, `star-biwfa`).
     pub max_traversal_len: usize,
     /// Minimum length of the longest observed traversal through the bubble.
     ///
@@ -55,11 +55,12 @@ pub struct ResolutionConfig {
     /// parent-scale bubbles with a pairwise graph-induction engine, then run a
     /// separate SPOA pass over remaining small local bubbles.
     pub min_traversal_len: usize,
-    /// Maximum median traversal length. A value of 0 disables this guard.
+    /// Maximum median traversal length for direct replacement methods. A value
+    /// of 0 disables this guard.
     pub max_median_traversal_len: usize,
-    /// Maximum sum of traversal sequence lengths for one replacement.
+    /// Maximum sum of traversal sequence lengths for one direct replacement.
     pub max_total_sequence: usize,
-    /// Maximum number of path-supported traversals through one replacement.
+    /// Maximum number of path-supported traversals through one direct replacement.
     pub max_traversals: usize,
     /// One-pass small-tangle polish rounds after BiWFA in-memory induction.
     ///
@@ -179,7 +180,9 @@ pub const DEFAULT_MAX_ITERATIONS: usize = 1;
 ///
 /// `max_bubble_span` is a POVU root-path coordinate guard. The root is currently
 /// the first GFA path, so this is intentionally not part of the default runtime
-/// budget. Use traversal length/count/total sequence for the real work cap.
+/// budget. Traversal length/count/total sequence caps apply to direct local
+/// replacement methods; pairwise induction methods are quality-guarded after
+/// replacement construction.
 pub const DEFAULT_MAX_BUBBLE_SPAN: usize = 0;
 pub const DEFAULT_MAX_TRAVERSAL_LEN: usize = 10_000;
 pub const DEFAULT_MIN_TRAVERSAL_LEN: usize = 0;
@@ -424,7 +427,7 @@ fn resolve_graph_bubbles(
 
         if emit_logs {
             log::info!(
-                "crush round {}: {} POVU site(s), {} unseen polymorphic candidate(s), {} selected, {} over budget in {:.2?}",
+                "crush round {}: {} POVU site(s), {} unseen polymorphic candidate(s), {} selected, {} selection-guarded in {:.2?}",
                 round + 1,
                 frontier.sites_seen,
                 frontier.candidates_seen,
@@ -436,7 +439,7 @@ fn resolve_graph_bubbles(
                 "crush round {} traversal stats: {}; {}",
                 round + 1,
                 format_candidate_length_summary("selected", &frontier.selected),
-                format_candidate_length_summary("over-budget", &frontier.bailed)
+                format_candidate_length_summary("selection-guarded", &frontier.bailed)
             );
         }
 
@@ -448,7 +451,7 @@ fn resolve_graph_bubbles(
         if frontier.selected.is_empty() {
             if emit_logs {
                 log::info!(
-                    "crush round {}: stopping because remaining candidate(s) are over budget",
+                    "crush round {}: stopping because remaining candidate(s) are outside selection guards",
                     round + 1
                 );
             }
@@ -466,19 +469,43 @@ fn resolve_graph_bubbles(
             .selected
             .into_par_iter()
             .map(|candidate| {
-                build_replacement(&candidate, config).map(|replacement| ReplacementPlan {
+                let replacement = build_replacement(&candidate, config)?;
+                if replacement.segments.is_empty() {
+                    return Ok::<Option<ReplacementPlan>, io::Error>(None);
+                }
+                if !config.disable_round_quality_check {
+                    let before = graph_quality(&candidate_original_graph(&graph, &candidate));
+                    let after = graph_quality(&replacement);
+                    if let RoundQualityDecision::Reject { reason } =
+                        round_quality_decision(before, after, config)
+                    {
+                        log::debug!(
+                            "resolution: rejecting local replacement {}: {}; before {}; after {}",
+                            candidate.signature,
+                            reason,
+                            before.summary(),
+                            after.summary()
+                        );
+                        return Ok::<Option<ReplacementPlan>, io::Error>(None);
+                    }
+                }
+                Ok::<Option<ReplacementPlan>, io::Error>(Some(ReplacementPlan {
                     candidate,
                     replacement,
-                })
+                }))
             })
             .collect::<Vec<_>>();
         let build_elapsed = build_start.elapsed();
 
         let mut plans = Vec::new();
+        let mut locally_rejected = 0usize;
         for result in build_results {
             match result {
-                Ok(plan) if !plan.replacement.segments.is_empty() => plans.push(plan),
-                Ok(_) => stats.bailed += 1,
+                Ok(Some(plan)) => plans.push(plan),
+                Ok(None) => {
+                    locally_rejected += 1;
+                    stats.bailed += 1;
+                }
                 Err(err) => {
                     log::debug!(
                         "resolution: candidate replacement failed in round {}: {}",
@@ -493,13 +520,25 @@ fn resolve_graph_bubbles(
         if plans.is_empty() {
             if emit_logs {
                 log::info!(
-                    "crush round {}: 0/{} replacement(s) built in {:.2?}",
+                    "crush round {}: 0/{} replacement(s) accepted in {:.2?} ({} rejected by local quality/build)",
                     round + 1,
                     selected_count,
-                    build_elapsed
+                    build_elapsed,
+                    locally_rejected
                 );
             }
             continue;
+        }
+
+        if emit_logs && locally_rejected > 0 {
+            log::info!(
+                "crush round {}: accepted {}/{} replacement(s) in {:.2?}; {} rejected by local quality/build",
+                round + 1,
+                plans.len(),
+                selected_count,
+                build_elapsed,
+                locally_rejected
+            );
         }
 
         let resolved_count = plans.len();
@@ -744,6 +783,60 @@ fn traversal_stats_from_lengths(mut lengths: Vec<usize>) -> TraversalStats {
         max_len: *lengths.last().unwrap_or(&0),
         total_len: lengths.iter().sum(),
     }
+}
+
+fn candidate_selection_method(
+    traversal_stats: TraversalStats,
+    config: &ResolutionConfig,
+) -> ResolutionMethod {
+    match config.method {
+        ResolutionMethod::Auto => {
+            if config.auto_spoa_max_traversal_len > 0
+                && traversal_stats.max_len <= config.auto_spoa_max_traversal_len
+            {
+                ResolutionMethod::Poa
+            } else {
+                ResolutionMethod::Allwave
+            }
+        }
+        method => method,
+    }
+}
+
+fn candidate_selection_priority(candidate: &BubbleCandidate, config: &ResolutionConfig) -> u8 {
+    if config.method != ResolutionMethod::Auto {
+        return 0;
+    }
+    match candidate_selection_method(candidate.traversal_stats, config) {
+        ResolutionMethod::Poa | ResolutionMethod::Poasta | ResolutionMethod::StarBiwfa => 0,
+        ResolutionMethod::Auto => unreachable!("auto candidate method should be resolved"),
+        ResolutionMethod::Allwave | ResolutionMethod::Sweepga => 1,
+    }
+}
+
+fn candidate_within_selection_budget(
+    root_span: usize,
+    traversal_count: usize,
+    traversal_stats: TraversalStats,
+    config: &ResolutionConfig,
+) -> bool {
+    if config.max_bubble_span > 0 && root_span > config.max_bubble_span {
+        return false;
+    }
+
+    let method = candidate_selection_method(traversal_stats, config);
+    if !matches!(
+        method,
+        ResolutionMethod::Poa | ResolutionMethod::Poasta | ResolutionMethod::StarBiwfa
+    ) {
+        return true;
+    }
+
+    traversal_count <= config.max_traversals
+        && traversal_stats.max_len <= config.max_traversal_len
+        && (config.max_median_traversal_len == 0
+            || traversal_stats.median_len <= config.max_median_traversal_len)
+        && traversal_stats.total_len <= config.max_total_sequence
 }
 
 fn percentile_index(len: usize, numerator: usize, denominator: usize) -> usize {
@@ -1092,13 +1185,8 @@ fn find_candidate_frontier(
             if traversal_stats.max_len < config.min_traversal_len {
                 return None;
             }
-            let within_budget = (config.max_bubble_span == 0
-                || root_span <= config.max_bubble_span)
-                && ranges.len() <= config.max_traversals
-                && traversal_stats.max_len <= config.max_traversal_len
-                && (config.max_median_traversal_len == 0
-                    || traversal_stats.median_len <= config.max_median_traversal_len)
-                && traversal_stats.total_len <= config.max_total_sequence;
+            let within_budget =
+                candidate_within_selection_budget(root_span, ranges.len(), traversal_stats, config);
             let signature = candidate_signature(
                 graph,
                 root_path_idx,
@@ -1129,8 +1217,9 @@ fn find_candidate_frontier(
 
     let select_start = Instant::now();
     candidates.sort_by(|a, b| {
-        b.estimated_step_savings()
-            .cmp(&a.estimated_step_savings())
+        candidate_selection_priority(a, config)
+            .cmp(&candidate_selection_priority(b, config))
+            .then_with(|| b.estimated_step_savings().cmp(&a.estimated_step_savings()))
             .then_with(|| b.unique_steps.cmp(&a.unique_steps))
             .then_with(|| b.root_step_span().cmp(&a.root_step_span()))
             .then_with(|| b.root_span.cmp(&a.root_span))
@@ -1303,6 +1392,34 @@ fn materialize_candidate_sequences(graph: &Graph, candidate: &mut BubbleCandidat
         .any(|range| range.sequence != first.sequence)
 }
 
+fn candidate_original_graph(graph: &Graph, candidate: &BubbleCandidate) -> Graph {
+    let mut node_map: FxHashMap<usize, usize> = FxHashMap::default();
+    let mut segments = Vec::new();
+    let mut paths = Vec::with_capacity(candidate.ranges.len());
+
+    for (range_idx, range) in candidate.ranges.iter().enumerate() {
+        let source_path = &graph.paths[range.path_idx];
+        let mut steps = Vec::with_capacity(range.end_step.saturating_sub(range.begin_step));
+        for step in &source_path.steps[range.begin_step..range.end_step] {
+            let local_node = *node_map.entry(step.node).or_insert_with(|| {
+                let idx = segments.len();
+                segments.push(graph.segments[step.node].clone());
+                idx
+            });
+            steps.push(Step {
+                node: local_node,
+                rev: step.rev,
+            });
+        }
+        paths.push(Path {
+            name: format!("{}#range{}", source_path.name, range_idx),
+            steps,
+        });
+    }
+
+    Graph { segments, paths }
+}
+
 fn candidate_signature(
     graph: &Graph,
     ref_path_idx: usize,
@@ -1366,7 +1483,6 @@ fn apply_replacement_frontier(graph: &Graph, plans: &[ReplacementPlan]) -> io::R
 
     let mut out_paths = Vec::with_capacity(graph.paths.len());
     let mut used_original: FxHashSet<usize> = FxHashSet::default();
-    let mut used_replacement: FxHashSet<(usize, usize)> = FxHashSet::default();
 
     for (path_idx, path) in graph.paths.iter().enumerate() {
         let path_replacements = replacements_by_path
@@ -1380,9 +1496,6 @@ fn apply_replacement_frontier(graph: &Graph, plans: &[ReplacementPlan]) -> io::R
             if let Some(replacement) = path_replacements.get(replacement_idx) {
                 if i == replacement.begin_step {
                     for step in &replacement.steps {
-                        if let OutNode::Replacement(plan_idx, node_idx) = step.node {
-                            used_replacement.insert((plan_idx, node_idx));
-                        }
                         steps.push(*step);
                     }
                     i = replacement.end_step;
@@ -1411,13 +1524,7 @@ fn apply_replacement_frontier(graph: &Graph, plans: &[ReplacementPlan]) -> io::R
         .iter()
         .map(|plan| plan.replacement.clone())
         .collect::<Vec<_>>();
-    let rendered = render_rewritten_graph(
-        graph,
-        &replacement_graphs,
-        &used_original,
-        &used_replacement,
-        &out_paths,
-    );
+    let rendered = render_rewritten_graph(graph, &replacement_graphs, &used_original, &out_paths);
     let next = parse_gfa(&rendered)?;
     if !path_sequences_equal(graph, &next)? {
         return Err(io::Error::other(
@@ -1449,24 +1556,11 @@ fn auto_replacement_method(
     candidate: &BubbleCandidate,
     config: &ResolutionConfig,
 ) -> ResolutionMethod {
-    // Keep very small local tangles on the deterministic SPOA path. Above this
-    // cutoff, use the intended many-to-many AllWave/seqwish path and then run
-    // the bounded SPOA polish in `finalize_pairwise_induced_replacement`.
-    if config.auto_spoa_max_traversal_len > 0
-        && candidate.traversal_stats.max_len <= config.auto_spoa_max_traversal_len
-    {
-        ResolutionMethod::Poa
-    } else if config.auto_allwave_max_total_sequence > 0
-        && candidate.traversal_stats.total_len > config.auto_allwave_max_total_sequence
-    {
-        ResolutionMethod::Poa
-    } else if config.auto_allwave_max_traversals > 0
-        && candidate.traversal_stats.count > config.auto_allwave_max_traversals
-    {
-        ResolutionMethod::Poa
-    } else {
-        ResolutionMethod::Allwave
-    }
+    // Keep very small local tangles on the deterministic SPOA path. Larger or
+    // high-copy bubbles need sparse many-to-many pair induction first; the
+    // bounded SPOA polish in `finalize_pairwise_induced_replacement` then
+    // resolves the residual small tangles inside the replacement graph.
+    candidate_selection_method(candidate.traversal_stats, config)
 }
 
 fn candidate_named_sequences(candidate: &BubbleCandidate) -> (Vec<String>, Vec<(String, Vec<u8>)>) {
@@ -2270,7 +2364,6 @@ fn render_rewritten_graph(
     original: &Graph,
     replacements: &[Graph],
     used_original: &FxHashSet<usize>,
-    used_replacement: &FxHashSet<(usize, usize)>,
     out_paths: &[(String, Vec<OutStep>)],
 ) -> String {
     let mut out = String::new();
@@ -2283,31 +2376,40 @@ fn render_rewritten_graph(
     }
     let mut next_id = 1usize;
 
-    let mut original_nodes: Vec<usize> = used_original.iter().copied().collect();
-    original_nodes.sort_unstable();
-    for node in original_nodes {
-        let id = original.segments[node].id.clone();
-        id_by_node.insert(OutNode::Original(node), id.clone());
-        out.push_str(&format!(
-            "S\t{}\t{}\n",
-            id,
-            String::from_utf8_lossy(&original.segments[node].seq)
-        ));
+    let mut seen_ordered = FxHashSet::<OutNode>::default();
+    let mut ordered_nodes = Vec::new();
+    for (_, steps) in out_paths {
+        for step in steps {
+            if seen_ordered.insert(step.node) {
+                ordered_nodes.push(step.node);
+            }
+        }
     }
 
-    let mut replacement_nodes: Vec<(usize, usize)> = used_replacement.iter().copied().collect();
-    replacement_nodes.sort_unstable();
-    for (replacement_idx, node) in replacement_nodes {
-        let replacement = replacements
-            .get(replacement_idx)
-            .expect("used replacement index must refer to an emitted replacement graph");
-        let id = next_unused_segment_id(&mut used_ids, &mut next_id);
-        id_by_node.insert(OutNode::Replacement(replacement_idx, node), id.clone());
-        out.push_str(&format!(
-            "S\t{}\t{}\n",
-            id,
-            String::from_utf8_lossy(&replacement.segments[node].seq)
-        ));
+    for node in ordered_nodes {
+        match node {
+            OutNode::Original(original_idx) => {
+                let id = original.segments[original_idx].id.clone();
+                id_by_node.insert(node, id.clone());
+                out.push_str(&format!(
+                    "S\t{}\t{}\n",
+                    id,
+                    String::from_utf8_lossy(&original.segments[original_idx].seq)
+                ));
+            }
+            OutNode::Replacement(replacement_idx, replacement_node_idx) => {
+                let replacement = replacements
+                    .get(replacement_idx)
+                    .expect("used replacement index must refer to an emitted replacement graph");
+                let id = next_unused_segment_id(&mut used_ids, &mut next_id);
+                id_by_node.insert(node, id.clone());
+                out.push_str(&format!(
+                    "S\t{}\t{}\n",
+                    id,
+                    String::from_utf8_lossy(&replacement.segments[replacement_node_idx].seq)
+                ));
+            }
+        }
     }
 
     let mut edges: BTreeSet<(String, bool, String, bool)> = BTreeSet::new();
@@ -2382,13 +2484,7 @@ fn render_graph(graph: &Graph) -> String {
         .iter()
         .flat_map(|path| path.steps.iter().map(|step| step.node))
         .collect::<FxHashSet<_>>();
-    render_rewritten_graph(
-        graph,
-        &[],
-        &used_original,
-        &FxHashSet::default(),
-        &out_paths,
-    )
+    render_rewritten_graph(graph, &[], &used_original, &out_paths)
 }
 
 #[cfg(test)]
@@ -2572,14 +2668,14 @@ P\tins\t1+,2+,3+\t*
         candidate.traversal_stats.count = config.auto_allwave_max_traversals + 1;
         assert_eq!(
             auto_replacement_method(&candidate, &config),
-            ResolutionMethod::Poa
+            ResolutionMethod::Allwave
         );
 
         candidate.traversal_stats.count = 2;
         candidate.traversal_stats.total_len = config.auto_allwave_max_total_sequence + 1;
         assert_eq!(
             auto_replacement_method(&candidate, &config),
-            ResolutionMethod::Poa
+            ResolutionMethod::Allwave
         );
 
         let config = ResolutionConfig {
@@ -2592,6 +2688,86 @@ P\tins\t1+,2+,3+\t*
         assert_eq!(
             auto_replacement_method(&candidate, &config),
             ResolutionMethod::Allwave
+        );
+    }
+
+    #[test]
+    fn direct_budgets_do_not_filter_pairwise_induction_candidates() {
+        let stats = TraversalStats {
+            count: 500,
+            min_len: 16_000,
+            median_len: 50_000,
+            p90_len: 200_000,
+            max_len: 500_000,
+            total_len: 25_000_000,
+        };
+        let config = ResolutionConfig {
+            method: ResolutionMethod::Sweepga,
+            max_traversal_len: 10_000,
+            max_median_traversal_len: 1_000,
+            max_total_sequence: 1_000_000,
+            max_traversals: 128,
+            ..ResolutionConfig::default()
+        };
+        assert!(candidate_within_selection_budget(
+            1_000,
+            stats.count,
+            stats,
+            &config
+        ));
+
+        let direct_config = ResolutionConfig {
+            method: ResolutionMethod::Poa,
+            ..config.clone()
+        };
+        assert!(!candidate_within_selection_budget(
+            1_000,
+            stats.count,
+            stats,
+            &direct_config
+        ));
+
+        let span_limited_config = ResolutionConfig {
+            method: ResolutionMethod::Sweepga,
+            max_bubble_span: 999,
+            ..config
+        };
+        assert!(!candidate_within_selection_budget(
+            1_000,
+            stats.count,
+            stats,
+            &span_limited_config
+        ));
+    }
+
+    #[test]
+    fn auto_prioritizes_direct_candidates_before_pairwise_candidates() {
+        let config = ResolutionConfig::default();
+        let mut candidate = BubbleCandidate {
+            ranges: Vec::new(),
+            signature: "candidate".to_string(),
+            within_budget: true,
+            root_start_step: 0,
+            root_end_step: 1,
+            root_span: 0,
+            total_steps: 0,
+            unique_steps: 0,
+            traversal_stats: TraversalStats {
+                max_len: config.auto_spoa_max_traversal_len,
+                ..TraversalStats::default()
+            },
+        };
+        assert_eq!(candidate_selection_priority(&candidate, &config), 0);
+        candidate.traversal_stats.max_len = config.auto_spoa_max_traversal_len + 1;
+        assert_eq!(candidate_selection_priority(&candidate, &config), 1);
+
+        let explicit_sweepga = ResolutionConfig {
+            method: ResolutionMethod::Sweepga,
+            ..config
+        };
+        assert_eq!(
+            candidate_selection_priority(&candidate, &explicit_sweepga),
+            0
         );
     }
 

@@ -2664,15 +2664,6 @@ fn parse_crush_stage(
             ),
         ));
     }
-    if config.min_traversal_len > config.max_traversal_len {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "Invalid --gfa-engine '{}': min-traversal-len exceeds max-traversal-len",
-                raw
-            ),
-        ));
-    }
     if config.pair_k_nearest == 0
         && config.pair_k_farthest == 0
         && config.pair_random_fraction <= 0.0
@@ -4591,7 +4582,7 @@ GFA engine shorthand:
         #[clap(long, alias = "max-bubble-span", value_parser = parse_usize_size, default_value = "0")]
         max_span: usize,
 
-        /// Maximum sequence length of any traversal through one candidate
+        /// Maximum traversal length for direct POA/POASTA/star-BiWFA candidates
         #[clap(long, alias = "max-traversal-length", value_parser = parse_usize_size, default_value = "10k")]
         max_traversal_len: usize,
 
@@ -4599,15 +4590,15 @@ GFA engine shorthand:
         #[clap(long, alias = "min-traversal-length", alias = "min-max-traversal-len", value_parser = parse_usize_size, default_value = "0")]
         min_traversal_len: usize,
 
-        /// Maximum median traversal length through one candidate; 0 disables this guard
+        /// Maximum median traversal length for direct POA/POASTA/star-BiWFA candidates; 0 disables
         #[clap(long, alias = "max-median-traversal-length", value_parser = parse_usize_size, default_value = "1k")]
         max_median_traversal_len: usize,
 
-        /// Maximum total sequence across all traversals through one candidate
+        /// Maximum total sequence across all traversals for one direct candidate
         #[clap(long, alias = "max-total-seq", value_parser = parse_usize_size, default_value = "1m")]
         max_total_sequence: usize,
 
-        /// Maximum number of path-supported traversals through one candidate
+        /// Maximum number of path-supported traversals through one direct candidate
         #[clap(long, value_parser = parse_usize_size, default_value = "10k")]
         max_traversals: usize,
 
@@ -4615,11 +4606,11 @@ GFA engine shorthand:
         #[clap(long, alias = "small-spoa-max-len", value_parser = parse_usize_size, default_value = "2k")]
         auto_spoa_max_traversal_len: usize,
 
-        /// Maximum total traversal sequence for auto mode to use AllWave; 0 disables
+        /// Legacy auto-routing knob; pairwise methods are guarded by replacement quality
         #[clap(long, alias = "auto-allwave-max-total-seq", value_parser = parse_usize_size, default_value = "200k")]
         auto_allwave_max_total_sequence: usize,
 
-        /// Maximum traversal count for auto mode to use AllWave; 0 disables
+        /// Legacy auto-routing knob; pairwise methods are guarded by replacement quality
         #[clap(long, alias = "auto-allwave-max-travs", value_parser = parse_usize_size, default_value = "128")]
         auto_allwave_max_traversals: usize,
 
@@ -7599,12 +7590,6 @@ fn run() -> io::Result<()> {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "--polish-max-traversals must be > 0",
-                ));
-            }
-            if min_traversal_len > max_traversal_len {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "--min-traversal-len must be <= --max-traversal-len",
                 ));
             }
             let Some(method) = impg::resolution::ResolutionMethod::parse_name(&method) else {
@@ -12372,6 +12357,36 @@ mod tests {
                 assert_eq!(crush.auto_allwave_max_traversals, 96);
                 assert_eq!(crush.polish_max_median_traversal_len, 128);
                 assert_eq!(crush.polish_iterations, 1);
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_crush_stage_allows_large_pairwise_pass_above_direct_budget() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush,method=sweepga,min-traversal-len=20k,max-traversal-len=10k",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                let crush = parsed.crush_config.unwrap();
+                assert_eq!(crush.method, impg::resolution::ResolutionMethod::Sweepga);
+                assert_eq!(crush.min_traversal_len, 20_000);
+                assert_eq!(crush.max_traversal_len, 10_000);
             }
             _ => panic!("expected query command"),
         }
