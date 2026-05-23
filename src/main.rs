@@ -4825,7 +4825,7 @@ GFA engine shorthand:
         )]
         sweepga_no_filter: bool,
 
-        /// Force sparse pairwise dispatch for --method sweepga; useful with wfmash pairs files, slow with FastGA
+        /// Deprecated for crush: SweepGA replacement induction always uses one all-vs-all self-alignment batch
         #[clap(
             long,
             value_parser = clap::value_parser!(bool),

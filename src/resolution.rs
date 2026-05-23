@@ -1923,49 +1923,34 @@ fn build_sweepga_seqwish_replacement(
         .iter()
         .map(|(name, seq)| (name.clone(), seq.as_slice()))
         .collect();
-    let mut paf_lines = Vec::new();
-    let sparse_pairs = config.sweepga_sparse_pairs || config.sweepga_aligner == "wfmash";
-    let mash_schedule = if sparse_pairs {
-        tree_mash_k_schedule(config.pair_mash_k, config.pair_tree_count)
-    } else {
-        vec![config.pair_mash_k]
-    };
-    for mash_k in mash_schedule {
-        let align_config = sweepga::library_api::SweepgaAlignConfig {
-            num_threads: rayon::current_num_threads().max(1),
-            kmer_frequency: config.sweepga_kmer_frequency,
-            min_aln_length: config.sweepga_min_aln_length,
-            no_filter: true,
-            sparsify: if sparse_pairs {
-                sweepga::knn_graph::SparsificationStrategy::TreeSampling(
-                    config.pair_k_nearest,
-                    config.pair_k_farthest,
-                    config.pair_random_fraction,
-                )
-            } else {
-                sweepga::knn_graph::SparsificationStrategy::None
-            },
-            mash_params: sweepga::knn_graph::MashParams {
-                kmer_size: mash_k,
-                ..sweepga::knn_graph::MashParams::default()
-            },
-            aligner: config.sweepga_aligner.clone(),
-            map_pct_identity: config.sweepga_map_pct_identity.clone(),
-            ..sweepga::library_api::SweepgaAlignConfig::default()
-        };
-        let paf_file =
-            sweepga::library_api::sweepga_align(&named, &align_config).map_err(|err| {
-                io::Error::other(format!("SweepGA replacement alignment failed: {err}"))
-            })?;
-        let mut chunk = String::new();
-        std::fs::File::open(paf_file.path())?.read_to_string(&mut chunk)?;
-        paf_lines.extend(
-            chunk
-                .lines()
-                .filter(|line| !line.is_empty())
-                .map(str::to_owned),
+
+    if config.sweepga_sparse_pairs {
+        log::info!(
+            "crush sweepga: ignoring sparse-pairs for replacement induction; using one all-vs-all self-alignment batch"
         );
     }
+    let align_config = sweepga::library_api::SweepgaAlignConfig {
+        num_threads: rayon::current_num_threads().max(1),
+        kmer_frequency: config.sweepga_kmer_frequency,
+        min_aln_length: config.sweepga_min_aln_length,
+        // Get raw all-vs-all alignments first. The shared graph induction
+        // tail below applies the configured SweepGA 1:1 scaffold-chain filter
+        // before seqwish, so sparse pair selection cannot drop the main chain.
+        no_filter: true,
+        sparsify: sweepga::knn_graph::SparsificationStrategy::None,
+        aligner: config.sweepga_aligner.clone(),
+        map_pct_identity: config.sweepga_map_pct_identity.clone(),
+        ..sweepga::library_api::SweepgaAlignConfig::default()
+    };
+    let paf_file = sweepga::library_api::sweepga_align(&named, &align_config)
+        .map_err(|err| io::Error::other(format!("SweepGA replacement alignment failed: {err}")))?;
+    let mut chunk = String::new();
+    std::fs::File::open(paf_file.path())?.read_to_string(&mut chunk)?;
+    let mut paf_lines = chunk
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     paf_lines.sort_unstable();
     paf_lines.dedup();
     let paf = if paf_lines.is_empty() {
@@ -1990,12 +1975,12 @@ fn build_sweepga_seqwish_replacement(
         )));
     }
     log::debug!(
-        "crush sweepga: {} traversal(s), {} unique PAF line(s), {} PAF byte(s) from {} backend ({})",
+        "crush sweepga: {} traversal(s), {} unique raw all-vs-all PAF line(s), {} PAF byte(s) from {} backend; seqwish tail will apply scaffold filter={}",
         seqs.len(),
         paf_lines.len(),
         paf.len(),
         config.sweepga_aligner,
-        if sparse_pairs { "sparse pairs" } else { "all pairs" }
+        if config.sweepga_no_filter { "disabled" } else { "1:1" }
     );
 
     let graph_config = seqwish_replacement_config(config);
