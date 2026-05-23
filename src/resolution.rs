@@ -17,6 +17,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeSet, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{self, Read};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 const GRAPH_QUALITY_LONG_BRIDGE_BP: usize = 10_000;
@@ -486,36 +487,73 @@ fn resolve_graph_bubbles(
 
         let selected_count = frontier.selected.len();
         let build_start = Instant::now();
+        let build_started = AtomicUsize::new(0);
+        let build_progress = AtomicUsize::new(0);
         let build_results = frontier
             .selected
             .into_par_iter()
             .map(|candidate| {
                 let method = candidate_replacement_method(&candidate, config);
-                let quality_guarded = replacement_method_needs_quality_guard(method);
-                let replacement = build_replacement_with_method(&candidate, config, method)?;
-                if replacement.segments.is_empty() {
-                    return Ok::<Option<ReplacementPlan>, io::Error>(None);
+                if emit_logs && selected_count <= 32 {
+                    let started = build_started.fetch_add(1, Ordering::Relaxed) + 1;
+                    log::info!(
+                        "crush round {}: building replacement {}/{} with {:?}; traversals={}, max-len={}, median-len={}, total-len={}, root-span={}",
+                        round + 1,
+                        started,
+                        selected_count,
+                        method,
+                        candidate.traversal_stats.count,
+                        candidate.traversal_stats.max_len,
+                        candidate.traversal_stats.median_len,
+                        candidate.traversal_stats.total_len,
+                        candidate.root_span
+                    );
                 }
-                if !config.disable_round_quality_check && quality_guarded {
-                    let before = graph_quality(&candidate_original_graph(&graph, &candidate));
-                    let after = graph_quality(&replacement);
-                    if let RoundQualityDecision::Reject { reason } =
-                        round_quality_decision(before, after, config)
-                    {
-                        log::debug!(
-                            "resolution: rejecting local replacement {}: {}; before {}; after {}",
-                            candidate.signature,
-                            reason,
-                            before.summary(),
-                            after.summary()
-                        );
+                let quality_guarded = replacement_method_needs_quality_guard(method);
+                let result = (|| {
+                    let replacement = build_replacement_with_method(&candidate, config, method)?;
+                    if replacement.segments.is_empty() {
                         return Ok::<Option<ReplacementPlan>, io::Error>(None);
                     }
+                    if !config.disable_round_quality_check && quality_guarded {
+                        let before = graph_quality(&candidate_original_graph(&graph, &candidate));
+                        let after = graph_quality(&replacement);
+                        if let RoundQualityDecision::Reject { reason } =
+                            round_quality_decision(before, after, config)
+                        {
+                            log::debug!(
+                                "resolution: rejecting local replacement {}: {}; before {}; after {}",
+                                candidate.signature,
+                                reason,
+                                before.summary(),
+                                after.summary()
+                            );
+                            return Ok::<Option<ReplacementPlan>, io::Error>(None);
+                        }
+                    }
+                    Ok::<Option<ReplacementPlan>, io::Error>(Some(ReplacementPlan {
+                        candidate,
+                        replacement,
+                    }))
+                })();
+                if emit_logs {
+                    let done = build_progress.fetch_add(1, Ordering::Relaxed) + 1;
+                    if selected_count <= 32 || done == selected_count || done % 25 == 0 {
+                        let status = match &result {
+                            Ok(Some(_)) => "accepted",
+                            Ok(None) => "rejected",
+                            Err(_) => "failed",
+                        };
+                        log::info!(
+                            "crush round {}: replacement build progress {}/{} ({})",
+                            round + 1,
+                            done,
+                            selected_count,
+                            status
+                        );
+                    }
                 }
-                Ok::<Option<ReplacementPlan>, io::Error>(Some(ReplacementPlan {
-                    candidate,
-                    replacement,
-                }))
+                result
             })
             .collect::<Vec<_>>();
         let build_elapsed = build_start.elapsed();
