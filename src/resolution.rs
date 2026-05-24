@@ -303,27 +303,42 @@ pub struct ResolvedGfa {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-struct Step {
-    node: usize,
-    rev: bool,
+pub(crate) struct Step {
+    pub(crate) node: usize,
+    pub(crate) rev: bool,
 }
 
 #[derive(Clone, Debug)]
-struct Segment {
-    id: String,
-    seq: Vec<u8>,
+pub(crate) struct Segment {
+    pub(crate) id: String,
+    pub(crate) seq: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
-struct Path {
-    name: String,
-    steps: Vec<Step>,
+pub(crate) struct Path {
+    pub(crate) name: String,
+    pub(crate) steps: Vec<Step>,
 }
 
 #[derive(Clone, Debug)]
-struct Graph {
-    segments: Vec<Segment>,
-    paths: Vec<Path>,
+pub(crate) struct Graph {
+    pub(crate) segments: Vec<Segment>,
+    pub(crate) paths: Vec<Path>,
+}
+
+/// Resolved in-memory graph: the graph the resolver produced, plus run statistics.
+///
+/// Avoids the render → parse round-trip when the caller already holds a parsed
+/// graph (e.g. a blunt syng GFA built in-process).  Callers that need GFA text
+/// wrap with `render_resolved_graph`; callers that hand off to the next pipeline
+/// stage operate on the in-memory graph directly.
+///
+/// `Graph` is `pub(crate)`, so this type is also crate-internal.  External callers
+/// use `resolve_gfa_bubbles` which returns `ResolvedGfa` with a GFA string.
+#[derive(Clone, Debug)]
+pub(crate) struct ResolvedGraph {
+    pub(crate) graph: Graph,
+    pub(crate) stats: ResolutionStats,
 }
 
 #[derive(Clone, Debug)]
@@ -410,6 +425,12 @@ struct OutStep {
 /// must be blunt (`0M`) because the re-rendered graph derives links from path
 /// adjacency and emits `0M` edges. Use `syng:blunt` output, not raw syng overlap
 /// GFA, as input.
+/// Parse a blunt GFA string, resolve bubbles, return the rewritten GFA.
+///
+/// Used by both the syng pipeline (`apply_graph_transforms`) and the
+/// standalone `impg crush` CLI.  The public surface of this function
+/// MUST NOT change shape or break existing behaviour; it is a thin
+/// wrapper around `resolve_graph_bubbles_inmemory`.
 pub fn resolve_gfa_bubbles(gfa: &str, config: &ResolutionConfig) -> io::Result<ResolvedGfa> {
     let parse_start = Instant::now();
     log::info!(
@@ -423,18 +444,44 @@ pub fn resolve_gfa_bubbles(gfa: &str, config: &ResolutionConfig) -> io::Result<R
         graph.paths.len(),
         parse_start.elapsed()
     );
-    resolve_graph_bubbles(graph, Some(gfa), config, true)
+    let resolved = resolve_graph_bubbles_inmemory(graph, config)?;
+    Ok(ResolvedGfa {
+        gfa: if resolved.stats.resolved > 0 {
+            render_resolved_graph(&resolved)
+        } else {
+            gfa.to_string()
+        },
+        stats: resolved.stats,
+    })
+}
+
+/// Same algorithm as `resolve_gfa_bubbles`, but takes an already-parsed graph
+/// and returns the resolved graph without a final GFA render.
+///
+/// Callers that need GFA text wrap with `render_resolved_graph(&resolved)`.
+/// Callers that hand off to the next pipeline stage operate on the in-memory
+/// graph directly.  The argument type `Graph` is `pub(crate)`, so this entry
+/// point is intentionally crate-internal.
+pub(crate) fn resolve_graph_bubbles_inmemory(
+    graph: Graph,
+    config: &ResolutionConfig,
+) -> io::Result<ResolvedGraph> {
+    let (graph, stats) = resolve_graph_bubbles(graph, config, true)?;
+    Ok(ResolvedGraph { graph, stats })
+}
+
+/// Render a resolved in-memory graph back to a GFA 1.0 string.
+pub(crate) fn render_resolved_graph(resolved: &ResolvedGraph) -> String {
+    render_graph(&resolved.graph)
 }
 
 fn resolve_graph_bubbles(
     mut graph: Graph,
-    original_gfa: Option<&str>,
     config: &ResolutionConfig,
     emit_logs: bool,
-) -> io::Result<ResolvedGfa> {
+) -> io::Result<(Graph, ResolutionStats)> {
     let mut stats = ResolutionStats::default();
     let mut seen: FxHashSet<String> = FxHashSet::default();
-    let mut changed = false;
     if emit_logs {
         let (match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2) =
             config.scoring_params;
@@ -614,7 +661,6 @@ fn resolve_graph_bubbles(
         let rewrite_elapsed = rewrite_start.elapsed();
         let after_quality = graph_quality(&next_graph);
         graph = next_graph;
-        changed = true;
         stats.resolved += resolved_count;
         if emit_logs {
             log::info!(
@@ -631,16 +677,7 @@ fn resolve_graph_bubbles(
         }
     }
 
-    Ok(ResolvedGfa {
-        gfa: if changed {
-            render_graph(&graph)
-        } else {
-            original_gfa
-                .map(str::to_string)
-                .unwrap_or_else(|| render_graph(&graph))
-        },
-        stats,
-    })
+    Ok((graph, stats))
 }
 
 /// Return `(path_name, sequence)` for each `P` line, using blunt concatenation.
@@ -2357,7 +2394,13 @@ fn polish_replacement_gfa_with_flubbles(
         ..ResolutionConfig::default()
     };
     let graph = parse_gfa(gfa)?;
-    resolve_graph_bubbles(graph, Some(gfa), &polish_config, false).map(|resolved| resolved.gfa)
+    resolve_graph_bubbles(graph, &polish_config, false).map(|(graph, stats)| {
+        if stats.resolved > 0 {
+            render_graph(&graph)
+        } else {
+            gfa.to_string()
+        }
+    })
 }
 
 fn polish_replacement_gfa_with_smooth(
@@ -4005,5 +4048,54 @@ P\tp\t1+,2+\t*
 ";
         let err = resolve_gfa_bubbles(gfa, &ResolutionConfig::default()).unwrap_err();
         assert!(err.to_string().contains("blunt 0M"));
+    }
+
+    #[test]
+    fn inmemory_and_string_entry_points_produce_identical_resolved_graph() {
+        let gfa = include_str!("../tests/test_data/crush/small_insertion.gfa");
+        let config = ResolutionConfig {
+            ..ResolutionConfig::default()
+        };
+        let via_string = resolve_gfa_bubbles(gfa, &config).unwrap();
+        let parsed = parse_gfa(gfa).unwrap();
+        let via_memory = resolve_graph_bubbles_inmemory(parsed, &config).unwrap();
+        assert_eq!(via_string.gfa, render_resolved_graph(&via_memory));
+        assert_eq!(via_string.stats, via_memory.stats);
+    }
+
+    #[test]
+    fn inmemory_entry_point_resolves_p_line_gfa_bubble() {
+        let gfa = include_str!("../tests/test_data/crush/small_insertion.gfa");
+        let before = seq_map(gfa);
+        let config = ResolutionConfig {
+            ..ResolutionConfig::default()
+        };
+        let parsed = parse_gfa(gfa).unwrap();
+        let resolved = resolve_graph_bubbles_inmemory(parsed, &config).unwrap();
+        let out_gfa = render_resolved_graph(&resolved);
+        assert_eq!(before, seq_map(&out_gfa), "in-memory resolve must preserve all path sequences");
+        assert!(
+            resolved.stats.resolved >= 1,
+            "expected at least 1 resolved bubble, got {:?}",
+            resolved.stats
+        );
+    }
+
+    #[test]
+    fn inmemory_entry_point_resolves_w_line_gfa_bubble() {
+        let gfa = include_str!("../tests/test_data/crush/small_insertion_walks.gfa");
+        let before = seq_map(gfa);
+        let config = ResolutionConfig {
+            ..ResolutionConfig::default()
+        };
+        let parsed = parse_gfa(gfa).unwrap();
+        let resolved = resolve_graph_bubbles_inmemory(parsed, &config).unwrap();
+        let out_gfa = render_resolved_graph(&resolved);
+        assert_eq!(before, seq_map(&out_gfa), "in-memory resolve must preserve all walk sequences");
+        assert!(
+            resolved.stats.resolved >= 1,
+            "expected at least 1 resolved bubble in W-line GFA, got {:?}",
+            resolved.stats
+        );
     }
 }

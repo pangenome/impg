@@ -1,0 +1,9 @@
+H	VN:Z:1.1
+S	1	AC
+S	2	GGG
+S	3	TA
+L	1	+	3	+	0M
+L	1	+	2	+	0M
+L	2	+	3	+	0M
+W	sample	0	ref	0	4	>1>3
+W	sample	0	ins	0	7	>1>2>3
