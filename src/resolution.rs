@@ -302,28 +302,34 @@ pub struct ResolvedGfa {
     pub stats: ResolutionStats,
 }
 
+/// Resolved in-memory graph plus run statistics (no GFA string round-trip).
+pub struct ResolvedGraph {
+    pub graph: Graph,
+    pub stats: ResolutionStats,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-struct Step {
-    node: usize,
-    rev: bool,
+pub(crate) struct Step {
+    pub(crate) node: usize,
+    pub(crate) rev: bool,
 }
 
 #[derive(Clone, Debug)]
-struct Segment {
-    id: String,
-    seq: Vec<u8>,
+pub(crate) struct Segment {
+    pub(crate) id: String,
+    pub(crate) seq: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
-struct Path {
-    name: String,
-    steps: Vec<Step>,
+pub(crate) struct Path {
+    pub(crate) name: String,
+    pub(crate) steps: Vec<Step>,
 }
 
 #[derive(Clone, Debug)]
-struct Graph {
-    segments: Vec<Segment>,
-    paths: Vec<Path>,
+pub(crate) struct Graph {
+    pub(crate) segments: Vec<Segment>,
+    pub(crate) paths: Vec<Path>,
 }
 
 #[derive(Clone, Debug)]
@@ -423,15 +429,38 @@ pub fn resolve_gfa_bubbles(gfa: &str, config: &ResolutionConfig) -> io::Result<R
         graph.paths.len(),
         parse_start.elapsed()
     );
-    resolve_graph_bubbles(graph, Some(gfa), config, true)
+    let (resolved_graph, stats, changed) = run_graph_resolution(graph, config, true)?;
+    Ok(ResolvedGfa {
+        gfa: if changed {
+            render_graph(&resolved_graph)
+        } else {
+            gfa.to_string()
+        },
+        stats,
+    })
 }
 
-fn resolve_graph_bubbles(
+/// Same algorithm as `resolve_gfa_bubbles`, but takes an already-parsed graph
+/// and returns the resolved graph without a final GFA render. Callers that need
+/// GFA text wrap with `render_resolved_graph`; callers that hand off to the next
+/// pipeline stage operate on the in-memory graph.
+pub fn resolve_graph_bubbles_inmemory(
+    _graph: Graph,
+    _config: &ResolutionConfig,
+) -> io::Result<ResolvedGraph> {
+    todo!("crush-impl-syng: implement in-memory entry point")
+}
+
+/// Render a resolved in-memory graph back to a GFA 1.0 string.
+pub fn render_resolved_graph(_resolved: &ResolvedGraph) -> String {
+    todo!("crush-impl-syng: implement render_resolved_graph")
+}
+
+fn run_graph_resolution(
     mut graph: Graph,
-    original_gfa: Option<&str>,
     config: &ResolutionConfig,
     emit_logs: bool,
-) -> io::Result<ResolvedGfa> {
+) -> io::Result<(Graph, ResolutionStats, bool)> {
     let mut stats = ResolutionStats::default();
     let mut seen: FxHashSet<String> = FxHashSet::default();
     let mut changed = false;
@@ -631,16 +660,7 @@ fn resolve_graph_bubbles(
         }
     }
 
-    Ok(ResolvedGfa {
-        gfa: if changed {
-            render_graph(&graph)
-        } else {
-            original_gfa
-                .map(str::to_string)
-                .unwrap_or_else(|| render_graph(&graph))
-        },
-        stats,
-    })
+    Ok((graph, stats, changed))
 }
 
 /// Return `(path_name, sequence)` for each `P` line, using blunt concatenation.
@@ -1533,7 +1553,7 @@ fn apply_replacement_frontier(graph: &Graph, plans: &[ReplacementPlan]) -> io::R
         .collect::<Vec<_>>();
     let rendered = render_rewritten_graph(graph, &replacement_graphs, &used_original, &out_paths);
     let next = parse_gfa(&rendered)?;
-    if !path_sequences_equal(graph, &next)? {
+    if !path_sequences_equal_streaming(graph, &next)? {
         return Err(io::Error::other(
             "resolved graph failed exact path-sequence validation",
         ));
@@ -2357,7 +2377,12 @@ fn polish_replacement_gfa_with_flubbles(
         ..ResolutionConfig::default()
     };
     let graph = parse_gfa(gfa)?;
-    resolve_graph_bubbles(graph, Some(gfa), &polish_config, false).map(|resolved| resolved.gfa)
+    let (resolved_graph, _stats, changed) = run_graph_resolution(graph, &polish_config, false)?;
+    Ok(if changed {
+        render_graph(&resolved_graph)
+    } else {
+        gfa.to_string()
+    })
 }
 
 fn polish_replacement_gfa_with_smooth(
@@ -2793,18 +2818,24 @@ fn order_replacement_paths(graph: &mut Graph, headers: &[String]) -> io::Result<
     Ok(())
 }
 
+#[cfg(test)]
 fn path_sequences_equal(before: &Graph, after: &Graph) -> io::Result<bool> {
     let before_map = path_sequence_map(before)?;
     let after_map = path_sequence_map(after)?;
     Ok(before_map == after_map)
 }
 
+#[cfg(test)]
 fn path_sequence_map(graph: &Graph) -> io::Result<FxHashMap<String, Vec<u8>>> {
     let mut map = FxHashMap::default();
     for path in &graph.paths {
         map.insert(path.name.clone(), path_sequence(graph, path)?);
     }
     Ok(map)
+}
+
+fn path_sequences_equal_streaming(_before: &Graph, _after: &Graph) -> io::Result<bool> {
+    todo!("crush-impl-syng: implement streaming path-sequence validator")
 }
 
 fn render_rewritten_graph(
@@ -4005,5 +4036,55 @@ P\tp\t1+,2+\t*
 ";
         let err = resolve_gfa_bubbles(gfa, &ResolutionConfig::default()).unwrap_err();
         assert!(err.to_string().contains("blunt 0M"));
+    }
+
+    fn crush_test_gfa_fixtures() -> Vec<String> {
+        let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/test_data/crush");
+        std::fs::read_dir(&fixture_dir)
+            .unwrap()
+            .filter_map(|e| {
+                let e = e.unwrap();
+                let path = e.path();
+                if path.extension().and_then(|ext| ext.to_str()) == Some("gfa") {
+                    Some(std::fs::read_to_string(&path).unwrap())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn inmemory_and_string_entry_points_produce_identical_resolved_graph() {
+        let gfa = include_str!("../tests/test_data/crush/small_insertion.gfa");
+        let config = ResolutionConfig::default();
+        let via_string = resolve_gfa_bubbles(gfa, &config).unwrap();
+        let parsed = parse_gfa(gfa).unwrap();
+        let via_memory = resolve_graph_bubbles_inmemory(parsed, &config).unwrap();
+        assert_eq!(
+            via_string.gfa,
+            render_resolved_graph(&via_memory),
+            "in-memory and string entry points produced different GFA"
+        );
+        assert_eq!(
+            via_string.stats, via_memory.stats,
+            "in-memory and string entry points produced different stats"
+        );
+    }
+
+    #[test]
+    fn streaming_validator_matches_materializing_validator_on_known_inputs() {
+        for gfa_text in crush_test_gfa_fixtures() {
+            let before = parse_gfa(&gfa_text).unwrap();
+            let resolved = resolve_gfa_bubbles(&gfa_text, &ResolutionConfig::default()).unwrap();
+            let after = parse_gfa(&resolved.gfa).unwrap();
+            let materializing = path_sequences_equal(&before, &after).unwrap();
+            let streaming = path_sequences_equal_streaming(&before, &after).unwrap();
+            assert_eq!(
+                materializing, streaming,
+                "streaming and materializing validators disagreed on a crush fixture"
+            );
+        }
     }
 }
