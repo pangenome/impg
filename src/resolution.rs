@@ -1531,8 +1531,44 @@ fn apply_replacement_frontier(graph: &Graph, plans: &[ReplacementPlan]) -> io::R
         .iter()
         .map(|plan| plan.replacement.clone())
         .collect::<Vec<_>>();
+    if log::log_enabled!(log::Level::Debug) {
+        let total_replacement_segments: usize = replacement_graphs
+            .iter()
+            .map(|g| g.segments.len())
+            .sum();
+        let total_replacement_bp: usize = replacement_graphs
+            .iter()
+            .map(|g| g.segments.iter().map(|s| s.seq.len()).sum::<usize>())
+            .sum();
+        log::debug!(
+            "crush apply: {} plan(s); replacement segments total={}, replacement bp total={}; rewriting {} path(s)",
+            plans.len(),
+            total_replacement_segments,
+            total_replacement_bp,
+            out_paths.len()
+        );
+    }
     let rendered = render_rewritten_graph(graph, &replacement_graphs, &used_original, &out_paths);
     let next = parse_gfa(&rendered)?;
+    if log::log_enabled!(log::Level::Debug) {
+        let mut sequence_counts: FxHashMap<&[u8], usize> = FxHashMap::default();
+        for segment in &next.segments {
+            *sequence_counts.entry(segment.seq.as_slice()).or_insert(0) += 1;
+        }
+        let duplicate_segments: usize = sequence_counts
+            .values()
+            .filter(|&&n| n > 1)
+            .map(|&n| n - 1)
+            .sum();
+        log::debug!(
+            "crush apply: rendered {} bytes -> parsed graph has {} segment(s), {} path(s), {} unique segment sequence(s), {} duplicate-sequence segment(s)",
+            rendered.len(),
+            next.segments.len(),
+            next.paths.len(),
+            sequence_counts.len(),
+            duplicate_segments
+        );
+    }
     if !path_sequences_equal(graph, &next)? {
         return Err(io::Error::other(
             "resolved graph failed exact path-sequence validation",
