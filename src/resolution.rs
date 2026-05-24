@@ -445,15 +445,16 @@ pub fn resolve_gfa_bubbles(gfa: &str, config: &ResolutionConfig) -> io::Result<R
 /// GFA text wrap with `render_resolved_graph`; callers that hand off to the next
 /// pipeline stage operate on the in-memory graph.
 pub fn resolve_graph_bubbles_inmemory(
-    _graph: Graph,
-    _config: &ResolutionConfig,
+    graph: Graph,
+    config: &ResolutionConfig,
 ) -> io::Result<ResolvedGraph> {
-    todo!("crush-impl-syng: implement in-memory entry point")
+    let (graph, stats, _changed) = run_graph_resolution(graph, config, true)?;
+    Ok(ResolvedGraph { graph, stats })
 }
 
 /// Render a resolved in-memory graph back to a GFA 1.0 string.
-pub fn render_resolved_graph(_resolved: &ResolvedGraph) -> String {
-    todo!("crush-impl-syng: implement render_resolved_graph")
+pub fn render_resolved_graph(resolved: &ResolvedGraph) -> String {
+    render_graph(&resolved.graph)
 }
 
 fn run_graph_resolution(
@@ -2834,8 +2835,122 @@ fn path_sequence_map(graph: &Graph) -> io::Result<FxHashMap<String, Vec<u8>>> {
     Ok(map)
 }
 
-fn path_sequences_equal_streaming(_before: &Graph, _after: &Graph) -> io::Result<bool> {
-    todo!("crush-impl-syng: implement streaming path-sequence validator")
+/// Streaming parallel path-sequence validator.  Avoids materializing full
+/// path sequences: forward steps use a direct slice reference; reverse-
+/// complement steps materialize at most one segment at a time (O(seg_len)).
+fn path_sequences_equal_streaming(before: &Graph, after: &Graph) -> io::Result<bool> {
+    if before.paths.len() != after.paths.len() {
+        return Ok(false);
+    }
+    let before_by_name: FxHashMap<&str, &Path> =
+        before.paths.iter().map(|p| (p.name.as_str(), p)).collect();
+    after
+        .paths
+        .par_iter()
+        .with_min_len(8)
+        .map(|after_path| -> io::Result<bool> {
+            let Some(before_path) = before_by_name.get(after_path.name.as_str()) else {
+                return Ok(false);
+            };
+            Ok(path_bytes_eq(before, before_path, after, after_path))
+        })
+        .try_reduce(|| true, |a, b| Ok(a && b))
+}
+
+fn path_bytes_eq(bg: &Graph, bp: &Path, ag: &Graph, ap: &Path) -> bool {
+    let mut b = StepCursor::new(bg, &bp.steps);
+    let mut a = StepCursor::new(ag, &ap.steps);
+    loop {
+        match (b.next_byte(), a.next_byte()) {
+            (Some(bv), Some(av)) => {
+                if bv != av {
+                    return false;
+                }
+            }
+            (None, None) => return true,
+            _ => return false,
+        }
+    }
+}
+
+/// Cursor over the byte sequence emitted by a graph path.
+///
+/// Forward steps reference the segment slice directly (zero allocation).
+/// Reverse-complement steps materialize one segment at a time into a reused
+/// buffer, so at most O(max_segment_len) bytes are live at once rather than
+/// O(total_path_len).
+struct StepCursor<'a> {
+    graph: &'a Graph,
+    steps: std::slice::Iter<'a, Step>,
+    fwd_seg: &'a [u8],
+    fwd_pos: usize,
+    rc_buf: Vec<u8>,
+    rc_pos: usize,
+    is_rev: bool,
+    exhausted: bool,
+}
+
+impl<'a> StepCursor<'a> {
+    fn new(graph: &'a Graph, steps: &'a [Step]) -> Self {
+        let mut c = StepCursor {
+            graph,
+            steps: steps.iter(),
+            fwd_seg: &[],
+            fwd_pos: 0,
+            rc_buf: Vec::new(),
+            rc_pos: 0,
+            is_rev: false,
+            exhausted: false,
+        };
+        c.advance();
+        c
+    }
+
+    fn advance(&mut self) {
+        loop {
+            let Some(step) = self.steps.next() else {
+                self.exhausted = true;
+                return;
+            };
+            let seg = &self.graph.segments[step.node].seq;
+            if seg.is_empty() {
+                continue; // skip zero-length segments
+            }
+            self.is_rev = step.rev;
+            if step.rev {
+                self.rc_buf = reverse_complement(seg);
+                self.rc_pos = 0;
+                self.fwd_seg = &[];
+                self.fwd_pos = 0;
+            } else {
+                self.fwd_seg = seg.as_slice();
+                self.fwd_pos = 0;
+                self.rc_buf.clear();
+                self.rc_pos = 0;
+            }
+            return;
+        }
+    }
+
+    fn next_byte(&mut self) -> Option<u8> {
+        loop {
+            if self.exhausted {
+                return None;
+            }
+            if self.is_rev {
+                if self.rc_pos < self.rc_buf.len() {
+                    let b = self.rc_buf[self.rc_pos];
+                    self.rc_pos += 1;
+                    return Some(b);
+                }
+            } else if self.fwd_pos < self.fwd_seg.len() {
+                let b = self.fwd_seg[self.fwd_pos];
+                self.fwd_pos += 1;
+                return Some(b);
+            }
+            self.advance();
+        }
+    }
 }
 
 fn render_rewritten_graph(
