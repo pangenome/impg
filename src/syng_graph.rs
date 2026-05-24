@@ -21,6 +21,10 @@
 
 use lib_wfa2::affine_wavefront::{AffineWavefronts, AlignmentStatus, Distance, MemoryMode};
 use std::cell::RefCell;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static DEBUG_GRAPH_BUILD_ID: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
     /// Gap-affine aligner reused across pair calls on the same thread.
@@ -581,6 +585,12 @@ pub fn build_gfa_from_paf_and_sequences(
     if seqs.is_empty() {
         return Ok(String::from("H\tVN:Z:1.0\n"));
     }
+    let debug_dir = std::env::var_os("IMPG_CRUSH_DEBUG_DIR").map(|root| {
+        let id = DEBUG_GRAPH_BUILD_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = PathBuf::from(root).join(format!("graph_build_{id:04}"));
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    });
 
     // Write combined FASTA to a temp file. One entry per input sequence;
     // seqwish indexes by the header name, so names must match the PAF's
@@ -598,6 +608,9 @@ pub fn build_gfa_from_paf_and_sequences(
         }
         w.flush()?;
     }
+    if let Some(dir) = &debug_dir {
+        let _ = std::fs::copy(combined_fasta.path(), dir.join("combined.fa"));
+    }
 
     let mut paf_file = tempfile::Builder::new()
         .suffix(".paf")
@@ -605,6 +618,9 @@ pub fn build_gfa_from_paf_and_sequences(
         .map_err(|e| std::io::Error::other(format!("Failed to create temp PAF: {}", e)))?;
     paf_file.write_all(paf_content.as_bytes())?;
     paf_file.flush()?;
+    if let Some(dir) = &debug_dir {
+        let _ = std::fs::write(dir.join("raw.paf"), paf_content);
+    }
 
     let total_bases = seqs.iter().map(|(_, seq)| seq.len() as u64).sum::<u64>();
     let avg_seq_len = if seqs.is_empty() {
@@ -613,6 +629,9 @@ pub fn build_gfa_from_paf_and_sequences(
         total_bases / seqs.len() as u64
     };
     let filtered_paf = crate::commands::graph::filter_generated_paf(paf_file, avg_seq_len, config)?;
+    if let Some(dir) = &debug_dir {
+        let _ = std::fs::copy(filtered_paf.path(), dir.join("filtered.paf"));
+    }
 
     // Hand off to the shared seqwish induction pipeline.
     let num_seqs = seqs.len();
@@ -629,6 +648,9 @@ pub fn build_gfa_from_paf_and_sequences(
     };
     let mut gfa_buf: Vec<u8> = Vec::new();
     crate::commands::graph::induce_graph_from_alignment(aln_result, &mut gfa_buf, config)?;
+    if let Some(dir) = &debug_dir {
+        let _ = std::fs::write(dir.join("seqwish.gfa"), &gfa_buf);
+    }
     String::from_utf8(gfa_buf).map_err(|e| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,

@@ -206,6 +206,11 @@ length kept by the SweepGA filter. A value of `min-map-length=0` follows
 `seqwish-k`, so the default graph-induction mapping scale is also `311`.
 `min-identity` / `replacement-min-identity` can require a minimum mapping
 identity before a pairwise alignment is allowed to seed local graph induction.
+For `method=sweepga`, `kmer-frequency=0` is the default and resolves per
+candidate to at least `1000` and otherwise `10 * traversal_count`. This differs
+from whole-genome FastGA defaults deliberately: local bubble crushing needs
+repeated seeds to survive, while the downstream plane-sweep/scaffold filter and
+`seqwish-k` control graph glue.
 
 Syng-native graph extraction has an earlier raw-layer mask before bluntification
 or crush. `gfa:syng:mask,min-run=3:crush` removes locally shared syncmer nodes

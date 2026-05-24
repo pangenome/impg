@@ -22,6 +22,7 @@ use std::time::Instant;
 
 const GRAPH_QUALITY_LONG_BRIDGE_BP: usize = 10_000;
 const GRAPH_QUALITY_WHITE_SPACE_FLOOR_BP: usize = 1_000;
+static DEBUG_REPLACEMENT_ID: AtomicUsize = AtomicUsize::new(0);
 
 /// Configuration for exact path-preserving bubble resolution.
 #[derive(Clone, Debug)]
@@ -118,7 +119,8 @@ pub struct ResolutionConfig {
     pub replacement_scaffold_filter: String,
     /// SweepGA aligner backend used by `method=sweepga`.
     pub sweepga_aligner: String,
-    /// SweepGA/FastGA k-mer frequency.
+    /// SweepGA/FastGA k-mer frequency. A value of 0 uses a crush-local
+    /// automatic frequency high enough to keep repeated bubble-local seeds.
     pub sweepga_kmer_frequency: usize,
     /// SweepGA minimum alignment length.
     pub sweepga_min_aln_length: u64,
@@ -234,7 +236,9 @@ pub const DEFAULT_PAIR_MASH_K: usize = 15;
 pub const DEFAULT_REPLACEMENT_SEQWISH_MIN_MATCH_LEN: u64 = 311;
 pub const DEFAULT_REPLACEMENT_MIN_MAP_LENGTH: u64 = 0;
 pub const DEFAULT_REPLACEMENT_MIN_IDENTITY: f64 = 0.0;
-pub const DEFAULT_SWEEPGA_KMER_FREQUENCY: usize = 10;
+pub const DEFAULT_SWEEPGA_KMER_FREQUENCY: usize = 0;
+const MIN_AUTO_SWEEPGA_KMER_FREQUENCY: usize = 1_000;
+const AUTO_SWEEPGA_KMER_FREQUENCY_PER_TRAVERSAL: usize = 10;
 pub const DEFAULT_SWEEPGA_MIN_ALN_LENGTH: u64 = 0;
 pub const DEFAULT_MAX_PAIR_ALIGNMENTS: usize = 10_000;
 pub const DEFAULT_MAX_REPLACEMENT_PAF_BYTES: usize = 64 * 1024 * 1024;
@@ -1621,6 +1625,15 @@ fn seqwish_replacement_config(
     }
 }
 
+fn replacement_sweepga_kmer_frequency(configured: usize, traversal_count: usize) -> usize {
+    if configured > 0 {
+        return configured;
+    }
+    traversal_count
+        .saturating_mul(AUTO_SWEEPGA_KMER_FREQUENCY_PER_TRAVERSAL)
+        .max(MIN_AUTO_SWEEPGA_KMER_FREQUENCY)
+}
+
 fn tree_mash_k_schedule(base: usize, count: usize) -> Vec<usize> {
     let base = base.clamp(3, 31);
     let mut values = Vec::with_capacity(count.max(1));
@@ -1724,7 +1737,29 @@ fn finalize_pairwise_induced_replacement(
     config: &ResolutionConfig,
     method: &str,
 ) -> io::Result<Graph> {
+    let debug_dir = std::env::var_os("IMPG_CRUSH_DEBUG_DIR").map(|root| {
+        let id = DEBUG_REPLACEMENT_ID.fetch_add(1, Ordering::Relaxed);
+        let method = method
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        let dir = std::path::PathBuf::from(root).join(format!("replacement_{id:04}_{method}"));
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    });
+    if let Some(dir) = &debug_dir {
+        let _ = std::fs::write(dir.join("seqwish.gfa"), &gfa);
+    }
     let compacted = unchop_gfa(&gfa)?;
+    if let Some(dir) = &debug_dir {
+        let _ = std::fs::write(dir.join("unchopped.gfa"), &compacted);
+    }
     let mut replacement = parse_gfa(&compacted)?;
     order_replacement_paths(&mut replacement, headers)?;
     if config.polish_iterations > 0 {
@@ -1868,9 +1903,11 @@ fn build_sweepga_seqwish_replacement(
             "crush sweepga: ignoring sparse-pairs for replacement induction; using one all-vs-all self-alignment batch"
         );
     }
+    let kmer_frequency =
+        replacement_sweepga_kmer_frequency(config.sweepga_kmer_frequency, seqs.len());
     let align_config = sweepga::library_api::SweepgaAlignConfig {
         num_threads: rayon::current_num_threads().max(1),
-        kmer_frequency: config.sweepga_kmer_frequency,
+        kmer_frequency,
         min_aln_length: config.sweepga_min_aln_length,
         // Get raw all-vs-all alignments first. The shared graph induction
         // tail below applies the configured SweepGA 1:1 scaffold-chain filter
@@ -1914,11 +1951,12 @@ fn build_sweepga_seqwish_replacement(
         )));
     }
     log::debug!(
-        "crush sweepga: {} traversal(s), {} unique raw all-vs-all PAF line(s), {} PAF byte(s) from {} backend; seqwish tail will apply scaffold filter={}",
+        "crush sweepga: {} traversal(s), {} unique raw all-vs-all PAF line(s), {} PAF byte(s) from {} backend (fastga_frequency={}); seqwish tail will apply scaffold filter={}",
         seqs.len(),
         paf_lines.len(),
         paf.len(),
         config.sweepga_aligner,
+        kmer_frequency,
         if config.sweepga_no_filter { "disabled" } else { "1:1" }
     );
 
@@ -3497,6 +3535,14 @@ P\talt\t1+,3+,4+\t*
         assert_eq!(graph_config.min_map_length, 500);
         assert_eq!(graph_config.num_mappings, "1:many");
         assert_eq!(graph_config.scaffold_filter, "many:many");
+    }
+
+    #[test]
+    fn sweepga_replacement_frequency_auto_keeps_local_repeats_seedable() {
+        assert_eq!(replacement_sweepga_kmer_frequency(42, 463), 42);
+        assert_eq!(replacement_sweepga_kmer_frequency(0, 2), 1_000);
+        assert_eq!(replacement_sweepga_kmer_frequency(0, 463), 4_630);
+        assert_eq!(replacement_sweepga_kmer_frequency(0, 10_000), 100_000);
     }
 
     #[test]

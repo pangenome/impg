@@ -4838,8 +4838,8 @@ GFA engine shorthand:
         #[clap(long, value_parser, default_value = "fastga")]
         sweepga_aligner: String,
 
-        /// SweepGA/FastGA k-mer frequency for --method sweepga
-        #[clap(long, value_parser = parse_usize_size, default_value = "10")]
+        /// SweepGA/FastGA k-mer frequency for --method sweepga; 0 auto-scales for bubble-local repeats
+        #[clap(long, value_parser = parse_usize_size, default_value = "0")]
         sweepga_kmer_frequency: usize,
 
         /// SweepGA minimum alignment length for --method sweepga
@@ -12850,6 +12850,35 @@ mod tests {
                 assert_eq!(crush.replacement_scaffold_filter, "1:many");
                 assert!(!crush.sweepga_no_filter);
                 assert!(crush.sweepga_sparse_pairs);
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_sweepga_crush_defaults_to_auto_frequency() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush,method=sweepga",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                let crush = parsed.crush_config.unwrap();
+                assert_eq!(crush.method, impg::resolution::ResolutionMethod::Sweepga);
+                assert_eq!(crush.sweepga_kmer_frequency, 0);
             }
             _ => panic!("expected query command"),
         }
