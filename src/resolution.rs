@@ -1570,7 +1570,7 @@ fn apply_replacement_frontier(graph: &Graph, plans: &[ReplacementPlan]) -> io::R
         .collect::<Vec<_>>();
     let rendered = render_rewritten_graph(graph, &replacement_graphs, &used_original, &out_paths);
     let next = parse_gfa(&rendered)?;
-    if !path_sequences_equal(graph, &next)? {
+    if !path_sequences_equal_streaming(graph, &next)? {
         return Err(io::Error::other(
             "resolved graph failed exact path-sequence validation",
         ));
@@ -2836,18 +2836,138 @@ fn order_replacement_paths(graph: &mut Graph, headers: &[String]) -> io::Result<
     Ok(())
 }
 
+#[cfg(test)]
 fn path_sequences_equal(before: &Graph, after: &Graph) -> io::Result<bool> {
     let before_map = path_sequence_map(before)?;
     let after_map = path_sequence_map(after)?;
     Ok(before_map == after_map)
 }
 
+#[cfg(test)]
 fn path_sequence_map(graph: &Graph) -> io::Result<FxHashMap<String, Vec<u8>>> {
     let mut map = FxHashMap::default();
     for path in &graph.paths {
         map.insert(path.name.clone(), path_sequence(graph, path)?);
     }
     Ok(map)
+}
+
+/// Streaming parallel path-sequence validator.  Avoids materializing full
+/// path sequences: forward steps use a direct slice reference; reverse-
+/// complement steps materialize at most one segment at a time (O(seg_len)).
+fn path_sequences_equal_streaming(before: &Graph, after: &Graph) -> io::Result<bool> {
+    if before.paths.len() != after.paths.len() {
+        return Ok(false);
+    }
+    let before_by_name: FxHashMap<&str, &Path> =
+        before.paths.iter().map(|p| (p.name.as_str(), p)).collect();
+    after
+        .paths
+        .par_iter()
+        .with_min_len(8)
+        .map(|after_path| -> io::Result<bool> {
+            let Some(before_path) = before_by_name.get(after_path.name.as_str()) else {
+                return Ok(false);
+            };
+            Ok(path_bytes_eq(before, before_path, after, after_path))
+        })
+        .try_reduce(|| true, |a, b| Ok(a && b))
+}
+
+fn path_bytes_eq(bg: &Graph, bp: &Path, ag: &Graph, ap: &Path) -> bool {
+    let mut b = StepCursor::new(bg, &bp.steps);
+    let mut a = StepCursor::new(ag, &ap.steps);
+    loop {
+        match (b.next_byte(), a.next_byte()) {
+            (Some(bv), Some(av)) => {
+                if bv != av {
+                    return false;
+                }
+            }
+            (None, None) => return true,
+            _ => return false,
+        }
+    }
+}
+
+/// Cursor over the byte sequence emitted by a graph path.
+///
+/// Forward steps reference the segment slice directly (zero allocation).
+/// Reverse-complement steps materialize one segment at a time into a reused
+/// buffer, so at most O(max_segment_len) bytes are live at once rather than
+/// O(total_path_len).
+struct StepCursor<'a> {
+    graph: &'a Graph,
+    steps: std::slice::Iter<'a, Step>,
+    fwd_seg: &'a [u8],
+    fwd_pos: usize,
+    rc_buf: Vec<u8>,
+    rc_pos: usize,
+    is_rev: bool,
+    exhausted: bool,
+}
+
+impl<'a> StepCursor<'a> {
+    fn new(graph: &'a Graph, steps: &'a [Step]) -> Self {
+        let mut c = StepCursor {
+            graph,
+            steps: steps.iter(),
+            fwd_seg: &[],
+            fwd_pos: 0,
+            rc_buf: Vec::new(),
+            rc_pos: 0,
+            is_rev: false,
+            exhausted: false,
+        };
+        c.advance();
+        c
+    }
+
+    fn advance(&mut self) {
+        loop {
+            let Some(step) = self.steps.next() else {
+                self.exhausted = true;
+                return;
+            };
+            let seg = &self.graph.segments[step.node].seq;
+            if seg.is_empty() {
+                continue;
+            }
+            self.is_rev = step.rev;
+            if step.rev {
+                self.rc_buf = reverse_complement(seg);
+                self.rc_pos = 0;
+                self.fwd_seg = &[];
+                self.fwd_pos = 0;
+            } else {
+                self.fwd_seg = seg.as_slice();
+                self.fwd_pos = 0;
+                self.rc_buf.clear();
+                self.rc_pos = 0;
+            }
+            return;
+        }
+    }
+
+    fn next_byte(&mut self) -> Option<u8> {
+        loop {
+            if self.exhausted {
+                return None;
+            }
+            if self.is_rev {
+                if self.rc_pos < self.rc_buf.len() {
+                    let b = self.rc_buf[self.rc_pos];
+                    self.rc_pos += 1;
+                    return Some(b);
+                }
+            } else if self.fwd_pos < self.fwd_seg.len() {
+                let b = self.fwd_seg[self.fwd_pos];
+                self.fwd_pos += 1;
+                return Some(b);
+            }
+            self.advance();
+        }
+    }
 }
 
 fn render_rewritten_graph(
@@ -4097,5 +4217,37 @@ P\tp\t1+,2+\t*
             "expected at least 1 resolved bubble in W-line GFA, got {:?}",
             resolved.stats
         );
+    }
+
+    fn crush_test_gfa_fixtures() -> Vec<String> {
+        let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/test_data/crush");
+        std::fs::read_dir(&fixture_dir)
+            .unwrap()
+            .filter_map(|e| {
+                let e = e.unwrap();
+                let path = e.path();
+                if path.extension().and_then(|ext| ext.to_str()) == Some("gfa") {
+                    Some(std::fs::read_to_string(&path).unwrap())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn streaming_validator_matches_materializing_validator_on_known_inputs() {
+        for gfa_text in crush_test_gfa_fixtures() {
+            let before = parse_gfa(&gfa_text).unwrap();
+            let resolved = resolve_gfa_bubbles(&gfa_text, &ResolutionConfig::default()).unwrap();
+            let after = parse_gfa(&resolved.gfa).unwrap();
+            let materializing = path_sequences_equal(&before, &after).unwrap();
+            let streaming = path_sequences_equal_streaming(&before, &after).unwrap();
+            assert_eq!(
+                materializing, streaming,
+                "streaming and materializing validators disagreed on a crush fixture"
+            );
+        }
     }
 }
