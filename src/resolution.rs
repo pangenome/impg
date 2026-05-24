@@ -475,6 +475,31 @@ pub(crate) fn render_resolved_graph(resolved: &ResolvedGraph) -> String {
     render_graph(&resolved.graph)
 }
 
+/// Bench helper: parse a blunt GFA string and return the segment / path count.
+/// Exposes the internal parser for `benches/crush.rs`; not intended for general
+/// callers (use `path_sequences` if you need parsed content).
+#[doc(hidden)]
+pub fn bench_parse_gfa(gfa: &str) -> io::Result<(usize, usize)> {
+    let g = parse_gfa(gfa)?;
+    Ok((g.segments.len(), g.paths.len()))
+}
+
+/// Bench helper: parse a blunt GFA string and re-render it without any
+/// resolution work (round-trip).
+#[doc(hidden)]
+pub fn bench_parse_render_gfa(gfa: &str) -> io::Result<String> {
+    let g = parse_gfa(gfa)?;
+    Ok(render_graph(&g))
+}
+
+/// Bench helper: streaming self-validate (parses twice, compares streamingly).
+#[doc(hidden)]
+pub fn bench_validate_streaming_self(gfa: &str) -> io::Result<bool> {
+    let a = parse_gfa(gfa)?;
+    let b = parse_gfa(gfa)?;
+    path_sequences_equal_streaming(&a, &b)
+}
+
 fn resolve_graph_bubbles(
     mut graph: Graph,
     config: &ResolutionConfig,
@@ -701,91 +726,200 @@ pub fn path_sequences(gfa: &str) -> io::Result<Vec<(String, String)>> {
 }
 
 fn parse_gfa(gfa: &str) -> io::Result<Graph> {
-    let mut segments = Vec::new();
-    let mut id_to_idx: FxHashMap<String, usize> = FxHashMap::default();
-    let mut paths = Vec::new();
+    // First pass: classify lines by tag and validate L lines inline.  The
+    // heavy work (path step parsing, hash lookup × millions) is deferred to
+    // a parallel second pass so it can scale across cores.
+    let mut s_records: Vec<(usize, &str)> = Vec::new();
+    let mut p_records: Vec<(usize, &str)> = Vec::new();
+    let mut w_records: Vec<(usize, &str)> = Vec::new();
 
     for (line_no, line) in gfa.lines().enumerate() {
         if line.is_empty() {
             continue;
         }
-        let fields: Vec<&str> = line.split('\t').collect();
-        match fields[0] {
-            "S" => {
-                if fields.len() < 3 {
-                    return Err(invalid_gfa(line_no, "S line has fewer than 3 fields"));
-                }
-                let id = fields[1].to_string();
-                if id_to_idx.contains_key(&id) {
-                    return Err(invalid_gfa(line_no, "duplicate segment ID"));
-                }
-                let idx = segments.len();
-                id_to_idx.insert(id.clone(), idx);
-                segments.push(Segment {
-                    id,
-                    seq: fields[2].as_bytes().to_vec(),
-                });
-            }
-            "L" => {
-                if fields.len() >= 6 && fields[5] != "0M" {
-                    return Err(invalid_gfa(
-                        line_no,
-                        "resolution currently requires blunt 0M links",
-                    ));
+        let bytes = line.as_bytes();
+        match bytes[0] {
+            b'S' => s_records.push((line_no, line)),
+            b'L' => {
+                // Validate the overlap field == "0M" if present.  Avoid
+                // allocating a Vec<&str>; just locate the 6th tab-separated
+                // field by hand.
+                if let Some(overlap) = nth_tab_field(line, 5) {
+                    if overlap != "0M" {
+                        return Err(invalid_gfa(
+                            line_no,
+                            "resolution currently requires blunt 0M links",
+                        ));
+                    }
                 }
             }
-            "P" => {
-                if fields.len() < 3 {
-                    return Err(invalid_gfa(line_no, "P line has fewer than 3 fields"));
-                }
-                if fields.len() >= 4 && fields[3] != "*" && fields[3] != "" {
-                    return Err(invalid_gfa(
-                        line_no,
-                        "resolution currently requires '*' path overlaps",
-                    ));
-                }
-                let mut steps = Vec::new();
-                for raw_step in fields[2].split(',').filter(|s| !s.is_empty()) {
-                    let (id, rev) = parse_p_step(raw_step)
-                        .ok_or_else(|| invalid_gfa(line_no, "P line has a malformed path step"))?;
-                    let Some(&node) = id_to_idx.get(id) else {
-                        return Err(invalid_gfa(line_no, "P line references unknown segment"));
-                    };
-                    steps.push(Step { node, rev });
-                }
-                if !steps.is_empty() {
-                    paths.push(Path {
-                        name: fields[1].to_string(),
-                        steps,
-                    });
-                }
-            }
-            "W" => {
-                if fields.len() < 7 {
-                    return Err(invalid_gfa(line_no, "W line has fewer than 7 fields"));
-                }
-                let mut steps = Vec::new();
-                for (id, rev) in parse_w_walk(fields[6])
-                    .ok_or_else(|| invalid_gfa(line_no, "W line has a malformed walk"))?
-                {
-                    let Some(&node) = id_to_idx.get(id) else {
-                        return Err(invalid_gfa(line_no, "W line references unknown segment"));
-                    };
-                    steps.push(Step { node, rev });
-                }
-                if !steps.is_empty() {
-                    paths.push(Path {
-                        name: fields[3].to_string(),
-                        steps,
-                    });
-                }
-            }
-            "H" | "C" | "J" => {}
+            b'P' => p_records.push((line_no, line)),
+            b'W' => w_records.push((line_no, line)),
+            b'H' | b'C' | b'J' => {}
             _ => {}
         }
     }
 
+    // Second pass: build segments and id_to_idx serially (small relative to
+    // path step parsing, and id_to_idx ownership must be sequential).
+    let mut segments: Vec<Segment> = Vec::with_capacity(s_records.len());
+    let mut id_to_idx: FxHashMap<String, usize> =
+        FxHashMap::with_capacity_and_hasher(s_records.len(), Default::default());
+    for (line_no, line) in &s_records {
+        let mut it = line.splitn(4, '\t');
+        let _tag = it.next();
+        let Some(id) = it.next() else {
+            return Err(invalid_gfa(*line_no, "S line has fewer than 3 fields"));
+        };
+        let Some(seq) = it.next() else {
+            return Err(invalid_gfa(*line_no, "S line has fewer than 3 fields"));
+        };
+        if id_to_idx.contains_key(id) {
+            return Err(invalid_gfa(*line_no, "duplicate segment ID"));
+        }
+        let idx = segments.len();
+        let owned_id = id.to_string();
+        id_to_idx.insert(owned_id.clone(), idx);
+        segments.push(Segment {
+            id: owned_id,
+            seq: seq.as_bytes().to_vec(),
+        });
+    }
+
+    // Third pass: parse P and W lines in parallel.  Each path is independent
+    // and the id_to_idx map is read-only at this point.
+    let mut paths: Vec<Path> = Vec::with_capacity(p_records.len() + w_records.len());
+
+    if !p_records.is_empty() {
+        let p_parsed: Vec<io::Result<Option<Path>>> = p_records
+            .par_iter()
+            .with_min_len(8)
+            .map(|(line_no, line)| parse_p_line(*line_no, line, &id_to_idx))
+            .collect();
+        for r in p_parsed {
+            if let Some(path) = r? {
+                paths.push(path);
+            }
+        }
+    }
+
+    if !w_records.is_empty() {
+        let w_parsed: Vec<io::Result<Option<Path>>> = w_records
+            .par_iter()
+            .with_min_len(8)
+            .map(|(line_no, line)| parse_w_line(*line_no, line, &id_to_idx))
+            .collect();
+        for r in w_parsed {
+            if let Some(path) = r? {
+                paths.push(path);
+            }
+        }
+    }
+
     Ok(Graph { segments, paths })
+}
+
+/// Locate the value of the 0-indexed tab-separated field `n` in `line`,
+/// returning `None` if the field does not exist.  Cheaper than
+/// `line.split('\t').collect::<Vec<_>>().get(n)`.
+fn nth_tab_field(line: &str, n: usize) -> Option<&str> {
+    let mut start = 0;
+    let mut cur = 0;
+    let bytes = line.as_bytes();
+    for (i, b) in bytes.iter().enumerate() {
+        if *b == b'\t' {
+            if cur == n {
+                return Some(&line[start..i]);
+            }
+            cur += 1;
+            start = i + 1;
+        }
+    }
+    if cur == n {
+        Some(&line[start..])
+    } else {
+        None
+    }
+}
+
+fn parse_p_line(
+    line_no: usize,
+    line: &str,
+    id_to_idx: &FxHashMap<String, usize>,
+) -> io::Result<Option<Path>> {
+    let mut it = line.splitn(5, '\t');
+    let _tag = it.next();
+    let Some(name) = it.next() else {
+        return Err(invalid_gfa(line_no, "P line has fewer than 3 fields"));
+    };
+    let Some(steps_field) = it.next() else {
+        return Err(invalid_gfa(line_no, "P line has fewer than 3 fields"));
+    };
+    if let Some(overlap) = it.next() {
+        if !overlap.is_empty() && overlap != "*" {
+            return Err(invalid_gfa(
+                line_no,
+                "resolution currently requires '*' path overlaps",
+            ));
+        }
+    }
+    let mut steps: Vec<Step> = Vec::new();
+    for raw_step in steps_field.split(',') {
+        if raw_step.is_empty() {
+            continue;
+        }
+        let (id, rev) = parse_p_step(raw_step)
+            .ok_or_else(|| invalid_gfa(line_no, "P line has a malformed path step"))?;
+        let Some(&node) = id_to_idx.get(id) else {
+            return Err(invalid_gfa(line_no, "P line references unknown segment"));
+        };
+        steps.push(Step { node, rev });
+    }
+    if steps.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(Path {
+            name: name.to_string(),
+            steps,
+        }))
+    }
+}
+
+fn parse_w_line(
+    line_no: usize,
+    line: &str,
+    id_to_idx: &FxHashMap<String, usize>,
+) -> io::Result<Option<Path>> {
+    // W tag layout: W \t sample \t hap_idx \t name \t start \t end \t walk
+    let mut it = line.splitn(7, '\t');
+    let _tag = it.next();
+    let _sample = it.next();
+    let _hap = it.next();
+    let Some(name) = it.next() else {
+        return Err(invalid_gfa(line_no, "W line has fewer than 7 fields"));
+    };
+    let _start = it.next();
+    let _end = it.next();
+    let Some(walk) = it.next() else {
+        return Err(invalid_gfa(line_no, "W line has fewer than 7 fields"));
+    };
+    let pairs = parse_w_walk(walk)
+        .ok_or_else(|| invalid_gfa(line_no, "W line has a malformed walk"))?;
+    let mut steps: Vec<Step> = Vec::with_capacity(pairs.len());
+    for (id, rev) in pairs {
+        let Some(&node) = id_to_idx.get(id) else {
+            return Err(invalid_gfa(line_no, "W line references unknown segment"));
+        };
+        steps.push(Step { node, rev });
+    }
+    if steps.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(Path {
+            name: name.to_string(),
+            steps,
+        }))
+    }
 }
 
 fn invalid_gfa(line_no: usize, msg: &str) -> io::Error {
@@ -2976,90 +3110,213 @@ fn render_rewritten_graph(
     used_original: &FxHashSet<usize>,
     out_paths: &[(String, Vec<OutStep>)],
 ) -> String {
-    let mut out = String::new();
-    out.push_str("H\tVN:Z:1.0\n");
+    // All emitted bytes (segment IDs, ASCII DNA, separators, path names) are
+    // ASCII, so the final `Vec<u8>` is valid UTF-8 by construction.  Building
+    // into bytes avoids the per-segment `String::from_utf8_lossy` UTF-8 check
+    // on `Vec<u8>` sequence data, which dominated the old renderer on big
+    // graphs (45 MiB of sequence × utf-8 validation × per-round).
+    let n_seg_hint: usize = used_original.len()
+        + replacements.iter().map(|g| g.segments.len()).sum::<usize>();
+    let mut total_seq_hint: usize =
+        used_original.iter().map(|&i| original.segments[i].seq.len()).sum();
+    total_seq_hint += replacements
+        .iter()
+        .flat_map(|g| g.segments.iter().map(|s| s.seq.len()))
+        .sum::<usize>();
+    let mut out: Vec<u8> = Vec::with_capacity(total_seq_hint + n_seg_hint * 48 + 64);
+    out.extend_from_slice(b"H\tVN:Z:1.0\n");
 
-    let mut id_by_node: FxHashMap<OutNode, String> = FxHashMap::default();
     let mut used_ids = FxHashSet::<String>::default();
-    for node in used_original {
-        used_ids.insert(original.segments[*node].id.clone());
+    used_ids.reserve(used_original.len());
+    for &node in used_original {
+        used_ids.insert(original.segments[node].id.clone());
     }
     let mut next_id = 1usize;
 
-    let mut seen_ordered = FxHashSet::<OutNode>::default();
-    let mut ordered_nodes = Vec::new();
-    for (_, steps) in out_paths {
-        for step in steps {
-            if seen_ordered.insert(step.node) {
-                ordered_nodes.push(step.node);
+    // Build the unique-in-traversal-order list of nodes referenced by paths.
+    // Fast path: when there are no replacement graphs, every step is
+    // OutNode::Original(i), so we can use a Vec<bool> keyed by `i` instead of
+    // hashing OutNode enums.  On the C4 graph (4.6 M total steps) this
+    // shaves ~30 ms off the hash-based path.
+    let mut ordered_nodes: Vec<OutNode> = Vec::with_capacity(n_seg_hint);
+    if replacements.is_empty() {
+        let mut seen_original: Vec<bool> = vec![false; original.segments.len()];
+        for (_, steps) in out_paths {
+            for step in steps {
+                if let OutNode::Original(i) = step.node {
+                    if !seen_original[i] {
+                        seen_original[i] = true;
+                        ordered_nodes.push(OutNode::Original(i));
+                    }
+                }
+            }
+        }
+    } else {
+        let mut seen_original: Vec<bool> = vec![false; original.segments.len()];
+        let mut seen_repl: FxHashSet<(usize, usize)> = FxHashSet::default();
+        for (_, steps) in out_paths {
+            for step in steps {
+                match step.node {
+                    OutNode::Original(i) => {
+                        if !seen_original[i] {
+                            seen_original[i] = true;
+                            ordered_nodes.push(OutNode::Original(i));
+                        }
+                    }
+                    OutNode::Replacement(r, n) => {
+                        if seen_repl.insert((r, n)) {
+                            ordered_nodes.push(OutNode::Replacement(r, n));
+                        }
+                    }
+                }
             }
         }
     }
 
-    for node in ordered_nodes {
-        match node {
+    // For each ordered node, store the emitted ID's range in `id_pool`.  This
+    // is a flat byte buffer of ID strings concatenated; offsets are recorded
+    // in `id_spans`.  Avoids storing N String allocations.
+    let mut id_pool: Vec<u8> = Vec::with_capacity(n_seg_hint * 8);
+    let mut id_spans: Vec<(u32, u32)> = Vec::with_capacity(n_seg_hint);
+    // Fast lookup tables: for OutNode::Original(i), `orig_out_idx[i]` holds
+    // the emitted out-index (u32::MAX if not used).  For OutNode::Replacement
+    // (rare), fall back to `repl_out_idx`.
+    let mut orig_out_idx: Vec<u32> = vec![u32::MAX; original.segments.len()];
+    let mut repl_out_idx: FxHashMap<(usize, usize), u32> = FxHashMap::default();
+
+    // First pass: emit S lines and remember each node's ID byte range.
+    for (out_idx, node) in ordered_nodes.iter().enumerate() {
+        match *node {
             OutNode::Original(original_idx) => {
-                let id = original.segments[original_idx].id.clone();
-                id_by_node.insert(node, id.clone());
-                out.push_str(&format!(
-                    "S\t{}\t{}\n",
-                    id,
-                    String::from_utf8_lossy(&original.segments[original_idx].seq)
-                ));
+                let seg = &original.segments[original_idx];
+                let start = id_pool.len() as u32;
+                id_pool.extend_from_slice(seg.id.as_bytes());
+                let end = id_pool.len() as u32;
+                id_spans.push((start, end));
+                orig_out_idx[original_idx] = out_idx as u32;
+                out.extend_from_slice(b"S\t");
+                out.extend_from_slice(&id_pool[start as usize..end as usize]);
+                out.push(b'\t');
+                out.extend_from_slice(&seg.seq);
+                out.push(b'\n');
             }
             OutNode::Replacement(replacement_idx, replacement_node_idx) => {
-                let replacement = replacements
-                    .get(replacement_idx)
-                    .expect("used replacement index must refer to an emitted replacement graph");
+                let replacement = replacements.get(replacement_idx).expect(
+                    "used replacement index must refer to an emitted replacement graph",
+                );
                 let id = next_unused_segment_id(&mut used_ids, &mut next_id);
-                id_by_node.insert(node, id.clone());
-                out.push_str(&format!(
-                    "S\t{}\t{}\n",
-                    id,
-                    String::from_utf8_lossy(&replacement.segments[replacement_node_idx].seq)
-                ));
+                let start = id_pool.len() as u32;
+                id_pool.extend_from_slice(id.as_bytes());
+                let end = id_pool.len() as u32;
+                id_spans.push((start, end));
+                repl_out_idx.insert((replacement_idx, replacement_node_idx), out_idx as u32);
+                used_ids.insert(id);
+                out.extend_from_slice(b"S\t");
+                out.extend_from_slice(&id_pool[start as usize..end as usize]);
+                out.push(b'\t');
+                out.extend_from_slice(&replacement.segments[replacement_node_idx].seq);
+                out.push(b'\n');
             }
         }
     }
+    // O(1) lookup that prefers the array path for Original nodes.
+    let out_idx_of = |node: OutNode| -> Option<u32> {
+        match node {
+            OutNode::Original(i) => {
+                let v = orig_out_idx[i];
+                if v == u32::MAX { None } else { Some(v) }
+            }
+            OutNode::Replacement(r, n) => repl_out_idx.get(&(r, n)).copied(),
+        }
+    };
+    let id_of = |out_idx: u32| -> &[u8] {
+        let (s, e) = id_spans[out_idx as usize];
+        &id_pool[s as usize..e as usize]
+    };
 
-    let mut edges: BTreeSet<(String, bool, String, bool)> = BTreeSet::new();
-    for (_, steps) in out_paths {
-        for pair in steps.windows(2) {
-            let from = pair[0];
-            let to = pair[1];
-            if let (Some(from_id), Some(to_id)) =
-                (id_by_node.get(&from.node), id_by_node.get(&to.node))
-            {
-                edges.insert((from_id.clone(), from.rev, to_id.clone(), to.rev));
+    // Edge collection: dedup with FxHashSet, then sort once.  Holds Copy
+    // tuples of u32 indices instead of cloned Strings.
+    let mut edges: Vec<(u32, bool, u32, bool)> = Vec::new();
+    {
+        let mut edge_seen: FxHashSet<(u32, bool, u32, bool)> = FxHashSet::default();
+        for (_, steps) in out_paths {
+            for pair in steps.windows(2) {
+                let from = pair[0];
+                let to = pair[1];
+                if let (Some(fi), Some(ti)) = (out_idx_of(from.node), out_idx_of(to.node)) {
+                    let e = (fi, from.rev, ti, to.rev);
+                    if edge_seen.insert(e) {
+                        edges.push(e);
+                    }
+                }
             }
         }
     }
-    for (from, from_rev, to, to_rev) in edges {
-        out.push_str(&format!(
-            "L\t{}\t{}\t{}\t{}\t0M\n",
-            from,
-            if from_rev { "-" } else { "+" },
-            to,
-            if to_rev { "-" } else { "+" }
-        ));
+    edges.sort_unstable_by(|a, b| {
+        id_of(a.0)
+            .cmp(id_of(b.0))
+            .then(a.1.cmp(&b.1))
+            .then_with(|| id_of(a.2).cmp(id_of(b.2)))
+            .then(a.3.cmp(&b.3))
+    });
+    for (fi, from_rev, ti, to_rev) in edges {
+        out.extend_from_slice(b"L\t");
+        out.extend_from_slice(id_of(fi));
+        out.extend_from_slice(if from_rev { b"\t-\t" } else { b"\t+\t" });
+        out.extend_from_slice(id_of(ti));
+        out.extend_from_slice(if to_rev { b"\t-\t0M\n" } else { b"\t+\t0M\n" });
     }
 
-    for (name, steps) in out_paths {
-        let step_string = steps
-            .iter()
-            .filter_map(|step| {
-                id_by_node
-                    .get(&step.node)
-                    .map(|id| format!("{}{}", id, if step.rev { "-" } else { "+" }))
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        if !step_string.is_empty() {
-            out.push_str(&format!("P\t{}\t{}\t*\n", name, step_string));
-        }
+    // P lines: render each path's bytes in parallel and concatenate.  Each
+    // path is independent and emits 3-8 bytes per step × 4-5 M steps total on
+    // the C4 graph, so memory bandwidth dominates and parallelism scales.
+    let path_chunks: Vec<Vec<u8>> = out_paths
+        .par_iter()
+        .with_min_len(4)
+        .map(|(name, steps)| {
+            // Heuristic capacity: header (~16 bytes) + 6 bytes per step
+            // (ID is typically 4-5 digits + sign + comma).
+            let mut buf: Vec<u8> = Vec::with_capacity(16 + name.len() + steps.len() * 6);
+            let mut any_present = false;
+            for step in steps {
+                if out_idx_of(step.node).is_some() {
+                    any_present = true;
+                    break;
+                }
+            }
+            if !any_present {
+                return buf;
+            }
+            buf.extend_from_slice(b"P\t");
+            buf.extend_from_slice(name.as_bytes());
+            buf.push(b'\t');
+            let mut first = true;
+            for step in steps {
+                let Some(idx) = out_idx_of(step.node) else {
+                    continue;
+                };
+                if !first {
+                    buf.push(b',');
+                }
+                first = false;
+                buf.extend_from_slice(id_of(idx));
+                buf.push(if step.rev { b'-' } else { b'+' });
+            }
+            buf.extend_from_slice(b"\t*\n");
+            buf
+        })
+        .collect();
+    let total_p_bytes: usize = path_chunks.iter().map(|c| c.len()).sum();
+    out.reserve(total_p_bytes);
+    for chunk in path_chunks {
+        out.extend_from_slice(&chunk);
     }
 
-    out
+    // SAFETY: every byte pushed is ASCII (GFA segment IDs are ASCII as parsed,
+    // DNA sequences are ASCII, framing chars are ASCII, path names are
+    // already valid UTF-8 from the input).  The buffer is valid UTF-8.
+    debug_assert!(std::str::from_utf8(&out).is_ok());
+    unsafe { String::from_utf8_unchecked(out) }
 }
 
 fn next_unused_segment_id(used_ids: &mut FxHashSet<String>, next_id: &mut usize) -> String {
