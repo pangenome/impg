@@ -7,12 +7,14 @@ up from the useful artifacts instead of repeating the failed experiments.
 
 - Branch: `eg/c4-crush-resolution-controls`
 - PR: https://github.com/pangenome/impg/pull/222
-- Latest pushed commit: `98fd538` (`Fix SweepGA crush local seed frequency`)
+- Latest pushed code commit: `98fd538` (`Fix SweepGA crush local seed frequency`)
 - Local tests after that commit: `cargo fmt --check && cargo test` passed.
-- Do not merge this PR solely on that commit. The commit fixes one observed
-  local FastGA seed-frequency starvation case, but it was validated on a
-  reduced CHM13/frozen-blunt experiment, not on the known-good GRCh38 C4
-  command below.
+- Treat `98fd538` as unproven for the known-good GRCh38 C4 command. It fixes
+  one reduced CHM13/frozen-blunt starvation case, but it changes the default
+  SweepGA/FastGA frequency semantics for the exact command below unless the
+  command is pinned with `kmer-frequency=10`.
+- Do not merge this PR for C4 graph quality until the two-run GRCh38 validation
+  below has been done.
 
 The worktree also has unrelated local state that should not be committed as
 part of the C4 fix:
@@ -50,6 +52,11 @@ target/release/impg query \
   -O data/c4_crush_eval_20260523T140141Z/C4A.parent5k.sweepga_allvsall_fastga.k311.done.nosort \
   -v 1
 ```
+
+This known-good artifact predates `98fd538`. At the time it was generated,
+`method=sweepga,aligner=fastga` used the historical FastGA default frequency
+(`10`). In the stderr for this run, the `FastGA` invocations do not include
+explicit `-f...` flags, which is consistent with `-f10`.
 
 Observed resource use:
 
@@ -90,13 +97,23 @@ Those were based on a frozen CHM13-range blunt graph:
 
 ```bash
 -r CHM13#0#chr6:31744284-31976975
+-d 100k
+```
+
+and then standalone `impg crush` runs against:
+
+```text
+data/c4_crush_rnd_20260523T235304Z/C4A.syng_blunt.mask_min3.gfa
 ```
 
 The known-good artifact was generated from the GRCh38 range:
 
 ```bash
 -r GRCh38#0#chr6:31891045-32123783
+-d 50k
 ```
+
+using the full `impg query` path.
 
 They are both C4-related, but they are not identical test inputs. I used the
 CHM13 frozen graph for fast debugging and then compared it too loosely against
@@ -114,8 +131,8 @@ data/c4_crush_rnd_20260523T235304Z/debug_fastga/
 
 showed:
 
-- `seqwish.gfa` and `unchopped.gfa` were byte-identical for replacements.
-- The explosion was already present in seqwish output.
+- The explosion was already visible in seqwish/replacement outputs, not caused
+  primarily by final graph rewriting.
 - Raw PAF covered only a small fraction of traversal names in several large
   candidates, so seqwish was being asked to place many paths without alignment
   support.
@@ -126,13 +143,16 @@ replacement frequency auto-scale instead of defaulting to the historical
 whole-genome `10` seed cap.
 
 This is useful, but it is not a complete explanation of the known-good GRCh38
-C4 behavior because the known-good run used the full query path and already
-looked nearly correct.
+C4 behavior because the known-good run used the full query path, predated the
+default change, and already looked nearly correct.
 
 ## Baseline To Reproduce First
 
-The next person should start by reproducing the known-good command exactly on
-current `HEAD`, then diff graph metrics against the existing artifact:
+The next person should start with two GRCh38 runs. This is necessary because
+the known-good artifact predates `98fd538`, and the same CLI string is no
+longer behaviorally identical on current `HEAD`.
+
+Run current `HEAD` semantics first:
 
 ```bash
 out=data/c4_handoff_repro_$(date -u +%Y%m%dT%H%M%SZ)
@@ -145,26 +165,54 @@ mkdir -p "$out"
   --sequence-files /home/erikg/hprcv2/HPRC_r2_assemblies_0.6.1.agc \
   -d 50k \
   -o 'gfa:syng:mask,min-run=3:crush,method=sweepga,aligner=fastga,min-traversal-len=5k,max-rounds=until-done,seqwish-k=311,max-pair-alignments=0,max-paf-bytes=0,polish-rounds=until-done,polish-max-traversal-len=10k,polish-max-median-traversal-len=1k:nosort' \
-  -O "$out/C4A.parent5k.sweepga_allvsall_fastga.k311.done.nosort" \
+  -O "$out/current_auto.nosort" \
   -v 1 \
-  > "$out/C4A.parent5k.sweepga_allvsall_fastga.k311.done.nosort.stdout" \
-  2> "$out/C4A.parent5k.sweepga_allvsall_fastga.k311.done.nosort.stderr"
-
-gfasort \
-  -i "$out/C4A.parent5k.sweepga_allvsall_fastga.k311.done.nosort.gfa" \
-  -o "$out/C4A.parent5k.sweepga_allvsall_fastga.k311.done.Ygs.gfa" \
-  -p Ygs \
-  -t 32
-
-gfalook \
-  -i "$out/C4A.parent5k.sweepga_allvsall_fastga.k311.done.Ygs.gfa" \
-  -o "$out/C4A.parent5k.sweepga_allvsall_fastga.k311.done.Ygs.mean-depth.paths.png" \
-  -m \
-  -x 2200 \
-  -y 1200
+  > "$out/current_auto.nosort.stdout" \
+  2> "$out/current_auto.nosort.stderr"
 ```
 
-After that, run the graph report on the new sorted GFA and compare against:
+Then run the legacy/baseline semantics by pinning the old FastGA frequency:
+
+```bash
+/usr/bin/time -v target/release/impg query \
+  -t 32 \
+  -a /home/erikg/hprcv2/HPRC_r2_assemblies_0.6.1.syng \
+  -r GRCh38#0#chr6:31891045-32123783 \
+  --sequence-files /home/erikg/hprcv2/HPRC_r2_assemblies_0.6.1.agc \
+  -d 50k \
+  -o 'gfa:syng:mask,min-run=3:crush,method=sweepga,aligner=fastga,kmer-frequency=10,min-traversal-len=5k,max-rounds=until-done,seqwish-k=311,max-pair-alignments=0,max-paf-bytes=0,polish-rounds=until-done,polish-max-traversal-len=10k,polish-max-median-traversal-len=1k:nosort' \
+  -O "$out/legacy_f10.nosort" \
+  -v 1 \
+  > "$out/legacy_f10.nosort.stdout" \
+  2> "$out/legacy_f10.nosort.stderr"
+```
+
+For each prefix:
+
+```bash
+for prefix in "$out/current_auto.nosort" "$out/legacy_f10.nosort"; do
+  gfasort \
+    -i "$prefix.gfa" \
+    -o "$prefix.Ygs.gfa" \
+    -p Ygs \
+    -t 32
+
+  target/release/impg graph-report \
+    -g "$prefix.Ygs.gfa" \
+    -o "$prefix.Ygs.report.md" \
+    --povu \
+    -t 32
+
+  gfalook \
+    -i "$prefix.Ygs.gfa" \
+    -o "$prefix.Ygs.mean-depth.paths.png" \
+    -m \
+    -x 2200 \
+    -y 1200
+done
+```
+
+Compare both reports and images against:
 
 ```text
 data/c4_crush_eval_20260523T140141Z/C4A.parent5k.sweepga_allvsall_fastga.k311.done.Ygs.report.md
