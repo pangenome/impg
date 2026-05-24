@@ -3152,24 +3152,69 @@ fn render_rewritten_graph(
             }
         }
     } else {
+        // Phase 1: Collect original nodes in path-traversal order.
         let mut seen_original: Vec<bool> = vec![false; original.segments.len()];
+        for (_, steps) in out_paths {
+            for step in steps {
+                if let OutNode::Original(i) = step.node {
+                    if !seen_original[i] {
+                        seen_original[i] = true;
+                        ordered_nodes.push(OutNode::Original(i));
+                    }
+                }
+            }
+        }
+
+        // Map each original segment index to its position in ordered_nodes.
+        let mut orig_pos_in_order: Vec<u32> = vec![u32::MAX; original.segments.len()];
+        for (pos, &node) in ordered_nodes.iter().enumerate() {
+            if let OutNode::Original(i) = node {
+                orig_pos_in_order[i] = pos as u32;
+            }
+        }
+
+        // Phase 2: For each first-seen replacement node, record (predecessor_pos, node).
+        // predecessor_pos is the ordered_nodes position of the last original node seen
+        // before this replacement in the same path.  u32::MAX means no predecessor —
+        // those replacements fall through to the end of the list.
+        let mut insertions: Vec<(u32, OutNode)> = Vec::new();
         let mut seen_repl: FxHashSet<(usize, usize)> = FxHashSet::default();
         for (_, steps) in out_paths {
+            let mut last_orig_pos = u32::MAX;
             for step in steps {
                 match step.node {
                     OutNode::Original(i) => {
-                        if !seen_original[i] {
-                            seen_original[i] = true;
-                            ordered_nodes.push(OutNode::Original(i));
+                        let p = orig_pos_in_order[i];
+                        if p != u32::MAX {
+                            last_orig_pos = p;
                         }
                     }
                     OutNode::Replacement(r, n) => {
                         if seen_repl.insert((r, n)) {
-                            ordered_nodes.push(OutNode::Replacement(r, n));
+                            insertions.push((last_orig_pos, OutNode::Replacement(r, n)));
                         }
                     }
                 }
             }
+        }
+
+        // Phase 3: Stable-sort by insertion position, then merge into ordered_nodes
+        // so each replacement immediately follows its predecessor original node.
+        // Replacements with no predecessor (u32::MAX) land at the end.
+        insertions.sort_by_key(|&(pos, _)| pos);
+        let orig_ordered: Vec<OutNode> = std::mem::take(&mut ordered_nodes);
+        ordered_nodes.reserve(orig_ordered.len() + insertions.len());
+        let mut ins_i = 0usize;
+        for (pos, orig_node) in orig_ordered.iter().enumerate() {
+            ordered_nodes.push(*orig_node);
+            while ins_i < insertions.len() && insertions[ins_i].0 == pos as u32 {
+                ordered_nodes.push(insertions[ins_i].1);
+                ins_i += 1;
+            }
+        }
+        while ins_i < insertions.len() {
+            ordered_nodes.push(insertions[ins_i].1);
+            ins_i += 1;
         }
     }
 
@@ -4491,6 +4536,64 @@ P\tp\t1+,2+\t*
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn render_rewritten_graph_places_replacement_near_predecessor() {
+        // Simulate the q.gfa ordering bug: N_FILLER paths each start with entry
+        // (Original(0)), locking it at S-line position 0.  The single bubble
+        // path appears last, so the replacement is currently appended after all
+        // fillers (position N_FILLER+1) even though its predecessor is at 0.
+        // After the fix the replacement must appear immediately after entry (≤ 1).
+
+        const N_FILLER: usize = 50;
+
+        let mut segs = vec![
+            Segment { id: "entry".to_string(), seq: b"AAAA".to_vec() },
+            Segment { id: "exit".to_string(), seq: b"TTTT".to_vec() },
+        ];
+        for i in 0..N_FILLER {
+            segs.push(Segment { id: format!("f{i}"), seq: b"CCCC".to_vec() });
+        }
+        let original = Graph { segments: segs, paths: vec![] };
+
+        let replacement = Graph {
+            segments: vec![Segment { id: "r0".to_string(), seq: b"GGGGGGGG".to_vec() }],
+            paths: vec![],
+        };
+
+        let used_original: FxHashSet<usize> = (0..original.segments.len()).collect();
+
+        let mut out_paths: Vec<(String, Vec<OutStep>)> = Vec::new();
+        for i in 0..N_FILLER {
+            out_paths.push((format!("f{i}"), vec![
+                OutStep { node: OutNode::Original(0), rev: false },
+                OutStep { node: OutNode::Original(2 + i), rev: false },
+            ]));
+        }
+        out_paths.push(("bubble".to_string(), vec![
+            OutStep { node: OutNode::Original(0), rev: false },
+            OutStep { node: OutNode::Replacement(0, 0), rev: false },
+            OutStep { node: OutNode::Original(1), rev: false },
+        ]));
+
+        let gfa = render_rewritten_graph(&original, &[replacement], &used_original, &out_paths);
+
+        let s_ids: Vec<&str> = gfa.lines()
+            .filter(|l| l.starts_with("S\t"))
+            .map(|l| l.split('\t').nth(1).unwrap())
+            .collect();
+
+        let entry_pos = s_ids.iter().position(|&id| id == "entry").unwrap();
+        let repl_pos = s_ids.iter()
+            .position(|&id| id != "entry" && id != "exit" && !id.starts_with('f'))
+            .unwrap();
+
+        assert!(
+            repl_pos <= entry_pos + 1,
+            "replacement at S-line position {repl_pos} but entry at {entry_pos}: \
+             expected replacement immediately after its predecessor, not after all fillers"
+        );
     }
 
     #[test]
