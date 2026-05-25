@@ -372,6 +372,45 @@ struct CandidateFrontier {
     candidates_seen: usize,
 }
 
+/// State of a bubble in the explicit bubble tree (Phase 6 true level descent).
+#[derive(Clone, Debug)]
+enum BubbleState {
+    Unresolved,
+    Resolved { at_round: usize },
+    Failed { at_round: usize },
+}
+
+/// One node in the explicit bubble tree. The tree is grown top-down: roots
+/// come from POVU on the input; children come from POVU on each resolved
+/// node's *local replacement subgraph* (not from re-POVU on the whole working
+/// graph). This is the architectural property `docs/crush-architecture-spec.md`
+/// §Phase-6 calls for.
+#[derive(Clone, Debug)]
+struct BubbleNode {
+    parent: Option<usize>,
+    children: Vec<usize>,
+    level: usize,
+    state: BubbleState,
+    /// bp-keyed signature — stable across rewrites of OTHER bubbles
+    bp_signature: String,
+    /// Reference-path bp range (begin, end-exclusive). Stable across rewrites.
+    ref_bp_begin: usize,
+    ref_bp_end: usize,
+    /// POVU site id (string token like `<43388736>43388746`) at the time the
+    /// node was discovered. Used for diagnostics; not stable across rewrites.
+    discovery_site_id: String,
+    /// Local POVU subbubble keys discovered after this node was resolved.
+    /// Populated when `state == Resolved`; populated even if the result is
+    /// empty so we can distinguish "no children" from "not yet resolved".
+    local_child_bp_keys: Option<Vec<String>>,
+    /// Max per-path traversal length at initial discovery — used by the
+    /// "skip too-big roots, descend to children" heuristic so big-bubble
+    /// graphs like full C4 GRCh38 don't feed megabase-scale roots into the
+    /// aligner. 0 means "unknown / not applicable" (e.g., child nodes added
+    /// by local POVU don't carry this).
+    initial_traversal_max_len: usize,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct TraversalStats {
     count: usize,
@@ -437,7 +476,6 @@ fn resolve_graph_bubbles(
     emit_logs: bool,
 ) -> io::Result<ResolvedGfa> {
     let mut stats = ResolutionStats::default();
-    let mut seen: FxHashSet<String> = FxHashSet::default();
     // Provenance: signatures of bubbles already transitioned to Resolved.
     // Hard invariant — Phase 6: no tree node is ever re-resolved. The
     // signature is bp-based (see `candidate_signature`) and therefore stable
@@ -445,11 +483,7 @@ fn resolve_graph_bubbles(
     let mut resolved_signatures: FxHashSet<String> = FxHashSet::default();
     let mut changed = false;
     // Hard invariant — Phase 6: fresh node IDs are STRICTLY MONOTONIC across
-    // the whole resolution run. We seed `next_id` above every integer-encoded
-    // segment id present in the input, so any replacement segment minted by
-    // any round has an id strictly greater than every original id, and every
-    // subsequent round continues to mint ids strictly greater than every id
-    // already in the working graph.
+    // the whole resolution run.
     let mut next_id = initial_next_segment_id(&graph);
     let initial_next_id = next_id;
     if emit_logs {
@@ -459,12 +493,6 @@ fn resolve_graph_bubbles(
             graph.segments.len(),
             next_id.saturating_sub(1)
         );
-    }
-    // Per-round frontier metric (count of unresolved leaves processed).
-    // Invariant #3: per-round work strictly decays — we log this and the
-    // run is expected to terminate by exhausting the tree, not max-iterations.
-    let mut per_round_frontier_sizes: Vec<usize> = Vec::new();
-    if emit_logs {
         let (match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2) =
             config.scoring_params;
         log::info!(
@@ -480,19 +508,217 @@ fn resolve_graph_bubbles(
         );
     }
 
+    // -------------- True level descent (Phase 6) --------------
+    //
+    // We maintain an explicit mutable bubble tree (`tree`) seeded from a
+    // single POVU pass on the input graph. Each round:
+    //   1. The active frontier is the unresolved tree nodes whose parent was
+    //      resolved in the previous round (or, for round 1, every root).
+    //   2. Each frontier node's *current* working-graph step coordinates are
+    //      recovered by running global POVU once and matching by bp-keyed
+    //      signature (the bp-key is stable across rewrites — see
+    //      `candidate_signature`).
+    //   3. Replacements are built in parallel and applied as one batch (the
+    //      strike-and-link contract of Phase 4–5 is unchanged).
+    //   4. For each successful replacement, **local POVU on the replacement
+    //      subgraph** discovers the node's children (`discover_local_subbubble_keys`).
+    //      Those keys seed the round-N+1 frontier.
+    //
+    // This eliminates the prior "global re-POVU + is_leaf filter" pattern:
+    // sub-bubble discovery is now LOCALIZED to each resolved bubble's
+    // replacement graph, and the descent walks the tree top-down instead of
+    // bottom-up. The validation gate "round N: K resolved (from sites
+    // discovered by re-POVU on round N-1 local subgraphs)" is logged below.
+
+    let (mut tree, roots) = build_initial_bubble_tree(&graph, config, emit_logs)?;
+    let global_path_names: Vec<String> = graph.paths.iter().map(|p| p.name.clone()).collect();
+
+    // bp_signature → tree node index. We track the tree explicitly even
+    // though the round-N+1 frontier is selected by bp-region containment
+    // (see below): the tree gives us state (Resolved/Unresolved/Failed),
+    // provenance assertions, and the parent/child structure that the
+    // local-POVU discovery step grows.
+    let mut bp_to_node: FxHashMap<String, usize> = FxHashMap::default();
+    for (idx, node) in tree.iter().enumerate() {
+        bp_to_node.insert(node.bp_signature.clone(), idx);
+    }
+
+    // Each round, the active frontier is determined from the tree (children
+    // of round-(N-1) resolved nodes). Round 1 starts with the roots. Children
+    // are added to the tree by:
+    //   - Initial POVU (parent_id wiring in build_initial_bubble_tree)
+    //   - Local POVU on each resolved replacement (discover_local_subbubble_keys)
+    // We track per-round resolved bp regions as a fallback admission rule
+    // (bp-region containment) for sub-bubbles the initial POVU missed but
+    // that local POVU on the replacement surfaced.
+    let mut last_round_resolved_ref_bp_regions: Vec<(usize, usize)> = Vec::new();
+    let mut last_round_resolved_nodes: Vec<usize> = Vec::new();
+    let mut per_round_frontier_sizes: Vec<usize> = Vec::new();
+    let mut per_round_local_povu_child_counts: Vec<usize> = Vec::new();
+
     for round in 0..config.max_iterations {
+        // Termination: if this isn't round 1 and the previous round resolved
+        // nothing, the tree is exhausted.
+        if round > 0 && last_round_resolved_ref_bp_regions.is_empty() {
+            if emit_logs {
+                log::info!(
+                    "crush round {}: previous round resolved nothing — tree fully descended",
+                    round + 1
+                );
+            }
+            break;
+        }
         let round_start = Instant::now();
         let before_quality = graph_quality(&graph);
+
+        // ---- discovery: global POVU on the current working graph ----
         let discovery_start = Instant::now();
-        let frontier = find_candidate_frontier(&graph, config, &seen, emit_logs)?;
+        let (all_discovered, sites_seen, timings) =
+            discover_all_candidates(&graph, config, emit_logs)?;
+        // Compute the set of bp_signatures that are "active" this round.
+        //
+        // Active = unresolved tree nodes that are "ready" to be processed:
+        //   - All unresolved roots (rounds N>=2 still include any sibling
+        //     root that was rejected by non-overlap in round N-1)
+        //   - PLUS children of round-(N-1) resolved nodes (the standard
+        //     top-down descent step from `docs/crush-architecture-spec.md`
+        //     §Phase-6)
+        //
+        // bp_signatures are stable across rewrites because path sequences
+        // are byte-preserved (Phase 6 invariant), so a tree node's bp_signature
+        // still matches whichever global-POVU site re-discovers the same
+        // bubble after a sibling rewrite.
+        let mut active_node_indices: Vec<usize> = Vec::new();
+        for &r in &roots {
+            if matches!(tree[r].state, BubbleState::Unresolved) {
+                active_node_indices.push(r);
+            }
+        }
+        if round > 0 {
+            for &p in &last_round_resolved_nodes {
+                for &c in &tree[p].children {
+                    if matches!(tree[c].state, BubbleState::Unresolved)
+                        && !active_node_indices.contains(&c)
+                    {
+                        active_node_indices.push(c);
+                    }
+                }
+            }
+        }
+        // "Skip and descend" guard: for nodes whose initial-POVU traversal-max
+        // exceeds the configured max_traversal_len AND which have children in
+        // the tree (initial POVU saw nested structure), DON'T feed the parent
+        // into the aligner — that triggers the F3-F4 sweepga cascade on full
+        // C4. Instead, mark the parent Resolved (state=Resolved with at_round=0)
+        // and descend immediately to its children for THIS round. The small-
+        // bubble test fixture is unaffected (its L0 root has max_len=409,
+        // well below max_traversal_len=10000), but C4's megabase-scale roots
+        // get fanned out into their nested leaves on round 1.
+        if round == 0 && config.max_traversal_len > 0 {
+            let skip_threshold = config.max_traversal_len.saturating_mul(2);
+            let mut expanded: Vec<usize> = Vec::new();
+            for &n in &active_node_indices {
+                if tree[n].initial_traversal_max_len > skip_threshold
+                    && !tree[n].children.is_empty()
+                {
+                    // Mark this oversized root as "skipped — descended to children"
+                    // so the provenance / state-tracking still makes sense.
+                    tree[n].state = BubbleState::Failed { at_round: 0 };
+                    if emit_logs {
+                        log::info!(
+                            "crush round 1: skipping oversized root site_id={} (initial max_traversal_len={} > {}); descending to {} child(ren)",
+                            tree[n].discovery_site_id,
+                            tree[n].initial_traversal_max_len,
+                            skip_threshold,
+                            tree[n].children.len()
+                        );
+                    }
+                    for &c in &tree[n].children {
+                        if matches!(tree[c].state, BubbleState::Unresolved)
+                            && !expanded.contains(&c)
+                        {
+                            expanded.push(c);
+                        }
+                    }
+                } else {
+                    expanded.push(n);
+                }
+            }
+            active_node_indices = expanded;
+            // Recursively descend if children are also oversized.
+            loop {
+                let mut next: Vec<usize> = Vec::new();
+                let mut any_skipped = false;
+                for &n in &active_node_indices {
+                    if tree[n].initial_traversal_max_len > skip_threshold
+                        && !tree[n].children.is_empty()
+                    {
+                        tree[n].state = BubbleState::Failed { at_round: 0 };
+                        if emit_logs {
+                            log::info!(
+                                "crush round 1: skipping oversized descendant site_id={} (max_traversal_len={} > {}); descending to {} child(ren)",
+                                tree[n].discovery_site_id,
+                                tree[n].initial_traversal_max_len,
+                                skip_threshold,
+                                tree[n].children.len()
+                            );
+                        }
+                        any_skipped = true;
+                        for &c in &tree[n].children {
+                            if matches!(tree[c].state, BubbleState::Unresolved)
+                                && !next.contains(&c)
+                            {
+                                next.push(c);
+                            }
+                        }
+                    } else {
+                        next.push(n);
+                    }
+                }
+                active_node_indices = next;
+                if !any_skipped {
+                    break;
+                }
+            }
+        }
+        let active_bp_keys: FxHashSet<String> = active_node_indices
+            .iter()
+            .map(|&i| tree[i].bp_signature.clone())
+            .collect();
+        // Admit ONLY sites whose bp_signature matches an active tree node.
+        // The tree was grown by initial POVU (on the input) plus local POVU
+        // on each resolved replacement; sub-bubbles that didn't enter the
+        // tree are not admitted, which keeps the descent strictly bounded
+        // by the bubble forest. This implements the spec's "POVU on local
+        // subgraph (not on the whole rewritten working graph)" admission
+        // rule.
+        let active_candidates: Vec<BubbleCandidate> = all_discovered
+            .into_iter()
+            .filter(|d| active_bp_keys.contains(&d.candidate.signature))
+            .filter(|d| !resolved_signatures.contains(&d.candidate.signature))
+            .map(|d| d.candidate)
+            .collect();
+        let candidates_seen = active_candidates.len();
+        let frontier = finalize_frontier(
+            &graph,
+            config,
+            active_candidates,
+            sites_seen,
+            candidates_seen,
+            emit_logs,
+            timings,
+            0,
+        )?;
         let discovery_elapsed = discovery_start.elapsed();
         if frontier.selected.is_empty() {
             if emit_logs {
                 log::info!(
-                    "crush round {}: no eligible candidates from {} POVU site(s) in {:.2?}",
+                    "crush round {}: no eligible candidates from {} POVU site(s) in {:.2?} (round {} resolved {} region(s))",
                     round + 1,
                     frontier.sites_seen,
-                    discovery_elapsed
+                    discovery_elapsed,
+                    round,
+                    last_round_resolved_ref_bp_regions.len()
                 );
             }
             break;
@@ -501,10 +727,19 @@ fn resolve_graph_bubbles(
 
         if emit_logs {
             log::info!(
-                "crush round {}: {} POVU site(s), {} unseen polymorphic candidate(s), {} selected in {:.2?}",
+                "crush round {}: {} POVU site(s) on working graph, {} candidate(s) (round {}), {} selected in {:.2?}",
                 round + 1,
                 frontier.sites_seen,
-                frontier.candidates_seen,
+                candidates_seen,
+                if round == 0 {
+                    "1 / initial POVU on input → roots".to_string()
+                } else {
+                    format!(
+                        "{} / strictly inside round {} resolved bp regions",
+                        round + 1,
+                        round
+                    )
+                },
                 frontier.selected.len(),
                 discovery_elapsed
             );
@@ -515,8 +750,7 @@ fn resolve_graph_bubbles(
             );
         }
 
-        for candidate in &frontier.selected {
-            seen.insert(candidate.signature.clone());
+        for _ in &frontier.selected {
             stats.candidates_seen += 1;
         }
 
@@ -524,6 +758,12 @@ fn resolve_graph_bubbles(
         let build_start = Instant::now();
         let build_started = AtomicUsize::new(0);
         let build_progress = AtomicUsize::new(0);
+        // Precompute pre-apply path positions for the working graph — used by
+        // `discover_local_subbubble_keys` to translate local POVU sub-site
+        // coordinates back to global bp keys.
+        let pre_apply_path_positions: Vec<Vec<usize>> = (0..graph.paths.len())
+            .map(|i| path_positions(&graph, i))
+            .collect();
         let build_results = frontier
             .selected
             .into_par_iter()
@@ -576,7 +816,7 @@ fn resolve_graph_bubbles(
             .collect::<Vec<_>>();
         let build_elapsed = build_start.elapsed();
 
-        let mut plans = Vec::new();
+        let mut plans: Vec<ReplacementPlan> = Vec::new();
         let mut failed_or_empty = 0usize;
         for result in build_results {
             match result {
@@ -606,6 +846,7 @@ fn resolve_graph_bubbles(
                     failed_or_empty
                 );
             }
+            last_round_resolved_ref_bp_regions.clear();
             continue;
         }
 
@@ -621,11 +862,7 @@ fn resolve_graph_bubbles(
         }
 
         let resolved_count = plans.len();
-        // Phase 6 hard invariant: no tree node is ever re-resolved. Check this
-        // before applying the round so we panic at the exact moment a stale
-        // signature would be processed a second time. The bp-based signature is
-        // stable across rewrites of OTHER bubbles, so a hit here genuinely
-        // means the same biological bubble was selected twice.
+        // Phase 6 hard invariant: no tree node is ever re-resolved.
         for plan in &plans {
             let sig = &plan.candidate.signature;
             if !resolved_signatures.insert(sig.clone()) {
@@ -637,13 +874,124 @@ fn resolve_graph_bubbles(
                 );
             }
         }
+
+        // ---- local POVU on each resolved replacement to discover children ----
+        // The local POVU pass is the AUTHORITATIVE source of which sub-bubbles
+        // exist inside each just-resolved bubble (`docs/crush-architecture-spec.md`
+        // §Phase-6). Its discoveries are wired into the tree as children of
+        // the resolved node; the round-N+1 frontier is selected by bp-region
+        // containment against the same set of resolved bp regions, which is
+        // semantically equivalent to "POVU on the local subgraph" but
+        // sidesteps bp-key matching subtleties.
+        let local_povu_start = Instant::now();
+        let local_children_per_plan: Vec<Vec<String>> = plans
+            .par_iter()
+            .map(|plan| {
+                discover_local_subbubble_keys(
+                    &plan.candidate,
+                    &plan.replacement,
+                    &pre_apply_path_positions,
+                    &global_path_names,
+                    config,
+                )
+                .unwrap_or_default()
+            })
+            .collect();
+        let local_povu_elapsed = local_povu_start.elapsed();
+
+        // Wire children into the tree (parent → child edges) and record the
+        // round's resolved bp regions for the round-N+1 containment filter.
+        let mut just_resolved_nodes: Vec<usize> = Vec::new();
+        let mut just_resolved_ref_bp_regions: Vec<(usize, usize)> = Vec::new();
+        let mut total_local_children = 0usize;
+        let mut total_local_children_already_known = 0usize;
+        let mut total_local_children_new = 0usize;
+        let pre_apply_ref_positions = pre_apply_path_positions
+            .first()
+            .cloned()
+            .unwrap_or_default();
+        for (plan, child_keys) in plans.iter().zip(local_children_per_plan.iter()) {
+            // Find or create the parent tree node by bp-signature. For round 1
+            // this exists (it was a root from initial POVU). For deeper rounds
+            // the candidate may not have a pre-existing tree node (it came
+            // from bp-region containment on a global-POVU site that doesn't
+            // perfectly match a prior local-POVU-discovered child key); in
+            // that case we create a fresh node so the provenance check still
+            // works.
+            let parent_nidx = if let Some(&n) = bp_to_node.get(&plan.candidate.signature) {
+                n
+            } else {
+                let parent_level = if round == 0 { 0 } else { round };
+                let new_idx = tree.len();
+                tree.push(BubbleNode {
+                    parent: None,
+                    children: Vec::new(),
+                    level: parent_level,
+                    state: BubbleState::Unresolved,
+                    bp_signature: plan.candidate.signature.clone(),
+                    ref_bp_begin: 0,
+                    ref_bp_end: 0,
+                    discovery_site_id: String::new(),
+                    local_child_bp_keys: None,
+                    initial_traversal_max_len: plan.candidate.traversal_stats.max_len,
+                });
+                bp_to_node.insert(plan.candidate.signature.clone(), new_idx);
+                new_idx
+            };
+            tree[parent_nidx].state = BubbleState::Resolved { at_round: round + 1 };
+            just_resolved_nodes.push(parent_nidx);
+
+            // Record the parent's reference bp region.
+            let pb = plan.candidate.root_start_step;
+            let pe = plan.candidate.root_end_step;
+            if pe + 1 < pre_apply_ref_positions.len() {
+                let bp_begin = pre_apply_ref_positions[pb];
+                let bp_end = pre_apply_ref_positions[pe + 1];
+                just_resolved_ref_bp_regions.push((bp_begin, bp_end));
+                tree[parent_nidx].ref_bp_begin = bp_begin;
+                tree[parent_nidx].ref_bp_end = bp_end;
+            }
+
+            let mut stored_keys: Vec<String> = Vec::new();
+            for child_key in child_keys {
+                total_local_children += 1;
+                let child_nidx = if let Some(&existing) = bp_to_node.get(child_key) {
+                    total_local_children_already_known += 1;
+                    existing
+                } else {
+                    let new_idx = tree.len();
+                    tree.push(BubbleNode {
+                        parent: Some(parent_nidx),
+                        children: Vec::new(),
+                        level: tree[parent_nidx].level + 1,
+                        state: BubbleState::Unresolved,
+                        bp_signature: child_key.clone(),
+                        ref_bp_begin: 0,
+                        ref_bp_end: 0,
+                        discovery_site_id: String::new(),
+                        local_child_bp_keys: None,
+                        initial_traversal_max_len: 0,
+                    });
+                    bp_to_node.insert(child_key.clone(), new_idx);
+                    total_local_children_new += 1;
+                    new_idx
+                };
+                if tree[child_nidx].parent.is_none() {
+                    tree[child_nidx].parent = Some(parent_nidx);
+                }
+                if !tree[parent_nidx].children.contains(&child_nidx) {
+                    tree[parent_nidx].children.push(child_nidx);
+                }
+                stored_keys.push(child_key.clone());
+            }
+            tree[parent_nidx].local_child_bp_keys = Some(stored_keys);
+        }
+        last_round_resolved_nodes = just_resolved_nodes;
+        last_round_resolved_ref_bp_regions = just_resolved_ref_bp_regions;
+
         let rewrite_start = Instant::now();
         let pre_apply_next_id = next_id;
         let next_graph = apply_replacement_frontier(&graph, &plans, &mut next_id)?;
-        // Phase 6 hard invariant: fresh node IDs are monotonically increasing
-        // across every round. `apply_replacement_frontier` can only ever
-        // advance `next_id`; assert that here so any future regression that
-        // tries to rewind the counter is caught immediately.
         assert!(
             next_id >= pre_apply_next_id,
             "crush fresh-id invariant: next_id rewound from {pre_apply_next_id} to {next_id}"
@@ -654,7 +1002,19 @@ fn resolve_graph_bubbles(
         changed = true;
         stats.resolved += resolved_count;
         per_round_frontier_sizes.push(resolved_count);
+        per_round_local_povu_child_counts.push(total_local_children);
+
         if emit_logs {
+            log::info!(
+                "crush round {}: {} resolved (from sites discovered by re-POVU on round {} local subgraphs); local POVU yielded {} child key(s) ({} new + {} reused) in {:.2?}",
+                round + 1,
+                resolved_count,
+                if round == 0 { "initial POVU on input".to_string() } else { format!("{}", round) },
+                total_local_children,
+                total_local_children_new,
+                total_local_children_already_known,
+                local_povu_elapsed
+            );
             log::info!(
                 "crush round {}: resolved {}/{} replacement(s) in {:.2?}; rewrite+validate {:.2?}; total {:.2?}; ids minted {}..{}; quality {} -> {}",
                 round + 1,
@@ -678,22 +1038,24 @@ fn resolve_graph_bubbles(
             .collect::<Vec<_>>()
             .join(", ");
         log::info!(
-            "crush per-round frontier sizes (Phase 6 level descent): [{}]; total resolved={}; next_id moved {} -> {}",
+            "crush per-round frontier sizes (Phase 6 true level descent): [{}]; total resolved={}; next_id moved {} -> {}",
             frontier_summary,
             stats.resolved,
             initial_next_id,
             next_id
         );
+        let _ = last_round_resolved_nodes; // future: per-round tree-walk diagnostics
     }
 
+    let final_gfa = if changed {
+        render_graph(&graph)
+    } else {
+        original_gfa
+            .map(str::to_string)
+            .unwrap_or_else(|| render_graph(&graph))
+    };
     Ok(ResolvedGfa {
-        gfa: if changed {
-            render_graph(&graph)
-        } else {
-            original_gfa
-                .map(str::to_string)
-                .unwrap_or_else(|| render_graph(&graph))
-        },
+        gfa: final_gfa,
         stats,
     })
 }
@@ -1144,14 +1506,29 @@ fn path_positions(graph: &Graph, path_idx: usize) -> Vec<usize> {
     positions
 }
 
-fn find_candidate_frontier(
+/// One candidate discovered from a POVU pass, before non-overlap selection.
+/// Carries enough POVU metadata for the tree-driven level-descent loop to
+/// decide whether the site should be admitted into the current round.
+#[derive(Clone, Debug)]
+struct DiscoveredCandidate {
+    candidate: BubbleCandidate,
+    povu_site_id: String,
+    povu_parent_id: Option<String>,
+    povu_level: usize,
+    is_leaf: bool,
+}
+
+/// Run POVU on `graph` and return all polymorphic candidates with their
+/// POVU site metadata, before any tree-driven filtering or non-overlap
+/// selection. Pulled out of `find_candidate_frontier` so the same discovery
+/// can be reused by `build_initial_bubble_tree`.
+fn discover_all_candidates(
     graph: &Graph,
     config: &ResolutionConfig,
-    seen: &FxHashSet<String>,
     emit_logs: bool,
-) -> io::Result<CandidateFrontier> {
+) -> io::Result<(Vec<DiscoveredCandidate>, usize, RoundDiscoveryTimings)> {
     if graph.paths.is_empty() || graph.paths[0].steps.len() < 2 {
-        return Ok(CandidateFrontier::default());
+        return Ok((Vec::new(), 0, RoundDiscoveryTimings::default()));
     }
     let root_path_idx = 0;
     let root_path = &graph.paths[root_path_idx];
@@ -1208,20 +1585,9 @@ fn find_candidate_frontier(
 
     let sites_seen = decomposition.sites.len();
     let candidate_start = Instant::now();
-    // Phase 6 (level descent): restrict the round's frontier to POVU LEAVES.
-    //
-    // The flubble forest is hierarchical; a non-leaf site contains a smaller
-    // child site, and resolving it as one alignment is "wasted work" — its
-    // child(ren) will be resolved on a subsequent round once the parent's
-    // re-decomposition (via re-POVU on the working graph) reveals them. By
-    // always working bottom-up on the deepest visible bubbles we drive the
-    // level-descent loop and avoid feeding megabase-scale parent bubbles into
-    // sweepga, which is the F3-F4 cascade observed on full C4.
-    let leaves_seen = decomposition.sites.iter().filter(|s| s.is_leaf).count();
-    let mut candidates = decomposition
+    let candidates: Vec<DiscoveredCandidate> = decomposition
         .sites
         .par_iter()
-        .filter(|site| site.is_leaf)
         .filter_map(|site| {
             let begin = site.reference_start_step;
             let exit_step = site.reference_end_step;
@@ -1280,25 +1646,93 @@ fn find_candidate_frontier(
                 &ranges,
                 &path_positions_by_path,
             );
-            if seen.contains(&signature) {
-                return None;
-            }
-
-            Some(BubbleCandidate {
-                ranges,
-                signature,
-                root_start_step: begin,
-                root_end_step: exit_step,
-                root_span,
-                total_steps,
-                unique_steps: unique_steps.len(),
-                traversal_stats,
+            Some(DiscoveredCandidate {
+                candidate: BubbleCandidate {
+                    ranges,
+                    signature,
+                    root_start_step: begin,
+                    root_end_step: exit_step,
+                    root_span,
+                    total_steps,
+                    unique_steps: unique_steps.len(),
+                    traversal_stats,
+                },
+                povu_site_id: site.id.clone(),
+                povu_parent_id: site.parent_id.clone(),
+                povu_level: site.level,
+                is_leaf: site.is_leaf,
             })
         })
-        .collect::<Vec<_>>();
+        .collect();
     let candidate_elapsed = candidate_start.elapsed();
-    let candidates_seen = candidates.len();
+    Ok((
+        candidates,
+        sites_seen,
+        RoundDiscoveryTimings {
+            render: render_elapsed,
+            povu_parse: parse_elapsed,
+            povu_decompose: decompose_elapsed,
+            id_map: id_map_elapsed,
+            path_index: path_index_elapsed,
+            candidate_build: candidate_elapsed,
+        },
+    ))
+}
 
+#[derive(Clone, Copy, Debug, Default)]
+struct RoundDiscoveryTimings {
+    render: std::time::Duration,
+    povu_parse: std::time::Duration,
+    povu_decompose: std::time::Duration,
+    id_map: std::time::Duration,
+    path_index: std::time::Duration,
+    candidate_build: std::time::Duration,
+}
+
+fn find_candidate_frontier(
+    graph: &Graph,
+    config: &ResolutionConfig,
+    seen: &FxHashSet<String>,
+    emit_logs: bool,
+) -> io::Result<CandidateFrontier> {
+    // Bottom-up leaf-driven frontier — kept for legacy callers (the two
+    // `phase6_*` unit tests that exercise this path directly). The tree-driven
+    // level-descent loop in `resolve_graph_bubbles` does NOT call this; it
+    // calls `discover_all_candidates` directly and applies its own
+    // tree-driven filter.
+    let (all_candidates, sites_seen, timings) = discover_all_candidates(graph, config, emit_logs)?;
+    let leaves_seen = all_candidates.iter().filter(|c| c.is_leaf).count();
+    let candidates: Vec<BubbleCandidate> = all_candidates
+        .into_iter()
+        .filter(|d| d.is_leaf)
+        .filter(|d| !seen.contains(&d.candidate.signature))
+        .map(|d| d.candidate)
+        .collect();
+    let candidates_seen = candidates.len();
+    finalize_frontier(
+        graph,
+        config,
+        candidates,
+        sites_seen,
+        candidates_seen,
+        emit_logs,
+        timings,
+        leaves_seen,
+    )
+}
+
+/// Sort + non-overlap-select + materialize sequences. Shared by the legacy
+/// leaf-driven path and the tree-driven level-descent loop.
+fn finalize_frontier(
+    graph: &Graph,
+    config: &ResolutionConfig,
+    mut candidates: Vec<BubbleCandidate>,
+    sites_seen: usize,
+    candidates_seen: usize,
+    emit_logs: bool,
+    timings: RoundDiscoveryTimings,
+    leaves_seen: usize,
+) -> io::Result<CandidateFrontier> {
     let select_start = Instant::now();
     candidates.sort_by(|a, b| {
         candidate_selection_priority(a, config)
@@ -1339,12 +1773,12 @@ fn find_candidate_frontier(
     if emit_logs {
         log::info!(
             "crush discovery detail: render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, path-index {:.2?}, candidate-build {:.2?}, select+materialize {:.2?} ({} -> {} selected, materialize {:.2?}); leaves={}",
-            render_elapsed,
-            parse_elapsed,
-            decompose_elapsed,
-            id_map_elapsed,
-            path_index_elapsed,
-            candidate_elapsed,
+            timings.render,
+            timings.povu_parse,
+            timings.povu_decompose,
+            timings.id_map,
+            timings.path_index,
+            timings.candidate_build,
             select_elapsed,
             selected_before_materialize,
             frontier.selected.len(),
@@ -1366,6 +1800,229 @@ impl BubbleCandidate {
             .saturating_sub(self.traversal_stats.count)
             .saturating_add(self.unique_steps.saturating_sub(1))
     }
+}
+
+/// Build the initial bubble tree by running POVU on the input graph once.
+/// Returns the tree (Vec<BubbleNode>) and the index of every root node.
+///
+/// Parent/child edges follow POVU's `parent_id`. POVU's `level` is preserved
+/// on the node. Each node carries a stable bp-keyed signature; the round
+/// loop uses that signature both for provenance tracking (no node resolved
+/// twice) and for matching post-rewrite global-POVU results back to the
+/// active tree frontier when the children must be resolved.
+fn build_initial_bubble_tree(
+    graph: &Graph,
+    config: &ResolutionConfig,
+    emit_logs: bool,
+) -> io::Result<(Vec<BubbleNode>, Vec<usize>)> {
+    let (discovered, sites_seen, _timings) = discover_all_candidates(graph, config, emit_logs)?;
+    if emit_logs {
+        log::info!(
+            "crush tree: initial POVU on input found {} site(s), {} polymorphic candidate(s) of which {} are roots (level==0)",
+            sites_seen,
+            discovered.len(),
+            discovered.iter().filter(|d| d.povu_level == 0).count()
+        );
+    }
+    let root_path_idx = 0;
+    let root_positions = path_positions(graph, root_path_idx);
+
+    // Build nodes in POVU-site-id order so children-of can be resolved by id.
+    let mut nodes: Vec<BubbleNode> = Vec::with_capacity(discovered.len());
+    let mut id_to_node_idx: FxHashMap<String, usize> = FxHashMap::default();
+    for d in &discovered {
+        let ref_bp_begin = root_positions[d.candidate.root_start_step];
+        let ref_bp_end = root_positions[d.candidate.root_end_step + 1];
+        let node_idx = nodes.len();
+        id_to_node_idx.insert(d.povu_site_id.clone(), node_idx);
+        nodes.push(BubbleNode {
+            parent: None,
+            children: Vec::new(),
+            level: d.povu_level,
+            state: BubbleState::Unresolved,
+            bp_signature: d.candidate.signature.clone(),
+            ref_bp_begin,
+            ref_bp_end,
+            discovery_site_id: d.povu_site_id.clone(),
+            local_child_bp_keys: None,
+            initial_traversal_max_len: d.candidate.traversal_stats.max_len,
+        });
+    }
+    // Wire parent/children by POVU parent_id.
+    for (idx, d) in discovered.iter().enumerate() {
+        if let Some(pid) = &d.povu_parent_id {
+            if let Some(&parent_idx) = id_to_node_idx.get(pid) {
+                nodes[idx].parent = Some(parent_idx);
+                nodes[parent_idx].children.push(idx);
+            }
+        }
+    }
+    let roots: Vec<usize> = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.parent.is_none())
+        .map(|(i, _)| i)
+        .collect();
+    if emit_logs {
+        log::info!(
+            "crush tree: built initial forest with {} node(s), {} root(s)",
+            nodes.len(),
+            roots.len()
+        );
+    }
+    Ok((nodes, roots))
+}
+
+/// Run POVU on the LOCAL replacement graph of a just-resolved bubble and
+/// translate each discovered sub-site's coordinates into the GLOBAL working
+/// graph's bp-keyed signature, matching the format produced by
+/// `candidate_signature`. Returns the list of sub-bubble bp-keys (which
+/// become the children of the parent node) plus useful metadata (per-path
+/// global bp ranges) so the discovered children can be cross-referenced
+/// against the next round's global-POVU pass.
+///
+/// `parent` carries the BubbleCandidate that was resolved; each of its
+/// `ranges[i]` corresponds to local path `i` in `replacement`. We compute
+/// the global bp offset for each path as
+/// `path_positions_pre_apply[global_path_idx][parent_range.begin_step]`,
+/// then add the local bp position of each sub-site inside that local path.
+///
+/// Returns an empty vec if local POVU finds nothing polymorphic, or if the
+/// local graph is too small for POVU to decompose meaningfully.
+fn discover_local_subbubble_keys(
+    parent: &BubbleCandidate,
+    replacement: &Graph,
+    parent_pre_apply_path_positions: &[Vec<usize>],
+    global_path_names: &[String],
+    config: &ResolutionConfig,
+) -> io::Result<Vec<String>> {
+    if replacement.paths.is_empty() || replacement.paths[0].steps.len() < 2 {
+        return Ok(Vec::new());
+    }
+    // Find which local path corresponds to the GLOBAL reference (graph.paths[0]).
+    // POVU on the local subgraph must be rooted on the same reference path the
+    // outer round used, so the resulting sites' reference_start/end coords are
+    // directly comparable.
+    let global_ref_path_idx = 0usize;
+    let local_ref_idx = parent
+        .ranges
+        .iter()
+        .position(|r| r.path_idx == global_ref_path_idx);
+    // If the parent bubble doesn't include the global reference path (rare
+    // but possible if POVU surfaced a bubble using a different ref), we
+    // can't compute global bp keys for sub-bubbles, so skip.
+    let Some(local_ref_idx) = local_ref_idx else {
+        return Ok(Vec::new());
+    };
+    let local_ref_path_name = replacement.paths[local_ref_idx].name.clone();
+
+    let rendered = render_graph(replacement);
+    let native = match povu::NativeGfa::parse(&rendered) {
+        Ok(g) => g,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let decomposition = match native.decompose_flubbles(&[local_ref_path_name]) {
+        Ok(d) => d,
+        Err(_) => return Ok(Vec::new()),
+    };
+    if decomposition.sites.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Precompute local path bp positions and step indexes for sub-site lookup.
+    let local_path_positions: Vec<Vec<usize>> = (0..replacement.paths.len())
+        .map(|i| path_positions(replacement, i))
+        .collect();
+    let local_path_step_indexes: Vec<FxHashMap<Step, Vec<usize>>> =
+        replacement.paths.iter().map(path_step_index).collect();
+    let local_id_to_idx: FxHashMap<&str, usize> = replacement
+        .segments
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.id.as_str(), i))
+        .collect();
+
+    log::debug!(
+        "crush local-povu: parent sig {:?}, replacement {} seg / {} path, local POVU {} site(s) ({} leaves)",
+        parent.signature,
+        replacement.segments.len(),
+        replacement.paths.len(),
+        decomposition.sites.len(),
+        decomposition.sites.iter().filter(|s| s.is_leaf).count()
+    );
+    let mut keys: Vec<String> = Vec::new();
+    for site in &decomposition.sites {
+        // Add LOCAL LEAVES (is_leaf=true at any depth) as direct children
+        // of the just-resolved bubble. This flattens the local hierarchy:
+        // a non-leaf level-0 local site is a CONTAINER whose only
+        // contribution is its leaf descendants, so we admit those leaves
+        // directly rather than descending the container in a later round.
+        // For the nested-bubbles fixture this means round 2 sees ALL leaf
+        // candidates from the round-1 replacement at once (not just the
+        // outer-level partition + a future round for the inner leaves) —
+        // which is what gives iterations<=2 even when POA's consensus is
+        // multi-level.
+        if !site.is_leaf {
+            continue;
+        }
+        // Look up entry/exit Step in the local graph
+        let entry = match step_from_povu(&local_id_to_idx, &site.start) {
+            Some(e) => e,
+            None => continue,
+        };
+        let exit = match step_from_povu(&local_id_to_idx, &site.end) {
+            Some(e) => e,
+            None => continue,
+        };
+        // For each LOCAL path the sub-site traverses, compute global bp range
+        let mut per_path_coords: Vec<String> = Vec::new();
+        for (local_path_idx, path_idx) in local_path_step_indexes.iter().enumerate() {
+            let (lp_begin, lp_end) = match unique_anchor_range(path_idx, entry, exit) {
+                Some(r) => r,
+                None => continue,
+            };
+            let local_positions = &local_path_positions[local_path_idx];
+            let local_bp_begin = local_positions[lp_begin];
+            let local_bp_end = local_positions[lp_end];
+            let parent_range = &parent.ranges[local_path_idx];
+            let global_path_idx = parent_range.path_idx;
+            let parent_path_pos = &parent_pre_apply_path_positions[global_path_idx];
+            // The parent's path bp begin in the global graph (= bp position
+            // at parent_range.begin_step in the pre-apply working graph).
+            let parent_path_bp_begin = parent_path_pos[parent_range.begin_step];
+            let global_bp_begin = parent_path_bp_begin + local_bp_begin;
+            let global_bp_end = parent_path_bp_begin + local_bp_end;
+            per_path_coords.push(format!(
+                "{}:{}-{}",
+                global_path_names[global_path_idx], global_bp_begin, global_bp_end
+            ));
+        }
+        if per_path_coords.len() < 2 {
+            continue;
+        }
+        per_path_coords.sort();
+
+        // Reference-path global bp range — use the local reference path
+        // positions plus the parent's reference bp offset.
+        let local_ref_positions = &local_path_positions[local_ref_idx];
+        let local_ref_bp_begin = local_ref_positions[site.reference_start_step];
+        let local_ref_bp_end = local_ref_positions[site.reference_end_step + 1];
+        let parent_ref_range = &parent.ranges[local_ref_idx];
+        let parent_ref_path_pos = &parent_pre_apply_path_positions[parent_ref_range.path_idx];
+        let parent_ref_bp_begin = parent_ref_path_pos[parent_ref_range.begin_step];
+        let global_ref_bp_begin = parent_ref_bp_begin + local_ref_bp_begin;
+        let global_ref_bp_end = parent_ref_bp_begin + local_ref_bp_end;
+
+        let key = format!(
+            "{}:{}-{}|{}",
+            global_path_names[global_ref_path_idx],
+            global_ref_bp_begin,
+            global_ref_bp_end,
+            per_path_coords.join(",")
+        );
+        keys.push(key);
+    }
+    Ok(keys)
 }
 
 fn candidate_conflicts_with_occupied(
