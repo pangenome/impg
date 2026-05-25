@@ -432,7 +432,32 @@ fn resolve_graph_bubbles(
 ) -> io::Result<ResolvedGfa> {
     let mut stats = ResolutionStats::default();
     let mut seen: FxHashSet<String> = FxHashSet::default();
+    // Provenance: signatures of bubbles already transitioned to Resolved.
+    // Hard invariant — Phase 6: no tree node is ever re-resolved. The
+    // signature is bp-based (see `candidate_signature`) and therefore stable
+    // across rewrites of other bubbles.
+    let mut resolved_signatures: FxHashSet<String> = FxHashSet::default();
     let mut changed = false;
+    // Hard invariant — Phase 6: fresh node IDs are STRICTLY MONOTONIC across
+    // the whole resolution run. We seed `next_id` above every integer-encoded
+    // segment id present in the input, so any replacement segment minted by
+    // any round has an id strictly greater than every original id, and every
+    // subsequent round continues to mint ids strictly greater than every id
+    // already in the working graph.
+    let mut next_id = initial_next_segment_id(&graph);
+    let initial_next_id = next_id;
+    if emit_logs {
+        log::info!(
+            "crush: initial next_id={} (input has {} segment(s), max integer id={})",
+            next_id,
+            graph.segments.len(),
+            next_id.saturating_sub(1)
+        );
+    }
+    // Per-round frontier metric (count of unresolved leaves processed).
+    // Invariant #3: per-round work strictly decays — we log this and the
+    // run is expected to terminate by exhausting the tree, not max-iterations.
+    let mut per_round_frontier_sizes: Vec<usize> = Vec::new();
     if emit_logs {
         let (match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2) =
             config.scoring_params;
@@ -590,26 +615,69 @@ fn resolve_graph_bubbles(
         }
 
         let resolved_count = plans.len();
+        // Phase 6 hard invariant: no tree node is ever re-resolved. Check this
+        // before applying the round so we panic at the exact moment a stale
+        // signature would be processed a second time. The bp-based signature is
+        // stable across rewrites of OTHER bubbles, so a hit here genuinely
+        // means the same biological bubble was selected twice.
+        for plan in &plans {
+            let sig = &plan.candidate.signature;
+            if !resolved_signatures.insert(sig.clone()) {
+                panic!(
+                    "crush provenance assertion: bubble signature {sig:?} was \
+                     resolved twice (current round {}); flubble tree node \
+                     re-resolution is forbidden by Phase 6 invariants",
+                    round + 1
+                );
+            }
+        }
         let rewrite_start = Instant::now();
-        let next_graph = apply_replacement_frontier(&graph, &plans)?;
+        let pre_apply_next_id = next_id;
+        let next_graph = apply_replacement_frontier(&graph, &plans, &mut next_id)?;
+        // Phase 6 hard invariant: fresh node IDs are monotonically increasing
+        // across every round. `apply_replacement_frontier` can only ever
+        // advance `next_id`; assert that here so any future regression that
+        // tries to rewind the counter is caught immediately.
+        assert!(
+            next_id >= pre_apply_next_id,
+            "crush fresh-id invariant: next_id rewound from {pre_apply_next_id} to {next_id}"
+        );
         let rewrite_elapsed = rewrite_start.elapsed();
         let after_quality = graph_quality(&next_graph);
         graph = next_graph;
         changed = true;
         stats.resolved += resolved_count;
+        per_round_frontier_sizes.push(resolved_count);
         if emit_logs {
             log::info!(
-                "crush round {}: resolved {}/{} replacement(s) in {:.2?}; rewrite+validate {:.2?}; total {:.2?}; quality {} -> {}",
+                "crush round {}: resolved {}/{} replacement(s) in {:.2?}; rewrite+validate {:.2?}; total {:.2?}; ids minted {}..{}; quality {} -> {}",
                 round + 1,
                 resolved_count,
                 selected_count,
                 build_elapsed,
                 rewrite_elapsed,
                 round_start.elapsed(),
+                pre_apply_next_id,
+                next_id,
                 before_quality.summary(),
                 after_quality.summary()
             );
         }
+    }
+    if emit_logs && !per_round_frontier_sizes.is_empty() {
+        let frontier_summary = per_round_frontier_sizes
+            .iter()
+            .enumerate()
+            .map(|(idx, n)| format!("r{}={}", idx + 1, n))
+            .collect::<Vec<_>>()
+            .join(", ");
+        log::info!(
+            "crush per-round frontier sizes (Phase 6 level descent): [{}]; total resolved={}; next_id moved {} -> {}",
+            frontier_summary,
+            stats.resolved,
+            initial_next_id,
+            next_id
+        );
     }
 
     Ok(ResolvedGfa {
@@ -1126,9 +1194,20 @@ fn find_candidate_frontier(
 
     let sites_seen = decomposition.sites.len();
     let candidate_start = Instant::now();
+    // Phase 6 (level descent): restrict the round's frontier to POVU LEAVES.
+    //
+    // The flubble forest is hierarchical; a non-leaf site contains a smaller
+    // child site, and resolving it as one alignment is "wasted work" — its
+    // child(ren) will be resolved on a subsequent round once the parent's
+    // re-decomposition (via re-POVU on the working graph) reveals them. By
+    // always working bottom-up on the deepest visible bubbles we drive the
+    // level-descent loop and avoid feeding megabase-scale parent bubbles into
+    // sweepga, which is the F3-F4 cascade observed on full C4.
+    let leaves_seen = decomposition.sites.iter().filter(|s| s.is_leaf).count();
     let mut candidates = decomposition
         .sites
         .par_iter()
+        .filter(|site| site.is_leaf)
         .filter_map(|site| {
             let begin = site.reference_start_step;
             let exit_step = site.reference_end_step;
@@ -1185,6 +1264,7 @@ fn find_candidate_frontier(
                 begin,
                 exit_step,
                 &ranges,
+                &path_positions_by_path,
             );
             if seen.contains(&signature) {
                 return None;
@@ -1244,7 +1324,7 @@ fn find_candidate_frontier(
 
     if emit_logs {
         log::info!(
-            "crush discovery detail: render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, path-index {:.2?}, candidate-build {:.2?}, select+materialize {:.2?} ({} -> {} selected, materialize {:.2?})",
+            "crush discovery detail: render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, path-index {:.2?}, candidate-build {:.2?}, select+materialize {:.2?} ({} -> {} selected, materialize {:.2?}); leaves={}",
             render_elapsed,
             parse_elapsed,
             decompose_elapsed,
@@ -1254,7 +1334,8 @@ fn find_candidate_frontier(
             select_elapsed,
             selected_before_materialize,
             frontier.selected.len(),
-            materialize_elapsed
+            materialize_elapsed,
+            leaves_seen
         );
     }
 
@@ -1385,22 +1466,38 @@ fn candidate_signature(
     begin: usize,
     exit_step: usize,
     ranges: &[PathRange],
+    path_positions_by_path: &[Vec<usize>],
 ) -> String {
+    // Use base-pair positions on every involved path so the signature is stable
+    // across rewrites of OTHER bubbles (their interior bytes are preserved
+    // byte-for-byte by `path_sequences_equal`, so bp positions outside their
+    // span don't shift). Step indices change as segmentation is rewritten, so
+    // they cannot be part of the persistent identity of a bubble.
     let mut coords: Vec<String> = ranges
         .iter()
-        .map(|r| format!("{}:{}-{}", r.path_idx, r.begin_step, r.end_step))
+        .map(|r| {
+            let positions = &path_positions_by_path[r.path_idx];
+            format!(
+                "{}:{}-{}",
+                graph.paths[r.path_idx].name, positions[r.begin_step], positions[r.end_step]
+            )
+        })
         .collect();
     coords.sort();
     format!(
-        "{}:{}-{}:{}",
+        "{}:{}-{}|{}",
         graph.paths[ref_path_idx].name,
         ref_positions[begin],
         ref_positions[exit_step + 1],
-        coords.join("|")
+        coords.join(",")
     )
 }
 
-fn apply_replacement_frontier(graph: &Graph, plans: &[ReplacementPlan]) -> io::Result<Graph> {
+fn apply_replacement_frontier(
+    graph: &Graph,
+    plans: &[ReplacementPlan],
+    next_id: &mut usize,
+) -> io::Result<Graph> {
     let mut replacements_by_path: FxHashMap<usize, Vec<PathReplacement>> = FxHashMap::default();
 
     for (plan_idx, plan) in plans.iter().enumerate() {
@@ -1499,7 +1596,13 @@ fn apply_replacement_frontier(graph: &Graph, plans: &[ReplacementPlan]) -> io::R
             out_paths.len()
         );
     }
-    let rendered = render_rewritten_graph(graph, &replacement_graphs, &used_original, &out_paths);
+    let rendered = render_rewritten_graph(
+        graph,
+        &replacement_graphs,
+        &used_original,
+        &out_paths,
+        next_id,
+    );
     let next = parse_gfa(&rendered)?;
     if log::log_enabled!(log::Level::Debug) {
         let mut sequence_counts: FxHashMap<&[u8], usize> = FxHashMap::default();
@@ -2771,6 +2874,7 @@ fn render_rewritten_graph(
     replacements: &[Graph],
     used_original: &FxHashSet<usize>,
     out_paths: &[(String, Vec<OutStep>)],
+    next_id: &mut usize,
 ) -> String {
     let mut out = String::new();
     out.push_str("H\tVN:Z:1.0\n");
@@ -2780,7 +2884,6 @@ fn render_rewritten_graph(
     for node in used_original {
         used_ids.insert(original.segments[*node].id.clone());
     }
-    let mut next_id = 1usize;
 
     let mut seen_ordered = FxHashSet::<OutNode>::default();
     let mut ordered_nodes = Vec::new();
@@ -2807,7 +2910,7 @@ fn render_rewritten_graph(
                 let replacement = replacements
                     .get(replacement_idx)
                     .expect("used replacement index must refer to an emitted replacement graph");
-                let id = next_unused_segment_id(&mut used_ids, &mut next_id);
+                let id = next_unused_segment_id(&mut used_ids, next_id);
                 id_by_node.insert(node, id.clone());
                 out.push_str(&format!(
                     "S\t{}\t{}\n",
@@ -2868,6 +2971,23 @@ fn next_unused_segment_id(used_ids: &mut FxHashSet<String>, next_id: &mut usize)
     }
 }
 
+/// Seed for the monotone fresh-id counter at the start of a resolution run.
+///
+/// Returns one more than the largest integer-encoded segment id present in the
+/// input graph (or 1 if no integer ids are present). This guarantees that any
+/// id minted by any round of `resolve_graph_bubbles` is strictly greater than
+/// every original id at the moment of insertion — the structural form of the
+/// Phase 6 fresh-id invariant from `docs/crush-architecture-spec.md`.
+fn initial_next_segment_id(graph: &Graph) -> usize {
+    let max = graph
+        .segments
+        .iter()
+        .filter_map(|s| s.id.parse::<usize>().ok())
+        .max()
+        .unwrap_or(0);
+    max.saturating_add(1)
+}
+
 fn render_graph(graph: &Graph) -> String {
     let out_paths = graph
         .paths
@@ -2890,7 +3010,10 @@ fn render_graph(graph: &Graph) -> String {
         .iter()
         .flat_map(|path| path.steps.iter().map(|step| step.node))
         .collect::<FxHashSet<_>>();
-    render_rewritten_graph(graph, &[], &used_original, &out_paths)
+    // No replacements are emitted here, so next_id is unused; seed at 1 to
+    // preserve the previous behaviour for the final-emit path.
+    let mut next_id = 1usize;
+    render_rewritten_graph(graph, &[], &used_original, &out_paths, &mut next_id)
 }
 
 #[cfg(test)]
@@ -3649,6 +3772,137 @@ P\tright_alt\t1+,2+,3+,4+,8+,6+\t*
         assert_eq!(resolved.stats.iterations, 1);
         assert_eq!(resolved.stats.resolved, 2);
         assert_eq!(resolved.stats.bailed, 0);
+    }
+
+    /// Phase 6 hard invariant: every replacement segment id is strictly
+    /// greater than the largest segment id present in the input graph at
+    /// the moment of insertion.
+    ///
+    /// See `docs/crush-architecture-spec.md` §"fresh node IDs" and the
+    /// task description's hard validation gate ("Fresh-ID assertion").
+    #[test]
+    fn phase6_fresh_segment_ids_are_strictly_above_initial_max() {
+        // Two independent bubbles + a non-integer survivor — the original-max
+        // integer id is 42, so every freshly minted segment id must be > 42.
+        let gfa = "\
+H\tVN:Z:1.0
+S\t10\tA
+S\t11\tC
+S\t12\tG
+S\t13\tT
+S\t14\tA
+S\t15\tC
+S\t16\tGG
+S\t17\tTT
+S\t42\tACGT
+L\t10\t+\t11\t+\t0M
+L\t11\t+\t12\t+\t0M
+L\t10\t+\t16\t+\t0M
+L\t16\t+\t12\t+\t0M
+L\t12\t+\t13\t+\t0M
+L\t13\t+\t14\t+\t0M
+L\t14\t+\t15\t+\t0M
+L\t13\t+\t17\t+\t0M
+L\t17\t+\t15\t+\t0M
+L\t15\t+\t42\t+\t0M
+P\tref\t10+,11+,12+,13+,14+,15+,42+\t*
+P\tleft_alt\t10+,16+,12+,13+,14+,15+,42+\t*
+P\tright_alt\t10+,11+,12+,13+,17+,15+,42+\t*
+";
+        let before = seq_map(gfa);
+        let resolved = resolve_gfa_bubbles(
+            gfa,
+            &ResolutionConfig {
+                max_iterations: 3,
+                ..ResolutionConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert!(resolved.stats.resolved >= 2, "{:?}", resolved.stats);
+
+        let resolved_graph = parse_gfa(&resolved.gfa).unwrap();
+        // Originals that survived keep their string id; any segment that did
+        // not appear in the input is a freshly minted replacement.
+        let original_ids = parse_gfa(gfa)
+            .unwrap()
+            .segments
+            .iter()
+            .map(|s| s.id.clone())
+            .collect::<FxHashSet<_>>();
+        let original_max_int = original_ids
+            .iter()
+            .filter_map(|id| id.parse::<usize>().ok())
+            .max()
+            .unwrap_or(0);
+        let mut new_ids = Vec::new();
+        for segment in &resolved_graph.segments {
+            if !original_ids.contains(&segment.id) {
+                let parsed: usize = segment
+                    .id
+                    .parse()
+                    .expect("freshly minted id must be integer-encoded");
+                new_ids.push(parsed);
+            }
+        }
+        assert!(
+            !new_ids.is_empty(),
+            "expected at least one freshly minted segment id"
+        );
+        for id in &new_ids {
+            assert!(
+                *id > original_max_int,
+                "fresh id {id} must be > original-max integer id {original_max_int}"
+            );
+        }
+    }
+
+    /// Phase 6 hard invariant: per-round frontier sizes are observed and
+    /// non-empty, the run terminates by exhausting the tree (not by hitting
+    /// max_iterations on a large iteration budget), and the resolved-set
+    /// stays monotonic (no node resolved twice — that would panic in
+    /// `resolve_graph_bubbles`).
+    #[test]
+    fn phase6_level_descent_terminates_below_max_iterations() {
+        // Nested SNP-in-an-indel: round 1 should resolve the inner leaf, the
+        // outer site then becomes a leaf and is resolved in round 2.
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tT
+S\t5\tAA
+S\t6\tA
+S\t7\tCCC
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+L\t2\t+\t5\t+\t0M
+L\t5\t+\t4\t+\t0M
+L\t4\t+\t6\t+\t0M
+L\t1\t+\t7\t+\t0M
+L\t7\t+\t6\t+\t0M
+P\tref\t1+,2+,3+,4+,6+\t*
+P\tinner_alt\t1+,2+,5+,4+,6+\t*
+P\touter_alt\t1+,7+,6+\t*
+";
+        let before = seq_map(gfa);
+        let resolved = resolve_gfa_bubbles(
+            gfa,
+            &ResolutionConfig {
+                max_iterations: 32,
+                method: ResolutionMethod::Poa,
+                ..ResolutionConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert!(
+            resolved.stats.iterations < 32,
+            "level descent must terminate before exhausting max-iterations; got {:?}",
+            resolved.stats
+        );
     }
 
     #[test]
