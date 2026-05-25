@@ -338,7 +338,6 @@ struct PathRange {
 struct BubbleCandidate {
     ranges: Vec<PathRange>,
     signature: String,
-    within_budget: bool,
     root_start_step: usize,
     root_end_step: usize,
     root_span: usize,
@@ -363,7 +362,6 @@ struct GraphQuality {
 #[derive(Clone, Debug, Default)]
 struct CandidateFrontier {
     selected: Vec<BubbleCandidate>,
-    bailed: Vec<BubbleCandidate>,
     sites_seen: usize,
     candidates_seen: usize,
 }
@@ -457,7 +455,7 @@ fn resolve_graph_bubbles(
         let discovery_start = Instant::now();
         let frontier = find_candidate_frontier(&graph, config, &seen, emit_logs)?;
         let discovery_elapsed = discovery_start.elapsed();
-        if frontier.selected.is_empty() && frontier.bailed.is_empty() {
+        if frontier.selected.is_empty() {
             if emit_logs {
                 log::info!(
                     "crush round {}: no eligible candidates from {} POVU site(s) in {:.2?}",
@@ -472,35 +470,18 @@ fn resolve_graph_bubbles(
 
         if emit_logs {
             log::info!(
-                "crush round {}: {} POVU site(s), {} unseen polymorphic candidate(s), {} selected, {} selection-guarded in {:.2?}",
+                "crush round {}: {} POVU site(s), {} unseen polymorphic candidate(s), {} selected in {:.2?}",
                 round + 1,
                 frontier.sites_seen,
                 frontier.candidates_seen,
                 frontier.selected.len(),
-                frontier.bailed.len(),
                 discovery_elapsed
             );
             log::info!(
-                "crush round {} traversal stats: {}; {}",
+                "crush round {} traversal stats: {}",
                 round + 1,
-                format_candidate_length_summary("selected", &frontier.selected),
-                format_candidate_length_summary("selection-guarded", &frontier.bailed)
+                format_candidate_length_summary("selected", &frontier.selected)
             );
-        }
-
-        for _candidate in frontier.bailed {
-            stats.candidates_seen += 1;
-            stats.bailed += 1;
-        }
-
-        if frontier.selected.is_empty() {
-            if emit_logs {
-                log::info!(
-                    "crush round {}: stopping because remaining candidate(s) are outside selection guards",
-                    round + 1
-                );
-            }
-            break;
         }
 
         for candidate in &frontier.selected {
@@ -876,29 +857,6 @@ fn candidate_selection_priority(candidate: &BubbleCandidate, config: &Resolution
     }
 }
 
-fn candidate_within_selection_budget(
-    root_span: usize,
-    traversal_count: usize,
-    traversal_stats: TraversalStats,
-    config: &ResolutionConfig,
-) -> bool {
-    if config.max_bubble_span > 0 && root_span > config.max_bubble_span {
-        return false;
-    }
-
-    let method = candidate_selection_method(traversal_stats, config);
-    if !matches!(
-        method,
-        ResolutionMethod::Poa | ResolutionMethod::Poasta | ResolutionMethod::StarBiwfa
-    ) {
-        return true;
-    }
-
-    let mut stats = traversal_stats;
-    stats.count = traversal_count;
-    direct_replacement_within_budget(stats, config)
-}
-
 fn percentile_index(len: usize, numerator: usize, denominator: usize) -> usize {
     if len == 0 || denominator == 0 {
         return 0;
@@ -1220,8 +1178,6 @@ fn find_candidate_frontier(
             if traversal_stats.max_len < config.min_traversal_len {
                 return None;
             }
-            let within_budget =
-                candidate_within_selection_budget(root_span, ranges.len(), traversal_stats, config);
             let signature = candidate_signature(
                 graph,
                 root_path_idx,
@@ -1237,7 +1193,6 @@ fn find_candidate_frontier(
             Some(BubbleCandidate {
                 ranges,
                 signature,
-                within_budget,
                 root_start_step: begin,
                 root_end_step: exit_step,
                 root_span,
@@ -1269,10 +1224,6 @@ fn find_candidate_frontier(
     };
     let mut occupied_by_path: Vec<Vec<(usize, usize)>> = vec![Vec::new(); graph.paths.len()];
     for candidate in candidates {
-        if !candidate.within_budget {
-            frontier.bailed.push(candidate);
-            continue;
-        }
         if candidate_conflicts_with_occupied(&occupied_by_path, &candidate) {
             continue;
         }
@@ -1871,13 +1822,6 @@ fn build_allwave_seqwish_replacement(
         );
         return build_poa_replacement(candidate, config);
     }
-    if config.max_pair_alignments > 0 && pairs.len() > config.max_pair_alignments {
-        return Err(io::Error::other(format!(
-            "AllWave replacement selected {} pair alignments, above max-pair-alignments {}",
-            pairs.len(),
-            config.max_pair_alignments
-        )));
-    }
     let orientation_params = allwave::AlignmentParams::edit_distance();
     let mut lines: Vec<String> = pairs
         .par_iter()
@@ -1904,13 +1848,6 @@ fn build_allwave_seqwish_replacement(
         out.push('\n');
         out
     };
-    if config.max_replacement_paf_bytes > 0 && paf.len() > config.max_replacement_paf_bytes {
-        return Err(io::Error::other(format!(
-            "AllWave replacement produced {} PAF bytes, above max-replacement-paf-bytes {}",
-            paf.len(),
-            config.max_replacement_paf_bytes
-        )));
-    }
     log::debug!(
         "crush allwave: {} traversal(s), {} selected pair alignment(s), {} unique PAF line(s), {} PAF byte(s)",
         sequences.len(),
@@ -1972,20 +1909,6 @@ fn build_sweepga_seqwish_replacement(
         out.push('\n');
         out
     };
-    if config.max_pair_alignments > 0 && paf_lines.len() > config.max_pair_alignments {
-        return Err(io::Error::other(format!(
-            "SweepGA replacement produced {} pair alignments, above max-pair-alignments {}",
-            paf_lines.len(),
-            config.max_pair_alignments
-        )));
-    }
-    if config.max_replacement_paf_bytes > 0 && paf.len() > config.max_replacement_paf_bytes {
-        return Err(io::Error::other(format!(
-            "SweepGA replacement produced {} PAF bytes, above max-replacement-paf-bytes {}",
-            paf.len(),
-            config.max_replacement_paf_bytes
-        )));
-    }
     log::debug!(
         "crush sweepga: {} traversal(s), {} unique raw all-vs-all PAF line(s), {} PAF byte(s) from {} backend (fastga_frequency={}); seqwish tail will apply scaffold filter={}",
         seqs.len(),
@@ -3289,7 +3212,6 @@ P\tp1\t1+,3+,4+\t*
         let mut candidate = BubbleCandidate {
             ranges: Vec::new(),
             signature: "route".to_string(),
-            within_budget: true,
             root_start_step: 0,
             root_end_step: 1,
             root_span: 0,
@@ -3367,77 +3289,11 @@ P\tp1\t1+,3+,4+\t*
     }
 
     #[test]
-    fn direct_budgets_do_not_filter_pairwise_induction_candidates() {
-        let stats = TraversalStats {
-            count: 500,
-            min_len: 16_000,
-            median_len: 50_000,
-            p90_len: 200_000,
-            max_len: 500_000,
-            total_len: 25_000_000,
-        };
-        let config = ResolutionConfig {
-            method: ResolutionMethod::Sweepga,
-            max_traversal_len: 10_000,
-            max_median_traversal_len: 1_000,
-            max_total_sequence: 1_000_000,
-            max_traversals: 128,
-            ..ResolutionConfig::default()
-        };
-        assert!(candidate_within_selection_budget(
-            1_000,
-            stats.count,
-            stats,
-            &config
-        ));
-
-        let direct_config = ResolutionConfig {
-            method: ResolutionMethod::Poa,
-            ..config.clone()
-        };
-        assert!(!candidate_within_selection_budget(
-            1_000,
-            stats.count,
-            stats,
-            &direct_config
-        ));
-
-        let span_limited_config = ResolutionConfig {
-            method: ResolutionMethod::Sweepga,
-            max_bubble_span: 999,
-            ..config
-        };
-        assert!(!candidate_within_selection_budget(
-            1_000,
-            stats.count,
-            stats,
-            &span_limited_config
-        ));
-
-        let auto_config = ResolutionConfig {
-            method: ResolutionMethod::Auto,
-            auto_spoa_max_traversal_len: 1_000_000,
-            ..direct_config
-        };
-        assert_eq!(
-            candidate_selection_method(stats, &auto_config),
-            ResolutionMethod::Allwave
-        );
-        assert!(candidate_within_selection_budget(
-            1_000,
-            stats.count,
-            stats,
-            &auto_config
-        ));
-    }
-
-    #[test]
     fn auto_prioritizes_pairwise_parent_candidates_before_direct_candidates() {
         let config = ResolutionConfig::default();
         let mut candidate = BubbleCandidate {
             ranges: Vec::new(),
             signature: "candidate".to_string(),
-            within_budget: true,
             root_start_step: 0,
             root_end_step: 1,
             root_span: 0,
@@ -3582,7 +3438,7 @@ P\talt\t1+,3+,4+\t*
     }
 
     #[test]
-    fn allwave_pair_alignment_cap_bails_before_seqwish() {
+    fn allwave_processes_candidate_regardless_of_pair_alignment_cap() {
         let gfa = "\
 H\tVN:Z:1.0
 S\t1\tAAAAAAAAAAAAAAAAAAAA
@@ -3606,8 +3462,8 @@ P\tins\t1+,2+,3+\t*
         )
         .unwrap();
         assert_eq!(before, seq_map(&resolved.gfa));
-        assert_eq!(resolved.stats.resolved, 0);
-        assert_eq!(resolved.stats.bailed, 1);
+        assert_eq!(resolved.stats.resolved, 1, "{:?}", resolved.stats);
+        assert_eq!(resolved.stats.bailed, 0, "{:?}", resolved.stats);
     }
 
     #[test]
@@ -3679,7 +3535,7 @@ P\talt\t1+,3+,4+\t*
     }
 
     #[test]
-    fn direct_poa_bails_out_when_candidate_exceeds_median_traversal_budget() {
+    fn direct_poa_processes_candidate_regardless_of_median_traversal_budget() {
         let gfa = "\
 H\tVN:Z:1.0
 S\t1\tAC
@@ -3702,8 +3558,8 @@ P\tins\t1+,2+,3+\t*
         )
         .unwrap();
         assert_eq!(before, seq_map(&resolved.gfa));
-        assert_eq!(resolved.stats.resolved, 0);
-        assert!(resolved.stats.bailed >= 1);
+        assert_eq!(resolved.stats.resolved, 1, "{:?}", resolved.stats);
+        assert_eq!(resolved.stats.bailed, 0, "{:?}", resolved.stats);
     }
 
     #[test]
@@ -3796,7 +3652,7 @@ P\tright_alt\t1+,2+,3+,4+,8+,6+\t*
     }
 
     #[test]
-    fn over_budget_candidates_are_not_marked_seen() {
+    fn all_candidates_processed_regardless_of_budget() {
         let gfa = "\
 H\tVN:Z:1.0
 S\t1\tA
@@ -3830,17 +3686,12 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
         )
         .unwrap();
         assert_eq!(before, seq_map(&resolved.gfa));
-        assert_eq!(resolved.stats.resolved, 1, "{:?}", resolved.stats);
-        assert_eq!(resolved.stats.iterations, 2, "{:?}", resolved.stats);
-        assert!(
-            resolved.stats.bailed >= 2,
-            "over-budget candidate should still be visible in the second round: {:?}",
-            resolved.stats
-        );
+        assert!(resolved.stats.resolved >= 2, "{:?}", resolved.stats);
+        assert_eq!(resolved.stats.bailed, 0, "{:?}", resolved.stats);
     }
 
     #[test]
-    fn direct_poa_bails_out_when_candidate_exceeds_budget() {
+    fn direct_poa_processes_candidate_regardless_of_max_traversal_len() {
         let gfa = "\
 H\tVN:Z:1.0
 S\t1\tAC
@@ -3860,9 +3711,8 @@ P\tins\t1+,2+,3+\t*
         };
         let resolved = resolve_gfa_bubbles(gfa, &config).unwrap();
         assert_eq!(before, seq_map(&resolved.gfa));
-        assert_eq!(resolved.gfa, gfa);
-        assert_eq!(resolved.stats.resolved, 0);
-        assert!(resolved.stats.bailed >= 1);
+        assert_eq!(resolved.stats.resolved, 1, "{:?}", resolved.stats);
+        assert_eq!(resolved.stats.bailed, 0, "{:?}", resolved.stats);
     }
 
     #[test]
@@ -3956,7 +3806,6 @@ P\talt\t1+,3+,4+\t*
                 },
             ],
             signature: "selected".to_string(),
-            within_budget: true,
             root_start_step: 0,
             root_end_step: 1,
             root_span: 10,
@@ -3974,7 +3823,6 @@ P\talt\t1+,3+,4+\t*
                 sequence: Vec::new(),
             }],
             signature: "adjacent".to_string(),
-            within_budget: true,
             root_start_step: 0,
             root_end_step: 1,
             root_span: 5,
@@ -3995,7 +3843,6 @@ P\talt\t1+,3+,4+\t*
                 sequence: Vec::new(),
             }],
             signature: "overlapping".to_string(),
-            within_budget: true,
             root_start_step: 0,
             root_end_step: 1,
             root_span: 6,
@@ -4016,7 +3863,6 @@ P\talt\t1+,3+,4+\t*
                 sequence: Vec::new(),
             }],
             signature: "different-path".to_string(),
-            within_budget: true,
             root_start_step: 0,
             root_end_step: 1,
             root_span: 10,
