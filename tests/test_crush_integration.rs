@@ -20,7 +20,10 @@
 //!   GFA and known-good round-1 output (pre-0af1a4c baseline). Tests that
 //!   require the full GFA skip automatically if the file is not present.
 
-use impg::resolution::{path_sequences, resolve_gfa_bubbles, ResolutionConfig};
+use impg::graph_report::{describe_gfa, GraphReportOptions};
+use impg::resolution::{
+    path_sequences, resolve_gfa_bubbles, ResolutionConfig, ResolutionMethod,
+};
 use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
@@ -488,5 +491,303 @@ fn c4_slice_auto_crush_preserves_path_sequences() {
     eprintln!(
         "slice: segs {} → {}, bp {} → {}",
         before_segs, after_segs, before_bp, after_bp
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Nested-bubble level descent — see docs/crush-nested-bubble-test.md
+//
+// Fixture: tests/test_data/crush/nested_bubbles_real.gfa
+//   Real C4A pangenome extract (5 haplotypes through chr6 ref steps 568-590 of
+//   CHM13#0#chr6:31744284-31976975, sourced from C4A.blunt.numeric.gfa). POVU
+//   on the fixture finds exactly:
+//     • 1 top-level (L0) site `<43388736>43388746` (16 ref-step span)
+//     • 2 leaf (L1) sub-bubbles nested INSIDE the L0 parent:
+//         `>43388742<2094988` and `>43388742>546635`
+//   1 component, 40 segments, 981 bp, 43 links, 5 paths (3.8 KB on disk).
+//
+// Correct behavior (top-down with localized re-POVU on the resolved bubble's
+// subgraph):
+//   • Round 1 selects exactly 1 candidate: the L0 parent.
+//   • The POA replacement subgraph still exposes ≥2 nested L1 sub-bubbles, so
+//     round 2 resolves the nested children.
+//   • Round 3 has no eligible candidates → terminate in 2 rounds.
+//   • Path sequences preserved, component count preserved.
+//   • Final POVU on the resolved graph finds ≤ a small handful of sites
+//     (everything cleanly resolved).
+//
+// HEAD (471f089) behavior — observed failure that drives this test:
+//   crush re-POVUs the WHOLE working graph every round and filters by
+//   `site.is_leaf` (src/resolution.rs:1224), so it works BOTTOM-UP. On the
+//   fixture this collapses to:
+//     • Round 1 resolves a LEAF (not the parent).
+//     • Each round's POA replacement re-fragments the graph, re-introducing
+//       internal sub-bubbles that POVU keeps re-discovering. Stops only when
+//       leftover sites fall below min_traversal_len.
+//     • Resolution takes 5 rounds, produces 16 replacement plans, and the
+//       result still contains ~15 POVU sites (10 L0 + 5 L1) — the "ramp /
+//       whitespace" fragmentation signature visible in
+//       /tmp/crush-ld/c4-crush-level-descent.png.
+//
+// Test asserts: iterations<=2, sites_after<=2, components preserved, path
+// sequences preserved, round-1 selected==1, round-2 selected>=2. The
+// iterations + sites_after assertions are the discriminators that FAIL on
+// HEAD; the others are sanity gates.
+// ---------------------------------------------------------------------------
+
+const NESTED_BUBBLES_REF: &str = "CHM13#0#chr6:31744284-31976975";
+
+/// Parse a single integer field from a `crush round N: ... K selected ...`
+/// stderr line. Returns the K value for each round in order. Robust against
+/// other interleaved log lines (FastGA, build progress, etc.).
+fn parse_round_selected_counts(stderr: &str) -> Vec<usize> {
+    let mut counts: Vec<(usize, usize)> = Vec::new();
+    for line in stderr.lines() {
+        // Match: "crush round <N>: <SITES> POVU site(s), ... <K> selected ..."
+        let Some(rest) = line.split_once("crush round ").map(|x| x.1) else {
+            continue;
+        };
+        let Some((round_str, after)) = rest.split_once(':') else {
+            continue;
+        };
+        let Ok(round_idx) = round_str.trim().parse::<usize>() else {
+            continue;
+        };
+        // Skip "crush round N traversal stats" lines and "no eligible
+        // candidates" lines — only count the headline selection line.
+        if after.contains("traversal stats") || after.contains("no eligible") {
+            continue;
+        }
+        let Some(sel_pos) = after.find(" selected ") else {
+            continue;
+        };
+        // Walk backwards from ' selected ' to find the integer before it.
+        let prefix = &after[..sel_pos];
+        let Some(num_start) = prefix.rfind(|c: char| !c.is_ascii_digit()) else {
+            continue;
+        };
+        let Ok(selected) = prefix[num_start + 1..].parse::<usize>() else {
+            continue;
+        };
+        // Keep only the first occurrence per round index (in case of dupes).
+        if !counts.iter().any(|&(r, _)| r == round_idx) {
+            counts.push((round_idx, selected));
+        }
+    }
+    counts.sort_by_key(|&(r, _)| r);
+    counts.into_iter().map(|(_, k)| k).collect()
+}
+
+#[test]
+fn nested_bubble_level_descent_actually_descends() {
+    // docs/crush-nested-bubble-test.md
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let gfa_path = manifest_dir.join("tests/test_data/crush/nested_bubbles_real.gfa");
+    assert!(
+        gfa_path.exists(),
+        "fixture missing: {}",
+        gfa_path.display()
+    );
+
+    let gfa = std::fs::read_to_string(&gfa_path).expect("failed to read fixture");
+
+    // Sanity: characterise the input fixture's bubble structure.
+    let describe_opts = GraphReportOptions {
+        top_n: 50,
+        include_povu: true,
+        povu_reference_names: vec![NESTED_BUBBLES_REF.to_string()],
+        ..GraphReportOptions::default()
+    };
+    let input_report =
+        describe_gfa("nested-fixture", &gfa, &describe_opts).expect("describe_gfa on fixture");
+    let input_povu = input_report
+        .povu
+        .as_ref()
+        .expect("POVU disabled or failed on fixture");
+    let input_l0 = input_povu
+        .top_sites
+        .iter()
+        .filter(|s| s.level == 0)
+        .count();
+    let input_l1 = input_povu
+        .top_sites
+        .iter()
+        .filter(|s| s.level == 1)
+        .count();
+    let input_l1_nested_in_l0: usize = input_povu
+        .top_sites
+        .iter()
+        .filter(|s| s.level == 1 && s.parent_id.is_some())
+        .count();
+    eprintln!(
+        "fixture POVU: {} sites total, level breakdown L0={}, L1={} (L1 nested-in-L0={})",
+        input_povu.sites, input_l0, input_l1, input_l1_nested_in_l0
+    );
+    assert_eq!(
+        input_l0, 1,
+        "fixture should have exactly 1 top-level (L0) bubble; got {}",
+        input_l0
+    );
+    assert!(
+        input_l1_nested_in_l0 >= 2,
+        "fixture should have >= 2 nested (L1) sub-bubbles inside the L0 parent; got {}",
+        input_l1_nested_in_l0
+    );
+    assert_eq!(
+        input_report.metrics.components, 1,
+        "fixture should be a single connected component; got {}",
+        input_report.metrics.components
+    );
+
+    // Capture input path sequences for end-to-end preservation check.
+    let before_seqs: std::collections::HashMap<_, _> =
+        path_sequences(&gfa).unwrap().into_iter().collect();
+    let input_components = input_report.metrics.components;
+
+    // Run crush with max_iterations=5 via the library to capture stats.iterations.
+    let resolved = resolve_gfa_bubbles(
+        &gfa,
+        &ResolutionConfig {
+            max_iterations: 5,
+            method: ResolutionMethod::Auto,
+            ..ResolutionConfig::default()
+        },
+    )
+    .expect("resolve_gfa_bubbles failed on nested fixture");
+
+    eprintln!(
+        "library crush: iterations={}, resolved={}, bailed={}, candidates_seen={}",
+        resolved.stats.iterations,
+        resolved.stats.resolved,
+        resolved.stats.bailed,
+        resolved.stats.candidates_seen,
+    );
+
+    // ----------- Hard assertions that FAIL on HEAD (471f089) -----------
+
+    // (1) Termination round count.
+    // CORRECT (top-down + localized re-POVU): round 1 resolves L0 parent, round
+    // 2 resolves the nested L1 leaves discovered inside the replacement, round
+    // 3 has no eligible candidates → terminate; iterations==2.
+    // HEAD: bottom-up leaf filter creates synthetic L0/L1 sites every rewrite,
+    // so resolution takes 5 rounds and ends only when leftover sites are below
+    // min_traversal_len.
+    assert!(
+        resolved.stats.iterations <= 2,
+        "nested-bubble level descent should terminate in <= 2 iterations \
+         (correct top-down algorithm needs exactly 2: round 1 = L0 parent, \
+         round 2 = nested L1 children); got iterations={} on this run \
+         (HEAD 471f089 takes 5 rounds because re-POVU on the WHOLE graph + \
+         is_leaf filter at src/resolution.rs:1224 keeps re-discovering POA \
+         fragmentation artifacts each round)",
+        resolved.stats.iterations
+    );
+
+    // (2) After resolution, POVU on the result must NOT find a fragmented
+    // graph littered with leftover sub-bubbles. The correct algorithm leaves
+    // ≤ a couple sites (the polymorphic structure is fully consumed). HEAD
+    // leaves ~15 sites (10 L0 + 5 L1) — the fragmentation signature.
+    let result_report = describe_gfa("nested-fixture-resolved", &resolved.gfa, &describe_opts)
+        .expect("describe_gfa on resolved");
+    let result_povu = result_report
+        .povu
+        .as_ref()
+        .expect("POVU disabled or failed on resolved");
+    eprintln!(
+        "resolved POVU: {} sites total, leaves={}, levels={:?}; segments={} components={}",
+        result_povu.sites,
+        result_povu.leaf_sites,
+        result_povu.level_counts,
+        result_report.metrics.segments,
+        result_report.metrics.components,
+    );
+    assert!(
+        result_povu.sites <= 2,
+        "resolved graph should have <= 2 POVU sites (cleanly consumed nested \
+         bubble); got {} sites. HEAD 471f089 leaves ~15 sites due to POA \
+         consensus fragmentation introducing new L0/L1 bubbles each round.",
+        result_povu.sites
+    );
+
+    // (3) Component count must stay at the input value (fragmentation must
+    // not introduce disconnected components).
+    assert_eq!(
+        result_report.metrics.components, input_components,
+        "resolved graph component count changed from {} to {} \
+         (fragmentation should not disconnect the graph)",
+        input_components, result_report.metrics.components
+    );
+
+    // (4) All input path sequences must be preserved.
+    let after_seqs: std::collections::HashMap<_, _> = path_sequences(&resolved.gfa)
+        .unwrap()
+        .into_iter()
+        .collect();
+    for (name, before_seq) in &before_seqs {
+        let after_seq = after_seqs
+            .get(name)
+            .unwrap_or_else(|| panic!("path {} disappeared after crush", name));
+        assert_eq!(
+            before_seq, after_seq,
+            "path {} changed sequence after crush",
+            name
+        );
+    }
+
+    // ----------- Round-by-round assertions (parsed from CLI stderr) ----------
+    //
+    // The library's ResolutionStats does not expose per-round frontier sizes.
+    // Run the CLI subprocess with -v 2 to capture the structured log lines
+    // and parse "crush round N: <X> POVU site(s), <Y> unseen ..., <K> selected"
+    // so we can assert round 1 selected == 1 and round 2 selected >= 2.
+
+    let Some(bin) = impg_binary() else {
+        eprintln!("SKIP CLI round-count assertions: impg binary not found");
+        return;
+    };
+    let out_path = std::env::temp_dir().join("nested_bubble_level_descent_out.gfa");
+    let run = Command::new(&bin)
+        .args([
+            "crush",
+            "--gfa",
+            gfa_path.to_str().unwrap(),
+            "--output",
+            out_path.to_str().unwrap(),
+            "--method",
+            "auto",
+            "--max-iterations",
+            "5",
+            "-v",
+            "2",
+        ])
+        .output()
+        .expect("failed to run impg crush CLI");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    let per_round = parse_round_selected_counts(&stderr);
+    eprintln!("CLI per-round selected counts: {:?}", per_round);
+    std::fs::remove_file(&out_path).ok();
+
+    assert!(
+        per_round.len() >= 2,
+        "expected >= 2 rounds in stderr; parsed {:?}\n--- stderr tail ---\n{}",
+        per_round,
+        stderr.lines().rev().take(15).collect::<Vec<_>>().join("\n")
+    );
+
+    // Round 1 should resolve exactly 1 candidate (the L0 parent).
+    assert_eq!(
+        per_round[0], 1,
+        "round 1 should select exactly 1 candidate (the L0 top-level parent); \
+         got {}. HEAD 471f089's leaf-filter selects whatever leaves pass the \
+         min_traversal_len cut — usually a count != 1.",
+        per_round[0]
+    );
+    // Round 2 should resolve the nested children (>= 2 plans) — POVU on the
+    // L0 replacement's local subgraph reveals the nested L1 leaves.
+    assert!(
+        per_round[1] >= 2,
+        "round 2 should select >= 2 candidates (the nested L1 sub-bubbles in \
+         the L0 replacement's local subgraph); got {}",
+        per_round[1]
     );
 }
