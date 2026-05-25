@@ -48,10 +48,23 @@ target/release/impg query \
   -r GRCh38#0#chr6:31891045-32123783 \
   --sequence-files /home/erikg/hprcv2/HPRC_r2_assemblies_0.6.1.agc \
   -d 50k \
-  -o 'gfa:syng:mask,min-run=3:crush,method=sweepga,aligner=fastga,min-traversal-len=5k,max-rounds=until-done,seqwish-k=311,max-pair-alignments=0,max-paf-bytes=0,polish-rounds=until-done,polish-max-traversal-len=10k,polish-max-median-traversal-len=1k:nosort' \
+  -o 'gfa:syng:mask,min-run=3:crush,method=auto,aligner=fastga,min-traversal-len=5k,max-rounds=until-done,seqwish-k=311,max-pair-alignments=0,max-paf-bytes=0,polish-rounds=until-done,polish-max-traversal-len=10k,polish-max-median-traversal-len=1k:nosort' \
   -O data/c4_crush_eval_20260523T140141Z/C4A.parent5k.sweepga_allvsall_fastga.k311.done.nosort \
   -v 1
 ```
+
+**2026-05-25 — `method=sweepga` → `method=auto`.** The previous canonical command
+pinned `method=sweepga`, which sent every bubble through sweepga + seqwish-k=311
+regardless of its size. The aligner-failure trace in
+`docs/crush-aligner-failure-trace.md` documented the resulting fragmentation:
+small-median bubbles cannot be anchored by seqwish-k=311 and come out as
+N-way disjoint per-traversal copies, driving the byte-duplicate rate above 90%
+on several rounds (4/4 deep rounds ≥75% duplicates; round 5 was 98.9%).
+`crush-fix-routing` implements the spec's 3-tier dispatch
+(`docs/crush-architecture-spec.md` §Phase-2): with `method=auto`, sPOA handles
+bubbles whose **median traversal length** is <1 kb, POASTA handles 1–10 kb,
+and sweepga handles ≥10 kb. The legacy `method=sweepga` form is still accepted
+and continues to pin every bubble to sweepga.
 
 This known-good artifact predates `98fd538`. At the time it was generated,
 `method=sweepga,aligner=fastga` used the historical FastGA default frequency
@@ -164,14 +177,16 @@ mkdir -p "$out"
   -r GRCh38#0#chr6:31891045-32123783 \
   --sequence-files /home/erikg/hprcv2/HPRC_r2_assemblies_0.6.1.agc \
   -d 50k \
-  -o 'gfa:syng:mask,min-run=3:crush,method=sweepga,aligner=fastga,min-traversal-len=5k,max-rounds=until-done,seqwish-k=311,max-pair-alignments=0,max-paf-bytes=0,polish-rounds=until-done,polish-max-traversal-len=10k,polish-max-median-traversal-len=1k:nosort' \
+  -o 'gfa:syng:mask,min-run=3:crush,method=auto,aligner=fastga,min-traversal-len=5k,max-rounds=until-done,seqwish-k=311,max-pair-alignments=0,max-paf-bytes=0,polish-rounds=until-done,polish-max-traversal-len=10k,polish-max-median-traversal-len=1k:nosort' \
   -O "$out/current_auto.nosort" \
   -v 1 \
   > "$out/current_auto.nosort.stdout" \
   2> "$out/current_auto.nosort.stderr"
 ```
 
-Then run the legacy/baseline semantics by pinning the old FastGA frequency:
+Then run the legacy/baseline semantics by pinning sweepga everywhere (and the
+old FastGA frequency) so the comparison isolates the routing change from the
+parameter-frequency change:
 
 ```bash
 /usr/bin/time -v target/release/impg query \

@@ -2584,6 +2584,12 @@ fn parse_crush_stage(
                 config.auto_spoa_max_traversal_len =
                     parse_usize_size_engine_param(raw, &param.key, &param.value)?;
             }
+            "auto-poasta-max-traversal-len"
+            | "auto-poasta-max-traversal-length"
+            | "auto-poasta-max-len" => {
+                config.auto_poasta_max_traversal_len =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
             "auto-allwave-max-total-sequence"
             | "auto-allwave-max-total-seq"
             | "auto-allwave-max-sequence"
@@ -4733,9 +4739,13 @@ GFA engine shorthand:
         #[clap(long, value_parser = parse_usize_size, default_value = "10k")]
         max_traversals: usize,
 
-        /// Maximum traversal length for auto mode to use direct SPOA before AllWave; 0 disables
-        #[clap(long, alias = "small-spoa-max-len", value_parser = parse_usize_size, default_value = "2k")]
+        /// Median traversal-length upper bound (exclusive) for auto-mode sPOA routing; 0 disables
+        #[clap(long, alias = "small-spoa-max-len", value_parser = parse_usize_size, default_value = "1k")]
         auto_spoa_max_traversal_len: usize,
+
+        /// Median traversal-length upper bound (exclusive) for auto-mode POASTA routing; bubbles at or above this go to sweepga. 0 disables
+        #[clap(long, alias = "auto-poasta-max-len", value_parser = parse_usize_size, default_value = "10k")]
+        auto_poasta_max_traversal_len: usize,
 
         /// Legacy auto-routing knob retained for CLI compatibility
         #[clap(long, alias = "auto-allwave-max-total-seq", value_parser = parse_usize_size, default_value = "200k")]
@@ -7712,6 +7722,7 @@ fn run() -> io::Result<()> {
             max_total_sequence,
             max_traversals,
             auto_spoa_max_traversal_len,
+            auto_poasta_max_traversal_len,
             auto_allwave_max_total_sequence,
             auto_allwave_max_traversals,
             polish_rounds,
@@ -7843,6 +7854,7 @@ fn run() -> io::Result<()> {
                 max_total_sequence,
                 max_traversals,
                 auto_spoa_max_traversal_len,
+                auto_poasta_max_traversal_len,
                 auto_allwave_max_total_sequence,
                 auto_allwave_max_traversals,
                 polish_iterations: polish_rounds,
@@ -12961,7 +12973,8 @@ mod tests {
                 assert_eq!(crush.max_median_traversal_len, 1_000);
                 assert_eq!(crush.max_traversal_len, 10_000);
                 assert_eq!(crush.max_traversals, 10_000);
-                assert_eq!(crush.auto_spoa_max_traversal_len, 2_000);
+                assert_eq!(crush.auto_spoa_max_traversal_len, 1_000);
+                assert_eq!(crush.auto_poasta_max_traversal_len, 10_000);
                 assert_eq!(crush.auto_allwave_max_total_sequence, 200_000);
                 assert_eq!(crush.auto_allwave_max_traversals, 128);
                 assert_eq!(crush.max_iterations, 1);

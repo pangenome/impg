@@ -31,17 +31,21 @@ pub struct ResolutionConfig {
     pub max_iterations: usize,
     /// Local graph induction method used for selected bubbles.
     pub method: ResolutionMethod,
-    /// Maximum traversal length for `method=auto` to use direct SPOA.
-    ///
-    /// Larger eligible single-entry/single-exit bubbles go through AllWave /
-    /// seqwish induction first, then the bounded SPOA polish pass. Set to 0 to
-    /// force the AllWave-first path for every auto-selected bubble.
+    /// Upper bound (exclusive) on **median traversal length** for `method=auto` to
+    /// route a bubble to direct SPOA. Per docs/crush-architecture-spec.md §Phase-2:
+    /// `median < auto_spoa_max_traversal_len` → sPOA. Set to 0 to disable the
+    /// sPOA tier entirely (everything routes to POASTA or sweepga).
     pub auto_spoa_max_traversal_len: usize,
-    /// Legacy auto-routing limit retained for CLI compatibility.
-    ///
-    /// Auto mode now sends every bubble above the SPOA length cutoff through
-    /// pairwise graph induction. Correctness is enforced by exact path
-    /// validation; graph-quality metrics are diagnostic telemetry only.
+    /// Upper bound (exclusive) on **median traversal length** for `method=auto` to
+    /// route a bubble to POASTA. Bubbles with
+    /// `auto_spoa_max_traversal_len <= median < auto_poasta_max_traversal_len`
+    /// route to POASTA; bubbles at or above this threshold route to sweepga.
+    /// Set to 0 to disable the POASTA tier (everything above the sPOA tier goes
+    /// to sweepga).
+    pub auto_poasta_max_traversal_len: usize,
+    /// Legacy auto-routing limit retained for CLI compatibility. Unused by the
+    /// median-based 3-tier dispatch but still accepted on the CLI so existing
+    /// command lines continue to parse.
     pub auto_allwave_max_total_sequence: usize,
     /// Legacy auto-routing limit retained for CLI compatibility. See
     /// `auto_allwave_max_total_sequence`.
@@ -220,7 +224,8 @@ pub const DEFAULT_MIN_TRAVERSAL_LEN: usize = 0;
 pub const DEFAULT_MAX_MEDIAN_TRAVERSAL_LEN: usize = 1_000;
 pub const DEFAULT_MAX_TOTAL_SEQUENCE: usize = 1_000_000;
 pub const DEFAULT_MAX_TRAVERSALS: usize = 10_000;
-pub const DEFAULT_AUTO_SPOA_MAX_TRAVERSAL_LEN: usize = 2_000;
+pub const DEFAULT_AUTO_SPOA_MAX_TRAVERSAL_LEN: usize = 1_000;
+pub const DEFAULT_AUTO_POASTA_MAX_TRAVERSAL_LEN: usize = 10_000;
 pub const DEFAULT_AUTO_ALLWAVE_MAX_TOTAL_SEQUENCE: usize = 200_000;
 pub const DEFAULT_AUTO_ALLWAVE_MAX_TRAVERSALS: usize = 128;
 pub const DEFAULT_POLISH_ITERATIONS: usize = usize::MAX;
@@ -248,6 +253,7 @@ impl Default for ResolutionConfig {
             max_iterations: DEFAULT_MAX_ITERATIONS,
             method: ResolutionMethod::Auto,
             auto_spoa_max_traversal_len: DEFAULT_AUTO_SPOA_MAX_TRAVERSAL_LEN,
+            auto_poasta_max_traversal_len: DEFAULT_AUTO_POASTA_MAX_TRAVERSAL_LEN,
             auto_allwave_max_total_sequence: DEFAULT_AUTO_ALLWAVE_MAX_TOTAL_SEQUENCE,
             auto_allwave_max_traversals: DEFAULT_AUTO_ALLWAVE_MAX_TRAVERSALS,
             max_bubble_span: DEFAULT_MAX_BUBBLE_SPAN,
@@ -889,29 +895,37 @@ fn candidate_selection_method(
     config: &ResolutionConfig,
 ) -> ResolutionMethod {
     match config.method {
-        ResolutionMethod::Auto => {
-            if config.auto_spoa_max_traversal_len > 0
-                && traversal_stats.max_len <= config.auto_spoa_max_traversal_len
-                && direct_replacement_within_budget(traversal_stats, config)
-            {
-                ResolutionMethod::Poa
-            } else {
-                ResolutionMethod::Allwave
-            }
-        }
+        ResolutionMethod::Auto => auto_method_by_median(traversal_stats, config),
         method => method,
     }
 }
 
-fn direct_replacement_within_budget(
+/// Size-stratified aligner routing by **median** traversal length, per
+/// docs/crush-architecture-spec.md §Phase-2 and the fix proposal in
+/// docs/crush-aligner-failure-trace.md §"Fix sketch":
+///
+/// - `median < auto_spoa_max_traversal_len`  → sPOA       (default <1 kb)
+/// - `median < auto_poasta_max_traversal_len` → POASTA    (default 1 kb..10 kb)
+/// - otherwise                                → sweepga   (default ≥10 kb)
+///
+/// The decision variable is **median**, not max: a small-median bubble with a
+/// single long outlier should still go to sPOA, because the outlier becomes a
+/// one-off insertion arc that sPOA represents cleanly. A `*_max_traversal_len`
+/// value of 0 disables that tier (the next tier takes over).
+fn auto_method_by_median(
     traversal_stats: TraversalStats,
     config: &ResolutionConfig,
-) -> bool {
-    traversal_stats.count <= config.max_traversals
-        && traversal_stats.max_len <= config.max_traversal_len
-        && (config.max_median_traversal_len == 0
-            || traversal_stats.median_len <= config.max_median_traversal_len)
-        && traversal_stats.total_len <= config.max_total_sequence
+) -> ResolutionMethod {
+    let median = traversal_stats.median_len;
+    if config.auto_spoa_max_traversal_len > 0 && median < config.auto_spoa_max_traversal_len {
+        ResolutionMethod::Poa
+    } else if config.auto_poasta_max_traversal_len > 0
+        && median < config.auto_poasta_max_traversal_len
+    {
+        ResolutionMethod::Poasta
+    } else {
+        ResolutionMethod::Sweepga
+    }
 }
 
 fn candidate_selection_priority(candidate: &BubbleCandidate, config: &ResolutionConfig) -> u8 {
@@ -1660,11 +1674,11 @@ fn auto_replacement_method(
     candidate: &BubbleCandidate,
     config: &ResolutionConfig,
 ) -> ResolutionMethod {
-    // Keep very small local tangles on the deterministic SPOA path. Larger or
-    // high-copy bubbles need sparse many-to-many pair induction first; the
-    // bounded POASTA polish in `finalize_pairwise_induced_replacement` then
-    // resolves the residual small tangles inside the replacement graph.
-    candidate_selection_method(candidate.traversal_stats, config)
+    // 3-tier dispatch by median traversal length per docs/crush-architecture-spec.md
+    // §Phase-2: median <1 kb → sPOA, 1–10 kb → POASTA, ≥10 kb → sweepga. See
+    // `auto_method_by_median` for the routing logic and the rationale for using
+    // median (not max) as the decision variable.
+    auto_method_by_median(candidate.traversal_stats, config)
 }
 
 fn candidate_named_sequences(candidate: &BubbleCandidate) -> (Vec<String>, Vec<(String, Vec<u8>)>) {
@@ -3330,9 +3344,8 @@ P\tp1\t1+,3+,4+\t*
         assert_eq!(before, seq_map(&polished));
     }
 
-    #[test]
-    fn auto_routes_small_bubbles_to_spoa_and_larger_bubbles_to_allwave() {
-        let mut candidate = BubbleCandidate {
+    fn routing_candidate_with_stats(stats: TraversalStats) -> BubbleCandidate {
+        BubbleCandidate {
             ranges: Vec::new(),
             signature: "route".to_string(),
             root_start_step: 0,
@@ -3340,105 +3353,175 @@ P\tp1\t1+,3+,4+\t*
             root_span: 0,
             total_steps: 0,
             unique_steps: 0,
-            traversal_stats: TraversalStats {
-                count: 2,
-                max_len: 128,
-                ..TraversalStats::default()
-            },
-        };
+            traversal_stats: stats,
+        }
+    }
+
+    fn traversal_stats_with(median_len: usize, max_len: usize, count: usize) -> TraversalStats {
+        TraversalStats {
+            count,
+            min_len: median_len.min(max_len),
+            median_len,
+            p90_len: max_len,
+            max_len,
+            total_len: median_len.saturating_mul(count.max(1)),
+        }
+    }
+
+    /// Per docs/crush-architecture-spec.md §Phase-2: median <1 kb → sPOA.
+    #[test]
+    fn auto_routes_small_median_to_spoa() {
         let config = ResolutionConfig::default();
+        let candidate = routing_candidate_with_stats(traversal_stats_with(500, 800, 10));
         assert_eq!(
             auto_replacement_method(&candidate, &config),
             ResolutionMethod::Poa
         );
+    }
 
-        candidate.traversal_stats.max_len = config.auto_spoa_max_traversal_len + 1;
-        candidate.traversal_stats.total_len = config.auto_allwave_max_total_sequence;
+    /// Per docs/crush-architecture-spec.md §Phase-2: 1 kb ≤ median < 10 kb → POASTA.
+    #[test]
+    fn auto_routes_medium_median_to_poasta() {
+        let config = ResolutionConfig::default();
+        let candidate = routing_candidate_with_stats(traversal_stats_with(5_000, 8_000, 10));
         assert_eq!(
             auto_replacement_method(&candidate, &config),
-            ResolutionMethod::Allwave
-        );
-
-        candidate.traversal_stats.count = config.auto_allwave_max_traversals + 1;
-        assert_eq!(
-            auto_replacement_method(&candidate, &config),
-            ResolutionMethod::Allwave
-        );
-
-        candidate.traversal_stats.count = 2;
-        candidate.traversal_stats.total_len = config.auto_allwave_max_total_sequence + 1;
-        assert_eq!(
-            auto_replacement_method(&candidate, &config),
-            ResolutionMethod::Allwave
-        );
-
-        candidate.traversal_stats = TraversalStats {
-            count: config.max_traversals + 1,
-            min_len: 128,
-            median_len: 128,
-            p90_len: 128,
-            max_len: 128,
-            total_len: 128,
-        };
-        assert_eq!(
-            auto_replacement_method(&candidate, &config),
-            ResolutionMethod::Allwave
-        );
-
-        candidate.traversal_stats = TraversalStats {
-            count: 2,
-            min_len: 128,
-            median_len: 128,
-            p90_len: 128,
-            max_len: 128,
-            total_len: config.max_total_sequence + 1,
-        };
-        assert_eq!(
-            auto_replacement_method(&candidate, &config),
-            ResolutionMethod::Allwave
-        );
-
-        let config = ResolutionConfig {
-            auto_spoa_max_traversal_len: 0,
-            auto_allwave_max_total_sequence: 0,
-            auto_allwave_max_traversals: 0,
-            ..ResolutionConfig::default()
-        };
-        candidate.traversal_stats.max_len = 1;
-        assert_eq!(
-            auto_replacement_method(&candidate, &config),
-            ResolutionMethod::Allwave
+            ResolutionMethod::Poasta
         );
     }
 
+    /// Per docs/crush-architecture-spec.md §Phase-2: median ≥10 kb → sweepga.
     #[test]
-    fn auto_prioritizes_pairwise_parent_candidates_before_direct_candidates() {
+    fn auto_routes_large_median_to_sweepga() {
         let config = ResolutionConfig::default();
-        let mut candidate = BubbleCandidate {
-            ranges: Vec::new(),
-            signature: "candidate".to_string(),
-            root_start_step: 0,
-            root_end_step: 1,
-            root_span: 0,
-            total_steps: 0,
-            unique_steps: 0,
-            traversal_stats: TraversalStats {
-                max_len: config.auto_spoa_max_traversal_len,
-                ..TraversalStats::default()
-            },
-        };
-        assert_eq!(candidate_selection_priority(&candidate, &config), 1);
-        candidate.traversal_stats.max_len = config.auto_spoa_max_traversal_len + 1;
-        assert_eq!(candidate_selection_priority(&candidate, &config), 0);
+        let candidate = routing_candidate_with_stats(traversal_stats_with(20_000, 30_000, 10));
+        assert_eq!(
+            auto_replacement_method(&candidate, &config),
+            ResolutionMethod::Sweepga
+        );
+    }
 
+    /// Decision variable is **median**, not max. A bubble with median=100 and
+    /// max=30000 (one long outlier among many short traversals) must route to
+    /// sPOA — see pick (a) in docs/crush-aligner-failure-trace.md where exactly
+    /// this shape (median 165 bp, max 25230 bp, 47 traversals) was mis-routed
+    /// to sweepga and produced 46 byte-identical disjoint segments.
+    #[test]
+    fn auto_routes_by_median_not_max() {
+        let config = ResolutionConfig::default();
+        let candidate = routing_candidate_with_stats(traversal_stats_with(100, 30_000, 47));
+        assert_eq!(
+            auto_replacement_method(&candidate, &config),
+            ResolutionMethod::Poa,
+            "median 100 bp must route to sPOA even with a 30 kb max outlier"
+        );
+    }
+
+    /// Tier-boundary behaviour: at the exact sPOA threshold the bubble is no
+    /// longer "small" and falls through to POASTA; at the POASTA threshold it
+    /// falls through to sweepga.
+    #[test]
+    fn auto_routing_boundaries_are_exclusive_upper_bounds() {
+        let config = ResolutionConfig::default();
+        let at_spoa_boundary =
+            routing_candidate_with_stats(traversal_stats_with(config.auto_spoa_max_traversal_len, 2_000, 10));
+        assert_eq!(
+            auto_replacement_method(&at_spoa_boundary, &config),
+            ResolutionMethod::Poasta,
+            "median == auto_spoa_max_traversal_len must route to POASTA, not sPOA"
+        );
+
+        let at_poasta_boundary = routing_candidate_with_stats(traversal_stats_with(
+            config.auto_poasta_max_traversal_len,
+            20_000,
+            10,
+        ));
+        assert_eq!(
+            auto_replacement_method(&at_poasta_boundary, &config),
+            ResolutionMethod::Sweepga,
+            "median == auto_poasta_max_traversal_len must route to sweepga, not POASTA"
+        );
+    }
+
+    /// Setting `auto_spoa_max_traversal_len = 0` disables the sPOA tier; bubbles
+    /// that would have been sPOA-routed fall through to the POASTA tier.
+    #[test]
+    fn auto_routing_disabling_spoa_tier_falls_through_to_poasta() {
+        let config = ResolutionConfig {
+            auto_spoa_max_traversal_len: 0,
+            ..ResolutionConfig::default()
+        };
+        let small = routing_candidate_with_stats(traversal_stats_with(100, 200, 10));
+        assert_eq!(
+            auto_replacement_method(&small, &config),
+            ResolutionMethod::Poasta
+        );
+    }
+
+    /// Setting both `auto_spoa_max_traversal_len = 0` and
+    /// `auto_poasta_max_traversal_len = 0` collapses all auto routing to sweepga.
+    #[test]
+    fn auto_routing_disabling_poasta_tier_falls_through_to_sweepga() {
+        let config = ResolutionConfig {
+            auto_spoa_max_traversal_len: 0,
+            auto_poasta_max_traversal_len: 0,
+            ..ResolutionConfig::default()
+        };
+        let small = routing_candidate_with_stats(traversal_stats_with(100, 200, 10));
+        assert_eq!(
+            auto_replacement_method(&small, &config),
+            ResolutionMethod::Sweepga
+        );
+    }
+
+    /// `candidate_replacement_method` honours an explicit `config.method` pin —
+    /// it does **not** apply the 3-tier routing when the user has asked for a
+    /// specific aligner. (The canonical command in docs/c4-crush-handoff.md
+    /// uses `method=auto`; this guard preserves the explicit-pin escape hatch.)
+    #[test]
+    fn explicit_method_pin_bypasses_auto_routing() {
+        let candidate = routing_candidate_with_stats(traversal_stats_with(100, 200, 10));
+        let sweepga = ResolutionConfig {
+            method: ResolutionMethod::Sweepga,
+            ..ResolutionConfig::default()
+        };
+        assert_eq!(
+            candidate_replacement_method(&candidate, &sweepga),
+            ResolutionMethod::Sweepga,
+            "explicit method=sweepga must still pin every bubble to sweepga"
+        );
+
+        let poasta = ResolutionConfig {
+            method: ResolutionMethod::Poasta,
+            ..ResolutionConfig::default()
+        };
+        let large = routing_candidate_with_stats(traversal_stats_with(20_000, 30_000, 10));
+        assert_eq!(
+            candidate_replacement_method(&large, &poasta),
+            ResolutionMethod::Poasta,
+            "explicit method=poasta must still pin every bubble to poasta"
+        );
+    }
+
+    /// Auto-mode priority places direct-tier picks (sPOA, POASTA) ahead of
+    /// sweepga so high-confidence local condensations are tried first within
+    /// one frontier round.
+    #[test]
+    fn auto_prioritizes_direct_candidates_before_sweepga() {
+        let config = ResolutionConfig::default();
+        let small = routing_candidate_with_stats(traversal_stats_with(500, 800, 10));
+        let medium = routing_candidate_with_stats(traversal_stats_with(5_000, 8_000, 10));
+        let large = routing_candidate_with_stats(traversal_stats_with(20_000, 30_000, 10));
+        assert_eq!(candidate_selection_priority(&small, &config), 1);
+        assert_eq!(candidate_selection_priority(&medium, &config), 1);
+        assert_eq!(candidate_selection_priority(&large, &config), 0);
+
+        // Explicit-method pin disables auto prioritization entirely.
         let explicit_sweepga = ResolutionConfig {
             method: ResolutionMethod::Sweepga,
             ..config
         };
-        assert_eq!(
-            candidate_selection_priority(&candidate, &explicit_sweepga),
-            0
-        );
+        assert_eq!(candidate_selection_priority(&small, &explicit_sweepga), 0);
     }
 
     #[test]
