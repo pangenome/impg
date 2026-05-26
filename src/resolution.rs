@@ -182,6 +182,12 @@ pub enum ResolutionMethod {
     Allwave,
     /// SweepGA/FastGA or wfmash pair selection and graph induction, then SPOA polish.
     Sweepga,
+    /// wfmash pair selection and graph induction, then SPOA polish. Equivalent to
+    /// `method=sweepga,aligner=wfmash` but pins the aligner field so the documented
+    /// intent survives any future config edit. Used to compare against PGGB's
+    /// wfmash-based induction without disturbing the existing `Sweepga` path's
+    /// `fastga` default. See `docs/crush-wfmash-replacement.md`.
+    Wfmash,
     /// Depth-based routing: level 0 (top-level bubbles) → sweepga+seqwish,
     /// level ≥ 1 (every sub-bubble) → POASTA. No size threshold; the choice
     /// of aligner is tied to the provenance-tree depth, not to median
@@ -219,6 +225,7 @@ impl ResolutionMethod {
             "star-biwfa" | "biwfa-star" | "biwfa" | "wfa" => Some(Self::StarBiwfa),
             "allwave" | "aw" => Some(Self::Allwave),
             "sweepga" | "sw" => Some(Self::Sweepga),
+            "wfmash" | "wf" => Some(Self::Wfmash),
             "hierarchical" | "hier" => Some(Self::Hierarchical),
             _ => None,
         }
@@ -1361,7 +1368,7 @@ fn candidate_selection_priority(candidate: &BubbleCandidate, config: &Resolution
         return 0;
     }
     match candidate_selection_method(candidate, config) {
-        ResolutionMethod::Allwave | ResolutionMethod::Sweepga => 0,
+        ResolutionMethod::Allwave | ResolutionMethod::Sweepga | ResolutionMethod::Wfmash => 0,
         ResolutionMethod::Poa | ResolutionMethod::Poasta | ResolutionMethod::StarBiwfa => 1,
         ResolutionMethod::Auto => unreachable!("auto candidate method should be resolved"),
         ResolutionMethod::Hierarchical => {
@@ -2395,6 +2402,7 @@ fn build_replacement_with_method(
         ResolutionMethod::StarBiwfa => build_biwfa_inmemory_replacement(candidate, config),
         ResolutionMethod::Allwave => build_allwave_seqwish_replacement(candidate, config),
         ResolutionMethod::Sweepga => build_sweepga_seqwish_replacement(candidate, config),
+        ResolutionMethod::Wfmash => build_wfmash_seqwish_replacement(candidate, config),
     }
 }
 
@@ -2845,6 +2853,19 @@ fn build_sweepga_seqwish_replacement(
     let graph_config = seqwish_replacement_config(config);
     let gfa = crate::syng_graph::build_gfa_from_paf_and_sequences(&seqs, &paf, &graph_config)?;
     finalize_pairwise_induced_replacement(gfa, &headers, candidate, config, "SweepGA/seqwish")
+}
+
+/// Wrapper for `method=wfmash` that forces the SweepGA backend's aligner to
+/// `wfmash`, leaving every other knob unchanged. This pins the aligner choice
+/// at the method layer so `method=wfmash` is invariant under any future edit of
+/// `sweepga_aligner` defaults.
+fn build_wfmash_seqwish_replacement(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+) -> io::Result<Graph> {
+    let mut wfmash_config = config.clone();
+    wfmash_config.sweepga_aligner = "wfmash".to_string();
+    build_sweepga_seqwish_replacement(candidate, &wfmash_config)
 }
 
 fn build_poa_replacement(

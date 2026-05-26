@@ -2755,7 +2755,7 @@ fn parse_crush_stage(
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, allwave, poa, poasta, star-biwfa, sweepga, or hierarchical)",
+                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, or hierarchical)",
                             raw, param.value
                         ),
                     ));
@@ -4262,7 +4262,8 @@ GFA engine shorthand:
   name the aligner prefix, e.g. `-o gfa:wfmash:seqwish`,
   `-o gfa:fastga:pggb`, or `-o gfa:sweepga:seqwish`. Add `:crush` to run
   exact path-preserving blunt-graph resolution, e.g. `-o gfa:syng:crush`.
-  Crush methods include allwave, poa, poasta, star-biwfa, and sweepga; e.g.
+  Crush methods include allwave, poa, poasta, star-biwfa, sweepga, wfmash,
+  hierarchical; e.g.
   `-o gfa:syng:crush,method=allwave,k-nearest=5,k-farthest=2`.
 ")]
     Query {
@@ -4792,7 +4793,7 @@ GFA engine shorthand:
         #[clap(long, value_parser = parse_usize_size, default_value = "10k")]
         polish_max_traversals: usize,
 
-        /// Resolver method: auto, allwave, poa, poasta, star-biwfa, or sweepga
+        /// Resolver method: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, or hierarchical
         #[clap(long, value_parser, default_value = "auto")]
         method: String,
 
@@ -7788,7 +7789,7 @@ fn run() -> io::Result<()> {
             let Some(method) = impg::resolution::ResolutionMethod::parse_name(&method) else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "--method must be one of: auto, allwave, poa, poasta, star-biwfa, sweepga",
+                    "--method must be one of: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical",
                 ));
             };
             let Some(polish_method) =
@@ -12405,7 +12406,7 @@ mod tests {
             "-o gfa:syng:crush:sort,pipeline=Ygs",
             "-o vcf:syng",
             "-o gfa:wfmash:seqwish",
-            "Crush methods include allwave, poa, poasta, star-biwfa, and sweepga",
+            "Crush methods include allwave, poa, poasta, star-biwfa, sweepga, wfmash,",
             "`impg syng2gfa` to dump the whole syng syncmer graph",
         ] {
             assert!(
@@ -12875,6 +12876,44 @@ mod tests {
                 assert_eq!(crush.replacement_scaffold_filter, "1:many");
                 assert!(!crush.sweepga_no_filter);
                 assert!(crush.sweepga_sparse_pairs);
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_method_wfmash_routes_through_sweepga_with_wfmash_aligner() {
+        // `method=wfmash` is the dedicated method variant for the
+        // wfmash-backed pair-induction path. It dispatches to the same
+        // sweepga+seqwish induction tail as `method=sweepga`, but pins
+        // the aligner to `wfmash` regardless of the `sweepga_aligner`
+        // config default ("fastga"). See `docs/crush-wfmash-replacement.md`.
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush,method=wfmash",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                let crush = parsed.crush_config.unwrap();
+                assert_eq!(crush.method, impg::resolution::ResolutionMethod::Wfmash);
+                // The aligner config field is left at its default ("fastga"); the
+                // dispatch shim in `build_wfmash_seqwish_replacement` clones the
+                // config and overrides this at the call site so the wfmash backend
+                // is invariant under any future default change.
+                assert_eq!(crush.sweepga_aligner, "fastga");
             }
             _ => panic!("expected query command"),
         }
