@@ -301,6 +301,7 @@ fn discover_partitions(
         poa_padding_fraction: 0.001,
         partition_size: None,
         crush_config: None,
+        smooth_after_crush: None,
         graph_sort_pipeline: None,
     };
 

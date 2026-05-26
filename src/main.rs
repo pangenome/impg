@@ -2294,6 +2294,7 @@ struct ParsedGfaEngine {
     syng_params: Option<impg::syng::SyncmerParams>,
     syng_gfa_frequency_mask: SyngGfaFrequencyMask,
     crush_config: Option<impg::resolution::ResolutionConfig>,
+    smooth_after_crush: Option<impg::SmoothPipelineConfig>,
     graph_sort_pipeline: Option<String>,
 }
 
@@ -2860,6 +2861,81 @@ fn engine_raw_has_crush_scoring_param(raw: &str) -> bool {
     })
 }
 
+fn parse_smooth_stage(
+    raw: &str,
+    stage: &GraphPipelineStage,
+) -> io::Result<impg::SmoothPipelineConfig> {
+    let mut config = impg::SmoothPipelineConfig::default();
+    for param in &stage.params {
+        match param.key.as_str() {
+            "target-poa-length" | "target-poa-lengths" | "poa-length" | "g" => {
+                // `,` is the pipeline stage parameter separator, so multi-pass
+                // length lists use `/` or `+` (e.g. `target-poa-length=700/1100`,
+                // analogous to pggb's `-G 700,1100`).
+                let lengths: Result<Vec<usize>, _> = param
+                    .value
+                    .split(|c| c == '/' || c == '+')
+                    .map(|s| s.trim().parse::<usize>())
+                    .collect();
+                let lengths = lengths.map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': smooth {}='{}' is not a `/`-separated list of positive integers",
+                            raw, param.key, param.value
+                        ),
+                    )
+                })?;
+                if lengths.is_empty() || lengths.iter().any(|&n| n == 0) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': smooth {}='{}' must be a non-empty list of positive integers",
+                            raw, param.key, param.value
+                        ),
+                    ));
+                }
+                config.target_poa_lengths = lengths;
+            }
+            "max-node-length" | "node-length" | "k" => {
+                config.max_node_length =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
+            "poa-padding-fraction" | "padding-fraction" | "pad" => {
+                let f: f64 = param.value.parse().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': smooth {}='{}' is not a valid float",
+                            raw, param.key, param.value
+                        ),
+                    )
+                })?;
+                if !(0.0..=1.0).contains(&f) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': smooth {}='{}' must be in [0.0, 1.0]",
+                            raw, param.key, param.value
+                        ),
+                    ));
+                }
+                config.poa_padding_fraction = f;
+            }
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Invalid --gfa-engine '{}': unknown smooth parameter '{}'",
+                        raw, other
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(config)
+}
+
 fn parse_graph_sort_stage(raw: &str, stage: &GraphPipelineStage) -> io::Result<Option<String>> {
     let mut pipeline = Some(impg::DEFAULT_SYNG_GFA_SORT_PIPELINE.to_string());
     for param in &stage.params {
@@ -3196,6 +3272,7 @@ impl EngineCliOpts {
         let mut syncmer_seed: Option<u32> = None;
         let mut saw_syng_param = false;
         let mut crush_config = None;
+        let mut smooth_after_crush: Option<impg::SmoothPipelineConfig> = None;
         let mut syng_gfa_frequency_mask = if is_syng {
             SyngGfaFrequencyMask::local_default()
         } else {
@@ -3242,6 +3319,15 @@ impl EngineCliOpts {
                         ));
                     }
                     crush_config = Some(parse_crush_stage(raw, stage)?);
+                }
+                "smooth" | "smoothxg" => {
+                    if smooth_after_crush.is_some() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Invalid --gfa-engine '{}': duplicate smooth stage", raw),
+                        ));
+                    }
+                    smooth_after_crush = Some(parse_smooth_stage(raw, stage)?);
                 }
                 "sort" if is_syng => {
                     graph_sort_pipeline = parse_graph_sort_stage(raw, stage)?;
@@ -3322,6 +3408,7 @@ impl EngineCliOpts {
             syng_params,
             syng_gfa_frequency_mask,
             crush_config,
+            smooth_after_crush,
             graph_sort_pipeline,
         })
     }
@@ -3407,6 +3494,7 @@ impl EngineCliOpts {
             parsed.syng_params,
             parsed.syng_gfa_frequency_mask,
             parsed.crush_config,
+            parsed.smooth_after_crush,
             parsed.graph_sort_pipeline,
         )
     }
@@ -9074,6 +9162,7 @@ fn build_engine_opts(
     syng_params: Option<impg::syng::SyncmerParams>,
     syng_gfa_frequency_mask: SyngGfaFrequencyMask,
     crush_config: Option<impg::resolution::ResolutionConfig>,
+    smooth_after_crush: Option<impg::SmoothPipelineConfig>,
     graph_sort_pipeline: Option<String>,
 ) -> io::Result<EngineOpts> {
     let pipeline = graph::GraphBuildConfig {
@@ -9115,6 +9204,7 @@ fn build_engine_opts(
         pipeline,
         partition_size,
         crush_config,
+        smooth_after_crush,
         graph_sort_pipeline,
         target_poa_lengths: smooth.parse_target_poa_lengths()?,
         max_node_length: smooth.max_node_length,
@@ -13100,6 +13190,113 @@ mod tests {
             }
             _ => panic!("expected query command"),
         }
+    }
+
+    #[test]
+    fn test_gfa_engine_smooth_stage_parses_defaults() {
+        // Canonical post-crush smoothxg integration: syng:crush:smooth:nosort.
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush:smooth:nosort",
+        ])
+        .unwrap();
+        let Args::Query {
+            output_format,
+            mut engine_cli,
+            ..
+        } = args
+        else {
+            panic!("expected query command");
+        };
+        apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+        let parsed = engine_cli.parse_engine().unwrap();
+        assert_eq!(parsed.engine, GfaEngine::SyngNative);
+        let smooth = parsed
+            .smooth_after_crush
+            .expect(":smooth stage should populate smooth_after_crush");
+        // Defaults match pggb's `-G 700,1100`.
+        assert_eq!(smooth.target_poa_lengths, vec![700, 1100]);
+        assert_eq!(smooth.max_node_length, 100);
+        assert!((smooth.poa_padding_fraction - 0.001).abs() < 1e-12);
+        // :nosort wins; final graph_sort_pipeline is None.
+        assert!(parsed.graph_sort_pipeline.is_none());
+    }
+
+    #[test]
+    fn test_gfa_engine_smooth_stage_parses_target_poa_length_override() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush:smooth,target-poa-length=500/1000/1500:nosort",
+        ])
+        .unwrap();
+        let Args::Query {
+            output_format,
+            mut engine_cli,
+            ..
+        } = args
+        else {
+            panic!("expected query command");
+        };
+        apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+        let parsed = engine_cli.parse_engine().unwrap();
+        let smooth = parsed.smooth_after_crush.unwrap();
+        assert_eq!(smooth.target_poa_lengths, vec![500, 1000, 1500]);
+    }
+
+    #[test]
+    fn test_gfa_engine_smooth_stage_rejects_duplicate() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush:smooth:smooth",
+        ])
+        .unwrap();
+        let Args::Query {
+            output_format,
+            mut engine_cli,
+            ..
+        } = args
+        else {
+            panic!("expected query command");
+        };
+        apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+        let err = engine_cli.parse_engine().unwrap_err();
+        assert!(err.to_string().contains("duplicate smooth stage"));
+    }
+
+    #[test]
+    fn test_gfa_engine_smooth_stage_rejects_unknown_param() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush:smooth,unknown=1",
+        ])
+        .unwrap();
+        let Args::Query {
+            output_format,
+            mut engine_cli,
+            ..
+        } = args
+        else {
+            panic!("expected query command");
+        };
+        apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+        let err = engine_cli.parse_engine().unwrap_err();
+        assert!(err.to_string().contains("unknown smooth parameter"));
     }
 
     #[test]

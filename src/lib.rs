@@ -59,6 +59,27 @@ pub enum GfaEngine {
 
 pub const DEFAULT_SYNG_GFA_SORT_PIPELINE: &str = "Ygs";
 
+/// Configuration for a post-crush smoothxg pass applied as a pipeline stage.
+/// Distinct from the pggb-engine smoothing knobs in `EngineOpts` because it
+/// is a separate stage with its own enable/disable flag (`Option<...>`) and
+/// reuses the same defaults pggb does.
+#[derive(Clone, Debug)]
+pub struct SmoothPipelineConfig {
+    pub target_poa_lengths: Vec<usize>,
+    pub max_node_length: usize,
+    pub poa_padding_fraction: f64,
+}
+
+impl Default for SmoothPipelineConfig {
+    fn default() -> Self {
+        Self {
+            target_poa_lengths: vec![700, 1100],
+            max_node_length: 100,
+            poa_padding_fraction: 0.001,
+        }
+    }
+}
+
 /// Resolved engine configuration passed to subcommand functions.
 pub struct EngineOpts {
     pub engine: GfaEngine,
@@ -79,6 +100,8 @@ pub struct EngineOpts {
     pub partition_size: Option<usize>,
     /// Optional exact path-preserving blunt-graph resolution pass.
     pub crush_config: Option<resolution::ResolutionConfig>,
+    /// Optional post-crush smoothxg pass on the whole graph.
+    pub smooth_after_crush: Option<SmoothPipelineConfig>,
     /// Optional final gfasort pipeline, e.g. `Yg` or `Ygs`. Currently enabled
     /// by default for syng-native GFA output and disabled for already-normalized
     /// alignment engines.
@@ -755,6 +778,46 @@ fn apply_graph_transforms(mut gfa: String, engine_opts: &EngineOpts) -> std::io:
         gfa = resolved.gfa;
     }
 
+    if let Some(config) = &engine_opts.smooth_after_crush {
+        let t0 = std::time::Instant::now();
+        // Count haplotypes from path names on the post-crush graph so the
+        // smoothxg block-weight scales the same way pggb does (target_poa_length
+        // * n_haps). Path names come from the syng/seqwish pipeline as
+        // `<sample>#<hap>#<chr>[:start-end]`; PanSnLevel::Haplotype groups by
+        // sample#hap and falls back to whole name for non-PanSN input.
+        let n_haps = sweepga::pansn::count_pansn_keys(
+            gfa.lines().filter_map(|line| {
+                let bytes = line.as_bytes();
+                if bytes.is_empty() || bytes[0] != b'P' {
+                    return None;
+                }
+                let mut iter = line.split('\t');
+                iter.next()?;
+                iter.next()
+            }),
+            sweepga::pansn::PanSnLevel::Haplotype,
+        );
+        let smooth_config = smooth::SmoothConfig {
+            num_threads: engine_opts.pipeline.num_threads,
+            target_poa_lengths: config.target_poa_lengths.clone(),
+            max_node_length: config.max_node_length,
+            poa_padding_fraction: config.poa_padding_fraction,
+            temp_dir: engine_opts.pipeline.temp_dir.clone(),
+            pre_sorted: false,
+            ..smooth::SmoothConfig::new(n_haps)
+        };
+        let smoothed = smooth::smooth_gfa(&gfa, &smooth_config)?;
+        log::info!(
+            "smooth: {:.3}s (n_haps={}, target_poa_lengths={:?})",
+            t0.elapsed().as_secs_f64(),
+            n_haps,
+            config.target_poa_lengths
+        );
+        // gfaffix normalize after smoothing (matches pggb's post-smooth step;
+        // sort is left for the optional graph_sort_pipeline below).
+        gfa = graph::run_gfaffix(&smoothed, engine_opts.pipeline.num_threads)?;
+    }
+
     if let Some(pipeline) = &engine_opts.graph_sort_pipeline {
         let t0 = std::time::Instant::now();
         let sorted = graph::sort_gfa_pipeline(&gfa, pipeline, engine_opts.pipeline.num_threads)?;
@@ -1330,6 +1393,7 @@ P\talt\t1+,3+,4+\t*
             poa_padding_fraction: 0.001,
             partition_size: None,
             crush_config: Some(resolution::ResolutionConfig::default()),
+            smooth_after_crush: None,
             graph_sort_pipeline: None,
         };
         let out = super::apply_graph_transforms(gfa.to_string(), &opts).unwrap();
