@@ -753,6 +753,33 @@ fn apply_graph_transforms(mut gfa: String, engine_opts: &EngineOpts) -> std::io:
             resolved.stats.iterations
         );
         gfa = resolved.gfa;
+
+        // PGGB-style final compaction: collapse byte-identical small segments
+        // produced by independent crush plans across rounds. No-op on a
+        // perfectly-crushed graph; on the current crush output it typically
+        // collapses hundreds of duplicate segments. Falls back to in-process
+        // unchop if the external gfaffix binary is not found, so library
+        // callers (tests, embedded use) keep working.
+        let t0 = std::time::Instant::now();
+        let segs_before = gfa.lines().filter(|l| l.starts_with("S\t")).count();
+        gfa = match graph::run_gfaffix(&gfa, engine_opts.pipeline.num_threads) {
+            Ok(g) => g,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                log::warn!(
+                    "crush: gfaffix binary unavailable ({}); falling back to in-process unchop",
+                    e
+                );
+                graph::unchop_gfa(&gfa)?
+            }
+            Err(e) => return Err(e),
+        };
+        let segs_after = gfa.lines().filter(|l| l.starts_with("S\t")).count();
+        log::info!(
+            "crush: final gfaffix compaction {} -> {} segments in {:.3}s",
+            segs_before,
+            segs_after,
+            t0.elapsed().as_secs_f64()
+        );
     }
 
     if let Some(pipeline) = &engine_opts.graph_sort_pipeline {

@@ -48,10 +48,26 @@ target/release/impg query \
   -r GRCh38#0#chr6:31891045-32123783 \
   --sequence-files /home/erikg/hprcv2/HPRC_r2_assemblies_0.6.1.agc \
   -d 50k \
-  -o 'gfa:syng:mask,min-run=3:crush,method=auto,aligner=fastga,min-traversal-len=5k,max-rounds=until-done,seqwish-k=311,max-pair-alignments=0,max-paf-bytes=0,polish-rounds=until-done,polish-max-traversal-len=10k,polish-max-median-traversal-len=1k:nosort' \
+  -o 'gfa:syng:mask,min-run=3:crush,method=auto,aligner=fastga,min-traversal-len=0,max-rounds=until-done,seqwish-k=311,max-pair-alignments=0,max-paf-bytes=0,polish-rounds=until-done,polish-max-traversal-len=10k,polish-max-median-traversal-len=1k:nosort' \
   -O data/c4_crush_eval_20260523T140141Z/C4A.parent5k.sweepga_allvsall_fastga.k311.done.nosort \
   -v 1
 ```
+
+**2026-05-26 — `min-traversal-len=5k` → `min-traversal-len=0`; added final
+gfaffix compaction after crush.** Both fixes are driven by the diagnostic
+chain `docs/crush-aligner-deep-diag.md` §Q5,
+`docs/crush-sweepga-everywhere-unfiltered.md`,
+`docs/crush-vs-pggb-comparison.md` §Step 4, and
+`docs/crush-spec-audit.md` §Phase-8. The 5 kb dispatch floor in
+`src/resolution.rs:1646` discarded ~62 of 70 POVU candidates per round —
+exactly the 60–150 bp small bubbles that PGGB compacts and crush left as
+trivial-stringy. Dropping the floor lets the routing dispatch send them to
+sPOA / POASTA / sweepga per the auto rules. PGGB ends in gfaffix; crush did
+not (`src/lib.rs:745`), so byte-identical small segments produced by
+independent crush plans across rounds were not collapsed. The new final
+gfaffix pass collapses them; on a perfectly-crushed graph it is a no-op.
+The 2026-05-23 known-good artifact above was generated before either fix
+and therefore predates the new behavior of the canonical command.
 
 **2026-05-25 — `method=sweepga` → `method=auto`.** The previous canonical command
 pinned `method=sweepga`, which sent every bubble through sweepga + seqwish-k=311
@@ -177,7 +193,7 @@ mkdir -p "$out"
   -r GRCh38#0#chr6:31891045-32123783 \
   --sequence-files /home/erikg/hprcv2/HPRC_r2_assemblies_0.6.1.agc \
   -d 50k \
-  -o 'gfa:syng:mask,min-run=3:crush,method=auto,aligner=fastga,min-traversal-len=5k,max-rounds=until-done,seqwish-k=311,max-pair-alignments=0,max-paf-bytes=0,polish-rounds=until-done,polish-max-traversal-len=10k,polish-max-median-traversal-len=1k:nosort' \
+  -o 'gfa:syng:mask,min-run=3:crush,method=auto,aligner=fastga,min-traversal-len=0,max-rounds=until-done,seqwish-k=311,max-pair-alignments=0,max-paf-bytes=0,polish-rounds=until-done,polish-max-traversal-len=10k,polish-max-median-traversal-len=1k:nosort' \
   -O "$out/current_auto.nosort" \
   -v 1 \
   > "$out/current_auto.nosort.stdout" \
