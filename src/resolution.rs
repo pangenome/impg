@@ -1274,6 +1274,15 @@ fn candidate_selection_method(
 /// single long outlier should still go to sPOA, because the outlier becomes a
 /// one-off insertion arc that sPOA represents cleanly. A `*_max_traversal_len`
 /// value of 0 disables that tier (the next tier takes over).
+///
+/// **2-tier variant** (engine flag `auto-2tier=true`, or
+/// `auto-spoa-max-traversal-len=0`): skip sPOA entirely so POASTA handles all
+/// `median < auto_poasta_max_traversal_len` bubbles and sweepga handles the
+/// rest. Rationale (docs/crush-aligner-speed-study.md §recommendation,
+/// docs/crush-exp-hybrid-sweepga-poasta.md): POASTA is 84× faster than sPOA on
+/// the canonical bimodal C4 plan and produces a cleaner result subgraph.
+/// sPOA's role was linearizing small recurrent motifs; POASTA can do that too,
+/// trading slightly more nodes for cleaner alignment and a faster wall.
 fn auto_method_by_median(
     traversal_stats: TraversalStats,
     config: &ResolutionConfig,

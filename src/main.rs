@@ -2584,6 +2584,15 @@ fn parse_crush_stage(
                 config.auto_spoa_max_traversal_len =
                     parse_usize_size_engine_param(raw, &param.key, &param.value)?;
             }
+            "auto-2tier" | "auto-two-tier" | "skip-spoa" => {
+                // Shorthand for the 2-tier auto-routing scheme tested in
+                // docs/crush-exp-hybrid-sweepga-poasta.md: skip sPOA entirely
+                // (POASTA handles <10kb, sweepga handles >=10kb). Equivalent
+                // to setting auto-spoa-max-traversal-len=0.
+                if parse_bool_engine_param(raw, &param.key, &param.value)? {
+                    config.auto_spoa_max_traversal_len = 0;
+                }
+            }
             "auto-poasta-max-traversal-len"
             | "auto-poasta-max-traversal-length"
             | "auto-poasta-max-len" => {
