@@ -171,6 +171,11 @@ pub enum ResolutionMethod {
     Allwave,
     /// SweepGA/FastGA or wfmash pair selection and graph induction, then SPOA polish.
     Sweepga,
+    /// Depth-based routing: level 0 (top-level bubbles) → sweepga+seqwish,
+    /// level ≥ 1 (every sub-bubble) → POASTA. No size threshold; the choice
+    /// of aligner is tied to the provenance-tree depth, not to median
+    /// traversal length. See `docs/crush-hierarchical.md`.
+    Hierarchical,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -203,6 +208,7 @@ impl ResolutionMethod {
             "star-biwfa" | "biwfa-star" | "biwfa" | "wfa" => Some(Self::StarBiwfa),
             "allwave" | "aw" => Some(Self::Allwave),
             "sweepga" | "sw" => Some(Self::Sweepga),
+            "hierarchical" | "hier" => Some(Self::Hierarchical),
             _ => None,
         }
     }
@@ -350,6 +356,11 @@ struct BubbleCandidate {
     total_steps: usize,
     unique_steps: usize,
     traversal_stats: TraversalStats,
+    /// Depth in the provenance tree. 0 = top-level (root) bubble, ≥1 = sub-bubble.
+    /// Populated at discovery from POVU's reported level and refined by the
+    /// tree-driven round loop to the authoritative tree depth. Used by
+    /// `ResolutionMethod::Hierarchical` to dispatch by depth instead of size.
+    level: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -696,7 +707,17 @@ fn resolve_graph_bubbles(
             .into_iter()
             .filter(|d| active_bp_keys.contains(&d.candidate.signature))
             .filter(|d| !resolved_signatures.contains(&d.candidate.signature))
-            .map(|d| d.candidate)
+            .map(|d| {
+                let mut c = d.candidate;
+                // The tree's level is authoritative — it's grown from POVU's
+                // parent_id at initial discovery and from local POVU on each
+                // resolved replacement (see `discover_local_subbubble_keys`).
+                // Used by `ResolutionMethod::Hierarchical` to dispatch by depth.
+                if let Some(&idx) = bp_to_node.get(&c.signature) {
+                    c.level = tree[idx].level;
+                }
+                c
+            })
             .collect();
         let candidates_seen = active_candidates.len();
         let frontier = finalize_frontier(
@@ -1253,11 +1274,12 @@ fn traversal_stats_from_lengths(mut lengths: Vec<usize>) -> TraversalStats {
 }
 
 fn candidate_selection_method(
-    traversal_stats: TraversalStats,
+    candidate: &BubbleCandidate,
     config: &ResolutionConfig,
 ) -> ResolutionMethod {
     match config.method {
-        ResolutionMethod::Auto => auto_method_by_median(traversal_stats, config),
+        ResolutionMethod::Auto => auto_method_by_median(candidate.traversal_stats, config),
+        ResolutionMethod::Hierarchical => hierarchical_method_by_level(candidate.level),
         method => method,
     }
 }
@@ -1299,14 +1321,36 @@ fn auto_method_by_median(
     }
 }
 
+/// Depth-based aligner dispatch for `method=hierarchical`:
+///
+/// - `level == 0` (top-level / root bubble) → sweepga+seqwish (all-vs-all
+///   alignment + induction). Big structure gets compacted by sweepga.
+/// - `level >= 1` (every sub-bubble inside a resolved bubble)      → POASTA.
+///   POASTA cleans up local structure inside what sweepga produced.
+///
+/// This decouples aligner choice from bubble size and ties it to the
+/// provenance-tree depth. There is intentionally no size threshold: sweepga
+/// only runs at the root and POASTA runs at every interior node, regardless
+/// of bp scale. See `docs/crush-hierarchical.md`.
+fn hierarchical_method_by_level(level: usize) -> ResolutionMethod {
+    if level == 0 {
+        ResolutionMethod::Sweepga
+    } else {
+        ResolutionMethod::Poasta
+    }
+}
+
 fn candidate_selection_priority(candidate: &BubbleCandidate, config: &ResolutionConfig) -> u8 {
-    if config.method != ResolutionMethod::Auto {
+    if config.method != ResolutionMethod::Auto && config.method != ResolutionMethod::Hierarchical {
         return 0;
     }
-    match candidate_selection_method(candidate.traversal_stats, config) {
+    match candidate_selection_method(candidate, config) {
         ResolutionMethod::Allwave | ResolutionMethod::Sweepga => 0,
         ResolutionMethod::Poa | ResolutionMethod::Poasta | ResolutionMethod::StarBiwfa => 1,
         ResolutionMethod::Auto => unreachable!("auto candidate method should be resolved"),
+        ResolutionMethod::Hierarchical => {
+            unreachable!("hierarchical candidate method should be resolved")
+        }
     }
 }
 
@@ -1643,7 +1687,15 @@ fn discover_all_candidates(
                     unique_steps.insert(path.steps[step_idx]);
                 }
             }
-            if traversal_stats.max_len < config.min_traversal_len {
+            // Under `method=hierarchical`, the min-traversal-len floor gates
+            // only level-0 (root) candidates. Level ≥ 1 sub-bubbles are
+            // always admitted so POASTA can resolve every interior bubble
+            // regardless of size — this is the core "no fixed threshold for
+            // sub-bubbles" promise from docs/crush-hierarchical.md. For all
+            // other methods the filter applies at every level, as before.
+            let apply_min_len_filter = config.method != ResolutionMethod::Hierarchical
+                || site.level == 0;
+            if apply_min_len_filter && traversal_stats.max_len < config.min_traversal_len {
                 return None;
             }
             let signature = candidate_signature(
@@ -1665,6 +1717,7 @@ fn discover_all_candidates(
                     total_steps,
                     unique_steps: unique_steps.len(),
                     traversal_stats,
+                    level: site.level,
                 },
                 povu_site_id: site.id.clone(),
                 povu_parent_id: site.parent_id.clone(),
@@ -2318,6 +2371,9 @@ fn build_replacement_with_method(
 ) -> io::Result<Graph> {
     match method {
         ResolutionMethod::Auto => unreachable!("auto is resolved before replacement dispatch"),
+        ResolutionMethod::Hierarchical => {
+            unreachable!("hierarchical is resolved before replacement dispatch")
+        }
         ResolutionMethod::Poa => build_poa_replacement(candidate, config),
         ResolutionMethod::Poasta => build_poasta_replacement(candidate, config),
         ResolutionMethod::StarBiwfa => build_biwfa_inmemory_replacement(candidate, config),
@@ -2332,6 +2388,7 @@ fn candidate_replacement_method(
 ) -> ResolutionMethod {
     match config.method {
         ResolutionMethod::Auto => auto_replacement_method(candidate, config),
+        ResolutionMethod::Hierarchical => hierarchical_method_by_level(candidate.level),
         method => method,
     }
 }
@@ -4051,6 +4108,21 @@ P\tp1\t1+,3+,4+\t*
             total_steps: 0,
             unique_steps: 0,
             traversal_stats: stats,
+            level: 0,
+        }
+    }
+
+    fn routing_candidate_at_level(level: usize) -> BubbleCandidate {
+        BubbleCandidate {
+            ranges: Vec::new(),
+            signature: format!("route-l{level}"),
+            root_start_step: 0,
+            root_end_step: 1,
+            root_span: 0,
+            total_steps: 0,
+            unique_steps: 0,
+            traversal_stats: TraversalStats::default(),
+            level,
         }
     }
 
@@ -4197,6 +4269,89 @@ P\tp1\t1+,3+,4+\t*
             candidate_replacement_method(&large, &poasta),
             ResolutionMethod::Poasta,
             "explicit method=poasta must still pin every bubble to poasta"
+        );
+    }
+
+    /// Hierarchical routing: level 0 (top-level) → sweepga, level ≥ 1 (every
+    /// sub-bubble) → POASTA. Decoupled from size; sweepga only at the root.
+    #[test]
+    fn hierarchical_routes_root_to_sweepga_and_subbubbles_to_poasta() {
+        let config = ResolutionConfig {
+            method: ResolutionMethod::Hierarchical,
+            ..ResolutionConfig::default()
+        };
+        let root = routing_candidate_at_level(0);
+        assert_eq!(
+            candidate_replacement_method(&root, &config),
+            ResolutionMethod::Sweepga,
+            "level=0 must route to sweepga regardless of size"
+        );
+        for level in 1..=3 {
+            let child = routing_candidate_at_level(level);
+            assert_eq!(
+                candidate_replacement_method(&child, &config),
+                ResolutionMethod::Poasta,
+                "level={level} must route to POASTA regardless of size",
+            );
+        }
+    }
+
+    /// Hierarchical routing ignores median traversal length — the same
+    /// candidate routes to sweepga at level 0 and POASTA at level ≥ 1 even
+    /// though `auto` would route both to POASTA.
+    #[test]
+    fn hierarchical_routing_ignores_size() {
+        let config = ResolutionConfig {
+            method: ResolutionMethod::Hierarchical,
+            ..ResolutionConfig::default()
+        };
+        // A small (median 100 bp) bubble that auto would send to sPOA.
+        let mut tiny_root = routing_candidate_with_stats(traversal_stats_with(100, 200, 10));
+        tiny_root.level = 0;
+        assert_eq!(
+            candidate_replacement_method(&tiny_root, &config),
+            ResolutionMethod::Sweepga
+        );
+        let mut tiny_child = routing_candidate_with_stats(traversal_stats_with(100, 200, 10));
+        tiny_child.level = 1;
+        assert_eq!(
+            candidate_replacement_method(&tiny_child, &config),
+            ResolutionMethod::Poasta
+        );
+        // A huge (median 20 kb) bubble that auto would send to sweepga.
+        let mut huge_child = routing_candidate_with_stats(traversal_stats_with(20_000, 30_000, 10));
+        huge_child.level = 1;
+        assert_eq!(
+            candidate_replacement_method(&huge_child, &config),
+            ResolutionMethod::Poasta,
+            "huge bubble at level ≥ 1 must still route to POASTA under hierarchical"
+        );
+    }
+
+    /// Hierarchical prioritization mirrors auto: level-0 (sweepga) bubbles get
+    /// priority 0 and level ≥ 1 (POASTA) bubbles get priority 1, so direct
+    /// sub-bubble work is sequenced after the root cut within one round.
+    #[test]
+    fn hierarchical_prioritizes_root_sweepga_before_subbubble_poasta() {
+        let config = ResolutionConfig {
+            method: ResolutionMethod::Hierarchical,
+            ..ResolutionConfig::default()
+        };
+        let root = routing_candidate_at_level(0);
+        let child = routing_candidate_at_level(1);
+        assert_eq!(candidate_selection_priority(&root, &config), 0);
+        assert_eq!(candidate_selection_priority(&child, &config), 1);
+    }
+
+    #[test]
+    fn hierarchical_parse_name_accepts_aliases() {
+        assert_eq!(
+            ResolutionMethod::parse_name("hierarchical"),
+            Some(ResolutionMethod::Hierarchical)
+        );
+        assert_eq!(
+            ResolutionMethod::parse_name("hier"),
+            Some(ResolutionMethod::Hierarchical)
         );
     }
 
@@ -4880,6 +5035,7 @@ P\talt\t1+,3+,4+\t*
             total_steps: 20,
             unique_steps: 2,
             traversal_stats: TraversalStats::default(),
+            level: 0,
         };
         mark_candidate_occupied(&mut occupied_by_path, &selected);
 
@@ -4897,6 +5053,7 @@ P\talt\t1+,3+,4+\t*
             total_steps: 5,
             unique_steps: 1,
             traversal_stats: TraversalStats::default(),
+            level: 0,
         };
         assert!(!candidate_conflicts_with_occupied(
             &occupied_by_path,
@@ -4917,6 +5074,7 @@ P\talt\t1+,3+,4+\t*
             total_steps: 6,
             unique_steps: 1,
             traversal_stats: TraversalStats::default(),
+            level: 0,
         };
         assert!(candidate_conflicts_with_occupied(
             &occupied_by_path,
@@ -4937,6 +5095,7 @@ P\talt\t1+,3+,4+\t*
             total_steps: 10,
             unique_steps: 1,
             traversal_stats: TraversalStats::default(),
+            level: 0,
         };
         assert!(!candidate_conflicts_with_occupied(
             &occupied_by_path,

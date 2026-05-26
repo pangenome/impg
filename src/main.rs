@@ -2751,7 +2751,7 @@ fn parse_crush_stage(
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, allwave, poa, poasta, star-biwfa, or sweepga)",
+                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, allwave, poa, poasta, star-biwfa, sweepga, or hierarchical)",
                             raw, param.value
                         ),
                     ));
