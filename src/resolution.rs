@@ -2374,8 +2374,18 @@ fn candidate_named_sequences_longest_first(
 fn seqwish_replacement_config(
     config: &ResolutionConfig,
 ) -> crate::commands::graph::GraphBuildConfig {
-    let min_map_length = if config.replacement_min_map_length == 0 {
+    // When the sweepga/seqwish path is in "no-filter" mode, drop every
+    // downstream filter — including seqwish's own `min_match_len` exact-match
+    // floor. Setting it to 1 keeps every CIGAR `=`/`M` run, so bimodal
+    // short-vs-long PAF lines (whose max internal match-run is below the
+    // 311 bp default and below the adaptive shortest-traversal clamp) survive.
+    let seqwish_min = if config.sweepga_no_filter {
+        1
+    } else {
         config.replacement_seqwish_min_match_len
+    };
+    let min_map_length = if config.replacement_min_map_length == 0 {
+        seqwish_min
     } else {
         config.replacement_min_map_length
     };
@@ -2383,9 +2393,13 @@ fn seqwish_replacement_config(
         num_threads: rayon::current_num_threads().max(1),
         show_progress: false,
         min_aln_length: 0,
-        min_match_len: config.replacement_seqwish_min_match_len,
+        min_match_len: seqwish_min,
         min_map_length,
-        min_identity: config.replacement_min_identity,
+        min_identity: if config.sweepga_no_filter {
+            0.0
+        } else {
+            config.replacement_min_identity
+        },
         input_paf: None,
         no_filter: config.sweepga_no_filter,
         num_mappings: config.replacement_num_mappings.clone(),
@@ -2402,6 +2416,24 @@ fn replacement_sweepga_kmer_frequency(configured: usize, traversal_count: usize)
     traversal_count
         .saturating_mul(AUTO_SWEEPGA_KMER_FREQUENCY_PER_TRAVERSAL)
         .max(MIN_AUTO_SWEEPGA_KMER_FREQUENCY)
+}
+
+/// Maximum FastGA k-mer-frequency cap when `sweepga_no_filter` is set.
+/// Picked very high so the cap is effectively disabled while still leaving
+/// FastGA's internal handling intact. Real repetitive k-mer densities in the
+/// test corpus top out near a few hundred thousand.
+const NO_FILTER_SWEEPGA_KMER_FREQUENCY: usize = 1_000_000;
+
+/// Resolve the FastGA k-mer frequency for the sweepga replacement path,
+/// honouring `sweepga_no_filter` as a request to disable the auto-cap.
+fn resolve_replacement_kmer_frequency(config: &ResolutionConfig, traversal_count: usize) -> usize {
+    if config.sweepga_kmer_frequency > 0 {
+        return config.sweepga_kmer_frequency;
+    }
+    if config.sweepga_no_filter {
+        return NO_FILTER_SWEEPGA_KMER_FREQUENCY;
+    }
+    replacement_sweepga_kmer_frequency(0, traversal_count)
 }
 
 fn tree_mash_k_schedule(base: usize, count: usize) -> Vec<usize> {
@@ -2659,8 +2691,7 @@ fn build_sweepga_seqwish_replacement(
             "crush sweepga: ignoring sparse-pairs for replacement induction; using one all-vs-all self-alignment batch"
         );
     }
-    let kmer_frequency =
-        replacement_sweepga_kmer_frequency(config.sweepga_kmer_frequency, seqs.len());
+    let kmer_frequency = resolve_replacement_kmer_frequency(config, seqs.len());
     let align_config = sweepga::library_api::SweepgaAlignConfig {
         num_threads: rayon::current_num_threads().max(1),
         kmer_frequency,
@@ -4307,6 +4338,40 @@ P\talt\t1+,3+,4+\t*
         assert_eq!(replacement_sweepga_kmer_frequency(0, 2), 1_000);
         assert_eq!(replacement_sweepga_kmer_frequency(0, 463), 4_630);
         assert_eq!(replacement_sweepga_kmer_frequency(0, 10_000), 100_000);
+    }
+
+    #[test]
+    fn no_filter_disables_seqwish_min_match_and_identity_filters() {
+        let config = ResolutionConfig {
+            replacement_seqwish_min_match_len: 311,
+            replacement_min_map_length: 0,
+            replacement_min_identity: 0.97,
+            sweepga_no_filter: true,
+            ..ResolutionConfig::default()
+        };
+        let graph_config = seqwish_replacement_config(&config);
+        assert_eq!(graph_config.min_match_len, 1);
+        assert_eq!(graph_config.min_map_length, 1);
+        assert!(graph_config.min_identity.abs() < f64::EPSILON);
+        assert!(graph_config.no_filter);
+    }
+
+    #[test]
+    fn no_filter_overrides_kmer_frequency_auto_cap() {
+        let mut config = ResolutionConfig {
+            sweepga_no_filter: true,
+            sweepga_kmer_frequency: 0,
+            ..ResolutionConfig::default()
+        };
+        assert_eq!(
+            resolve_replacement_kmer_frequency(&config, 312),
+            NO_FILTER_SWEEPGA_KMER_FREQUENCY
+        );
+        config.sweepga_kmer_frequency = 4242;
+        assert_eq!(resolve_replacement_kmer_frequency(&config, 312), 4242);
+        config.sweepga_kmer_frequency = 0;
+        config.sweepga_no_filter = false;
+        assert_eq!(resolve_replacement_kmer_frequency(&config, 312), 3_120);
     }
 
     #[test]
