@@ -2462,6 +2462,25 @@ fn seqwish_replacement_config(
     } else {
         config.replacement_min_map_length
     };
+    // `no-filter=true` is the documented "fully unfiltered + many-to-many"
+    // request. The post-alignment filter is skipped entirely
+    // (`filter_generated_paf` early-returns on `no_filter`), but we also
+    // force the mapping / scaffold filter modes to `many:many` and zero
+    // the scaffold-mass floor so the requested semantics survive if the
+    // filter is ever re-enabled downstream.
+    let (num_mappings, scaffold_filter, scaffold_mass) = if config.sweepga_no_filter {
+        (
+            "many:many".to_string(),
+            "many:many".to_string(),
+            0u64,
+        )
+    } else {
+        (
+            config.replacement_num_mappings.clone(),
+            config.replacement_scaffold_filter.clone(),
+            config.replacement_scaffold_mass,
+        )
+    };
     crate::commands::graph::GraphBuildConfig {
         num_threads: rayon::current_num_threads().max(1),
         show_progress: false,
@@ -2475,9 +2494,9 @@ fn seqwish_replacement_config(
         },
         input_paf: None,
         no_filter: config.sweepga_no_filter,
-        num_mappings: config.replacement_num_mappings.clone(),
-        scaffold_filter: config.replacement_scaffold_filter.clone(),
-        scaffold_mass: config.replacement_scaffold_mass,
+        num_mappings,
+        scaffold_filter,
+        scaffold_mass,
         sparsify: sweepga::knn_graph::SparsificationStrategy::None,
         ..crate::commands::graph::GraphBuildConfig::default()
     }
@@ -2770,10 +2789,17 @@ fn build_sweepga_seqwish_replacement(
         num_threads: rayon::current_num_threads().max(1),
         kmer_frequency,
         min_aln_length: config.sweepga_min_aln_length,
-        // Get raw all-vs-all alignments first. The shared graph induction
-        // tail below applies the configured SweepGA 1:1 scaffold-chain filter
-        // before seqwish, so sparse pair selection cannot drop the main chain.
+        // Get raw all-vs-all alignments. `no_filter=true` skips sweepga's
+        // post-alignment plane-sweep / scaffold filter; the shared graph
+        // induction tail below applies the configured replacement-tier filter
+        // before seqwish (or skips it too when `sweepga_no_filter=true`).
+        // We also pin the would-be filter modes to many:many and zero out
+        // the scaffold-mass floor — defensive coupling so the "raw all-vs-all"
+        // intent survives any future change that re-enables sweepga's filter.
         no_filter: true,
+        num_mappings: "many:many".to_string(),
+        scaffold_filter: "many:many".to_string(),
+        scaffold_mass: 0,
         sparsify: sweepga::knn_graph::SparsificationStrategy::None,
         aligner: config.sweepga_aligner.clone(),
         map_pct_identity: config.sweepga_map_pct_identity.clone(),
@@ -2798,13 +2824,22 @@ fn build_sweepga_seqwish_replacement(
         out
     };
     log::debug!(
-        "crush sweepga: {} traversal(s), {} unique raw all-vs-all PAF line(s), {} PAF byte(s) from {} backend (fastga_frequency={}); seqwish tail will apply scaffold filter={}",
+        "crush sweepga: {} traversal(s), {} unique raw all-vs-all PAF line(s), {} PAF byte(s) from {} backend (fastga_frequency={}); seqwish tail filter={}",
         seqs.len(),
         paf_lines.len(),
         paf.len(),
         config.sweepga_aligner,
         kmer_frequency,
-        if config.sweepga_no_filter { "disabled" } else { "1:1" }
+        if config.sweepga_no_filter {
+            "disabled (many:many semantics)".to_string()
+        } else {
+            format!(
+                "{} mappings + {} scaffold (mass={})",
+                config.replacement_num_mappings,
+                config.replacement_scaffold_filter,
+                config.replacement_scaffold_mass
+            )
+        }
     );
 
     let graph_config = seqwish_replacement_config(config);
