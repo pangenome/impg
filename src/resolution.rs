@@ -121,6 +121,17 @@ pub struct ResolutionConfig {
     pub replacement_num_mappings: String,
     /// Scaffold-chain filter for pairwise replacement graph induction.
     pub replacement_scaffold_filter: String,
+    /// Minimum scaffold chain length (`min_scaffold_length` in the sweepga PAF
+    /// filter) for pairwise replacement graph induction. Set to 0 to disable
+    /// the scaffold-mass filter entirely. A non-zero value still passes
+    /// through the adaptive `clamp_scaffold_params` shrink at sweepga's
+    /// `filter_config_from_align_cfg` for short bubble-local inputs. The
+    /// crush default is **0**: short bubble-local PAFs are dropped by the
+    /// adaptive scaffold-mass clamp (≈ avg_seq_len × 3/5 ≈ 419 bp for
+    /// plan-7-class inputs) even when the user already passed
+    /// `no-filter=true`, so we explicitly disable the filter at the
+    /// resolution-config layer. See `docs/crush-scaffold-mass-zero.md`.
+    pub replacement_scaffold_mass: u64,
     /// SweepGA aligner backend used by `method=sweepga`.
     pub sweepga_aligner: String,
     /// SweepGA/FastGA k-mer frequency. A value of 0 uses a crush-local
@@ -247,6 +258,10 @@ pub const DEFAULT_PAIR_MASH_K: usize = 15;
 pub const DEFAULT_REPLACEMENT_SEQWISH_MIN_MATCH_LEN: u64 = 311;
 pub const DEFAULT_REPLACEMENT_MIN_MAP_LENGTH: u64 = 0;
 pub const DEFAULT_REPLACEMENT_MIN_IDENTITY: f64 = 0.0;
+/// Default `replacement_scaffold_mass` is 0 — disable the sweepga
+/// scaffold-mass filter for bubble-local replacement induction. See
+/// `docs/crush-scaffold-mass-zero.md` and `ResolutionConfig::replacement_scaffold_mass`.
+pub const DEFAULT_REPLACEMENT_SCAFFOLD_MASS: u64 = 0;
 pub const DEFAULT_SWEEPGA_KMER_FREQUENCY: usize = 0;
 const MIN_AUTO_SWEEPGA_KMER_FREQUENCY: usize = 1_000;
 const AUTO_SWEEPGA_KMER_FREQUENCY_PER_TRAVERSAL: usize = 10;
@@ -284,6 +299,7 @@ impl Default for ResolutionConfig {
             replacement_min_identity: DEFAULT_REPLACEMENT_MIN_IDENTITY,
             replacement_num_mappings: "1:1".to_string(),
             replacement_scaffold_filter: "1:1".to_string(),
+            replacement_scaffold_mass: DEFAULT_REPLACEMENT_SCAFFOLD_MASS,
             sweepga_aligner: "fastga".to_string(),
             sweepga_kmer_frequency: DEFAULT_SWEEPGA_KMER_FREQUENCY,
             sweepga_min_aln_length: DEFAULT_SWEEPGA_MIN_ALN_LENGTH,
@@ -2461,6 +2477,7 @@ fn seqwish_replacement_config(
         no_filter: config.sweepga_no_filter,
         num_mappings: config.replacement_num_mappings.clone(),
         scaffold_filter: config.replacement_scaffold_filter.clone(),
+        scaffold_mass: config.replacement_scaffold_mass,
         sparsify: sweepga::knn_graph::SparsificationStrategy::None,
         ..crate::commands::graph::GraphBuildConfig::default()
     }
@@ -4509,6 +4526,26 @@ P\talt\t1+,3+,4+\t*
         assert_eq!(graph_config.min_map_length, 1);
         assert!(graph_config.min_identity.abs() < f64::EPSILON);
         assert!(graph_config.no_filter);
+    }
+
+    #[test]
+    fn replacement_scaffold_mass_defaults_to_zero_and_propagates() {
+        // Default ResolutionConfig should leave the sweepga scaffold-mass
+        // filter disabled (0). See docs/crush-scaffold-mass-zero.md.
+        let config = ResolutionConfig::default();
+        assert_eq!(config.replacement_scaffold_mass, 0);
+        let graph_config = seqwish_replacement_config(&config);
+        assert_eq!(graph_config.scaffold_mass, 0);
+    }
+
+    #[test]
+    fn replacement_scaffold_mass_user_override_propagates() {
+        let config = ResolutionConfig {
+            replacement_scaffold_mass: 500,
+            ..ResolutionConfig::default()
+        };
+        let graph_config = seqwish_replacement_config(&config);
+        assert_eq!(graph_config.scaffold_mass, 500);
     }
 
     #[test]

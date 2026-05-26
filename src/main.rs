@@ -2705,6 +2705,10 @@ fn parse_crush_stage(
                 config.replacement_scaffold_filter =
                     parse_filter_mode_engine_param(raw, &param.key, &param.value)?;
             }
+            "replacement-scaffold-mass" | "scaffold-mass" => {
+                config.replacement_scaffold_mass =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)? as u64;
+            }
             "poa-scoring" | "spoa-scoring" | "poasta-scoring" | "scoring" => {
                 config.scoring_params = parse_poa_scoring_string(&param.value).map_err(|err| {
                     io::Error::new(
