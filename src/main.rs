@@ -2750,6 +2750,10 @@ fn parse_crush_stage(
                 config.sweepga_sparse_pairs =
                     parse_bool_engine_param(raw, &param.key, &param.value)?;
             }
+            "flank" | "flank-bp" | "replacement-flank" | "replacement-flank-bp" => {
+                config.replacement_flank_bp =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
             "method" => {
                 let Some(method) = impg::resolution::ResolutionMethod::parse_name(&param.value)
                 else {
@@ -4989,6 +4993,16 @@ GFA engine shorthand:
             num_args = 0..=1
         )]
         sweepga_sparse_pairs: bool,
+
+        /// Bubble-flanking context in bp added on each side of the bubble interior when feeding the replacement aligner; 0 disables. Clipped from the aligner output before integration. See docs/crush-wider-context-bubbles.md
+        #[clap(
+            long = "replacement-flank-bp",
+            alias = "flank-bp",
+            alias = "flank",
+            value_parser = parse_usize_size,
+            default_value = "0"
+        )]
+        replacement_flank_bp: usize,
 
         #[clap(flatten)]
         common: CommonOpts,
@@ -7853,6 +7867,7 @@ fn run() -> io::Result<()> {
             max_replacement_paf_bytes,
             sweepga_no_filter,
             sweepga_sparse_pairs,
+            replacement_flank_bp,
             common,
         } => {
             initialize_threads_and_log(&common);
@@ -7983,6 +7998,7 @@ fn run() -> io::Result<()> {
                 max_replacement_paf_bytes,
                 sweepga_no_filter,
                 sweepga_sparse_pairs,
+                replacement_flank_bp,
                 scoring_params: poa_scoring,
                 ..Default::default()
             };

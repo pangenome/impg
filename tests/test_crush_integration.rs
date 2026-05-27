@@ -495,6 +495,51 @@ fn c4_slice_auto_crush_preserves_path_sequences() {
 }
 
 // ---------------------------------------------------------------------------
+// Wider-context bubble resolution — see docs/crush-wider-context-bubbles.md.
+// Verifies that enabling `replacement_flank_bp` on the canonical C4 slice still
+// preserves every path sequence exactly. The integration code clips the
+// flanking aligned portion before substitution; if that clipping is wrong, the
+// resolved path sequence will not equal the input path sequence.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn c4_slice_auto_crush_with_flank_preserves_path_sequences() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let gfa_path = manifest_dir.join("tests/test_data/crush/c4_slice_1500_3000.gfa");
+    if !gfa_path.exists() {
+        eprintln!("SKIP: test data slice not found at {:?}", gfa_path);
+        return;
+    }
+
+    let gfa = std::fs::read_to_string(&gfa_path).expect("failed to read C4 slice GFA");
+    let before_seqs: std::collections::HashMap<_, _> =
+        path_sequences(&gfa).unwrap().into_iter().collect();
+
+    let mut config = ResolutionConfig::default();
+    config.replacement_flank_bp = 500;
+    let resolved = resolve_gfa_bubbles(&gfa, &config)
+        .expect("resolve_gfa_bubbles with flank=500 failed on C4 slice");
+
+    let after_seqs: std::collections::HashMap<_, _> =
+        path_sequences(&resolved.gfa).unwrap().into_iter().collect();
+
+    for (name, before_seq) in &before_seqs {
+        let after_seq = after_seqs.get(name).expect("path disappeared after crush");
+        assert_eq!(
+            before_seq, after_seq,
+            "path {} changed sequence after crush with flank=500",
+            name
+        );
+    }
+    eprintln!(
+        "slice crush (flank=500): {} paths preserved, {} resolved, {} bailed",
+        before_seqs.len(),
+        resolved.stats.resolved,
+        resolved.stats.bailed
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Nested-bubble level descent — see docs/crush-nested-bubble-test.md
 //
 // Fixture: tests/test_data/crush/nested_bubbles_real.gfa

@@ -163,6 +163,16 @@ pub struct ResolutionConfig {
     /// pairs are still useful with wfmash, where the pairs file is honored by a
     /// single aligner invocation.
     pub sweepga_sparse_pairs: bool,
+    /// Bubble-flanking context, in bp, included on each side of every bubble
+    /// interior sequence when feeding the replacement aligner. A value of 0
+    /// disables flanking (the aligner sees only the bubble interior). When
+    /// non-zero, the aligner sees `<flank><interior><flank>` for each
+    /// traversal; the flanking portion is clipped from the aligner's output
+    /// graph before path-step substitution so the integration boundary remains
+    /// the original bubble interior. The flank length per side is capped by
+    /// the available path prefix/suffix bp so it never crosses the path edge.
+    /// See `docs/crush-wider-context-bubbles.md`.
+    pub replacement_flank_bp: usize,
     /// SPOA scoring parameters: (match, mismatch, gap_open, gap_ext, gap_open2, gap_ext2).
     pub scoring_params: (u8, u8, u8, u8, u8, u8),
 }
@@ -217,6 +227,19 @@ impl ResolutionPolishMethod {
 }
 
 impl ResolutionMethod {
+    pub fn method_name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Poa => "SPOA",
+            Self::Poasta => "POASTA",
+            Self::StarBiwfa => "BiWFA/in-memory",
+            Self::Allwave => "AllWave/seqwish",
+            Self::Sweepga => "SweepGA/seqwish",
+            Self::Wfmash => "wfmash/seqwish",
+            Self::Hierarchical => "hierarchical",
+        }
+    }
+
     pub fn parse_name(value: &str) -> Option<Self> {
         match value.replace('_', "-").to_ascii_lowercase().as_str() {
             "auto" => Some(Self::Auto),
@@ -275,6 +298,10 @@ const AUTO_SWEEPGA_KMER_FREQUENCY_PER_TRAVERSAL: usize = 10;
 pub const DEFAULT_SWEEPGA_MIN_ALN_LENGTH: u64 = 0;
 pub const DEFAULT_MAX_PAIR_ALIGNMENTS: usize = 10_000;
 pub const DEFAULT_MAX_REPLACEMENT_PAF_BYTES: usize = 64 * 1024 * 1024;
+/// Default `replacement_flank_bp` is 0 — no flanking context is added. The
+/// canonical "wider-context" run sets this to 500. See
+/// `docs/crush-wider-context-bubbles.md`.
+pub const DEFAULT_REPLACEMENT_FLANK_BP: usize = 0;
 impl Default for ResolutionConfig {
     fn default() -> Self {
         Self {
@@ -315,6 +342,7 @@ impl Default for ResolutionConfig {
             max_replacement_paf_bytes: DEFAULT_MAX_REPLACEMENT_PAF_BYTES,
             sweepga_no_filter: false,
             sweepga_sparse_pairs: false,
+            replacement_flank_bp: DEFAULT_REPLACEMENT_FLANK_BP,
             scoring_params: (1, 4, 6, 2, 26, 1),
         }
     }
@@ -361,12 +389,24 @@ struct Graph {
     paths: Vec<Path>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct PathRange {
     path_idx: usize,
     begin_step: usize,
     end_step: usize,
+    /// Bubble interior sequence (the bytes between `begin_step` and `end_step`
+    /// on this path). This is what the integration code substitutes.
     sequence: Vec<u8>,
+    /// Flank-extended sequence presented to the replacement aligner:
+    /// `<left_flank><interior><right_flank>`. Empty when flanking is disabled;
+    /// in that case the aligner sees `sequence` directly. The flank lengths
+    /// are tracked in `left_flank_bp` / `right_flank_bp` so the aligner's
+    /// output graph can be clipped back to the interior before substitution.
+    extended_sequence: Vec<u8>,
+    /// Left-flank length in bp (0 when no flank was added).
+    left_flank_bp: usize,
+    /// Right-flank length in bp (0 when no flank was added).
+    right_flank_bp: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -1683,6 +1723,9 @@ fn discover_all_candidates(
                         begin_step: range_begin,
                         end_step: range_end,
                         sequence: Vec::new(),
+                        extended_sequence: Vec::new(),
+                        left_flank_bp: 0,
+                        right_flank_bp: 0,
                     });
                 }
             }
@@ -1849,7 +1892,7 @@ fn finalize_frontier(
         .selected
         .into_par_iter()
         .filter_map(|mut candidate| {
-            materialize_candidate_sequences(graph, &mut candidate).then_some(candidate)
+            materialize_candidate_sequences(graph, &mut candidate, config).then_some(candidate)
         })
         .collect();
     let materialize_elapsed = materialize_start.elapsed();
@@ -2202,9 +2245,19 @@ fn unique_anchor_range(
     found
 }
 
-fn materialize_candidate_sequences(graph: &Graph, candidate: &mut BubbleCandidate) -> bool {
+fn materialize_candidate_sequences(
+    graph: &Graph,
+    candidate: &mut BubbleCandidate,
+    config: &ResolutionConfig,
+) -> bool {
     for range in &mut candidate.ranges {
         range.sequence = range_sequence(graph, range);
+        range.extended_sequence = Vec::new();
+        range.left_flank_bp = 0;
+        range.right_flank_bp = 0;
+    }
+    if config.replacement_flank_bp > 0 {
+        materialize_flanked_sequences(graph, candidate, config.replacement_flank_bp);
     }
     let Some(first) = candidate.ranges.first() else {
         return false;
@@ -2213,6 +2266,85 @@ fn materialize_candidate_sequences(graph: &Graph, candidate: &mut BubbleCandidat
         .ranges
         .iter()
         .any(|range| range.sequence != first.sequence)
+}
+
+/// Compute up to `flank_bp` bp of path-sequence context on each side of each
+/// PathRange interior, capped by the available path-prefix / path-suffix bp so
+/// the flank never crosses the path edge. The interior step range
+/// (`begin_step`..`end_step`) is preserved verbatim — the flank is sequence
+/// context fed to the replacement aligner, not new interior the integration
+/// would substitute. The aligner-visible sequence becomes
+/// `<left_flank><interior><right_flank>` and is stored on
+/// `range.extended_sequence`; `left_flank_bp` / `right_flank_bp` track the
+/// per-side flank length so the aligner output graph can be clipped back to
+/// just the interior before the path-step substitution.
+fn materialize_flanked_sequences(
+    graph: &Graph,
+    candidate: &mut BubbleCandidate,
+    flank_bp: usize,
+) {
+    for range in &mut candidate.ranges {
+        let path = &graph.paths[range.path_idx];
+        let left_flank = collect_flank_left(graph, path, range.begin_step, flank_bp);
+        let right_flank = collect_flank_right(graph, path, range.end_step, flank_bp);
+        if left_flank.is_empty() && right_flank.is_empty() {
+            continue;
+        }
+        let mut extended =
+            Vec::with_capacity(left_flank.len() + range.sequence.len() + right_flank.len());
+        extended.extend_from_slice(&left_flank);
+        extended.extend_from_slice(&range.sequence);
+        extended.extend_from_slice(&right_flank);
+        range.left_flank_bp = left_flank.len();
+        range.right_flank_bp = right_flank.len();
+        range.extended_sequence = extended;
+    }
+}
+
+/// Walk path steps from `begin_step - 1` toward the path start, accumulating
+/// step-aligned sequence until at least `flank_bp` bp is collected (the last
+/// step included may overshoot — we don't split mid-segment for flanks because
+/// the aligner reads bp, not step structure).
+fn collect_flank_left(graph: &Graph, path: &Path, begin_step: usize, flank_bp: usize) -> Vec<u8> {
+    let mut collected: Vec<u8> = Vec::new();
+    let mut step_idx = begin_step;
+    while step_idx > 0 && collected.len() < flank_bp {
+        step_idx -= 1;
+        let step = path.steps[step_idx];
+        let segment = &graph.segments[step.node].seq;
+        let segment_seq: Vec<u8> = if step.rev {
+            reverse_complement(segment)
+        } else {
+            segment.to_vec()
+        };
+        let mut prepended = segment_seq;
+        prepended.extend_from_slice(&collected);
+        collected = prepended;
+    }
+    if collected.len() > flank_bp {
+        let drop = collected.len() - flank_bp;
+        collected.drain(..drop);
+    }
+    collected
+}
+
+fn collect_flank_right(graph: &Graph, path: &Path, end_step: usize, flank_bp: usize) -> Vec<u8> {
+    let mut collected: Vec<u8> = Vec::new();
+    let mut step_idx = end_step;
+    while step_idx < path.steps.len() && collected.len() < flank_bp {
+        let step = path.steps[step_idx];
+        let segment = &graph.segments[step.node].seq;
+        if step.rev {
+            collected.extend(reverse_complement(segment));
+        } else {
+            collected.extend_from_slice(segment);
+        }
+        step_idx += 1;
+    }
+    if collected.len() > flank_bp {
+        collected.truncate(flank_bp);
+    }
+    collected
 }
 
 fn candidate_signature(
@@ -2392,6 +2524,47 @@ fn build_replacement_with_method(
     config: &ResolutionConfig,
     method: ResolutionMethod,
 ) -> io::Result<Graph> {
+    let replacement = build_replacement_with_method_inner(candidate, config, method)?;
+    if candidate_has_flank(candidate) {
+        let clipped = clip_replacement_to_interior(replacement, candidate)?;
+        validate_interior_replacement_paths(&clipped, candidate, method.method_name())?;
+        Ok(clipped)
+    } else {
+        Ok(replacement)
+    }
+}
+
+fn validate_interior_replacement_paths(
+    replacement: &Graph,
+    candidate: &BubbleCandidate,
+    method: &str,
+) -> io::Result<()> {
+    if replacement.paths.len() != candidate.ranges.len() {
+        return Err(io::Error::other(format!(
+            "{method} clipped replacement emitted {} paths for {} traversals",
+            replacement.paths.len(),
+            candidate.ranges.len()
+        )));
+    }
+    for (idx, range) in candidate.ranges.iter().enumerate() {
+        let observed = path_sequence(replacement, &replacement.paths[idx])?;
+        if observed != range.sequence {
+            return Err(io::Error::other(format!(
+                "{method} clipped replacement path {} has {} bp interior, expected {} bp",
+                idx,
+                observed.len(),
+                range.sequence.len()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn build_replacement_with_method_inner(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+    method: ResolutionMethod,
+) -> io::Result<Graph> {
     match method {
         ResolutionMethod::Auto => unreachable!("auto is resolved before replacement dispatch"),
         ResolutionMethod::Hierarchical => {
@@ -2428,6 +2601,17 @@ fn auto_replacement_method(
     auto_method_by_median(candidate.traversal_stats, config)
 }
 
+/// Sequence presented to the replacement aligner for one PathRange. When
+/// flanking context is active this is `<left_flank><interior><right_flank>`;
+/// otherwise it is the bubble interior alone.
+fn range_aligner_sequence(range: &PathRange) -> &[u8] {
+    if range.extended_sequence.is_empty() {
+        &range.sequence
+    } else {
+        &range.extended_sequence
+    }
+}
+
 fn candidate_named_sequences(candidate: &BubbleCandidate) -> (Vec<String>, Vec<(String, Vec<u8>)>) {
     let headers: Vec<String> = candidate
         .ranges
@@ -2438,9 +2622,21 @@ fn candidate_named_sequences(candidate: &BubbleCandidate) -> (Vec<String>, Vec<(
     let seqs = headers
         .iter()
         .cloned()
-        .zip(candidate.ranges.iter().map(|range| range.sequence.clone()))
+        .zip(
+            candidate
+                .ranges
+                .iter()
+                .map(|range| range_aligner_sequence(range).to_vec()),
+        )
         .collect();
     (headers, seqs)
+}
+
+fn candidate_has_flank(candidate: &BubbleCandidate) -> bool {
+    candidate
+        .ranges
+        .iter()
+        .any(|range| !range.extended_sequence.is_empty())
 }
 
 fn candidate_named_sequences_longest_first(
@@ -3351,16 +3547,160 @@ fn validate_replacement_paths(
 
     for (idx, range) in candidate.ranges.iter().enumerate() {
         let observed = path_sequence(replacement, &replacement.paths[idx])?;
-        if observed != range.sequence {
+        let expected = range_aligner_sequence(range);
+        if observed != expected {
             return Err(io::Error::other(format!(
                 "{method} replacement path {} changed sequence length {} -> {}",
                 idx,
-                range.sequence.len(),
+                expected.len(),
                 observed.len()
             )));
         }
     }
     Ok(())
+}
+
+/// After the replacement aligner has run on the flank-extended sequences,
+/// clip the leading `left_flank_bp` and trailing `right_flank_bp` bp from each
+/// replacement path so the resulting Graph encodes only the bubble interior
+/// — the same shape `apply_replacement_frontier` expects when the path-step
+/// substitution happens between `range.begin_step` and `range.end_step`.
+/// Segments whose own bp boundaries fall inside the flank are split into the
+/// minimum number of nodes needed to preserve the path topology around the
+/// flank/interior boundary; segments fully inside the flank are dropped from
+/// the new graph (they remain referenced by no clipped path).
+fn clip_replacement_to_interior(
+    replacement: Graph,
+    candidate: &BubbleCandidate,
+) -> io::Result<Graph> {
+    if replacement.paths.len() != candidate.ranges.len() {
+        return Err(io::Error::other(format!(
+            "clip_replacement_to_interior: replacement has {} paths but candidate has {} ranges",
+            replacement.paths.len(),
+            candidate.ranges.len()
+        )));
+    }
+    let mut output_segments: Vec<Segment> = Vec::new();
+    let mut node_by_slice: FxHashMap<(usize, bool, usize, usize), usize> = FxHashMap::default();
+    let mut output_paths: Vec<Path> = Vec::with_capacity(replacement.paths.len());
+
+    for (range_idx, range) in candidate.ranges.iter().enumerate() {
+        let path = &replacement.paths[range_idx];
+        let pieces = replacement_path_pieces(&replacement, path)?;
+        let raw_len: usize = pieces.iter().map(|p| p.end - p.start).sum();
+        let interior_start = range.left_flank_bp;
+        let interior_end = raw_len
+            .checked_sub(range.right_flank_bp)
+            .ok_or_else(|| io::Error::other(
+                "clip_replacement_to_interior: right flank exceeds replacement path length",
+            ))?;
+        if interior_start > interior_end {
+            return Err(io::Error::other(
+                "clip_replacement_to_interior: interior bounds inverted",
+            ));
+        }
+        if interior_end - interior_start != range.sequence.len() {
+            return Err(io::Error::other(format!(
+                "clip_replacement_to_interior: interior span {} bp does not match expected interior {} bp on path {}",
+                interior_end - interior_start,
+                range.sequence.len(),
+                range_idx
+            )));
+        }
+        let mut new_steps = Vec::new();
+        for piece in pieces {
+            let from = piece.start.max(interior_start);
+            let to = piece.end.min(interior_end);
+            if from >= to {
+                continue;
+            }
+            let local_start = from - piece.start;
+            let local_end = to - piece.start;
+            let node = slice_replacement_segment(
+                &replacement.segments,
+                &mut output_segments,
+                &mut node_by_slice,
+                piece.node,
+                piece.rev,
+                local_start,
+                local_end,
+            )?;
+            new_steps.push(Step { node, rev: false });
+        }
+        output_paths.push(Path {
+            name: path.name.clone(),
+            steps: new_steps,
+        });
+    }
+
+    Ok(Graph {
+        segments: output_segments,
+        paths: output_paths,
+    })
+}
+
+struct ReplacementPathPiece {
+    node: usize,
+    rev: bool,
+    start: usize,
+    end: usize,
+}
+
+fn replacement_path_pieces(graph: &Graph, path: &Path) -> io::Result<Vec<ReplacementPathPiece>> {
+    let mut offset = 0usize;
+    let mut pieces = Vec::with_capacity(path.steps.len());
+    for step in &path.steps {
+        let segment = graph.segments.get(step.node).ok_or_else(|| {
+            io::Error::other("clip_replacement_to_interior: replacement path references an out-of-range segment")
+        })?;
+        let len = segment.seq.len();
+        let start = offset;
+        offset = offset
+            .checked_add(len)
+            .ok_or_else(|| io::Error::other("replacement path length overflow"))?;
+        pieces.push(ReplacementPathPiece {
+            node: step.node,
+            rev: step.rev,
+            start,
+            end: offset,
+        });
+    }
+    Ok(pieces)
+}
+
+fn slice_replacement_segment(
+    source_segments: &[Segment],
+    output_segments: &mut Vec<Segment>,
+    node_by_slice: &mut FxHashMap<(usize, bool, usize, usize), usize>,
+    source_node: usize,
+    rev: bool,
+    local_start: usize,
+    local_end: usize,
+) -> io::Result<usize> {
+    let segment = source_segments.get(source_node).ok_or_else(|| {
+        io::Error::other("clip_replacement_to_interior: source segment out of range")
+    })?;
+    let seg_len = segment.seq.len();
+    if local_start > local_end || local_end > seg_len {
+        return Err(io::Error::other(
+            "clip_replacement_to_interior: slice outside segment bounds",
+        ));
+    }
+    let key = (source_node, rev, local_start, local_end);
+    if let Some(&idx) = node_by_slice.get(&key) {
+        return Ok(idx);
+    }
+    let oriented: Vec<u8> = if rev {
+        reverse_complement(&segment.seq)
+    } else {
+        segment.seq.clone()
+    };
+    let slice = oriented[local_start..local_end].to_vec();
+    let id = format!("clip_{}_{}_{}_{}", source_node, rev as u8, local_start, local_end);
+    let idx = output_segments.len();
+    output_segments.push(Segment { id, seq: slice });
+    node_by_slice.insert(key, idx);
+    Ok(idx)
 }
 
 fn validate_expected_paths(
@@ -5112,13 +5452,13 @@ P\talt\t1+,3+,4+\t*
                     path_idx: 0,
                     begin_step: 10,
                     end_step: 20,
-                    sequence: Vec::new(),
+                    ..PathRange::default()
                 },
                 PathRange {
                     path_idx: 1,
                     begin_step: 30,
                     end_step: 40,
-                    sequence: Vec::new(),
+                    ..PathRange::default()
                 },
             ],
             signature: "selected".to_string(),
@@ -5137,7 +5477,7 @@ P\talt\t1+,3+,4+\t*
                 path_idx: 0,
                 begin_step: 20,
                 end_step: 25,
-                sequence: Vec::new(),
+                ..PathRange::default()
             }],
             signature: "adjacent".to_string(),
             root_start_step: 0,
@@ -5158,7 +5498,7 @@ P\talt\t1+,3+,4+\t*
                 path_idx: 0,
                 begin_step: 19,
                 end_step: 25,
-                sequence: Vec::new(),
+                ..PathRange::default()
             }],
             signature: "overlapping".to_string(),
             root_start_step: 0,
@@ -5179,7 +5519,7 @@ P\talt\t1+,3+,4+\t*
                 path_idx: 1,
                 begin_step: 10,
                 end_step: 20,
-                sequence: Vec::new(),
+                ..PathRange::default()
             }],
             signature: "different-path".to_string(),
             root_start_step: 0,
