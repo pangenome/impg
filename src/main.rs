@@ -2771,7 +2771,7 @@ fn parse_crush_stage(
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, or chain-povu)",
+                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, or top-flubble-sweepga)",
                             raw, param.value
                         ),
                     ));
@@ -4507,7 +4507,7 @@ GFA engine shorthand:
   `-o gfa:fastga:pggb`, or `-o gfa:sweepga:seqwish`. Add `:crush` to run
   exact path-preserving blunt-graph resolution, e.g. `-o gfa:syng:crush`.
   Crush methods include allwave, poa, poasta, star-biwfa, sweepga, wfmash,
-  hierarchical, chain-povu; e.g.
+  hierarchical, chain-povu, top-flubble-sweepga; e.g.
   `-o gfa:syng:crush,method=allwave,k-nearest=5,k-farthest=2`.
 ")]
     Query {
@@ -5037,7 +5037,7 @@ GFA engine shorthand:
         #[clap(long, value_parser = parse_usize_size, default_value = "10k")]
         polish_max_traversals: usize,
 
-        /// Resolver method: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, or chain-povu
+        /// Resolver method: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, or top-flubble-sweepga
         #[clap(long, value_parser, default_value = "auto")]
         method: String,
 
@@ -8058,7 +8058,7 @@ fn run() -> io::Result<()> {
             let Some(method) = impg::resolution::ResolutionMethod::parse_name(&method) else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "--method must be one of: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu",
+                    "--method must be one of: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy, chain-povu, top-flubble-sweepga",
                 ));
             };
             let Some(polish_method) =
@@ -12687,6 +12687,7 @@ mod tests {
             "-o gfa:wfmash:seqwish",
             "Crush methods include allwave, poa, poasta, star-biwfa, sweepga, wfmash,",
             "chain-povu",
+            "top-flubble-sweepga",
             "`impg syng2gfa` to dump the whole syng syncmer graph",
         ] {
             assert!(
@@ -13255,6 +13256,39 @@ mod tests {
                 let parsed = engine_cli.parse_engine().unwrap();
                 let crush = parsed.crush_config.unwrap();
                 assert_eq!(crush.method, impg::resolution::ResolutionMethod::ChainPovu);
+                assert_eq!(crush.max_iterations, 3);
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_method_top_flubble_sweepga_parses() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush,method=chain-povu-sweepga,no-filter=true,max-rounds=3",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                let crush = parsed.crush_config.unwrap();
+                assert_eq!(
+                    crush.method,
+                    impg::resolution::ResolutionMethod::TopFlubbleSweepga
+                );
+                assert!(crush.sweepga_no_filter);
                 assert_eq!(crush.max_iterations, 3);
             }
             _ => panic!("expected query command"),

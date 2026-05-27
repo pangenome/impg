@@ -236,6 +236,11 @@ pub enum ResolutionMethod {
     /// under the chain block cap. The block replacement runs a local
     /// smoothxg-style pass followed by bounded POASTA cleanup.
     ChainPovu,
+    /// Top-level POVU flubble blocking: select only level-0/root flubbles and
+    /// run one local all-vs-all SweepGA/seqwish replacement for each complete
+    /// bounded region. Descendant flubbles are absorbed into the root traversal
+    /// sequences; adjacent roots are not merged.
+    TopFlubbleSweepga,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -272,6 +277,7 @@ impl ResolutionMethod {
             Self::Hierarchical => "hierarchical",
             Self::ChainGreedy => "chain-greedy/POASTA",
             Self::ChainPovu => "chain-povu smoothxg→POASTA",
+            Self::TopFlubbleSweepga => "top-flubble-sweepga",
         }
     }
 
@@ -289,6 +295,14 @@ impl ResolutionMethod {
             | "path-walk-chain" | "crush-chain-greedy" => Some(Self::ChainGreedy),
             "chain-povu" | "povu-chain" | "povu-tree-blocks" | "tree-blocks"
             | "crush-chain-povu" => Some(Self::ChainPovu),
+            "top-flubble-sweepga"
+            | "top-level-flubble-sweepga"
+            | "top-flubble"
+            | "top-level-flubble"
+            | "flubble-sweepga"
+            | "chain-povu-sweepga"
+            | "povu-sweepga"
+            | "crush-top-flubble-sweepga" => Some(Self::TopFlubbleSweepga),
             _ => None,
         }
     }
@@ -664,6 +678,17 @@ fn resolve_graph_bubbles(
 
     if config.method == ResolutionMethod::ChainPovu {
         return resolve_graph_bubbles_chain_povu(
+            graph,
+            original_gfa,
+            config,
+            emit_logs,
+            stats,
+            next_id,
+            initial_next_id,
+        );
+    }
+    if config.method == ResolutionMethod::TopFlubbleSweepga {
+        return resolve_graph_bubbles_top_flubble_sweepga(
             graph,
             original_gfa,
             config,
@@ -1755,6 +1780,286 @@ fn resolve_graph_bubbles_chain_povu(
     })
 }
 
+fn resolve_graph_bubbles_top_flubble_sweepga(
+    mut graph: Graph,
+    original_gfa: Option<&str>,
+    config: &ResolutionConfig,
+    emit_logs: bool,
+    mut stats: ResolutionStats,
+    mut next_id: usize,
+    initial_next_id: usize,
+) -> io::Result<ResolvedGfa> {
+    let before_quality = graph_quality(&graph);
+    let discovery_start = Instant::now();
+    let (all_discovered, sites_seen, timings) = discover_all_candidates(&graph, config, emit_logs)?;
+    let selection = select_top_flubble_sweepga_regions(&all_discovered, &FxHashSet::default());
+    let selected_sizes = selection
+        .selected
+        .iter()
+        .map(chain_povu_block_bp)
+        .collect::<Vec<_>>();
+    let candidates_seen = selection.selected.len();
+    let frontier = finalize_frontier(
+        &graph,
+        config,
+        selection.selected,
+        sites_seen,
+        candidates_seen,
+        emit_logs,
+        timings,
+        0,
+    )?;
+    let discovery_elapsed = discovery_start.elapsed();
+
+    if frontier.selected.is_empty() {
+        if emit_logs {
+            log::info!(
+                "crush top-flubble-sweepga: no materialized top-level region(s) selected from {} POVU site(s), {} top-level flubble(s) in {:.2?}; no cross-top-level merging performed",
+                sites_seen,
+                selection.top_level_regions,
+                discovery_elapsed
+            );
+            log::info!(
+                "crush top-flubble-sweepga per-round regions: []; total resolved=0; next_id moved {} -> {}",
+                initial_next_id,
+                next_id
+            );
+        }
+        let final_gfa = original_gfa
+            .map(str::to_string)
+            .unwrap_or_else(|| render_graph(&graph));
+        return Ok(ResolvedGfa {
+            gfa: final_gfa,
+            stats,
+        });
+    }
+
+    stats.iterations = 1;
+    stats.candidates_seen += frontier.selected.len();
+    let selected_count = frontier.selected.len();
+
+    if emit_logs {
+        log::info!(
+            "crush top-flubble-sweepga: {} POVU site(s), {} top-level flubble(s), {} descendant/non-root site(s), {} sequence-variable top-level region(s) selected in {:.2?}; pre-materialize size {}; no cross-top-level merging performed",
+            sites_seen,
+            selection.top_level_regions,
+            selection.descendant_sites,
+            selected_count,
+            discovery_elapsed,
+            format_bp_distribution("top-level", &selected_sizes)
+        );
+        log::info!(
+            "crush top-flubble-sweepga traversal stats: {}",
+            format_candidate_length_summary("selected", &frontier.selected)
+        );
+    }
+
+    let build_start = Instant::now();
+    let mut selected_regions = frontier.selected;
+    selected_regions.sort_by_key(|candidate| {
+        (
+            candidate.traversal_stats.total_len,
+            candidate.traversal_stats.max_len,
+            candidate.root_span,
+        )
+    });
+    let mut build_results = Vec::with_capacity(selected_count);
+    for (idx, candidate) in selected_regions.into_iter().enumerate() {
+        let region_ordinal = idx + 1;
+        if emit_logs && (region_ordinal <= 10 || region_ordinal % 25 == 0) {
+            log::info!(
+                "crush top-flubble-sweepga: building top-level region {}/{}; traversals={}, input-bp={}, max-len={}, median-len={}, root-span={}",
+                region_ordinal,
+                selected_count,
+                candidate.traversal_stats.count,
+                candidate.traversal_stats.total_len,
+                candidate.traversal_stats.max_len,
+                candidate.traversal_stats.median_len,
+                candidate.root_span
+            );
+        }
+        let result = build_top_flubble_sweepga_replacement_with_evidence(&candidate, config).map(
+            |(replacement, evidence)| TopFlubbleSweepgaBuild {
+                region_ordinal,
+                candidate,
+                replacement,
+                evidence,
+            },
+        );
+        if emit_logs {
+            let status = if result.is_ok() { "accepted" } else { "failed" };
+            if region_ordinal <= 10 || region_ordinal == selected_count || region_ordinal % 25 == 0
+            {
+                log::info!(
+                    "crush top-flubble-sweepga: region build progress {}/{} ({})",
+                    region_ordinal,
+                    selected_count,
+                    status
+                );
+            }
+        }
+        build_results.push(result);
+    }
+    let build_elapsed = build_start.elapsed();
+
+    let mut builds = Vec::with_capacity(build_results.len());
+    for result in build_results {
+        match result {
+            Ok(build) => builds.push(build),
+            Err(err) => {
+                return Err(io::Error::other(format!(
+                    "top-flubble-sweepga replacement failed validity/build: {err}"
+                )));
+            }
+        }
+    }
+    if builds.is_empty() {
+        return Err(io::Error::other(
+            "top-flubble-sweepga selected regions but built no replacements",
+        ));
+    }
+
+    let evidence_rows = builds
+        .iter()
+        .map(TopFlubbleSweepgaEvidenceRow::from_build)
+        .collect::<Vec<_>>();
+    let plans = builds
+        .into_iter()
+        .map(|build| ReplacementPlan {
+            candidate: build.candidate,
+            replacement: build.replacement,
+        })
+        .collect::<Vec<_>>();
+
+    log_replacement_compression_diagnostics(&plans, config, 0, emit_logs);
+
+    let rewrite_start = Instant::now();
+    let pre_apply_next_id = next_id;
+    let next_graph = apply_replacement_frontier(&graph, &plans, &mut next_id)?;
+    assert!(
+        next_id >= pre_apply_next_id,
+        "crush fresh-id invariant: next_id rewound from {pre_apply_next_id} to {next_id}"
+    );
+    let rewrite_elapsed = rewrite_start.elapsed();
+    let after_quality = graph_quality(&next_graph);
+    graph = next_graph;
+    stats.resolved += plans.len();
+
+    if emit_logs {
+        for row in &evidence_rows {
+            log::info!(
+                "crush top-flubble-sweepga region {}/{} evidence: input_traversals={}, input_bp={}, emitted_alignment_records={}, aligned_bp={}, paf_bytes={}, fastga_frequency={}, replacement_segments={}, replacement_bp={}, applied=true",
+                row.region_ordinal,
+                selected_count,
+                row.input_traversals,
+                row.input_bp,
+                row.alignment_records,
+                row.aligned_bp,
+                row.paf_bytes,
+                row.kmer_frequency,
+                row.replacement_segments,
+                row.replacement_bp
+            );
+        }
+        let accepted_sizes = plans
+            .iter()
+            .map(|plan| chain_povu_block_bp(&plan.candidate))
+            .collect::<Vec<_>>();
+        log::info!(
+            "crush top-flubble-sweepga: applied {}/{} top-level region replacement(s) in one round; build {:.2?}; rewrite+validate {:.2?}; ids minted {}..{}; accepted-size {}; quality {} -> {}",
+            stats.resolved,
+            selected_count,
+            build_elapsed,
+            rewrite_elapsed,
+            pre_apply_next_id,
+            next_id,
+            format_bp_distribution("accepted", &accepted_sizes),
+            before_quality.summary(),
+            after_quality.summary()
+        );
+        log::info!(
+            "crush top-flubble-sweepga per-round regions: [r1={}]; top-level flubble count={}; no cross-top-level merging; total resolved={}; next_id moved {} -> {}",
+            stats.resolved,
+            selection.top_level_regions,
+            stats.resolved,
+            initial_next_id,
+            next_id
+        );
+    }
+
+    Ok(ResolvedGfa {
+        gfa: render_graph(&graph),
+        stats,
+    })
+}
+
+#[derive(Clone, Debug, Default)]
+struct TopFlubbleSweepgaSelection {
+    selected: Vec<BubbleCandidate>,
+    top_level_regions: usize,
+    descendant_sites: usize,
+}
+
+fn select_top_flubble_sweepga_regions(
+    discovered: &[DiscoveredCandidate],
+    resolved_signatures: &FxHashSet<String>,
+) -> TopFlubbleSweepgaSelection {
+    let top_level_regions = discovered.iter().filter(|d| d.povu_level == 0).count();
+    let descendant_sites = discovered.len().saturating_sub(top_level_regions);
+    let selected = discovered
+        .iter()
+        .filter(|d| d.povu_level == 0)
+        .filter(|d| !resolved_signatures.contains(&d.candidate.signature))
+        .map(|d| {
+            let mut candidate = d.candidate.clone();
+            candidate.level = 0;
+            candidate
+        })
+        .collect::<Vec<_>>();
+    TopFlubbleSweepgaSelection {
+        selected,
+        top_level_regions,
+        descendant_sites,
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TopFlubbleSweepgaBuild {
+    region_ordinal: usize,
+    candidate: BubbleCandidate,
+    replacement: Graph,
+    evidence: SweepgaReplacementEvidence,
+}
+
+#[derive(Clone, Debug)]
+struct TopFlubbleSweepgaEvidenceRow {
+    region_ordinal: usize,
+    input_traversals: usize,
+    input_bp: usize,
+    alignment_records: usize,
+    aligned_bp: u64,
+    paf_bytes: usize,
+    kmer_frequency: usize,
+    replacement_segments: usize,
+    replacement_bp: usize,
+}
+
+impl TopFlubbleSweepgaEvidenceRow {
+    fn from_build(build: &TopFlubbleSweepgaBuild) -> Self {
+        Self {
+            region_ordinal: build.region_ordinal,
+            input_traversals: build.candidate.traversal_stats.count,
+            input_bp: build.candidate.traversal_stats.total_len,
+            alignment_records: build.evidence.alignment_records,
+            aligned_bp: build.evidence.aligned_bp,
+            paf_bytes: build.evidence.paf_bytes,
+            kmer_frequency: build.evidence.kmer_frequency,
+            replacement_segments: build.evidence.replacement_segments,
+            replacement_bp: build.evidence.replacement_bp,
+        }
+    }
+}
+
 /// Return `(path_name, sequence)` for each `P` line, using blunt concatenation.
 pub fn path_sequences(gfa: &str) -> io::Result<Vec<(String, String)>> {
     let graph = parse_gfa(gfa)?;
@@ -1955,6 +2260,7 @@ fn candidate_selection_method(
         ResolutionMethod::Auto => auto_method_by_median(candidate.traversal_stats, config),
         ResolutionMethod::Hierarchical => hierarchical_method_by_level(candidate.level),
         ResolutionMethod::ChainPovu => ResolutionMethod::Poasta,
+        ResolutionMethod::TopFlubbleSweepga => ResolutionMethod::Sweepga,
         method => method,
     }
 }
@@ -2034,6 +2340,9 @@ fn candidate_selection_priority(candidate: &BubbleCandidate, config: &Resolution
         }
         ResolutionMethod::ChainPovu => {
             unreachable!("chain-povu candidate method should be resolved")
+        }
+        ResolutionMethod::TopFlubbleSweepga => {
+            unreachable!("top-flubble-sweepga candidate method should be resolved")
         }
     }
 }
@@ -2448,13 +2757,14 @@ fn discover_all_candidates(
             }
             // Tree-driven modes need complete POVU topology. Under
             // `method=hierarchical`, the min-traversal-len floor gates only
-            // level-0 roots. Under `method=chain-povu`, all discovered sites
-            // are admitted so parent blocks can absorb every descendant under
-            // the block cap. For other methods the filter applies at every
-            // level, as before.
+            // level-0 roots. Under `method=chain-povu` and
+            // `method=top-flubble-sweepga`, all discovered sites are admitted
+            // so parent/top-level blocks can absorb every descendant under the
+            // same bounded region. For other methods the filter applies at
+            // every level, as before.
             let apply_min_len_filter = match config.method {
                 ResolutionMethod::Hierarchical => site.level == 0,
-                ResolutionMethod::ChainPovu => false,
+                ResolutionMethod::ChainPovu | ResolutionMethod::TopFlubbleSweepga => false,
                 _ => true,
             };
             if apply_min_len_filter && traversal_stats.max_len < config.min_traversal_len {
@@ -3687,6 +3997,7 @@ fn build_replacement_with_method_inner(
         ResolutionMethod::ChainPovu => {
             build_chain_povu_smooth_poasta_replacement(candidate, config)
         }
+        ResolutionMethod::TopFlubbleSweepga => build_sweepga_seqwish_replacement(candidate, config),
         ResolutionMethod::Poa => build_poa_replacement(candidate, config),
         ResolutionMethod::Poasta => build_poasta_replacement(candidate, config),
         ResolutionMethod::ChainGreedy => build_chain_greedy_replacement(candidate, config),
@@ -3705,6 +4016,7 @@ fn candidate_replacement_method(
         ResolutionMethod::Auto => auto_replacement_method(candidate, config),
         ResolutionMethod::Hierarchical => hierarchical_method_by_level(candidate.level),
         ResolutionMethod::ChainPovu => ResolutionMethod::ChainPovu,
+        ResolutionMethod::TopFlubbleSweepga => ResolutionMethod::Sweepga,
         method => method,
     }
 }
@@ -4283,9 +4595,57 @@ fn build_sweepga_seqwish_replacement(
     candidate: &BubbleCandidate,
     config: &ResolutionConfig,
 ) -> io::Result<Graph> {
+    build_sweepga_seqwish_replacement_with_evidence(candidate, config).map(|(graph, _)| graph)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SweepgaSeqwishTailMode {
+    Standard,
+    TrustSweepgaFilteredPaf,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SweepgaReplacementEvidence {
+    alignment_records: usize,
+    aligned_bp: u64,
+    paf_bytes: usize,
+    kmer_frequency: usize,
+    replacement_segments: usize,
+    replacement_bp: usize,
+}
+
+fn build_sweepga_seqwish_replacement_with_evidence(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+) -> io::Result<(Graph, SweepgaReplacementEvidence)> {
+    build_sweepga_seqwish_replacement_with_tail_mode(
+        candidate,
+        config,
+        SweepgaSeqwishTailMode::Standard,
+    )
+}
+
+fn build_top_flubble_sweepga_replacement_with_evidence(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+) -> io::Result<(Graph, SweepgaReplacementEvidence)> {
+    build_sweepga_seqwish_replacement_with_tail_mode(
+        candidate,
+        config,
+        SweepgaSeqwishTailMode::TrustSweepgaFilteredPaf,
+    )
+}
+
+fn build_sweepga_seqwish_replacement_with_tail_mode(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+    tail_mode: SweepgaSeqwishTailMode,
+) -> io::Result<(Graph, SweepgaReplacementEvidence)> {
     let (headers, seqs) = candidate_named_sequences(candidate);
+    let min_aligner_sequence_len = sweepga_backend_min_sequence_len(&config.sweepga_aligner);
     let named: Vec<(String, &[u8])> = seqs
         .iter()
+        .filter(|(_, seq)| seq.len() >= min_aligner_sequence_len)
         .map(|(name, seq)| (name.clone(), seq.as_slice()))
         .collect();
 
@@ -4295,30 +4655,44 @@ fn build_sweepga_seqwish_replacement(
         );
     }
     let kmer_frequency = resolve_replacement_kmer_frequency(config, seqs.len());
+    let trust_sweepga_filter =
+        tail_mode == SweepgaSeqwishTailMode::TrustSweepgaFilteredPaf && !config.sweepga_no_filter;
+    let (align_no_filter, num_mappings, scaffold_filter, scaffold_mass) = if trust_sweepga_filter {
+        (
+            false,
+            config.replacement_num_mappings.clone(),
+            config.replacement_scaffold_filter.clone(),
+            config.replacement_scaffold_mass,
+        )
+    } else {
+        (true, "many:many".to_string(), "many:many".to_string(), 0)
+    };
     let align_config = sweepga::library_api::SweepgaAlignConfig {
         num_threads: rayon::current_num_threads().max(1),
         kmer_frequency,
         min_aln_length: config.sweepga_min_aln_length,
-        // Get raw all-vs-all alignments. `no_filter=true` skips sweepga's
-        // post-alignment plane-sweep / scaffold filter; the shared graph
-        // induction tail below applies the configured replacement-tier filter
-        // before seqwish (or skips it too when `sweepga_no_filter=true`).
-        // We also pin the would-be filter modes to many:many and zero out
-        // the scaffold-mass floor — defensive coupling so the "raw all-vs-all"
-        // intent survives any future change that re-enables sweepga's filter.
-        no_filter: true,
-        num_mappings: "many:many".to_string(),
-        scaffold_filter: "many:many".to_string(),
-        scaffold_mass: 0,
+        // Normal per-bubble sweepga keeps the historical raw all-vs-all PAF
+        // and lets the shared seqwish tail filter it. Top-flubble mode instead
+        // trusts SweepGA's own replacement-tier filter and disables the older
+        // tail filter below, avoiding a second expansion/rescue pass on large
+        // contained regions.
+        no_filter: align_no_filter,
+        num_mappings,
+        scaffold_filter,
+        scaffold_mass,
         sparsify: sweepga::knn_graph::SparsificationStrategy::None,
         aligner: config.sweepga_aligner.clone(),
         map_pct_identity: config.sweepga_map_pct_identity.clone(),
         ..sweepga::library_api::SweepgaAlignConfig::default()
     };
-    let paf_file = sweepga::library_api::sweepga_align(&named, &align_config)
-        .map_err(|err| io::Error::other(format!("SweepGA replacement alignment failed: {err}")))?;
     let mut chunk = String::new();
-    std::fs::File::open(paf_file.path())?.read_to_string(&mut chunk)?;
+    if named.len() >= 2 {
+        let paf_file =
+            sweepga::library_api::sweepga_align(&named, &align_config).map_err(|err| {
+                io::Error::other(format!("SweepGA replacement alignment failed: {err}"))
+            })?;
+        std::fs::File::open(paf_file.path())?.read_to_string(&mut chunk)?;
+    }
     let mut paf_lines = chunk
         .lines()
         .filter(|line| !line.is_empty())
@@ -4326,6 +4700,10 @@ fn build_sweepga_seqwish_replacement(
         .collect::<Vec<_>>();
     paf_lines.sort_unstable();
     paf_lines.dedup();
+    let aligned_bp = paf_lines
+        .iter()
+        .filter_map(|line| paf_alignment_block_bp(line))
+        .sum::<u64>();
     let paf = if paf_lines.is_empty() {
         String::new()
     } else {
@@ -4334,9 +4712,11 @@ fn build_sweepga_seqwish_replacement(
         out
     };
     log::debug!(
-        "crush sweepga: {} traversal(s), {} unique raw all-vs-all PAF line(s), {} PAF byte(s) from {} backend (fastga_frequency={}); seqwish tail filter={}",
+        "crush sweepga: {} traversal(s), {} aligner-input traversal(s), {} unique raw all-vs-all PAF line(s), {} aligned bp, {} PAF byte(s) from {} backend (fastga_frequency={}); seqwish tail filter={}",
         seqs.len(),
+        named.len(),
         paf_lines.len(),
+        aligned_bp,
         paf.len(),
         config.sweepga_aligner,
         kmer_frequency,
@@ -4352,9 +4732,46 @@ fn build_sweepga_seqwish_replacement(
         }
     );
 
-    let graph_config = seqwish_replacement_config(config);
+    let mut graph_config = seqwish_replacement_config(config);
+    if tail_mode == SweepgaSeqwishTailMode::TrustSweepgaFilteredPaf && !config.sweepga_no_filter {
+        // `sweepga_align` has already run SweepGA's plane-sweep/scaffold
+        // filter. Top-level flubble regions can be much larger than the
+        // original per-bubble replacements; running the older seqwish-tail
+        // filter plus short-full-length rescue here can re-expand the PAF
+        // before induction and recreate the concatenation/explosion failure.
+        graph_config.no_filter = true;
+    }
     let gfa = crate::syng_graph::build_gfa_from_paf_and_sequences(&seqs, &paf, &graph_config)?;
-    finalize_pairwise_induced_replacement(gfa, &headers, candidate, config, "SweepGA/seqwish")
+    let replacement =
+        finalize_pairwise_induced_replacement(gfa, &headers, candidate, config, "SweepGA/seqwish")?;
+    let evidence = SweepgaReplacementEvidence {
+        alignment_records: paf_lines.len(),
+        aligned_bp,
+        paf_bytes: paf.len(),
+        kmer_frequency,
+        replacement_segments: replacement.segments.len(),
+        replacement_bp: replacement_segment_bp(&replacement),
+    };
+    Ok((replacement, evidence))
+}
+
+fn sweepga_backend_min_sequence_len(aligner: &str) -> usize {
+    if aligner.eq_ignore_ascii_case("wfmash") {
+        // SweepGA's wfmash wrapper adapts wfmash `-s` as roughly half the
+        // average input length. Keep every submitted record >=200 bp so that
+        // adaptive `-s` never falls below wfmash/MashMap's 100 bp floor. Those
+        // shorter traversals still belong in the replacement graph and path
+        // validation; they just cannot be submitted to this backend safely.
+        200
+    } else {
+        // FastGA accepts short non-empty records, but empty FASTA records are
+        // not alignable and can trip backend preparation.
+        1
+    }
+}
+
+fn paf_alignment_block_bp(line: &str) -> Option<u64> {
+    line.split('\t').nth(10)?.parse().ok()
 }
 
 /// Wrapper for `method=wfmash` that forces the SweepGA backend's aligner to
@@ -6225,6 +6642,24 @@ P\tp1\t1+,3+,4+\t*
     }
 
     #[test]
+    fn top_flubble_sweepga_parse_name_accepts_aliases() {
+        assert_eq!(
+            ResolutionMethod::parse_name("top-flubble-sweepga"),
+            Some(ResolutionMethod::TopFlubbleSweepga)
+        );
+        assert_eq!(
+            ResolutionMethod::parse_name("chain-povu-sweepga"),
+            Some(ResolutionMethod::TopFlubbleSweepga)
+        );
+    }
+
+    #[test]
+    fn wfmash_aligner_input_floor_keeps_adaptive_segment_length_valid() {
+        assert_eq!(sweepga_backend_min_sequence_len("wfmash"), 200);
+        assert_eq!(sweepga_backend_min_sequence_len("fastga"), 1);
+    }
+
+    #[test]
     fn chain_povu_selects_parent_subtree_under_cap() {
         let gfa = "\
 H\tVN:Z:1.0
@@ -6262,6 +6697,64 @@ P\touter_alt\t1+,7+,6+\t*
         assert!(
             selection.merged_descendant_sites > 0,
             "chain-povu should absorb nested descendants into the parent block"
+        );
+    }
+
+    #[test]
+    fn top_flubble_sweepga_selects_only_level_zero_roots() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tT
+S\t5\tAA
+S\t6\tA
+S\t7\tCCC
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+L\t2\t+\t5\t+\t0M
+L\t5\t+\t4\t+\t0M
+L\t4\t+\t6\t+\t0M
+L\t1\t+\t7\t+\t0M
+L\t7\t+\t6\t+\t0M
+P\tref\t1+,2+,3+,4+,6+\t*
+P\tinner_alt\t1+,2+,5+,4+,6+\t*
+P\touter_alt\t1+,7+,6+\t*
+";
+        let graph = parse_gfa(gfa).unwrap();
+        let config = ResolutionConfig {
+            method: ResolutionMethod::TopFlubbleSweepga,
+            ..ResolutionConfig::default()
+        };
+        let (discovered, _, _) = discover_all_candidates(&graph, &config, false).unwrap();
+        assert!(
+            discovered.iter().any(|d| d.povu_level > 0),
+            "fixture must exercise nested POVU sites"
+        );
+        let selection = select_top_flubble_sweepga_regions(&discovered, &FxHashSet::default());
+        assert_eq!(selection.top_level_regions, selection.selected.len());
+        assert!(
+            selection.descendant_sites > 0,
+            "nested sites should be counted but not selected as separate SweepGA regions"
+        );
+        assert!(selection
+            .selected
+            .iter()
+            .all(|candidate| candidate.level == 0));
+    }
+
+    #[test]
+    fn top_flubble_sweepga_routes_replacement_to_sweepga() {
+        let config = ResolutionConfig {
+            method: ResolutionMethod::TopFlubbleSweepga,
+            ..ResolutionConfig::default()
+        };
+        let root = routing_candidate_at_level(0);
+        assert_eq!(
+            candidate_replacement_method(&root, &config),
+            ResolutionMethod::Sweepga
         );
     }
 
