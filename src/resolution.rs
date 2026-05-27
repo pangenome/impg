@@ -188,6 +188,14 @@ pub struct ResolutionConfig {
     /// where input_bp/output_bp can be noisy (e.g. trivial 1-bp bubbles)
     /// are skipped. Set to 0 to retry every bubble below the ratio threshold.
     pub retry_min_input_bp: usize,
+    /// Target root-path span, in bp, for `method=chain-greedy`.
+    ///
+    /// The greedy path-walk mode ignores the POVU parent/child tree when
+    /// deciding replacement blocks: it sorts candidate bubbles by root-path
+    /// adjacency and accumulates consecutive non-contained bubbles into one
+    /// chain until adding the next bubble would exceed this span. A single
+    /// larger bubble is still emitted as a one-bubble chain.
+    pub chain_greedy_target_bp: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -216,6 +224,13 @@ pub enum ResolutionMethod {
     /// of aligner is tied to the provenance-tree depth, not to median
     /// traversal length. See `docs/crush-hierarchical.md`.
     Hierarchical,
+    /// Greedy reference-path walk that groups consecutive bubble candidates
+    /// into path-adjacent chains and aligns each whole chain with POASTA.
+    ///
+    /// This is a selection strategy rather than a new aligner: it deliberately
+    /// bypasses the POVU provenance tree in `resolve_graph_bubbles` and uses
+    /// only root-path adjacency to form replacement blocks.
+    ChainGreedy,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -250,6 +265,7 @@ impl ResolutionMethod {
             Self::Sweepga => "SweepGA/seqwish",
             Self::Wfmash => "wfmash/seqwish",
             Self::Hierarchical => "hierarchical",
+            Self::ChainGreedy => "chain-greedy/POASTA",
         }
     }
 
@@ -263,6 +279,8 @@ impl ResolutionMethod {
             "sweepga" | "sw" => Some(Self::Sweepga),
             "wfmash" | "wf" => Some(Self::Wfmash),
             "hierarchical" | "hier" => Some(Self::Hierarchical),
+            "chain-greedy" | "greedy-chain" | "greedy-walk" | "chain-walk" | "path-chain"
+            | "path-walk-chain" | "crush-chain-greedy" => Some(Self::ChainGreedy),
             _ => None,
         }
     }
@@ -326,6 +344,8 @@ pub const DEFAULT_RETRY_MIN_INPUT_BP: usize = 1_000;
 /// canonical "wider-context" run sets this to 500. See
 /// `docs/crush-wider-context-bubbles.md`.
 pub const DEFAULT_REPLACEMENT_FLANK_BP: usize = 0;
+/// Default greedy chain span for `method=chain-greedy`.
+pub const DEFAULT_CHAIN_GREEDY_TARGET_BP: usize = 10_000;
 impl Default for ResolutionConfig {
     fn default() -> Self {
         Self {
@@ -370,6 +390,7 @@ impl Default for ResolutionConfig {
             scoring_params: (1, 4, 6, 2, 26, 1),
             retry_min_compression_ratio: DEFAULT_RETRY_MIN_COMPRESSION_RATIO,
             retry_min_input_bp: DEFAULT_RETRY_MIN_INPUT_BP,
+            chain_greedy_target_bp: DEFAULT_CHAIN_GREEDY_TARGET_BP,
         }
     }
 }
@@ -483,6 +504,21 @@ struct CandidateFrontier {
     candidates_seen: usize,
 }
 
+#[derive(Clone, Debug)]
+struct ChainCandidate {
+    candidate: BubbleCandidate,
+    source_bubbles: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ChainFrontier {
+    selected: Vec<ChainCandidate>,
+    sites_seen: usize,
+    discovered_candidates: usize,
+    path_walk_candidates: usize,
+    chains_formed: usize,
+}
+
 /// State of a bubble in the explicit bubble tree (Phase 6 true level descent).
 #[derive(Clone, Debug)]
 enum BubbleState {
@@ -586,6 +622,10 @@ fn resolve_graph_bubbles(
     config: &ResolutionConfig,
     emit_logs: bool,
 ) -> io::Result<ResolvedGfa> {
+    if config.method == ResolutionMethod::ChainGreedy {
+        return resolve_graph_bubble_chains(graph, original_gfa, config, emit_logs);
+    }
+
     let mut stats = ResolutionStats::default();
     // Provenance: signatures of bubbles already transitioned to Resolved.
     // Hard invariant — Phase 6: no tree node is ever re-resolved. The
@@ -1087,7 +1127,9 @@ fn resolve_graph_bubbles(
                 bp_to_node.insert(plan.candidate.signature.clone(), new_idx);
                 new_idx
             };
-            tree[parent_nidx].state = BubbleState::Resolved { at_round: round + 1 };
+            tree[parent_nidx].state = BubbleState::Resolved {
+                at_round: round + 1,
+            };
             just_resolved_nodes.push(parent_nidx);
 
             // Record the parent's reference bp region.
@@ -1194,6 +1236,249 @@ fn resolve_graph_bubbles(
             next_id
         );
         let _ = last_round_resolved_nodes; // future: per-round tree-walk diagnostics
+    }
+
+    let final_gfa = if changed {
+        render_graph(&graph)
+    } else {
+        original_gfa
+            .map(str::to_string)
+            .unwrap_or_else(|| render_graph(&graph))
+    };
+    Ok(ResolvedGfa {
+        gfa: final_gfa,
+        stats,
+    })
+}
+
+/// Greedy path-walk chain mode.
+///
+/// This intentionally does not use `build_initial_bubble_tree` or POVU
+/// parent/leaf metadata to decide replacement blocks. POVU is still used to
+/// surface candidate bubble boundaries, but the block decision is made by
+/// walking the root path in coordinate order and chaining consecutive
+/// non-contained bubbles until the configured root-span cap is reached.
+fn resolve_graph_bubble_chains(
+    mut graph: Graph,
+    original_gfa: Option<&str>,
+    config: &ResolutionConfig,
+    emit_logs: bool,
+) -> io::Result<ResolvedGfa> {
+    let mut stats = ResolutionStats::default();
+    let mut resolved_signatures: FxHashSet<String> = FxHashSet::default();
+    let mut changed = false;
+    let mut next_id = initial_next_segment_id(&graph);
+    let initial_next_id = next_id;
+
+    if emit_logs {
+        let (match_score, mismatch, gap_open1, gap_extend1, gap_open2, gap_extend2) =
+            config.scoring_params;
+        log::info!(
+            "crush chain-greedy: target-bp={}, max-rounds={}, replacement=POASTA, poa-scoring={},{},{},{},{},{}",
+            config.chain_greedy_target_bp,
+            config.max_iterations,
+            match_score,
+            mismatch,
+            gap_open1,
+            gap_extend1,
+            gap_open2,
+            gap_extend2
+        );
+    }
+
+    let mut per_round_chain_counts: Vec<usize> = Vec::new();
+    for round in 0..config.max_iterations {
+        let round_start = Instant::now();
+        let before_quality = graph_quality(&graph);
+        let frontier =
+            find_path_walk_chain_frontier(&graph, config, &resolved_signatures, emit_logs)?;
+
+        if frontier.selected.is_empty() {
+            if emit_logs {
+                log::info!(
+                    "crush chain-greedy round {}: no chain blocks selected from {} POVU site(s), {} candidate bubble(s), {} path-walk bubble(s), {} formed chain(s)",
+                    round + 1,
+                    frontier.sites_seen,
+                    frontier.discovered_candidates,
+                    frontier.path_walk_candidates,
+                    frontier.chains_formed
+                );
+            }
+            break;
+        }
+
+        stats.iterations = round + 1;
+        stats.candidates_seen += frontier.selected.len();
+        let selected_count = frontier.selected.len();
+
+        if emit_logs {
+            log::info!(
+                "crush chain-greedy round {}: {} POVU site(s), {} candidate bubble(s), {} path-walk bubble(s), {} chain(s) formed, {} selected",
+                round + 1,
+                frontier.sites_seen,
+                frontier.discovered_candidates,
+                frontier.path_walk_candidates,
+                frontier.chains_formed,
+                selected_count
+            );
+            log::info!(
+                "crush chain-greedy round {} chain-size distribution: {}",
+                round + 1,
+                format_chain_candidate_summary("selected", &frontier.selected)
+            );
+        }
+
+        let build_start = Instant::now();
+        let build_started = AtomicUsize::new(0);
+        let build_progress = AtomicUsize::new(0);
+        let build_results = frontier
+            .selected
+            .into_par_iter()
+            .map(|chain| {
+                let source_bubbles = chain.source_bubbles;
+                let candidate = chain.candidate;
+                if emit_logs && selected_count <= 64 {
+                    let started = build_started.fetch_add(1, Ordering::Relaxed) + 1;
+                    log::info!(
+                        "crush chain-greedy round {}: building chain {}/{} with POASTA; bubbles={}, traversals={}, max-len={}, median-len={}, total-len={}, root-span={}",
+                        round + 1,
+                        started,
+                        selected_count,
+                        source_bubbles,
+                        candidate.traversal_stats.count,
+                        candidate.traversal_stats.max_len,
+                        candidate.traversal_stats.median_len,
+                        candidate.traversal_stats.total_len,
+                        candidate.root_span
+                    );
+                }
+                let result = (|| {
+                    let replacement =
+                        build_replacement_with_method(&candidate, config, ResolutionMethod::ChainGreedy)?;
+                    if replacement.segments.is_empty() {
+                        return Ok::<Option<ReplacementPlan>, io::Error>(None);
+                    }
+                    Ok::<Option<ReplacementPlan>, io::Error>(Some(ReplacementPlan {
+                        candidate,
+                        replacement,
+                    }))
+                })();
+                if emit_logs {
+                    let done = build_progress.fetch_add(1, Ordering::Relaxed) + 1;
+                    if selected_count <= 64 || done == selected_count || done % 25 == 0 {
+                        let status = match &result {
+                            Ok(Some(_)) => "accepted",
+                            Ok(None) => "empty",
+                            Err(_) => "failed",
+                        };
+                        log::info!(
+                            "crush chain-greedy round {}: replacement build progress {}/{} ({})",
+                            round + 1,
+                            done,
+                            selected_count,
+                            status
+                        );
+                    }
+                }
+                result
+            })
+            .collect::<Vec<_>>();
+        let build_elapsed = build_start.elapsed();
+
+        let mut plans: Vec<ReplacementPlan> = Vec::new();
+        let mut failed_or_empty = 0usize;
+        for result in build_results {
+            match result {
+                Ok(Some(plan)) => plans.push(plan),
+                Ok(None) => {
+                    failed_or_empty += 1;
+                    stats.bailed += 1;
+                }
+                Err(err) => {
+                    failed_or_empty += 1;
+                    log::debug!(
+                        "resolution: chain-greedy replacement failed in round {}: {}",
+                        round + 1,
+                        err
+                    );
+                    stats.bailed += 1;
+                }
+            }
+        }
+
+        if plans.is_empty() {
+            if emit_logs {
+                log::info!(
+                    "crush chain-greedy round {}: 0/{} chain replacement(s) accepted in {:.2?} ({} failed or empty)",
+                    round + 1,
+                    selected_count,
+                    build_elapsed,
+                    failed_or_empty
+                );
+            }
+            break;
+        }
+
+        for plan in &plans {
+            resolved_signatures.insert(plan.candidate.signature.clone());
+        }
+
+        let resolved_count = plans.len();
+        let rewrite_start = Instant::now();
+        let pre_apply_next_id = next_id;
+        let next_graph = apply_replacement_frontier(&graph, &plans, &mut next_id)?;
+        assert!(
+            next_id >= pre_apply_next_id,
+            "crush fresh-id invariant: next_id rewound from {pre_apply_next_id} to {next_id}"
+        );
+        let rewrite_elapsed = rewrite_start.elapsed();
+        let after_quality = graph_quality(&next_graph);
+        graph = next_graph;
+        changed = true;
+        stats.resolved += resolved_count;
+        per_round_chain_counts.push(resolved_count);
+
+        if emit_logs {
+            if failed_or_empty > 0 {
+                log::info!(
+                    "crush chain-greedy round {}: accepted {}/{} chain replacement(s) in {:.2?}; {} failed or empty",
+                    round + 1,
+                    resolved_count,
+                    selected_count,
+                    build_elapsed,
+                    failed_or_empty
+                );
+            }
+            log::info!(
+                "crush chain-greedy round {}: resolved {}/{} chain replacement(s) in {:.2?}; rewrite+validate {:.2?}; total {:.2?}; ids minted {}..{}; quality {} -> {}",
+                round + 1,
+                resolved_count,
+                selected_count,
+                build_elapsed,
+                rewrite_elapsed,
+                round_start.elapsed(),
+                pre_apply_next_id,
+                next_id,
+                before_quality.summary(),
+                after_quality.summary()
+            );
+        }
+    }
+
+    if emit_logs && !per_round_chain_counts.is_empty() {
+        let summary = per_round_chain_counts
+            .iter()
+            .enumerate()
+            .map(|(idx, n)| format!("r{}={}", idx + 1, n))
+            .collect::<Vec<_>>()
+            .join(", ");
+        log::info!(
+            "crush chain-greedy per-round chains: [{}]; total resolved={}; next_id moved {} -> {}",
+            summary,
+            stats.resolved,
+            initial_next_id,
+            next_id
+        );
     }
 
     let final_gfa = if changed {
@@ -1474,7 +1759,10 @@ fn candidate_selection_priority(candidate: &BubbleCandidate, config: &Resolution
     }
     match candidate_selection_method(candidate, config) {
         ResolutionMethod::Allwave | ResolutionMethod::Sweepga | ResolutionMethod::Wfmash => 0,
-        ResolutionMethod::Poa | ResolutionMethod::Poasta | ResolutionMethod::StarBiwfa => 1,
+        ResolutionMethod::Poa
+        | ResolutionMethod::Poasta
+        | ResolutionMethod::StarBiwfa
+        | ResolutionMethod::ChainGreedy => 1,
         ResolutionMethod::Auto => unreachable!("auto candidate method should be resolved"),
         ResolutionMethod::Hierarchical => {
             unreachable!("hierarchical candidate method should be resolved")
@@ -1545,6 +1833,78 @@ fn format_candidate_length_summary(label: &str, candidates: &[BubbleCandidate]) 
         max_total,
         max_step_savings,
         max_root_span
+    )
+}
+
+fn format_chain_candidate_summary(label: &str, chains: &[ChainCandidate]) -> String {
+    if chains.is_empty() {
+        return format!("{label} none");
+    }
+
+    let source_bubbles = chains
+        .iter()
+        .map(|chain| chain.source_bubbles)
+        .collect::<Vec<_>>();
+    let root_spans = chains
+        .iter()
+        .map(|chain| chain.candidate.root_span)
+        .collect::<Vec<_>>();
+    let traversal_totals = chains
+        .iter()
+        .map(|chain| chain.candidate.traversal_stats.total_len)
+        .collect::<Vec<_>>();
+    let max_lengths = chains
+        .iter()
+        .map(|chain| chain.candidate.traversal_stats.max_len)
+        .collect::<Vec<_>>();
+    let median_lengths = chains
+        .iter()
+        .map(|chain| chain.candidate.traversal_stats.median_len)
+        .collect::<Vec<_>>();
+    let traversal_counts = chains
+        .iter()
+        .map(|chain| chain.candidate.traversal_stats.count)
+        .collect::<Vec<_>>();
+
+    let (bubble_median, bubble_p90, bubble_max) = distribution_triplet(&source_bubbles);
+    let (span_median, span_p90, span_max) = distribution_triplet(&root_spans);
+    let (total_median, total_p90, total_max) = distribution_triplet(&traversal_totals);
+    let (max_len_median, max_len_p90, max_len_max) = distribution_triplet(&max_lengths);
+    let (median_len_median, median_len_p90, median_len_max) = distribution_triplet(&median_lengths);
+    let (_, _, traversal_count_max) = distribution_triplet(&traversal_counts);
+
+    format!(
+        "{label} n={}, source-bubbles median/p90/max={}/{}/{}, root-span median/p90/max={}/{}/{}, total-len median/p90/max={}/{}/{}, max-len median/p90/max={}/{}/{}, median-len median/p90/max={}/{}/{}, traversals max={}",
+        chains.len(),
+        bubble_median,
+        bubble_p90,
+        bubble_max,
+        span_median,
+        span_p90,
+        span_max,
+        total_median,
+        total_p90,
+        total_max,
+        max_len_median,
+        max_len_p90,
+        max_len_max,
+        median_len_median,
+        median_len_p90,
+        median_len_max,
+        traversal_count_max
+    )
+}
+
+fn distribution_triplet(values: &[usize]) -> (usize, usize, usize) {
+    if values.is_empty() {
+        return (0, 0, 0);
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    (
+        sorted[sorted.len() / 2],
+        sorted[percentile_index(sorted.len(), 90, 100)],
+        *sorted.last().unwrap_or(&0),
     )
 }
 
@@ -1824,8 +2184,8 @@ fn discover_all_candidates(
             // regardless of size — this is the core "no fixed threshold for
             // sub-bubbles" promise from docs/crush-hierarchical.md. For all
             // other methods the filter applies at every level, as before.
-            let apply_min_len_filter = config.method != ResolutionMethod::Hierarchical
-                || site.level == 0;
+            let apply_min_len_filter =
+                config.method != ResolutionMethod::Hierarchical || site.level == 0;
             if apply_min_len_filter && traversal_stats.max_len < config.min_traversal_len {
                 return None;
             }
@@ -1912,6 +2272,285 @@ fn find_candidate_frontier(
         timings,
         leaves_seen,
     )
+}
+
+fn find_path_walk_chain_frontier(
+    graph: &Graph,
+    config: &ResolutionConfig,
+    seen: &FxHashSet<String>,
+    emit_logs: bool,
+) -> io::Result<ChainFrontier> {
+    let (all_discovered, sites_seen, timings) = discover_all_candidates(graph, config, emit_logs)?;
+    let discovered_candidates = all_discovered.len();
+    let candidates = all_discovered
+        .into_iter()
+        .filter(|d| !seen.contains(&d.candidate.signature))
+        .map(|d| d.candidate)
+        .collect::<Vec<_>>();
+    let minimal = reference_minimal_path_candidates(candidates);
+    let path_walk_candidates = reference_path_walk_candidates(minimal);
+    let path_walk_candidate_count = path_walk_candidates.len();
+    let chains = greedy_path_walk_chain_candidates(graph, config, path_walk_candidates)?
+        .into_iter()
+        .filter(|chain| !seen.contains(&chain.candidate.signature))
+        .collect::<Vec<_>>();
+    materialize_chain_frontier(
+        graph,
+        config,
+        chains,
+        sites_seen,
+        discovered_candidates,
+        path_walk_candidate_count,
+        emit_logs,
+        timings,
+    )
+}
+
+/// Keep only reference-minimal candidates using interval containment on the
+/// root path. This is deliberately not POVU-tree logic: a site is considered
+/// a container only if another discovered candidate has a strictly contained
+/// root-path interval.
+fn reference_minimal_path_candidates(candidates: Vec<BubbleCandidate>) -> Vec<BubbleCandidate> {
+    let mut contained = vec![false; candidates.len()];
+    for (idx, candidate) in candidates.iter().enumerate() {
+        contained[idx] = candidates.iter().enumerate().any(|(other_idx, other)| {
+            idx != other_idx
+                && candidate.root_start_step <= other.root_start_step
+                && candidate.root_end_step >= other.root_end_step
+                && (candidate.root_start_step < other.root_start_step
+                    || candidate.root_end_step > other.root_end_step)
+        });
+    }
+    candidates
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, candidate)| (!contained[idx]).then_some(candidate))
+        .collect()
+}
+
+/// Walk the root path in coordinate order and choose a non-nested stream of
+/// bubble candidates. Adjacent candidates are allowed to share a boundary step
+/// (`start == previous_end`), because the chain block will replace the outer
+/// range once.
+fn reference_path_walk_candidates(mut candidates: Vec<BubbleCandidate>) -> Vec<BubbleCandidate> {
+    candidates.sort_by(|a, b| {
+        a.root_start_step
+            .cmp(&b.root_start_step)
+            .then_with(|| a.root_end_step.cmp(&b.root_end_step))
+            .then_with(|| {
+                b.traversal_stats
+                    .total_len
+                    .cmp(&a.traversal_stats.total_len)
+            })
+            .then_with(|| a.signature.cmp(&b.signature))
+    });
+
+    let mut walked = Vec::new();
+    let mut last_end: Option<usize> = None;
+    for candidate in candidates {
+        if candidate.root_end_step < candidate.root_start_step {
+            continue;
+        }
+        if let Some(end) = last_end {
+            if candidate.root_start_step < end {
+                continue;
+            }
+        }
+        last_end = Some(candidate.root_end_step);
+        walked.push(candidate);
+    }
+    walked
+}
+
+fn greedy_path_walk_chain_candidates(
+    graph: &Graph,
+    config: &ResolutionConfig,
+    walk_candidates: Vec<BubbleCandidate>,
+) -> io::Result<Vec<ChainCandidate>> {
+    if walk_candidates.is_empty() || graph.paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let path_positions_by_path: Vec<Vec<usize>> = (0..graph.paths.len())
+        .map(|idx| path_positions(graph, idx))
+        .collect();
+    let path_step_indexes: Vec<FxHashMap<Step, Vec<usize>>> =
+        graph.paths.iter().map(path_step_index).collect();
+    let root_positions = &path_positions_by_path[0];
+    let target_bp = config.chain_greedy_target_bp.max(1);
+
+    let mut groups: Vec<Vec<BubbleCandidate>> = Vec::new();
+    let mut current: Vec<BubbleCandidate> = Vec::new();
+    for candidate in walk_candidates {
+        if current.is_empty() {
+            current.push(candidate);
+            continue;
+        }
+
+        let current_start = current[0].root_start_step;
+        let projected_span = candidate
+            .root_end_step
+            .checked_add(1)
+            .and_then(|end| root_positions.get(end).copied())
+            .zip(root_positions.get(current_start).copied())
+            .map(|(end_bp, start_bp)| end_bp.saturating_sub(start_bp))
+            .unwrap_or(usize::MAX);
+        if projected_span > target_bp {
+            groups.push(std::mem::take(&mut current));
+        }
+        current.push(candidate);
+    }
+    if !current.is_empty() {
+        groups.push(current);
+    }
+
+    let mut chains = Vec::new();
+    for group in groups {
+        if let Some(candidate) =
+            chain_candidate_from_group(graph, &group, &path_positions_by_path, &path_step_indexes)
+        {
+            chains.push(ChainCandidate {
+                candidate,
+                source_bubbles: group.len(),
+            });
+        }
+    }
+    Ok(chains)
+}
+
+fn chain_candidate_from_group(
+    graph: &Graph,
+    group: &[BubbleCandidate],
+    path_positions_by_path: &[Vec<usize>],
+    path_step_indexes: &[FxHashMap<Step, Vec<usize>>],
+) -> Option<BubbleCandidate> {
+    let first = group.first()?;
+    let last = group.last()?;
+    let root_path_idx = 0usize;
+    let root_path = graph.paths.get(root_path_idx)?;
+    let root_start_step = first.root_start_step;
+    let root_end_step = last.root_end_step;
+    let entry = *root_path.steps.get(root_start_step)?;
+    let exit = *root_path.steps.get(root_end_step)?;
+
+    let mut ranges = Vec::new();
+    for (path_idx, path_index) in path_step_indexes.iter().enumerate() {
+        if let Some((begin_step, end_step)) = unique_anchor_range(path_index, entry, exit) {
+            ranges.push(PathRange {
+                path_idx,
+                begin_step,
+                end_step,
+                sequence: Vec::new(),
+                extended_sequence: Vec::new(),
+                left_flank_bp: 0,
+                right_flank_bp: 0,
+            });
+        }
+    }
+    if ranges.len() < 2 {
+        return None;
+    }
+
+    let lengths = ranges
+        .iter()
+        .map(|range| {
+            let positions = &path_positions_by_path[range.path_idx];
+            positions[range.end_step] - positions[range.begin_step]
+        })
+        .collect::<Vec<_>>();
+    let traversal_stats = traversal_stats_from_lengths(lengths);
+    let total_steps = ranges
+        .iter()
+        .map(|range| range.end_step.saturating_sub(range.begin_step))
+        .sum::<usize>();
+    let mut unique_steps = FxHashSet::default();
+    for range in &ranges {
+        let path = &graph.paths[range.path_idx];
+        for step_idx in range.begin_step..range.end_step {
+            unique_steps.insert(path.steps[step_idx]);
+        }
+    }
+
+    let root_positions = &path_positions_by_path[root_path_idx];
+    let root_span = root_positions[root_end_step + 1] - root_positions[root_start_step];
+    let signature = candidate_signature(
+        graph,
+        root_path_idx,
+        root_positions,
+        root_start_step,
+        root_end_step,
+        &ranges,
+        path_positions_by_path,
+    );
+
+    Some(BubbleCandidate {
+        ranges,
+        signature,
+        root_start_step,
+        root_end_step,
+        root_span,
+        total_steps,
+        unique_steps: unique_steps.len(),
+        traversal_stats,
+        level: 0,
+    })
+}
+
+fn materialize_chain_frontier(
+    graph: &Graph,
+    config: &ResolutionConfig,
+    chains: Vec<ChainCandidate>,
+    sites_seen: usize,
+    discovered_candidates: usize,
+    path_walk_candidates: usize,
+    emit_logs: bool,
+    timings: RoundDiscoveryTimings,
+) -> io::Result<ChainFrontier> {
+    let select_start = Instant::now();
+    let chains_formed = chains.len();
+    let mut selected = Vec::new();
+    let mut occupied_by_path: Vec<Vec<(usize, usize)>> = vec![Vec::new(); graph.paths.len()];
+    for chain in chains {
+        if candidate_conflicts_with_occupied(&occupied_by_path, &chain.candidate) {
+            continue;
+        }
+        mark_candidate_occupied(&mut occupied_by_path, &chain.candidate);
+        selected.push(chain);
+    }
+    let selected_before_materialize = selected.len();
+    let materialize_start = Instant::now();
+    selected = selected
+        .into_par_iter()
+        .filter_map(|mut chain| {
+            materialize_candidate_sequences(graph, &mut chain.candidate, config).then_some(chain)
+        })
+        .collect();
+    let materialize_elapsed = materialize_start.elapsed();
+    let select_elapsed = select_start.elapsed();
+
+    if emit_logs {
+        log::info!(
+            "crush chain-greedy discovery detail: render {:.2?}, povu-parse {:.2?}, povu-decompose {:.2?}, id-map {:.2?}, path-index {:.2?}, candidate-build {:.2?}, chain-select+materialize {:.2?} ({} formed -> {} non-overlap -> {} selected, materialize {:.2?})",
+            timings.render,
+            timings.povu_parse,
+            timings.povu_decompose,
+            timings.id_map,
+            timings.path_index,
+            timings.candidate_build,
+            select_elapsed,
+            chains_formed,
+            selected_before_materialize,
+            selected.len(),
+            materialize_elapsed
+        );
+    }
+
+    Ok(ChainFrontier {
+        selected,
+        sites_seen,
+        discovered_candidates,
+        path_walk_candidates,
+        chains_formed,
+    })
 }
 
 /// Sort + non-overlap-select + materialize sequences. Shared by the legacy
@@ -2343,11 +2982,7 @@ fn materialize_candidate_sequences(
 /// `range.extended_sequence`; `left_flank_bp` / `right_flank_bp` track the
 /// per-side flank length so the aligner output graph can be clipped back to
 /// just the interior before the path-step substitution.
-fn materialize_flanked_sequences(
-    graph: &Graph,
-    candidate: &mut BubbleCandidate,
-    flank_bp: usize,
-) {
+fn materialize_flanked_sequences(graph: &Graph, candidate: &mut BubbleCandidate, flank_bp: usize) {
     for range in &mut candidate.ranges {
         let path = &graph.paths[range.path_idx];
         let left_flank = collect_flank_left(graph, path, range.begin_step, flank_bp);
@@ -2533,10 +3168,8 @@ fn apply_replacement_frontier(
         .map(|plan| plan.replacement.clone())
         .collect::<Vec<_>>();
     if log::log_enabled!(log::Level::Debug) {
-        let total_replacement_segments: usize = replacement_graphs
-            .iter()
-            .map(|g| g.segments.len())
-            .sum();
+        let total_replacement_segments: usize =
+            replacement_graphs.iter().map(|g| g.segments.len()).sum();
         let total_replacement_bp: usize = replacement_graphs
             .iter()
             .map(|g| g.segments.iter().map(|s| s.seq.len()).sum::<usize>())
@@ -2637,6 +3270,7 @@ fn build_replacement_with_method_inner(
         }
         ResolutionMethod::Poa => build_poa_replacement(candidate, config),
         ResolutionMethod::Poasta => build_poasta_replacement(candidate, config),
+        ResolutionMethod::ChainGreedy => build_chain_greedy_replacement(candidate, config),
         ResolutionMethod::StarBiwfa => build_biwfa_inmemory_replacement(candidate, config),
         ResolutionMethod::Allwave => build_allwave_seqwish_replacement(candidate, config),
         ResolutionMethod::Sweepga => build_sweepga_seqwish_replacement(candidate, config),
@@ -2692,7 +3326,9 @@ fn alternate_replacement_method(method: ResolutionMethod) -> Option<ResolutionMe
         ResolutionMethod::Allwave => Some(ResolutionMethod::Poasta),
         ResolutionMethod::Poa => Some(ResolutionMethod::Poasta),
         ResolutionMethod::StarBiwfa => Some(ResolutionMethod::Poasta),
-        ResolutionMethod::Auto | ResolutionMethod::Hierarchical => None,
+        ResolutionMethod::Auto | ResolutionMethod::Hierarchical | ResolutionMethod::ChainGreedy => {
+            None
+        }
     }
 }
 
@@ -3069,11 +3705,7 @@ fn seqwish_replacement_config(
     // the scaffold-mass floor so the requested semantics survive if the
     // filter is ever re-enabled downstream.
     let (num_mappings, scaffold_filter, scaffold_mass) = if config.sweepga_no_filter {
-        (
-            "many:many".to_string(),
-            "many:many".to_string(),
-            0u64,
-        )
+        ("many:many".to_string(), "many:many".to_string(), 0u64)
     } else {
         (
             config.replacement_num_mappings.clone(),
@@ -3487,6 +4119,13 @@ fn build_poa_replacement(
 
     validate_replacement_paths(&replacement, candidate, "SPOA")?;
     Ok(replacement)
+}
+
+fn build_chain_greedy_replacement(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+) -> io::Result<Graph> {
+    build_poasta_replacement(candidate, config)
 }
 
 fn build_poasta_replacement(
@@ -3985,11 +4624,11 @@ fn clip_replacement_to_interior(
         let pieces = replacement_path_pieces(&replacement, path)?;
         let raw_len: usize = pieces.iter().map(|p| p.end - p.start).sum();
         let interior_start = range.left_flank_bp;
-        let interior_end = raw_len
-            .checked_sub(range.right_flank_bp)
-            .ok_or_else(|| io::Error::other(
+        let interior_end = raw_len.checked_sub(range.right_flank_bp).ok_or_else(|| {
+            io::Error::other(
                 "clip_replacement_to_interior: right flank exceeds replacement path length",
-            ))?;
+            )
+        })?;
         if interior_start > interior_end {
             return Err(io::Error::other(
                 "clip_replacement_to_interior: interior bounds inverted",
@@ -4047,7 +4686,9 @@ fn replacement_path_pieces(graph: &Graph, path: &Path) -> io::Result<Vec<Replace
     let mut pieces = Vec::with_capacity(path.steps.len());
     for step in &path.steps {
         let segment = graph.segments.get(step.node).ok_or_else(|| {
-            io::Error::other("clip_replacement_to_interior: replacement path references an out-of-range segment")
+            io::Error::other(
+                "clip_replacement_to_interior: replacement path references an out-of-range segment",
+            )
         })?;
         let len = segment.seq.len();
         let start = offset;
@@ -4092,7 +4733,10 @@ fn slice_replacement_segment(
         segment.seq.clone()
     };
     let slice = oriented[local_start..local_end].to_vec();
-    let id = format!("clip_{}_{}_{}_{}", source_node, rev as u8, local_start, local_end);
+    let id = format!(
+        "clip_{}_{}_{}_{}",
+        source_node, rev as u8, local_start, local_end
+    );
     let idx = output_segments.len();
     output_segments.push(Segment { id, seq: slice });
     node_by_slice.insert(key, idx);
@@ -5001,8 +5645,11 @@ P\tp1\t1+,3+,4+\t*
     #[test]
     fn auto_routing_boundaries_are_exclusive_upper_bounds() {
         let config = ResolutionConfig::default();
-        let at_spoa_boundary =
-            routing_candidate_with_stats(traversal_stats_with(config.auto_spoa_max_traversal_len, 2_000, 10));
+        let at_spoa_boundary = routing_candidate_with_stats(traversal_stats_with(
+            config.auto_spoa_max_traversal_len,
+            2_000,
+            10,
+        ));
         assert_eq!(
             auto_replacement_method(&at_spoa_boundary, &config),
             ResolutionMethod::Poasta,
@@ -5743,6 +6390,48 @@ P\tright_alt\t1+,2+,4+,6+,7+\t*
     }
 
     #[test]
+    fn chain_greedy_groups_adjacent_reference_bubbles() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tT
+S\t5\tA
+S\t6\tGGGG
+S\t7\tT
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t4\t+\t0M
+L\t1\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+L\t4\t+\t5\t+\t0M
+L\t5\t+\t7\t+\t0M
+L\t4\t+\t6\t+\t0M
+L\t6\t+\t7\t+\t0M
+P\tref\t1+,2+,4+,5+,7+\t*
+P\tleft_alt\t1+,3+,4+,5+,7+\t*
+P\tright_alt\t1+,2+,4+,6+,7+\t*
+";
+        let graph = parse_gfa(gfa).unwrap();
+        let config = ResolutionConfig {
+            max_iterations: 1,
+            method: ResolutionMethod::ChainGreedy,
+            chain_greedy_target_bp: 100,
+            ..ResolutionConfig::default()
+        };
+        let frontier =
+            find_path_walk_chain_frontier(&graph, &config, &FxHashSet::default(), false).unwrap();
+        assert_eq!(frontier.selected.len(), 1, "{:?}", frontier);
+        assert_eq!(frontier.selected[0].source_bubbles, 2);
+
+        let before = seq_map(gfa);
+        let resolved = resolve_gfa_bubbles(gfa, &config).unwrap();
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert_eq!(resolved.stats.resolved, 1, "{:?}", resolved.stats);
+        assert_eq!(resolved.stats.bailed, 0, "{:?}", resolved.stats);
+    }
+
+    #[test]
     fn direct_poa_processes_candidate_regardless_of_max_traversal_len() {
         let gfa = "\
 H\tVN:Z:1.0
@@ -5979,12 +6668,13 @@ P\tp\t1+,2+\t*
         // Routing modes are resolved upstream; there is no concrete aligner
         // here to pair with, so the retry path must opt out cleanly rather
         // than recurse on Auto/Hierarchical.
+        assert_eq!(alternate_replacement_method(ResolutionMethod::Auto), None);
         assert_eq!(
-            alternate_replacement_method(ResolutionMethod::Auto),
+            alternate_replacement_method(ResolutionMethod::Hierarchical),
             None
         );
         assert_eq!(
-            alternate_replacement_method(ResolutionMethod::Hierarchical),
+            alternate_replacement_method(ResolutionMethod::ChainGreedy),
             None
         );
 

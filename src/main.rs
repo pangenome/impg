@@ -2754,13 +2754,24 @@ fn parse_crush_stage(
                 config.replacement_flank_bp =
                     parse_usize_size_engine_param(raw, &param.key, &param.value)?;
             }
+            "chain-target-bp"
+            | "chain-target-len"
+            | "chain-target-length"
+            | "chain-target-size"
+            | "target-chain-bp"
+            | "chain-size"
+            | "chain-bp"
+            | "greedy-chain-target-bp" => {
+                config.chain_greedy_target_bp =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
             "method" => {
                 let Some(method) = impg::resolution::ResolutionMethod::parse_name(&param.value)
                 else {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, or hierarchical)",
+                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, or chain-greedy)",
                             raw, param.value
                         ),
                     ));
@@ -2873,6 +2884,15 @@ fn parse_crush_stage(
             io::ErrorKind::InvalidInput,
             format!(
                 "Invalid --gfa-engine '{}': replacement minimum identity must be between 0 and 1",
+                raw
+            ),
+        ));
+    }
+    if config.chain_greedy_target_bp == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': chain-greedy target bp must be > 0",
                 raw
             ),
         ));
@@ -4968,7 +4988,7 @@ GFA engine shorthand:
         #[clap(long, value_parser = parse_usize_size, default_value = "10k")]
         polish_max_traversals: usize,
 
-        /// Resolver method: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, or hierarchical
+        /// Resolver method: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, or chain-greedy
         #[clap(long, value_parser, default_value = "auto")]
         method: String,
 
@@ -5086,6 +5106,19 @@ GFA engine shorthand:
             default_value = "0"
         )]
         replacement_flank_bp: usize,
+
+        /// Target root-path span for --method chain-greedy chain blocks
+        #[clap(
+            long = "chain-target-bp",
+            alias = "chain-target-len",
+            alias = "chain-target-size",
+            alias = "target-chain-bp",
+            alias = "chain-size",
+            alias = "chain-bp",
+            value_parser = parse_usize_size,
+            default_value = "10k"
+        )]
+        chain_greedy_target_bp: usize,
 
         #[clap(flatten)]
         common: CommonOpts,
@@ -7951,6 +7984,7 @@ fn run() -> io::Result<()> {
             sweepga_no_filter,
             sweepga_sparse_pairs,
             replacement_flank_bp,
+            chain_greedy_target_bp,
             common,
         } => {
             initialize_threads_and_log(&common);
@@ -7975,7 +8009,7 @@ fn run() -> io::Result<()> {
             let Some(method) = impg::resolution::ResolutionMethod::parse_name(&method) else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "--method must be one of: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical",
+                    "--method must be one of: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-greedy",
                 ));
             };
             let Some(polish_method) =
@@ -8021,6 +8055,12 @@ fn run() -> io::Result<()> {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "--replacement-min-identity/--min-identity must be between 0 and 1",
+                ));
+            }
+            if chain_greedy_target_bp == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--chain-target-bp must be > 0",
                 ));
             }
             let replacement_num_mappings = normalize_filter_mode_value(&replacement_num_mappings)
@@ -8082,6 +8122,7 @@ fn run() -> io::Result<()> {
                 sweepga_no_filter,
                 sweepga_sparse_pairs,
                 replacement_flank_bp,
+                chain_greedy_target_bp,
                 scoring_params: poa_scoring,
                 ..Default::default()
             };
@@ -12824,6 +12865,39 @@ mod tests {
                 assert_eq!(crush.method, impg::resolution::ResolutionMethod::Sweepga);
                 assert_eq!(crush.min_traversal_len, 20_000);
                 assert_eq!(crush.max_traversal_len, 10_000);
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_accepts_chain_greedy_crush_params() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush,method=chain-greedy,chain-target-bp=8k,max-rounds=3",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                let crush = parsed.crush_config.unwrap();
+                assert_eq!(
+                    crush.method,
+                    impg::resolution::ResolutionMethod::ChainGreedy
+                );
+                assert_eq!(crush.chain_greedy_target_bp, 8_000);
+                assert_eq!(crush.max_iterations, 3);
             }
             _ => panic!("expected query command"),
         }
