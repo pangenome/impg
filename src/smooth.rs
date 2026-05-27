@@ -10,7 +10,7 @@ use crate::graph::{
 use bitvec::{bitvec, prelude::BitVec};
 use log::info;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::io;
+use std::{collections::BTreeSet, io};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -38,6 +38,19 @@ pub struct SmoothConfig {
     pub temp_dir: Option<String>,
     /// Skip the initial unchop+sort step (use when input is already unchopped and sorted).
     pub pre_sorted: bool,
+    /// Source used to place smoothing blocks.
+    pub block_source: SmoothBlockSource,
+    /// Optional POVU reference path hints used by flubble-guided block placement.
+    pub flubble_reference_names: Vec<String>,
+}
+
+/// Block placement strategy for smoothing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SmoothBlockSource {
+    /// smoothxg-style path-overlap decomposition.
+    PathOverlap,
+    /// POVU flubble extents (`level >= 1`) plus passthrough gap blocks.
+    Flubble,
 }
 
 impl SmoothConfig {
@@ -55,6 +68,8 @@ impl SmoothConfig {
             num_threads: 4,
             temp_dir: None,
             pre_sorted: false,
+            block_source: SmoothBlockSource::PathOverlap,
+            flubble_reference_names: Vec::new(),
         }
     }
 }
@@ -98,8 +113,29 @@ struct PathRange {
     length: usize,   // total base pairs
 }
 
+#[derive(Clone)]
 struct Block {
     path_ranges: Vec<PathRange>,
+    source: BlockSource,
+}
+
+#[derive(Clone)]
+enum BlockSource {
+    PathOverlap,
+    Flubble {
+        site_id: String,
+        level: usize,
+        reference_start_step: usize,
+        reference_end_step: usize,
+        is_leaf: bool,
+    },
+    Gap,
+}
+
+impl BlockSource {
+    fn is_gap(&self) -> bool {
+        matches!(self, Self::Gap)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -228,13 +264,33 @@ fn smooth_gfa_pass(
     let path_positions = compute_path_positions(&graph);
 
     // Step 6: Block decomposition
-    let mut blocks = smoothable_blocks(
-        &graph,
-        &node_step_index,
-        max_block_weight,
-        target_poa_length,
-    );
-    info!("[smooth] Decomposed into {} blocks", blocks.len());
+    let mut blocks = match config.block_source {
+        SmoothBlockSource::PathOverlap => {
+            let blocks = smoothable_blocks(
+                &graph,
+                &node_step_index,
+                max_block_weight,
+                target_poa_length,
+            );
+            info!(
+                "[smooth] Decomposed into {} path-overlap blocks",
+                blocks.len()
+            );
+            blocks
+        }
+        SmoothBlockSource::Flubble => {
+            let plan = flubble_guided_blocks(&graph, &path_positions, config)?;
+            info!(
+                "[smooth] POVU flubble-guided placement: {} site(s), {} level>=1 candidate(s), {} selected flubble-block(s), {} overlap-skipped, {} gap block(s)",
+                plan.povu_sites,
+                plan.level_ge_1_sites,
+                plan.selected_flubble_blocks,
+                plan.overlap_skipped_sites,
+                plan.gap_blocks
+            );
+            plan.blocks
+        }
+    };
 
     // Step 7: Break long blocks
     break_blocks(&mut blocks, &graph, max_poa_length);
@@ -243,6 +299,20 @@ fn smooth_gfa_pass(
         blocks.len(),
         blocks.iter().map(|b| b.path_ranges.len()).sum::<usize>()
     );
+    if config.block_source == SmoothBlockSource::Flubble {
+        let processing_flubble_blocks = blocks
+            .iter()
+            .filter(|block| matches!(block.source, BlockSource::Flubble { .. }))
+            .count();
+        let processing_gap_blocks = blocks
+            .iter()
+            .filter(|block| matches!(block.source, BlockSource::Gap))
+            .count();
+        info!(
+            "[smooth] Processing {} flubble block(s) and {} gap block(s) after size splitting",
+            processing_flubble_blocks, processing_gap_blocks,
+        );
+    }
 
     // Step 8: Per-block SPOA smoothing (parallelized).
     //
@@ -269,7 +339,13 @@ fn smooth_gfa_pass(
             .par_iter()
             .enumerate()
             .filter_map(|(i, block)| {
-                let smooth_result = smooth_block(block, &graph, config, &path_positions);
+                let input_bp = block_input_bp(block);
+                let used_passthrough = block.source.is_gap();
+                let smooth_result = if used_passthrough {
+                    Ok(String::new())
+                } else {
+                    smooth_block(block, &graph, config, &path_positions)
+                };
                 let needs_passthrough = match &smooth_result {
                     Ok(s) if s.is_empty() => true,
                     Ok(_) => false,
@@ -280,11 +356,15 @@ fn smooth_gfa_pass(
                 };
                 if !needs_passthrough {
                     n_smoothed.fetch_add(1, Ordering::Relaxed);
+                    if let Ok(s) = &smooth_result {
+                        log_flubble_block_compression(i, block, input_bp, gfa_segment_bp(s), false);
+                    }
                     return smooth_result.ok();
                 }
                 match passthrough_block_gfa(block, &graph, &path_positions) {
                     Ok(s) if !s.is_empty() => {
                         n_passthrough.fetch_add(1, Ordering::Relaxed);
+                        log_flubble_block_compression(i, block, input_bp, gfa_segment_bp(&s), true);
                         Some(s)
                     }
                     Ok(_) => None,
@@ -705,8 +785,20 @@ fn compute_range_length(
 
 /// Split path_ranges into separate blocks for disconnected graph components.
 fn topological_split(path_ranges: Vec<PathRange>, graph: &SmoothGraph) -> Vec<Block> {
+    topological_split_with_source(path_ranges, graph, BlockSource::PathOverlap)
+}
+
+/// Split path_ranges into separate blocks for disconnected graph components.
+fn topological_split_with_source(
+    path_ranges: Vec<PathRange>,
+    graph: &SmoothGraph,
+    source: BlockSource,
+) -> Vec<Block> {
     if path_ranges.len() <= 1 {
-        return vec![Block { path_ranges }];
+        return vec![Block {
+            path_ranges,
+            source,
+        }];
     }
 
     // Collect all nodes referenced in path_ranges
@@ -720,7 +812,10 @@ fn topological_split(path_ranges: Vec<PathRange>, graph: &SmoothGraph) -> Vec<Bl
 
     let nodes: Vec<usize> = node_set.into_iter().collect();
     if nodes.len() <= 1 {
-        return vec![Block { path_ranges }];
+        return vec![Block {
+            path_ranges,
+            source,
+        }];
     }
 
     let node_to_local: FxHashMap<usize, usize> =
@@ -754,7 +849,10 @@ fn topological_split(path_ranges: Vec<PathRange>, graph: &SmoothGraph) -> Vec<Bl
     if component_ranges.len() == 1 {
         return component_ranges
             .into_values()
-            .map(|path_ranges| Block { path_ranges })
+            .map(|path_ranges| Block {
+                path_ranges,
+                source: source.clone(),
+            })
             .collect();
     }
 
@@ -762,8 +860,332 @@ fn topological_split(path_ranges: Vec<PathRange>, graph: &SmoothGraph) -> Vec<Bl
     component_ranges
         .into_values()
         .filter(|ranges| !ranges.is_empty())
-        .map(|path_ranges| Block { path_ranges })
+        .map(|path_ranges| Block {
+            path_ranges,
+            source: source.clone(),
+        })
         .collect()
+}
+
+struct FlubbleGuidedBlockPlan {
+    blocks: Vec<Block>,
+    povu_sites: usize,
+    level_ge_1_sites: usize,
+    selected_flubble_blocks: usize,
+    overlap_skipped_sites: usize,
+    gap_blocks: usize,
+}
+
+#[derive(Clone)]
+struct FlubbleBlockCandidate {
+    source: BlockSource,
+    path_ranges: Vec<PathRange>,
+    level: usize,
+    reference_start_step: usize,
+    reference_end_step: usize,
+    reference_span_bp: usize,
+}
+
+fn flubble_guided_blocks(
+    graph: &SmoothGraph,
+    path_positions: &[Vec<usize>],
+    config: &SmoothConfig,
+) -> io::Result<FlubbleGuidedBlockPlan> {
+    if graph.paths.is_empty() {
+        return Ok(FlubbleGuidedBlockPlan {
+            blocks: Vec::new(),
+            povu_sites: 0,
+            level_ge_1_sites: 0,
+            selected_flubble_blocks: 0,
+            overlap_skipped_sites: 0,
+            gap_blocks: 0,
+        });
+    }
+
+    let rendered = render_smooth_graph_gfa(graph)?;
+    let native = povu::NativeGfa::parse(&rendered).map_err(povu_to_io_error)?;
+    let reference_names = if config.flubble_reference_names.is_empty() {
+        vec![graph.paths[0].name.clone()]
+    } else {
+        config.flubble_reference_names.clone()
+    };
+    let decomposition = match native.decompose_flubbles(&reference_names) {
+        Ok(decomposition) => decomposition,
+        Err(err) if !config.flubble_reference_names.is_empty() => {
+            let fallback_reference_names = vec![graph.paths[0].name.clone()];
+            log::warn!(
+                "[smooth] POVU flubble reference hint(s) {:?} did not match after graph transforms ({}); falling back to '{}'",
+                config.flubble_reference_names,
+                err,
+                fallback_reference_names[0],
+            );
+            native
+                .decompose_flubbles(&fallback_reference_names)
+                .map_err(povu_to_io_error)?
+        }
+        Err(err) => return Err(povu_to_io_error(err)),
+    };
+    let root_positions = path_positions
+        .get(decomposition.reference_path_index)
+        .ok_or_else(|| {
+            io::Error::other("POVU reference path index is outside smooth graph paths")
+        })?;
+
+    let id_to_idx = (0..graph.nodes.len())
+        .map(|idx| ((idx + 1).to_string(), idx))
+        .collect::<FxHashMap<_, _>>();
+    let path_step_indexes = graph
+        .paths
+        .iter()
+        .map(smooth_path_step_index)
+        .collect::<Vec<_>>();
+
+    let mut candidates = Vec::new();
+    let mut level_ge_1_sites = 0usize;
+    for site in &decomposition.sites {
+        if site.level < 1 {
+            continue;
+        }
+        level_ge_1_sites += 1;
+        let Some(entry) = smooth_step_from_povu(&id_to_idx, &site.start) else {
+            continue;
+        };
+        let Some(exit) = smooth_step_from_povu(&id_to_idx, &site.end) else {
+            continue;
+        };
+        let mut path_ranges = Vec::new();
+        for (path_idx, path_index) in path_step_indexes.iter().enumerate() {
+            if let Some((begin_step, end_step)) =
+                unique_smooth_anchor_range(path_index, entry, exit)
+            {
+                let length =
+                    path_positions[path_idx][end_step] - path_positions[path_idx][begin_step];
+                if length > 0 {
+                    path_ranges.push(PathRange {
+                        path_idx,
+                        begin_step,
+                        end_step,
+                        length,
+                    });
+                }
+            }
+        }
+        if path_ranges.len() < 2 {
+            continue;
+        }
+        path_ranges.sort_by(|a, b| b.length.cmp(&a.length));
+        let reference_span_bp = if site.reference_end_step + 1 < root_positions.len()
+            && site.reference_start_step < root_positions.len()
+        {
+            root_positions[site.reference_end_step + 1] - root_positions[site.reference_start_step]
+        } else {
+            0
+        };
+        candidates.push(FlubbleBlockCandidate {
+            source: BlockSource::Flubble {
+                site_id: site.id.clone(),
+                level: site.level,
+                reference_start_step: site.reference_start_step,
+                reference_end_step: site.reference_end_step,
+                is_leaf: site.is_leaf,
+            },
+            path_ranges,
+            level: site.level,
+            reference_start_step: site.reference_start_step,
+            reference_end_step: site.reference_end_step,
+            reference_span_bp,
+        });
+    }
+
+    // Prefer the most local natural boundaries first. If a parent and child
+    // flubble overlap, this keeps the deeper child and leaves the parent span to
+    // gap passthrough around it, avoiding duplicate lacing ranges.
+    candidates.sort_by_key(|candidate| {
+        (
+            std::cmp::Reverse(candidate.level),
+            candidate.reference_span_bp,
+            candidate.reference_start_step,
+            candidate.reference_end_step,
+        )
+    });
+
+    let mut claimed_steps: Vec<BitVec> = graph
+        .paths
+        .iter()
+        .map(|path| bitvec![0; path.steps.len()])
+        .collect();
+    let mut blocks = Vec::new();
+    let mut selected_flubble_blocks = 0usize;
+    let mut overlap_skipped_sites = 0usize;
+
+    for candidate in candidates {
+        if ranges_overlap_claimed(&candidate.path_ranges, &claimed_steps) {
+            overlap_skipped_sites += 1;
+            continue;
+        }
+        mark_claimed_ranges(&candidate.path_ranges, &mut claimed_steps);
+        let candidate_blocks =
+            topological_split_with_source(candidate.path_ranges, graph, candidate.source);
+        selected_flubble_blocks += candidate_blocks.len();
+        blocks.extend(candidate_blocks);
+    }
+
+    let gap_ranges = unclaimed_path_ranges(graph, &claimed_steps);
+    let mut gap_blocks = topological_split_with_source(gap_ranges, graph, BlockSource::Gap);
+    let gap_block_count = gap_blocks.len();
+    blocks.append(&mut gap_blocks);
+
+    Ok(FlubbleGuidedBlockPlan {
+        blocks,
+        povu_sites: decomposition.sites.len(),
+        level_ge_1_sites,
+        selected_flubble_blocks,
+        overlap_skipped_sites,
+        gap_blocks: gap_block_count,
+    })
+}
+
+fn render_smooth_graph_gfa(graph: &SmoothGraph) -> io::Result<String> {
+    let mut out = String::new();
+    out.push_str("H\tVN:Z:1.0\n");
+    for (idx, seq) in graph.nodes.iter().enumerate() {
+        let seq = std::str::from_utf8(seq)
+            .map_err(|err| io::Error::other(format!("non-UTF8 node sequence: {}", err)))?;
+        out.push_str(&format!("S\t{}\t{}\n", idx + 1, seq));
+    }
+
+    let mut edges = BTreeSet::new();
+    for &(from_idx, from_rev, to_idx, to_rev) in &graph.edges {
+        edges.insert((from_idx, from_rev, to_idx, to_rev));
+    }
+    for path in &graph.paths {
+        for pair in path.steps.windows(2) {
+            edges.insert((pair[0].0, pair[0].1, pair[1].0, pair[1].1));
+        }
+    }
+    for (from_idx, from_rev, to_idx, to_rev) in edges {
+        out.push_str(&format!(
+            "L\t{}\t{}\t{}\t{}\t0M\n",
+            from_idx + 1,
+            if from_rev { "-" } else { "+" },
+            to_idx + 1,
+            if to_rev { "-" } else { "+" },
+        ));
+    }
+
+    for path in &graph.paths {
+        let steps = path
+            .steps
+            .iter()
+            .map(|&(node_idx, is_reverse)| {
+                format!("{}{}", node_idx + 1, if is_reverse { "-" } else { "+" })
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        if !steps.is_empty() {
+            out.push_str(&format!("P\t{}\t{}\t*\n", path.name, steps));
+        }
+    }
+    Ok(out)
+}
+
+fn povu_to_io_error(err: povu::Error) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("POVU flubble decomposition failed: {err}"),
+    )
+}
+
+fn smooth_path_step_index(path: &PathData) -> FxHashMap<(usize, bool), Vec<usize>> {
+    let mut index: FxHashMap<(usize, bool), Vec<usize>> = FxHashMap::default();
+    for (idx, &step) in path.steps.iter().enumerate() {
+        index.entry(step).or_default().push(idx);
+    }
+    index
+}
+
+fn smooth_step_from_povu(
+    id_to_idx: &FxHashMap<String, usize>,
+    step: &povu::native_gfa::Step,
+) -> Option<(usize, bool)> {
+    let node_idx = *id_to_idx.get(&step.segment)?;
+    Some((
+        node_idx,
+        matches!(step.strand, povu::native_gfa::Strand::Reverse),
+    ))
+}
+
+fn unique_smooth_anchor_range(
+    path_index: &FxHashMap<(usize, bool), Vec<usize>>,
+    entry: (usize, bool),
+    exit: (usize, bool),
+) -> Option<(usize, usize)> {
+    let starts = path_index.get(&entry)?;
+    let exits = path_index.get(&exit)?;
+    let mut found = None;
+    for &i in starts {
+        let exit_pos = exits.partition_point(|&j| j <= i);
+        if exit_pos >= exits.len() {
+            continue;
+        }
+        let j = exits[exit_pos];
+        if found.is_some() {
+            return None;
+        }
+        found = Some((i, j + 1));
+    }
+    found
+}
+
+fn ranges_overlap_claimed(path_ranges: &[PathRange], claimed_steps: &[BitVec]) -> bool {
+    path_ranges.iter().any(|range| {
+        (range.begin_step..range.end_step).any(|step_idx| claimed_steps[range.path_idx][step_idx])
+    })
+}
+
+fn mark_claimed_ranges(path_ranges: &[PathRange], claimed_steps: &mut [BitVec]) {
+    for range in path_ranges {
+        for step_idx in range.begin_step..range.end_step {
+            claimed_steps[range.path_idx].set(step_idx, true);
+        }
+    }
+}
+
+fn unclaimed_path_ranges(graph: &SmoothGraph, claimed_steps: &[BitVec]) -> Vec<PathRange> {
+    let mut ranges = Vec::new();
+    for (path_idx, path) in graph.paths.iter().enumerate() {
+        let mut begin = None;
+        for step_idx in 0..path.steps.len() {
+            if !claimed_steps[path_idx][step_idx] {
+                begin.get_or_insert(step_idx);
+                continue;
+            }
+            if let Some(start) = begin.take() {
+                let length = compute_range_length(graph, path_idx, start, step_idx);
+                if length > 0 {
+                    ranges.push(PathRange {
+                        path_idx,
+                        begin_step: start,
+                        end_step: step_idx,
+                        length,
+                    });
+                }
+            }
+        }
+        if let Some(start) = begin.take() {
+            let length = compute_range_length(graph, path_idx, start, path.steps.len());
+            if length > 0 {
+                ranges.push(PathRange {
+                    path_idx,
+                    begin_step: start,
+                    end_step: path.steps.len(),
+                    length,
+                });
+            }
+        }
+    }
+    ranges.sort_by(|a, b| b.length.cmp(&a.length));
+    ranges
 }
 
 // ---------------------------------------------------------------------------
@@ -774,6 +1196,11 @@ fn break_blocks(blocks: &mut Vec<Block>, graph: &SmoothGraph, max_poa_length: us
     let mut new_blocks: Vec<Block> = Vec::with_capacity(blocks.len());
 
     for block in blocks.drain(..) {
+        if block.source.is_gap() {
+            new_blocks.push(block);
+            continue;
+        }
+
         // Check if any path_range exceeds max_poa_length
         let needs_break = block.path_ranges.iter().any(|r| r.length > max_poa_length);
 
@@ -837,6 +1264,7 @@ fn break_blocks(blocks: &mut Vec<Block>, graph: &SmoothGraph, max_poa_length: us
         new_ranges.sort_by(|a, b| b.length.cmp(&a.length));
         new_blocks.push(Block {
             path_ranges: new_ranges,
+            source: block.source,
         });
     }
 
@@ -1050,6 +1478,59 @@ fn passthrough_block_gfa(
     }
 
     Ok(out)
+}
+
+fn block_input_bp(block: &Block) -> usize {
+    block.path_ranges.iter().map(|range| range.length).sum()
+}
+
+fn gfa_segment_bp(gfa: &str) -> usize {
+    gfa.lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            if fields.next()? != "S" {
+                return None;
+            }
+            Some(fields.nth(1)?.len())
+        })
+        .sum()
+}
+
+fn log_flubble_block_compression(
+    block_idx: usize,
+    block: &Block,
+    input_bp: usize,
+    output_bp: usize,
+    passthrough: bool,
+) {
+    if let BlockSource::Flubble {
+        site_id,
+        level,
+        reference_start_step,
+        reference_end_step,
+        is_leaf,
+    } = &block.source
+    {
+        let ratio = if input_bp > 0 {
+            output_bp as f64 / input_bp as f64
+        } else {
+            0.0
+        };
+        info!(
+            "[smooth] flubble-block {} site={} level={} leaf={} ref_steps={}-{} ranges={} input_bp={} output_bp={} ratio={:.4} mode={}",
+            block_idx,
+            site_id,
+            level,
+            is_leaf,
+            reference_start_step,
+            reference_end_step,
+            block.path_ranges.len(),
+            input_bp,
+            output_bp,
+            ratio,
+            if passthrough { "passthrough" } else { "poa" },
+        );
+    }
 }
 
 /// Smooth a single block: extract sequences → SPOA → GFA.
@@ -1535,6 +2016,7 @@ P\tchr2:200-212\t1+,2+,3+\t*
                     length: 12,
                 },
             ],
+            source: BlockSource::PathOverlap,
         };
         let out =
             passthrough_block_gfa(&block, &graph, &path_positions).expect("passthrough failed");
@@ -1562,5 +2044,113 @@ P\tchr2:200-212\t1+,2+,3+\t*
         // At least two L-lines: edges 1→2 (both paths) and 2→3 (chr2 only).
         let l_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("L\t")).collect();
         assert!(l_lines.len() >= 2, "edges: {:?}", l_lines);
+    }
+
+    #[test]
+    fn test_flubble_guided_blocks_use_level_ge_1_sites_and_cover_paths() {
+        let gfa = include_str!("../tests/test_data/crush/nested_bubbles_real.gfa");
+        let graph = parse_gfa(gfa);
+        let positions = compute_path_positions(&graph);
+        let config = SmoothConfig {
+            block_source: SmoothBlockSource::Flubble,
+            flubble_reference_names: vec!["CHM13#0#chr6".to_string()],
+            ..SmoothConfig::new(graph.paths.len())
+        };
+
+        let plan = flubble_guided_blocks(&graph, &positions, &config).unwrap();
+        assert!(plan.povu_sites > 0);
+        assert!(
+            plan.level_ge_1_sites > 0,
+            "fixture must exercise nested flubbles"
+        );
+        assert!(
+            plan.selected_flubble_blocks > 0,
+            "expected at least one level>=1 flubble block"
+        );
+        assert!(plan.gap_blocks > 0, "outside-flubble gaps must be retained");
+
+        let mut covered: Vec<BitVec> = graph
+            .paths
+            .iter()
+            .map(|path| bitvec![0; path.steps.len()])
+            .collect();
+        for block in &plan.blocks {
+            for range in &block.path_ranges {
+                for step_idx in range.begin_step..range.end_step {
+                    assert!(
+                        !covered[range.path_idx][step_idx],
+                        "step covered by more than one block"
+                    );
+                    covered[range.path_idx].set(step_idx, true);
+                }
+            }
+        }
+        for (path_idx, path) in graph.paths.iter().enumerate() {
+            assert_eq!(
+                covered[path_idx].count_ones(),
+                path.steps.len(),
+                "path {} coverage",
+                path.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_flubble_guided_blocks_falls_back_when_reference_hint_misses() {
+        let gfa = include_str!("../tests/test_data/crush/nested_bubbles_real.gfa");
+        let graph = parse_gfa(gfa);
+        let positions = compute_path_positions(&graph);
+        let config = SmoothConfig {
+            block_source: SmoothBlockSource::Flubble,
+            flubble_reference_names: vec!["GRCh38#0#chr6".to_string()],
+            ..SmoothConfig::new(graph.paths.len())
+        };
+
+        let plan = flubble_guided_blocks(&graph, &positions, &config).unwrap();
+        assert!(
+            plan.selected_flubble_blocks > 0,
+            "fallback to first path should still produce flubble blocks"
+        );
+    }
+
+    #[test]
+    fn test_flubble_guided_smooth_preserves_path_sequences_on_nested_fixture() {
+        let gfa = include_str!("../tests/test_data/crush/nested_bubbles_real.gfa");
+        let before = keyed_path_sequences(gfa);
+        let config = SmoothConfig {
+            target_poa_lengths: vec![700],
+            block_source: SmoothBlockSource::Flubble,
+            flubble_reference_names: vec!["CHM13#0#chr6".to_string()],
+            pre_sorted: true,
+            num_threads: 1,
+            ..SmoothConfig::new(5)
+        };
+
+        let smoothed = smooth_gfa(gfa, &config).unwrap();
+        let after = keyed_path_sequences(&smoothed);
+        assert_eq!(before, after);
+    }
+
+    fn keyed_path_sequences(gfa: &str) -> FxHashMap<String, String> {
+        let graph = parse_gfa(gfa);
+        graph
+            .paths
+            .iter()
+            .map(|path| {
+                let (key, _) = parse_path_coords(&path.name);
+                let seq = path
+                    .steps
+                    .iter()
+                    .flat_map(|&(node_idx, is_reverse)| {
+                        if is_reverse {
+                            reverse_complement(&graph.nodes[node_idx])
+                        } else {
+                            graph.nodes[node_idx].clone()
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                (key, String::from_utf8(seq).unwrap())
+            })
+            .collect()
     }
 }

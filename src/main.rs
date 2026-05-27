@@ -2899,6 +2899,12 @@ fn parse_smooth_stage(
     stage: &GraphPipelineStage,
 ) -> io::Result<impg::SmoothPipelineConfig> {
     let mut config = impg::SmoothPipelineConfig::default();
+    if matches!(
+        stage.name.as_str(),
+        "flubble-smooth" | "flubble-guided-smooth" | "povu-smooth"
+    ) {
+        config.block_source = impg::smooth::SmoothBlockSource::Flubble;
+    }
     for param in &stage.params {
         match param.key.as_str() {
             "target-poa-length" | "target-poa-lengths" | "poa-length" | "g" => {
@@ -2955,6 +2961,28 @@ fn parse_smooth_stage(
                 }
                 config.poa_padding_fraction = f;
             }
+            "block-source" | "blocks" | "block-placement" | "placement" => {
+                config.block_source = parse_smooth_block_source(raw, &param.key, &param.value)?;
+            }
+            "reference" | "ref" | "reference-name" | "povu-reference" => {
+                let refs = param
+                    .value
+                    .split(|c| c == '/' || c == '+')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+                if refs.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': smooth {}='{}' must name at least one reference path/sample",
+                            raw, param.key, param.value
+                        ),
+                    ));
+                }
+                config.flubble_reference_names = refs;
+            }
             other => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -2967,6 +2995,28 @@ fn parse_smooth_stage(
         }
     }
     Ok(config)
+}
+
+fn parse_smooth_block_source(
+    raw: &str,
+    key: &str,
+    value: &str,
+) -> io::Result<impg::smooth::SmoothBlockSource> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "path-overlap" | "overlap" | "default" | "smoothxg" => {
+            Ok(impg::smooth::SmoothBlockSource::PathOverlap)
+        }
+        "flubble" | "flubbles" | "povu" | "povu-flubble" | "flubble-guided" => {
+            Ok(impg::smooth::SmoothBlockSource::Flubble)
+        }
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': smooth {}='{}' is unsupported (expected path-overlap or flubble)",
+                raw, key, other
+            ),
+        )),
+    }
 }
 
 fn parse_graph_sort_stage(raw: &str, stage: &GraphPipelineStage) -> io::Result<Option<String>> {
@@ -3353,7 +3403,11 @@ impl EngineCliOpts {
                     }
                     crush_config = Some(parse_crush_stage(raw, stage)?);
                 }
-                "smooth" | "smoothxg" => {
+                "smooth"
+                | "smoothxg"
+                | "flubble-smooth"
+                | "flubble-guided-smooth"
+                | "povu-smooth" => {
                     if smooth_after_crush.is_some() {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
@@ -13267,6 +13321,10 @@ mod tests {
         assert_eq!(smooth.target_poa_lengths, vec![700, 1100]);
         assert_eq!(smooth.max_node_length, 100);
         assert!((smooth.poa_padding_fraction - 0.001).abs() < 1e-12);
+        assert_eq!(
+            smooth.block_source,
+            impg::smooth::SmoothBlockSource::PathOverlap
+        );
         // :nosort wins; final graph_sort_pipeline is None.
         assert!(parsed.graph_sort_pipeline.is_none());
     }
@@ -13342,6 +13400,63 @@ mod tests {
         apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
         let err = engine_cli.parse_engine().unwrap_err();
         assert!(err.to_string().contains("unknown smooth parameter"));
+    }
+
+    #[test]
+    fn test_gfa_engine_smooth_stage_parses_flubble_block_source() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush:smooth,blocks=flubble,reference=GRCh38#0#chr6:nosort",
+        ])
+        .unwrap();
+        let Args::Query {
+            output_format,
+            mut engine_cli,
+            ..
+        } = args
+        else {
+            panic!("expected query command");
+        };
+        apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+        let parsed = engine_cli.parse_engine().unwrap();
+        let smooth = parsed.smooth_after_crush.unwrap();
+        assert_eq!(
+            smooth.block_source,
+            impg::smooth::SmoothBlockSource::Flubble
+        );
+        assert_eq!(smooth.flubble_reference_names, vec!["GRCh38#0#chr6"]);
+    }
+
+    #[test]
+    fn test_gfa_engine_flubble_smooth_stage_alias_sets_block_source() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush:flubble-smooth:nosort",
+        ])
+        .unwrap();
+        let Args::Query {
+            output_format,
+            mut engine_cli,
+            ..
+        } = args
+        else {
+            panic!("expected query command");
+        };
+        apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+        let parsed = engine_cli.parse_engine().unwrap();
+        let smooth = parsed.smooth_after_crush.unwrap();
+        assert_eq!(
+            smooth.block_source,
+            impg::smooth::SmoothBlockSource::Flubble
+        );
     }
 
     #[test]

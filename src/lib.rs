@@ -68,6 +68,8 @@ pub struct SmoothPipelineConfig {
     pub target_poa_lengths: Vec<usize>,
     pub max_node_length: usize,
     pub poa_padding_fraction: f64,
+    pub block_source: smooth::SmoothBlockSource,
+    pub flubble_reference_names: Vec<String>,
 }
 
 impl Default for SmoothPipelineConfig {
@@ -76,6 +78,8 @@ impl Default for SmoothPipelineConfig {
             target_poa_lengths: vec![700, 1100],
             max_node_length: 100,
             poa_padding_fraction: 0.001,
+            block_source: smooth::SmoothBlockSource::PathOverlap,
+            flubble_reference_names: Vec::new(),
         }
     }
 }
@@ -804,6 +808,8 @@ fn apply_graph_transforms(mut gfa: String, engine_opts: &EngineOpts) -> std::io:
             poa_padding_fraction: config.poa_padding_fraction,
             temp_dir: engine_opts.pipeline.temp_dir.clone(),
             pre_sorted: false,
+            block_source: config.block_source,
+            flubble_reference_names: config.flubble_reference_names.clone(),
             ..smooth::SmoothConfig::new(n_haps)
         };
         let smoothed = smooth::smooth_gfa(&gfa, &smooth_config)?;
