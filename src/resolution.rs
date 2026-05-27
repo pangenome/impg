@@ -165,6 +165,37 @@ pub struct ResolutionConfig {
     pub sweepga_sparse_pairs: bool,
     /// SPOA scoring parameters: (match, mismatch, gap_open, gap_ext, gap_open2, gap_ext2).
     pub scoring_params: (u8, u8, u8, u8, u8, u8),
+    /// Optional smoothxg pass applied to the working graph BETWEEN every
+    /// per-bubble crush round. Distinct from any post-crush full-graph smooth:
+    /// this runs INSIDE `resolve_graph_bubbles` so that round-(N+1) POVU
+    /// decomposes a cleaned graph instead of one carrying round-N's stringy
+    /// artifacts. The per-round pass uses a smaller `target_poa_lengths`
+    /// than the full-graph post-crush smooth because it runs `max_iterations`
+    /// times. See `docs/crush-smoothxg-between-rounds.md`.
+    pub smooth_between_rounds: Option<SmoothBetweenRoundsConfig>,
+}
+
+/// Per-round smoothxg pass configuration. Mirrors the shape of
+/// `SmoothPipelineConfig` (in `lib.rs`) but is owned by the resolution config
+/// so the inner loop can run smooth_gfa without crossing a higher-level
+/// pipeline boundary. Defaults are tuned for speed: a single short pass that
+/// completes in <2 min on full C4 GRCh38 rather than the 60 min the
+/// `[700, 1100]` two-pass full-graph smooth takes.
+#[derive(Clone, Debug)]
+pub struct SmoothBetweenRoundsConfig {
+    pub target_poa_lengths: Vec<usize>,
+    pub max_node_length: usize,
+    pub poa_padding_fraction: f64,
+}
+
+impl Default for SmoothBetweenRoundsConfig {
+    fn default() -> Self {
+        Self {
+            target_poa_lengths: vec![700],
+            max_node_length: 100,
+            poa_padding_fraction: 0.001,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -316,6 +347,7 @@ impl Default for ResolutionConfig {
             sweepga_no_filter: false,
             sweepga_sparse_pairs: false,
             scoring_params: (1, 4, 6, 2, 26, 1),
+            smooth_between_rounds: None,
         }
     }
 }
@@ -1047,6 +1079,73 @@ fn resolve_graph_bubbles(
         stats.resolved += resolved_count;
         per_round_frontier_sizes.push(resolved_count);
         per_round_local_povu_child_counts.push(total_local_children);
+
+        // Per-round smoothxg cleanup. Runs on the just-rewritten graph so that
+        // any stringy structure introduced by this round's pairwise induction
+        // is cleaned BEFORE round-(N+1) POVU decomposes it into bogus child
+        // bubbles. See docs/crush-smoothxg-between-rounds.md for why this
+        // matters on full C4 GRCh38: round-1 stringiness propagates into
+        // round-2 POVU finding spurious children inside it.
+        if let Some(smooth_cfg) = config.smooth_between_rounds.clone() {
+            let smooth_start = Instant::now();
+            let pre_smooth_quality = graph_quality(&graph);
+            let pre_smooth_gfa = render_graph(&graph);
+            // n_haps counts unique PanSN sample#hap prefixes on the current
+            // working graph's path names; falls back to the bare name (one
+            // group per path) for non-PanSN inputs, matching the post-crush
+            // :smooth stage in lib.rs.
+            let n_haps = sweepga::pansn::count_pansn_keys(
+                graph.paths.iter().map(|p| p.name.as_str()),
+                sweepga::pansn::PanSnLevel::Haplotype,
+            )
+            .max(1);
+            let smooth_config = crate::smooth::SmoothConfig {
+                n_haps,
+                num_threads: rayon::current_num_threads().max(1),
+                target_poa_lengths: smooth_cfg.target_poa_lengths.clone(),
+                max_node_length: smooth_cfg.max_node_length,
+                poa_padding_fraction: smooth_cfg.poa_padding_fraction,
+                scoring_params: config.scoring_params,
+                pre_sorted: false,
+                ..crate::smooth::SmoothConfig::new(n_haps)
+            };
+            let smoothed_gfa = crate::smooth::smooth_gfa(&pre_smooth_gfa, &smooth_config)?;
+            // smoothxg always emits paths with `:start-end` suffixes; strip
+            // full-range `:0-N` suffixes so bp-keyed bubble signatures from
+            // the explicit tree (which use the original bare names from the
+            // input GFA) keep matching subsequent POVU discoveries.
+            let smoothed_gfa = strip_full_range_path_names(&smoothed_gfa)?;
+            // Re-parse back into the working Graph. The new graph has fresh
+            // segment IDs; that's fine because the tree's bp_signatures are
+            // anchored on path bp-coordinates, not segment IDs. Path bytes
+            // remain preserved (smoothxg is sequence-preserving), so signatures
+            // stay valid across the smoothing pass.
+            let smoothed_graph = parse_gfa(&smoothed_gfa)?;
+            // After smoothing, monotonic-ID minting must resume above any ID
+            // present in the smoothed graph so the next round's
+            // apply_replacement_frontier doesn't collide with smoothxg-issued
+            // node ids.
+            let max_smoothed_id = smoothed_graph
+                .segments
+                .iter()
+                .filter_map(|s| s.id.parse::<usize>().ok())
+                .max()
+                .unwrap_or(0);
+            next_id = next_id.max(max_smoothed_id + 1);
+            let post_smooth_quality = graph_quality(&smoothed_graph);
+            graph = smoothed_graph;
+            if emit_logs {
+                log::info!(
+                    "crush round {}: smoothxg-between pass (n_haps={}, target_poa_lengths={:?}) {:.2?}; quality {} -> {}",
+                    round + 1,
+                    n_haps,
+                    smooth_cfg.target_poa_lengths,
+                    smooth_start.elapsed(),
+                    pre_smooth_quality.summary(),
+                    post_smooth_quality.summary()
+                );
+            }
+        }
 
         if emit_logs {
             log::info!(
@@ -4003,6 +4102,34 @@ P\tins\t1+,2+,3+\t*
         assert_eq!(before, seq_map(&resolved.gfa));
         assert_eq!(before["ref"], "ACTA");
         assert_eq!(before["ins"], "ACGGGTA");
+        assert_eq!(resolved.stats.resolved, 1);
+    }
+
+    #[test]
+    fn smooth_between_rounds_preserves_path_sequences() {
+        // Per-round smoothxg pass must be exact-path-preserving: smoothxg
+        // realigns block sequences with SPOA but the resulting graph must
+        // emit the same path strings the resolver started with. This guards
+        // the byte-preservation invariant the round loop relies on for
+        // bp_signature stability across rounds.
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tAC
+S\t2\tGGG
+S\t3\tTA
+L\t1\t+\t3\t+\t0M
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t3\t+\t0M
+P\tref\t1+,3+\t*
+P\tins\t1+,2+,3+\t*
+";
+        let before = seq_map(gfa);
+        let config = ResolutionConfig {
+            smooth_between_rounds: Some(SmoothBetweenRoundsConfig::default()),
+            ..ResolutionConfig::default()
+        };
+        let resolved = resolve_gfa_bubbles(gfa, &config).unwrap();
+        assert_eq!(before, seq_map(&resolved.gfa));
         assert_eq!(resolved.stats.resolved, 1);
     }
 

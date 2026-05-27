@@ -2763,6 +2763,91 @@ fn parse_crush_stage(
                 };
                 config.method = method;
             }
+            // Per-round smoothxg pass. Empty value / `true` / `default` enables
+            // the built-in default (a single short target-poa-length pass; see
+            // SmoothBetweenRoundsConfig). A slash- or plus-separated list of
+            // positive integers configures multi-pass target-poa-lengths.
+            // `false` / `off` disables. See docs/crush-smoothxg-between-rounds.md.
+            "smooth-between" | "smooth-between-rounds" | "smoothxg-between" => {
+                let v = param.value.trim();
+                if v.eq_ignore_ascii_case("false")
+                    || v.eq_ignore_ascii_case("off")
+                    || v.eq_ignore_ascii_case("no")
+                    || v == "0"
+                {
+                    config.smooth_between_rounds = None;
+                } else if v.is_empty()
+                    || v.eq_ignore_ascii_case("true")
+                    || v.eq_ignore_ascii_case("on")
+                    || v.eq_ignore_ascii_case("yes")
+                    || v.eq_ignore_ascii_case("default")
+                    || v == "1"
+                {
+                    let base = config
+                        .smooth_between_rounds
+                        .clone()
+                        .unwrap_or_default();
+                    config.smooth_between_rounds = Some(base);
+                } else {
+                    let lengths: Result<Vec<usize>, _> = v
+                        .split(|c| c == '/' || c == '+')
+                        .map(|s| s.trim().parse::<usize>())
+                        .collect();
+                    let lengths = lengths.map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!(
+                                "Invalid --gfa-engine '{}': smooth-between {}='{}' is not a `/`-separated list of positive integers",
+                                raw, param.key, param.value
+                            ),
+                        )
+                    })?;
+                    if lengths.is_empty() || lengths.iter().any(|&n| n == 0) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!(
+                                "Invalid --gfa-engine '{}': smooth-between {}='{}' must be a non-empty list of positive integers",
+                                raw, param.key, param.value
+                            ),
+                        ));
+                    }
+                    let mut base = config
+                        .smooth_between_rounds
+                        .clone()
+                        .unwrap_or_default();
+                    base.target_poa_lengths = lengths;
+                    config.smooth_between_rounds = Some(base);
+                }
+            }
+            "smooth-between-max-node-length" | "smooth-between-node-length" => {
+                let n = parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+                let mut base = config.smooth_between_rounds.clone().unwrap_or_default();
+                base.max_node_length = n;
+                config.smooth_between_rounds = Some(base);
+            }
+            "smooth-between-padding-fraction" | "smooth-between-poa-padding-fraction" => {
+                let f: f64 = param.value.parse().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': {}='{}' is not a valid float",
+                            raw, param.key, param.value
+                        ),
+                    )
+                })?;
+                if !(0.0..=1.0).contains(&f) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': {}='{}' must be in [0.0, 1.0]",
+                            raw, param.key, param.value
+                        ),
+                    ));
+                }
+                let mut base = config.smooth_between_rounds.clone().unwrap_or_default();
+                base.poa_padding_fraction = f;
+                config.smooth_between_rounds = Some(base);
+            }
             other => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -13297,6 +13382,95 @@ mod tests {
         apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
         let err = engine_cli.parse_engine().unwrap_err();
         assert!(err.to_string().contains("unknown smooth parameter"));
+    }
+
+    #[test]
+    fn test_gfa_engine_crush_smooth_between_default_enabled() {
+        // Per-round smoothxg pass inside resolve_graph_bubbles is opt-in via
+        // the `smooth-between` parameter on the :crush stage. Bare `=true`
+        // populates the SmoothBetweenRoundsConfig with built-in defaults
+        // (single short-pass target_poa_length tuned for speed).
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush,smooth-between=true:nosort",
+        ])
+        .unwrap();
+        let Args::Query {
+            output_format,
+            mut engine_cli,
+            ..
+        } = args
+        else {
+            panic!("expected query command");
+        };
+        apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+        let parsed = engine_cli.parse_engine().unwrap();
+        let crush = parsed.crush_config.expect("crush stage parsed");
+        let sb = crush
+            .smooth_between_rounds
+            .expect("smooth-between=true populates smooth_between_rounds");
+        assert_eq!(sb.target_poa_lengths, vec![700]);
+        assert_eq!(sb.max_node_length, 100);
+        assert!((sb.poa_padding_fraction - 0.001).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_gfa_engine_crush_smooth_between_target_poa_length_override() {
+        // Multi-pass list parses identically to the post-crush :smooth stage:
+        // `/` or `+` separates per-pass target POA lengths.
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush,smooth-between=300/500:nosort",
+        ])
+        .unwrap();
+        let Args::Query {
+            output_format,
+            mut engine_cli,
+            ..
+        } = args
+        else {
+            panic!("expected query command");
+        };
+        apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+        let parsed = engine_cli.parse_engine().unwrap();
+        let crush = parsed.crush_config.expect("crush stage parsed");
+        let sb = crush.smooth_between_rounds.unwrap();
+        assert_eq!(sb.target_poa_lengths, vec![300, 500]);
+    }
+
+    #[test]
+    fn test_gfa_engine_crush_smooth_between_off_disables() {
+        // `smooth-between=false` explicitly leaves the per-round smoothxg
+        // pass disabled (matches the default).
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush,smooth-between=false:nosort",
+        ])
+        .unwrap();
+        let Args::Query {
+            output_format,
+            mut engine_cli,
+            ..
+        } = args
+        else {
+            panic!("expected query command");
+        };
+        apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+        let parsed = engine_cli.parse_engine().unwrap();
+        let crush = parsed.crush_config.expect("crush stage parsed");
+        assert!(crush.smooth_between_rounds.is_none());
     }
 
     #[test]
