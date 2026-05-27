@@ -38,6 +38,16 @@ static DEBUG_GRAPH_BUILD_ID: AtomicUsize = AtomicUsize::new(0);
 /// `docs/crush-fix-sweepga-short-filter.md`.
 const SHORT_FULL_LENGTH_RESCUE_FRACTION: f64 = 0.9;
 
+#[derive(Clone, Copy, Debug, Default)]
+struct PafExactMatchRunStats {
+    records: usize,
+    parsed_records: usize,
+    records_with_cigar: usize,
+    name_mismatches: usize,
+    length_mismatches: usize,
+    max_exact_match_run: u64,
+}
+
 thread_local! {
     /// Gap-affine aligner reused across pair calls on the same thread.
     /// `MemoryMode::Low` (piggyback BiWFA) is faster on our size range
@@ -74,6 +84,213 @@ where
         }
         f(opt.as_mut().unwrap())
     })
+}
+
+fn complement_base(base: u8) -> u8 {
+    match base.to_ascii_uppercase() {
+        b'A' => b'T',
+        b'C' => b'G',
+        b'G' => b'C',
+        b'T' => b'A',
+        b'U' => b'A',
+        other => other,
+    }
+}
+
+fn bases_equal_for_seqwish(query: u8, target: u8) -> bool {
+    let query = query.to_ascii_uppercase();
+    let target = target.to_ascii_uppercase();
+    query == target && query != b'N'
+}
+
+fn paf_cigar<'a>(line_fields: &'a [&'a str]) -> Option<&'a str> {
+    line_fields
+        .iter()
+        .skip(12)
+        .find_map(|field| field.strip_prefix("cg:Z:"))
+}
+
+fn paf_line_max_exact_match_run(
+    fields: &[&str],
+    seq_by_name: &std::collections::HashMap<&str, &[u8]>,
+) -> Option<(u64, bool)> {
+    if fields.len() < 12 {
+        return None;
+    }
+    let qseq = *seq_by_name.get(fields[0])?;
+    let tseq = *seq_by_name.get(fields[5])?;
+    let qlen = fields[1].parse::<usize>().ok()?;
+    let qstart = fields[2].parse::<usize>().ok()?;
+    let qend = fields[3].parse::<usize>().ok()?;
+    let tlen = fields[6].parse::<usize>().ok()?;
+    let tstart = fields[7].parse::<usize>().ok()?;
+    let tend = fields[8].parse::<usize>().ok()?;
+    if qlen != qseq.len()
+        || tlen != tseq.len()
+        || qstart > qend
+        || tstart > tend
+        || qend > qseq.len()
+        || tend > tseq.len()
+    {
+        return None;
+    }
+
+    let Some(cigar) = paf_cigar(fields) else {
+        // No base-level CIGAR: use the PAF block length as a conservative
+        // upper bound. seqwish itself requires a CIGAR to split exact runs, but
+        // this preserves old behaviour for PAF producers that emit single-run
+        // alignments without cg:Z.
+        return fields
+            .get(10)
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(|len| (len, false));
+    };
+
+    let query_is_rev = fields[4] == "-";
+    let mut q_pos = if query_is_rev {
+        qend.checked_sub(1)? as isize
+    } else {
+        qstart as isize
+    };
+    let q_step: isize = if query_is_rev { -1 } else { 1 };
+    let mut t_pos = tstart;
+    let mut digits = 0u64;
+    let mut saw_op = false;
+    let mut run = 0u64;
+    let mut max_run = 0u64;
+
+    for op in cigar.bytes() {
+        if op.is_ascii_digit() {
+            digits = digits.saturating_mul(10).saturating_add((op - b'0') as u64);
+            continue;
+        }
+        if digits == 0 {
+            return None;
+        }
+        saw_op = true;
+        let len = digits as usize;
+        digits = 0;
+        match op {
+            b'M' | b'=' | b'X' => {
+                for _ in 0..len {
+                    if q_pos < 0 || q_pos as usize >= qseq.len() || t_pos >= tseq.len() {
+                        return None;
+                    }
+                    let mut query_base = qseq[q_pos as usize];
+                    if query_is_rev {
+                        query_base = complement_base(query_base);
+                    }
+                    let target_base = tseq[t_pos];
+                    if bases_equal_for_seqwish(query_base, target_base) {
+                        run += 1;
+                        max_run = max_run.max(run);
+                    } else {
+                        run = 0;
+                    }
+                    q_pos += q_step;
+                    t_pos += 1;
+                }
+            }
+            b'I' => {
+                run = 0;
+                q_pos += q_step.saturating_mul(len as isize);
+            }
+            b'D' | b'N' => {
+                run = 0;
+                t_pos = t_pos.saturating_add(len);
+            }
+            b'S' => {
+                run = 0;
+                q_pos += q_step.saturating_mul(len as isize);
+            }
+            b'H' | b'P' => {
+                run = 0;
+            }
+            _ => {
+                run = 0;
+            }
+        }
+    }
+    if digits != 0 || !saw_op {
+        return None;
+    }
+    Some((max_run, true))
+}
+
+fn filtered_paf_exact_match_run_stats(
+    seqs: &[(String, Vec<u8>)],
+    paf_path: &std::path::Path,
+) -> std::io::Result<PafExactMatchRunStats> {
+    use std::io::BufRead;
+
+    let seq_by_name: std::collections::HashMap<&str, &[u8]> = seqs
+        .iter()
+        .map(|(name, seq)| (name.as_str(), seq.as_slice()))
+        .collect();
+    let file = std::fs::File::open(paf_path)?;
+    let reader = std::io::BufReader::new(file);
+    let mut stats = PafExactMatchRunStats::default();
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        stats.records += 1;
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() < 12 {
+            continue;
+        }
+        let names_match =
+            seq_by_name.contains_key(fields[0]) && seq_by_name.contains_key(fields[5]);
+        if !names_match {
+            stats.name_mismatches += 1;
+            continue;
+        }
+        let lengths_match = fields[1]
+            .parse::<usize>()
+            .ok()
+            .zip(seq_by_name.get(fields[0]).map(|seq| seq.len()))
+            .is_some_and(|(paf_len, seq_len)| paf_len == seq_len)
+            && fields[6]
+                .parse::<usize>()
+                .ok()
+                .zip(seq_by_name.get(fields[5]).map(|seq| seq.len()))
+                .is_some_and(|(paf_len, seq_len)| paf_len == seq_len);
+        if !lengths_match {
+            stats.length_mismatches += 1;
+            continue;
+        }
+        if let Some((max_run, has_cigar)) = paf_line_max_exact_match_run(&fields, &seq_by_name) {
+            stats.parsed_records += 1;
+            if has_cigar {
+                stats.records_with_cigar += 1;
+            }
+            stats.max_exact_match_run = stats.max_exact_match_run.max(max_run);
+        }
+    }
+
+    Ok(stats)
+}
+
+fn gfa_line_stats(gfa: &str) -> (usize, usize, usize, usize) {
+    let mut segments = 0usize;
+    let mut segment_bp = 0usize;
+    let mut links = 0usize;
+    let mut paths = 0usize;
+    for line in gfa.lines() {
+        if line.starts_with("S\t") {
+            segments += 1;
+            if let Some(seq) = line.split('\t').nth(2) {
+                segment_bp += seq.len();
+            }
+        } else if line.starts_with("L\t") {
+            links += 1;
+        } else if line.starts_with("P\t") || line.starts_with("W\t") {
+            paths += 1;
+        }
+    }
+    (segments, segment_bp, links, paths)
 }
 
 /// Compact a byte CIGAR (one char per aligned position) into PAF-style
@@ -615,10 +832,8 @@ fn rescue_short_full_length_alignments(
 
     let mut filtered_content = String::new();
     std::fs::File::open(filtered_paf.path())?.read_to_string(&mut filtered_content)?;
-    let filtered_lines: HashSet<&str> = filtered_content
-        .lines()
-        .filter(|l| !l.is_empty())
-        .collect();
+    let filtered_lines: HashSet<&str> =
+        filtered_content.lines().filter(|l| !l.is_empty()).collect();
 
     let mut rescue_lines: Vec<&str> = Vec::new();
     for line in raw_paf.lines() {
@@ -703,6 +918,10 @@ pub fn build_gfa_from_paf_and_sequences(
     if seqs.is_empty() {
         return Ok(String::from("H\tVN:Z:1.0\n"));
     }
+    let raw_paf_records = paf_content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
     let debug_dir = std::env::var_os("IMPG_CRUSH_DEBUG_DIR").map(|root| {
         let id = DEBUG_GRAPH_BUILD_ID.fetch_add(1, Ordering::Relaxed);
         let dir = PathBuf::from(root).join(format!("graph_build_{id:04}"));
@@ -759,6 +978,7 @@ pub fn build_gfa_from_paf_and_sequences(
     if let Some(dir) = &debug_dir {
         let _ = std::fs::copy(filtered_paf.path(), dir.join("filtered.paf"));
     }
+    let paf_match_stats = filtered_paf_exact_match_run_stats(seqs, filtered_paf.path())?;
 
     // Per-plan adaptive seqwish floor. The default `min_match_len`
     // (== `seqwish-k`, 311 bp) is set for whole-genome inductions where
@@ -782,6 +1002,35 @@ pub fn build_gfa_from_paf_and_sequences(
         );
         effective_config.min_match_len = min_seq_len;
     }
+    if paf_match_stats.max_exact_match_run > 0
+        && paf_match_stats.max_exact_match_run < effective_config.min_match_len
+    {
+        log::info!(
+            "crush seqwish min-match rescue: clamping seqwish min_match_len {} -> {} (filtered PAF has {} record(s), {} with cg:Z, longest exact run seqwish can index is {} bp)",
+            effective_config.min_match_len,
+            paf_match_stats.max_exact_match_run,
+            paf_match_stats.records,
+            paf_match_stats.records_with_cigar,
+            paf_match_stats.max_exact_match_run,
+        );
+        effective_config.min_match_len = paf_match_stats.max_exact_match_run;
+    } else if paf_match_stats.records > 0 && paf_match_stats.max_exact_match_run == 0 {
+        log::warn!(
+            "crush seqwish min-match diagnostic: filtered PAF has {} record(s) but no indexable exact match run; names_missing={}, length_mismatches={}",
+            paf_match_stats.records,
+            paf_match_stats.name_mismatches,
+            paf_match_stats.length_mismatches,
+        );
+    }
+    log::debug!(
+        "crush seqwish input summary: sequences={}, raw_paf_records={}, filtered_paf_records={}, parsed_filtered_records={}, max_exact_match_run={}, effective_min_match_len={}",
+        seqs.len(),
+        raw_paf_records,
+        paf_match_stats.records,
+        paf_match_stats.parsed_records,
+        paf_match_stats.max_exact_match_run,
+        effective_config.min_match_len,
+    );
 
     // Hand off to the shared seqwish induction pipeline.
     let num_seqs = seqs.len();
@@ -797,16 +1046,55 @@ pub fn build_gfa_from_paf_and_sequences(
         num_genomes,
     };
     let mut gfa_buf: Vec<u8> = Vec::new();
-    crate::commands::graph::induce_graph_from_alignment(aln_result, &mut gfa_buf, &effective_config)?;
-    if let Some(dir) = &debug_dir {
-        let _ = std::fs::write(dir.join("seqwish.gfa"), &gfa_buf);
-    }
-    String::from_utf8(gfa_buf).map_err(|e| {
+    crate::commands::graph::induce_graph_from_alignment(
+        aln_result,
+        &mut gfa_buf,
+        &effective_config,
+    )?;
+    let gfa_text = String::from_utf8(gfa_buf).map_err(|e| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("Invalid UTF-8 in GFA: {}", e),
         )
-    })
+    })?;
+    if let Some(dir) = &debug_dir {
+        let (segments, segment_bp, links, paths) = gfa_line_stats(&gfa_text);
+        let summary = format!(
+            concat!(
+                "sequences\t{}\n",
+                "total_sequence_bp\t{}\n",
+                "raw_paf_records\t{}\n",
+                "filtered_paf_records\t{}\n",
+                "parsed_filtered_paf_records\t{}\n",
+                "filtered_paf_records_with_cigar\t{}\n",
+                "paf_name_mismatches\t{}\n",
+                "paf_length_mismatches\t{}\n",
+                "max_exact_match_run\t{}\n",
+                "effective_min_match_len\t{}\n",
+                "seqwish_segments\t{}\n",
+                "seqwish_segment_bp\t{}\n",
+                "seqwish_links\t{}\n",
+                "seqwish_paths\t{}\n"
+            ),
+            seqs.len(),
+            total_bases,
+            raw_paf_records,
+            paf_match_stats.records,
+            paf_match_stats.parsed_records,
+            paf_match_stats.records_with_cigar,
+            paf_match_stats.name_mismatches,
+            paf_match_stats.length_mismatches,
+            paf_match_stats.max_exact_match_run,
+            effective_config.min_match_len,
+            segments,
+            segment_bp,
+            links,
+            paths,
+        );
+        let _ = std::fs::write(dir.join("seqwish.gfa"), gfa_text.as_bytes());
+        let _ = std::fs::write(dir.join("summary.tsv"), summary);
+    }
+    Ok(gfa_text)
 }
 
 /// Anchor-seeded driver: re-queries syng from a seed interval to recover

@@ -22,10 +22,8 @@
 //!   require the full GFA skip automatically if the file is not present.
 
 use impg::graph_report::{describe_gfa, GraphReportOptions};
-use impg::resolution::{
-    path_sequences, resolve_gfa_bubbles, ResolutionConfig, ResolutionMethod,
-};
-use std::collections::HashSet;
+use impg::resolution::{path_sequences, resolve_gfa_bubbles, ResolutionConfig, ResolutionMethod};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
 
@@ -68,6 +66,51 @@ fn gfa_segment_stats(gfa: &str) -> (usize, usize) {
         }
     }
     (count, bp)
+}
+
+fn fasta_records(path: &Path) -> Vec<(String, Vec<u8>)> {
+    let text = std::fs::read_to_string(path).expect("failed to read FASTA");
+    let mut records = Vec::new();
+    let mut name: Option<String> = None;
+    let mut seq = Vec::new();
+    for line in text.lines() {
+        if let Some(header) = line.strip_prefix('>') {
+            if let Some(prev) = name.replace(header.to_string()) {
+                records.push((prev, std::mem::take(&mut seq)));
+            }
+        } else {
+            seq.extend_from_slice(line.trim().as_bytes());
+        }
+    }
+    if let Some(name) = name {
+        records.push((name, seq));
+    }
+    records
+}
+
+fn gfa_shared_path_segment_count(gfa: &str) -> usize {
+    let mut support: HashMap<String, HashSet<String>> = HashMap::new();
+    for line in gfa.lines().filter(|line| line.starts_with("P\t")) {
+        let mut fields = line.split('\t');
+        fields.next();
+        let Some(path_name) = fields.next() else {
+            continue;
+        };
+        let Some(steps) = fields.next() else {
+            continue;
+        };
+        for step in steps.split(',').filter(|step| !step.is_empty()) {
+            let node = step
+                .strip_suffix('+')
+                .or_else(|| step.strip_suffix('-'))
+                .unwrap_or(step);
+            support
+                .entry(node.to_string())
+                .or_default()
+                .insert(path_name.to_string());
+        }
+    }
+    support.values().filter(|paths| paths.len() > 1).count()
 }
 
 /// Count S-lines and sum bp in a GFA file without reading it all into memory.
@@ -128,6 +171,44 @@ fn gfa_file_duplicate_seqs(path: &str) -> usize {
     total
 }
 
+#[test]
+fn c4_top_flubble_seqwish_indexes_observed_exact_runs() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fasta_path = manifest_dir.join("tests/test_data/crush/top_flubble_seqwish_minrun.fa");
+    let paf_path = manifest_dir.join("tests/test_data/crush/top_flubble_seqwish_minrun.paf");
+    let seqs = fasta_records(&fasta_path);
+    let paf = std::fs::read_to_string(&paf_path).expect("failed to read C4 top-flubble PAF");
+    let input_bp: usize = seqs.iter().map(|(_, seq)| seq.len()).sum();
+
+    let config = impg::commands::graph::GraphBuildConfig {
+        num_threads: 1,
+        min_match_len: 311,
+        no_filter: true,
+        show_progress: false,
+        ..impg::commands::graph::GraphBuildConfig::default()
+    };
+    let gfa = impg::syng_graph::build_gfa_from_paf_and_sequences(&seqs, &paf, &config)
+        .expect("seqwish induction failed for C4 top-flubble regression block");
+    let shared_segments = gfa_shared_path_segment_count(&gfa);
+    let (segments, segment_bp) = gfa_segment_stats(&gfa);
+
+    assert!(
+        shared_segments > 0,
+        "C4 top-flubble block has {} real PAF records but seqwish emitted no shared segment; \
+         before the fix min_match_len clamped only to the shortest traversal (299 bp), \
+         above every exact run in this PAF, and produced five isolated full-length paths\n{}",
+        paf.lines().count(),
+        gfa,
+    );
+    assert!(
+        segment_bp < input_bp,
+        "replacement should reuse aligned sequence (segment bp {} < input bp {}); segments={}",
+        segment_bp,
+        input_bp,
+        segments,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Failure 2 — No round-level quality gate: rounds that grow score are accepted
 //
@@ -155,8 +236,7 @@ fn c4_round1_sweep_quality_gate_rejects_score_growth() {
         eprintln!("SKIP: impg binary not found");
         return;
     };
-    let gfa_path =
-        "/home/erikg/impg/data/c4_crush_eval_20260523T140141Z/C4A.blunt.numeric.gfa";
+    let gfa_path = "/home/erikg/impg/data/c4_crush_eval_20260523T140141Z/C4A.blunt.numeric.gfa";
     if !Path::new(gfa_path).exists() {
         eprintln!("SKIP: {} not found", gfa_path);
         return;
@@ -171,20 +251,39 @@ fn c4_round1_sweep_quality_gate_rejects_score_growth() {
     let run = Command::new(&bin)
         .args([
             "crush",
-            "--gfa", gfa_path,
-            "--output", out_path.to_str().unwrap(),
-            "--method", "sweepga",
-            "--sweepga-aligner", "fastga",
-            "--seqwish-k", "311",
-            "--min-traversal-len", "5000",
-            "--max-iterations", "1",
-            "-v", "2",
+            "--gfa",
+            gfa_path,
+            "--output",
+            out_path.to_str().unwrap(),
+            "--method",
+            "sweepga",
+            "--sweepga-aligner",
+            "fastga",
+            "--seqwish-k",
+            "311",
+            "--min-traversal-len",
+            "5000",
+            "--max-iterations",
+            "1",
+            "-v",
+            "2",
         ])
         .output()
         .expect("failed to run impg crush");
 
     let stderr = String::from_utf8_lossy(&run.stderr);
-    eprintln!("stderr (tail):\n{}", stderr.lines().rev().take(5).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"));
+    eprintln!(
+        "stderr (tail):\n{}",
+        stderr
+            .lines()
+            .rev()
+            .take(5)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
     assert!(
         run.status.success(),
         "impg crush failed unexpectedly: {}",
@@ -195,7 +294,8 @@ fn c4_round1_sweep_quality_gate_rejects_score_growth() {
     let growth = (after_bp as f64 - before_bp as f64) / before_bp as f64;
     eprintln!(
         "After round 1: {} segments / {} bp (Δsegs={:+}, Δbp={:+}, bp_growth={:.1}%)",
-        after_segs, after_bp,
+        after_segs,
+        after_bp,
         after_segs as i64 - before_segs as i64,
         after_bp as i64 - before_bp as i64,
         growth * 100.0,
@@ -242,8 +342,7 @@ fn c4_round1_render_emits_no_duplicate_segment_sequences() {
         eprintln!("SKIP: impg binary not found");
         return;
     };
-    let gfa_path =
-        "/home/erikg/impg/data/c4_crush_eval_20260523T140141Z/C4A.blunt.numeric.gfa";
+    let gfa_path = "/home/erikg/impg/data/c4_crush_eval_20260523T140141Z/C4A.blunt.numeric.gfa";
     if !Path::new(gfa_path).exists() {
         eprintln!("SKIP: {} not found", gfa_path);
         return;
@@ -255,14 +354,22 @@ fn c4_round1_render_emits_no_duplicate_segment_sequences() {
     let run = Command::new(&bin)
         .args([
             "crush",
-            "--gfa", gfa_path,
-            "--output", out_path.to_str().unwrap(),
-            "--method", "sweepga",
-            "--sweepga-aligner", "fastga",
-            "--seqwish-k", "311",
-            "--min-traversal-len", "5000",
-            "--max-iterations", "1",
-            "-v", "1",
+            "--gfa",
+            gfa_path,
+            "--output",
+            out_path.to_str().unwrap(),
+            "--method",
+            "sweepga",
+            "--sweepga-aligner",
+            "fastga",
+            "--seqwish-k",
+            "311",
+            "--min-traversal-len",
+            "5000",
+            "--max-iterations",
+            "1",
+            "-v",
+            "1",
         ])
         .output()
         .expect("failed to run impg crush");
@@ -317,8 +424,7 @@ fn c4_round2_segment_bp_does_not_exceed_round1() {
         eprintln!("SKIP: impg binary not found");
         return;
     };
-    let gfa_path =
-        "/home/erikg/impg/data/c4_crush_eval_20260523T140141Z/C4A.blunt.numeric.gfa";
+    let gfa_path = "/home/erikg/impg/data/c4_crush_eval_20260523T140141Z/C4A.blunt.numeric.gfa";
     if !Path::new(gfa_path).exists() {
         eprintln!("SKIP: {} not found", gfa_path);
         return;
@@ -331,30 +437,35 @@ fn c4_round2_segment_bp_does_not_exceed_round1() {
     let run = Command::new(&bin)
         .args([
             "crush",
-            "--gfa", gfa_path,
-            "--output", out_path.to_str().unwrap(),
-            "--method", "sweepga",
-            "--sweepga-aligner", "fastga",
-            "--seqwish-k", "311",
-            "--min-traversal-len", "5000",
-            "--max-iterations", "2",
-            "-v", "1",
+            "--gfa",
+            gfa_path,
+            "--output",
+            out_path.to_str().unwrap(),
+            "--method",
+            "sweepga",
+            "--sweepga-aligner",
+            "fastga",
+            "--seqwish-k",
+            "311",
+            "--min-traversal-len",
+            "5000",
+            "--max-iterations",
+            "2",
+            "-v",
+            "1",
         ])
         .output()
         .expect("failed to run impg crush (2 rounds)");
 
     let stderr = String::from_utf8_lossy(&run.stderr);
-    assert!(
-        run.status.success(),
-        "impg crush failed: {}",
-        stderr
-    );
+    assert!(run.status.success(), "impg crush failed: {}", stderr);
 
     let (after_segs, after_bp) = gfa_file_segment_stats(out_path.to_str().unwrap());
     let growth = (after_bp as f64 - before_bp as f64) / before_bp as f64;
     eprintln!(
         "After 2 rounds: {} segs / {} bp (growth={:.1}%)",
-        after_segs, after_bp,
+        after_segs,
+        after_bp,
         growth * 100.0,
     );
 
@@ -394,8 +505,7 @@ fn c4_canonical_command_completes_within_budget() {
         eprintln!("SKIP: impg binary not found");
         return;
     };
-    let gfa_path =
-        "/home/erikg/impg/data/c4_crush_eval_20260523T140141Z/C4A.blunt.numeric.gfa";
+    let gfa_path = "/home/erikg/impg/data/c4_crush_eval_20260523T140141Z/C4A.blunt.numeric.gfa";
     if !Path::new(gfa_path).exists() {
         eprintln!("SKIP: {} not found", gfa_path);
         return;
@@ -412,26 +522,48 @@ fn c4_canonical_command_completes_within_budget() {
             "360s",
             bin.to_str().unwrap(),
             "crush",
-            "--gfa", gfa_path,
-            "--output", out_path.to_str().unwrap(),
-            "--method", "sweepga",
-            "--sweepga-aligner", "fastga",
-            "--seqwish-k", "311",
-            "--min-traversal-len", "5000",
-            "--max-iterations", "until-done",
-            "--polish-method", "smooth",
-            "--polish-rounds", "until-done",
-            "--polish-max-traversal-len", "10000",
-            "--polish-max-median-traversal-len", "1000",
-            "-v", "1",
+            "--gfa",
+            gfa_path,
+            "--output",
+            out_path.to_str().unwrap(),
+            "--method",
+            "sweepga",
+            "--sweepga-aligner",
+            "fastga",
+            "--seqwish-k",
+            "311",
+            "--min-traversal-len",
+            "5000",
+            "--max-iterations",
+            "until-done",
+            "--polish-method",
+            "smooth",
+            "--polish-rounds",
+            "until-done",
+            "--polish-max-traversal-len",
+            "10000",
+            "--polish-max-median-traversal-len",
+            "1000",
+            "-v",
+            "1",
         ])
         .output()
         .expect("failed to run impg crush under timeout");
 
     let stderr = String::from_utf8_lossy(&run.stderr);
     eprintln!("exit status: {}", run.status);
-    eprintln!("stderr (last 5 lines):\n{}",
-        stderr.lines().rev().take(5).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"));
+    eprintln!(
+        "stderr (last 5 lines):\n{}",
+        stderr
+            .lines()
+            .rev()
+            .take(5)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 
     std::fs::remove_file(&out_path).ok();
 
@@ -630,11 +762,7 @@ fn nested_bubble_level_descent_actually_descends() {
     // docs/crush-nested-bubble-test.md
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let gfa_path = manifest_dir.join("tests/test_data/crush/nested_bubbles_real.gfa");
-    assert!(
-        gfa_path.exists(),
-        "fixture missing: {}",
-        gfa_path.display()
-    );
+    assert!(gfa_path.exists(), "fixture missing: {}", gfa_path.display());
 
     let gfa = std::fs::read_to_string(&gfa_path).expect("failed to read fixture");
 
@@ -651,16 +779,8 @@ fn nested_bubble_level_descent_actually_descends() {
         .povu
         .as_ref()
         .expect("POVU disabled or failed on fixture");
-    let input_l0 = input_povu
-        .top_sites
-        .iter()
-        .filter(|s| s.level == 0)
-        .count();
-    let input_l1 = input_povu
-        .top_sites
-        .iter()
-        .filter(|s| s.level == 1)
-        .count();
+    let input_l0 = input_povu.top_sites.iter().filter(|s| s.level == 0).count();
+    let input_l1 = input_povu.top_sites.iter().filter(|s| s.level == 1).count();
     let input_l1_nested_in_l0: usize = input_povu
         .top_sites
         .iter()
@@ -766,10 +886,8 @@ fn nested_bubble_level_descent_actually_descends() {
     );
 
     // (4) All input path sequences must be preserved.
-    let after_seqs: std::collections::HashMap<_, _> = path_sequences(&resolved.gfa)
-        .unwrap()
-        .into_iter()
-        .collect();
+    let after_seqs: std::collections::HashMap<_, _> =
+        path_sequences(&resolved.gfa).unwrap().into_iter().collect();
     for (name, before_seq) in &before_seqs {
         let after_seq = after_seqs
             .get(name)

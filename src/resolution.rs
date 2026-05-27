@@ -1898,15 +1898,27 @@ fn resolve_graph_bubbles_top_flubble_sweepga(
                 );
             }
         }
-        build_results.push(result);
+        build_results.push((region_ordinal, result));
     }
     let build_elapsed = build_start.elapsed();
 
     let mut builds = Vec::with_capacity(build_results.len());
-    for result in build_results {
+    for (region_ordinal, result) in build_results {
         match result {
             Ok(build) => builds.push(build),
             Err(err) => {
+                if is_zero_alignment_replacement_error(&err) {
+                    stats.bailed += 1;
+                    if emit_logs {
+                        log::info!(
+                            "crush top-flubble-sweepga: skipped top-level region {}/{} because alignment emitted no PAF records; leaving original graph interval intact: {}",
+                            region_ordinal,
+                            selected_count,
+                            err
+                        );
+                    }
+                    continue;
+                }
                 return Err(io::Error::other(format!(
                     "top-flubble-sweepga replacement failed validity/build: {err}"
                 )));
@@ -1914,9 +1926,16 @@ fn resolve_graph_bubbles_top_flubble_sweepga(
         }
     }
     if builds.is_empty() {
-        return Err(io::Error::other(
-            "top-flubble-sweepga selected regions but built no replacements",
-        ));
+        if emit_logs {
+            log::info!(
+                "crush top-flubble-sweepga: selected {} top-level region(s), but every region emitted zero PAF records; no replacement graph was applied",
+                selected_count
+            );
+        }
+        return Ok(ResolvedGfa {
+            gfa: render_graph(&graph),
+            stats,
+        });
     }
 
     let evidence_rows = builds
@@ -1948,7 +1967,7 @@ fn resolve_graph_bubbles_top_flubble_sweepga(
     if emit_logs {
         for row in &evidence_rows {
             log::info!(
-                "crush top-flubble-sweepga region {}/{} evidence: input_traversals={}, input_bp={}, emitted_alignment_records={}, aligned_bp={}, paf_bytes={}, fastga_frequency={}, replacement_segments={}, replacement_bp={}, applied=true",
+                "crush top-flubble-sweepga region {}/{} evidence: input_traversals={}, input_bp={}, emitted_alignment_records={}, aligned_bp={}, paf_bytes={}, fastga_frequency={}, replacement_segments={}, replacement_shared_segments={}, replacement_bp={}, applied=true",
                 row.region_ordinal,
                 selected_count,
                 row.input_traversals,
@@ -1958,6 +1977,7 @@ fn resolve_graph_bubbles_top_flubble_sweepga(
                 row.paf_bytes,
                 row.kmer_frequency,
                 row.replacement_segments,
+                row.replacement_shared_segments,
                 row.replacement_bp
             );
         }
@@ -2041,6 +2061,7 @@ struct TopFlubbleSweepgaEvidenceRow {
     paf_bytes: usize,
     kmer_frequency: usize,
     replacement_segments: usize,
+    replacement_shared_segments: usize,
     replacement_bp: usize,
 }
 
@@ -2055,6 +2076,7 @@ impl TopFlubbleSweepgaEvidenceRow {
             paf_bytes: build.evidence.paf_bytes,
             kmer_frequency: build.evidence.kmer_frequency,
             replacement_segments: build.evidence.replacement_segments,
+            replacement_shared_segments: build.evidence.replacement_shared_segments,
             replacement_bp: build.evidence.replacement_bp,
         }
     }
@@ -4027,6 +4049,20 @@ fn replacement_segment_bp(replacement: &Graph) -> usize {
     replacement.segments.iter().map(|s| s.seq.len()).sum()
 }
 
+fn replacement_shared_segment_count(replacement: &Graph) -> usize {
+    let mut path_support = vec![0usize; replacement.segments.len()];
+    let mut last_path_seen = vec![usize::MAX; replacement.segments.len()];
+    for (path_idx, path) in replacement.paths.iter().enumerate() {
+        for step in &path.steps {
+            if step.node < path_support.len() && last_path_seen[step.node] != path_idx {
+                path_support[step.node] += 1;
+                last_path_seen[step.node] = path_idx;
+            }
+        }
+    }
+    path_support.into_iter().filter(|&count| count > 1).count()
+}
+
 /// Compression ratio = sum(input traversal bp) / sum(replacement segment bp).
 /// Returns `None` when the inputs make the ratio meaningless: zero input bp,
 /// zero output bp (cannot divide), or an empty replacement.
@@ -4604,6 +4640,25 @@ enum SweepgaSeqwishTailMode {
     TrustSweepgaFilteredPaf,
 }
 
+const ZERO_ALIGNMENT_REPLACEMENT_ERROR: &str =
+    "SweepGA/seqwish replacement has zero PAF alignment records";
+
+fn zero_alignment_replacement_error(
+    aligner: &str,
+    traversals: usize,
+    aligner_inputs: usize,
+    input_bp: usize,
+    kmer_frequency: usize,
+) -> io::Error {
+    io::Error::other(format!(
+        "{ZERO_ALIGNMENT_REPLACEMENT_ERROR}: {aligner} emitted no alignments for {traversals} traversal(s), {aligner_inputs} aligner-input traversal(s), {input_bp} input bp, kmer_frequency={kmer_frequency}; refusing to induce an unfolded replacement graph"
+    ))
+}
+
+fn is_zero_alignment_replacement_error(err: &io::Error) -> bool {
+    err.to_string().contains(ZERO_ALIGNMENT_REPLACEMENT_ERROR)
+}
+
 #[derive(Clone, Debug, Default)]
 struct SweepgaReplacementEvidence {
     alignment_records: usize,
@@ -4611,6 +4666,7 @@ struct SweepgaReplacementEvidence {
     paf_bytes: usize,
     kmer_frequency: usize,
     replacement_segments: usize,
+    replacement_shared_segments: usize,
     replacement_bp: usize,
 }
 
@@ -4667,7 +4723,7 @@ fn build_sweepga_seqwish_replacement_with_tail_mode(
     } else {
         (true, "many:many".to_string(), "many:many".to_string(), 0)
     };
-    let align_config = sweepga::library_api::SweepgaAlignConfig {
+    let make_align_config = |aligner: String| sweepga::library_api::SweepgaAlignConfig {
         num_threads: rayon::current_num_threads().max(1),
         kmer_frequency,
         min_aln_length: config.sweepga_min_aln_length,
@@ -4677,16 +4733,21 @@ fn build_sweepga_seqwish_replacement_with_tail_mode(
         // tail filter below, avoiding a second expansion/rescue pass on large
         // contained regions.
         no_filter: align_no_filter,
-        num_mappings,
-        scaffold_filter,
+        num_mappings: num_mappings.clone(),
+        scaffold_filter: scaffold_filter.clone(),
         scaffold_mass,
         sparsify: sweepga::knn_graph::SparsificationStrategy::None,
-        aligner: config.sweepga_aligner.clone(),
-        map_pct_identity: config.sweepga_map_pct_identity.clone(),
+        map_pct_identity: if aligner.eq_ignore_ascii_case("wfmash") {
+            config.sweepga_map_pct_identity.clone()
+        } else {
+            None
+        },
+        aligner,
         ..sweepga::library_api::SweepgaAlignConfig::default()
     };
     let mut chunk = String::new();
     if named.len() >= 2 {
+        let align_config = make_align_config(config.sweepga_aligner.clone());
         let paf_file =
             sweepga::library_api::sweepga_align(&named, &align_config).map_err(|err| {
                 io::Error::other(format!("SweepGA replacement alignment failed: {err}"))
@@ -4704,13 +4765,24 @@ fn build_sweepga_seqwish_replacement_with_tail_mode(
         .iter()
         .filter_map(|line| paf_alignment_block_bp(line))
         .sum::<u64>();
-    let paf = if paf_lines.is_empty() {
-        String::new()
-    } else {
-        let mut out = paf_lines.join("\n");
-        out.push('\n');
-        out
-    };
+    if paf_lines.is_empty() {
+        log::info!(
+            "crush sweepga: {} backend emitted zero replacement PAF record(s) for {} traversal(s), {} aligner-input traversal(s), {} input bp; skipping replacement induction",
+            config.sweepga_aligner,
+            seqs.len(),
+            named.len(),
+            candidate.traversal_stats.total_len
+        );
+        return Err(zero_alignment_replacement_error(
+            &config.sweepga_aligner,
+            seqs.len(),
+            named.len(),
+            candidate.traversal_stats.total_len,
+            kmer_frequency,
+        ));
+    }
+    let mut paf = paf_lines.join("\n");
+    paf.push('\n');
     log::debug!(
         "crush sweepga: {} traversal(s), {} aligner-input traversal(s), {} unique raw all-vs-all PAF line(s), {} aligned bp, {} PAF byte(s) from {} backend (fastga_frequency={}); seqwish tail filter={}",
         seqs.len(),
@@ -4744,12 +4816,22 @@ fn build_sweepga_seqwish_replacement_with_tail_mode(
     let gfa = crate::syng_graph::build_gfa_from_paf_and_sequences(&seqs, &paf, &graph_config)?;
     let replacement =
         finalize_pairwise_induced_replacement(gfa, &headers, candidate, config, "SweepGA/seqwish")?;
+    let replacement_shared_segments = replacement_shared_segment_count(&replacement);
+    if !paf_lines.is_empty() && replacement_shared_segments == 0 {
+        return Err(io::Error::other(format!(
+            "SweepGA/seqwish replacement lost {} PAF alignment record(s): seqwish output has {} segment(s), {} bp, and no segment is used by more than one replacement path",
+            paf_lines.len(),
+            replacement.segments.len(),
+            replacement_segment_bp(&replacement),
+        )));
+    }
     let evidence = SweepgaReplacementEvidence {
         alignment_records: paf_lines.len(),
         aligned_bp,
         paf_bytes: paf.len(),
         kmer_frequency,
         replacement_segments: replacement.segments.len(),
+        replacement_shared_segments,
         replacement_bp: replacement_segment_bp(&replacement),
     };
     Ok((replacement, evidence))
