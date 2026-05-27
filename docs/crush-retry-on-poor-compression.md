@@ -1,4 +1,4 @@
-# crush: retry-on-poor-compression
+# crush: compression diagnostics (former retry-on-poor-compression)
 
 Task: `crush-retry-on-poor-compression` (workgraph id `crush-retry-on`).
 Branch: `wg/agent-182/crush-retry-on`.
@@ -7,6 +7,16 @@ Branch: `wg/agent-182/crush-retry-on`.
 
 > If mistakes get made at first pass they can stick as we dig into the
 > hierarchy. — task spec, user insight.
+
+## Current status
+
+`remove-crush-replacement` disables this mechanism as an acceptance policy.
+Crush replacement is now unconditional after graph-validity checks: the
+replacement must parse, the replacement path names/order must match the input
+traversals, and the rewritten graph must preserve every input path spelling.
+Compression ratio is still useful in logs, but it is diagnostic only. It does
+not trigger an alternate aligner, swap in a smaller result, reject a larger
+result, or keep the previous graph.
 
 In the Phase-6 true level descent (see `docs/crush-architecture-spec.md`,
 `docs/crush-hierarchical.md`), each accepted bubble is replaced exactly once
@@ -25,93 +35,64 @@ compute
 compression ratio = sum(input traversal bp) / sum(replacement segment bp)
 ```
 
-If the ratio is below `retry_min_compression_ratio` (default `2.0`) **and**
-the bubble's input size is above `retry_min_input_bp` (default `1 000` bp,
-to keep noisy 1-bp bubbles out of the retry path), rebuild the same bubble
-with an *alternate* aligner. Keep whichever replacement is smaller in
-segment-bp.
-
-`alternate_replacement_method` in `src/resolution.rs` enforces a fixed
-mapping so the cascade is deterministic and auditable:
-
-| Original method   | Alternate |
-|-------------------|-----------|
-| `Sweepga`         | `Poasta`  |
-| `Wfmash`          | `Poasta`  |
-| `Poasta`          | `Allwave` |
-| `Allwave`         | `Poasta`  |
-| `Poa` (sPOA)      | `Poasta`  |
-| `StarBiwfa`       | `Poasta`  |
-| `Auto` / `Hierarchical` | (none — these are routing modes that always resolve to a concrete aligner before this point) |
+The ratio is logged with the accepted replacement's output segment-bp. If
+`retry-min-compression-ratio` is supplied in an older engine string, the log
+also reports how many replacements fell below that threshold. No alternate
+replacement is built and no replacement is selected by this metric.
 
 ## Safety invariants
 
-1. **Bounded wall.** Each bubble gets at most ONE alternate attempt
-   (original + 1 retry). There is no recursive cascade and no per-bubble
-   loop.
-2. **Path preservation.** Each aligner's builder
+1. **Path preservation.** Each aligner's builder
    (`build_poa_replacement`, `build_poasta_replacement`, etc.) calls
-   `validate_replacement_paths` on its output before returning, so the
-   retry can only swap in a replacement whose paths spell the same bytes
-   as the input traversals. The outer `apply_replacement_frontier` re-runs
-   `path_sequences_equal` after rewriting, providing a second-line
-   defense.
-3. **Never lose ground.** If the alternate's build errors, returns an
-   empty replacement, or merely fails to beat the original on segment-bp,
-   the original plan is kept. The retry path can only make a bubble's
-   replacement smaller; it can never make it larger or invalid.
+   `validate_replacement_paths` on its output before returning, so every
+   accepted replacement's paths spell the same bytes as the input
+   traversals. The outer `apply_replacement_frontier` re-runs
+   `path_sequences_equal` after rewriting, providing a second-line defense.
+2. **Parse and path identity.** Replacement GFA must parse and preserve
+   replacement path names/order before it can be spliced.
+3. **No quality gate.** Segment count, segment-bp, compression ratio,
+   stringiness, and visual-complexity metrics are never used to reject or
+   replace an otherwise valid result.
 
 ## Configuration
 
-Exposed on the `crush:` engine pipeline (parsed in `src/main.rs`,
-`parse_crush_engine_stage_params`):
+The legacy keys are still accepted on the `crush:` engine pipeline (parsed in
+`src/main.rs`, `parse_crush_engine_stage_params`) so older command strings do
+not fail:
 
 - `retry-min-compression-ratio=<f64>` (alias: `retry-ratio`,
-  `min-compression-ratio`, `compression-retry-ratio`). Default `2.0`.
-  Set to `0.0` to disable the mechanism entirely.
+  `min-compression-ratio`, `compression-retry-ratio`). Default `0.0`.
+  Values above zero only annotate the diagnostic log.
 - `retry-min-input-bp=<usize>` (alias: `retry-min-input`). Default
-  `1 000`. Bubbles whose total input traversal bp is below this floor
-  are not retried regardless of ratio — small bubbles where neither
-  aligner can meaningfully compress the input would waste wall on
-  retries that cannot improve the result.
+  `1 000`. This is only used to decide which replacements are counted as
+  "below threshold" in diagnostics.
 
 ## Reporting
 
-`ResolutionStats` carries three new counters:
+`ResolutionStats` keeps the older `retry_attempts`, `retry_wins`, and
+`retry_failures` fields for API compatibility. They remain zero because no
+retry is attempted.
 
-- `retry_attempts` — number of bubbles below threshold whose alternate
-  was actually built (not just considered).
-- `retry_wins` — alternate compressed strictly better than the original
-  and was swapped in.
-- `retry_failures` — alternate's build returned an error, an empty
-  graph, or otherwise could not be evaluated; original was kept.
+Per-round diagnostics are written at `info` level, for example:
 
-Per-bubble decisions are also written to the log at `info` level with the
-short signature of the bubble, the original→alternate method pair, the
-old/new segment-bp, and old/new ratios. A round summary line at the end
-of each retry pass reports `attempts/wins/failures` for that round and
-the running totals.
+```text
+crush round 1: replacement compression diagnostics: ratio input/output n=8, ...
+threshold=disabled (diagnostic only); no alternate aligner attempted and no replacement was rejected by ratio
+```
 
 ## Tests
 
 `src/resolution.rs` (unit, under `mod tests`):
 
-- `alternate_replacement_method_picks_a_different_aligner` — enforces
-  the mapping table above and the "alternate must differ from original"
-  invariant.
 - `replacement_compression_ratio_handles_zero_and_basic_cases` — exact
   values on perfect (4 traversals → 1 segment, ratio 4.0) and no-op
   (4 traversals → 4 segments, ratio 1.0) cases; `None` returned when
-  input or output bp is zero so the retry path treats them as "no
+  input or output bp is zero so diagnostics treat them as "no
   signal" instead of dividing by zero or grading every empty graph as
   infinitely well compressed.
-- `retry_preserves_path_sequences_on_simple_bubble` — end-to-end on the
-  canonical SNP bubble fixture: with a 1e9 threshold every bubble
-  becomes a retry candidate; output paths must still spell the input
-  byte-for-byte.
-- `retry_skips_bubbles_below_min_input_bp` — verifies the input-bp
-  floor suppresses retries on tiny fixtures even when the ratio
-  threshold is aggressive.
+- `compression_ratio_threshold_is_diagnostic_only` — end-to-end on the
+  canonical SNP bubble fixture: even a 1e9 threshold must preserve paths
+  and leave `retry_attempts`, `retry_wins`, and `retry_failures` at zero.
 
 `cargo test --release --lib resolution` passes 54 tests (50 pre-existing
 + 4 new).
@@ -152,36 +133,24 @@ S: 19698  L: 23399  P: 465  segment-bp: 543930
 `validate_replacement_paths` per builder and again at the frontier rewrite
 by `path_sequences_equal`).
 
-### Retry mechanism in action
+### Historical retry mechanism output
 
-From `stderr.log`:
+The original `crush-retry-on` experiment predates
+`remove-crush-replacement` and did run a compression-ratio retry as an
+acceptance policy. Current runs emit compression diagnostics instead and do not
+attempt alternate aligners.
 
-```
-crush round 1: retry-on-poor-compression: 1/8 bubble(s) below ratio=2.00 (min-input-bp=1000), attempting alternate aligner
-crush round 1 retry: bubble sig=CHM13#0#chr6:31744284-31976975:143224-143389|...
-  Poa→Poasta alternate LOST (orig=25230bp ratio=1.30, alt=25230bp ratio=1.30); keeping original
-crush round 1 retry summary: attempts=1 wins=0 failures=0 (running totals: attempts=1 wins=0 failures=0)
-```
+At that time, 1 of the 8 accepted round-1 plans was below the 2.0
+compression-ratio threshold. The current code would report that fact as a
+diagnostic and keep the originally selected, path-valid replacement
+unconditionally.
 
-Of the 8 accepted round-1 plans, 1 was below the 2.0 compression-ratio
-threshold (input traversal bp / output segment bp = 1.30). The original
-aligner was `Poa` (sPOA, picked by the median-based 3-tier dispatch for
-a small-median bubble); the retry rebuilt it with `Poasta` and produced
-the same output bp (25 230). Because the alternate did not strictly
-beat the original, the original plan was kept (`AlternateLost`).
-Rounds 2 and 3 saw no candidates below the threshold.
-
-Total stats:
+Historical stats:
 - `retry_attempts = 1`
 - `retry_wins = 0`
 - `retry_failures = 0`
 
-The retry mechanism is conservative on this C4 fixture: the worst
-round-1 compression (Poa, ratio 1.30) was already at the Poa/Poasta
-crossover where neither aligner has an obvious advantage on a 165 bp
-bubble with 47 traversals. With deeper / different inputs the
-mechanism can fire more often; the same code path will swap in
-whichever aligner produces the smaller segment-bp.
+Current stats stay at zero because no retry attempts are made.
 
 ### Metrics vs the closest no-smoothxg baseline
 
@@ -208,11 +177,10 @@ only knob differences are `method=sweepga` (baseline) vs `method=auto`
 (Computed with
 `data/c4_pggb_control_20260526T025439Z/analysis-scripts/gfa_metrics2.py`.)
 
-Because the retry only fired once and the alternate lost, the metric
+Because the historical retry only fired once and the alternate lost, the metric
 deltas above mostly reflect the `method=auto` 3-tier dispatch vs
-`method=sweepga`, not the retry path. The important property is that
-enabling retry did not regress anything (paths preserved, segment-bp
-went down not up, dup-extras either improved or stayed flat).
+`method=sweepga`, not the retry path. They are retained as historical context,
+not as a current acceptance rule.
 
 ### Render
 
@@ -241,16 +209,13 @@ flow, per `docs/crush-smoothxg-on-output.md` §Publish).
 
 ## Hard gates
 
-- [x] Retry mechanism implemented; `cargo test --release --lib resolution`
-      passes 54 tests (50 pre-existing + 4 new). `cargo test --all`
-      passes everything except the pre-existing
-      `nested_bubble_level_descent_actually_descends` red test
-      (documented as RED on HEAD before this branch and unrelated to
-      the retry code path).
+- [x] Historical retry mechanism implemented for the original
+      `crush-retry-on` task. It is now superseded by
+      `remove-crush-replacement`, where compression metrics are diagnostic
+      only.
 - [x] Real C4 GRCh38 run, **465 / 465** paths preserved.
-- [x] Retry stats reported: `retry_attempts=1, retry_wins=0,
-      retry_failures=0` (logged at info level; also accessible via
-      `ResolutionStats`).
+- [x] Historical retry stats reported: `retry_attempts=1, retry_wins=0,
+      retry_failures=0`. Current runs leave these counters at zero.
 - [x] Final metrics: segments **19 698**, segment-bp **543 930**,
       dup-extras 51–200 bp = **10**, dup-extras > 200 bp = **0**,
       distinct sequences **13 065**, paths **465**.

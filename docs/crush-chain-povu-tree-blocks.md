@@ -13,11 +13,13 @@ into children; oversized leaves are skipped.
 
 Each selected block is materialized as path sequences and processed through a
 local smoothxg-style smoothing pass followed by bounded POASTA cleanup. The
-replacement is compacted and path-validated before rewrite. A direct POASTA
-fallback is also built and wins when the smoothed replacement is larger by
-segment-bp, or equal in bp but larger by segment count. This guard was added
-after an initial C4 validation run showed the unguarded smooth seed could
-expand small many-haplotype blocks into hundreds of path-overlap chunks.
+replacement is compacted and path-validated before rewrite. As of
+`remove-crush-replacement`, this mode no longer compares the smoothxg -> POASTA
+replacement against direct POASTA by segment-bp or segment count. If the
+smoothxg -> POASTA replacement parses and preserves every traversal sequence,
+it is used unconditionally; metrics are diagnostic only. Direct POASTA is only
+used when the smooth path cannot produce a valid replacement, or when an empty
+traversal makes the smooth path inapplicable.
 
 ## Code changes
 
@@ -39,7 +41,7 @@ expand small many-haplotype blocks into hundreds of path-overlap chunks.
   - selected and accepted block-size distributions
   - final per-iteration block counts and distributions
 - Added regression tests for parser aliases, subtree selection, nested parent
-  replacement, and the smoothed-replacement inflation guard.
+  replacement, and path-preserving chain-POVU replacement.
 
 ## Validation
 
@@ -254,18 +256,17 @@ too low. In the 5-round comparison, the selected block maxima were 9,320,
 subtrees (`oversize_internal` 5, 6, 10, 16, 13 and `oversize_leaves` 57, 26,
 28, 24, 20), but most processed blocks are much smaller than the target.
 
-The stronger signal is the replacement decision log: every selected block in
-the 5-round comparison used `direct_fallback`, with `smooth_kept=0` in all
-rounds. That means the local smoothxg -> POASTA seed path consistently expanded
-or failed to condense better than direct POASTA on these subtree blocks. The
-fallback guard is necessary for sane output, but it also shows that this exact
-per-block smoothxg construction is not yet delivering the PGGB-like smoothing
-benefit.
+The old replacement decision log compared smoothxg -> POASTA against direct
+POASTA and selected the direct result by metric. That decision path has been
+removed. Current chain-POVU semantics do not let direct POASTA win because it
+is smaller; a valid smoothxg -> POASTA replacement is spliced into the graph
+unconditionally. Direct POASTA remains a validity recovery path when smoothxg
+-> POASTA fails to build, parse, or preserve traversal spellings.
 
 Increasing the cap beyond 10 kb is therefore not justified as the next primary
-lever from these logs alone. A higher cap might help a few oversized internal
-subtrees, but the dominant problem is that current selected blocks are tiny and
-the smoothxg path loses to direct POASTA. A follow-up should either change how
+lever from these historical logs alone. A higher cap might help a few oversized
+internal subtrees, but most selected blocks were already tiny. A follow-up
+should either change how
 the smooth seed graph is constructed for many-haplotype blocks, or select wider
 context using a different criterion than simply raising the cap.
 
