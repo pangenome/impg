@@ -26,10 +26,25 @@ use impg::resolution::{path_sequences, resolve_gfa_bubbles, ResolutionConfig, Re
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard, Once};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+static C4_FRAGMENT_TEST_THREADS: Once = Once::new();
+static C4_FRAGMENT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn c4_fragment_test_guard() -> MutexGuard<'static, ()> {
+    C4_FRAGMENT_TEST_THREADS.call_once(|| {
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(32)
+            .build_global();
+    });
+    C4_FRAGMENT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Locate the compiled `impg` binary.
 fn impg_binary() -> Option<std::path::PathBuf> {
@@ -113,6 +128,177 @@ fn gfa_shared_path_segment_count(gfa: &str) -> usize {
     support.values().filter(|paths| paths.len() > 1).count()
 }
 
+fn gfa_max_path_segment_depth(gfa: &str) -> usize {
+    let mut support: HashMap<String, HashSet<String>> = HashMap::new();
+    for line in gfa.lines().filter(|line| line.starts_with("P\t")) {
+        let mut fields = line.split('\t');
+        fields.next();
+        let Some(path_name) = fields.next() else {
+            continue;
+        };
+        let Some(steps) = fields.next() else {
+            continue;
+        };
+        for step in steps.split(',').filter(|step| !step.is_empty()) {
+            let node = step
+                .strip_suffix('+')
+                .or_else(|| step.strip_suffix('-'))
+                .unwrap_or(step);
+            support
+                .entry(node.to_string())
+                .or_default()
+                .insert(path_name.to_string());
+        }
+    }
+    support.values().map(HashSet::len).max().unwrap_or_default()
+}
+
+fn gfa_path_count(gfa: &str) -> usize {
+    gfa.lines().filter(|line| line.starts_with("P\t")).count()
+}
+
+fn gfa_duplicate_segment_seqs(gfa: &str) -> usize {
+    let mut seqs: HashSet<String> = HashSet::new();
+    let mut duplicates = 0usize;
+    for line in gfa.lines().filter(|line| line.starts_with("S\t")) {
+        let mut fields = line.splitn(4, '\t');
+        fields.next();
+        fields.next();
+        if let Some(seq) = fields.next() {
+            if !seqs.insert(seq.to_string()) {
+                duplicates += 1;
+            }
+        }
+    }
+    duplicates
+}
+
+#[derive(Default, Debug)]
+struct PafFixtureStats {
+    records: usize,
+    aligned_bp: usize,
+    name_mismatches: usize,
+    length_mismatches: usize,
+}
+
+fn paf_fixture_stats(paf: &str, seqs: &[(String, Vec<u8>)]) -> PafFixtureStats {
+    let lengths: HashMap<&str, usize> = seqs
+        .iter()
+        .map(|(name, seq)| (name.as_str(), seq.len()))
+        .collect();
+    let mut stats = PafFixtureStats::default();
+    for line in paf.lines().filter(|line| !line.trim().is_empty()) {
+        let fields: Vec<_> = line.split('\t').collect();
+        if fields.len() < 12 {
+            continue;
+        }
+        stats.records += 1;
+        stats.aligned_bp += fields[10].parse::<usize>().unwrap_or_default();
+        let q_len = lengths.get(fields[0]).copied();
+        let t_len = lengths.get(fields[5]).copied();
+        if q_len.is_none() || t_len.is_none() {
+            stats.name_mismatches += 1;
+            continue;
+        }
+        if fields[1].parse::<usize>().ok() != q_len || fields[6].parse::<usize>().ok() != t_len {
+            stats.length_mismatches += 1;
+        }
+    }
+    stats
+}
+
+fn assert_gfa_paths_spell_fasta(gfa: &str, seqs: &[(String, Vec<u8>)], context: &str) {
+    let expected: HashMap<String, String> = seqs
+        .iter()
+        .map(|(name, seq)| {
+            (
+                name.clone(),
+                String::from_utf8(seq.clone()).expect("fixture sequence is not UTF-8"),
+            )
+        })
+        .collect();
+    let observed: HashMap<String, String> = path_sequences(gfa)
+        .expect("failed to spell GFA paths")
+        .into_iter()
+        .collect();
+    assert_eq!(
+        observed.len(),
+        expected.len(),
+        "{context}: path count changed"
+    );
+    for (name, expected_seq) in &expected {
+        let observed_seq = observed
+            .get(name)
+            .unwrap_or_else(|| panic!("{context}: path {name} disappeared"));
+        assert_eq!(
+            observed_seq, expected_seq,
+            "{context}: path {name} changed spelling"
+        );
+    }
+}
+
+fn common_prefix_len(seqs: &[Vec<u8>]) -> usize {
+    let min_len = seqs.iter().map(Vec::len).min().unwrap_or_default();
+    (0..min_len)
+        .take_while(|&idx| seqs.iter().all(|seq| seq[idx] == seqs[0][idx]))
+        .count()
+}
+
+fn common_suffix_len(seqs: &[Vec<u8>], max_len: usize) -> usize {
+    let min_len = seqs.iter().map(Vec::len).min().unwrap_or_default();
+    (0..min_len.min(max_len))
+        .take_while(|&idx| {
+            seqs.iter()
+                .all(|seq| seq[seq.len() - 1 - idx] == seqs[0][seqs[0].len() - 1 - idx])
+        })
+        .count()
+}
+
+fn one_bubble_gfa_from_fasta_records(seqs: &[(String, Vec<u8>)]) -> String {
+    let raw_seqs: Vec<Vec<u8>> = seqs.iter().map(|(_, seq)| seq.clone()).collect();
+    let left_len = common_prefix_len(&raw_seqs).min(20);
+    let right_len = common_suffix_len(
+        &raw_seqs,
+        raw_seqs.iter().map(Vec::len).min().unwrap() - left_len,
+    )
+    .min(20);
+    assert!(
+        left_len > 0 && right_len > 0,
+        "C4 fragment fixture must have shared flanks to build a bubble"
+    );
+    let exit_id = seqs.len() + 2;
+    let mut gfa = String::from("H\tVN:Z:1.0\n");
+    gfa.push_str(&format!(
+        "S\t1\t{}\n",
+        String::from_utf8(raw_seqs[0][..left_len].to_vec()).unwrap()
+    ));
+    for (idx, (_, seq)) in seqs.iter().enumerate() {
+        assert!(
+            left_len + right_len < seq.len(),
+            "C4 fragment fixture traversal must contain non-empty bubble interior"
+        );
+        gfa.push_str(&format!(
+            "S\t{}\t{}\n",
+            idx + 2,
+            String::from_utf8(seq[left_len..seq.len() - right_len].to_vec()).unwrap()
+        ));
+    }
+    gfa.push_str(&format!(
+        "S\t{exit_id}\t{}\n",
+        String::from_utf8(raw_seqs[0][raw_seqs[0].len() - right_len..].to_vec()).unwrap()
+    ));
+    for idx in 0..seqs.len() {
+        let seg_id = idx + 2;
+        gfa.push_str(&format!("L\t1\t+\t{seg_id}\t+\t0M\n"));
+        gfa.push_str(&format!("L\t{seg_id}\t+\t{exit_id}\t+\t0M\n"));
+    }
+    for (idx, (name, _)) in seqs.iter().enumerate() {
+        let seg_id = idx + 2;
+        gfa.push_str(&format!("P\t{name}\t1+,{seg_id}+,{exit_id}+\t*\n"));
+    }
+    gfa
+}
+
 /// Count S-lines and sum bp in a GFA file without reading it all into memory.
 fn gfa_file_segment_stats(path: &str) -> (usize, usize) {
     use std::io::BufRead;
@@ -133,19 +319,6 @@ fn gfa_file_segment_stats(path: &str) -> (usize, usize) {
         }
     }
     (count, bp)
-}
-
-/// Return the set of sequences present in the S-lines.
-fn gfa_segment_seqs(gfa: &str) -> HashSet<String> {
-    gfa.lines()
-        .filter(|l| l.starts_with("S\t"))
-        .filter_map(|l| {
-            let mut p = l.splitn(4, '\t');
-            p.next(); // "S"
-            p.next(); // id
-            p.next().map(|s| s.to_owned()) // sequence
-        })
-        .collect()
 }
 
 /// Count duplicate sequences in a GFA file.
@@ -170,6 +343,82 @@ fn gfa_file_duplicate_seqs(path: &str) -> usize {
     }
     total
 }
+
+struct C4FragmentFixture {
+    name: &'static str,
+    fasta_rel: &'static str,
+    paf_rel: &'static str,
+    protects: &'static str,
+    min_paf_records: usize,
+    min_shared_segments: usize,
+    min_shared_depth: usize,
+    max_segments: usize,
+    max_segment_bp: usize,
+    max_duplicate_segment_seqs: usize,
+}
+
+const C4_FRAGMENT_FIXTURES: &[C4FragmentFixture] = &[
+    C4FragmentFixture {
+        name: "easy_shared_flank",
+        fasta_rel: "tests/test_data/crush/c4_fragments/easy_shared_flank.fa",
+        paf_rel: "tests/test_data/crush/c4_fragments/easy_shared_flank.paf",
+        protects: "simple top-flubble block with obvious shared flanks and two allelic interiors",
+        min_paf_records: 12,
+        min_shared_segments: 1,
+        min_shared_depth: 3,
+        max_segments: 4,
+        max_segment_bp: 700,
+        max_duplicate_segment_seqs: 0,
+    },
+    C4FragmentFixture {
+        name: "bounded_multi_bubble",
+        fasta_rel: "tests/test_data/crush/c4_fragments/bounded_multi_bubble.fa",
+        paf_rel: "tests/test_data/crush/c4_fragments/bounded_multi_bubble.paf",
+        protects: "locally complex but bounded C4 top-flubble block with three compact allelic classes",
+        min_paf_records: 12,
+        min_shared_segments: 1,
+        min_shared_depth: 4,
+        max_segments: 12,
+        max_segment_bp: 2_000,
+        max_duplicate_segment_seqs: 6,
+    },
+    C4FragmentFixture {
+        name: "unfolded_minrun",
+        fasta_rel: "tests/test_data/crush/top_flubble_seqwish_minrun.fa",
+        paf_rel: "tests/test_data/crush/top_flubble_seqwish_minrun.paf",
+        protects: "previous broken output class where nonempty C4 PAF became path-specific unfolded segments",
+        min_paf_records: 16,
+        min_shared_segments: 1,
+        min_shared_depth: 2,
+        max_segments: 8,
+        max_segment_bp: 1800,
+        max_duplicate_segment_seqs: 0,
+    },
+    C4FragmentFixture {
+        name: "short_floor",
+        fasta_rel: "tests/test_data/crush/c4_fragments/short_floor.fa",
+        paf_rel: "tests/test_data/crush/c4_fragments/short_floor.paf",
+        protects: "short C4 block at the 159-300 bp length floor where filtering and seqwish-k must not erase alignments",
+        min_paf_records: 20,
+        min_shared_segments: 2,
+        min_shared_depth: 4,
+        max_segments: 8,
+        max_segment_bp: 900,
+        max_duplicate_segment_seqs: 0,
+    },
+    C4FragmentFixture {
+        name: "duplicated_repeat",
+        fasta_rel: "tests/test_data/crush/c4_fragments/duplicated_repeat.fa",
+        paf_rel: "tests/test_data/crush/c4_fragments/duplicated_repeat.paf",
+        protects: "repeated/duplicated C4 sequence where alignments must survive filtering and be consumed by seqwish",
+        min_paf_records: 40,
+        min_shared_segments: 2,
+        min_shared_depth: 4,
+        max_segments: 8,
+        max_segment_bp: 900,
+        max_duplicate_segment_seqs: 0,
+    },
+];
 
 #[test]
 fn c4_top_flubble_seqwish_indexes_observed_exact_runs() {
@@ -207,6 +456,195 @@ fn c4_top_flubble_seqwish_indexes_observed_exact_runs() {
         input_bp,
         segments,
     );
+}
+
+#[test]
+fn c4_fragment_seqwish_regressions_induce_shared_graphs() {
+    let _guard = c4_fragment_test_guard();
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for fixture in C4_FRAGMENT_FIXTURES {
+        let fasta_path = manifest_dir.join(fixture.fasta_rel);
+        let paf_path = manifest_dir.join(fixture.paf_rel);
+        let seqs = fasta_records(&fasta_path);
+        let paf = std::fs::read_to_string(&paf_path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", paf_path.display()));
+        let input_bp: usize = seqs.iter().map(|(_, seq)| seq.len()).sum();
+        let paf_stats = paf_fixture_stats(&paf, &seqs);
+        assert!(
+            paf_stats.records >= fixture.min_paf_records,
+            "{}: expected at least {} real PAF records, got {}; protects: {}",
+            fixture.name,
+            fixture.min_paf_records,
+            paf_stats.records,
+            fixture.protects
+        );
+        assert_eq!(
+            paf_stats.name_mismatches, 0,
+            "{}: PAF query/target names must match FASTA IDs",
+            fixture.name
+        );
+        assert_eq!(
+            paf_stats.length_mismatches, 0,
+            "{}: PAF query/target lengths must match FASTA lengths",
+            fixture.name
+        );
+        assert!(
+            paf_stats.aligned_bp > 0,
+            "{}: homologous C4 fragment should have nonempty aligned bp",
+            fixture.name
+        );
+
+        let config = impg::commands::graph::GraphBuildConfig {
+            num_threads: 1,
+            min_match_len: 311,
+            min_map_length: 311,
+            no_filter: false,
+            num_mappings: "many:many".to_string(),
+            scaffold_filter: "many:many".to_string(),
+            scaffold_mass: 0,
+            show_progress: false,
+            ..impg::commands::graph::GraphBuildConfig::default()
+        };
+        let gfa = impg::syng_graph::build_gfa_from_paf_and_sequences(&seqs, &paf, &config)
+            .unwrap_or_else(|err| panic!("{}: seqwish induction failed: {err}", fixture.name));
+        assert_gfa_paths_spell_fasta(&gfa, &seqs, fixture.name);
+
+        let (segments, segment_bp) = gfa_segment_stats(&gfa);
+        let shared_segments = gfa_shared_path_segment_count(&gfa);
+        let shared_depth = gfa_max_path_segment_depth(&gfa);
+        let duplicate_segment_seqs = gfa_duplicate_segment_seqs(&gfa);
+        eprintln!(
+            "{} seqwish: paths={}, segments={}, bp={}, shared={}, depth={}, duplicate_seqs={}",
+            fixture.name,
+            gfa_path_count(&gfa),
+            segments,
+            segment_bp,
+            shared_segments,
+            shared_depth,
+            duplicate_segment_seqs
+        );
+        assert_eq!(
+            gfa_path_count(&gfa),
+            seqs.len(),
+            "{}: seqwish path count changed",
+            fixture.name
+        );
+        assert!(
+            shared_segments >= fixture.min_shared_segments,
+            "{}: induced graph has only {} shared segment(s), expected >= {}; protects: {}",
+            fixture.name,
+            shared_segments,
+            fixture.min_shared_segments,
+            fixture.protects
+        );
+        assert!(
+            shared_depth >= fixture.min_shared_depth,
+            "{}: max shared-node depth {} below expected {}; GFA was:\n{}",
+            fixture.name,
+            shared_depth,
+            fixture.min_shared_depth,
+            gfa
+        );
+        assert!(
+            segments <= fixture.max_segments,
+            "{}: induced graph has {} segment(s), expected <= {}",
+            fixture.name,
+            segments,
+            fixture.max_segments
+        );
+        assert!(
+            segment_bp <= fixture.max_segment_bp,
+            "{}: induced graph has {} segment bp, expected <= {}",
+            fixture.name,
+            segment_bp,
+            fixture.max_segment_bp
+        );
+        assert!(
+            segment_bp < input_bp,
+            "{}: induced graph looks unfolded/concatenated (segment bp {} >= input bp {})",
+            fixture.name,
+            segment_bp,
+            input_bp
+        );
+        assert!(
+            duplicate_segment_seqs <= fixture.max_duplicate_segment_seqs,
+            "{}: duplicate segment sequence count {} exceeds bound {}; duplicate/unfolded signature not eliminated",
+            fixture.name,
+            duplicate_segment_seqs,
+            fixture.max_duplicate_segment_seqs
+        );
+    }
+}
+
+#[test]
+fn c4_fragment_lacing_uses_pairwise_induced_graphs() {
+    let _guard = c4_fragment_test_guard();
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for fixture in C4_FRAGMENT_FIXTURES {
+        let fasta_path = manifest_dir.join(fixture.fasta_rel);
+        let seqs = fasta_records(&fasta_path);
+        let gfa = one_bubble_gfa_from_fasta_records(&seqs);
+        let before: HashMap<_, _> = path_sequences(&gfa).unwrap().into_iter().collect();
+        let (before_segments, before_bp) = gfa_segment_stats(&gfa);
+        let config = ResolutionConfig {
+            max_iterations: 1,
+            method: ResolutionMethod::TopFlubbleSweepga,
+            replacement_seqwish_min_match_len: 311,
+            replacement_min_map_length: 311,
+            replacement_num_mappings: "many:many".to_string(),
+            replacement_scaffold_filter: "many:many".to_string(),
+            replacement_scaffold_mass: 0,
+            sweepga_aligner: "fastga".to_string(),
+            sweepga_min_aln_length: 1,
+            max_pair_alignments: 0,
+            max_replacement_paf_bytes: 0,
+            polish_iterations: 0,
+            polish_max_traversal_len: 0,
+            polish_max_median_traversal_len: 0,
+            polish_max_total_sequence: 0,
+            polish_max_traversals: 0,
+            ..ResolutionConfig::default()
+        };
+        let resolved = resolve_gfa_bubbles(&gfa, &config)
+            .unwrap_or_else(|err| panic!("{}: top-flubble crush failed: {err}", fixture.name));
+        assert_eq!(
+            resolved.stats.bailed, 0,
+            "{}: no quality-guard fallback or bailout should hide bad behavior; stats={:?}",
+            fixture.name, resolved.stats
+        );
+        assert_eq!(
+            resolved.stats.resolved, 1,
+            "{}: expected exactly one top-flubble replacement to be applied; stats={:?}",
+            fixture.name, resolved.stats
+        );
+        let after: HashMap<_, _> = path_sequences(&resolved.gfa).unwrap().into_iter().collect();
+        assert_eq!(
+            after, before,
+            "{}: replacement/lacing changed path spellings",
+            fixture.name
+        );
+        let (after_segments, after_bp) = gfa_segment_stats(&resolved.gfa);
+        let after_shared = gfa_shared_path_segment_count(&resolved.gfa);
+        assert!(
+            after_shared > 0,
+            "{}: laced graph has no shared path-supported nodes",
+            fixture.name
+        );
+        assert!(
+            after_bp < before_bp,
+            "{}: laced graph still looks like concatenated traversal sequence (bp {} -> {})",
+            fixture.name,
+            before_bp,
+            after_bp
+        );
+        assert!(
+            after_segments < before_segments,
+            "{}: replacement should reduce segment count on this bounded fixture ({} -> {})",
+            fixture.name,
+            before_segments,
+            after_segments
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
