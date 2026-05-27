@@ -2924,6 +2924,12 @@ fn parse_smooth_stage(
         "flubble-smooth" | "flubble-guided-smooth" | "povu-smooth"
     ) {
         config.block_source = impg::smooth::SmoothBlockSource::Flubble;
+    } else if matches!(
+        stage.name.as_str(),
+        "neighbor-merge-poasta" | "neighbor-merge" | "bubble-neighbor-merge"
+    ) {
+        config.block_source = impg::smooth::SmoothBlockSource::NeighborMergePoasta;
+        config.target_poa_lengths = vec![10_000, 10_000, 10_000];
     }
     for param in &stage.params {
         match param.key.as_str() {
@@ -2955,6 +2961,44 @@ fn parse_smooth_stage(
                     ));
                 }
                 config.target_poa_lengths = lengths;
+            }
+            "target-length" | "target-len" | "max-block-length" | "max-block-len"
+            | "block-size-cap" | "block-cap" => {
+                let value = parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+                if value == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': smooth {}='{}' must be > 0",
+                            raw, param.key, param.value
+                        ),
+                    ));
+                }
+                for length in &mut config.target_poa_lengths {
+                    *length = value;
+                }
+            }
+            "iterations" | "iteration" | "passes" | "rounds" => {
+                let iterations: usize = param.value.parse().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': smooth {}='{}' is not a positive integer",
+                            raw, param.key, param.value
+                        ),
+                    )
+                })?;
+                if iterations == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': smooth {}='{}' must be > 0",
+                            raw, param.key, param.value
+                        ),
+                    ));
+                }
+                let target = config.target_poa_lengths.first().copied().unwrap_or(10_000);
+                config.target_poa_lengths = vec![target; iterations];
             }
             "max-node-length" | "node-length" | "k" => {
                 config.max_node_length =
@@ -3029,10 +3073,12 @@ fn parse_smooth_block_source(
         "flubble" | "flubbles" | "povu" | "povu-flubble" | "flubble-guided" => {
             Ok(impg::smooth::SmoothBlockSource::Flubble)
         }
+        "neighbor-merge" | "neighbor-merge-poasta" | "bubble-neighbor-merge"
+        | "neighbors" => Ok(impg::smooth::SmoothBlockSource::NeighborMergePoasta),
         other => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "Invalid --gfa-engine '{}': smooth {}='{}' is unsupported (expected path-overlap or flubble)",
+                "Invalid --gfa-engine '{}': smooth {}='{}' is unsupported (expected path-overlap, flubble, or neighbor-merge-poasta)",
                 raw, key, other
             ),
         )),
@@ -3427,7 +3473,10 @@ impl EngineCliOpts {
                 | "smoothxg"
                 | "flubble-smooth"
                 | "flubble-guided-smooth"
-                | "povu-smooth" => {
+                | "povu-smooth"
+                | "neighbor-merge-poasta"
+                | "neighbor-merge"
+                | "bubble-neighbor-merge" => {
                     if smooth_after_crush.is_some() {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
@@ -13531,6 +13580,64 @@ mod tests {
             smooth.block_source,
             impg::smooth::SmoothBlockSource::Flubble
         );
+    }
+
+    #[test]
+    fn test_gfa_engine_neighbor_merge_poasta_stage_parses_defaults() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush:neighbor-merge-poasta:nosort",
+        ])
+        .unwrap();
+        let Args::Query {
+            output_format,
+            mut engine_cli,
+            ..
+        } = args
+        else {
+            panic!("expected query command");
+        };
+        apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+        let parsed = engine_cli.parse_engine().unwrap();
+        let smooth = parsed.smooth_after_crush.unwrap();
+        assert_eq!(
+            smooth.block_source,
+            impg::smooth::SmoothBlockSource::NeighborMergePoasta
+        );
+        assert_eq!(smooth.target_poa_lengths, vec![10_000, 10_000, 10_000]);
+    }
+
+    #[test]
+    fn test_gfa_engine_neighbor_merge_poasta_stage_parses_iterations_and_cap() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush:neighbor-merge-poasta,iterations=2,target-length=8k:nosort",
+        ])
+        .unwrap();
+        let Args::Query {
+            output_format,
+            mut engine_cli,
+            ..
+        } = args
+        else {
+            panic!("expected query command");
+        };
+        apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+        let parsed = engine_cli.parse_engine().unwrap();
+        let smooth = parsed.smooth_after_crush.unwrap();
+        assert_eq!(
+            smooth.block_source,
+            impg::smooth::SmoothBlockSource::NeighborMergePoasta
+        );
+        assert_eq!(smooth.target_poa_lengths, vec![8_000, 8_000]);
     }
 
     #[test]

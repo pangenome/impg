@@ -4180,6 +4180,129 @@ fn build_poasta_replacement(
     Ok(replacement)
 }
 
+/// Build an exact path-preserving POASTA graph for already-extracted local
+/// sequences and return it as numeric GFA 1.0 `S/L/P` records.
+///
+/// This is intentionally narrower than full crush replacement: callers own
+/// block discovery and lacing, while this helper owns the POASTA invocation and
+/// the exact-path clipping/validation used by the crush POASTA backend.
+pub fn poasta_sequences_to_gfa(
+    headers: &[String],
+    sequences: &[Vec<u8>],
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+) -> io::Result<String> {
+    use poasta::aligner::config::Affine2PieceMinGapCost;
+    use poasta::aligner::PoastaAligner;
+    use poasta::graphs::poa::POAGraph;
+    use poasta::io::graph::graph_to_gfa;
+
+    if headers.len() != sequences.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "POASTA block got {} header(s) for {} sequence(s)",
+                headers.len(),
+                sequences.len()
+            ),
+        ));
+    }
+    if headers.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut sorted_sequences = headers
+        .iter()
+        .cloned()
+        .zip(sequences.iter().cloned())
+        .collect::<Vec<_>>();
+    sorted_sequences.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
+    let sorted_headers = sorted_sequences
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let sequence_refs = sorted_sequences
+        .iter()
+        .map(|(_, sequence)| sequence.as_slice())
+        .collect::<Vec<_>>();
+    let weights = sequence_refs
+        .iter()
+        .map(|sequence| vec![1usize; sequence.len()])
+        .collect::<Vec<_>>();
+
+    let mut graph = POAGraph::<u32>::new();
+    let scoring = poasta_two_piece_scoring(scoring_params)?;
+    let mut aligner = PoastaAligner::new(Affine2PieceMinGapCost(scoring), poasta_alignment_type());
+    add_poasta_sequences(
+        &mut graph,
+        &mut aligner,
+        &sorted_headers,
+        &sequence_refs,
+        &weights,
+    )?;
+
+    let mut gfa = Vec::new();
+    graph_to_gfa(&mut gfa, &graph)
+        .map_err(|err| io::Error::other(format!("POASTA block GFA generation failed: {err}")))?;
+    let gfa = String::from_utf8(gfa).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("POASTA block GFA is not UTF-8: {err}"),
+        )
+    })?;
+
+    let expected_paths = sorted_sequences.into_iter().collect::<Vec<_>>();
+    let mut replacement = poasta_gfa_to_exact_graph(&gfa, &expected_paths)?;
+    order_replacement_paths(&mut replacement, headers)?;
+    let expected_in_header_order = headers
+        .iter()
+        .cloned()
+        .zip(sequences.iter().cloned())
+        .collect::<Vec<_>>();
+    validate_expected_paths(&replacement, &expected_in_header_order, "POASTA block")?;
+    Ok(render_numeric_graph(&replacement))
+}
+
+fn render_numeric_graph(graph: &Graph) -> String {
+    let mut out = String::new();
+    out.push_str("H\tVN:Z:1.0\n");
+    for (idx, segment) in graph.segments.iter().enumerate() {
+        out.push_str(&format!(
+            "S\t{}\t{}\n",
+            idx + 1,
+            String::from_utf8_lossy(&segment.seq)
+        ));
+    }
+
+    let mut edges = BTreeSet::new();
+    for path in &graph.paths {
+        for pair in path.steps.windows(2) {
+            edges.insert((pair[0].node, pair[0].rev, pair[1].node, pair[1].rev));
+        }
+    }
+    for (from, from_rev, to, to_rev) in edges {
+        out.push_str(&format!(
+            "L\t{}\t{}\t{}\t{}\t0M\n",
+            from + 1,
+            if from_rev { "-" } else { "+" },
+            to + 1,
+            if to_rev { "-" } else { "+" }
+        ));
+    }
+
+    for path in &graph.paths {
+        let steps = path
+            .steps
+            .iter()
+            .map(|step| format!("{}{}", step.node + 1, if step.rev { "-" } else { "+" }))
+            .collect::<Vec<_>>()
+            .join(",");
+        if !steps.is_empty() {
+            out.push_str(&format!("P\t{}\t{}\t*\n", path.name, steps));
+        }
+    }
+    out
+}
+
 fn poasta_uses_two_piece_affine(scoring_params: (u8, u8, u8, u8, u8, u8)) -> bool {
     let (_, _, _, gap_extend, _, gap_extend2) = scoring_params;
     gap_extend > gap_extend2
