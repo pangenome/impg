@@ -2861,11 +2861,68 @@ fn engine_raw_has_crush_scoring_param(raw: &str) -> bool {
     })
 }
 
-fn parse_smooth_stage(
+#[derive(Clone, Copy)]
+enum SmoothStageAlignerMode {
+    Fixed(impg::smooth::SmoothBlockAligner),
+    AutoByTarget,
+}
+
+fn parse_smooth_target_length(raw: &str, key: &str, value: &str) -> io::Result<usize> {
+    let trimmed = value.trim();
+    let normalized = trimmed
+        .strip_suffix("bp")
+        .or_else(|| trimmed.strip_suffix("BP"))
+        .or_else(|| trimmed.strip_suffix('b'))
+        .or_else(|| trimmed.strip_suffix('B'))
+        .unwrap_or(trimmed);
+    parse_usize_size_engine_param(raw, key, normalized)
+}
+
+fn smooth_aligners_for(
+    target_poa_lengths: &[usize],
+    mode: SmoothStageAlignerMode,
+) -> Vec<impg::smooth::SmoothBlockAligner> {
+    match mode {
+        SmoothStageAlignerMode::Fixed(aligner) => vec![aligner; target_poa_lengths.len()],
+        SmoothStageAlignerMode::AutoByTarget => target_poa_lengths
+            .iter()
+            .copied()
+            .map(impg::smooth::SmoothBlockAligner::for_target_poa_length)
+            .collect(),
+    }
+}
+
+fn parse_smooth_aligner_mode(
+    raw: &str,
+    key: &str,
+    value: &str,
+) -> io::Result<SmoothStageAlignerMode> {
+    match value.replace('_', "-").to_ascii_lowercase().as_str() {
+        "auto" | "target" | "by-target" | "size" | "size-tiered" => {
+            Ok(SmoothStageAlignerMode::AutoByTarget)
+        }
+        "poa" | "spoa" => Ok(SmoothStageAlignerMode::Fixed(
+            impg::smooth::SmoothBlockAligner::Poa,
+        )),
+        "poasta" => Ok(SmoothStageAlignerMode::Fixed(
+            impg::smooth::SmoothBlockAligner::Poasta,
+        )),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid --gfa-engine '{}': smooth {}='{}' is unsupported (expected auto, poa, or poasta)",
+                raw, key, other
+            ),
+        )),
+    }
+}
+
+fn parse_smooth_stage_with_mode(
     raw: &str,
     stage: &GraphPipelineStage,
+    mut config: impg::SmoothPipelineConfig,
+    mut aligner_mode: SmoothStageAlignerMode,
 ) -> io::Result<impg::SmoothPipelineConfig> {
-    let mut config = impg::SmoothPipelineConfig::default();
     for param in &stage.params {
         match param.key.as_str() {
             "target-poa-length" | "target-poa-lengths" | "poa-length" | "g" => {
@@ -2875,7 +2932,7 @@ fn parse_smooth_stage(
                 let lengths: Result<Vec<usize>, _> = param
                     .value
                     .split(|c| c == '/' || c == '+')
-                    .map(|s| s.trim().parse::<usize>())
+                    .map(|s| parse_smooth_target_length(raw, &param.key, s))
                     .collect();
                 let lengths = lengths.map_err(|_| {
                     io::Error::new(
@@ -2896,6 +2953,9 @@ fn parse_smooth_stage(
                     ));
                 }
                 config.target_poa_lengths = lengths;
+            }
+            "aligner" | "block-aligner" | "method" => {
+                aligner_mode = parse_smooth_aligner_mode(raw, &param.key, &param.value)?;
             }
             "max-node-length" | "node-length" | "k" => {
                 config.max_node_length =
@@ -2933,7 +2993,32 @@ fn parse_smooth_stage(
             }
         }
     }
+    config.block_aligners = smooth_aligners_for(&config.target_poa_lengths, aligner_mode);
     Ok(config)
+}
+
+fn parse_smooth_stage(
+    raw: &str,
+    stage: &GraphPipelineStage,
+) -> io::Result<impg::SmoothPipelineConfig> {
+    parse_smooth_stage_with_mode(
+        raw,
+        stage,
+        impg::SmoothPipelineConfig::default(),
+        SmoothStageAlignerMode::Fixed(impg::smooth::SmoothBlockAligner::Poa),
+    )
+}
+
+fn parse_smooth_multi_stage(
+    raw: &str,
+    stage: &GraphPipelineStage,
+) -> io::Result<impg::SmoothPipelineConfig> {
+    parse_smooth_stage_with_mode(
+        raw,
+        stage,
+        impg::SmoothPipelineConfig::iterative_multi_block(),
+        SmoothStageAlignerMode::AutoByTarget,
+    )
 }
 
 fn parse_graph_sort_stage(raw: &str, stage: &GraphPipelineStage) -> io::Result<Option<String>> {
@@ -3320,14 +3405,20 @@ impl EngineCliOpts {
                     }
                     crush_config = Some(parse_crush_stage(raw, stage)?);
                 }
-                "smooth" | "smoothxg" => {
+                "smooth" | "smoothxg" | "smooth-multi" | "smoothxg-multi" => {
                     if smooth_after_crush.is_some() {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
                             format!("Invalid --gfa-engine '{}': duplicate smooth stage", raw),
                         ));
                     }
-                    smooth_after_crush = Some(parse_smooth_stage(raw, stage)?);
+                    smooth_after_crush = Some(
+                        if matches!(stage.name.as_str(), "smooth-multi" | "smoothxg-multi") {
+                            parse_smooth_multi_stage(raw, stage)?
+                        } else {
+                            parse_smooth_stage(raw, stage)?
+                        },
+                    );
                 }
                 "sort" if is_syng => {
                     graph_sort_pipeline = parse_graph_sort_stage(raw, stage)?;
@@ -13220,6 +13311,13 @@ mod tests {
             .expect(":smooth stage should populate smooth_after_crush");
         // Defaults match pggb's `-G 700,1100`.
         assert_eq!(smooth.target_poa_lengths, vec![700, 1100]);
+        assert_eq!(
+            smooth.block_aligners,
+            vec![
+                impg::smooth::SmoothBlockAligner::Poa,
+                impg::smooth::SmoothBlockAligner::Poa
+            ]
+        );
         assert_eq!(smooth.max_node_length, 100);
         assert!((smooth.poa_padding_fraction - 0.001).abs() < 1e-12);
         // :nosort wins; final graph_sort_pipeline is None.
@@ -13249,6 +13347,81 @@ mod tests {
         let parsed = engine_cli.parse_engine().unwrap();
         let smooth = parsed.smooth_after_crush.unwrap();
         assert_eq!(smooth.target_poa_lengths, vec![500, 1000, 1500]);
+        assert_eq!(
+            smooth.block_aligners,
+            vec![
+                impg::smooth::SmoothBlockAligner::Poa,
+                impg::smooth::SmoothBlockAligner::Poa,
+                impg::smooth::SmoothBlockAligner::Poa
+            ]
+        );
+    }
+
+    #[test]
+    fn test_gfa_engine_smooth_multi_stage_parses_iterative_schedule() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush:smooth-multi:nosort",
+        ])
+        .unwrap();
+        let Args::Query {
+            output_format,
+            mut engine_cli,
+            ..
+        } = args
+        else {
+            panic!("expected query command");
+        };
+        apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+        let parsed = engine_cli.parse_engine().unwrap();
+        let smooth = parsed.smooth_after_crush.unwrap();
+        assert_eq!(smooth.target_poa_lengths, vec![1000, 2000, 5000, 10000]);
+        assert_eq!(
+            smooth.block_aligners,
+            vec![
+                impg::smooth::SmoothBlockAligner::Poa,
+                impg::smooth::SmoothBlockAligner::Poa,
+                impg::smooth::SmoothBlockAligner::Poasta,
+                impg::smooth::SmoothBlockAligner::Poasta
+            ]
+        );
+    }
+
+    #[test]
+    fn test_gfa_engine_smooth_stage_parses_kb_targets_with_auto_aligner() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush:smooth,target-poa-length=1kb/2kb/5kb,aligner=auto:nosort",
+        ])
+        .unwrap();
+        let Args::Query {
+            output_format,
+            mut engine_cli,
+            ..
+        } = args
+        else {
+            panic!("expected query command");
+        };
+        apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+        let parsed = engine_cli.parse_engine().unwrap();
+        let smooth = parsed.smooth_after_crush.unwrap();
+        assert_eq!(smooth.target_poa_lengths, vec![1000, 2000, 5000]);
+        assert_eq!(
+            smooth.block_aligners,
+            vec![
+                impg::smooth::SmoothBlockAligner::Poa,
+                impg::smooth::SmoothBlockAligner::Poa,
+                impg::smooth::SmoothBlockAligner::Poasta
+            ]
+        );
     }
 
     #[test]

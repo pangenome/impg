@@ -16,6 +16,33 @@ use std::io;
 // Configuration
 // ---------------------------------------------------------------------------
 
+/// Per-block graph aligner used by the smoothxg-style smoothing pass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SmoothBlockAligner {
+    /// SPOA/POA block polish.
+    Poa,
+    /// POASTA block polish.
+    Poasta,
+}
+
+impl SmoothBlockAligner {
+    /// Iterative C4 smoothing policy: POA at <=2kb, POASTA above.
+    pub fn for_target_poa_length(target_poa_length: usize) -> Self {
+        if target_poa_length <= 2_000 {
+            Self::Poa
+        } else {
+            Self::Poasta
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Poa => "poa",
+            Self::Poasta => "poasta",
+        }
+    }
+}
+
 /// Configuration for graph smoothing.
 pub struct SmoothConfig {
     /// Number of haplotypes (used for per-pass max_block_weight = target * n_haps).
@@ -32,6 +59,8 @@ pub struct SmoothConfig {
     pub max_block_depth_for_padding_more: usize,
     /// SPOA scoring parameters: (match, mismatch, gap_open, gap_ext, gap_open2, gap_ext2).
     pub scoring_params: (u8, u8, u8, u8, u8, u8),
+    /// Per-block aligner used for this smoothing call.
+    pub block_aligner: SmoothBlockAligner,
     /// Number of threads for parallel block processing.
     pub num_threads: usize,
     /// Optional temp directory for intermediate files.
@@ -52,6 +81,7 @@ impl SmoothConfig {
             poa_padding_fraction: 0.001,
             max_block_depth_for_padding_more: 100,
             scoring_params: (1, 4, 6, 2, 26, 1),
+            block_aligner: SmoothBlockAligner::Poa,
             num_threads: 4,
             temp_dir: None,
             pre_sorted: false,
@@ -85,6 +115,7 @@ struct PathData {
 /// A sequence entry prepared for SPOA with padding metadata.
 struct SeqEntry {
     sequence: String,
+    core_sequence: String,
     path_name: String,
     left_pad: usize,
     right_pad: usize,
@@ -164,10 +195,11 @@ pub fn smooth_gfa(gfa_content: &str, config: &SmoothConfig) -> io::Result<String
     for (pass_idx, &target_poa_length) in config.target_poa_lengths.iter().enumerate() {
         let is_first = pass_idx == 0;
         info!(
-            "[smooth] Pass {}/{} (target_poa_length={}bp)",
+            "[smooth] Pass {}/{} (target_poa_length={}bp, aligner={})",
             pass_idx + 1,
             n_passes,
-            target_poa_length
+            target_poa_length,
+            config.block_aligner.as_str()
         );
         current = smooth_gfa_pass(
             &current,
@@ -244,7 +276,7 @@ fn smooth_gfa_pass(
         blocks.iter().map(|b| b.path_ranges.len()).sum::<usize>()
     );
 
-    // Step 8: Per-block SPOA smoothing (parallelized).
+    // Step 8: Per-block smoothing (parallelized).
     //
     // When SPOA produces nothing usable (degenerate padding trim, SPOA error,
     // empty entries), the block's path-steps are already marked seen by
@@ -274,7 +306,12 @@ fn smooth_gfa_pass(
                     Ok(s) if s.is_empty() => true,
                     Ok(_) => false,
                     Err(e) => {
-                        log::debug!("[smooth] Block {} SPOA failed: {} — passthrough", i, e);
+                        log::debug!(
+                            "[smooth] Block {} {} failed: {} — passthrough",
+                            i,
+                            config.block_aligner.as_str(),
+                            e
+                        );
                         true
                     }
                 };
@@ -298,8 +335,9 @@ fn smooth_gfa_pass(
     });
 
     info!(
-        "[smooth] Smoothed {} blocks ({} passthrough)",
+        "[smooth] Smoothed {} blocks with {} ({} passthrough)",
         n_smoothed.load(Ordering::Relaxed),
+        config.block_aligner.as_str(),
         n_passthrough.load(Ordering::Relaxed),
     );
 
@@ -1052,7 +1090,7 @@ fn passthrough_block_gfa(
     Ok(out)
 }
 
-/// Smooth a single block: extract sequences → SPOA → GFA.
+/// Smooth a single block: extract sequences → block aligner → GFA.
 fn smooth_block(
     block: &Block,
     graph: &SmoothGraph,
@@ -1151,6 +1189,18 @@ fn smooth_block(
         full_seq.extend_from_slice(&left_pad_seq);
         full_seq.extend_from_slice(&core_seq);
         full_seq.extend_from_slice(&right_pad_seq);
+        let core_sequence = String::from_utf8(core_seq).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("block core sequence is not UTF-8 DNA: {}", err),
+            )
+        })?;
+        let sequence = String::from_utf8(full_seq).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("block sequence is not UTF-8 DNA: {}", err),
+            )
+        })?;
 
         // Compute path coordinates for naming
         let range_start_bp = path_start + path_positions[range.path_idx][range.begin_step];
@@ -1158,7 +1208,8 @@ fn smooth_block(
         let path_name = format!("{}:{}-{}", path_key, range_start_bp, range_end_bp);
 
         entries.push(SeqEntry {
-            sequence: String::from_utf8_lossy(&full_seq).to_string(),
+            sequence,
+            core_sequence,
             path_name,
             left_pad: actual_left_pad,
             right_pad: actual_right_pad,
@@ -1169,10 +1220,18 @@ fn smooth_block(
         return Ok(String::new());
     }
 
-    // Sort by sequence length descending (SPOA benefits from longest-first)
+    // Sort by sequence length descending (both block aligners benefit from a
+    // long stable backbone first on these C4-sized blocks).
     entries.sort_by(|a, b| b.sequence.len().cmp(&a.sequence.len()));
 
-    // 3. Run SPOA on all sequences
+    match config.block_aligner {
+        SmoothBlockAligner::Poa => smooth_entries_with_spoa(entries, config),
+        SmoothBlockAligner::Poasta => smooth_entries_with_poasta(entries, config),
+    }
+}
+
+fn smooth_entries_with_spoa(entries: Vec<SeqEntry>, config: &SmoothConfig) -> io::Result<String> {
+    // Run SPOA on all sequences.
     let (mut spoa_graph, mut spoa_engine) = build_spoa_engine(config.scoring_params);
     feed_sequences_to_graph(
         &mut spoa_engine,
@@ -1269,6 +1328,494 @@ fn smooth_block(
         .collect();
     let gfa = graph2.generate_gfa(&headers, false);
     unchop_gfa(&gfa)
+}
+
+fn smooth_entries_with_poasta(entries: Vec<SeqEntry>, config: &SmoothConfig) -> io::Result<String> {
+    use poasta::aligner::config::Affine2PieceMinGapCost;
+    use poasta::aligner::PoastaAligner;
+    use poasta::graphs::poa::POAGraph;
+    use poasta::io::graph::graph_to_gfa;
+
+    let headers = entries
+        .iter()
+        .map(|entry| entry.path_name.clone())
+        .collect::<Vec<_>>();
+    let sequences = entries
+        .iter()
+        .map(|entry| entry.sequence.as_bytes())
+        .collect::<Vec<_>>();
+    let weights = sequences
+        .iter()
+        .map(|sequence| vec![1usize; sequence.len()])
+        .collect::<Vec<_>>();
+
+    let scoring = poasta_two_piece_scoring(config.scoring_params)?;
+    let mut graph = POAGraph::<u32>::new();
+    let mut aligner = PoastaAligner::new(Affine2PieceMinGapCost(scoring), poasta_alignment_type());
+    add_poasta_sequences(&mut graph, &mut aligner, &headers, &sequences, &weights)?;
+
+    let mut gfa = Vec::new();
+    graph_to_gfa(&mut gfa, &graph)
+        .map_err(|err| io::Error::other(format!("POASTA block GFA generation failed: {err}")))?;
+    let gfa = String::from_utf8(gfa).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("POASTA block GFA is not UTF-8: {err}"),
+        )
+    })?;
+
+    poasta_block_gfa_to_core_gfa(&gfa, &entries)
+}
+
+fn poasta_uses_two_piece_affine(scoring_params: (u8, u8, u8, u8, u8, u8)) -> bool {
+    let (_, _, _, gap_extend, _, gap_extend2) = scoring_params;
+    gap_extend > gap_extend2
+}
+
+fn poasta_two_piece_scoring(
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+) -> io::Result<poasta::aligner::scoring::GapAffine2Piece> {
+    let (_, mismatch, gap_open, gap_extend, gap_open2, gap_extend2) = scoring_params;
+    if !poasta_uses_two_piece_affine(scoring_params) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "POASTA smoothing requires two-piece affine scoring with gap_extend1 > gap_extend2; got gap_open1={gap_open}, gap_extend1={gap_extend}, gap_open2={gap_open2}, gap_extend2={gap_extend2}"
+            ),
+        ));
+    }
+    Ok(poasta::aligner::scoring::GapAffine2Piece::new(
+        mismatch,
+        gap_extend,
+        gap_open,
+        gap_extend2,
+        gap_open2,
+    ))
+}
+
+fn poasta_alignment_type() -> poasta::aligner::scoring::AlignmentType {
+    poasta::aligner::scoring::AlignmentType::Global
+}
+
+fn add_poasta_sequences<C>(
+    graph: &mut poasta::graphs::poa::POAGraph<u32>,
+    aligner: &mut poasta::aligner::PoastaAligner<C>,
+    headers: &[String],
+    sequences: &[&[u8]],
+    weights: &[Vec<usize>],
+) -> io::Result<()>
+where
+    C: poasta::aligner::config::AlignmentConfig,
+{
+    for (idx, sequence) in sequences.iter().enumerate() {
+        if graph.is_empty() {
+            graph
+                .add_alignment_with_weights(&headers[idx], sequence, None, &weights[idx])
+                .map_err(poasta_to_io_error)?;
+        } else {
+            let result = aligner.align::<u32, _>(graph, sequence);
+            graph
+                .add_alignment_with_weights(
+                    &headers[idx],
+                    sequence,
+                    Some(&result.alignment),
+                    &weights[idx],
+                )
+                .map_err(poasta_to_io_error)?;
+        }
+    }
+    Ok(())
+}
+
+fn poasta_to_io_error(err: poasta::errors::PoastaError) -> io::Error {
+    io::Error::other(format!("POASTA smoothing block failed: {err}"))
+}
+
+#[derive(Clone, Debug)]
+struct PoastaBlockSegment {
+    seq: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PoastaBlockStep {
+    node: usize,
+    rev: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PoastaBlockWalk {
+    name: String,
+    reported_start: Option<usize>,
+    reported_end: Option<usize>,
+    steps: Vec<PoastaBlockStep>,
+}
+
+#[derive(Clone, Debug)]
+struct PoastaBlockWalkPiece {
+    node: usize,
+    rev: bool,
+    start: usize,
+    end: usize,
+    sequence: Vec<u8>,
+}
+
+fn poasta_block_gfa_to_core_gfa(gfa: &str, entries: &[SeqEntry]) -> io::Result<String> {
+    let (segments, walks) = parse_poasta_block_gfa_segments_and_walks(gfa)?;
+    let mut walks_by_name = walks
+        .into_iter()
+        .map(|walk| (walk.name.clone(), walk))
+        .collect::<FxHashMap<_, _>>();
+    let mut output_segments: Vec<Vec<u8>> = Vec::new();
+    let mut node_by_slice: FxHashMap<(usize, bool, usize, usize), usize> = FxHashMap::default();
+    let mut output_paths: Vec<(String, Vec<usize>)> = Vec::with_capacity(entries.len());
+    let mut edges: FxHashSet<(usize, usize)> = FxHashSet::default();
+
+    for entry in entries {
+        let walk = walks_by_name.remove(&entry.path_name).ok_or_else(|| {
+            io::Error::other(format!(
+                "POASTA smoothing block is missing walk/path '{}'",
+                entry.path_name
+            ))
+        })?;
+        let pieces = poasta_block_walk_pieces(&segments, &walk)?;
+        let raw_sequence = pieces
+            .iter()
+            .flat_map(|piece| piece.sequence.iter().copied())
+            .collect::<Vec<_>>();
+        let (full_start, full_end) = find_expected_interval(
+            &raw_sequence,
+            entry.sequence.as_bytes(),
+            walk.reported_start,
+            walk.reported_end,
+            &entry.path_name,
+        )?;
+        let full_len = full_end.saturating_sub(full_start);
+        if entry.left_pad + entry.right_pad > full_len {
+            return Err(io::Error::other(format!(
+                "POASTA smoothing block '{}' padding exceeds aligned walk length",
+                entry.path_name
+            )));
+        }
+        let clip_start = full_start + entry.left_pad;
+        let clip_end = full_end - entry.right_pad;
+        if raw_sequence.get(clip_start..clip_end) != Some(entry.core_sequence.as_bytes()) {
+            return Err(io::Error::other(format!(
+                "POASTA smoothing block '{}' core sequence changed during clipping",
+                entry.path_name
+            )));
+        }
+
+        let mut steps = Vec::new();
+        for piece in pieces {
+            let from = piece.start.max(clip_start);
+            let to = piece.end.min(clip_end);
+            if from >= to {
+                continue;
+            }
+            let local_start = from - piece.start;
+            let local_end = to - piece.start;
+            let node = poasta_block_slice_node(
+                &segments,
+                &mut output_segments,
+                &mut node_by_slice,
+                piece.node,
+                piece.rev,
+                local_start,
+                local_end,
+            )?;
+            steps.push(node);
+        }
+
+        if steps.is_empty() && !entry.core_sequence.is_empty() {
+            return Err(io::Error::other(format!(
+                "POASTA smoothing block '{}' clipped to an empty walk",
+                entry.path_name
+            )));
+        }
+        let rebuilt = steps
+            .iter()
+            .flat_map(|&node| output_segments[node].iter().copied())
+            .collect::<Vec<_>>();
+        if rebuilt != entry.core_sequence.as_bytes() {
+            return Err(io::Error::other(format!(
+                "POASTA smoothing block '{}' emitted sequence does not match input core",
+                entry.path_name
+            )));
+        }
+        for pair in steps.windows(2) {
+            edges.insert((pair[0], pair[1]));
+        }
+        output_paths.push((entry.path_name.clone(), steps));
+    }
+
+    let mut out = String::new();
+    for (idx, seq) in output_segments.iter().enumerate() {
+        let seq = std::str::from_utf8(seq).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("POASTA smoothing segment is not UTF-8 DNA: {err}"),
+            )
+        })?;
+        out.push_str(&format!("S\t{}\t{}\n", idx + 1, seq));
+    }
+    for (from, to) in edges {
+        out.push_str(&format!("L\t{}\t+\t{}\t+\t0M\n", from + 1, to + 1));
+    }
+    for (path_name, steps) in output_paths {
+        if steps.is_empty() {
+            continue;
+        }
+        let steps = steps
+            .iter()
+            .map(|node| format!("{}+", node + 1))
+            .collect::<Vec<_>>()
+            .join(",");
+        out.push_str(&format!("P\t{}\t{}\t*\n", path_name, steps));
+    }
+    Ok(out)
+}
+
+fn parse_poasta_block_gfa_segments_and_walks(
+    gfa: &str,
+) -> io::Result<(Vec<PoastaBlockSegment>, Vec<PoastaBlockWalk>)> {
+    let mut segments = Vec::new();
+    let mut id_to_idx: FxHashMap<String, usize> = FxHashMap::default();
+    let mut pending_walks = Vec::new();
+
+    for (line_no, line) in gfa.lines().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let fields = line.split('\t').collect::<Vec<_>>();
+        match fields[0] {
+            "S" => {
+                if fields.len() < 3 {
+                    return Err(invalid_smooth_gfa(
+                        line_no,
+                        "S line has fewer than 3 fields",
+                    ));
+                }
+                let id = fields[1].to_string();
+                if id_to_idx.contains_key(&id) {
+                    return Err(invalid_smooth_gfa(line_no, "duplicate segment ID"));
+                }
+                id_to_idx.insert(id, segments.len());
+                segments.push(PoastaBlockSegment {
+                    seq: fields[2].as_bytes().to_vec(),
+                });
+            }
+            "P" => {
+                if fields.len() < 3 {
+                    return Err(invalid_smooth_gfa(
+                        line_no,
+                        "P line has fewer than 3 fields",
+                    ));
+                }
+                pending_walks.push((
+                    line_no,
+                    fields[1].to_string(),
+                    None,
+                    None,
+                    fields[2].to_string(),
+                ));
+            }
+            "W" => {
+                if fields.len() < 7 {
+                    return Err(invalid_smooth_gfa(
+                        line_no,
+                        "W line has fewer than 7 fields",
+                    ));
+                }
+                pending_walks.push((
+                    line_no,
+                    fields[3].to_string(),
+                    fields[4].parse::<usize>().ok(),
+                    fields[5].parse::<usize>().ok(),
+                    fields[6].to_string(),
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    let mut walks = Vec::with_capacity(pending_walks.len());
+    for (line_no, name, reported_start, reported_end, raw_walk) in pending_walks {
+        let raw_steps = if raw_walk.contains('>') || raw_walk.contains('<') {
+            parse_w_walk(&raw_walk)
+        } else {
+            parse_p_walk(&raw_walk)
+        }
+        .ok_or_else(|| invalid_smooth_gfa(line_no, "walk line has a malformed path"))?;
+        let mut steps = Vec::new();
+        for (id, rev) in raw_steps {
+            let Some(&node) = id_to_idx.get(id) else {
+                return Err(invalid_smooth_gfa(
+                    line_no,
+                    "walk references unknown segment",
+                ));
+            };
+            steps.push(PoastaBlockStep { node, rev });
+        }
+        walks.push(PoastaBlockWalk {
+            name,
+            reported_start,
+            reported_end,
+            steps,
+        });
+    }
+
+    Ok((segments, walks))
+}
+
+fn parse_p_walk(walk: &str) -> Option<Vec<(&str, bool)>> {
+    walk.split(',')
+        .filter(|step| !step.is_empty())
+        .map(|step| {
+            if let Some(id) = step.strip_suffix('+') {
+                Some((id, false))
+            } else {
+                step.strip_suffix('-').map(|id| (id, true))
+            }
+        })
+        .collect()
+}
+
+fn parse_w_walk(walk: &str) -> Option<Vec<(&str, bool)>> {
+    let mut steps = Vec::new();
+    let mut start = None;
+    let mut rev = false;
+    for (idx, ch) in walk.char_indices() {
+        if ch != '>' && ch != '<' {
+            continue;
+        }
+        if let Some(prev_start) = start {
+            if prev_start == idx {
+                return None;
+            }
+            steps.push((&walk[prev_start..idx], rev));
+        }
+        start = Some(idx + ch.len_utf8());
+        rev = ch == '<';
+    }
+    let prev_start = start?;
+    if prev_start == walk.len() {
+        return None;
+    }
+    steps.push((&walk[prev_start..], rev));
+    Some(steps)
+}
+
+fn poasta_block_walk_pieces(
+    segments: &[PoastaBlockSegment],
+    walk: &PoastaBlockWalk,
+) -> io::Result<Vec<PoastaBlockWalkPiece>> {
+    let mut offset = 0usize;
+    let mut pieces = Vec::with_capacity(walk.steps.len());
+    for step in &walk.steps {
+        let segment = segments.get(step.node).ok_or_else(|| {
+            io::Error::other("POASTA smoothing block walk references an out-of-range segment")
+        })?;
+        let sequence = if step.rev {
+            reverse_complement(&segment.seq)
+        } else {
+            segment.seq.clone()
+        };
+        let start = offset;
+        offset = offset
+            .checked_add(sequence.len())
+            .ok_or_else(|| io::Error::other("POASTA smoothing block walk length overflow"))?;
+        pieces.push(PoastaBlockWalkPiece {
+            node: step.node,
+            rev: step.rev,
+            start,
+            end: offset,
+            sequence,
+        });
+    }
+    Ok(pieces)
+}
+
+fn find_expected_interval(
+    raw_sequence: &[u8],
+    expected_sequence: &[u8],
+    reported_start: Option<usize>,
+    reported_end: Option<usize>,
+    path_name: &str,
+) -> io::Result<(usize, usize)> {
+    if expected_sequence.is_empty() {
+        let start = reported_start.unwrap_or(0).min(raw_sequence.len());
+        return Ok((start, start));
+    }
+
+    if let (Some(start), Some(end)) = (reported_start, reported_end) {
+        if start <= end
+            && end <= raw_sequence.len()
+            && raw_sequence.get(start..end) == Some(expected_sequence)
+        {
+            return Ok((start, end));
+        }
+    }
+
+    let mut matches = Vec::new();
+    if expected_sequence.len() <= raw_sequence.len() {
+        for start in 0..=raw_sequence.len() - expected_sequence.len() {
+            if &raw_sequence[start..start + expected_sequence.len()] == expected_sequence {
+                matches.push(start);
+            }
+        }
+    }
+    let Some(start) = matches
+        .into_iter()
+        .min_by_key(|start| reported_start.map_or(*start, |reported| start.abs_diff(reported)))
+    else {
+        return Err(io::Error::other(format!(
+            "POASTA smoothing block walk '{path_name}' does not contain the expected sequence (walk length {}, expected length {})",
+            raw_sequence.len(),
+            expected_sequence.len()
+        )));
+    };
+    Ok((start, start + expected_sequence.len()))
+}
+
+fn poasta_block_slice_node(
+    source_segments: &[PoastaBlockSegment],
+    output_segments: &mut Vec<Vec<u8>>,
+    node_by_slice: &mut FxHashMap<(usize, bool, usize, usize), usize>,
+    source_node: usize,
+    rev: bool,
+    local_start: usize,
+    local_end: usize,
+) -> io::Result<usize> {
+    let segment = source_segments.get(source_node).ok_or_else(|| {
+        io::Error::other("POASTA smoothing block walk references an out-of-range segment")
+    })?;
+    let segment_len = segment.seq.len();
+    if local_start > local_end || local_end > segment_len {
+        return Err(io::Error::other(
+            "POASTA smoothing block clipped walk slice is outside its segment",
+        ));
+    }
+    let key = (source_node, rev, local_start, local_end);
+    if let Some(&node) = node_by_slice.get(&key) {
+        return Ok(node);
+    }
+
+    let oriented = if rev {
+        reverse_complement(&segment.seq)
+    } else {
+        segment.seq.clone()
+    };
+    let node = output_segments.len();
+    output_segments.push(oriented[local_start..local_end].to_vec());
+    node_by_slice.insert(key, node);
+    Ok(node)
+}
+
+fn invalid_smooth_gfa(line_no: usize, msg: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("invalid smoothing GFA at line {}: {}", line_no + 1, msg),
+    )
 }
 
 /// Find the MSA column range corresponding to the core (non-padding) region.
@@ -1562,5 +2109,96 @@ P\tchr2:200-212\t1+,2+,3+\t*
         // At least two L-lines: edges 1→2 (both paths) and 2→3 (chr2 only).
         let l_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("L\t")).collect();
         assert!(l_lines.len() >= 2, "edges: {:?}", l_lines);
+    }
+
+    #[test]
+    fn poasta_block_smoothing_preserves_core_path_sequences() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tACGT
+S\t2\tACGT
+S\t3\tAGGT
+P\tseq1:0-8\t1+,2+\t*
+P\tseq2:0-8\t1+,3+\t*
+";
+        let graph = parse_gfa(gfa);
+        let path_positions = compute_path_positions(&graph);
+        let block = Block {
+            path_ranges: vec![
+                PathRange {
+                    path_idx: 0,
+                    begin_step: 0,
+                    end_step: 2,
+                    length: 8,
+                },
+                PathRange {
+                    path_idx: 1,
+                    begin_step: 0,
+                    end_step: 2,
+                    length: 8,
+                },
+            ],
+        };
+        let config = SmoothConfig {
+            block_aligner: SmoothBlockAligner::Poasta,
+            poa_padding_fraction: 0.0,
+            ..SmoothConfig::new(2)
+        };
+        let out = smooth_block(&block, &graph, &config, &path_positions).unwrap();
+        let mut paths = crate::resolution::path_sequences(&out).unwrap();
+        paths.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            paths,
+            vec![
+                ("seq1:0-8".to_string(), "ACGTACGT".to_string()),
+                ("seq2:0-8".to_string(), "ACGTAGGT".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn poasta_block_smoothing_trims_padding_to_core_coordinates() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tAAA
+S\t2\tACGTACGT
+S\t3\tTTT
+S\t4\tACGTAGGT
+P\tseq1:0-14\t1+,2+,3+\t*
+P\tseq2:0-14\t1+,4+,3+\t*
+";
+        let graph = parse_gfa(gfa);
+        let path_positions = compute_path_positions(&graph);
+        let block = Block {
+            path_ranges: vec![
+                PathRange {
+                    path_idx: 0,
+                    begin_step: 1,
+                    end_step: 2,
+                    length: 8,
+                },
+                PathRange {
+                    path_idx: 1,
+                    begin_step: 1,
+                    end_step: 2,
+                    length: 8,
+                },
+            ],
+        };
+        let config = SmoothConfig {
+            block_aligner: SmoothBlockAligner::Poasta,
+            poa_padding_fraction: 0.001,
+            ..SmoothConfig::new(2)
+        };
+        let out = smooth_block(&block, &graph, &config, &path_positions).unwrap();
+        let mut paths = crate::resolution::path_sequences(&out).unwrap();
+        paths.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            paths,
+            vec![
+                ("seq1:3-11".to_string(), "ACGTACGT".to_string()),
+                ("seq2:3-11".to_string(), "ACGTAGGT".to_string())
+            ]
+        );
     }
 }

@@ -66,6 +66,7 @@ pub const DEFAULT_SYNG_GFA_SORT_PIPELINE: &str = "Ygs";
 #[derive(Clone, Debug)]
 pub struct SmoothPipelineConfig {
     pub target_poa_lengths: Vec<usize>,
+    pub block_aligners: Vec<smooth::SmoothBlockAligner>,
     pub max_node_length: usize,
     pub poa_padding_fraction: f64,
 }
@@ -74,9 +75,45 @@ impl Default for SmoothPipelineConfig {
     fn default() -> Self {
         Self {
             target_poa_lengths: vec![700, 1100],
+            block_aligners: vec![smooth::SmoothBlockAligner::Poa; 2],
             max_node_length: 100,
             poa_padding_fraction: 0.001,
         }
+    }
+}
+
+impl SmoothPipelineConfig {
+    /// Built-in iterative C4 schedule: 1kb, 2kb, 5kb, 10kb with POA for
+    /// <=2kb blocks and POASTA above.
+    pub fn iterative_multi_block() -> Self {
+        let target_poa_lengths = vec![1_000, 2_000, 5_000, 10_000];
+        let block_aligners = target_poa_lengths
+            .iter()
+            .copied()
+            .map(smooth::SmoothBlockAligner::for_target_poa_length)
+            .collect();
+        Self {
+            target_poa_lengths,
+            block_aligners,
+            max_node_length: 100,
+            poa_padding_fraction: 0.001,
+        }
+    }
+
+    pub fn passes(&self) -> Vec<(usize, smooth::SmoothBlockAligner)> {
+        self.target_poa_lengths
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(idx, target)| {
+                let aligner = self
+                    .block_aligners
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(smooth::SmoothBlockAligner::Poa);
+                (target, aligner)
+            })
+            .collect()
     }
 }
 
@@ -765,6 +802,23 @@ pub fn dispatch_gfa_engine(
     apply_graph_transforms(gfa, engine_opts)
 }
 
+fn gfa_segment_count(gfa: &str) -> usize {
+    gfa.lines().filter(|line| line.starts_with("S\t")).count()
+}
+
+fn gfa_path_count(gfa: &str) -> usize {
+    gfa.lines().filter(|line| line.starts_with("P\t")).count()
+}
+
+fn gfa_segment_bp(gfa: &str) -> usize {
+    gfa.lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            (fields.next()? == "S").then(|| fields.nth(1).map(str::len))?
+        })
+        .sum()
+}
+
 fn apply_graph_transforms(mut gfa: String, engine_opts: &EngineOpts) -> std::io::Result<String> {
     if let Some(config) = &engine_opts.crush_config {
         let resolved = resolution::resolve_gfa_bubbles(&gfa, config)?;
@@ -779,7 +833,7 @@ fn apply_graph_transforms(mut gfa: String, engine_opts: &EngineOpts) -> std::io:
     }
 
     if let Some(config) = &engine_opts.smooth_after_crush {
-        let t0 = std::time::Instant::now();
+        let smooth_start = std::time::Instant::now();
         // Count haplotypes from path names on the post-crush graph so the
         // smoothxg block-weight scales the same way pggb does (target_poa_length
         // * n_haps). Path names come from the syng/seqwish pipeline as
@@ -797,25 +851,49 @@ fn apply_graph_transforms(mut gfa: String, engine_opts: &EngineOpts) -> std::io:
             }),
             sweepga::pansn::PanSnLevel::Haplotype,
         );
-        let smooth_config = smooth::SmoothConfig {
-            num_threads: engine_opts.pipeline.num_threads,
-            target_poa_lengths: config.target_poa_lengths.clone(),
-            max_node_length: config.max_node_length,
-            poa_padding_fraction: config.poa_padding_fraction,
-            temp_dir: engine_opts.pipeline.temp_dir.clone(),
-            pre_sorted: false,
-            ..smooth::SmoothConfig::new(n_haps)
-        };
-        let smoothed = smooth::smooth_gfa(&gfa, &smooth_config)?;
+        let passes = config.passes();
+        for (idx, (target_poa_length, block_aligner)) in passes.iter().copied().enumerate() {
+            let iter_start = std::time::Instant::now();
+            let segs_before = gfa_segment_count(&gfa);
+            let smooth_config = smooth::SmoothConfig {
+                num_threads: engine_opts.pipeline.num_threads,
+                target_poa_lengths: vec![target_poa_length],
+                block_aligner,
+                max_node_length: config.max_node_length,
+                poa_padding_fraction: config.poa_padding_fraction,
+                temp_dir: engine_opts.pipeline.temp_dir.clone(),
+                pre_sorted: false,
+                ..smooth::SmoothConfig::new(n_haps)
+            };
+            let smoothed = smooth::smooth_gfa(&gfa, &smooth_config)?;
+            let segs_after = gfa_segment_count(&smoothed);
+            log::info!(
+                "smooth iteration {}/{}: block-size={}bp aligner={} segs-before={} segs-after={} wall={:.3}s",
+                idx + 1,
+                passes.len(),
+                target_poa_length,
+                block_aligner.as_str(),
+                segs_before,
+                segs_after,
+                iter_start.elapsed().as_secs_f64()
+            );
+            gfa = smoothed;
+        }
         log::info!(
-            "smooth: {:.3}s (n_haps={}, target_poa_lengths={:?})",
-            t0.elapsed().as_secs_f64(),
+            "smooth: {:.3}s (n_haps={}, schedule={:?})",
+            smooth_start.elapsed().as_secs_f64(),
             n_haps,
-            config.target_poa_lengths
+            passes
         );
         // gfaffix normalize after smoothing (matches pggb's post-smooth step;
         // sort is left for the optional graph_sort_pipeline below).
-        gfa = graph::run_gfaffix(&smoothed, engine_opts.pipeline.num_threads)?;
+        gfa = graph::run_gfaffix(&gfa, engine_opts.pipeline.num_threads)?;
+        log::info!(
+            "smooth final metrics: segments={} segment-bp={} paths={}",
+            gfa_segment_count(&gfa),
+            gfa_segment_bp(&gfa),
+            gfa_path_count(&gfa)
+        );
     }
 
     if let Some(pipeline) = &engine_opts.graph_sort_pipeline {
