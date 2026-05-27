@@ -10,7 +10,7 @@ use crate::graph::{
 use bitvec::{bitvec, prelude::BitVec};
 use log::info;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::{collections::BTreeSet, io};
+use std::{collections::BTreeSet, io, time::Instant};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -51,6 +51,9 @@ pub enum SmoothBlockSource {
     PathOverlap,
     /// POVU flubble extents (`level >= 1`) plus passthrough gap blocks.
     Flubble,
+    /// POVU bubble neighborhoods merged greedily along the reference path and
+    /// realigned with POASTA as local blocks.
+    NeighborMergePoasta,
 }
 
 impl SmoothConfig {
@@ -129,12 +132,22 @@ enum BlockSource {
         reference_end_step: usize,
         is_leaf: bool,
     },
+    NeighborMerge {
+        site_count: usize,
+        reference_start_step: usize,
+        reference_end_step: usize,
+        reference_span_bp: usize,
+    },
     Gap,
 }
 
 impl BlockSource {
     fn is_gap(&self) -> bool {
         matches!(self, Self::Gap)
+    }
+
+    fn uses_poasta(&self) -> bool {
+        matches!(self, Self::NeighborMerge { .. })
     }
 }
 
@@ -199,20 +212,83 @@ pub fn smooth_gfa(gfa_content: &str, config: &SmoothConfig) -> io::Result<String
     let mut current = gfa_content.to_string();
     for (pass_idx, &target_poa_length) in config.target_poa_lengths.iter().enumerate() {
         let is_first = pass_idx == 0;
+        let pass_start = Instant::now();
+        let before_stats = gfa_basic_stats(&current);
         info!(
             "[smooth] Pass {}/{} (target_poa_length={}bp)",
             pass_idx + 1,
             n_passes,
             target_poa_length
         );
-        current = smooth_gfa_pass(
+        let result = smooth_gfa_pass(
             &current,
             target_poa_length,
             is_first && config.pre_sorted,
             config,
         )?;
+        current = result.gfa;
+        if let Some(metrics) = result.neighbor_metrics {
+            let after_stats = gfa_basic_stats(&current);
+            info!(
+                "[neighbor-merge-poasta] iteration {}/{}: block-size-cap={}bp, blocks-merged={} ({} site(s) in merged blocks), neighbor-blocks={}, gap-blocks={}, selected-sites={}, skipped-overlap={}, skipped-over-cap={}, segs-before={}, segs-after={}, segment-bp-before={}, segment-bp-after={}, wall={:.3}s",
+                pass_idx + 1,
+                n_passes,
+                metrics.block_size_cap,
+                metrics.blocks_merged,
+                metrics.sites_in_merged_blocks,
+                metrics.neighbor_blocks,
+                metrics.gap_blocks,
+                metrics.selected_sites,
+                metrics.overlap_skipped_sites,
+                metrics.over_cap_skipped_sites,
+                before_stats.segments,
+                after_stats.segments,
+                before_stats.segment_bp,
+                after_stats.segment_bp,
+                pass_start.elapsed().as_secs_f64(),
+            );
+        }
     }
     Ok(current)
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct GfaBasicStats {
+    segments: usize,
+    segment_bp: usize,
+}
+
+fn gfa_basic_stats(gfa: &str) -> GfaBasicStats {
+    let mut stats = GfaBasicStats::default();
+    for line in gfa.lines() {
+        let mut fields = line.split('\t');
+        if fields.next() != Some("S") {
+            continue;
+        }
+        fields.next();
+        if let Some(seq) = fields.next() {
+            stats.segments += 1;
+            stats.segment_bp += seq.len();
+        }
+    }
+    stats
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct NeighborMergeMetrics {
+    block_size_cap: usize,
+    selected_sites: usize,
+    overlap_skipped_sites: usize,
+    over_cap_skipped_sites: usize,
+    blocks_merged: usize,
+    sites_in_merged_blocks: usize,
+    neighbor_blocks: usize,
+    gap_blocks: usize,
+}
+
+struct SmoothPassResult {
+    gfa: String,
+    neighbor_metrics: Option<NeighborMergeMetrics>,
 }
 
 /// Run a single smoothing pass on a (not yet sorted) GFA string.
@@ -224,7 +300,7 @@ fn smooth_gfa_pass(
     target_poa_length: usize,
     pre_sorted: bool,
     config: &SmoothConfig,
-) -> io::Result<String> {
+) -> io::Result<SmoothPassResult> {
     let max_block_weight = target_poa_length * config.n_haps.max(1);
     let max_poa_length = 2 * target_poa_length;
 
@@ -245,7 +321,10 @@ fn smooth_gfa_pass(
     );
 
     if graph.nodes.is_empty() || graph.paths.is_empty() {
-        return Ok(gfa_content.to_string());
+        return Ok(SmoothPassResult {
+            gfa: gfa_content.to_string(),
+            neighbor_metrics: None,
+        });
     }
 
     // Step 3: Chop nodes to max_node_length
@@ -264,6 +343,7 @@ fn smooth_gfa_pass(
     let path_positions = compute_path_positions(&graph);
 
     // Step 6: Block decomposition
+    let mut neighbor_metrics = None;
     let mut blocks = match config.block_source {
         SmoothBlockSource::PathOverlap => {
             let blocks = smoothable_blocks(
@@ -288,6 +368,33 @@ fn smooth_gfa_pass(
                 plan.overlap_skipped_sites,
                 plan.gap_blocks
             );
+            plan.blocks
+        }
+        SmoothBlockSource::NeighborMergePoasta => {
+            let plan = neighbor_merge_blocks(&graph, &path_positions, config, target_poa_length)?;
+            info!(
+                "[neighbor-merge-poasta] placement: {} POVU site(s), {} candidate site(s), {} selected site(s), {} selected group(s), {} neighbor block(s), {} merged block(s), {} site(s) inside merged blocks, {} gap block(s), {} overlap-skipped, {} over-cap-skipped",
+                plan.povu_sites,
+                plan.candidate_sites,
+                plan.selected_sites,
+                plan.selected_groups,
+                plan.neighbor_blocks,
+                plan.blocks_merged,
+                plan.sites_in_merged_blocks,
+                plan.gap_blocks,
+                plan.overlap_skipped_sites,
+                plan.over_cap_skipped_sites,
+            );
+            neighbor_metrics = Some(NeighborMergeMetrics {
+                block_size_cap: target_poa_length,
+                selected_sites: plan.selected_sites,
+                overlap_skipped_sites: plan.overlap_skipped_sites,
+                over_cap_skipped_sites: plan.over_cap_skipped_sites,
+                blocks_merged: plan.blocks_merged,
+                sites_in_merged_blocks: plan.sites_in_merged_blocks,
+                neighbor_blocks: plan.neighbor_blocks,
+                gap_blocks: plan.gap_blocks,
+            });
             plan.blocks
         }
     };
@@ -343,6 +450,8 @@ fn smooth_gfa_pass(
                 let used_passthrough = block.source.is_gap();
                 let smooth_result = if used_passthrough {
                     Ok(String::new())
+                } else if block.source.uses_poasta() {
+                    poasta_block(block, &graph, config, &path_positions)
                 } else {
                     smooth_block(block, &graph, config, &path_positions)
                 };
@@ -384,7 +493,10 @@ fn smooth_gfa_pass(
     );
 
     if block_gfas.is_empty() {
-        return Ok(String::from("H\tVN:Z:1.0\n"));
+        return Ok(SmoothPassResult {
+            gfa: String::from("H\tVN:Z:1.0\n"),
+            neighbor_metrics,
+        });
     }
 
     // Step 9: Lace block GFAs together
@@ -393,7 +505,10 @@ fn smooth_gfa_pass(
     let laced = crate::commands::lace::lace_subgraphs(&block_gfas, config.temp_dir.as_deref())?;
     info!("[smooth] Lacing complete");
 
-    Ok(laced)
+    Ok(SmoothPassResult {
+        gfa: laced,
+        neighbor_metrics,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -886,6 +1001,37 @@ struct FlubbleBlockCandidate {
     reference_span_bp: usize,
 }
 
+struct NeighborMergeBlockPlan {
+    blocks: Vec<Block>,
+    povu_sites: usize,
+    candidate_sites: usize,
+    selected_sites: usize,
+    selected_groups: usize,
+    neighbor_blocks: usize,
+    blocks_merged: usize,
+    sites_in_merged_blocks: usize,
+    overlap_skipped_sites: usize,
+    over_cap_skipped_sites: usize,
+    gap_blocks: usize,
+}
+
+#[derive(Clone)]
+struct NeighborSiteCandidate {
+    entry: (usize, bool),
+    exit: (usize, bool),
+    level: usize,
+    reference_start_step: usize,
+    reference_end_step: usize,
+    reference_span_bp: usize,
+}
+
+struct NeighborSiteGroup {
+    sites: Vec<NeighborSiteCandidate>,
+    reference_start_step: usize,
+    reference_end_step: usize,
+    reference_span_bp: usize,
+}
+
 fn flubble_guided_blocks(
     graph: &SmoothGraph,
     path_positions: &[Vec<usize>],
@@ -1043,6 +1189,321 @@ fn flubble_guided_blocks(
         overlap_skipped_sites,
         gap_blocks: gap_block_count,
     })
+}
+
+fn neighbor_merge_blocks(
+    graph: &SmoothGraph,
+    path_positions: &[Vec<usize>],
+    config: &SmoothConfig,
+    max_block_bp: usize,
+) -> io::Result<NeighborMergeBlockPlan> {
+    if graph.paths.is_empty() || max_block_bp == 0 {
+        return Ok(NeighborMergeBlockPlan {
+            blocks: Vec::new(),
+            povu_sites: 0,
+            candidate_sites: 0,
+            selected_sites: 0,
+            selected_groups: 0,
+            neighbor_blocks: 0,
+            blocks_merged: 0,
+            sites_in_merged_blocks: 0,
+            overlap_skipped_sites: 0,
+            over_cap_skipped_sites: 0,
+            gap_blocks: 0,
+        });
+    }
+
+    let rendered = render_smooth_graph_gfa(graph)?;
+    let native = povu::NativeGfa::parse(&rendered).map_err(povu_to_io_error)?;
+    let reference_names = if config.flubble_reference_names.is_empty() {
+        vec![graph.paths[0].name.clone()]
+    } else {
+        config.flubble_reference_names.clone()
+    };
+    let decomposition = match native.decompose_flubbles(&reference_names) {
+        Ok(decomposition) => decomposition,
+        Err(err) if !config.flubble_reference_names.is_empty() => {
+            let fallback_reference_names = vec![graph.paths[0].name.clone()];
+            log::warn!(
+                "[neighbor-merge-poasta] POVU reference hint(s) {:?} did not match after graph transforms ({}); falling back to '{}'",
+                config.flubble_reference_names,
+                err,
+                fallback_reference_names[0],
+            );
+            native
+                .decompose_flubbles(&fallback_reference_names)
+                .map_err(povu_to_io_error)?
+        }
+        Err(err) => return Err(povu_to_io_error(err)),
+    };
+    let root_positions = path_positions
+        .get(decomposition.reference_path_index)
+        .ok_or_else(|| {
+            io::Error::other("POVU reference path index is outside smooth graph paths")
+        })?;
+
+    let id_to_idx = (0..graph.nodes.len())
+        .map(|idx| ((idx + 1).to_string(), idx))
+        .collect::<FxHashMap<_, _>>();
+    let path_step_indexes = graph
+        .paths
+        .iter()
+        .map(smooth_path_step_index)
+        .collect::<Vec<_>>();
+
+    let mut candidates = Vec::new();
+    for site in &decomposition.sites {
+        let Some(entry) = smooth_step_from_povu(&id_to_idx, &site.start) else {
+            continue;
+        };
+        let Some(exit) = smooth_step_from_povu(&id_to_idx, &site.end) else {
+            continue;
+        };
+        let reference_end_idx = site.reference_end_step.saturating_add(1);
+        let reference_span_bp = if reference_end_idx < root_positions.len()
+            && site.reference_start_step < root_positions.len()
+        {
+            root_positions[reference_end_idx] - root_positions[site.reference_start_step]
+        } else {
+            continue;
+        };
+
+        let mut path_ranges = Vec::new();
+        for (path_idx, path_index) in path_step_indexes.iter().enumerate() {
+            if let Some((begin_step, end_step)) =
+                unique_smooth_anchor_range(path_index, entry, exit)
+            {
+                let length =
+                    path_positions[path_idx][end_step] - path_positions[path_idx][begin_step];
+                if length > 0 {
+                    path_ranges.push(PathRange {
+                        path_idx,
+                        begin_step,
+                        end_step,
+                        length,
+                    });
+                }
+            }
+        }
+        if path_ranges.len() < 2 {
+            continue;
+        }
+        path_ranges.sort_by(|a, b| b.length.cmp(&a.length));
+        candidates.push(NeighborSiteCandidate {
+            entry,
+            exit,
+            level: site.level,
+            reference_start_step: site.reference_start_step,
+            reference_end_step: site.reference_end_step,
+            reference_span_bp,
+        });
+    }
+    let candidate_sites = candidates.len();
+
+    // Pick the smallest/deepest non-overlapping sites first, independent of
+    // parent ID. That keeps natural local bubbles while still allowing sites
+    // from unrelated tree positions to become neighbors in the later path-order
+    // grouping step.
+    candidates.sort_by_key(|candidate| {
+        (
+            candidate.reference_span_bp,
+            std::cmp::Reverse(candidate.level),
+            candidate.reference_start_step,
+            candidate.reference_end_step,
+        )
+    });
+
+    let mut occupied_reference: Vec<(usize, usize)> = Vec::new();
+    let mut selected = Vec::new();
+    let mut overlap_skipped_sites = 0usize;
+    let mut over_cap_skipped_sites = 0usize;
+    for candidate in candidates {
+        if candidate.reference_span_bp > max_block_bp {
+            over_cap_skipped_sites += 1;
+            continue;
+        }
+        let end_exclusive = candidate
+            .reference_end_step
+            .max(candidate.reference_start_step.saturating_add(1));
+        if step_interval_conflicts(
+            &occupied_reference,
+            candidate.reference_start_step,
+            end_exclusive,
+        ) {
+            overlap_skipped_sites += 1;
+            continue;
+        }
+        insert_step_interval(
+            &mut occupied_reference,
+            candidate.reference_start_step,
+            end_exclusive,
+        );
+        selected.push(candidate);
+    }
+
+    selected.sort_by_key(|candidate| {
+        (
+            candidate.reference_start_step,
+            candidate.reference_end_step,
+            candidate.reference_span_bp,
+        )
+    });
+    let selected_sites = selected.len();
+    let groups = greedy_neighbor_site_groups(selected, root_positions, max_block_bp);
+    let selected_groups = groups.len();
+    let blocks_merged = groups.iter().filter(|group| group.sites.len() > 1).count();
+    let sites_in_merged_blocks = groups
+        .iter()
+        .filter(|group| group.sites.len() > 1)
+        .map(|group| group.sites.len())
+        .sum();
+
+    let mut claimed_steps: Vec<BitVec> = graph
+        .paths
+        .iter()
+        .map(|path| bitvec![0; path.steps.len()])
+        .collect();
+    let mut blocks = Vec::new();
+    let mut final_overlap_skipped_sites = 0usize;
+    for group in groups {
+        let Some(first) = group.sites.first() else {
+            continue;
+        };
+        let Some(last) = group.sites.last() else {
+            continue;
+        };
+        let mut path_ranges = Vec::new();
+        for (path_idx, path_index) in path_step_indexes.iter().enumerate() {
+            if let Some((begin_step, end_step)) =
+                unique_smooth_anchor_range(path_index, first.entry, last.exit)
+            {
+                let length =
+                    path_positions[path_idx][end_step] - path_positions[path_idx][begin_step];
+                if length > 0 {
+                    path_ranges.push(PathRange {
+                        path_idx,
+                        begin_step,
+                        end_step,
+                        length,
+                    });
+                }
+            }
+        }
+        if path_ranges.len() < 2 || ranges_overlap_claimed(&path_ranges, &claimed_steps) {
+            final_overlap_skipped_sites += group.sites.len();
+            continue;
+        }
+        path_ranges.sort_by(|a, b| b.length.cmp(&a.length));
+        mark_claimed_ranges(&path_ranges, &mut claimed_steps);
+        let source = BlockSource::NeighborMerge {
+            site_count: group.sites.len(),
+            reference_start_step: group.reference_start_step,
+            reference_end_step: group.reference_end_step,
+            reference_span_bp: group.reference_span_bp,
+        };
+        blocks.extend(topological_split_with_source(path_ranges, graph, source));
+    }
+    overlap_skipped_sites += final_overlap_skipped_sites;
+    let neighbor_blocks = blocks.len();
+
+    let gap_ranges = unclaimed_path_ranges(graph, &claimed_steps);
+    let mut gap_blocks = topological_split_with_source(gap_ranges, graph, BlockSource::Gap);
+    let gap_block_count = gap_blocks.len();
+    blocks.append(&mut gap_blocks);
+
+    Ok(NeighborMergeBlockPlan {
+        blocks,
+        povu_sites: decomposition.sites.len(),
+        candidate_sites,
+        selected_sites,
+        selected_groups,
+        neighbor_blocks,
+        blocks_merged,
+        sites_in_merged_blocks,
+        overlap_skipped_sites,
+        over_cap_skipped_sites,
+        gap_blocks: gap_block_count,
+    })
+}
+
+fn greedy_neighbor_site_groups(
+    selected: Vec<NeighborSiteCandidate>,
+    root_positions: &[usize],
+    max_block_bp: usize,
+) -> Vec<NeighborSiteGroup> {
+    let mut groups = Vec::new();
+    let mut current: Vec<NeighborSiteCandidate> = Vec::new();
+    let mut current_start_step = 0usize;
+    let mut current_end_step = 0usize;
+    let mut current_span_bp = 0usize;
+
+    for candidate in selected {
+        if current.is_empty() {
+            current_start_step = candidate.reference_start_step;
+            current_end_step = candidate.reference_end_step;
+            current_span_bp = candidate.reference_span_bp;
+            current.push(candidate);
+            continue;
+        }
+
+        let proposed_end_step = current_end_step.max(candidate.reference_end_step);
+        let proposed_span_bp = if proposed_end_step + 1 < root_positions.len()
+            && current_start_step < root_positions.len()
+        {
+            root_positions[proposed_end_step + 1] - root_positions[current_start_step]
+        } else {
+            usize::MAX
+        };
+        let path_adjacent_or_downstream = candidate.reference_start_step >= current_end_step;
+        if path_adjacent_or_downstream && proposed_span_bp <= max_block_bp {
+            current_end_step = proposed_end_step;
+            current_span_bp = proposed_span_bp;
+            current.push(candidate);
+            continue;
+        }
+
+        groups.push(NeighborSiteGroup {
+            sites: std::mem::take(&mut current),
+            reference_start_step: current_start_step,
+            reference_end_step: current_end_step,
+            reference_span_bp: current_span_bp,
+        });
+        current_start_step = candidate.reference_start_step;
+        current_end_step = candidate.reference_end_step;
+        current_span_bp = candidate.reference_span_bp;
+        current.push(candidate);
+    }
+
+    if !current.is_empty() {
+        groups.push(NeighborSiteGroup {
+            sites: current,
+            reference_start_step: current_start_step,
+            reference_end_step: current_end_step,
+            reference_span_bp: current_span_bp,
+        });
+    }
+    groups
+}
+
+fn step_interval_conflicts(occupied: &[(usize, usize)], begin: usize, end: usize) -> bool {
+    let insert_pos = occupied.partition_point(|&(occupied_begin, _)| occupied_begin < begin);
+    if insert_pos > 0 {
+        let (_, previous_end) = occupied[insert_pos - 1];
+        if previous_end > begin {
+            return true;
+        }
+    }
+    if let Some(&(next_begin, _)) = occupied.get(insert_pos) {
+        if next_begin < end {
+            return true;
+        }
+    }
+    false
+}
+
+fn insert_step_interval(occupied: &mut Vec<(usize, usize)>, begin: usize, end: usize) {
+    let insert_pos = occupied.partition_point(|&(occupied_begin, _)| occupied_begin < begin);
+    occupied.insert(insert_pos, (begin, end));
 }
 
 fn render_smooth_graph_gfa(graph: &SmoothGraph) -> io::Result<String> {
@@ -1530,7 +1991,59 @@ fn log_flubble_block_compression(
             ratio,
             if passthrough { "passthrough" } else { "poa" },
         );
+    } else if let BlockSource::NeighborMerge {
+        site_count,
+        reference_start_step,
+        reference_end_step,
+        reference_span_bp,
+    } = &block.source
+    {
+        let ratio = if input_bp > 0 {
+            output_bp as f64 / input_bp as f64
+        } else {
+            0.0
+        };
+        info!(
+            "[neighbor-merge-poasta] block {} sites={} ref_steps={}-{} ref_span_bp={} ranges={} input_bp={} output_bp={} ratio={:.4} mode={}",
+            block_idx,
+            site_count,
+            reference_start_step,
+            reference_end_step,
+            reference_span_bp,
+            block.path_ranges.len(),
+            input_bp,
+            output_bp,
+            ratio,
+            if passthrough { "passthrough" } else { "poasta" },
+        );
     }
+}
+
+/// Realign a neighbor-merged local block with POASTA and emit lacer-compatible
+/// GFA. The surrounding smooth pass owns block placement, path coordinate
+/// naming, fallback passthrough, and final lacing.
+fn poasta_block(
+    block: &Block,
+    graph: &SmoothGraph,
+    config: &SmoothConfig,
+    path_positions: &[Vec<usize>],
+) -> io::Result<String> {
+    if block.path_ranges.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut headers = Vec::with_capacity(block.path_ranges.len());
+    let mut sequences = Vec::with_capacity(block.path_ranges.len());
+    for range in &block.path_ranges {
+        let path = &graph.paths[range.path_idx];
+        let (path_key, path_start) = parse_path_coords(&path.name);
+        let range_start_bp = path_start + path_positions[range.path_idx][range.begin_step];
+        let range_end_bp = path_start + path_positions[range.path_idx][range.end_step];
+        headers.push(format!("{}:{}-{}", path_key, range_start_bp, range_end_bp));
+        sequences.push(extract_path_range_sequence(graph, range));
+    }
+
+    crate::resolution::poasta_sequences_to_gfa(&headers, &sequences, config.scoring_params)
 }
 
 /// Smooth a single block: extract sequences → SPOA → GFA.
@@ -2120,6 +2633,78 @@ P\tchr2:200-212\t1+,2+,3+\t*
         let config = SmoothConfig {
             target_poa_lengths: vec![700],
             block_source: SmoothBlockSource::Flubble,
+            flubble_reference_names: vec!["CHM13#0#chr6".to_string()],
+            pre_sorted: true,
+            num_threads: 1,
+            ..SmoothConfig::new(5)
+        };
+
+        let smoothed = smooth_gfa(gfa, &config).unwrap();
+        let after = keyed_path_sequences(&smoothed);
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn test_neighbor_site_groups_merge_adjacent_sites_up_to_cap() {
+        fn site(start: usize, end: usize, span: usize) -> NeighborSiteCandidate {
+            NeighborSiteCandidate {
+                entry: (start, false),
+                exit: (end, false),
+                level: 0,
+                reference_start_step: start,
+                reference_end_step: end,
+                reference_span_bp: span,
+            }
+        }
+
+        let root_positions = vec![0, 100, 200, 300, 400, 500, 600];
+        let groups = greedy_neighbor_site_groups(
+            vec![site(0, 1, 200), site(1, 2, 200), site(4, 5, 200)],
+            &root_positions,
+            350,
+        );
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].sites.len(), 2);
+        assert_eq!(groups[0].reference_span_bp, 300);
+        assert_eq!(groups[1].sites.len(), 1);
+    }
+
+    #[test]
+    fn test_neighbor_merge_blocks_select_povu_sites_on_nested_fixture() {
+        let gfa = include_str!("../tests/test_data/crush/nested_bubbles_real.gfa");
+        let graph = parse_gfa(gfa);
+        let positions = compute_path_positions(&graph);
+        let config = SmoothConfig {
+            block_source: SmoothBlockSource::NeighborMergePoasta,
+            flubble_reference_names: vec!["CHM13#0#chr6".to_string()],
+            ..SmoothConfig::new(graph.paths.len())
+        };
+
+        let plan = neighbor_merge_blocks(&graph, &positions, &config, 10_000).unwrap();
+        assert!(plan.povu_sites > 0);
+        assert!(plan.candidate_sites > 0);
+        assert!(
+            plan.selected_sites > 0,
+            "expected at least one <=10kb neighbor-merge candidate"
+        );
+        assert!(
+            plan.neighbor_blocks > 0,
+            "selected candidates should materialize into local blocks"
+        );
+        assert!(
+            plan.gap_blocks > 0,
+            "passthrough gaps should retain coverage"
+        );
+    }
+
+    #[test]
+    fn test_neighbor_merge_poasta_preserves_path_sequences_on_nested_fixture() {
+        let gfa = include_str!("../tests/test_data/crush/nested_bubbles_real.gfa");
+        let before = keyed_path_sequences(gfa);
+        let config = SmoothConfig {
+            target_poa_lengths: vec![10_000],
+            block_source: SmoothBlockSource::NeighborMergePoasta,
             flubble_reference_names: vec!["CHM13#0#chr6".to_string()],
             pre_sorted: true,
             num_threads: 1,

@@ -1087,7 +1087,9 @@ fn resolve_graph_bubbles(
                 bp_to_node.insert(plan.candidate.signature.clone(), new_idx);
                 new_idx
             };
-            tree[parent_nidx].state = BubbleState::Resolved { at_round: round + 1 };
+            tree[parent_nidx].state = BubbleState::Resolved {
+                at_round: round + 1,
+            };
             just_resolved_nodes.push(parent_nidx);
 
             // Record the parent's reference bp region.
@@ -1824,8 +1826,8 @@ fn discover_all_candidates(
             // regardless of size — this is the core "no fixed threshold for
             // sub-bubbles" promise from docs/crush-hierarchical.md. For all
             // other methods the filter applies at every level, as before.
-            let apply_min_len_filter = config.method != ResolutionMethod::Hierarchical
-                || site.level == 0;
+            let apply_min_len_filter =
+                config.method != ResolutionMethod::Hierarchical || site.level == 0;
             if apply_min_len_filter && traversal_stats.max_len < config.min_traversal_len {
                 return None;
             }
@@ -2343,11 +2345,7 @@ fn materialize_candidate_sequences(
 /// `range.extended_sequence`; `left_flank_bp` / `right_flank_bp` track the
 /// per-side flank length so the aligner output graph can be clipped back to
 /// just the interior before the path-step substitution.
-fn materialize_flanked_sequences(
-    graph: &Graph,
-    candidate: &mut BubbleCandidate,
-    flank_bp: usize,
-) {
+fn materialize_flanked_sequences(graph: &Graph, candidate: &mut BubbleCandidate, flank_bp: usize) {
     for range in &mut candidate.ranges {
         let path = &graph.paths[range.path_idx];
         let left_flank = collect_flank_left(graph, path, range.begin_step, flank_bp);
@@ -2533,10 +2531,8 @@ fn apply_replacement_frontier(
         .map(|plan| plan.replacement.clone())
         .collect::<Vec<_>>();
     if log::log_enabled!(log::Level::Debug) {
-        let total_replacement_segments: usize = replacement_graphs
-            .iter()
-            .map(|g| g.segments.len())
-            .sum();
+        let total_replacement_segments: usize =
+            replacement_graphs.iter().map(|g| g.segments.len()).sum();
         let total_replacement_bp: usize = replacement_graphs
             .iter()
             .map(|g| g.segments.iter().map(|s| s.seq.len()).sum::<usize>())
@@ -3069,11 +3065,7 @@ fn seqwish_replacement_config(
     // the scaffold-mass floor so the requested semantics survive if the
     // filter is ever re-enabled downstream.
     let (num_mappings, scaffold_filter, scaffold_mass) = if config.sweepga_no_filter {
-        (
-            "many:many".to_string(),
-            "many:many".to_string(),
-            0u64,
-        )
+        ("many:many".to_string(), "many:many".to_string(), 0u64)
     } else {
         (
             config.replacement_num_mappings.clone(),
@@ -3541,6 +3533,129 @@ fn build_poasta_replacement(
     Ok(replacement)
 }
 
+/// Build an exact path-preserving POASTA graph for already-extracted local
+/// sequences and return it as numeric GFA 1.0 `S/L/P` records.
+///
+/// This is intentionally narrower than full crush replacement: callers own
+/// block discovery and lacing, while this helper owns the POASTA invocation and
+/// the exact-path clipping/validation used by the crush POASTA backend.
+pub fn poasta_sequences_to_gfa(
+    headers: &[String],
+    sequences: &[Vec<u8>],
+    scoring_params: (u8, u8, u8, u8, u8, u8),
+) -> io::Result<String> {
+    use poasta::aligner::config::Affine2PieceMinGapCost;
+    use poasta::aligner::PoastaAligner;
+    use poasta::graphs::poa::POAGraph;
+    use poasta::io::graph::graph_to_gfa;
+
+    if headers.len() != sequences.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "POASTA block got {} header(s) for {} sequence(s)",
+                headers.len(),
+                sequences.len()
+            ),
+        ));
+    }
+    if headers.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut sorted_sequences = headers
+        .iter()
+        .cloned()
+        .zip(sequences.iter().cloned())
+        .collect::<Vec<_>>();
+    sorted_sequences.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
+    let sorted_headers = sorted_sequences
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let sequence_refs = sorted_sequences
+        .iter()
+        .map(|(_, sequence)| sequence.as_slice())
+        .collect::<Vec<_>>();
+    let weights = sequence_refs
+        .iter()
+        .map(|sequence| vec![1usize; sequence.len()])
+        .collect::<Vec<_>>();
+
+    let mut graph = POAGraph::<u32>::new();
+    let scoring = poasta_two_piece_scoring(scoring_params)?;
+    let mut aligner = PoastaAligner::new(Affine2PieceMinGapCost(scoring), poasta_alignment_type());
+    add_poasta_sequences(
+        &mut graph,
+        &mut aligner,
+        &sorted_headers,
+        &sequence_refs,
+        &weights,
+    )?;
+
+    let mut gfa = Vec::new();
+    graph_to_gfa(&mut gfa, &graph)
+        .map_err(|err| io::Error::other(format!("POASTA block GFA generation failed: {err}")))?;
+    let gfa = String::from_utf8(gfa).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("POASTA block GFA is not UTF-8: {err}"),
+        )
+    })?;
+
+    let expected_paths = sorted_sequences.into_iter().collect::<Vec<_>>();
+    let mut replacement = poasta_gfa_to_exact_graph(&gfa, &expected_paths)?;
+    order_replacement_paths(&mut replacement, headers)?;
+    let expected_in_header_order = headers
+        .iter()
+        .cloned()
+        .zip(sequences.iter().cloned())
+        .collect::<Vec<_>>();
+    validate_expected_paths(&replacement, &expected_in_header_order, "POASTA block")?;
+    Ok(render_numeric_graph(&replacement))
+}
+
+fn render_numeric_graph(graph: &Graph) -> String {
+    let mut out = String::new();
+    out.push_str("H\tVN:Z:1.0\n");
+    for (idx, segment) in graph.segments.iter().enumerate() {
+        out.push_str(&format!(
+            "S\t{}\t{}\n",
+            idx + 1,
+            String::from_utf8_lossy(&segment.seq)
+        ));
+    }
+
+    let mut edges = BTreeSet::new();
+    for path in &graph.paths {
+        for pair in path.steps.windows(2) {
+            edges.insert((pair[0].node, pair[0].rev, pair[1].node, pair[1].rev));
+        }
+    }
+    for (from, from_rev, to, to_rev) in edges {
+        out.push_str(&format!(
+            "L\t{}\t{}\t{}\t{}\t0M\n",
+            from + 1,
+            if from_rev { "-" } else { "+" },
+            to + 1,
+            if to_rev { "-" } else { "+" }
+        ));
+    }
+
+    for path in &graph.paths {
+        let steps = path
+            .steps
+            .iter()
+            .map(|step| format!("{}{}", step.node + 1, if step.rev { "-" } else { "+" }))
+            .collect::<Vec<_>>()
+            .join(",");
+        if !steps.is_empty() {
+            out.push_str(&format!("P\t{}\t{}\t*\n", path.name, steps));
+        }
+    }
+    out
+}
+
 fn poasta_uses_two_piece_affine(scoring_params: (u8, u8, u8, u8, u8, u8)) -> bool {
     let (_, _, _, gap_extend, _, gap_extend2) = scoring_params;
     gap_extend > gap_extend2
@@ -3985,11 +4100,11 @@ fn clip_replacement_to_interior(
         let pieces = replacement_path_pieces(&replacement, path)?;
         let raw_len: usize = pieces.iter().map(|p| p.end - p.start).sum();
         let interior_start = range.left_flank_bp;
-        let interior_end = raw_len
-            .checked_sub(range.right_flank_bp)
-            .ok_or_else(|| io::Error::other(
+        let interior_end = raw_len.checked_sub(range.right_flank_bp).ok_or_else(|| {
+            io::Error::other(
                 "clip_replacement_to_interior: right flank exceeds replacement path length",
-            ))?;
+            )
+        })?;
         if interior_start > interior_end {
             return Err(io::Error::other(
                 "clip_replacement_to_interior: interior bounds inverted",
@@ -4047,7 +4162,9 @@ fn replacement_path_pieces(graph: &Graph, path: &Path) -> io::Result<Vec<Replace
     let mut pieces = Vec::with_capacity(path.steps.len());
     for step in &path.steps {
         let segment = graph.segments.get(step.node).ok_or_else(|| {
-            io::Error::other("clip_replacement_to_interior: replacement path references an out-of-range segment")
+            io::Error::other(
+                "clip_replacement_to_interior: replacement path references an out-of-range segment",
+            )
         })?;
         let len = segment.seq.len();
         let start = offset;
@@ -4092,7 +4209,10 @@ fn slice_replacement_segment(
         segment.seq.clone()
     };
     let slice = oriented[local_start..local_end].to_vec();
-    let id = format!("clip_{}_{}_{}_{}", source_node, rev as u8, local_start, local_end);
+    let id = format!(
+        "clip_{}_{}_{}_{}",
+        source_node, rev as u8, local_start, local_end
+    );
     let idx = output_segments.len();
     output_segments.push(Segment { id, seq: slice });
     node_by_slice.insert(key, idx);
@@ -5001,8 +5121,11 @@ P\tp1\t1+,3+,4+\t*
     #[test]
     fn auto_routing_boundaries_are_exclusive_upper_bounds() {
         let config = ResolutionConfig::default();
-        let at_spoa_boundary =
-            routing_candidate_with_stats(traversal_stats_with(config.auto_spoa_max_traversal_len, 2_000, 10));
+        let at_spoa_boundary = routing_candidate_with_stats(traversal_stats_with(
+            config.auto_spoa_max_traversal_len,
+            2_000,
+            10,
+        ));
         assert_eq!(
             auto_replacement_method(&at_spoa_boundary, &config),
             ResolutionMethod::Poasta,
@@ -5979,10 +6102,7 @@ P\tp\t1+,2+\t*
         // Routing modes are resolved upstream; there is no concrete aligner
         // here to pair with, so the retry path must opt out cleanly rather
         // than recurse on Auto/Hierarchical.
-        assert_eq!(
-            alternate_replacement_method(ResolutionMethod::Auto),
-            None
-        );
+        assert_eq!(alternate_replacement_method(ResolutionMethod::Auto), None);
         assert_eq!(
             alternate_replacement_method(ResolutionMethod::Hierarchical),
             None
