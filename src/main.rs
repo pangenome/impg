@@ -2767,6 +2767,35 @@ fn parse_crush_stage(
                 };
                 config.method = method;
             }
+            "retry-min-compression-ratio"
+            | "retry-ratio"
+            | "min-compression-ratio"
+            | "compression-retry-ratio" => {
+                config.retry_min_compression_ratio = param.value.parse().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': {}='{}' is not a valid f64 ratio",
+                            raw, param.key, param.value
+                        ),
+                    )
+                })?;
+                if config.retry_min_compression_ratio < 0.0
+                    || !config.retry_min_compression_ratio.is_finite()
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Invalid --gfa-engine '{}': {}='{}' must be a non-negative finite f64",
+                            raw, param.key, param.value
+                        ),
+                    ));
+                }
+            }
+            "retry-min-input-bp" | "retry-min-input" => {
+                config.retry_min_input_bp =
+                    parse_usize_size_engine_param(raw, &param.key, &param.value)?;
+            }
             other => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,

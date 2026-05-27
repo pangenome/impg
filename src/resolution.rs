@@ -175,6 +175,19 @@ pub struct ResolutionConfig {
     pub replacement_flank_bp: usize,
     /// SPOA scoring parameters: (match, mismatch, gap_open, gap_ext, gap_open2, gap_ext2).
     pub scoring_params: (u8, u8, u8, u8, u8, u8),
+    /// Minimum input/output compression ratio. After a bubble is replaced, the
+    /// ratio is computed as
+    /// `sum(traversal bp) / sum(replacement segment bp)`. If the result is
+    /// finite and below this threshold the bubble is retried with a different
+    /// aligner and the better-compressing replacement is kept. The retry is
+    /// bounded to a single alternative attempt (original + 1 retry) to keep
+    /// total wall bounded. Set to 0.0 to disable retries entirely. See
+    /// `docs/crush-retry-on-poor-compression.md`.
+    pub retry_min_compression_ratio: f64,
+    /// Minimum input bp for a bubble to be eligible for retry. Tiny bubbles
+    /// where input_bp/output_bp can be noisy (e.g. trivial 1-bp bubbles)
+    /// are skipped. Set to 0 to retry every bubble below the ratio threshold.
+    pub retry_min_input_bp: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -298,6 +311,17 @@ const AUTO_SWEEPGA_KMER_FREQUENCY_PER_TRAVERSAL: usize = 10;
 pub const DEFAULT_SWEEPGA_MIN_ALN_LENGTH: u64 = 0;
 pub const DEFAULT_MAX_PAIR_ALIGNMENTS: usize = 10_000;
 pub const DEFAULT_MAX_REPLACEMENT_PAF_BYTES: usize = 64 * 1024 * 1024;
+/// Default minimum compression ratio (input bp / output bp) below which a
+/// bubble is retried with a different aligner. 2.0 means "the replacement must
+/// at least halve the input traversal bp"; bubbles that fail this gate go to
+/// the alternate aligner so a poor first-pass choice doesn't get locked in
+/// before the descent into its sub-bubbles begins.
+/// See `docs/crush-retry-on-poor-compression.md`.
+pub const DEFAULT_RETRY_MIN_COMPRESSION_RATIO: f64 = 2.0;
+/// Default minimum input bp (sum of traversal lengths) for a bubble to be
+/// eligible for compression-ratio retry. Below this size the ratio is noisy
+/// and retry overhead outweighs the potential gain.
+pub const DEFAULT_RETRY_MIN_INPUT_BP: usize = 1_000;
 /// Default `replacement_flank_bp` is 0 — no flanking context is added. The
 /// canonical "wider-context" run sets this to 500. See
 /// `docs/crush-wider-context-bubbles.md`.
@@ -344,6 +368,8 @@ impl Default for ResolutionConfig {
             sweepga_sparse_pairs: false,
             replacement_flank_bp: DEFAULT_REPLACEMENT_FLANK_BP,
             scoring_params: (1, 4, 6, 2, 26, 1),
+            retry_min_compression_ratio: DEFAULT_RETRY_MIN_COMPRESSION_RATIO,
+            retry_min_input_bp: DEFAULT_RETRY_MIN_INPUT_BP,
         }
     }
 }
@@ -356,6 +382,17 @@ pub struct ResolutionStats {
     pub candidates_seen: usize,
     pub resolved: usize,
     pub bailed: usize,
+    /// Number of bubbles that fell below the compression-ratio threshold and
+    /// triggered a retry with an alternate aligner. See
+    /// `docs/crush-retry-on-poor-compression.md`.
+    pub retry_attempts: usize,
+    /// Number of retries whose alternate aligner produced a strictly
+    /// better-compressing replacement (was kept).
+    pub retry_wins: usize,
+    /// Number of retries whose alternate aligner failed (build error, empty,
+    /// or path-equality violation). The original replacement is kept in that
+    /// case so the run does not lose ground.
+    pub retry_failures: usize,
 }
 
 /// Resolved GFA plus run statistics.
@@ -901,10 +938,15 @@ fn resolve_graph_bubbles(
         let build_elapsed = build_start.elapsed();
 
         let mut plans: Vec<ReplacementPlan> = Vec::new();
+        let mut plan_methods: Vec<ResolutionMethod> = Vec::new();
         let mut failed_or_empty = 0usize;
         for result in build_results {
             match result {
-                Ok(Some(plan)) => plans.push(plan),
+                Ok(Some(plan)) => {
+                    let method = candidate_replacement_method(&plan.candidate, config);
+                    plans.push(plan);
+                    plan_methods.push(method);
+                }
                 Ok(None) => {
                     failed_or_empty += 1;
                     stats.bailed += 1;
@@ -942,6 +984,29 @@ fn resolve_graph_bubbles(
                 selected_count,
                 build_elapsed,
                 failed_or_empty
+            );
+        }
+
+        // ---- retry-on-poor-compression ----
+        // For each accepted plan, compute the compression ratio and, if it
+        // falls below the configured threshold, rebuild the same bubble with
+        // an alternate aligner. Keep whichever replacement compresses better.
+        // Constraints (per docs/crush-retry-on-poor-compression.md):
+        //   - Each bubble gets at most ONE alternative attempt (bounded wall).
+        //   - The alternate must still satisfy path_sequences_equal — that is
+        //     enforced inside `build_replacement_with_method` by each builder's
+        //     `validate_replacement_paths` tail. We additionally check at the
+        //     graph level via `path_sequences_equal` in `apply_replacement_frontier`.
+        //   - On any retry failure (build error, empty, validation), the
+        //     original replacement is kept so the run does not lose ground.
+        if config.retry_min_compression_ratio > 0.0 {
+            run_retry_on_poor_compression(
+                &mut plans,
+                &plan_methods,
+                config,
+                round,
+                emit_logs,
+                &mut stats,
             );
         }
 
@@ -2587,6 +2652,337 @@ fn candidate_replacement_method(
         ResolutionMethod::Auto => auto_replacement_method(candidate, config),
         ResolutionMethod::Hierarchical => hierarchical_method_by_level(candidate.level),
         method => method,
+    }
+}
+
+/// Sum of the replacement graph's segment-bp. This is the "output bp" half of
+/// the compression ratio used by the retry-on-poor-compression mechanism.
+fn replacement_segment_bp(replacement: &Graph) -> usize {
+    replacement.segments.iter().map(|s| s.seq.len()).sum()
+}
+
+/// Compression ratio = sum(input traversal bp) / sum(replacement segment bp).
+/// Returns `None` when the inputs make the ratio meaningless: zero input bp,
+/// zero output bp (cannot divide), or an empty replacement.
+fn replacement_compression_ratio(candidate: &BubbleCandidate, replacement: &Graph) -> Option<f64> {
+    let input_bp = candidate.traversal_stats.total_len;
+    let output_bp = replacement_segment_bp(replacement);
+    if input_bp == 0 || output_bp == 0 {
+        return None;
+    }
+    Some(input_bp as f64 / output_bp as f64)
+}
+
+/// Pick a *different* aligner for the retry of a poorly compressed bubble.
+/// The mapping is fixed per task spec
+/// (docs/crush-retry-on-poor-compression.md §"Implementation"):
+///
+/// - Sweepga / Wfmash → Poasta (a different alignment paradigm)
+/// - Poasta → Allwave (different graph induction)
+/// - Allwave → Poasta
+/// - Poa → Poasta
+/// - StarBiwfa → Poasta
+///
+/// `Auto` / `Hierarchical` are routing modes and never reach here directly —
+/// `candidate_replacement_method` resolves them to a concrete method first.
+fn alternate_replacement_method(method: ResolutionMethod) -> Option<ResolutionMethod> {
+    match method {
+        ResolutionMethod::Sweepga | ResolutionMethod::Wfmash => Some(ResolutionMethod::Poasta),
+        ResolutionMethod::Poasta => Some(ResolutionMethod::Allwave),
+        ResolutionMethod::Allwave => Some(ResolutionMethod::Poasta),
+        ResolutionMethod::Poa => Some(ResolutionMethod::Poasta),
+        ResolutionMethod::StarBiwfa => Some(ResolutionMethod::Poasta),
+        ResolutionMethod::Auto | ResolutionMethod::Hierarchical => None,
+    }
+}
+
+/// Retry-on-poor-compression: scan each accepted plan, compute its
+/// compression ratio, and for those below the threshold rebuild the bubble
+/// with an alternate aligner. The plan is swapped iff the alternate
+/// compresses strictly better. Stats and a per-bubble decision log are
+/// produced so the mechanism is auditable. See
+/// `docs/crush-retry-on-poor-compression.md`.
+fn run_retry_on_poor_compression(
+    plans: &mut [ReplacementPlan],
+    plan_methods: &[ResolutionMethod],
+    config: &ResolutionConfig,
+    round: usize,
+    emit_logs: bool,
+    stats: &mut ResolutionStats,
+) {
+    let threshold = config.retry_min_compression_ratio;
+    let min_input_bp = config.retry_min_input_bp;
+
+    // Identify retry candidates upfront so the rebuild loop can be parallel.
+    let retry_indices: Vec<usize> = plans
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, plan)| {
+            let input_bp = plan.candidate.traversal_stats.total_len;
+            if input_bp < min_input_bp {
+                return None;
+            }
+            let ratio = replacement_compression_ratio(&plan.candidate, &plan.replacement)?;
+            if ratio < threshold {
+                Some(idx)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if retry_indices.is_empty() {
+        return;
+    }
+
+    if emit_logs {
+        log::info!(
+            "crush round {}: retry-on-poor-compression: {}/{} bubble(s) below ratio={:.2} (min-input-bp={}), attempting alternate aligner",
+            round + 1,
+            retry_indices.len(),
+            plans.len(),
+            threshold,
+            min_input_bp
+        );
+    }
+
+    // Build alternate replacements in parallel. We carry the result back as
+    // `(index, decision)` so the original plan slot can be updated in place
+    // when the alternate wins. `decision` carries enough to log + bump stats.
+    let retries: Vec<(usize, RetryOutcome)> = retry_indices
+        .par_iter()
+        .map(|&idx| {
+            let plan = &plans[idx];
+            let original_method = plan_methods[idx];
+            let original_ratio =
+                replacement_compression_ratio(&plan.candidate, &plan.replacement).unwrap_or(0.0);
+            let original_output_bp = replacement_segment_bp(&plan.replacement);
+            let Some(alt_method) = alternate_replacement_method(original_method) else {
+                return (
+                    idx,
+                    RetryOutcome::NoAlternate {
+                        original_method,
+                        original_ratio,
+                    },
+                );
+            };
+            if alt_method == original_method {
+                return (
+                    idx,
+                    RetryOutcome::NoAlternate {
+                        original_method,
+                        original_ratio,
+                    },
+                );
+            }
+            let build_result = build_replacement_with_method(&plan.candidate, config, alt_method);
+            match build_result {
+                Ok(alt_replacement) => {
+                    if alt_replacement.segments.is_empty() {
+                        return (
+                            idx,
+                            RetryOutcome::AlternateFailed {
+                                original_method,
+                                alt_method,
+                                original_ratio,
+                                reason: "empty replacement".to_string(),
+                            },
+                        );
+                    }
+                    let alt_output_bp = replacement_segment_bp(&alt_replacement);
+                    let alt_ratio =
+                        replacement_compression_ratio(&plan.candidate, &alt_replacement)
+                            .unwrap_or(0.0);
+                    if alt_output_bp < original_output_bp {
+                        (
+                            idx,
+                            RetryOutcome::AlternateWon {
+                                original_method,
+                                alt_method,
+                                original_ratio,
+                                alt_ratio,
+                                original_output_bp,
+                                alt_output_bp,
+                                alt_replacement,
+                            },
+                        )
+                    } else {
+                        (
+                            idx,
+                            RetryOutcome::AlternateLost {
+                                original_method,
+                                alt_method,
+                                original_ratio,
+                                alt_ratio,
+                                original_output_bp,
+                                alt_output_bp,
+                            },
+                        )
+                    }
+                }
+                Err(err) => (
+                    idx,
+                    RetryOutcome::AlternateFailed {
+                        original_method,
+                        alt_method,
+                        original_ratio,
+                        reason: err.to_string(),
+                    },
+                ),
+            }
+        })
+        .collect();
+
+    let mut attempts = 0usize;
+    let mut wins = 0usize;
+    let mut failures = 0usize;
+
+    for (idx, outcome) in retries {
+        match outcome {
+            RetryOutcome::NoAlternate {
+                original_method,
+                original_ratio,
+            } => {
+                if emit_logs {
+                    log::info!(
+                        "crush round {} retry: bubble sig={} method={:?} ratio={:.2} — no alternate aligner; keeping original",
+                        round + 1,
+                        short_signature(&plans[idx].candidate.signature),
+                        original_method,
+                        original_ratio
+                    );
+                }
+            }
+            RetryOutcome::AlternateFailed {
+                original_method,
+                alt_method,
+                original_ratio,
+                reason,
+            } => {
+                attempts += 1;
+                failures += 1;
+                if emit_logs {
+                    log::info!(
+                        "crush round {} retry: bubble sig={} {:?}→{:?} alternate FAILED ({}); keeping original ratio={:.2}",
+                        round + 1,
+                        short_signature(&plans[idx].candidate.signature),
+                        original_method,
+                        alt_method,
+                        reason,
+                        original_ratio
+                    );
+                }
+            }
+            RetryOutcome::AlternateLost {
+                original_method,
+                alt_method,
+                original_ratio,
+                alt_ratio,
+                original_output_bp,
+                alt_output_bp,
+            } => {
+                attempts += 1;
+                if emit_logs {
+                    log::info!(
+                        "crush round {} retry: bubble sig={} {:?}→{:?} alternate LOST (orig={}bp ratio={:.2}, alt={}bp ratio={:.2}); keeping original",
+                        round + 1,
+                        short_signature(&plans[idx].candidate.signature),
+                        original_method,
+                        alt_method,
+                        original_output_bp,
+                        original_ratio,
+                        alt_output_bp,
+                        alt_ratio
+                    );
+                }
+            }
+            RetryOutcome::AlternateWon {
+                original_method,
+                alt_method,
+                original_ratio,
+                alt_ratio,
+                original_output_bp,
+                alt_output_bp,
+                alt_replacement,
+            } => {
+                attempts += 1;
+                wins += 1;
+                if emit_logs {
+                    log::info!(
+                        "crush round {} retry: bubble sig={} {:?}→{:?} alternate WON (orig={}bp ratio={:.2}, alt={}bp ratio={:.2}); swapping",
+                        round + 1,
+                        short_signature(&plans[idx].candidate.signature),
+                        original_method,
+                        alt_method,
+                        original_output_bp,
+                        original_ratio,
+                        alt_output_bp,
+                        alt_ratio
+                    );
+                }
+                plans[idx].replacement = alt_replacement;
+            }
+        }
+    }
+
+    stats.retry_attempts += attempts;
+    stats.retry_wins += wins;
+    stats.retry_failures += failures;
+
+    if emit_logs && attempts > 0 {
+        log::info!(
+            "crush round {} retry summary: attempts={} wins={} failures={} (running totals: attempts={} wins={} failures={})",
+            round + 1,
+            attempts,
+            wins,
+            failures,
+            stats.retry_attempts,
+            stats.retry_wins,
+            stats.retry_failures
+        );
+    }
+}
+
+#[derive(Debug)]
+enum RetryOutcome {
+    NoAlternate {
+        original_method: ResolutionMethod,
+        original_ratio: f64,
+    },
+    AlternateFailed {
+        original_method: ResolutionMethod,
+        alt_method: ResolutionMethod,
+        original_ratio: f64,
+        reason: String,
+    },
+    AlternateLost {
+        original_method: ResolutionMethod,
+        alt_method: ResolutionMethod,
+        original_ratio: f64,
+        alt_ratio: f64,
+        original_output_bp: usize,
+        alt_output_bp: usize,
+    },
+    AlternateWon {
+        original_method: ResolutionMethod,
+        alt_method: ResolutionMethod,
+        original_ratio: f64,
+        alt_ratio: f64,
+        original_output_bp: usize,
+        alt_output_bp: usize,
+        alt_replacement: Graph,
+    },
+}
+
+/// Truncate the long bp-coords signature for log readability. The full
+/// signature is still in the bubble-tree provenance; logs only need a stable
+/// fingerprint per round.
+fn short_signature(sig: &str) -> String {
+    const MAX: usize = 64;
+    if sig.len() <= MAX {
+        sig.to_string()
+    } else {
+        format!("{}…(+{}b)", &sig[..MAX], sig.len() - MAX)
     }
 }
 
@@ -5547,5 +5943,250 @@ P\tp\t1+,2+\t*
 ";
         let err = resolve_gfa_bubbles(gfa, &ResolutionConfig::default()).unwrap_err();
         assert!(err.to_string().contains("blunt 0M"));
+    }
+
+    /// Verify the alternate-aligner mapping documented at
+    /// `docs/crush-retry-on-poor-compression.md` §"Implementation". The
+    /// retry on a poorly compressed bubble must rebuild with a *different*
+    /// aligner — the mapping is fixed so the cascade is deterministic and
+    /// auditable from the logs.
+    #[test]
+    fn alternate_replacement_method_picks_a_different_aligner() {
+        assert_eq!(
+            alternate_replacement_method(ResolutionMethod::Sweepga),
+            Some(ResolutionMethod::Poasta)
+        );
+        assert_eq!(
+            alternate_replacement_method(ResolutionMethod::Wfmash),
+            Some(ResolutionMethod::Poasta)
+        );
+        assert_eq!(
+            alternate_replacement_method(ResolutionMethod::Poasta),
+            Some(ResolutionMethod::Allwave)
+        );
+        assert_eq!(
+            alternate_replacement_method(ResolutionMethod::Allwave),
+            Some(ResolutionMethod::Poasta)
+        );
+        assert_eq!(
+            alternate_replacement_method(ResolutionMethod::Poa),
+            Some(ResolutionMethod::Poasta)
+        );
+        assert_eq!(
+            alternate_replacement_method(ResolutionMethod::StarBiwfa),
+            Some(ResolutionMethod::Poasta)
+        );
+        // Routing modes are resolved upstream; there is no concrete aligner
+        // here to pair with, so the retry path must opt out cleanly rather
+        // than recurse on Auto/Hierarchical.
+        assert_eq!(
+            alternate_replacement_method(ResolutionMethod::Auto),
+            None
+        );
+        assert_eq!(
+            alternate_replacement_method(ResolutionMethod::Hierarchical),
+            None
+        );
+
+        // Sanity: the alternate must always differ from the original. A
+        // self-recursive retry would burn budget without changing the
+        // failure mode that caused the poor compression.
+        for original in [
+            ResolutionMethod::Poa,
+            ResolutionMethod::Poasta,
+            ResolutionMethod::StarBiwfa,
+            ResolutionMethod::Allwave,
+            ResolutionMethod::Sweepga,
+            ResolutionMethod::Wfmash,
+        ] {
+            let alt = alternate_replacement_method(original).expect("concrete method must map");
+            assert_ne!(
+                alt, original,
+                "alternate aligner must differ from original {:?}",
+                original
+            );
+        }
+    }
+
+    /// Compression ratio = sum(input bp) / sum(output bp). Guard cases where
+    /// either side is zero (empty replacement, zero input) must return None
+    /// so the retry path treats them as "no signal" rather than crashing on
+    /// a divide-by-zero or grading every empty graph as infinitely well
+    /// compressed.
+    #[test]
+    fn replacement_compression_ratio_handles_zero_and_basic_cases() {
+        let candidate = BubbleCandidate {
+            ranges: Vec::new(),
+            signature: "test".to_string(),
+            root_start_step: 0,
+            root_end_step: 0,
+            root_span: 0,
+            total_steps: 0,
+            unique_steps: 0,
+            traversal_stats: TraversalStats {
+                count: 4,
+                min_len: 100,
+                median_len: 100,
+                p90_len: 100,
+                max_len: 100,
+                total_len: 400,
+            },
+            level: 0,
+        };
+        let mk_replacement = |segs: &[(&str, &[u8])]| Graph {
+            segments: segs
+                .iter()
+                .map(|(id, seq)| Segment {
+                    id: id.to_string(),
+                    seq: seq.to_vec(),
+                })
+                .collect(),
+            paths: Vec::new(),
+        };
+
+        // 4 traversals @ 100 bp collapsed to a 100 bp single shared segment
+        // is the canonical "perfect compression" case — ratio = 4.0.
+        let replacement = mk_replacement(&[("1", &[b'A'; 100])]);
+        let ratio = replacement_compression_ratio(&candidate, &replacement).unwrap();
+        assert!((ratio - 4.0).abs() < 1e-9, "got {}", ratio);
+
+        // Same input, but the replacement kept every traversal as its own
+        // segment — no compression. Ratio = 1.0.
+        let replacement = mk_replacement(&[
+            ("1", &[b'A'; 100]),
+            ("2", &[b'C'; 100]),
+            ("3", &[b'G'; 100]),
+            ("4", &[b'T'; 100]),
+        ]);
+        let ratio = replacement_compression_ratio(&candidate, &replacement).unwrap();
+        assert!((ratio - 1.0).abs() < 1e-9, "got {}", ratio);
+
+        // Empty replacement → cannot divide; must return None so retry
+        // ignores it instead of treating empty as well-compressed.
+        let replacement = mk_replacement(&[]);
+        assert!(replacement_compression_ratio(&candidate, &replacement).is_none());
+
+        // Zero input bp → no signal either.
+        let mut zero_input = candidate.clone();
+        zero_input.traversal_stats.total_len = 0;
+        let replacement = mk_replacement(&[("1", &[b'A'; 10])]);
+        assert!(replacement_compression_ratio(&zero_input, &replacement).is_none());
+    }
+
+    /// End-to-end: enabling the retry path must not damage the
+    /// path-preservation invariant on a simple bubble. A 0.0 threshold
+    /// disables the retry entirely; a very high threshold (forces retry on
+    /// every bubble) is the more interesting case — we want every alternate
+    /// attempt to either improve the graph or be cleanly rejected without
+    /// breaking byte-exact path sequences.
+    #[test]
+    fn retry_preserves_path_sequences_on_simple_bubble() {
+        // Reuse the canonical snp bubble fixture from
+        // `resolves_simple_snp_bubble_without_changing_path_sequences`.
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tT
+S\t5\tA
+S\t6\tC
+S\t7\tG
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t3\t+\t0M
+L\t1\t+\t4\t+\t0M
+L\t4\t+\t3\t+\t0M
+L\t3\t+\t5\t+\t0M
+L\t5\t+\t6\t+\t0M
+L\t6\t+\t7\t+\t0M
+P\tref\t1+,2+,3+,5+,6+,7+\t*
+P\talt\t1+,4+,3+,5+,6+,7+\t*
+";
+        let before = seq_map(gfa);
+
+        // Threshold of 0.0 disables retry — baseline.
+        let cfg_disabled = ResolutionConfig {
+            retry_min_compression_ratio: 0.0,
+            retry_min_input_bp: 0,
+            ..ResolutionConfig::default()
+        };
+        let baseline = resolve_gfa_bubbles(gfa, &cfg_disabled).unwrap();
+        assert_eq!(before, seq_map(&baseline.gfa));
+        assert_eq!(baseline.stats.retry_attempts, 0);
+        assert_eq!(baseline.stats.retry_wins, 0);
+        assert_eq!(baseline.stats.retry_failures, 0);
+
+        // Threshold of 1e9 forces every bubble to be a retry candidate. The
+        // alternate may or may not win, but the resulting paths MUST still
+        // match the input byte-for-byte.
+        let cfg_aggressive = ResolutionConfig {
+            retry_min_compression_ratio: 1e9,
+            retry_min_input_bp: 0,
+            ..ResolutionConfig::default()
+        };
+        let aggressive = resolve_gfa_bubbles(gfa, &cfg_aggressive).unwrap();
+        assert_eq!(
+            before,
+            seq_map(&aggressive.gfa),
+            "retry path must preserve every input path sequence"
+        );
+        // With at least one accepted bubble of >0 bp and a 1e9 ratio
+        // threshold, we expect at least one retry attempt to have fired.
+        // (`bailed` may have absorbed some, so we only assert non-zero.)
+        assert!(
+            aggressive.stats.retry_attempts > 0,
+            "expected at least one retry; got stats {:?}",
+            aggressive.stats
+        );
+        // Wins + losses + failures account for every attempt; a "loss"
+        // (alt didn't beat original) is *not* tracked in `retry_failures`,
+        // it just doesn't bump `retry_wins`. We sanity-check the invariant
+        // that wins/failures never exceed attempts.
+        assert!(aggressive.stats.retry_wins <= aggressive.stats.retry_attempts);
+        assert!(aggressive.stats.retry_failures <= aggressive.stats.retry_attempts);
+    }
+
+    /// `retry_min_input_bp` is the size-floor guard — tiny bubbles where the
+    /// ratio is noisy (e.g. 1-bp SNP, total_len < threshold) should be
+    /// skipped even when the ratio would otherwise trigger a retry. This
+    /// prevents wasting wall on trivial bubbles where neither aligner can
+    /// meaningfully "compress" the input.
+    #[test]
+    fn retry_skips_bubbles_below_min_input_bp() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tT
+S\t5\tA
+S\t6\tC
+S\t7\tG
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t3\t+\t0M
+L\t1\t+\t4\t+\t0M
+L\t4\t+\t3\t+\t0M
+L\t3\t+\t5\t+\t0M
+L\t5\t+\t6\t+\t0M
+L\t6\t+\t7\t+\t0M
+P\tref\t1+,2+,3+,5+,6+,7+\t*
+P\talt\t1+,4+,3+,5+,6+,7+\t*
+";
+        // Input bp per traversal is tiny (1 bp inside the bubble). Setting
+        // the min-input-bp floor to 1_000 must keep the retry-on-poor-
+        // compression mechanism quiet on this fixture even with an
+        // aggressive ratio threshold.
+        let cfg = ResolutionConfig {
+            retry_min_compression_ratio: 1e9,
+            retry_min_input_bp: 1_000,
+            ..ResolutionConfig::default()
+        };
+        let resolved = resolve_gfa_bubbles(gfa, &cfg).unwrap();
+        assert_eq!(seq_map(gfa), seq_map(&resolved.gfa));
+        assert_eq!(
+            resolved.stats.retry_attempts, 0,
+            "below min-input-bp floor should suppress retry; got stats {:?}",
+            resolved.stats
+        );
     }
 }
