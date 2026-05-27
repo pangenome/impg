@@ -23,6 +23,10 @@ use std::time::Instant;
 const GRAPH_QUALITY_LONG_BRIDGE_BP: usize = 10_000;
 const GRAPH_QUALITY_WHITE_SPACE_FLOOR_BP: usize = 1_000;
 static DEBUG_REPLACEMENT_ID: AtomicUsize = AtomicUsize::new(0);
+static CHAIN_POVU_SMOOTH_KEPT: AtomicUsize = AtomicUsize::new(0);
+static CHAIN_POVU_DIRECT_FALLBACK: AtomicUsize = AtomicUsize::new(0);
+static CHAIN_POVU_SMOOTH_FAILED_DIRECT_FALLBACK: AtomicUsize = AtomicUsize::new(0);
+static CHAIN_POVU_DIRECT_FAILED_KEEP_SMOOTH: AtomicUsize = AtomicUsize::new(0);
 
 /// Configuration for exact path-preserving bubble resolution.
 #[derive(Clone, Debug)]
@@ -216,6 +220,11 @@ pub enum ResolutionMethod {
     /// of aligner is tied to the provenance-tree depth, not to median
     /// traversal length. See `docs/crush-hierarchical.md`.
     Hierarchical,
+    /// POVU-subtree chain blocking: walk the current POVU tree top-down and
+    /// replace the largest subtree-rooted blocks whose parent interior fits
+    /// under the chain block cap. The block replacement runs a local
+    /// smoothxg-style pass followed by bounded POASTA cleanup.
+    ChainPovu,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -250,6 +259,7 @@ impl ResolutionMethod {
             Self::Sweepga => "SweepGA/seqwish",
             Self::Wfmash => "wfmash/seqwish",
             Self::Hierarchical => "hierarchical",
+            Self::ChainPovu => "chain-povu smoothxg→POASTA",
         }
     }
 
@@ -263,6 +273,8 @@ impl ResolutionMethod {
             "sweepga" | "sw" => Some(Self::Sweepga),
             "wfmash" | "wf" => Some(Self::Wfmash),
             "hierarchical" | "hier" => Some(Self::Hierarchical),
+            "chain-povu" | "povu-chain" | "povu-tree-blocks" | "tree-blocks"
+            | "crush-chain-povu" => Some(Self::ChainPovu),
             _ => None,
         }
     }
@@ -286,6 +298,8 @@ pub const DEFAULT_MAX_TOTAL_SEQUENCE: usize = 1_000_000;
 pub const DEFAULT_MAX_TRAVERSALS: usize = 10_000;
 pub const DEFAULT_AUTO_SPOA_MAX_TRAVERSAL_LEN: usize = 1_000;
 pub const DEFAULT_AUTO_POASTA_MAX_TRAVERSAL_LEN: usize = 10_000;
+pub const DEFAULT_CHAIN_POVU_MAX_BLOCK_BP: usize = 10_000;
+const DEFAULT_CHAIN_POVU_POASTA_ITERATIONS: usize = 2;
 pub const DEFAULT_AUTO_ALLWAVE_MAX_TOTAL_SEQUENCE: usize = 200_000;
 pub const DEFAULT_AUTO_ALLWAVE_MAX_TRAVERSALS: usize = 128;
 pub const DEFAULT_POLISH_ITERATIONS: usize = usize::MAX;
@@ -616,6 +630,18 @@ fn resolve_graph_bubbles(
             gap_extend1,
             gap_open2,
             gap_extend2
+        );
+    }
+
+    if config.method == ResolutionMethod::ChainPovu {
+        return resolve_graph_bubbles_chain_povu(
+            graph,
+            original_gfa,
+            config,
+            emit_logs,
+            stats,
+            next_id,
+            initial_next_id,
         );
     }
 
@@ -1087,7 +1113,9 @@ fn resolve_graph_bubbles(
                 bp_to_node.insert(plan.candidate.signature.clone(), new_idx);
                 new_idx
             };
-            tree[parent_nidx].state = BubbleState::Resolved { at_round: round + 1 };
+            tree[parent_nidx].state = BubbleState::Resolved {
+                at_round: round + 1,
+            };
             just_resolved_nodes.push(parent_nidx);
 
             // Record the parent's reference bp region.
@@ -1194,6 +1222,277 @@ fn resolve_graph_bubbles(
             next_id
         );
         let _ = last_round_resolved_nodes; // future: per-round tree-walk diagnostics
+    }
+
+    let final_gfa = if changed {
+        render_graph(&graph)
+    } else {
+        original_gfa
+            .map(str::to_string)
+            .unwrap_or_else(|| render_graph(&graph))
+    };
+    Ok(ResolvedGfa {
+        gfa: final_gfa,
+        stats,
+    })
+}
+
+fn resolve_graph_bubbles_chain_povu(
+    mut graph: Graph,
+    original_gfa: Option<&str>,
+    config: &ResolutionConfig,
+    emit_logs: bool,
+    mut stats: ResolutionStats,
+    mut next_id: usize,
+    initial_next_id: usize,
+) -> io::Result<ResolvedGfa> {
+    let mut changed = false;
+    let mut resolved_signatures: FxHashSet<String> = FxHashSet::default();
+    let mut per_round_block_counts: Vec<usize> = Vec::new();
+    let mut per_round_block_sizes: Vec<Vec<usize>> = Vec::new();
+
+    for round in 0..config.max_iterations {
+        let round_start = Instant::now();
+        let before_quality = graph_quality(&graph);
+        let discovery_start = Instant::now();
+        let (all_discovered, sites_seen, timings) =
+            discover_all_candidates(&graph, config, emit_logs)?;
+        let selection = select_chain_povu_blocks(
+            &all_discovered,
+            DEFAULT_CHAIN_POVU_MAX_BLOCK_BP,
+            &resolved_signatures,
+        );
+        let candidates_seen = selection.selected.len();
+        let frontier = finalize_frontier(
+            &graph,
+            config,
+            selection.selected,
+            sites_seen,
+            candidates_seen,
+            emit_logs,
+            timings,
+            0,
+        )?;
+        let discovery_elapsed = discovery_start.elapsed();
+        if frontier.selected.is_empty() {
+            if emit_logs {
+                log::info!(
+                    "crush chain-povu round {}: no eligible subtree block(s) from {} POVU site(s) in {:.2?}; target_block_bp={}, tree_nodes={}, roots={}, skipped_seen={}, oversize_internal={}, oversize_leaves={}",
+                    round + 1,
+                    frontier.sites_seen,
+                    discovery_elapsed,
+                    DEFAULT_CHAIN_POVU_MAX_BLOCK_BP,
+                    selection.tree_nodes,
+                    selection.roots,
+                    selection.skipped_seen,
+                    selection.oversize_internal,
+                    selection.oversize_leaves
+                );
+            }
+            break;
+        }
+
+        stats.iterations = round + 1;
+        let selected_count = frontier.selected.len();
+        let selected_sizes = frontier
+            .selected
+            .iter()
+            .map(chain_povu_block_bp)
+            .collect::<Vec<_>>();
+        stats.candidates_seen += selected_count;
+
+        if emit_logs {
+            log::info!(
+                "crush chain-povu round {}: {} POVU site(s), target_block_bp={}, tree_nodes={}, roots={}, selected {} subtree block(s) ({} descendant site(s) absorbed, {} already-seen skipped, {} oversized internal node(s), {} oversized leaf/leaves) in {:.2?}; block-size {}",
+                round + 1,
+                frontier.sites_seen,
+                DEFAULT_CHAIN_POVU_MAX_BLOCK_BP,
+                selection.tree_nodes,
+                selection.roots,
+                selected_count,
+                selection.merged_descendant_sites,
+                selection.skipped_seen,
+                selection.oversize_internal,
+                selection.oversize_leaves,
+                discovery_elapsed,
+                format_bp_distribution("selected", &selected_sizes)
+            );
+            log::info!(
+                "crush chain-povu round {} traversal stats: {}",
+                round + 1,
+                format_candidate_length_summary("selected", &frontier.selected)
+            );
+        }
+
+        let build_start = Instant::now();
+        let build_started = AtomicUsize::new(0);
+        let build_progress = AtomicUsize::new(0);
+        reset_chain_povu_replacement_decisions();
+        let build_results = frontier
+            .selected
+            .into_par_iter()
+            .map(|candidate| {
+                if emit_logs && selected_count <= 32 {
+                    let started = build_started.fetch_add(1, Ordering::Relaxed) + 1;
+                    log::info!(
+                        "crush chain-povu round {}: building block {}/{} with smoothxg→POASTA; traversals={}, max-len={}, median-len={}, total-len={}, root-span={}, block-bp={}",
+                        round + 1,
+                        started,
+                        selected_count,
+                        candidate.traversal_stats.count,
+                        candidate.traversal_stats.max_len,
+                        candidate.traversal_stats.median_len,
+                        candidate.traversal_stats.total_len,
+                        candidate.root_span,
+                        chain_povu_block_bp(&candidate)
+                    );
+                }
+                let result = (|| {
+                    let replacement =
+                        build_replacement_with_method(&candidate, config, ResolutionMethod::ChainPovu)?;
+                    if replacement.segments.is_empty() {
+                        return Ok::<Option<ReplacementPlan>, io::Error>(None);
+                    }
+                    Ok::<Option<ReplacementPlan>, io::Error>(Some(ReplacementPlan {
+                        candidate,
+                        replacement,
+                    }))
+                })();
+                if emit_logs {
+                    let done = build_progress.fetch_add(1, Ordering::Relaxed) + 1;
+                    if selected_count <= 32 || done == selected_count || done % 25 == 0 {
+                        let status = match &result {
+                            Ok(Some(_)) => "accepted",
+                            Ok(None) => "empty",
+                            Err(_) => "failed",
+                        };
+                        log::info!(
+                            "crush chain-povu round {}: block build progress {}/{} ({})",
+                            round + 1,
+                            done,
+                            selected_count,
+                            status
+                        );
+                    }
+                }
+                result
+            })
+            .collect::<Vec<_>>();
+        let build_elapsed = build_start.elapsed();
+        let replacement_decisions = chain_povu_replacement_decisions();
+
+        let mut plans: Vec<ReplacementPlan> = Vec::new();
+        let mut failed_or_empty = 0usize;
+        for result in build_results {
+            match result {
+                Ok(Some(plan)) => plans.push(plan),
+                Ok(None) => {
+                    failed_or_empty += 1;
+                    stats.bailed += 1;
+                }
+                Err(err) => {
+                    failed_or_empty += 1;
+                    stats.bailed += 1;
+                    log::debug!(
+                        "resolution: chain-povu block replacement failed in round {}: {}",
+                        round + 1,
+                        err
+                    );
+                }
+            }
+        }
+
+        if plans.is_empty() {
+            if emit_logs {
+                log::info!(
+                    "crush chain-povu round {}: 0/{} block replacement(s) accepted in {:.2?} ({} failed or produced empty replacements)",
+                    round + 1,
+                    selected_count,
+                    build_elapsed,
+                    failed_or_empty
+                );
+            }
+            break;
+        }
+
+        let resolved_count = plans.len();
+        for plan in &plans {
+            resolved_signatures.insert(plan.candidate.signature.clone());
+        }
+
+        let rewrite_start = Instant::now();
+        let pre_apply_next_id = next_id;
+        let next_graph = apply_replacement_frontier(&graph, &plans, &mut next_id)?;
+        assert!(
+            next_id >= pre_apply_next_id,
+            "crush fresh-id invariant: next_id rewound from {pre_apply_next_id} to {next_id}"
+        );
+        let rewrite_elapsed = rewrite_start.elapsed();
+        let after_quality = graph_quality(&next_graph);
+        graph = next_graph;
+        changed = true;
+        stats.resolved += resolved_count;
+
+        let accepted_sizes = plans
+            .iter()
+            .map(|plan| chain_povu_block_bp(&plan.candidate))
+            .collect::<Vec<_>>();
+        per_round_block_counts.push(resolved_count);
+        per_round_block_sizes.push(accepted_sizes.clone());
+
+        if emit_logs {
+            log::info!(
+                "crush chain-povu round {}: accepted {}/{} block replacement(s) in {:.2?}; rewrite+validate {:.2?}; total {:.2?}; ids minted {}..{}; accepted-size {}; replacement decisions: smooth_kept={}, direct_fallback={}, smooth_failed_direct_fallback={}, direct_failed_keep_smooth={}; quality {} -> {}",
+                round + 1,
+                resolved_count,
+                selected_count,
+                build_elapsed,
+                rewrite_elapsed,
+                round_start.elapsed(),
+                pre_apply_next_id,
+                next_id,
+                format_bp_distribution("accepted", &accepted_sizes),
+                replacement_decisions.smooth_kept,
+                replacement_decisions.direct_fallback,
+                replacement_decisions.smooth_failed_direct_fallback,
+                replacement_decisions.direct_failed_keep_smooth,
+                before_quality.summary(),
+                after_quality.summary()
+            );
+        }
+    }
+
+    if emit_logs {
+        if per_round_block_counts.is_empty() {
+            log::info!(
+                "crush chain-povu per-iteration block counts: []; total resolved=0; next_id moved {} -> {}",
+                initial_next_id,
+                next_id
+            );
+        } else {
+            let count_summary = per_round_block_counts
+                .iter()
+                .enumerate()
+                .map(|(idx, n)| format!("r{}={}", idx + 1, n))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let size_summary = per_round_block_sizes
+                .iter()
+                .enumerate()
+                .map(|(idx, sizes)| {
+                    format!("r{} {}", idx + 1, format_bp_distribution("blocks", sizes))
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            log::info!(
+                "crush chain-povu per-iteration block counts: [{}]; size distributions: [{}]; total resolved={}; next_id moved {} -> {}",
+                count_summary,
+                size_summary,
+                stats.resolved,
+                initial_next_id,
+                next_id
+            );
+        }
     }
 
     let final_gfa = if changed {
@@ -1408,6 +1707,7 @@ fn candidate_selection_method(
     match config.method {
         ResolutionMethod::Auto => auto_method_by_median(candidate.traversal_stats, config),
         ResolutionMethod::Hierarchical => hierarchical_method_by_level(candidate.level),
+        ResolutionMethod::ChainPovu => ResolutionMethod::Poasta,
         method => method,
     }
 }
@@ -1469,7 +1769,10 @@ fn hierarchical_method_by_level(level: usize) -> ResolutionMethod {
 }
 
 fn candidate_selection_priority(candidate: &BubbleCandidate, config: &ResolutionConfig) -> u8 {
-    if config.method != ResolutionMethod::Auto && config.method != ResolutionMethod::Hierarchical {
+    if config.method != ResolutionMethod::Auto
+        && config.method != ResolutionMethod::Hierarchical
+        && config.method != ResolutionMethod::ChainPovu
+    {
         return 0;
     }
     match candidate_selection_method(candidate, config) {
@@ -1478,6 +1781,9 @@ fn candidate_selection_priority(candidate: &BubbleCandidate, config: &Resolution
         ResolutionMethod::Auto => unreachable!("auto candidate method should be resolved"),
         ResolutionMethod::Hierarchical => {
             unreachable!("hierarchical candidate method should be resolved")
+        }
+        ResolutionMethod::ChainPovu => {
+            unreachable!("chain-povu candidate method should be resolved")
         }
     }
 }
@@ -1818,14 +2124,17 @@ fn discover_all_candidates(
                     unique_steps.insert(path.steps[step_idx]);
                 }
             }
-            // Under `method=hierarchical`, the min-traversal-len floor gates
-            // only level-0 (root) candidates. Level ≥ 1 sub-bubbles are
-            // always admitted so POASTA can resolve every interior bubble
-            // regardless of size — this is the core "no fixed threshold for
-            // sub-bubbles" promise from docs/crush-hierarchical.md. For all
-            // other methods the filter applies at every level, as before.
-            let apply_min_len_filter = config.method != ResolutionMethod::Hierarchical
-                || site.level == 0;
+            // Tree-driven modes need complete POVU topology. Under
+            // `method=hierarchical`, the min-traversal-len floor gates only
+            // level-0 roots. Under `method=chain-povu`, all discovered sites
+            // are admitted so parent blocks can absorb every descendant under
+            // the block cap. For other methods the filter applies at every
+            // level, as before.
+            let apply_min_len_filter = match config.method {
+                ResolutionMethod::Hierarchical => site.level == 0,
+                ResolutionMethod::ChainPovu => false,
+                _ => true,
+            };
             if apply_min_len_filter && traversal_stats.max_len < config.min_traversal_len {
                 return None;
             }
@@ -1995,6 +2304,151 @@ impl BubbleCandidate {
     }
 }
 
+#[derive(Clone, Debug)]
+struct ChainPovuSelectionNode {
+    parent: Option<usize>,
+    children: Vec<usize>,
+    candidate_idx: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ChainPovuBlockSelection {
+    selected: Vec<BubbleCandidate>,
+    tree_nodes: usize,
+    roots: usize,
+    skipped_seen: usize,
+    oversize_internal: usize,
+    oversize_leaves: usize,
+    merged_descendant_sites: usize,
+}
+
+fn select_chain_povu_blocks(
+    discovered: &[DiscoveredCandidate],
+    max_block_bp: usize,
+    resolved_signatures: &FxHashSet<String>,
+) -> ChainPovuBlockSelection {
+    let mut nodes: Vec<ChainPovuSelectionNode> = Vec::with_capacity(discovered.len());
+    let mut id_to_node_idx: FxHashMap<&str, usize> = FxHashMap::default();
+    for (candidate_idx, d) in discovered.iter().enumerate() {
+        let node_idx = nodes.len();
+        id_to_node_idx.insert(d.povu_site_id.as_str(), node_idx);
+        nodes.push(ChainPovuSelectionNode {
+            parent: None,
+            children: Vec::new(),
+            candidate_idx,
+        });
+    }
+
+    for (idx, d) in discovered.iter().enumerate() {
+        if let Some(pid) = &d.povu_parent_id {
+            if let Some(&parent_idx) = id_to_node_idx.get(pid.as_str()) {
+                nodes[idx].parent = Some(parent_idx);
+                nodes[parent_idx].children.push(idx);
+            }
+        }
+    }
+
+    let roots = nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, node)| node.parent.is_none().then_some(idx))
+        .collect::<Vec<_>>();
+    let mut selection = ChainPovuBlockSelection {
+        tree_nodes: nodes.len(),
+        roots: roots.len(),
+        ..ChainPovuBlockSelection::default()
+    };
+    for root in roots {
+        visit_chain_povu_node(
+            root,
+            &nodes,
+            discovered,
+            max_block_bp,
+            resolved_signatures,
+            &mut selection,
+        );
+    }
+    selection
+}
+
+fn visit_chain_povu_node(
+    node_idx: usize,
+    nodes: &[ChainPovuSelectionNode],
+    discovered: &[DiscoveredCandidate],
+    max_block_bp: usize,
+    resolved_signatures: &FxHashSet<String>,
+    selection: &mut ChainPovuBlockSelection,
+) {
+    let node = &nodes[node_idx];
+    let candidate = &discovered[node.candidate_idx].candidate;
+    if resolved_signatures.contains(&candidate.signature) {
+        selection.skipped_seen += 1;
+        return;
+    }
+
+    let block_bp = chain_povu_block_bp(candidate);
+    if block_bp <= max_block_bp {
+        let mut selected = candidate.clone();
+        selected.level = discovered[node.candidate_idx].povu_level;
+        selection.selected.push(selected);
+        selection.merged_descendant_sites += chain_povu_descendant_count(node_idx, nodes);
+        return;
+    }
+
+    if node.children.is_empty() {
+        selection.oversize_leaves += 1;
+        return;
+    }
+    selection.oversize_internal += 1;
+    for &child in &node.children {
+        visit_chain_povu_node(
+            child,
+            nodes,
+            discovered,
+            max_block_bp,
+            resolved_signatures,
+            selection,
+        );
+    }
+}
+
+fn chain_povu_descendant_count(node_idx: usize, nodes: &[ChainPovuSelectionNode]) -> usize {
+    nodes[node_idx]
+        .children
+        .iter()
+        .map(|&child| 1 + chain_povu_descendant_count(child, nodes))
+        .sum()
+}
+
+fn chain_povu_block_bp(candidate: &BubbleCandidate) -> usize {
+    // The block is bounded by the selected parent flubble interior. Descendant
+    // interiors are nested in that same interval, so summing them would
+    // double-count exactly the chains this mode is meant to merge.
+    candidate.root_span.max(candidate.traversal_stats.max_len)
+}
+
+fn format_bp_distribution(label: &str, values: &[usize]) -> String {
+    if values.is_empty() {
+        return format!("{label} n=0");
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let sum = sorted.iter().sum::<usize>();
+    let p50 = sorted[sorted.len() / 2];
+    let p90 = sorted[percentile_index(sorted.len(), 90, 100)];
+    let min = sorted[0];
+    let max = *sorted.last().unwrap_or(&0);
+    format!(
+        "{label} n={}, min={}, p50={}, p90={}, max={}, total={}",
+        sorted.len(),
+        min,
+        p50,
+        p90,
+        max,
+        sum
+    )
+}
+
 /// Build the initial bubble tree by running POVU on the input graph once.
 /// Returns the tree (Vec<BubbleNode>) and the index of every root node.
 ///
@@ -2087,7 +2541,7 @@ fn discover_local_subbubble_keys(
     replacement: &Graph,
     parent_pre_apply_path_positions: &[Vec<usize>],
     global_path_names: &[String],
-    config: &ResolutionConfig,
+    _config: &ResolutionConfig,
 ) -> io::Result<Vec<String>> {
     if replacement.paths.is_empty() || replacement.paths[0].steps.len() < 2 {
         return Ok(Vec::new());
@@ -2343,11 +2797,7 @@ fn materialize_candidate_sequences(
 /// `range.extended_sequence`; `left_flank_bp` / `right_flank_bp` track the
 /// per-side flank length so the aligner output graph can be clipped back to
 /// just the interior before the path-step substitution.
-fn materialize_flanked_sequences(
-    graph: &Graph,
-    candidate: &mut BubbleCandidate,
-    flank_bp: usize,
-) {
+fn materialize_flanked_sequences(graph: &Graph, candidate: &mut BubbleCandidate, flank_bp: usize) {
     for range in &mut candidate.ranges {
         let path = &graph.paths[range.path_idx];
         let left_flank = collect_flank_left(graph, path, range.begin_step, flank_bp);
@@ -2533,10 +2983,8 @@ fn apply_replacement_frontier(
         .map(|plan| plan.replacement.clone())
         .collect::<Vec<_>>();
     if log::log_enabled!(log::Level::Debug) {
-        let total_replacement_segments: usize = replacement_graphs
-            .iter()
-            .map(|g| g.segments.len())
-            .sum();
+        let total_replacement_segments: usize =
+            replacement_graphs.iter().map(|g| g.segments.len()).sum();
         let total_replacement_bp: usize = replacement_graphs
             .iter()
             .map(|g| g.segments.iter().map(|s| s.seq.len()).sum::<usize>())
@@ -2635,6 +3083,9 @@ fn build_replacement_with_method_inner(
         ResolutionMethod::Hierarchical => {
             unreachable!("hierarchical is resolved before replacement dispatch")
         }
+        ResolutionMethod::ChainPovu => {
+            build_chain_povu_smooth_poasta_replacement(candidate, config)
+        }
         ResolutionMethod::Poa => build_poa_replacement(candidate, config),
         ResolutionMethod::Poasta => build_poasta_replacement(candidate, config),
         ResolutionMethod::StarBiwfa => build_biwfa_inmemory_replacement(candidate, config),
@@ -2651,6 +3102,7 @@ fn candidate_replacement_method(
     match config.method {
         ResolutionMethod::Auto => auto_replacement_method(candidate, config),
         ResolutionMethod::Hierarchical => hierarchical_method_by_level(candidate.level),
+        ResolutionMethod::ChainPovu => ResolutionMethod::ChainPovu,
         method => method,
     }
 }
@@ -2692,7 +3144,9 @@ fn alternate_replacement_method(method: ResolutionMethod) -> Option<ResolutionMe
         ResolutionMethod::Allwave => Some(ResolutionMethod::Poasta),
         ResolutionMethod::Poa => Some(ResolutionMethod::Poasta),
         ResolutionMethod::StarBiwfa => Some(ResolutionMethod::Poasta),
-        ResolutionMethod::Auto | ResolutionMethod::Hierarchical => None,
+        ResolutionMethod::Auto | ResolutionMethod::Hierarchical | ResolutionMethod::ChainPovu => {
+            None
+        }
     }
 }
 
@@ -3069,11 +3523,7 @@ fn seqwish_replacement_config(
     // the scaffold-mass floor so the requested semantics survive if the
     // filter is ever re-enabled downstream.
     let (num_mappings, scaffold_filter, scaffold_mass) = if config.sweepga_no_filter {
-        (
-            "many:many".to_string(),
-            "many:many".to_string(),
-            0u64,
-        )
+        ("many:many".to_string(), "many:many".to_string(), 0u64)
     } else {
         (
             config.replacement_num_mappings.clone(),
@@ -3287,6 +3737,142 @@ fn finalize_pairwise_induced_replacement(
     }
     validate_replacement_paths(&replacement, candidate, method)?;
     Ok(replacement)
+}
+
+fn build_chain_povu_smooth_poasta_replacement(
+    candidate: &BubbleCandidate,
+    config: &ResolutionConfig,
+) -> io::Result<Graph> {
+    let (headers, seqs) = candidate_named_sequences(candidate);
+    if seqs.iter().any(|(_, seq)| seq.is_empty()) {
+        log::debug!(
+            "crush chain-povu: empty traversal present; using direct POASTA for this block"
+        );
+        return build_poasta_replacement(candidate, config);
+    }
+
+    let smoothed_attempt = (|| {
+        let seed_gfa = linear_candidate_sequences_gfa(&seqs)?;
+        let smooth_config = crate::smooth::SmoothConfig {
+            n_haps: seqs.len().max(1),
+            target_poa_lengths: vec![DEFAULT_CHAIN_POVU_MAX_BLOCK_BP],
+            num_threads: 1,
+            scoring_params: config.scoring_params,
+            poa_padding_fraction: 0.0,
+            pre_sorted: false,
+            ..crate::smooth::SmoothConfig::new(seqs.len().max(1))
+        };
+        let smoothed = crate::smooth::smooth_gfa(&seed_gfa, &smooth_config)?;
+        let smoothed = unchop_gfa(&smoothed)?;
+        let smoothed = strip_full_range_path_names(&smoothed)?;
+        let mut poasta_config = config.clone();
+        poasta_config.method = ResolutionMethod::Poasta;
+        poasta_config.max_iterations = DEFAULT_CHAIN_POVU_POASTA_ITERATIONS;
+        poasta_config.polish_iterations = 0;
+        poasta_config.retry_min_compression_ratio = 0.0;
+        poasta_config.max_traversal_len = DEFAULT_CHAIN_POVU_MAX_BLOCK_BP;
+        poasta_config.max_median_traversal_len = DEFAULT_CHAIN_POVU_MAX_BLOCK_BP;
+
+        let smoothed_graph = parse_gfa(&smoothed)?;
+        let poasta_polished =
+            resolve_graph_bubbles(smoothed_graph, Some(&smoothed), &poasta_config, false)?.gfa;
+        let poasta_polished = unchop_gfa(&poasta_polished)?;
+        let mut replacement = parse_gfa(&poasta_polished)?;
+        order_replacement_paths(&mut replacement, &headers)?;
+        validate_replacement_paths(&replacement, candidate, "chain-povu smoothxg→POASTA")?;
+        Ok::<Graph, io::Error>(replacement)
+    })();
+
+    match smoothed_attempt {
+        Ok(smoothed_replacement) => match build_poasta_replacement(candidate, config) {
+            Ok(direct_replacement)
+                if chain_povu_direct_fallback_is_better(
+                    &smoothed_replacement,
+                    &direct_replacement,
+                ) =>
+            {
+                CHAIN_POVU_DIRECT_FALLBACK.fetch_add(1, Ordering::Relaxed);
+                log::debug!(
+                    "crush chain-povu: direct POASTA fallback beat smoothxg→POASTA (smooth: {} segment(s), {} bp; direct: {} segment(s), {} bp)",
+                    smoothed_replacement.segments.len(),
+                    replacement_segment_bp(&smoothed_replacement),
+                    direct_replacement.segments.len(),
+                    replacement_segment_bp(&direct_replacement)
+                );
+                Ok(direct_replacement)
+            }
+            Ok(_) => {
+                CHAIN_POVU_SMOOTH_KEPT.fetch_add(1, Ordering::Relaxed);
+                Ok(smoothed_replacement)
+            }
+            Err(err) => {
+                CHAIN_POVU_DIRECT_FAILED_KEEP_SMOOTH.fetch_add(1, Ordering::Relaxed);
+                log::debug!(
+                    "crush chain-povu: direct POASTA fallback failed after smoothxg→POASTA succeeded ({}); keeping smoothed replacement",
+                    err
+                );
+                Ok(smoothed_replacement)
+            }
+        },
+        Err(err) => {
+            CHAIN_POVU_SMOOTH_FAILED_DIRECT_FALLBACK.fetch_add(1, Ordering::Relaxed);
+            log::debug!(
+                "crush chain-povu: smoothxg→POASTA block path failed ({}); falling back to direct POASTA",
+                err
+            );
+            build_poasta_replacement(candidate, config)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ChainPovuReplacementDecisions {
+    smooth_kept: usize,
+    direct_fallback: usize,
+    smooth_failed_direct_fallback: usize,
+    direct_failed_keep_smooth: usize,
+}
+
+fn reset_chain_povu_replacement_decisions() {
+    CHAIN_POVU_SMOOTH_KEPT.store(0, Ordering::Relaxed);
+    CHAIN_POVU_DIRECT_FALLBACK.store(0, Ordering::Relaxed);
+    CHAIN_POVU_SMOOTH_FAILED_DIRECT_FALLBACK.store(0, Ordering::Relaxed);
+    CHAIN_POVU_DIRECT_FAILED_KEEP_SMOOTH.store(0, Ordering::Relaxed);
+}
+
+fn chain_povu_replacement_decisions() -> ChainPovuReplacementDecisions {
+    ChainPovuReplacementDecisions {
+        smooth_kept: CHAIN_POVU_SMOOTH_KEPT.load(Ordering::Relaxed),
+        direct_fallback: CHAIN_POVU_DIRECT_FALLBACK.load(Ordering::Relaxed),
+        smooth_failed_direct_fallback: CHAIN_POVU_SMOOTH_FAILED_DIRECT_FALLBACK
+            .load(Ordering::Relaxed),
+        direct_failed_keep_smooth: CHAIN_POVU_DIRECT_FAILED_KEEP_SMOOTH.load(Ordering::Relaxed),
+    }
+}
+
+fn chain_povu_direct_fallback_is_better(smoothed: &Graph, direct: &Graph) -> bool {
+    let smooth_bp = replacement_segment_bp(smoothed);
+    let direct_bp = replacement_segment_bp(direct);
+    direct_bp < smooth_bp
+        || (direct_bp == smooth_bp && direct.segments.len() < smoothed.segments.len())
+}
+
+fn linear_candidate_sequences_gfa(seqs: &[(String, Vec<u8>)]) -> io::Result<String> {
+    let mut out = String::new();
+    out.push_str("H\tVN:Z:1.0\n");
+    for (idx, (_, seq)) in seqs.iter().enumerate() {
+        let seq = std::str::from_utf8(seq).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("chain-povu block sequence is not UTF-8 DNA: {err}"),
+            )
+        })?;
+        out.push_str(&format!("S\t{}\t{}\n", idx + 1, seq));
+    }
+    for (idx, (name, _)) in seqs.iter().enumerate() {
+        out.push_str(&format!("P\t{}\t{}+\t*\n", name, idx + 1));
+    }
+    Ok(out)
 }
 
 fn build_allwave_seqwish_replacement(
@@ -3985,11 +4571,11 @@ fn clip_replacement_to_interior(
         let pieces = replacement_path_pieces(&replacement, path)?;
         let raw_len: usize = pieces.iter().map(|p| p.end - p.start).sum();
         let interior_start = range.left_flank_bp;
-        let interior_end = raw_len
-            .checked_sub(range.right_flank_bp)
-            .ok_or_else(|| io::Error::other(
+        let interior_end = raw_len.checked_sub(range.right_flank_bp).ok_or_else(|| {
+            io::Error::other(
                 "clip_replacement_to_interior: right flank exceeds replacement path length",
-            ))?;
+            )
+        })?;
         if interior_start > interior_end {
             return Err(io::Error::other(
                 "clip_replacement_to_interior: interior bounds inverted",
@@ -4047,7 +4633,9 @@ fn replacement_path_pieces(graph: &Graph, path: &Path) -> io::Result<Vec<Replace
     let mut pieces = Vec::with_capacity(path.steps.len());
     for step in &path.steps {
         let segment = graph.segments.get(step.node).ok_or_else(|| {
-            io::Error::other("clip_replacement_to_interior: replacement path references an out-of-range segment")
+            io::Error::other(
+                "clip_replacement_to_interior: replacement path references an out-of-range segment",
+            )
         })?;
         let len = segment.seq.len();
         let start = offset;
@@ -4092,7 +4680,10 @@ fn slice_replacement_segment(
         segment.seq.clone()
     };
     let slice = oriented[local_start..local_end].to_vec();
-    let id = format!("clip_{}_{}_{}_{}", source_node, rev as u8, local_start, local_end);
+    let id = format!(
+        "clip_{}_{}_{}_{}",
+        source_node, rev as u8, local_start, local_end
+    );
     let idx = output_segments.len();
     output_segments.push(Segment { id, seq: slice });
     node_by_slice.insert(key, idx);
@@ -4935,6 +5526,19 @@ P\tp1\t1+,3+,4+\t*
         }
     }
 
+    fn replacement_graph(segs: &[(&str, &[u8])]) -> Graph {
+        Graph {
+            segments: segs
+                .iter()
+                .map(|(id, seq)| Segment {
+                    id: id.to_string(),
+                    seq: seq.to_vec(),
+                })
+                .collect(),
+            paths: Vec::new(),
+        }
+    }
+
     fn traversal_stats_with(median_len: usize, max_len: usize, count: usize) -> TraversalStats {
         TraversalStats {
             count,
@@ -5001,8 +5605,11 @@ P\tp1\t1+,3+,4+\t*
     #[test]
     fn auto_routing_boundaries_are_exclusive_upper_bounds() {
         let config = ResolutionConfig::default();
-        let at_spoa_boundary =
-            routing_candidate_with_stats(traversal_stats_with(config.auto_spoa_max_traversal_len, 2_000, 10));
+        let at_spoa_boundary = routing_candidate_with_stats(traversal_stats_with(
+            config.auto_spoa_max_traversal_len,
+            2_000,
+            10,
+        ));
         assert_eq!(
             auto_replacement_method(&at_spoa_boundary, &config),
             ResolutionMethod::Poasta,
@@ -5162,6 +5769,120 @@ P\tp1\t1+,3+,4+\t*
             ResolutionMethod::parse_name("hier"),
             Some(ResolutionMethod::Hierarchical)
         );
+    }
+
+    #[test]
+    fn chain_povu_parse_name_accepts_aliases() {
+        assert_eq!(
+            ResolutionMethod::parse_name("chain-povu"),
+            Some(ResolutionMethod::ChainPovu)
+        );
+        assert_eq!(
+            ResolutionMethod::parse_name("povu-tree-blocks"),
+            Some(ResolutionMethod::ChainPovu)
+        );
+    }
+
+    #[test]
+    fn chain_povu_selects_parent_subtree_under_cap() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tT
+S\t5\tAA
+S\t6\tA
+S\t7\tCCC
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+L\t2\t+\t5\t+\t0M
+L\t5\t+\t4\t+\t0M
+L\t4\t+\t6\t+\t0M
+L\t1\t+\t7\t+\t0M
+L\t7\t+\t6\t+\t0M
+P\tref\t1+,2+,3+,4+,6+\t*
+P\tinner_alt\t1+,2+,5+,4+,6+\t*
+P\touter_alt\t1+,7+,6+\t*
+";
+        let graph = parse_gfa(gfa).unwrap();
+        let config = ResolutionConfig {
+            method: ResolutionMethod::ChainPovu,
+            ..ResolutionConfig::default()
+        };
+        let (discovered, _, _) = discover_all_candidates(&graph, &config, false).unwrap();
+        let selection = select_chain_povu_blocks(
+            &discovered,
+            DEFAULT_CHAIN_POVU_MAX_BLOCK_BP,
+            &FxHashSet::default(),
+        );
+        assert_eq!(selection.selected.len(), 1, "{selection:?}");
+        assert!(
+            selection.merged_descendant_sites > 0,
+            "chain-povu should absorb nested descendants into the parent block"
+        );
+    }
+
+    #[test]
+    fn chain_povu_resolves_nested_parent_as_one_block() {
+        let gfa = "\
+H\tVN:Z:1.0
+S\t1\tA
+S\t2\tC
+S\t3\tG
+S\t4\tT
+S\t5\tAA
+S\t6\tA
+S\t7\tCCC
+L\t1\t+\t2\t+\t0M
+L\t2\t+\t3\t+\t0M
+L\t3\t+\t4\t+\t0M
+L\t2\t+\t5\t+\t0M
+L\t5\t+\t4\t+\t0M
+L\t4\t+\t6\t+\t0M
+L\t1\t+\t7\t+\t0M
+L\t7\t+\t6\t+\t0M
+P\tref\t1+,2+,3+,4+,6+\t*
+P\tinner_alt\t1+,2+,5+,4+,6+\t*
+P\touter_alt\t1+,7+,6+\t*
+";
+        let before = seq_map(gfa);
+        let resolved = resolve_gfa_bubbles(
+            gfa,
+            &ResolutionConfig {
+                max_iterations: 1,
+                method: ResolutionMethod::ChainPovu,
+                retry_min_compression_ratio: 0.0,
+                ..ResolutionConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(before, seq_map(&resolved.gfa));
+        assert_eq!(resolved.stats.resolved, 1, "{:?}", resolved.stats);
+        assert_eq!(resolved.stats.bailed, 0, "{:?}", resolved.stats);
+    }
+
+    #[test]
+    fn chain_povu_rejects_inflated_smoothed_replacement() {
+        let smoothed = replacement_graph(&[("1", b"AC"), ("2", b"GT")]);
+        let same_bp_fewer_segments = replacement_graph(&[("1", b"ACGT")]);
+        assert!(chain_povu_direct_fallback_is_better(
+            &smoothed,
+            &same_bp_fewer_segments
+        ));
+
+        let lower_bp_more_segments = replacement_graph(&[("1", b"A"), ("2", b"C")]);
+        assert!(chain_povu_direct_fallback_is_better(
+            &smoothed,
+            &lower_bp_more_segments
+        ));
+
+        let bigger_direct = replacement_graph(&[("1", b"ACGTAC")]);
+        assert!(!chain_povu_direct_fallback_is_better(
+            &smoothed,
+            &bigger_direct
+        ));
     }
 
     /// Auto-mode priority places direct-tier picks (sPOA, POASTA) ahead of
@@ -5979,12 +6700,13 @@ P\tp\t1+,2+\t*
         // Routing modes are resolved upstream; there is no concrete aligner
         // here to pair with, so the retry path must opt out cleanly rather
         // than recurse on Auto/Hierarchical.
+        assert_eq!(alternate_replacement_method(ResolutionMethod::Auto), None);
         assert_eq!(
-            alternate_replacement_method(ResolutionMethod::Auto),
+            alternate_replacement_method(ResolutionMethod::Hierarchical),
             None
         );
         assert_eq!(
-            alternate_replacement_method(ResolutionMethod::Hierarchical),
+            alternate_replacement_method(ResolutionMethod::ChainPovu),
             None
         );
 

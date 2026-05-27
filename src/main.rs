@@ -2760,7 +2760,7 @@ fn parse_crush_stage(
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, or hierarchical)",
+                            "Invalid --gfa-engine '{}': crush method '{}' is unsupported (expected auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, or chain-povu)",
                             raw, param.value
                         ),
                     ));
@@ -4438,7 +4438,7 @@ GFA engine shorthand:
   `-o gfa:fastga:pggb`, or `-o gfa:sweepga:seqwish`. Add `:crush` to run
   exact path-preserving blunt-graph resolution, e.g. `-o gfa:syng:crush`.
   Crush methods include allwave, poa, poasta, star-biwfa, sweepga, wfmash,
-  hierarchical; e.g.
+  hierarchical, chain-povu; e.g.
   `-o gfa:syng:crush,method=allwave,k-nearest=5,k-farthest=2`.
 ")]
     Query {
@@ -4968,7 +4968,7 @@ GFA engine shorthand:
         #[clap(long, value_parser = parse_usize_size, default_value = "10k")]
         polish_max_traversals: usize,
 
-        /// Resolver method: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, or hierarchical
+        /// Resolver method: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, or chain-povu
         #[clap(long, value_parser, default_value = "auto")]
         method: String,
 
@@ -7975,7 +7975,7 @@ fn run() -> io::Result<()> {
             let Some(method) = impg::resolution::ResolutionMethod::parse_name(&method) else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "--method must be one of: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical",
+                    "--method must be one of: auto, allwave, poa, poasta, star-biwfa, sweepga, wfmash, hierarchical, chain-povu",
                 ));
             };
             let Some(polish_method) =
@@ -12596,6 +12596,7 @@ mod tests {
             "-o vcf:syng",
             "-o gfa:wfmash:seqwish",
             "Crush methods include allwave, poa, poasta, star-biwfa, sweepga, wfmash,",
+            "chain-povu",
             "`impg syng2gfa` to dump the whole syng syncmer graph",
         ] {
             assert!(
@@ -13103,6 +13104,35 @@ mod tests {
                 // config and overrides this at the call site so the wfmash backend
                 // is invariant under any future default change.
                 assert_eq!(crush.sweepga_aligner, "fastga");
+            }
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
+    fn test_gfa_output_format_method_chain_povu_parses() {
+        let args = Args::try_parse_from([
+            "impg",
+            "query",
+            "-d",
+            "0",
+            "-o",
+            "gfa:syng:crush,method=chain-povu,max-rounds=3",
+        ])
+        .unwrap();
+        match args {
+            Args::Query {
+                output_format,
+                mut engine_cli,
+                ..
+            } => {
+                let output_format =
+                    apply_gfa_output_engine_shorthand(output_format, &mut engine_cli).unwrap();
+                assert_eq!(output_format, "gfa");
+                let parsed = engine_cli.parse_engine().unwrap();
+                let crush = parsed.crush_config.unwrap();
+                assert_eq!(crush.method, impg::resolution::ResolutionMethod::ChainPovu);
+                assert_eq!(crush.max_iterations, 3);
             }
             _ => panic!("expected query command"),
         }
