@@ -342,5 +342,7 @@ fn test_identical_sequences_get_distinct_start_counts() {
     eprintln!("query_region(seqB) returned {} intervals", intervals.len());
     assert!(!intervals.is_empty(), "Should find at least self-hit");
 
+    drop(loaded);
+    drop(index);
     std::fs::remove_dir_all(&dir).ok();
 }

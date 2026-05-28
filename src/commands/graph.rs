@@ -52,6 +52,9 @@ pub struct GraphBuildConfig {
     pub min_repeat_dist: u64,
     /// Minimum match length filter for alignments
     pub min_match_len: u64,
+    /// Allow local replacement induction to lower `min_match_len` to observed
+    /// traversal/CIGAR evidence before calling seqwish.
+    pub adaptive_min_match_len: bool,
     /// Sparse factor for input matches
     pub sparse_factor: f32,
     /// Batch size for transitive closure computation
@@ -108,6 +111,7 @@ impl Default for GraphBuildConfig {
             repeat_max: 0,
             min_repeat_dist: 0,
             min_match_len: 23,
+            adaptive_min_match_len: false,
             sparse_factor: 0.0,
             transclose_batch: 10_000_000,
             disk_backed: false,

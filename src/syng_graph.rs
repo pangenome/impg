@@ -993,28 +993,31 @@ pub fn build_gfa_from_paf_and_sequences(
     // as an upper bound — long inputs still use the user's setting.
     let min_seq_len = seqs.iter().map(|(_, s)| s.len() as u64).min().unwrap_or(0);
     let mut effective_config = config.clone();
-    if min_seq_len > 0 && min_seq_len < effective_config.min_match_len {
-        log::info!(
-            "crush short-filter rescue: clamping seqwish min_match_len {} → {} (shortest input traversal is {} bp; configured default would induce zero matches)",
-            effective_config.min_match_len,
-            min_seq_len,
-            min_seq_len,
-        );
-        effective_config.min_match_len = min_seq_len;
+    if effective_config.adaptive_min_match_len {
+        if min_seq_len > 0 && min_seq_len < effective_config.min_match_len {
+            log::info!(
+                "crush short-filter rescue: clamping seqwish min_match_len {} → {} (shortest input traversal is {} bp; configured default would induce zero matches)",
+                effective_config.min_match_len,
+                min_seq_len,
+                min_seq_len,
+            );
+            effective_config.min_match_len = min_seq_len;
+        }
+        if paf_match_stats.max_exact_match_run > 0
+            && paf_match_stats.max_exact_match_run < effective_config.min_match_len
+        {
+            log::info!(
+                "crush seqwish min-match rescue: clamping seqwish min_match_len {} -> {} (filtered PAF has {} record(s), {} with cg:Z, longest exact run seqwish can index is {} bp)",
+                effective_config.min_match_len,
+                paf_match_stats.max_exact_match_run,
+                paf_match_stats.records,
+                paf_match_stats.records_with_cigar,
+                paf_match_stats.max_exact_match_run,
+            );
+            effective_config.min_match_len = paf_match_stats.max_exact_match_run;
+        }
     }
-    if paf_match_stats.max_exact_match_run > 0
-        && paf_match_stats.max_exact_match_run < effective_config.min_match_len
-    {
-        log::info!(
-            "crush seqwish min-match rescue: clamping seqwish min_match_len {} -> {} (filtered PAF has {} record(s), {} with cg:Z, longest exact run seqwish can index is {} bp)",
-            effective_config.min_match_len,
-            paf_match_stats.max_exact_match_run,
-            paf_match_stats.records,
-            paf_match_stats.records_with_cigar,
-            paf_match_stats.max_exact_match_run,
-        );
-        effective_config.min_match_len = paf_match_stats.max_exact_match_run;
-    } else if paf_match_stats.records > 0 && paf_match_stats.max_exact_match_run == 0 {
+    if paf_match_stats.records > 0 && paf_match_stats.max_exact_match_run == 0 {
         log::warn!(
             "crush seqwish min-match diagnostic: filtered PAF has {} record(s) but no indexable exact match run; names_missing={}, length_mismatches={}",
             paf_match_stats.records,
@@ -1070,6 +1073,7 @@ pub fn build_gfa_from_paf_and_sequences(
                 "paf_name_mismatches\t{}\n",
                 "paf_length_mismatches\t{}\n",
                 "max_exact_match_run\t{}\n",
+                "adaptive_min_match_len\t{}\n",
                 "effective_min_match_len\t{}\n",
                 "seqwish_segments\t{}\n",
                 "seqwish_segment_bp\t{}\n",
@@ -1085,6 +1089,7 @@ pub fn build_gfa_from_paf_and_sequences(
             paf_match_stats.name_mismatches,
             paf_match_stats.length_mismatches,
             paf_match_stats.max_exact_match_run,
+            effective_config.adaptive_min_match_len,
             effective_config.min_match_len,
             segments,
             segment_bp,

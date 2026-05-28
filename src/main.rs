@@ -2350,6 +2350,36 @@ fn parse_usize_size_engine_param(raw: &str, key: &str, value: &str) -> io::Resul
     })
 }
 
+fn parse_replacement_min_match_len_policy(
+    value: &str,
+) -> Result<impg::resolution::ReplacementMinMatchLenPolicy, String> {
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("adaptive") {
+        return Ok(impg::resolution::ReplacementMinMatchLenPolicy::Adaptive);
+    }
+    if matches!(
+        trimmed.to_ascii_lowercase().as_str(),
+        "off" | "none" | "disabled" | "disable"
+    ) {
+        return Ok(impg::resolution::ReplacementMinMatchLenPolicy::Fixed(1));
+    }
+    parse_usize_size(trimmed)
+        .map(|value| impg::resolution::ReplacementMinMatchLenPolicy::Fixed(value as u64))
+}
+
+fn parse_replacement_min_match_len_policy_engine_param(
+    raw: &str,
+    key: &str,
+    value: &str,
+) -> io::Result<impg::resolution::ReplacementMinMatchLenPolicy> {
+    parse_replacement_min_match_len_policy(value).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Invalid --gfa-engine '{}': {}='{}': {}", raw, key, value, e),
+        )
+    })
+}
+
 fn parse_round_count_engine_param(raw: &str, key: &str, value: &str) -> io::Result<usize> {
     parse_round_count(value).map_err(|e| {
         io::Error::new(
@@ -2679,6 +2709,17 @@ fn parse_crush_stage(
             | "replacement-min-match-length" => {
                 config.replacement_seqwish_min_match_len =
                     parse_usize_size_engine_param(raw, &param.key, &param.value)? as u64;
+            }
+            "min-match-length"
+            | "min-match-len"
+            | "local-min-match-length"
+            | "local-min-match-len" => {
+                config.replacement_min_match_len_policy =
+                    parse_replacement_min_match_len_policy_engine_param(
+                        raw,
+                        &param.key,
+                        &param.value,
+                    )?;
             }
             "replacement-min-map-length"
             | "replacement-min-map-len"
@@ -5065,7 +5106,7 @@ GFA engine shorthand:
         #[clap(long, value_parser = parse_usize_size, default_value = "15")]
         mash_k: usize,
 
-        /// Minimum exact-match length used by seqwish when inducing crush replacement graphs
+        /// Legacy adaptive base for local replacement seqwish min-match; exact-run filtering defaults off unless --min-match-length opts in
         #[clap(
             long = "seqwish-k",
             alias = "seqwish-min-match-len",
@@ -5075,7 +5116,16 @@ GFA engine shorthand:
         )]
         replacement_seqwish_min_match_len: usize,
 
-        /// Minimum pairwise mapping length kept before replacement seqwish induction; 0 follows --seqwish-k
+        /// Local replacement exact-run floor: off, adaptive, 0/1, or a fixed bp length
+        #[clap(
+            long = "min-match-length",
+            alias = "min-match-len",
+            alias = "local-min-match-length",
+            default_value = "off"
+        )]
+        replacement_min_match_length: String,
+
+        /// Minimum pairwise mapping length kept before replacement seqwish induction; 0 follows the effective min-match length
         #[clap(
             long = "replacement-min-map-length",
             alias = "replacement-min-map-len",
@@ -8020,6 +8070,7 @@ fn run() -> io::Result<()> {
             random_fraction,
             mash_k,
             replacement_seqwish_min_match_len,
+            replacement_min_match_length,
             replacement_min_map_length,
             replacement_min_identity,
             replacement_num_mappings,
@@ -8100,6 +8151,17 @@ fn run() -> io::Result<()> {
                     "--seqwish-k/--seqwish-min-match-len must be > 0",
                 ));
             }
+            let replacement_min_match_len_policy = parse_replacement_min_match_len_policy(
+                &replacement_min_match_length,
+            )
+            .map_err(|err| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "--min-match-length must be off, adaptive, 0/1, or a fixed bp length: {err}"
+                    ),
+                )
+            })?;
             if !(0.0..=1.0).contains(&replacement_min_identity) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -8158,6 +8220,7 @@ fn run() -> io::Result<()> {
                 pair_random_fraction: random_fraction,
                 pair_mash_k: mash_k,
                 replacement_seqwish_min_match_len: replacement_seqwish_min_match_len as u64,
+                replacement_min_match_len_policy,
                 replacement_min_map_length: replacement_min_map_length as u64,
                 replacement_min_identity,
                 replacement_num_mappings,
@@ -9303,6 +9366,7 @@ fn build_graph_config(
         repeat_max: engine_cli.seqwish.repeat_max,
         min_repeat_dist: engine_cli.seqwish.min_repeat_dist,
         min_match_len: engine_cli.seqwish.min_match_len,
+        adaptive_min_match_len: false,
         sparse_factor: engine_cli.seqwish.sparse_factor,
         transclose_batch: engine_cli.seqwish.transclose_batch,
         disk_backed: engine_cli.seqwish.disk_backed,
@@ -12962,7 +13026,7 @@ mod tests {
             "-d",
             "0",
             "-o",
-            "gfa:syng:crush,method=allwave,k-nearest=5,k-farthest=2,pair-trees=3,random-fraction=0.05,mash-k=17,seqwish-k=79,min-map-length=500,min-identity=0.97,max-pair-alignments=20k,max-paf-bytes=128m,max-rounds=until-done,polish-rounds=until-done,polish-method=smooth,poa-scoring=2/3/5/4/25/1",
+            "gfa:syng:crush,method=allwave,k-nearest=5,k-farthest=2,pair-trees=3,random-fraction=0.05,mash-k=17,seqwish-k=79,min-match-length=63,min-map-length=500,min-identity=0.97,max-pair-alignments=20k,max-paf-bytes=128m,max-rounds=until-done,polish-rounds=until-done,polish-method=smooth,poa-scoring=2/3/5/4/25/1",
         ])
         .unwrap();
         match args {
@@ -12983,6 +13047,10 @@ mod tests {
                 assert!((crush.pair_random_fraction - 0.05).abs() < f64::EPSILON);
                 assert_eq!(crush.pair_mash_k, 17);
                 assert_eq!(crush.replacement_seqwish_min_match_len, 79);
+                assert_eq!(
+                    crush.replacement_min_match_len_policy,
+                    impg::resolution::ReplacementMinMatchLenPolicy::Fixed(63)
+                );
                 assert_eq!(crush.replacement_min_map_length, 500);
                 assert!((crush.replacement_min_identity - 0.97).abs() < f64::EPSILON);
                 assert_eq!(crush.max_pair_alignments, 20_000);

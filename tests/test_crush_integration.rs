@@ -22,7 +22,10 @@
 //!   require the full GFA skip automatically if the file is not present.
 
 use impg::graph_report::{describe_gfa, GraphReportOptions};
-use impg::resolution::{path_sequences, resolve_gfa_bubbles, ResolutionConfig, ResolutionMethod};
+use impg::resolution::{
+    path_sequences, resolve_gfa_bubbles, ReplacementMinMatchLenPolicy, ResolutionConfig,
+    ResolutionMethod,
+};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
@@ -431,7 +434,8 @@ fn c4_top_flubble_seqwish_indexes_observed_exact_runs() {
 
     let config = impg::commands::graph::GraphBuildConfig {
         num_threads: 1,
-        min_match_len: 311,
+        min_match_len: 1,
+        adaptive_min_match_len: false,
         no_filter: true,
         show_progress: false,
         ..impg::commands::graph::GraphBuildConfig::default()
@@ -444,8 +448,7 @@ fn c4_top_flubble_seqwish_indexes_observed_exact_runs() {
     assert!(
         shared_segments > 0,
         "C4 top-flubble block has {} real PAF records but seqwish emitted no shared segment; \
-         before the fix min_match_len clamped only to the shortest traversal (299 bp), \
-         above every exact run in this PAF, and produced five isolated full-length paths\n{}",
+         local wrapper min_match_len filtering should be off for this fixture\n{}",
         paf.lines().count(),
         gfa,
     );
@@ -497,6 +500,7 @@ fn c4_fragment_seqwish_regressions_induce_shared_graphs() {
         let config = impg::commands::graph::GraphBuildConfig {
             num_threads: 1,
             min_match_len: 311,
+            adaptive_min_match_len: true,
             min_map_length: 311,
             no_filter: false,
             num_mappings: "many:many".to_string(),
@@ -590,6 +594,7 @@ fn c4_fragment_lacing_uses_pairwise_induced_graphs() {
             max_iterations: 1,
             method: ResolutionMethod::TopFlubbleSweepga,
             replacement_seqwish_min_match_len: 311,
+            replacement_min_match_len_policy: ReplacementMinMatchLenPolicy::Adaptive,
             replacement_min_map_length: 311,
             replacement_num_mappings: "many:many".to_string(),
             replacement_scaffold_filter: "many:many".to_string(),

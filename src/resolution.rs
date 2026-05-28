@@ -102,13 +102,20 @@ pub struct ResolutionConfig {
     pub pair_random_fraction: f64,
     /// Mash k-mer size for pair selection.
     pub pair_mash_k: usize,
-    /// Minimum exact-match length used by seqwish when inducing replacement graphs.
+    /// Legacy/default exact-match length used by adaptive replacement seqwish policy.
     ///
-    /// This is deliberately separate from the outer graph builder defaults:
-    /// bubble-local induction in repetitive loci should ignore short
-    /// off-diagonal matches while still allowing the pairwise alignment engine
-    /// to align full traversal sequences end-to-end.
+    /// Local bubble induction defaults to no exact-run floor; this value is
+    /// only used when `replacement_min_match_len_policy` is explicitly set to
+    /// `Adaptive`.
     pub replacement_seqwish_min_match_len: u64,
+    /// Policy for choosing the exact-run floor passed to local seqwish induction.
+    ///
+    /// `Fixed(0)` and `Fixed(1)` both effectively disable exact-run filtering
+    /// because seqwish needs a positive length and every non-empty exact run is
+    /// at least 1 bp. `Adaptive` is opt-in: start from
+    /// `replacement_seqwish_min_match_len`, then lower it per local block when
+    /// the block or its observed CIGAR evidence is shorter.
+    pub replacement_min_match_len_policy: ReplacementMinMatchLenPolicy,
     /// Minimum pairwise mapping length kept before replacement seqwish induction.
     ///
     /// A value of 0 follows `replacement_seqwish_min_match_len`, so the PAF
@@ -196,6 +203,12 @@ pub struct ResolutionConfig {
     /// chain until adding the next bubble would exceed this span. A single
     /// larger bubble is still emitted as a one-bubble chain.
     pub chain_greedy_target_bp: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReplacementMinMatchLenPolicy {
+    Adaptive,
+    Fixed(u64),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -392,6 +405,7 @@ impl Default for ResolutionConfig {
             pair_random_fraction: DEFAULT_PAIR_RANDOM_FRACTION,
             pair_mash_k: DEFAULT_PAIR_MASH_K,
             replacement_seqwish_min_match_len: DEFAULT_REPLACEMENT_SEQWISH_MIN_MATCH_LEN,
+            replacement_min_match_len_policy: ReplacementMinMatchLenPolicy::Fixed(1),
             replacement_min_map_length: DEFAULT_REPLACEMENT_MIN_MAP_LENGTH,
             replacement_min_identity: DEFAULT_REPLACEMENT_MIN_IDENTITY,
             replacement_num_mappings: "1:1".to_string(),
@@ -4209,10 +4223,16 @@ fn seqwish_replacement_config(
     // floor. Setting it to 1 keeps every CIGAR `=`/`M` run, so bimodal
     // short-vs-long PAF lines (whose max internal match-run is below the
     // 311 bp default and below the adaptive shortest-traversal clamp) survive.
-    let seqwish_min = if config.sweepga_no_filter {
-        1
+    let (seqwish_min, adaptive_min_match_len) = if config.sweepga_no_filter {
+        (1, false)
     } else {
-        config.replacement_seqwish_min_match_len
+        match config.replacement_min_match_len_policy {
+            ReplacementMinMatchLenPolicy::Adaptive => {
+                (config.replacement_seqwish_min_match_len, true)
+            }
+            ReplacementMinMatchLenPolicy::Fixed(0) => (1, false),
+            ReplacementMinMatchLenPolicy::Fixed(value) => (value, false),
+        }
     };
     let min_map_length = if config.replacement_min_map_length == 0 {
         seqwish_min
@@ -4239,6 +4259,7 @@ fn seqwish_replacement_config(
         show_progress: false,
         min_aln_length: 0,
         min_match_len: seqwish_min,
+        adaptive_min_match_len,
         min_map_length,
         min_identity: if config.sweepga_no_filter {
             0.0
@@ -6987,7 +7008,7 @@ P\talt\t1+,3+,4+\t*
     }
 
     #[test]
-    fn replacement_seqwish_filter_defaults_to_seqwish_k_scale() {
+    fn replacement_seqwish_filter_defaults_to_local_min_match_off() {
         let mut config = ResolutionConfig {
             replacement_seqwish_min_match_len: 311,
             replacement_min_map_length: 0,
@@ -6995,8 +7016,9 @@ P\talt\t1+,3+,4+\t*
             ..ResolutionConfig::default()
         };
         let graph_config = seqwish_replacement_config(&config);
-        assert_eq!(graph_config.min_match_len, 311);
-        assert_eq!(graph_config.min_map_length, 311);
+        assert_eq!(graph_config.min_match_len, 1);
+        assert!(!graph_config.adaptive_min_match_len);
+        assert_eq!(graph_config.min_map_length, 1);
         assert!((graph_config.min_identity - 0.97).abs() < f64::EPSILON);
         assert_eq!(graph_config.num_mappings, "1:1");
         assert_eq!(graph_config.scaffold_filter, "1:1");
@@ -7005,10 +7027,49 @@ P\talt\t1+,3+,4+\t*
         config.replacement_num_mappings = "1:many".to_string();
         config.replacement_scaffold_filter = "many:many".to_string();
         let graph_config = seqwish_replacement_config(&config);
-        assert_eq!(graph_config.min_match_len, 311);
+        assert_eq!(graph_config.min_match_len, 1);
+        assert!(!graph_config.adaptive_min_match_len);
         assert_eq!(graph_config.min_map_length, 500);
         assert_eq!(graph_config.num_mappings, "1:many");
         assert_eq!(graph_config.scaffold_filter, "many:many");
+    }
+
+    #[test]
+    fn adaptive_min_match_policy_is_opt_in() {
+        let config = ResolutionConfig {
+            replacement_seqwish_min_match_len: 311,
+            replacement_min_match_len_policy: ReplacementMinMatchLenPolicy::Adaptive,
+            replacement_min_map_length: 0,
+            ..ResolutionConfig::default()
+        };
+        let graph_config = seqwish_replacement_config(&config);
+        assert_eq!(graph_config.min_match_len, 311);
+        assert_eq!(graph_config.min_map_length, 311);
+        assert!(graph_config.adaptive_min_match_len);
+    }
+
+    #[test]
+    fn replacement_min_match_policy_can_be_fixed_or_disabled() {
+        let config = ResolutionConfig {
+            replacement_seqwish_min_match_len: 311,
+            replacement_min_match_len_policy: ReplacementMinMatchLenPolicy::Fixed(63),
+            replacement_min_map_length: 0,
+            ..ResolutionConfig::default()
+        };
+        let graph_config = seqwish_replacement_config(&config);
+        assert_eq!(graph_config.min_match_len, 63);
+        assert_eq!(graph_config.min_map_length, 63);
+        assert!(!graph_config.adaptive_min_match_len);
+
+        let config = ResolutionConfig {
+            replacement_min_match_len_policy: ReplacementMinMatchLenPolicy::Fixed(0),
+            replacement_min_map_length: 0,
+            ..ResolutionConfig::default()
+        };
+        let graph_config = seqwish_replacement_config(&config);
+        assert_eq!(graph_config.min_match_len, 1);
+        assert_eq!(graph_config.min_map_length, 1);
+        assert!(!graph_config.adaptive_min_match_len);
     }
 
     #[test]
@@ -7031,6 +7092,7 @@ P\talt\t1+,3+,4+\t*
         let graph_config = seqwish_replacement_config(&config);
         assert_eq!(graph_config.min_match_len, 1);
         assert_eq!(graph_config.min_map_length, 1);
+        assert!(!graph_config.adaptive_min_match_len);
         assert!(graph_config.min_identity.abs() < f64::EPSILON);
         assert!(graph_config.no_filter);
     }
